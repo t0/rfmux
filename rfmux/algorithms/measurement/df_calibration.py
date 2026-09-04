@@ -17,7 +17,7 @@ take the calibration from ``bias_kids`` instead.
 """
 
 import warnings
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -31,7 +31,7 @@ __all__ = ["measure_df_calibrations"]
 @macro(CRS, register=True)
 async def measure_df_calibrations(
     crs: CRS,
-    channels: List[int],
+    channels: Optional[List[int]] = None,
     module: int = 1,
     span_hz: float = 100e3,
     resolution_hz: float = 500.0,
@@ -41,9 +41,10 @@ async def measure_df_calibrations(
 
     Parameters
     ----------
-    channels : list[int]
+    channels : list[int], optional
         Channels to measure.  Each is swept around its own bias frequency
-        and restored afterwards.
+        and restored afterwards.  None means every channel the module
+        reports as biased (get_biased_channels).
     module : int
         Module index (1-based).
     span_hz : float
@@ -68,10 +69,13 @@ async def measure_df_calibrations(
         axes to the frequency direction.  Channels whose sweep gives no
         usable derivative are left out rather than guessed at.
     """
-    nco = await crs.get_nco_frequency(module=module)
-    channels = [int(c) for c in channels]
+    if channels is None:
+        from .channel_selection import get_biased_channels
+        channels = await get_biased_channels(crs, module)
+    channels = [int(c) for c in channels or []]
     if not channels:
         return {}
+    nco = await crs.get_nco_frequency(module=module)
     bias: Dict[int, float] = {}
     for channel in channels:
         rel = await crs.get_frequency(channel=channel, module=module)

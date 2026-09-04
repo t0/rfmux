@@ -204,6 +204,37 @@ class UDPReceiver(QtCore.QThread):
         except OSError:
             pass
 
+class DfCalibrationSignals(QObject):
+    completed = pyqtSignal(int, dict)
+    error = pyqtSignal(str)
+
+
+class DfCalibrationTask(QtCore.QThread):
+    """Runs one df-calibration measurement off the GUI thread.
+
+    *measure* is a callable returning the coroutine to run; the app
+    hands in the get_biased_channels + measure_df_calibrations pair,
+    tests hand in whatever they like.  Mock mode measures at startup
+    and the sweep is seconds at many tones: it must not hold the window.
+    """
+
+    def __init__(self, measure, module: int,
+                 signals: DfCalibrationSignals, parent=None):
+        super().__init__(parent)
+        self.measure, self.module, self.signals = measure, module, signals
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            cals = loop.run_until_complete(self.measure())
+            self.signals.completed.emit(self.module, dict(cals or {}))
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+        finally:
+            loop.close()
+
+
 class IQSignals(QObject):
     done = pyqtSignal(int, str, object)
 

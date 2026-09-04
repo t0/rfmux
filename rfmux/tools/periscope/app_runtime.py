@@ -1389,6 +1389,10 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
+        # The startup df-calibration worker, if still sweeping.
+        task = getattr(self, "_df_cal_task", None)
+        if task is not None and task.isRunning():
+            task.wait(2000)
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
             if not sip.isdeleted(self.notebook_dock):

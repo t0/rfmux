@@ -33,6 +33,47 @@ sudo apt-get install libxcb-cursor0
 sudo sysctl net.core.rmem_max=268435456
 ```
 
+## After every change: the review pass
+
+Every feature, bug fix or improvement gets this pass before it is
+reported, without being asked. It is what the explicit review passes on
+this project have kept asking for.
+
+- **Claims against the code, not the summary.** Every statement in
+  prose, comments, tooltips, docs and figures is checked against the
+  source it describes: units, defaults, which stream, which attribute.
+  A stale or wrong statement is a bug.
+- **Measure, don't assert.** A performance or behaviour claim comes
+  with a number from a run, before and after. The report says what was
+  not verified and why (a port held, no board).
+- **Net code.** Prefer deletion and simplification. If a change is
+  growing a lot of new code, stop and say so. Never re-create what an
+  existing path does (the toolchain, a helper, a kernel): call it.
+- **Where code lives.** Orchestration and anything that can run
+  headlessly lives in `rfmux/algorithms` or `rfmux/mock`; Periscope is
+  a thin caller. A mock property is not a Periscope property.
+- **Comments say what and why**, never the history of how it got there
+  ("used to", "previously"). Narrative belongs in the commit message.
+  Minimal docstrings. The release note is a how-to, not a changelog.
+- **Tests pin contracts, not re-enactments.** Assert what a caller
+  relies on, one behaviour per test; incidental details (packet
+  boundaries, dispatch counts) are not contracts unless stated. Every
+  bug fix carries the test that fails without it.
+- **No unnecessary dialogs or warnings.** Routine outcomes go to the
+  status line or the console; a dialog is for a failure the user must
+  act on. No artificial caps: use the system's value and warn if it is
+  too low.
+- **Defaults and docs move together.** Changing a default updates every
+  example, tooltip, validation message and figure that cites it, and
+  the tier counts when tests are added.
+- **Judgement calls are listed** in the report with the choice made, so
+  they can be overruled.
+- **Commit hygiene.** No attribution trailers. Stage explicit paths.
+  Gate a commit on its test run in one command. Do not push unless
+  asked.
+- **The report** leads with what changed and what was measured, states
+  what was left out and why, and shows test failures verbatim.
+
 ## Code Style & Conventions
 
 ### Python Style

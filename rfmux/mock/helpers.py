@@ -164,6 +164,59 @@ async def reconfigure_mock_crs(
         raise Exception(error_msg) from e
 
 
+# ── Bringing a running mock to a new configuration ────────────────
+
+_PULSE_PREFIX = "pulse_"
+
+
+def config_changes(previous: Dict[str, Any], config: Dict[str, Any]) -> set:
+    return {k for k in set(previous) | set(config)
+            if previous.get(k) != config.get(k)}
+
+
+def pulse_only_change(changed) -> bool:
+    """True when every changed key is a pulse setting, which the running
+    model takes live through set_pulse_mode; anything else means the
+    array has to be regenerated.  An empty change is pulse-only too."""
+    return all(k.startswith(_PULSE_PREFIX) for k in changed)
+
+
+def pulse_mode_kwargs(config: Dict[str, Any]) -> Dict[str, Any]:
+    """set_pulse_mode's keyword arguments from a mock config: the
+    pulse_* keys without their prefix, the mode aside."""
+    return {k[len(_PULSE_PREFIX):]: v for k, v in config.items()
+            if k.startswith(_PULSE_PREFIX) and k != "pulse_mode"}
+
+
+async def apply_mock_config(crs: CRS, config: Dict[str, Any],
+                            previous: Optional[Dict[str, Any]] = None):
+    """Bring a running mock to *config*.
+
+    Pulse settings are taken live through set_pulse_mode.  Anything
+    else regenerates the array, which at many tones is seconds during
+    which the stream stalls, so only what changed against *previous*
+    decides; with no *previous*, everything counts as changed.  A
+    regeneration pins a random seed into *config* first, so the client
+    and the server agree on the array that was built.
+
+    Returns ``(outcome, resonator_count)`` with outcome one of
+    ``"unchanged"``, ``"pulses"``, ``"regenerated"``; the count is None
+    unless the array was regenerated.
+    """
+    changed = None if previous is None else config_changes(previous, config)
+    if changed is not None and pulse_only_change(changed):
+        if not changed:
+            return "unchanged", None
+        await crs.set_pulse_mode(config.get("pulse_mode", "none"),
+                                 **pulse_mode_kwargs(config))
+        return "pulses", None
+    if config.get("resonator_random_seed") is None:
+        import random
+        config["resonator_random_seed"] = random.randint(0, 2**31 - 1)
+    count = await crs.generate_resonators(config)
+    return "regenerated", count
+
+
 # Convenience function for quick testing
 async def test_mock_crs():
     """

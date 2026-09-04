@@ -1296,13 +1296,20 @@ class MockResonatorModel:
                              if t_from - p['start_time']
                              < p['tau_rise'] + p['tau_decay'] * 15]
 
-    def warm_pulse_caches(self, module, sample_rate, block_len):
+    def warm_pulse_caches(self, module, sample_rate, block_len,
+                          progress=None):
         """Run one pulse on every resonator through the block path the
         streamer uses, so the first real pulse does not stall the stream
-        on cold convergence caches and kernels (0.8 s at 100 tones).
-        Time and pulse state are put back; the caches are what remain.
-        The configured pulse parameters decide which keys are warmed, so
-        a pulse amplitude or decay changed later warms itself.
+        on cold convergence caches and kernels.  Time and pulse state
+        are put back; the caches are what remain.  The configured pulse
+        parameters decide which keys are warmed, so a pulse amplitude or
+        decay changed later warms itself.
+
+        This is the first pulse's whole cost, paid here instead: one
+        convergence of the array per tone per distinct quasiparticle
+        key along the decay, 36,500 of them (28 s) at 100 tones with
+        the default 0.1 s decay.  *progress* is called per block as
+        ``progress(done, total)``.
         """
         if not self.mr_lekids:
             return
@@ -1317,9 +1324,11 @@ class MockResonatorModel:
                 dt = 1.0 / sample_rate
                 span = (self.pulse_config['tau_rise']
                         + 15 * self.pulse_config['tau_decay'])
+                n_blocks = int(np.ceil(span / (block_len * dt))) + 1
                 t = self.last_update_time
-                end = t + span + block_len * dt
-                while t < end:
+                for k in range(n_blocks):
+                    if progress is not None:
+                        progress(k, n_blocks)
                     self.advance_pulses_to(t + (block_len - 1) * dt,
                                            block_len, dt)
                     self.calculate_module_response_coupled(

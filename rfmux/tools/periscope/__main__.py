@@ -59,8 +59,10 @@ def _build_with_progress(crs_obj, config, loop):
 
     n = config.get("num_resonances", 0)
     biasing = bool(config.get("auto_bias_kids"))
+    # Three stages of one bar, a third each: generation, biasing, and
+    # the pulse-cache warm-up, whose blocks are scaled onto its third.
     offsets = {"generating": 0, "biasing": n, "warming": 2 * n}
-    total = 2 * n + 1 if biasing else n
+    total = 3 * n if biasing else n
     dialog = QtWidgets.QProgressDialog(
         f"Building the mock array: {n} resonators", None, 0, total)
     dialog.setWindowTitle("Periscope")
@@ -102,10 +104,11 @@ def _build_with_progress(crs_obj, config, loop):
         stage = field("stage", "")
         if stage in _STAGE_TEXT:
             done, stage_total = field("done", 0), field("total", 0)
+            unit = "blocks" if stage == "warming" else ""
             dialog.setLabelText(
-                f"{_STAGE_TEXT[stage]}: {done} / {stage_total}"
-                if stage != "warming" else _STAGE_TEXT[stage])
-            dialog.setValue(min(total, offsets[stage] + done))
+                f"{_STAGE_TEXT[stage]}: {done} / {stage_total} {unit}".rstrip())
+            share = done * n // stage_total if stage_total else 0
+            dialog.setValue(min(total, offsets[stage] + share))
     worker.join()
     dialog.close()
     if "error" in result:

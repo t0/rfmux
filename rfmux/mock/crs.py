@@ -328,7 +328,9 @@ class ServerMockCRS:
                 await asyncio.to_thread(
                     self._resonator_model.warm_pulse_caches,
                     1, decimation_to_sampling(dec),
-                    MockCRSStreamer.slow_block_len(dec))
+                    MockCRSStreamer.slow_block_len(dec),
+                    progress=lambda done, total:
+                        self._progress("warming", done, total))
 
             self._progress("done", resonator_count, resonator_count)
             return resonator_count, resonance_frequencies

@@ -80,7 +80,7 @@ def test_slow_emitter_evaluates_at_its_own_frame_time():
 
     t_frame = 12.5
     with pytest.raises(_Stop):
-        streamer._emit_slow_packet(1, t_frame, dec=6)
+        streamer._emit_slow_block(1, t_frame, 6, 1)
 
     assert seen.get("pulse_time") == t_frame, \
         f"slow emitter must pin pulse_time to its own frame time, got {seen}"

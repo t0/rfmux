@@ -215,11 +215,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # measures them behind its build window for large arrays and
         # hands them in instead.
         self._df_cal_task = None
-        if df_calibrations:
+        if df_calibrations is None:
+            self._start_df_calibration(self.module)
+        elif df_calibrations:
             self._handle_df_calibration_ready(self.module,
                                               dict(df_calibrations))
-        else:
-            self._start_df_calibration(self.module)
 
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.
@@ -1923,12 +1923,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._build_layout()
     
     def _measure_df_calibrations(self, module: int) -> None:
-        """Measure a calibration for the displayed channels, in mock mode.
-
-        The measurement is ``crs.measure_df_calibrations`` -- a narrow
-        sweep around each bias point, the same one ``bias_kids`` does as
-        part of its fit -- so a simulated session can use df units
-        without a multisweep first.
+        """Measure a calibration for every biased channel, in mock mode:
+        ``crs.measure_df_calibrations``, a narrow sweep around each bias
+        point, so a simulated session can use df units without a
+        multisweep first.
 
         Only in mock mode.  Sweeping moves each channel's frequency and
         puts it back, which is free against a simulator and not something

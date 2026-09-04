@@ -372,7 +372,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         if 'bias_frequency' in det_data:
             print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
             if 'df_calibration' in det_data:
-                print(f"                      df_cal={det_data['df_calibration']:.3e} Hz/rad")
+                print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V")
     
     
     ### Step 8. Slow Noise spectrum 

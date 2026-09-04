@@ -2,7 +2,6 @@
 point for every channel, progress per point, and a slope that repeats
 under noise because it is fitted, not differenced."""
 import asyncio
-import contextlib
 
 import numpy as np
 import pytest

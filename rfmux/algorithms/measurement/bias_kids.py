@@ -167,6 +167,19 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
     return results_by_detector, metadata
 
 
+def _suitable(det_data: Dict, nonlinear_threshold: float):
+    """Whether an amplitude can be biased at: its sweep does not jump
+    and, where it carries a nonlinear fit, the fitted nonlinearity is
+    below the threshold.  A failed fit leaves None behind and counts as
+    no fit.  Returns (suitable, is_bifurcated, a, has_fit)."""
+    is_bifurcated = bool(det_data.get('is_bifurcated', False))
+    params = det_data.get('nonlinear_fit_params') or {}
+    a = params.get('a', float('inf'))
+    has_fit = bool(det_data.get('nonlinear_fit_success', False)) and np.isfinite(a)
+    suitable = not is_bifurcated and (a < nonlinear_threshold if has_fit else True)
+    return suitable, is_bifurcated, a, has_fit
+
+
 def _fit_entries(entries, fit_method: str) -> int:
     """Give every entry the fit bias_kids works from; say how many
     needed it, since at thousands of resonators that is seconds."""
@@ -267,18 +280,22 @@ async def bias_kids(
         results_by_detector, _ = _extract_data_from_gui_format(multisweep_results)
 
     if results_by_detector is not None:
-        _fit_entries([e for d in results_by_detector.values() for e in d.values()],
-                     fit_method)
-        # Find optimal configuration for each detector
+        if fit_method == "nonlinear":
+            # The amplitude choice reads the fitted nonlinearity of every
+            # amplitude.  The skewed fit has none to read, so with it
+            # only the chosen amplitude is fitted, below.
+            _fit_entries([e for d in results_by_detector.values() for e in d.values()],
+                         fit_method)
         optimal_configs = analyze_multiamp_data(results_by_detector, nonlinear_threshold, fallback_to_lowest)
 
-        # Convert to single result set using optimal configurations
+        # The chosen entries themselves, so the fit and the bias
+        # frequency written below land on the caller's results.
         single_results = {}
         for det_idx, config in optimal_configs.items():
-            _bias_point_from_fit(config['selected_data'], fit_method)
-            single_results[det_idx] = config['selected_data'].copy()
-            single_results[det_idx]['selected_amplitude'] = config['selected_amplitude']
-            single_results[det_idx]['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
+            entry = config['selected_data']
+            entry['selected_amplitude'] = config['selected_amplitude']
+            entry['bifurcation_ever_seen'] = config.get('bifurcation_ever_seen', False)
+            single_results[det_idx] = entry
 
         # Proceed with single-amplitude logic using optimal results
         multisweep_results = single_results
@@ -346,14 +363,7 @@ async def bias_kids(
         # For now, assume single amplitude per detector
         
         # Extract key parameters
-        is_bifurcated = det_data.get('is_bifurcated', False)
-        nonlinear_params = det_data.get('nonlinear_fit_params') or {}
-        nonlinear_a = nonlinear_params.get('a', float('inf'))
-
-        if det_data.get('nonlinear_fit_success', False):
-            suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
-        else:
-            suitable = not is_bifurcated
+        suitable, is_bifurcated, nonlinear_a, _ = _suitable(det_data, nonlinear_threshold)
         
         if suitable or fallback_to_lowest:
             # Prepare bias configuration
@@ -460,8 +470,7 @@ async def bias_kids(
             # flow's nonlinear fit if it ran, else the skewed fit, else
             # what multisweep fitted for it.
             try:
-                cal = df_calibration_for_entry(biased_data, prefer=fit_method,
-                                               fit_if_missing=False)
+                cal = df_calibration_for_entry(biased_data, prefer=fit_method)
                 if cal is not None:
                     biased_data['df_calibration'] = cal
             except Exception as exc:
@@ -529,18 +538,10 @@ def analyze_multiamp_data(
             if amp is None:
                 continue
 
-            is_bifurcated = det_data.get('is_bifurcated', False)
-            nonlinear_params = det_data.get('nonlinear_fit_params', {})
-            nonlinear_a = nonlinear_params.get('a', float('inf'))
-            nonlinear_success = det_data.get('nonlinear_fit_success', False)
-
+            suitable, is_bifurcated, nonlinear_a, nonlinear_success = _suitable(
+                det_data, nonlinear_threshold)
             if is_bifurcated:
                 bifurcation_ever_seen = True
-
-            if nonlinear_success:
-                suitable = not is_bifurcated and nonlinear_a < nonlinear_threshold
-            else:
-                suitable = not is_bifurcated
 
             amp_analysis.append({
                 'amplitude': amp,

@@ -1688,7 +1688,7 @@ class PeriscopeRuntime:
                 bias_output = load_params['bias_kids_output']
                 df_calibrations = {}
                 for det_idx, det_data in bias_output.items():
-                    if 'df_calibration' in det_data:
+                    if det_data.get('df_calibration') is not None:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
                 # Load calibrations into main window

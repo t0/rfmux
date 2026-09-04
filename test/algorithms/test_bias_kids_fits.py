@@ -92,6 +92,20 @@ async def test_skewed_choice_uses_the_skewed_fit_and_runs_no_nonlinear_fit(monke
 
 
 @pytest.mark.asyncio
+async def test_a_failed_fit_counts_as_no_fit_not_a_crash():
+    # The batch fitter leaves nonlinear_fit_params = None behind when a
+    # fit fails; the amplitude choice then falls back to the jump
+    # detector for that entry.
+    loud = _entry(a=0.2, amplitude=0.03)
+    loud["nonlinear_fit_params"] = None
+    loud["nonlinear_fit_success"] = False
+    loud["is_bifurcated"] = True
+    results = {"results_by_detector": {1: {0: _entry(a=0.2, amplitude=0.01), 1: loud}}}
+    out = await bk.bias_kids(_Board(), results, module=1)
+    assert out[1]["selected_amplitude"] == 0.01
+
+
+@pytest.mark.asyncio
 async def test_amplitude_choice_comes_from_the_fitted_nonlinearity():
     # Two amplitudes, neither sweep jumping: only the fitted nonlinearity
     # can rule the louder one out, and it has to be fitted first.

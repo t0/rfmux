@@ -11,8 +11,7 @@ import warnings
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import convert_roc_to_volts
-from .fitting import identify_bifurcation
-from .fitting import center_resonance_iq_circle
+from .fitting import center_resonance_iq_circle, identify_bifurcation
 from typing import Optional, Tuple # Added for type hinting
 
 def _get_recalculated_center_freq(
@@ -154,13 +153,12 @@ async def multisweep(
                       'applied_rotation_degrees': Optional[float], # Rotation applied to sweep data
                       'sweep_direction': str, # "upward" or "downward"
                       'sweep_amplitude': float, # Normalized amplitude used in sweep
-                      'iq_complex_volts': Optional[np.ndarray], # Sweep IQ data in voltage units
                       'is_bifurcated': bool, # The sweep jumps: too much amplitude for this resonance
                       'df_calibration': None, # bias_kids fills this in, from a resonance fit
-                      'calibrated_tod_df': None,
                       
-                      # Fitting results (if fitting was applied):
-                      'is_bifurcated': bool, # Whether bifurcation was detected
+                      # Added onto the same dicts by the fit steps
+                      # (fit_skewed_multisweep, fit_nonlinear_iq_multisweep,
+                      # bias_kids) when they run:
                       'skewed_fit_applied': bool,
                       'skewed_fit_success': bool,
                       'fit_params': Optional[dict], # Skewed fit parameters if successful
@@ -536,9 +534,9 @@ async def multisweep(
         # seconds.  bias_kids fits what it needs and calibrates then.
         # Whether the sweep jumps needs no fit, and both bias_kids and
         # the digest read it.
-        iq_complex_volts = convert_roc_to_volts(final_iq_complex)
         sort_idx = np.argsort(data_entry['frequencies'])
-        data_entry['is_bifurcated'] = identify_bifurcation(iq_complex_volts[sort_idx])
+        data_entry['is_bifurcated'] = identify_bifurcation(
+            convert_roc_to_volts(final_iq_complex[sort_idx]))
         if data_entry['is_bifurcated']:
             warnings.warn(
                 f"resonance at {bias_freq / 1e6:.3f} MHz: the sweep jumps, so "
@@ -554,10 +552,8 @@ async def multisweep(
             'applied_rotation_degrees': data_entry.get('applied_rotation_degrees'),
             'sweep_direction': sweep_direction,
             'sweep_amplitude': amp,  # Store the amplitude used in the sweep
-            'iq_complex_volts': iq_complex_volts,  # Sweep IQ data in voltage units
             'is_bifurcated': data_entry['is_bifurcated'],
             'df_calibration': None,
-            'calibrated_tod_df': None,
         }
         results_by_index[idx] = result_dict
     

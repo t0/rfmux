@@ -3,6 +3,8 @@ The Plot field: which channels the histograms and templates draw, and
 how several channels' accumulators combine into one series.
 """
 
+import re
+
 import numpy as np
 import pytest
 
@@ -30,9 +32,9 @@ def test_absent_channels_are_dropped():
     assert plot_groups("4-9", CH) == [("Ch4-9", [4, 5, 8])]
 
 
-@pytest.mark.parametrize("bad", ["x", "3-1", "1,a"])
-def test_bad_tokens_name_themselves(bad):
-    with pytest.raises(ValueError):
+@pytest.mark.parametrize("bad, token", [("x", "x"), ("3-1", "3-1"), ("1,a", "a")])
+def test_bad_tokens_name_themselves(bad, token):
+    with pytest.raises(ValueError, match=re.escape(token)):
         plot_groups(bad, CH)
 
 

@@ -2223,16 +2223,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _fits_present(self) -> set:
         """Which resonance fits the current results carry, for the Bias
         KIDs dialog to preselect from."""
-        from rfmux.algorithms.measurement.df_calibration import (
-            _has_nonlinear_fit, _has_skewed_fit)
-        present = set()
-        for iterations in self.results_by_detector.values():
-            for entry in iterations.values():
-                if _has_nonlinear_fit(entry):
-                    present.add("nonlinear")
-                if _has_skewed_fit(entry):
-                    present.add("skewed")
-        return present
+        from rfmux.algorithms.measurement.df_calibration import fits_present
+        return fits_present(entry for iterations in self.results_by_detector.values()
+                            for entry in iterations.values())
 
     def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
         """Handle completion of the bias_kids task."""

@@ -114,7 +114,7 @@ await crs.stop_udp_streaming()
 await crs.set_pulse_mode('periodic', 
     pulse_period=2.0,
     pulse_amplitude=2.0,
-    pulse_tau_decay=0.1)
+    pulse_tau_decay=5e-3)
 
 # Add manual pulse event
 await crs.add_pulse_event(resonator_index=0, start_time=time.time(), amplitude=3.0)

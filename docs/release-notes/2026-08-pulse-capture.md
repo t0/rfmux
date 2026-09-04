@@ -5,10 +5,9 @@ detector timestream, recording them to HDF5, and reviewing them as they
 arrive. It works headlessly from a script, interactively from Periscope, and
 offline against the mock board.
 
-Previously the only way to look at a pulse was to capture a raw timestream and
-find it yourself afterwards. Now the board streams, rfmux triggers on the
-stream, and you get a file of individual pulses with their summary statistics
-already computed.
+The board streams, rfmux triggers on the stream, and you get a file of
+individual pulses with their summary statistics already computed, instead of
+a raw timestream to search afterwards.
 
 ## Capture pulses in one call
 
@@ -35,9 +34,9 @@ The call estimates the noise on each channel first, then triggers at
 `threshold_sigma` above that baseline. Nothing needs to be known in advance
 about the pulse height. Training takes twenty times `max_pulse_ms`, five
 seconds at the default, and is not charged against `time_run`. The σ it
-learns is the samples' scatter about a rolling baseline, measured directly
-rather than inferred from adjacent differences, so it is right for the
-correlated samples the decimators produce as well as for white noise.
+learns is the samples' scatter about a block-median baseline, measured
+directly rather than inferred from adjacent differences, so it is right for
+the correlated samples the decimators produce as well as for white noise.
 
 `result` carries the pulses, their summaries and the noise statistics. The
 same content is written to `hdf5_path` as the capture runs, so an interrupted
@@ -67,19 +66,20 @@ divided by the square root of two while carrying the full noise.
 The calibration is the slope of the resonance at the bias point, from a
 resonance fitted to the sweep. `bias_kids` works from one fit, chosen with
 `fit_method`: the nonlinear IQ fit (the default) or the skewed Lorentzian.
-Sweeps that already carry that fit are used as they are; the rest are fitted
-then, about 20 ms each for the nonlinear fit and 4 ms for the skewed. A
-multisweep with no fit selected runs no fit at all, so it stays the quick
-look. From the chosen fit come the bias frequency (the max-diq or min-s21
-point read off the fitted curve, not the raw grid), the amplitude choice, and
-the calibration. In Periscope the Bias KIDs dialog has the same choice,
-preselected to whatever fit the sweeps carry. The multisweep's bias frequency
-method defaults to max-dIQ, headless and in Periscope; it needs no fit of its
-own, since the multisweep reads that point off the raw grid and `bias_kids`
-reads it off the fit. A resonance biased into
-bifurcation has no such slope: the sweep jumps, and both `bias_kids` and
-`measure_df_calibrations` warn that its calibration is unreliable while
-still biasing it.
+Sweeps that already carry that fit (from Periscope's multisweep fit
+checkboxes, or `fit_skewed_multisweep` / `fit_nonlinear_iq_multisweep`
+headless) are used as they are; the rest are fitted then, about 20 ms each
+for the nonlinear fit and 4 ms for the skewed. `multisweep` itself never
+fits, so it stays the quick look. From the chosen fit come the bias
+frequency (the max-diq or min-s21 point read off the fitted curve, not the
+raw grid), the amplitude choice, and the calibration. In Periscope the Bias
+KIDs dialog has the same choice, preselected to whatever fit the sweeps
+carry. The multisweep's bias frequency method defaults to max-dIQ, headless
+and in Periscope; it needs no fit of its own, since the multisweep reads that
+point off the raw grid and `bias_kids` reads it off the fit. A resonance
+biased into bifurcation has no such slope: the sweep jumps, `multisweep` and
+`measure_df_calibrations` say so, and `bias_kids` still biases it, at the
+lowest amplitude swept when it has a choice.
 
 Rotating before thresholding is therefore the default wherever a calibration
 exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A
@@ -318,8 +318,10 @@ spike rather than a pulse.
 `bias_amplitude`, a tone power of -55 dBm by default, and biases it at the
 S21 minimum it finds. That gives biased resonators, not a df calibration, so
 `measure_df_calibrations(module=1)` measures one for every biased channel
-afterwards; Periscope does this itself at startup in mock mode. Both work
-headlessly, and both are what a notebook gets from `create_mock_crs`.
+afterwards; Periscope does this itself at startup in mock mode, behind the
+build progress window for arrays above 25 resonators and in the background
+for smaller ones. Both work headlessly: `create_mock_crs` runs the auto-bias
+as part of the build, and the notebook calls `measure_df_calibrations`.
 
 `periscope --mock` gives the same simulation behind the GUI. The screenshots
 in this document were taken from a mock capture, triggered in the frequency

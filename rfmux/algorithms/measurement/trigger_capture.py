@@ -223,8 +223,7 @@ async def trigger_capture(
         Full detection configuration.  ``threshold_sigma`` (5.0),
         ``end_sigma`` (1.0) and ``max_pulse_ms`` override individual
         fields of it, so passing a config and one shortcut does what it
-        looks like.  Previously the shortcuts were silently ignored
-        whenever a config was given.
+        looks like.
     max_pulse_ms : float
         Longest pulse to expect.  Sizes the ring buffer and, through it,
         the noise-training and baseline windows — so it also determines

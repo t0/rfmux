@@ -8,11 +8,11 @@ developer laptop.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 676 | ~1 min | Default while editing. |
-| `pytest --tier=acquisition` | 16 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 692 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=quick` | 690 | ~1 min | Default while editing. |
+| `pytest --tier=acquisition` | 18 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 708 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 767 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 783 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -118,8 +118,10 @@ Two kinds, both executed as tests rather than checked in as `.ipynb`:
 
 Both are jupytext markdown; edit them in JupyterLab or as text. A demo that
 writes output must write to a temp directory, since the reference copies are
-provisioned read-only. The `.py` scripts beside the demos are not executed by
-any test; run one against `MOCK` by hand when its notebook changes.
+provisioned read-only. Of the `.py` scripts beside the demos,
+`simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier
+(`test_measurement_flow.py`); `pulse_capture_flow.py` is not executed by any
+test, so run it by hand when its notebook changes.
 
 ## Platform skips
 
@@ -136,4 +138,6 @@ every test that does not need a board.
 
 It triggers on push and pull request against `main`, plus `workflow_dispatch`. A
 long-lived branch gets **no CI until it opens a PR**, so run the tiers locally
-or dispatch the workflow against the branch by hand.
+or dispatch the workflow against the branch by hand. Changes to READMEs,
+`CLAUDE.md` and `CHANGELOG.md` alone do not trigger it; the jupytext demos do,
+since the acquisition tier executes them.

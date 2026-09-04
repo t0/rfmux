@@ -1,6 +1,6 @@
 """A multisweep with no fit selected runs no fit; bias_kids then fits
-what it needs.  Uses a MockCRS session for its RPC surface only, no UDP
-stream, so this stays out of the acquisition tier."""
+what it needs.  A MockCRS session for its RPC surface, no UDP stream,
+but a server process all the same: the acquisition tier."""
 import asyncio
 import contextlib
 import io
@@ -19,6 +19,7 @@ SESSION = """
 - !CRS { serial: "0000", hostname: "127.0.0.1" }
 """
 N = 3
+pytestmark = pytest.mark.slow_acquisition
 
 
 @pytest.fixture(scope="module")

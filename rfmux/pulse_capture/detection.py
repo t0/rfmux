@@ -59,11 +59,8 @@ _SQRT2 = math.sqrt(2.0)
 
 #: Ring headroom over the longest expected pulse.  The pre-trigger
 #: margin and the end-confirmation tail share the ring with the pulse.
-#: End-of-pulse threshold, in sigma.  Defined here, where the engine
-#: lives, because it was written three times with two different values:
-#: PulseCapture and PulseCaptureSession said 1.0, PulseCaptureConfig
-#: said 1.5, so constructing the engine directly behaved differently
-#: from going through the config.
+#: End-of-pulse threshold, in sigma: the one definition the engine, the
+#: session and the config share.
 DEFAULT_END_SIGMA = 1.0
 
 BUFFER_SAFETY: float = 1.5

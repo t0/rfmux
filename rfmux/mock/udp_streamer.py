@@ -320,10 +320,6 @@ class MockCRSStreamer(threading.Thread):
         return max(1, min(cls.SLOW_BLOCK_MAX,
                           int(round(cls.SLOW_BLOCK_SECONDS * slow_rate))))
 
-    def _emit_slow_packet(self, module_num, t_frame, dec):
-        """One slow ReadoutPacket for *module_num*: a block of one."""
-        self._emit_slow_block(module_num, t_frame, dec, 1)
-
     def _emit_slow_block(self, module_num, t_frame, dec, n):
         """*n* consecutive slow frames for *module_num* from one physics
         call, sent as *n* packets with their own sequence numbers and
@@ -360,11 +356,10 @@ class MockCRSStreamer(threading.Thread):
         for ch_num_1, signal_val in channel_responses.items():
             signal[:, ch_num_1 - 1] = np.atleast_1d(signal_val) * full_scale
 
+        noise = (np.random.normal(0, noise_level, (n, num_channels))
+                 + 1j * np.random.normal(0, noise_level, (n, num_channels)))
         for k in range(n):
-            noise_i = np.random.normal(0, noise_level, num_channels)
-            noise_q = np.random.normal(0, noise_level, num_channels)
-            self._send_slow_packet(module_num, dec,
-                                   signal[k] + noise_i + 1j * noise_q)
+            self._send_slow_packet(module_num, dec, signal[k] + noise[k])
 
     def _send_slow_packet(self, module_num, dec, channel_samples):
         """Stamp, build and send one slow packet; advances the module's

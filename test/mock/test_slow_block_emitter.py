@@ -33,8 +33,8 @@ def _seconds(ts):
 def test_block_length_is_about_50_ms_capped(dec):
     rate = 625e6 / 256 / 64 / 2 ** dec
     n = MockCRSStreamer.slow_block_len(dec)
-    assert 1 <= n <= MockCRSStreamer.SLOW_BLOCK_MAX
-    assert n == min(MockCRSStreamer.SLOW_BLOCK_MAX, round(0.05 * rate))
+    assert n == min(MockCRSStreamer.SLOW_BLOCK_MAX,
+                    round(MockCRSStreamer.SLOW_BLOCK_SECONDS * rate))
 
 
 def test_one_physics_call_per_block_and_one_packet_per_frame(monkeypatch):
@@ -73,7 +73,7 @@ def test_one_physics_call_per_block_and_one_packet_per_frame(monkeypatch):
 
 def test_a_block_of_one_is_the_old_single_frame():
     crs, st = _streamer(6)
-    st._emit_slow_packet(1, 0.0, 6)
+    st._emit_slow_block(1, 0.0, 6, 1)
     assert st.packets_sent == 1 and st.seq_counters[1] == 1
 
 

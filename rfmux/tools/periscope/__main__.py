@@ -28,7 +28,7 @@ import warnings
 import asyncio
 
 import click
-from PyQt6 import QtCore, QtGui
+from PyQt6 import QtCore
 
 
 #: Arrays this size and under build in about a second; the progress
@@ -130,7 +130,7 @@ def _build_with_progress(crs_obj, config, loop, module):
     dialog.close()
     if "error" in result:
         raise result["error"]
-    return result["count"], result.get("cals") or {}
+    return result["count"], result.get("cals")
 
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog

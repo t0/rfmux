@@ -28,8 +28,7 @@ from .fitting import identify_bifurcation
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
            "df_calibration_for_entry", "bias_frequency_from_fit",
-           "ensure_fits", "slope_from_nonlinear",
-           "slope_from_skewed", "fit_for_calibration"]
+           "ensure_fits", "fits_present"]
 
 
 def _finite(v) -> bool:
@@ -130,33 +129,29 @@ def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     """
     if method not in ("max-diq", "min-s21"):
         return None
-    f, iq = _sorted_sweep(entry)
     if fit == "nonlinear" and _has_nonlinear_fit(entry):
         from .fitting_nonlinear import nonlinear_iq
         nl = entry["nonlinear_fit_params"]
         p = [nl[k] for k in ("fr", "Qr", "amp", "phi", "a", "i0", "q0")]
         model = lambda ff: nonlinear_iq(np.asarray(ff, dtype=np.float64), *p)
     elif fit == "skewed" and _has_skewed_fit(entry):
-        model = _skewed_model(f, iq, entry["fit_params"])
+        model = _skewed_model(*_sorted_sweep(entry), entry["fit_params"])
     else:
         return None
-    grid = np.linspace(f[0], f[-1], 4001)
+    f = np.asarray(entry["frequencies"], dtype=np.float64)
+    grid = np.linspace(f.min(), f.max(), 4001)
     z = model(grid)
     if method == "min-s21":
         return float(grid[np.argmin(np.abs(z))])
     return float(grid[np.argmax(np.abs(np.gradient(z, grid)))])
 
 
-def df_calibration_for_entry(entry, *, prefer="nonlinear", fit_if_missing=True,
-                             warn=True):
+def df_calibration_for_entry(entry, *, prefer="nonlinear"):
     """The calibration for one multisweep result at its bias frequency,
     from the fit it carries: the *prefer*red one ("nonlinear" or
-    "skewed") if present, else the other, else (with a warning, since
-    a fit is being run for it) the nonlinear fit, which is then stored
-    on the entry so it is not run again.  The sweep's IQ is in counts,
-    as multisweep stores it.  Returns None when nothing can be fitted.
+    "skewed") if present, else the other.  The sweep's IQ is in counts,
+    as multisweep stores it.  None when the entry carries no fit.
     """
-    f, iq = _sorted_sweep(entry)
     f_bias = float(entry.get("bias_frequency",
                              entry.get("original_center_frequency")))
     order = ("skewed", "nonlinear") if prefer == "skewed" else ("nonlinear", "skewed")
@@ -166,27 +161,24 @@ def df_calibration_for_entry(entry, *, prefer="nonlinear", fit_if_missing=True,
                                          entry.get("gain_complex", 1.0))
             return complex(1.0 / slope)
         if fit == "skewed" and _has_skewed_fit(entry):
+            f, iq = _sorted_sweep(entry)
             return complex(1.0 / slope_from_skewed(f, iq, f_bias, entry["fit_params"]))
-    if not fit_if_missing:
-        return None
-    if warn:
-        warnings.warn(f"resonance at {f_bias / 1e6:.3f} MHz carries no fit; "
-                      f"running the nonlinear fit for its df calibration",
-                      stacklevel=2)
-    fitted = fit_for_calibration(f, iq)
-    if fitted is None:
-        warnings.warn(f"resonance at {f_bias / 1e6:.3f} MHz: the fit did not "
-                      f"converge; the df calibration is the spline derivative "
-                      f"through the sweep points", stacklevel=2)
-        return complex(convert_iq_to_df(np.array([1.0 + 0j]), f_bias, f, iq)[0])
-    params, gain = fitted
-    entry["nonlinear_fit_params"] = params
-    entry["gain_complex"] = gain
-    entry["nonlinear_fit_success"] = True
-    return complex(1.0 / slope_from_nonlinear(f_bias, params, gain))
+    return None
 
 
-def ensure_fits(entries, fit="nonlinear", parallel=False) -> int:
+def fits_present(entries) -> set:
+    """Which resonance fits the *entries* carry: a subset of
+    {"nonlinear", "skewed"}."""
+    present = set()
+    for entry in entries:
+        if _has_nonlinear_fit(entry):
+            present.add("nonlinear")
+        if _has_skewed_fit(entry):
+            present.add("skewed")
+    return present
+
+
+def ensure_fits(entries, fit="nonlinear") -> int:
     """Run the resonance *fit* ("nonlinear" or "skewed") on every entry
     in *entries* (an iterable of multisweep result dicts) that lacks
     it, with the flow's own batch fitter, storing what the flow's fit
@@ -196,14 +188,14 @@ def ensure_fits(entries, fit="nonlinear", parallel=False) -> int:
     Cost: 21 ms per sweep for the nonlinear fit, 3.5 ms for the skewed,
     on 101-point sweeps.  The batch fitter's thread pool makes the
     nonlinear fit slower, not faster (the work holds the GIL), so it is
-    off by default.
+    not used.
     """
     if fit == "nonlinear":
         from .fitting_nonlinear import fit_nonlinear_iq_multisweep
         has, keys = _has_nonlinear_fit, ("nonlinear_fit_params", "nonlinear_fit_errors",
                                          "nonlinear_fit_residual", "nonlinear_fit_success",
                                          "gain_complex", "iq_gain_corrected")
-        run = lambda batch: fit_nonlinear_iq_multisweep(batch, parallel=parallel)
+        run = lambda batch: fit_nonlinear_iq_multisweep(batch, parallel=False)
     elif fit == "skewed":
         from .fitting import fit_skewed_multisweep
         has, keys = _has_skewed_fit, ("fit_params", "iq_centered")

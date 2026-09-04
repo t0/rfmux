@@ -365,8 +365,8 @@ How pulse detection works:
 - **The baseline is a rolling median**, re-estimated continuously over
   `baseline_window` samples. A median rather than a mean because it ignores
   pulses as long as they stay a minority of the window. The trained σ is the
-  samples' scatter about a baseline of that same span, so the threshold and
-  the σ it is stated in are measured in the same frame.
+  samples' scatter about a block-median baseline of about three pulse
+  lengths, so a slow drift is not counted as noise.
 - **`max_pulse_ms` is the primary control.** It sizes the ring buffer at 1.5× the
   longest pulse, leaving room for the samples before the trigger and the tail
   after it, and sets the floor under the baseline window and the noise training

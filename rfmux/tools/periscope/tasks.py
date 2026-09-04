@@ -708,20 +708,7 @@ class MultisweepTask(QtCore.QThread):
                         self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
                         return
                     
-                    # Process bifurcation detection first
-                    if raw_results_from_crs:
-                        for res_key, data_dict_val in raw_results_from_crs.items():
-                            if not isinstance(res_key, (int, np.integer)): continue
-                            iq_data = data_dict_val.get('iq_complex')
-                            if iq_data is not None:
-                                try:
-                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data, threshold_factor=7)
-                                except Exception as e:
-                                    print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
-                                    data_dict_val['is_bifurcated'] = False
-                            else:
-                                data_dict_val['is_bifurcated'] = False
-                    
+                    # is_bifurcated comes with the multisweep's results.
                     # Now apply fitting analysis using the (potentially) bifurcation-annotated data
                     # Use async version with ThreadPoolExecutor for better responsiveness
                     enhanced_results = loop.run_until_complete(
@@ -1048,7 +1035,7 @@ class BiasKidsTask(QtCore.QThread):
                 # Extract df_calibration values (result is now guaranteed to be a dict)
                 df_calibrations = {}
                 for det_idx, det_data in result.items():
-                    if 'df_calibration' in det_data:
+                    if det_data.get('df_calibration') is not None:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
                 # Read the NCO frequency that was used during biasing

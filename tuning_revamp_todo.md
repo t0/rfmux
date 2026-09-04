@@ -218,12 +218,18 @@ What is left:
 2. **df calibration**, which §11 of the design doc wants off the fit — the
    piece `multisweep` gave up when it stopped calibrating on the way past.
    Nothing in `fits.py` computes it yet.
-3. **`add_bifurcation_flags_to_multisweep_data`** and `identify_bifurcation`
-   (`algorithms/measurement/fitting.py`) were left where they are: they are
-   sweep analysis rather than fitting, and `identify_bifurcation` is what
-   Periscope calls today. Note the nonlinear fit's `a` answers the same
-   question better — bifurcation is at `a ≈ 0.77` — so the flag may not survive
-   the rewire at all.
+3. **`identify_bifurcation`** (`algorithms/measurement/fitting.py`) is still
+   there, because Periscope calls it (`tools/periscope/tasks.py:687`). It is
+   sweep analysis rather than fitting, and `tuning/bias.py` now does the job
+   properly with `bifurcated_by_derivative` / `bifurcated_by_hysteresis`. Note
+   the nonlinear fit's `a` answers the same question better — bifurcation is at
+   `a ≈ 0.77` — so the flag may not survive the rewire at all.
+
+   Its wrapper `add_bifurcation_flags_to_multisweep_data` is **gone**: it had no
+   callers and walked `results_by_iteration`, a shape retired at
+   `RESULTS_SCHEMA_VERSION = 2`. It was also the last of the ad-hoc
+   `pickle_filepath_or_data` / `output_pickle_filepath` file handling, which
+   `store.py` replaces.
 4. **A flag on `multiamp_multisweep`** to fit as it goes. Deliberately not
    built: the driver measures, and a caller who wants every amplitude step
    fitted calls `fit_sweeps` on what came back. If it is ever added it should take the

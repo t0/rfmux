@@ -22,8 +22,6 @@ subdict rather than flat beside the measurement.
 
 import numpy as np
 import warnings
-from typing import Dict, Optional, Union
-import pickle
 
 # Re-exported for callers that reach for them by attribute — Periscope does.
 # The implementations live in rfmux/tuning/fits.py.
@@ -48,7 +46,6 @@ __all__ = [
     "identify_bifurcation",
     "find_resonances",
     "fit_skewed_multisweep",
-    "add_bifurcation_flags_to_multisweep_data",
 ]
 
 
@@ -395,103 +392,3 @@ def _fit_skewed_multisweep(
                 # resonance_data['iq_centered'] remains None
 
     return multisweep_data
-
-
-def add_bifurcation_flags_to_multisweep_data(
-    pickle_filepath_or_data: Union[str, Dict], 
-    output_pickle_filepath: Optional[str] = None,
-    bifurcation_threshold_factor: float = 10.0,
-    bifurcation_min_peak_prominence_factor: float = 1.5
-) -> Dict:
-    """
-    Loads multisweep data from a pickle file (or uses an existing data dictionary),
-    identifies bifurcated resonances using identify_bifurcation, adds an 
-    'is_bifurcated' flag to each resonance sweep, and optionally saves
-    the modified data to a new pickle file if an output path is provided.
-
-    Args:
-        pickle_filepath_or_data (Union[str, Dict]): Path to the input multisweep 
-                                                     pickle file or the already loaded data dictionary.
-        output_pickle_filepath (Optional[str]): Path to save the modified data.
-                                                If None, data is modified in memory.
-                                                Only used if pickle_filepath_or_data is a string path.
-        bifurcation_threshold_factor (float): Threshold factor for identify_bifurcation.
-        bifurcation_min_peak_prominence_factor (float): Min peak prominence factor for identify_bifurcation.
-
-    Returns:
-        Dict: The loaded and modified multisweep data dictionary.
-    """
-
-    if isinstance(pickle_filepath_or_data, str):
-        pickle_filepath = pickle_filepath_or_data
-        print(f"Loading data from: {pickle_filepath} for bifurcation analysis.")
-        try:
-            with open(pickle_filepath, 'rb') as f:
-                all_data = pickle.load(f)
-        except FileNotFoundError:
-            print(f"Error: File not found at {pickle_filepath}")
-            raise
-        except Exception as e:
-            print(f"Error loading pickle file {pickle_filepath}: {e}")
-            raise
-    elif isinstance(pickle_filepath_or_data, dict):
-        all_data = pickle_filepath_or_data # Use the provided dictionary
-        print("Processing provided data dictionary for bifurcation analysis.")
-    else:
-        raise TypeError("pickle_filepath_or_data must be a file path (str) or a dictionary.")
-
-
-    if not isinstance(all_data, dict) or 'results_by_iteration' not in all_data:
-        warnings.warn("Loaded data is not in the expected format or 'results_by_iteration' key is missing. Bifurcation flagging skipped.")
-        return all_data
-
-    sweep_data_container = all_data.get('results_by_iteration')
-    if not isinstance(sweep_data_container, dict):
-        warnings.warn("'results_by_iteration' does not contain a dictionary. Bifurcation flagging skipped.")
-        return all_data
-
-    print("Identifying bifurcated resonances...")
-    bifurcated_resonances_count = 0
-    total_resonances_checked = 0
-
-    for iteration_key, iteration_data in sweep_data_container.items():
-        if isinstance(iteration_data, dict) and 'data' in iteration_data:
-            resonances_in_iteration = iteration_data['data']
-            if isinstance(resonances_in_iteration, dict):
-                for res_key, res_data_dict in resonances_in_iteration.items(): # res_key should be int
-                    total_resonances_checked +=1
-                    if isinstance(res_data_dict, dict) and 'iq_complex' in res_data_dict:
-                        iq_data = res_data_dict['iq_complex']
-                        if isinstance(iq_data, np.ndarray):
-                            is_bifurcated = identify_bifurcation(
-                                iq_data,
-                                threshold_factor=bifurcation_threshold_factor,
-                                min_peak_prominence_factor=bifurcation_min_peak_prominence_factor
-                            )
-                            res_data_dict['is_bifurcated'] = is_bifurcated
-                            if is_bifurcated:
-                                bifurcated_resonances_count +=1
-                        else:
-                            res_data_dict['is_bifurcated'] = False 
-                            warnings.warn(f"IQ data for iteration {iteration_key}, res key {res_key} is not a numpy array. Flagged as not bifurcated.")
-                    else:
-                        if isinstance(res_data_dict, dict):
-                             res_data_dict['is_bifurcated'] = False
-                        warnings.warn(f"Data structure issue or missing 'iq_complex' for iteration {iteration_key}, res key {res_key}. Flagged as not bifurcated.")
-            else:
-                warnings.warn(f"Iteration {iteration_key} 'data' field is not a dictionary.")
-        else:
-            warnings.warn(f"Iteration {iteration_key} is not a dictionary or missing 'data' field.")
-
-    
-    print(f"Bifurcation analysis complete. Found {bifurcated_resonances_count} bifurcated resonances out of {total_resonances_checked} checked.")
-
-    if isinstance(pickle_filepath_or_data, str) and output_pickle_filepath:
-        try:
-            with open(output_pickle_filepath, 'wb') as f_out:
-                pickle.dump(all_data, f_out)
-            print(f"Modified data with bifurcation flags saved to: {output_pickle_filepath}")
-        except Exception as e:
-            print(f"Error saving modified pickle file to {output_pickle_filepath}: {e}")
-            
-    return all_data

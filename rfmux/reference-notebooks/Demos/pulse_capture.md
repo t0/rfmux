@@ -651,7 +651,8 @@ the raw quadratures even where a calibration exists.
 `auto_bias_kids` puts tones on the resonances but does not produce a
 calibration, so a simulated array has none yet. `measure_df_calibrations` is
 that measurement on its own: a narrow sweep around each bias point, every
-channel stepping together, through the same `convert_iq_to_df`. It is
+channel stepping together, with a resonance fitted to the sweep and
+differentiated at the bias point, the same estimate `bias_kids` uses. It is
 host-side and uses only `set_frequency` and `get_samples`, so it runs against a
 board too — though on hardware you would normally take the calibration from
 `bias_kids` rather than sweep a tuned array again. With no channel list it

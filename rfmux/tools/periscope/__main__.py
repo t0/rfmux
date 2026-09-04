@@ -31,42 +31,57 @@ import click
 from PyQt6 import QtCore, QtGui
 
 
-#: Arrays this size and under build in about a second; the splash is
-#: for the ones that take long enough to wonder about.
-SPLASH_MIN_RESONATORS = 25
+#: Arrays this size and under build in about a second; the progress
+#: window is for the ones that take long enough to wonder about.
+PROGRESS_MIN_RESONATORS = 25
 
 
-def _building_splash(config):
-    """A window for the wait before there is one: the mock array is
-    built, and biased, before Periscope can show anything."""
+def _build_with_progress(crs_obj, config):
+    """generate_resonators in a worker thread, with a progress window
+    on the main thread meanwhile.
+
+    The build is one RPC that takes seconds at many tones.  Blocking
+    the GUI thread on it left a window that answered no events, which
+    the window manager reports as hung; the worker keeps the event loop
+    alive, so the window can be moved and nothing looks stuck.
+    """
+    import threading
+
     n = config.get("num_resonances", 0)
     text = f"Building the mock array: {n} resonators"
     if config.get("auto_bias_kids"):
-        text += ", sweeping and biasing each"
-    text += "\n\nThe window opens when it is done."
-    pixmap = QtGui.QPixmap(480, 120)
-    pixmap.fill(QtGui.QColor("#232a33"))
-    splash = QtWidgets.QSplashScreen(
-        pixmap, QtCore.Qt.WindowType.WindowStaysOnTopHint)
-    splash.showMessage(text, QtCore.Qt.AlignmentFlag.AlignCenter,
-                       QtGui.QColor("#f0f0f0"))
-    splash.show()
-    # What follows blocks the thread for seconds, and a window is only
-    # on screen once the platform has mapped and painted it, which
-    # takes a few event passes, not one.  Pump until it is exposed.
-    deadline = QtCore.QDeadlineTimer(1000)
-    while not deadline.hasExpired():
+        text += ", sweeping and biasing each."
+    text += "\nThe window opens when it is done."
+    dialog = QtWidgets.QProgressDialog(text, None, 0, 0)
+    dialog.setWindowTitle("Periscope")
+    dialog.setMinimumDuration(0)
+    dialog.setMinimumWidth(420)
+    dialog.show()
+
+    result = {}
+
+    def work():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result["count"] = loop.run_until_complete(
+                crs_obj.generate_resonators(config))
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            loop.close()
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    while worker.is_alive():
         QtWidgets.QApplication.processEvents(
-            QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
-        # The native window, and so the handle, appears during the
-        # first passes: ask each time.
-        handle = splash.windowHandle()
-        if handle is not None and handle.isExposed():
-            QtWidgets.QApplication.processEvents(
-                QtCore.QEventLoop.ProcessEventsFlag.AllEvents, 20)
-            break
-        QtCore.QThread.msleep(10)
-    return splash
+            QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+            | QtCore.QEventLoop.ProcessEventsFlag.WaitForMoreEvents, 50)
+    worker.join()
+    dialog.close()
+    if "error" in result:
+        raise result["error"]
+    return result["count"]
 
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog
@@ -166,7 +181,6 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
-    splash = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
     
@@ -344,11 +358,12 @@ def main():
 
                 try:
                     # Apply configuration to the server.  Seconds at many
-                    # tones, before there is a window: say so.  A small
-                    # array is done before a splash would be read.
-                    if initial_mock_config.get("num_resonances", 0) > SPLASH_MIN_RESONATORS:
-                        splash = _building_splash(initial_mock_config)
-                    resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
+                    # tones, before there is a window: show one.  A small
+                    # array is done before it would be read.
+                    if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
+                        resonator_count = _build_with_progress(crs_obj, initial_mock_config)
+                    else:
+                        resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
                     if load_mock_config_from_session:
                         print(f"[Session] Mock configuration restored: {resonator_count} resonators generated")
                     #else:
@@ -483,8 +498,6 @@ def main():
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.
     viewer.setWindowIcon(app_icon)
     viewer.show()
-    if splash is not None:
-        splash.finish(viewer)
     # Held in a local so it outlives this call: a QTimer that goes out
     # of scope is destroyed and stops firing.
     _sigint_wake = install_sigint_handler()

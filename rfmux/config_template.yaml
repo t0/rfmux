@@ -1,0 +1,48 @@
+# rfmux configuration — the template.
+#
+# This file is tracked in git and read only when you ask for a copy of it.
+# Nothing in rfmux reads your edits to *this* file; make your own copy first:
+#
+#     python -c "import rfmux.config; print(rfmux.config.init())"
+#
+# That writes rfmux/config.yaml next to this file (gitignored, so your paths
+# never end up in a commit) and prints where it went. Edit that copy.
+#
+# Every setting below can also be overridden without touching a file at all —
+# see the env var named against each one, or the equivalent call in
+# rfmux.tuning.store, which wins for the rest of the Python session.
+
+store:
+
+  # Where measurement output goes.
+  #
+  # rfmux does not write one folder per session the way Periscope does: from a
+  # notebook there is no moment that obviously starts a session. Instead it
+  # creates one folder per day inside this directory —
+  #
+  #     ~/rfmux_data/ipy_session_20260904/
+  #
+  # and drops each measurement in as
+  #
+  #     multisweep_20260904_142231_cooldown3.pkl
+  #
+  # "~" expands to your home directory. A relative path is taken from wherever
+  # Python is running, which is rarely what you want — prefer an absolute one.
+  #
+  # Override with $RFMUX_DATA_DIR, or for one session:
+  #     rfmux.tuning.store.set_output_directory("/data/cooldown7")
+  directory: ~/rfmux_data
+
+  # Write a .pkl automatically when a measurement finishes.
+  #
+  # This is what makes `await crs.multisweep(...)` leave something behind
+  # without your having to remember to save it. Turn it off here if you would
+  # rather save by hand with rfmux.tuning.store.save().
+  #
+  # A `save=` argument on an individual call beats this either way, so you can
+  # leave it on and pass save=False to the one measurement you are throwing
+  # away.
+  #
+  # Override with $RFMUX_AUTOSAVE (0/1, false/true), or for one session:
+  #     rfmux.tuning.store.set_autosave(False)
+  autosave: true

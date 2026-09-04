@@ -23,6 +23,17 @@ venv/
 outputs/
 test/session_testing/
 
+# Your rfmux config — the copy of rfmux/config_template.yaml that
+# rfmux.config.init() writes. It holds machine-specific paths, so it is yours
+# and not the repo's; the template is the tracked one. Note that a wheel built
+# from a checkout that has this file will carry it, since scikit-build-core
+# copies the whole package directory — delete it before building one to ship.
+rfmux/config.yaml
+
+# Headless measurement output, if you point store.directory inside the repo.
+# Same argument as outputs/ above: run data, gigabytes of it.
+ipy_session_*/
+
 # Untracked scratch from ad-hoc debugging sessions. Anything here worth
 # keeping belongs in test/ as a real test.
 test_debug_scripts/

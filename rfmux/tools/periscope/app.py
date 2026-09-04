@@ -1967,6 +1967,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._df_cal_task = DfCalibrationTask(measure, module, signals,
                                               parent=self)
         self._df_cal_task.start()
+        self.statusBar().showMessage(
+            f"Measuring df calibrations for module {module} in the "
+            "background; df units are available when it finishes")
 
     def _df_calibration_running(self) -> bool:
         task = getattr(self, "_df_cal_task", None)
@@ -1975,6 +1978,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     def _on_df_calibration_measured(self, module: int, cals: dict) -> None:
         if cals:
             self._handle_df_calibration_ready(module, cals)
+        self.statusBar().showMessage(
+            f"df calibrations measured for {len(cals)} channels on module "
+            f"{module}", 8000)
         self._df_cal_task = None
 
     def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):

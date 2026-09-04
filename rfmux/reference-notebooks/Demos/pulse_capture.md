@@ -149,9 +149,9 @@ below no-ops in that case.
 If you have no hardware, this stands up a simulated CRS: two resonators
 biased and carrying tones, and periodic quasiparticle pulses to detect.
 `auto_bias_kids` is what biases them: the simulation sweeps each resonator at
-`bias_amplitude` (a tone power, -55 dBm by default) and parks the tone on the
-S21 minimum it finds, the way a tuning flow would. It gives tones, not a df
-calibration; section 7 measures that separately.
+`bias_amplitude` (a tone power, -55 dBm by default) and biases it at the S21
+minimum it finds, the way a tuning flow would. It gives biased resonators,
+not a df calibration; section 7 measures that separately.
 
 Pulse heights are drawn uniformly between `pulse_random_amp_min` and
 `pulse_random_amp_max`, so the amplitude histogram in section 7 shows a

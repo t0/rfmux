@@ -28,6 +28,25 @@ import warnings
 import asyncio
 
 import click
+from PyQt6 import QtCore, QtGui
+
+
+def _building_splash(config):
+    """A window for the wait before there is one: the mock array is
+    built, and biased, before Periscope can show anything."""
+    n = config.get("num_resonances", 0)
+    text = f"Building the mock array: {n} resonators"
+    if config.get("auto_bias_kids"):
+        text += ", sweeping and biasing each"
+    text += "\n\nThe window opens when it is done."
+    pixmap = QtGui.QPixmap(480, 120)
+    pixmap.fill(QtGui.QColor("#232a33"))
+    splash = QtWidgets.QSplashScreen(pixmap)
+    splash.showMessage(text, QtCore.Qt.AlignmentFlag.AlignCenter,
+                       QtGui.QColor("#f0f0f0"))
+    splash.show()
+    QtWidgets.QApplication.processEvents()
+    return splash
 
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog
@@ -127,6 +146,7 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
+    splash = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
     
@@ -303,7 +323,9 @@ def main():
                     initial_mock_config['resonator_random_seed'] = _rng.randint(0, 2**31 - 1)
 
                 try:
-                    # Apply configuration to the server
+                    # Apply configuration to the server.  Seconds at many
+                    # tones, before there is a window: say so.
+                    splash = _building_splash(initial_mock_config)
                     resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
                     if load_mock_config_from_session:
                         print(f"[Session] Mock configuration restored: {resonator_count} resonators generated")
@@ -439,6 +461,8 @@ def main():
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.
     viewer.setWindowIcon(app_icon)
     viewer.show()
+    if splash is not None:
+        splash.finish(viewer)
     # Held in a local so it outlives this call: a QTimer that goes out
     # of scope is destroyed and stops firing.
     _sigint_wake = install_sigint_handler()

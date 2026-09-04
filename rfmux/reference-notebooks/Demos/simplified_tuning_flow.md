@@ -136,8 +136,8 @@ across 600 MHz–1 GHz, generated from a physical LEKID model, so they respond t
 drive power and temperature the way real ones do.
 
 Note what is **not** set here: `auto_bias_kids`. The simulation *can* bias
-carriers on its own resonators, sweeping each one at `bias_amplitude` and
-parking a tone on the S21 minimum it finds; the pulse-capture notebook uses
+its own resonators, sweeping each one at `bias_amplitude` and biasing it at
+the S21 minimum it finds; the pulse-capture notebook uses
 that to skip straight to detection. It is the shortcut this guide exists to
 replace with the real flow, so we don't take it.
 

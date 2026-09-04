@@ -298,8 +298,8 @@ inside one sample and is detected but not resolved, which looks like a single
 spike rather than a pulse.
 
 `auto_bias_kids` is the simulation's own tuning: it sweeps each resonator at
-`bias_amplitude`, a tone power of -55 dBm by default, and parks the tone on
-the S21 minimum it finds. That gives tones, not a df calibration, so
+`bias_amplitude`, a tone power of -55 dBm by default, and biases it at the
+S21 minimum it finds. That gives biased resonators, not a df calibration, so
 `measure_df_calibrations(module=1)` measures one for every biased channel
 afterwards; Periscope does this itself at startup in mock mode. Both work
 headlessly, and both are what a notebook gets from `create_mock_crs`.

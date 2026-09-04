@@ -28,14 +28,40 @@ from ...core.transferfunctions import convert_iq_to_df, convert_roc_to_volts
 __all__ = ["measure_df_calibrations"]
 
 
+def _local_fit(offsets, iq_volts, degree: int = 3):
+    """The sweep replaced by a cubic fitted through its central half.
+
+    The conversion differentiates a spline through the points at the
+    bias frequency, and a spline's derivative at one point is set by
+    its nearest neighbours: on a real sweep, whose points carry drift
+    as well as noise, repeated measurements disagreed by a factor of
+    two in magnitude.  A cubic over the central half of the span uses
+    every point there; repeated sweeps then agree to a few percent.
+    The fitted curve is what gets differentiated, so the conversion
+    itself is untouched.
+    """
+    offsets = np.asarray(offsets, dtype=np.float64)
+    half = 0.25 * (offsets[-1] - offsets[0])
+    keep = np.abs(offsets) <= half
+    if keep.sum() <= degree + 1:
+        return iq_volts
+    fit_i = np.polyfit(offsets[keep], iq_volts.real[keep], degree)
+    fit_q = np.polyfit(offsets[keep], iq_volts.imag[keep], degree)
+    smooth = np.array(iq_volts, dtype=complex)
+    smooth[keep] = (np.polyval(fit_i, offsets[keep])
+                    + 1j * np.polyval(fit_q, offsets[keep]))
+    return smooth
+
+
 @macro(CRS, register=True)
 async def measure_df_calibrations(
     crs: CRS,
     channels: Optional[List[int]] = None,
     module: int = 1,
-    span_hz: float = 100e3,
+    span_hz: float = 20e3,
     resolution_hz: float = 500.0,
     n_samples: int = 10,
+    progress=None,
 ) -> Dict[int, complex]:
     """``{channel: calibration}`` measured where each channel sits now.
 
@@ -48,18 +74,18 @@ async def measure_df_calibrations(
     module : int
         Module index (1-based).
     span_hz : float
-        Full width of the sweep, centred on the bias point.
+        Full width of the sweep, centred on the bias point.  The slope
+        is fitted over the central half of it, so about three
+        linewidths is right: wide enough for the fit to see the
+        curvature, narrow enough that a cubic still describes it.
     resolution_hz : float
-        Spacing between points.  This is the parameter that matters:
-        the spline has to resolve the resonance to differentiate it, so
-        the spacing must be well inside the linewidth.  A few kHz of
-        linewidth against 100 Hz spacing gives tens of points across the
-        feature.  Coarser than the linewidth and the fit runs through
-        the dip rather than around it -- the magnitude still looks
-        plausible while the phase, which is the whole rotation, is
-        wrong.
+        Spacing between points.  The fit wants a dozen or more points
+        across its window, so the spacing must be well inside the
+        linewidth.
     n_samples : int
         Samples averaged per point.
+    progress : callable, optional
+        Called as ``progress(done, total)`` per sweep point.
 
     Returns
     -------
@@ -91,6 +117,8 @@ async def measure_df_calibrations(
         # per point.  On the simulator each read runs the whole array's
         # physics, so per channel the old loop was minutes at 100 tones.
         for k, off in enumerate(offsets):
+            if progress is not None:
+                progress(k, n_points)
             async with crs.tuber_context() as ctx:
                 for ch in channels:
                     ctx.set_frequency(bias[ch] + off - nco, channel=ch,
@@ -114,9 +142,9 @@ async def measure_df_calibrations(
     out: Dict[int, complex] = {}
     for ch in channels:
         try:
-            cal = convert_iq_to_df(np.array([1.0 + 0j]), bias[ch],
-                                   bias[ch] + offsets,
-                                   convert_roc_to_volts(iq[ch]))[0]
+            cal = convert_iq_to_df(
+                np.array([1.0 + 0j]), bias[ch], bias[ch] + offsets,
+                _local_fit(offsets, convert_roc_to_volts(iq[ch])))[0]
         except Exception as exc:
             # Skipping one channel is fine -- it simply gets no
             # calibration -- but skipping all of them silently would

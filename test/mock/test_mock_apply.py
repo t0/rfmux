@@ -29,6 +29,26 @@ def test_turning_pulses_on_is_pulse_only():
     assert pulse_only_change(changed)
 
 
+def test_keys_the_dialog_does_not_carry_are_not_changes():
+    """The dialog hands back None for what it does not show, and floats
+    that went through a text field a rounding step off."""
+    from_dialog = dict(BASE, pulse_period=0.05, scale_factor=None,
+                       cache_qp_step=None, bias_amplitude=0.0016 * (1 + 1e-12))
+    assert config_changes(BASE, from_dialog) == {"pulse_period"}
+
+
+def test_pulse_only_apply_uses_the_merged_config():
+    """set_pulse_mode must see the mode and parameters the dialog did
+    not carry, from the configuration in force."""
+    crs = _FakeCRS()
+    prev = dict(BASE, pulse_mode="periodic")
+    from_dialog = dict(prev, pulse_period=0.05, pulse_mode=None)
+    outcome, _ = asyncio.run(apply_mock_config(crs, from_dialog, prev))
+    assert outcome == "pulses"
+    assert crs.calls == [("set_pulse_mode", "periodic",
+                          {"period": 0.05, "tau_decay": 25e-3})]
+
+
 def test_anything_else_regenerates():
     changed = config_changes(BASE, dict(BASE, num_resonances=50,
                                         pulse_mode="periodic"))

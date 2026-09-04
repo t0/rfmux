@@ -131,6 +131,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         dot_px: int = DENSITY_DOT_SIZE,       # Constant from .utils
         crs=None, # CRS object, type hint likely from .utils or a core module
         skip_startup_dialog: bool = False,  # Skip dialog if already handled by launcher
+        df_calibrations: Optional[Dict[int, complex]] = None,
     ):
         """
         Initializes the Periscope main window.
@@ -209,11 +210,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._init_receiver()
 
         # Measure df calibrations from startup, off the GUI thread, so
-        # the window is up and streaming while the sweep runs (27 s at
-        # 100 tones on the simulator).  Mock mode only -- see
-        # _measure_df_calibrations.
+        # the window is up and streaming while the sweep runs.  Mock
+        # mode only -- see _measure_df_calibrations.  The launcher
+        # measures them behind its build window for large arrays and
+        # hands them in instead.
         self._df_cal_task = None
-        self._start_df_calibration(self.module)
+        if df_calibrations:
+            self._handle_df_calibration_ready(self.module,
+                                              dict(df_calibrations))
+        else:
+            self._start_df_calibration(self.module)
 
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.

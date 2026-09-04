@@ -169,9 +169,28 @@ async def reconfigure_mock_crs(
 _PULSE_PREFIX = "pulse_"
 
 
+def _same(a, b) -> bool:
+    if isinstance(a, float) and isinstance(b, (int, float)):
+        return abs(a - b) <= 1e-9 * max(abs(a), abs(b), 1e-300)
+    return a == b
+
+
 def config_changes(previous: Dict[str, Any], config: Dict[str, Any]) -> set:
-    return {k for k in set(previous) | set(config)
-            if previous.get(k) != config.get(k)}
+    """Keys *config* changes against *previous*.
+
+    A key *config* lacks, or carries as None, is not a change: the
+    dialog only edits what it shows and hands back None for the rest.
+    Floats that have been through a text field compare with tolerance.
+    """
+    return {k for k, v in config.items()
+            if v is not None and not _same(previous.get(k), v)}
+
+
+def merged(previous: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+    """*previous* with *config*'s non-None values on top."""
+    out = dict(previous)
+    out.update({k: v for k, v in config.items() if v is not None})
+    return out
 
 
 def pulse_only_change(changed) -> bool:
@@ -207,8 +226,9 @@ async def apply_mock_config(crs: CRS, config: Dict[str, Any],
     if changed is not None and pulse_only_change(changed):
         if not changed:
             return "unchanged", None
-        await crs.set_pulse_mode(config.get("pulse_mode", "none"),
-                                 **pulse_mode_kwargs(config))
+        full = merged(previous, config)
+        await crs.set_pulse_mode(full.get("pulse_mode", "none"),
+                                 **pulse_mode_kwargs(full))
         return "pulses", None
     if config.get("resonator_random_seed") is None:
         import random

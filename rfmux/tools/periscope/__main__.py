@@ -40,29 +40,35 @@ _STAGE_TEXT = {
     "generating": "Generating resonators",
     "biasing": "Biasing detectors",
     "warming": "Warming pulse caches",
+    "calibrating": "Measuring df calibrations",
 }
+_STAGE_UNIT = {"warming": "blocks", "calibrating": "points"}
 
 
-def _build_with_progress(crs_obj, config, loop):
-    """generate_resonators in a worker thread, with a progress window
-    on the main thread showing where the build is.
+def _build_with_progress(crs_obj, config, loop, module):
+    """The mock build in a worker thread, with a progress window on the
+    main thread showing where it is.
 
-    The build is one RPC that takes seconds at many tones.  Blocking
-    the GUI thread on it left a window that answered no events, which
-    the window manager reports as hung; the worker keeps the event loop
-    alive, and the main thread polls get_build_progress on *loop*
-    (idle while the worker runs) to fill the bar: resonators generated,
-    then channels biased, then the pulse-cache warm-up.
+    The build is seconds at many tones: generate_resonators (one RPC
+    the server reports on through get_build_progress) and then, when
+    the array was biased, the df calibration sweep, which the client
+    drives point by point.  Blocking the GUI thread on either left a
+    window that answered no events, which the window manager reports
+    as hung; the worker keeps the event loop alive, and the main thread
+    polls on *loop* (idle while the worker runs) to fill one bar with
+    the four stages.
+
+    Returns ``(resonator_count, df_calibrations)``.
     """
     import threading
     import time
 
     n = config.get("num_resonances", 0)
     biasing = bool(config.get("auto_bias_kids"))
-    # Three stages of one bar, a third each: generation, biasing, and
-    # the pulse-cache warm-up, whose blocks are scaled onto its third.
-    offsets = {"generating": 0, "biasing": n, "warming": 2 * n}
-    total = 3 * n if biasing else n
+    stages = (["generating", "biasing", "warming", "calibrating"] if biasing
+              else ["generating"])
+    offsets = {stage: k * n for k, stage in enumerate(stages)}
+    total = len(stages) * n
     dialog = QtWidgets.QProgressDialog(
         f"Building the mock array: {n} resonators", None, 0, total)
     dialog.setWindowTitle("Periscope")
@@ -71,6 +77,7 @@ def _build_with_progress(crs_obj, config, loop):
     dialog.show()
 
     result = {}
+    local = {}          # the calibration stage's progress, client-side
 
     def work():
         worker_loop = asyncio.new_event_loop()
@@ -78,6 +85,12 @@ def _build_with_progress(crs_obj, config, loop):
         try:
             result["count"] = worker_loop.run_until_complete(
                 crs_obj.generate_resonators(config))
+            if biasing:
+                local.update(stage="calibrating", done=0, total=1)
+                result["cals"] = worker_loop.run_until_complete(
+                    crs_obj.measure_df_calibrations(
+                        module=module,
+                        progress=lambda d, t: local.update(done=d, total=t)))
         except Exception as exc:
             result["error"] = exc
         finally:
@@ -93,18 +106,22 @@ def _build_with_progress(crs_obj, config, loop):
         if time.monotonic() - last_poll < 0.2:
             continue
         last_poll = time.monotonic()
-        try:
-            p = loop.run_until_complete(crs_obj.get_build_progress())
-        except Exception:
-            continue
-        # Over tuber the dict comes back as an attribute-access result;
-        # in-process it is the dict itself.
-        field = (p.get if isinstance(p, dict)
-                 else lambda k, d=None: getattr(p, k, d))
-        stage = field("stage", "")
-        if stage in _STAGE_TEXT:
-            done, stage_total = field("done", 0), field("total", 0)
-            unit = "blocks" if stage == "warming" else ""
+        if local:
+            stage, done, stage_total = (local["stage"], local["done"],
+                                        local["total"])
+        else:
+            try:
+                p = loop.run_until_complete(crs_obj.get_build_progress())
+            except Exception:
+                continue
+            # Over tuber the dict comes back as an attribute-access
+            # result; in-process it is the dict itself.
+            field = (p.get if isinstance(p, dict)
+                     else lambda k, d=None: getattr(p, k, d))
+            stage, done, stage_total = (field("stage", ""), field("done", 0),
+                                        field("total", 0))
+        if stage in offsets:
+            unit = _STAGE_UNIT.get(stage, "")
             dialog.setLabelText(
                 f"{_STAGE_TEXT[stage]}: {done} / {stage_total} {unit}".rstrip())
             share = done * n // stage_total if stage_total else 0
@@ -113,7 +130,7 @@ def _build_with_progress(crs_obj, config, loop):
     dialog.close()
     if "error" in result:
         raise result["error"]
-    return result["count"]
+    return result["count"], result.get("cals") or {}
 
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog
@@ -213,6 +230,7 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
+    initial_df_calibrations = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
     
@@ -393,7 +411,8 @@ def main():
                     # tones, before there is a window: show one.  A small
                     # array is done before it would be read.
                     if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
-                        resonator_count = _build_with_progress(crs_obj, initial_mock_config, loop)
+                        resonator_count, initial_df_calibrations = _build_with_progress(
+                            crs_obj, initial_mock_config, loop, args.module)
                     else:
                         resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
                     if load_mock_config_from_session:
@@ -465,6 +484,7 @@ def main():
         dot_px=args.density_dot,
         crs=crs_obj,  # Pass the CRS object
         skip_startup_dialog=(session_config is not None),  # Skip dialog if already shown
+        df_calibrations=initial_df_calibrations,
     )
     
     # Store the initial mock configuration if in mock mode

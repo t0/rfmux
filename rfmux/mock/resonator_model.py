@@ -1281,8 +1281,11 @@ class MockResonatorModel:
             nqp = self._batch_nqp(np.array([t_to], dtype=np.float64))[0]
             self.update_base_params_from_nqp(nqp.tolist())
             self.invalidate_caches()
+        # Keep every event still contributing at the START of the span:
+        # the span's samples are evaluated after this, and a block of
+        # slow frames is many decay times long.
         self.pulse_events = [p for p in self.pulse_events
-                             if t_to - p['start_time']
+                             if t_from - p['start_time']
                              < p['tau_rise'] + p['tau_decay'] * 15]
 
     def _sample_random_pulse_amplitude(self):

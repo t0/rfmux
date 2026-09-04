@@ -83,6 +83,25 @@ class DummyReceiver:
     def get_dropped_packets(self): return 0
     def get_received_packets(self): return 0
 
+def changed_keys(previous: dict, config: dict) -> set:
+    return {k for k in set(previous) | set(config)
+            if previous.get(k) != config.get(k)}
+
+
+def pulse_only_change(changed) -> bool:
+    """True when every changed key is a pulse setting, which the running
+    model takes live through set_pulse_mode; anything else means the
+    array has to be regenerated.  An empty change is pulse-only too."""
+    return all(k.startswith("pulse_") for k in changed)
+
+
+def pulse_mode_kwargs(config: dict) -> dict:
+    """set_pulse_mode's keyword arguments from a mock config: the
+    pulse_* keys without their prefix, mode aside."""
+    return {k[len("pulse_"):]: v for k, v in config.items()
+            if k.startswith("pulse_") and k != "pulse_mode"}
+
+
 class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     """
     Multi‑pane PyQt application for real-time data visualization of:
@@ -2011,10 +2030,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             # Get new configuration
             new_config = dialog.get_configuration()
+            previous = self.mock_config
             self.mock_config = new_config
-            
+
             # Apply configuration to the mock CRS
-            self._apply_mock_configuration(new_config)
+            self._apply_mock_configuration(new_config, previous)
             
     def _get_current_mock_config(self) -> dict:
         """
@@ -2029,20 +2049,24 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error getting current mock config: {e}")
             return mc.defaults()
             
-    def _apply_mock_configuration(self, config: dict):
+    def _apply_mock_configuration(self, config: dict, previous=None):
         """
         Apply the user's configuration to the mock CRS system.
-        
-        This sends the configuration to the server-side MockCRS to regenerate
-        resonators with the new parameters.
-        
+
+        Pulse settings are taken live by the running model; anything
+        else is sent to the server-side MockCRS to regenerate the
+        resonators, which at many tones is seconds of blocked GUI and a
+        stalled stream.  *previous* is the configuration in force
+        before, so only what changed decides which.
+
         Args:
             config: Dictionary of configuration values
+            previous: the configuration it replaces, if known
         """
         try:
             if self.crs is not None and hasattr(self.crs, 'generate_resonators'):
                 import asyncio
-                
+
                 # Use the existing event loop or create new one
                 try:
                     loop = asyncio.get_event_loop()
@@ -2052,7 +2076,23 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                
+
+                changed = (None if previous is None
+                           else changed_keys(previous, config))
+                if changed is not None and pulse_only_change(changed):
+                    if changed:
+                        loop.run_until_complete(self.crs.set_pulse_mode(
+                            config.get("pulse_mode", "none"),
+                            **pulse_mode_kwargs(config)))
+                        self.qp_pulse_mode = config.get("pulse_mode", "none")
+                        print(f"[Periscope] Pulse settings applied live: "
+                              f"{', '.join(sorted(changed))}")
+                    else:
+                        print("[Periscope] Mock configuration unchanged")
+                    if self.session_manager.is_active:
+                        self.session_manager.save_mock_config(config)
+                    return
+
                 try:
                     # Ensure a concrete random seed exists before sending to server.
                     # generate_resonators() is a tuber RPC — mutations on the server

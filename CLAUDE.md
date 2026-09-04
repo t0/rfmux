@@ -141,6 +141,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 - PFB stream: ~2.44 MHz, port 9877, `PFBPacket`
 - The C++ receiver hands Periscope and the PFB source one demuxed array per drain (`pop_readout_batch`, `pop_pfb_batch`); the per-packet conversions remain the reference
 - `get_multicast_socket()` uses `SO_REUSEPORT` — multiple listeners OK
+- Mock slow stream is generated a ~50 ms block of frames at a time (one
+  physics call, one packet per frame): 100 tones run at real time this
+  way and at a quarter of it frame by frame
 - Mock streams to the same multicast group as hardware, with TTL 0 so it
   cannot leave the host. If multicast does not work on the machine it
   falls back to loopback unicast and prints which step failed —
@@ -169,9 +172,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 647 tests, ~1 min, zero skips
+pytest --tier=quick                 # Edit loop: 657 tests, ~1 min, zero skips
 pytest --tier=portable              # No CRS, no GUI: 37 tests, ~9 s
-pytest --tier=full                  # All 663 that run without a board, ~4 min
+pytest --tier=full                  # All 673 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 16 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
@@ -182,7 +185,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 `hardware`/`all` excludes the board tests, so they report zero skips. Markers
 tag tests: `portable`, `slow_acquisition`, `hardware` — the last applied
 automatically to anything using the `crs`/`live_session`/`serial` fixtures,
-so don't add it by hand. A bare `pytest` still runs 663 + ~75 hardware skips.
+so don't add it by hand. A bare `pytest` still runs 673 + ~75 hardware skips.
 `full` contains `acquisition`; running both pays the slow set twice.
 
 `test/` is organized into subdirectories mirroring the package under test

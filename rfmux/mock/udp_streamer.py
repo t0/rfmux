@@ -252,13 +252,17 @@ class MockCRSStreamer(threading.Thread):
                         self.last_decimation = dec
                         self._pfb_buf = None
 
-                    # Simulation time for this frame
+                    # Simulation time for this block of frames
                     t_frame = (self.total_elapsed_time.get(1, 0.0)
                                + self.seq_counters.get(1, 0) / slow_rate)
+                    n_block = self.slow_block_len(dec)
 
-                    # ── PFB samples for this frame (if enabled) ──
+                    # ── PFB samples, one frame at a time (if enabled) ──
                     if self.pfb_enabled and self.pfb_channels:
-                        self._emit_pfb_frame(t_frame, dec)
+                        for k in range(n_block):
+                            if not self.running:
+                                break
+                            self._emit_pfb_frame(t_frame + k / slow_rate, dec)
                     else:
                         self._pfb_buf = None
 
@@ -271,13 +275,14 @@ class MockCRSStreamer(threading.Thread):
                     for module_num in modules:
                         if not self.running:
                             break
-                        self._emit_slow_packet(module_num, t_frame, dec)
+                        self._emit_slow_block(module_num, t_frame, dec,
+                                              n_block)
 
-                    self.frame_index += 1
+                    self.frame_index += n_block
 
                     # ── Pace to real time ─────────────────────
                     elapsed = time.perf_counter() - t_wall_start
-                    sleep_dur = frame_time - elapsed
+                    sleep_dur = frame_time * n_block - elapsed
                     if sleep_dur > 0:
                         time.sleep(sleep_dur)
 
@@ -299,16 +304,34 @@ class MockCRSStreamer(threading.Thread):
 
     # ── Slow packet emission ──────────────────────────────────
 
+    #: The slow stream is generated a block of frames at a time: one
+    #: physics call per block, then one packet per frame.  Per-sample
+    #: overhead dominated the single-frame path at many tones (100
+    #: tones: 7 ms a sample against a 1.7 ms budget at stage 6, a
+    #: quarter of real time; 0.7 ms a sample in blocks of 32).  About
+    #: this much stream time per block, so the latency it adds stays
+    #: under what the board's own buffering already is.
+    SLOW_BLOCK_SECONDS = 0.05
+    SLOW_BLOCK_MAX = 128
+
+    @classmethod
+    def slow_block_len(cls, dec) -> int:
+        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
+        return max(1, min(cls.SLOW_BLOCK_MAX,
+                          int(round(cls.SLOW_BLOCK_SECONDS * slow_rate))))
+
     def _emit_slow_packet(self, module_num, t_frame, dec):
-        """Generate and send one slow ReadoutPacket for *module_num*."""
+        """One slow ReadoutPacket for *module_num*: a block of one."""
+        self._emit_slow_block(module_num, t_frame, dec, 1)
+
+    def _emit_slow_block(self, module_num, t_frame, dec, n):
+        """*n* consecutive slow frames for *module_num* from one physics
+        call, sent as *n* packets with their own sequence numbers and
+        timestamps."""
         if self.mock_crs._short_packets:
             num_channels = SHORT_PACKET_CHANNELS
-            version = SHORT_PACKET_VERSION
         else:
             num_channels = LONG_PACKET_CHANNELS
-            version = LONG_PACKET_VERSION
-
-        seq = self.seq_counters[module_num]
         slow_rate = 625e6 / 256 / 64 / (2 ** dec)
 
         # ── Physics ───────────────────────────────────────────
@@ -317,11 +340,12 @@ class MockCRSStreamer(threading.Thread):
         full_scale = scale_factor * 256.0
         noise_level = cfg.get('udp_noise_level', 10.0)
 
-        noise_i = np.random.normal(0, noise_level, num_channels)
-        noise_q = np.random.normal(0, noise_level, num_channels)
-        channel_samples = noise_i + 1j * noise_q
-
         model = self.mock_crs._resonator_model
+        # Pulses that would start inside the block are scheduled on
+        # the frame grid first, as the PFB emitter does for its frame.
+        if n > 1:
+            model.advance_pulses_to(t_frame + (n - 1) / slow_rate, n,
+                                    1.0 / slow_rate)
         # pulse_time is explicit (same escape hatch the PFB emitter uses):
         # update_qp_densities_for_time is a monotonic ratchet, and with
         # PFB enabled advance_pulses_to has already moved
@@ -329,13 +353,26 @@ class MockCRSStreamer(threading.Thread):
         # slow stream would be evaluated at the PFB's time, skewing it
         # by up to one frame.
         channel_responses = model.calculate_module_response_coupled(
-            module_num, num_samples=1, sample_rate=slow_rate,
+            module_num, num_samples=n, sample_rate=slow_rate,
             start_time=t_frame, pulse_time=t_frame,
         )
-
+        signal = np.zeros((n, num_channels), dtype=complex)
         for ch_num_1, signal_val in channel_responses.items():
-            ch_idx_0 = ch_num_1 - 1
-            channel_samples[ch_idx_0] += signal_val * full_scale
+            signal[:, ch_num_1 - 1] = np.atleast_1d(signal_val) * full_scale
+
+        for k in range(n):
+            noise_i = np.random.normal(0, noise_level, num_channels)
+            noise_q = np.random.normal(0, noise_level, num_channels)
+            self._send_slow_packet(module_num, dec,
+                                   signal[k] + noise_i + 1j * noise_q)
+
+    def _send_slow_packet(self, module_num, dec, channel_samples):
+        """Stamp, build and send one slow packet; advances the module's
+        sequence counter, which is what dates it."""
+        version = (SHORT_PACKET_VERSION if self.mock_crs._short_packets
+                   else LONG_PACKET_VERSION)
+        seq = self.seq_counters[module_num]
+        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
 
         # ── Timestamp ─────────────────────────────────────────
         total_elapsed = (self.total_elapsed_time.get(module_num, 0.0)

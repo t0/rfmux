@@ -421,6 +421,7 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
             self.df_calibrations = {}
 
         _measure_df_calibrations = Periscope._measure_df_calibrations
+        _df_calibration_measurement = Periscope._df_calibration_measurement
 
         def _handle_df_calibration_ready(self, module, cals):
             self.df_calibrations[module] = cals

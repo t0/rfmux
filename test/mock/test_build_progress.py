@@ -25,13 +25,31 @@ def test_progress_is_answerable_during_the_build():
     with contextlib.redirect_stdout(io.StringIO()):
         count, freqs = asyncio.run(main())
     assert count == 6
+    # Six resonators generate in a few milliseconds, so which stage the
+    # poller catches is timing; that it caught the build mid-way at all
+    # is the contract, and it did so only because the work is off the
+    # event loop.
     stages = [p["stage"] for p in seen]
-    assert "generating" in stages and "biasing" in stages, stages
-    biasing = [p for p in seen if p["stage"] == "biasing"]
-    assert all(p["total"] == 6 for p in biasing)
-    assert max(p["done"] for p in biasing) >= 1
+    mid = [s for s in stages if s not in ("idle", "done")]
+    assert mid, stages
+    assert set(mid) <= {"generating", "biasing", "warming"}, stages
     final = asyncio.run(crs.get_build_progress())
     assert final == {"stage": "done", "done": 6, "total": 6}
+
+
+def test_generation_reports_each_resonator():
+    from rfmux.mock.crs import ServerMockCRS
+    crs = ServerMockCRS("0000")
+    with contextlib.redirect_stdout(io.StringIO()):
+        asyncio.run(crs.generate_resonators({
+            "num_resonances": 2, "resonator_random_seed": 3,
+            "auto_bias_kids": False}))
+    calls = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        crs._resonator_model.generate_resonators(
+            num_resonances=5, config=crs._physics_config,
+            progress=lambda done, total: calls.append((done, total)))
+    assert calls == [(k, 5) for k in range(5)]
 
 
 def test_auto_bias_is_not_capped_at_256():

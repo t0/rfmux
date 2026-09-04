@@ -497,7 +497,9 @@ def analyze_multiamp_data(
     fallback_to_lowest: bool = True
 ) -> Dict[int, Dict[str, Any]]:
     """
-    Analyze multi-amplitude multisweep results to find optimal bias points.
+    Analyze multi-amplitude multisweep results to find optimal bias points:
+    the highest amplitude whose sweep does not jump and, where the entry
+    carries a nonlinear fit, whose nonlinearity is below the threshold.
 
     Args:
         results_by_detector: Detector-indexed data keyed by iteration index:

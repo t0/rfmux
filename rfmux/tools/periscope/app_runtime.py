@@ -2390,7 +2390,7 @@ class PeriscopeRuntime:
             "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
             "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
             "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
-            "bias_frequency_method": None,
+            "bias_frequency_method": "max-diq",
             "rotate_saved_data": False,
             "sweep_direction": "upward",
             "resonance_frequencies": {self.module: [90e6, 91e6]},

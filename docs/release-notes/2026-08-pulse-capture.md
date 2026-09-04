@@ -73,10 +73,10 @@ multisweep with no fit selected runs no fit at all, so it stays the quick
 look. From the chosen fit come the bias frequency (the max-diq or min-s21
 point read off the fitted curve, not the raw grid), the amplitude choice, and
 the calibration. In Periscope the Bias KIDs dialog has the same choice,
-preselected to whatever fit the sweeps carry. Periscope's multisweep dialog
-defaults the bias frequency method to None, which keeps the original centre
-frequency; select max-dIQ there for the fitted bias point (headless
-`multisweep` defaults to it). A resonance biased into
+preselected to whatever fit the sweeps carry. The multisweep's bias frequency
+method defaults to max-dIQ, headless and in Periscope; it needs no fit of its
+own, since the multisweep reads that point off the raw grid and `bias_kids`
+reads it off the fit. A resonance biased into
 bifurcation has no such slope: the sweep jumps, and both `bias_kids` and
 `measure_df_calibrations` warn that its calibration is unreliable while
 still biasing it.

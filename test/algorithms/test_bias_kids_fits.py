@@ -100,21 +100,22 @@ async def test_calibration_is_measured_where_the_detector_sits():
     assert out[1]["df_calibration"] == pytest.approx(expect, rel=1e-2)
     assert "df_calibration_fit" in out[1]
     # The tone is back where it was biased, and it stepped by a
-    # twentieth of the fitted 20 kHz linewidth.
+    # twentieth of the fitted 20 kHz linewidth, on the tone grid.
     freqs = [f for kind, ch, f in board.log if kind == "frequency"]
     assert board.freq[1] == freqs[0]
-    assert freqs[1] - freqs[0] == pytest.approx(-1000.0, rel=0.05)
+    assert freqs[1] - freqs[0] == pytest.approx(-3 * bk.TONE_GRID_HZ)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("qr", [1.0e6, 5.0e4])
 async def test_measured_calibration_holds_for_a_narrow_resonator(qr):
-    # At Qr = 1e6 the linewidth is 1 kHz and the step 50 Hz; the
-    # curvature correction is a percent or two either way.
+    # At Qr = 1e6 the linewidth is 1 kHz and the smallest step, one
+    # 298 Hz grid step, reads a slope 35% low before the correction.
     entry = _entry(qr=qr, span=20e3 if qr > 1e5 else 200e3)
     board = _ResonanceBoard(qr)
     out = await bk.bias_kids(board, {1: entry}, module=1)
-    f_bias = out[1]["bias_frequency"]
+    # The truth at the frequency the tone was actually placed at.
+    f_bias = round(out[1]["bias_frequency"] / bk.TONE_GRID_HZ) * bk.TONE_GRID_HZ
     h = 1e-2
     z = nonlinear_iq(np.array([f_bias - h, f_bias + h]), FR, qr, 0.6, 0.1, 0.0, 1.0, 0.2)
     true = 1.0 / ((z[1] - z[0]) / (2 * h))

@@ -8,6 +8,12 @@ import asyncio
 import warnings
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
                              ensure_fits, fitted_linewidth, step_slope_correction)
+
+#: Tones are placed on multiples of the slow stream's frame rate at
+#: decimation 7, 625 MHz / 2^21, so that intermodulation products of
+#: the tones land on that grid too and stay out of the measurements.
+#: Not a limit of the board, whose frequency resolution is far finer.
+TONE_GRID_HZ = 625e6 / 2 ** 21
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
 
@@ -278,9 +284,13 @@ async def bias_kids(
                         within 4.  The fit's calibration is kept as
                         'df_calibration_fit'.  Defaults to True.
         calibration_step (float): Each detector's half-step as a fraction of its
-                        fitted linewidth.  At the default 0.05 the central
-                        difference is within 2% of the slope before the curvature
-                        correction from the fit.  300 Hz for a detector with no fit.
+                        fitted linewidth, rounded to the tone grid (multiples of
+                        298 Hz, so the stepped tones intermodulate onto the grid
+                        too) and never less than one grid step.  At the default
+                        0.05 the central difference is within 2% of the slope
+                        before the curvature correction from the fit; a resonator
+                        narrower than 6 kHz gets the one grid step and leans on
+                        that correction.
         module (int | list[int], optional): Target module(s). If None, extracted from results.
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         
@@ -409,9 +419,7 @@ async def bias_kids(
             channel = det_idx
             
             # Quantize the absolute bias frequency to nearest multiple of base frequency
-            # The tone goes exactly where the fit put it: the board's
-            # frequency resolution is far finer than any bias choice.
-            quantized_bias_freq = float(bias_freq)
+            quantized_bias_freq = round(bias_freq / TONE_GRID_HZ) * TONE_GRID_HZ
             
             # Calculate channel frequency relative to NCO
             channel_freq = quantized_bias_freq - nco_freq
@@ -494,7 +502,8 @@ async def bias_kids(
         steps = {}
         for det_idx, config in bias_configs.items():
             lw = fitted_linewidth(multisweep_results[det_idx], fit_method)
-            steps[det_idx] = calibration_step * lw if lw else 300.0
+            grid_steps = max(1, round(calibration_step * lw / TONE_GRID_HZ)) if lw else 1
+            steps[det_idx] = grid_steps * TONE_GRID_HZ
         try:
             measured = await measure_calibrations_by_step(crs, bias_configs, module, steps)
             for det_idx in list(measured):

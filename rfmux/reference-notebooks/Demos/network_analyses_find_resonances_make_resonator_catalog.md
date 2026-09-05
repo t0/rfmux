@@ -478,7 +478,6 @@ by_hand_catalog = ResonatorCatalog(
         ),
     ],
     module=2,
-    nco_frequency_hz=1.03e9,
 )
 print(by_hand_catalog)
 print(f"\nred's df calibration: "
@@ -743,7 +742,7 @@ files you produced or trust, not ones that arrived from somewhere unknown.
 
 **Note that going back and forth from CSV files is deliberately lossy.**
 These files will carry the operating point and nothing else:
-`notes`, `nco_frequency_hz` and every calibration field are dropped. Use it to
+`notes` and every calibration field are dropped. Use it to
 hand someone a bias table they can edit; use `to_dict` when you need everything
 back.
 

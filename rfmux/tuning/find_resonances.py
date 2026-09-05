@@ -154,7 +154,7 @@ class ResonanceSearch:
         The step that turns anonymous dips into named resonators on channels.
         ``amplitude`` is the probe amplitude the catalog's bias points start at;
         remaining keyword arguments go to ``ResonatorCatalog.from_frequencies``
-        (``names``, ``nco_frequency_hz``, ``min_separation_hz``).
+        (``names``, ``min_separation_hz``).
         """
         return ResonatorCatalog.from_frequencies(
             self.resonance_frequencies_hz, module=module, amplitude=amplitude, **kwargs

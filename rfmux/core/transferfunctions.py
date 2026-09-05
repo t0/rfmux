@@ -29,6 +29,17 @@ FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
 # TODO: verify still appropriate
 BASE_FREQUENCY = COMB_SAMPLING_FREQ / 256 / 2**12
 
+# How far apart the tones in one NCO region are allowed to sit: every tone
+# within +/- ALLOWED_NCO_BANDWIDTH_HZ / 2 of the NCO frequency.
+#
+# This is a policy, not a hardware limit. The band a module can actually
+# convert is a separate, wider number; this is the span across which we are
+# willing to place tones and still call the result trustworthy. It lives here,
+# in one place, so that a catalog which fits the sweep also fits the bias
+# applier -- two algorithms disagreeing about how wide a region may be is a
+# catalog that can be measured and then not played back.
+ALLOWED_NCO_BANDWIDTH_HZ = 500e6
+
 # ────────────────── Cable Delay Compensation Functions ───────────────────
 SPEED_OF_LIGHT_VACUUM = c  # m/s
 VELOCITY_FACTOR_COAX = 0.66

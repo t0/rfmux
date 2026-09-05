@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import ResonatorCatalog
-from ...core.transferfunctions import convert_roc_to_volts
+from ...core.transferfunctions import ALLOWED_NCO_BANDWIDTH_HZ, convert_roc_to_volts
 from ...tuning import store
 from ...tuning.sweep_results import merge_modules, pack_sweep
 
@@ -531,9 +531,6 @@ async def multisweep(
     # it — crs.clear_channels(module=...) before the call.
     swept_channels = {t.channel for t in targets}
 
-    # --- Define Constants ---
-    MAX_NCO_SPAN_HZ = 500e6
-
     # --- Generate sweep frequencies ---
     resonance_data = {}
     for t in targets:
@@ -568,7 +565,7 @@ async def multisweep(
     region_min = sorted_targets[0].center_frequency_hz - span_hz / 2
 
     for t in sorted_targets[1:]:
-        if (t.center_frequency_hz + span_hz / 2) - region_min > MAX_NCO_SPAN_HZ:
+        if (t.center_frequency_hz + span_hz / 2) - region_min > ALLOWED_NCO_BANDWIDTH_HZ:
             nco_regions.append(current_region)
             current_region = [t]
             region_min = t.center_frequency_hz - span_hz / 2

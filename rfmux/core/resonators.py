@@ -44,10 +44,13 @@ from typing import Iterable, Iterator, Literal
 from .transferfunctions import BASE_FREQUENCY
 
 
-def _on_grid(frequency_hz: float) -> float:
+def on_grid(frequency_hz: float) -> float:
     """Round onto the hardware tone grid, ``transferfunctions.BASE_FREQUENCY``.
 
-    The single definition every quantizing path in the tree uses.
+    The single definition every quantizing path in the tree uses. Public
+    because the grid binds more than bias points: the NCO an operation parks
+    its tones against has to land on it too, or every offset computed from
+    that NCO is off-grid however carefully the tone was quantized.
     """
     return round(frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
 
@@ -101,7 +104,7 @@ class BiasPoint:
         if self.frequency_hz <= 0:
             raise ValueError(f"frequency_hz={self.frequency_hz}: must be positive Hz.")
         if self.bias_frequency_quantized:
-            snapped = _on_grid(self.frequency_hz)
+            snapped = on_grid(self.frequency_hz)
             if snapped <= 0:
                 raise ValueError(
                     f"frequency_hz={self.frequency_hz}: quantizes to 0 Hz — it is "
@@ -131,7 +134,7 @@ class BiasPoint:
         resonator's width. ``bias_frequency_quantized`` is policy and is left
         alone, so an opted-out point stays opted out for its next move.
         """
-        return replace(self, frequency_hz=_on_grid(self.frequency_hz))
+        return replace(self, frequency_hz=on_grid(self.frequency_hz))
 
 
 # ─── Resonator ────────────────────────────────────────────────────────────────
@@ -207,6 +210,17 @@ class ResonatorCatalog:
     Retuning through ``Resonator.set_bias`` is not re-checked — two tones can be
     walked onto one frequency after the fact. Worth a ``validate()`` pass once
     there is a caller that retunes in bulk.
+
+    There is deliberately no NCO frequency here. A catalog is free to span more
+    frequency than one NCO can carry — multisweep already re-tunes the NCO as it
+    walks across such an array — so a single number recorded on the catalog
+    would be a fact about one moment of one operation rather than about the
+    array. The NCO in force is the board's to answer for
+    (``crs.get_nco_frequency(module=...)``), and ``crs.apply_bias`` sets it from
+    the frequencies it is applying. Worth adding back the day a caller turns up
+    that has to record which NCO a set of measurements was taken against — but
+    it should arrive with that caller, and probably alongside the measurements
+    rather than on the catalog.
     """
 
     # Stamped into to_dict output and required exactly by from_dict, so a file
@@ -219,14 +233,12 @@ class ResonatorCatalog:
         self,
         resonators: Iterable[Resonator],
         module: int,
-        nco_frequency_hz: float | None = None,
         min_separation_hz: float | None = 0.0,
     ):
         """
         Args:
             resonators: the members; names and channels must be unique.
             module: the readout module these channel numbers refer to.
-            nco_frequency_hz: NCO the channel frequencies are offset from.
             min_separation_hz: reject bias frequencies this close together or
                 closer. The default, 0.0, rejects only exactly equal
                 frequencies; ``None`` allows any spacing, including none at
@@ -238,7 +250,6 @@ class ResonatorCatalog:
                 f"Hz (>= 0), or None to allow any spacing."
             )
         self.module = module
-        self.nco_frequency_hz = nco_frequency_hz
         self.min_separation_hz = min_separation_hz
         # The one store. Channel is read off the resonators themselves rather
         # than mirrored into a second index that could fall out of step.
@@ -462,7 +473,6 @@ class ResonatorCatalog:
         return {
             "schema_version": self.SCHEMA_VERSION,
             "module": self.module,
-            "nco_frequency_hz": self.nco_frequency_hz,
             "min_separation_hz": self.min_separation_hz,
             "resonators": [
                 {
@@ -491,10 +501,13 @@ class ResonatorCatalog:
             )
             for rd in d["resonators"]
         ]
+        # A file written while the catalog still carried an NCO frequency has
+        # that key and it is ignored, which is why removing the field did not
+        # need a schema bump: neither direction of the round trip loses a
+        # resonator over it.
         return cls(
             resonators,
             module=d["module"],
-            nco_frequency_hz=d.get("nco_frequency_hz"),
             # Absent in files written before the rule was persisted; those were
             # written under the old default, which is this one.
             min_separation_hz=d.get("min_separation_hz", 0.0),
@@ -503,9 +516,9 @@ class ResonatorCatalog:
     # -- CSV ------------------------------------------------------------------
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
-    # operating point and nothing else. `notes`, `nco_frequency_hz`,
-    # `min_separation_hz`, `bias_frequency_quantized` and every calibration field
-    # (and so df_calibration) are dropped — pass the separation rule to
+    # operating point and nothing else. `notes`, `min_separation_hz`,
+    # `bias_frequency_quantized` and every calibration field (and so
+    # df_calibration) are dropped — pass the separation rule to
     # `from_csv` if the table needs it, and note that a row read back comes in
     # quantized whether or not it was written that way. Use to_dict for a
     # faithful round-trip.

@@ -130,9 +130,18 @@ Board-facing code stays where it is:
 ```
 rfmux/algorithms/measurement/
     multisweep.py       (takes/returns a Catalog instead of a bare dict)
-    bias_kids.py        (keeps apply_bias only — the analysis half moves out)
+    bias_kids.py        (legacy; superseded by tuning/bias.py + operation/apply_bias.py)
     tune_resonators.py  (new: the one-call front door)
+
+rfmux/algorithms/operation/
+    apply_bias.py       (new: puts a Catalog's tones on the air)
 ```
+
+`operation` is a second algorithms category, added when `apply_bias` was
+written: a measurement asks the array a question and returns the answer, an
+operation tells the array how to be and returns nothing. Future array-control
+work (rotation, clearing, NCO planning) goes here rather than beside the
+sweeps.
 
 ---
 
@@ -350,8 +359,11 @@ and versioning it, so the format can move later without touching callers.
 * `multisweep` — unchanged in spirit, but takes and returns a `Catalog`. Its
   Option A / Option B split (build a fresh registry vs. re-use one) is exactly
   `Catalog` construction vs. `Catalog` consumption.
-* `apply_bias` — stays as-is, minus the write-back: the catalog's frequencies
-  are already the quantized ones, so it reads them and programs the tones.
+* `apply_bias` — rewritten against the catalog, in `algorithms/operation/`, and
+  without the write-back: the catalog's frequencies are already the quantized
+  ones, so it reads them and programs the tones. It also owns the module's NCO,
+  which has to reach every tone and sit on the tone grid for those frequencies
+  to mean what they say. **Landed.**
 * `tune_resonators` (new) — the `trigger_capture` analogue: one call that runs
   netanal → find resonances → sweep ladder → find bias → apply → rotation, and
   returns a result dataclass with the catalog, the sweeps and the output path.
@@ -405,7 +417,8 @@ Each step is independently shippable and behaviour-preserving.
    and it retires the rotation bug and the fallback chains on its own.
 2. `config.py` with `validate` / `describe`; dialogs become views. Biggest
    visible reduction in GUI code.
-3. Split `bias_kids.py`: analysis to `tuning/bias.py`, `apply_bias` stays.
+3. Split `bias_kids.py`: analysis to `tuning/bias.py`, applying to
+   `algorithms/operation/apply_bias.py`.
    `fits.py` and `rotation.py` follow the same cut.
 4. `store.py` — one reader/writer owning the folder layout and the legacy
    formats.

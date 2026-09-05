@@ -531,11 +531,11 @@ def test_copy_is_independent():
 
 def test_copy_preserves_catalog_metadata():
     m = ResonatorCatalog.from_frequencies(
-        [1e9], module=3, amplitude=0.01, nco_frequency_hz=1.2e9
+        [1e9], module=3, amplitude=0.01, min_separation_hz=None
     )
     c = m.copy()
     assert c.module == 3
-    assert c.nco_frequency_hz == 1.2e9
+    assert c.min_separation_hz is None
 
 
 # ─── persistence ──────────────────────────────────────────────────────────────
@@ -618,13 +618,22 @@ def test_from_dict_rejects_unknown_schema_version():
         ResonatorCatalog.from_dict(d)
 
 
-def test_dict_round_trip_preserves_module_and_nco():
-    m = ResonatorCatalog.from_frequencies(
-        [1e9], module=4, amplitude=0.01, nco_frequency_hz=1.1e9
-    )
+def test_dict_round_trip_preserves_module():
+    m = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01)
     back = ResonatorCatalog.from_dict(m.to_dict())
     assert back.module == 4
-    assert back.nco_frequency_hz == 1.1e9
+
+
+def test_a_file_carrying_the_retired_nco_field_still_loads():
+    """The catalog used to record an NCO frequency. Dropping it was not a
+    schema change, because a file written with the key reads back fine without
+    it — which is the whole reason SCHEMA_VERSION did not have to move."""
+    d = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01).to_dict()
+    d["nco_frequency_hz"] = 1.1e9
+
+    back = ResonatorCatalog.from_dict(d)
+    assert back.module == 4
+    assert not hasattr(back, "nco_frequency_hz")
 
 
 def test_dict_round_trip_preserves_the_separation_rule():

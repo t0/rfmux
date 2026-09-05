@@ -997,11 +997,45 @@ print(f"flagged: {len(bias_report.flagged)}")
 ```
 
 
-## 6. What is not here yet
+## 6. Applying the bias points
 
-- **Applying the bias.** `bias_report.catalog` is a catalog with the operating points
-  in it; programming those tones onto the board is `apply_bias`, which has not
-  been ported to take a catalog yet.
+`bias_report.catalog` is a catalog with the operating points in it. Playing
+those tones is one call, and it is the first thing in this notebook that needs a
+board:
+
+    await crs.apply_bias(bias_report.catalog)
+
+Read `bias_report.flagged` before you run it. A flagged bias point is still the
+best the measurement supports, but it is a default rather than something the
+amplitude steps established, and applying one is a decision rather than a
+formality.
+
+Nothing comes back. `apply_bias` is an *operation* — it lives in
+`rfmux.algorithms.operation` rather than `.measurement` — so it either put the
+board into the state you asked for or it raised saying why it could not. Each
+resonator gets its bias frequency and its bias amplitude on its own channel.
+Channels the catalog does not name are left exactly as they were, which means a
+tone you parked by hand survives the call and also that applying a bias does not
+leave the module otherwise quiet. Call `await crs.clear_channels(module=MODULE)`
+first if you need it to be.
+
+The one thing it may change beyond those channels is the module's NCO. Every
+channel frequency is programmed as an offset from it, so the NCO has to reach
+every tone in the catalog — and it has to sit on the tone grid, or the offsets
+computed from it are off-grid however carefully each bias point was quantized.
+If the NCO in place satisfies both, it is left alone; otherwise it is reset to
+the quantized midpoint of the catalog's frequencies. `allow_nco_reset=False`
+turns that into an error instead, for a run where something else owns the NCO:
+
+    await crs.apply_bias(bias_report.catalog, allow_nco_reset=False)
+
+A catalog whose bias frequencies span more than `ALLOWED_NCO_BANDWIDTH_HZ`
+raises whatever you pass, because a module plays one NCO at a time and those
+tones cannot be on the air together. That one is a catalog to be split, not a
+call to be retried.
+
+## 7. What is not here yet
+
 - **IQ rotation.** `BiasPoint` has a field for it, and bias finding leaves it
   alone: the angle comes from a timestream rather than from a sweep, so it is
   not this step's to measure.

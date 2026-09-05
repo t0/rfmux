@@ -30,9 +30,13 @@ def swept():
     loop.run_until_complete(crs.resolve())
     amp = bias_amplitude_from_dbm(-55.0)
     with contextlib.redirect_stdout(io.StringIO()):
+        # No frequency noise in the physics: the tone-step check below
+        # compares two reads a second or more apart, and the simulator's
+        # 1/f noise is about 100 Hz rms, a third of the step.
         loop.run_until_complete(crs.generate_resonators(
             {"num_resonances": N, "resonator_random_seed": 5,
-             "auto_bias_kids": True, "bias_amplitude": amp}))
+             "auto_bias_kids": True, "bias_amplitude": amp,
+             "tls_noise_enabled": False, "nqp_noise_enabled": False}))
     nco = loop.run_until_complete(crs.get_nco_frequency(module=1))
     cfs = [nco + loop.run_until_complete(crs.get_frequency(channel=ch, module=1))
            for ch in range(1, N + 1)]

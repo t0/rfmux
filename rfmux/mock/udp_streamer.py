@@ -43,6 +43,7 @@ from ..streamer import (
     SS_PER_SECOND,
     STREAMER_PORT, PFB_STREAMER_PORT,
 )
+from .config import MOCK_DEFAULTS
 from ..core.transferfunctions import (
     CIC1_DECIMATION, PFB_SAMPLING_FREQ, decimated_stream_delay_s,
     decimation_to_sampling)
@@ -361,10 +362,13 @@ class MockCRSStreamer(threading.Thread):
         return int(serial) if serial and serial.isdigit() else 0
 
     def _scale_and_noise(self):
-        """(full scale of a unit response in counts, slow-stream noise sigma)."""
+        """(full scale of a unit response in ADC counts, slow-stream noise
+        sigma): the scale get_samples reports, so a consumer reading the
+        stream through the receiver sees the same counts it would read
+        through get_samples."""
         cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
-        return (cfg.get('scale_factor', 2 ** 21) * 256.0,
-                cfg.get('udp_noise_level', 10.0))
+        return (cfg.get('scale_factor', MOCK_DEFAULTS['scale_factor']),
+                cfg.get('udp_noise_level', MOCK_DEFAULTS['udp_noise_level']))
 
     # ── Slow packet emission ──────────────────────────────────
 

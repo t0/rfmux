@@ -320,13 +320,9 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
                     found = True
         assert found
 
-        # NOTE on cross-stream scales: run_pfb_source applies the
-        # 24-bit -> 16-bit /256 so both streams use the same digital
-        # convention, but the MOCK's slow-path gain varies with the
-        # decimation stage while its PFB rendering is fixed (measured
-        # fast/slow baseline ratios pre-/256: ~255x at dec 1, ~51x at
-        # dec 6) — so no amplitude-ratio assertion is possible here.
-        # See the plan doc follow-up on mock stream-gain modeling.
+        # No fast-to-slow amplitude ratio is asserted: the board's gain
+        # between the two streams is a hardware check
+        # (docs/release-notes/2026-09-hardware-checks.md, check 2).
 
 
 def test_macro_stores_df_calibrations(mock_crs, tmp_path):

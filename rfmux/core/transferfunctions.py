@@ -134,6 +134,17 @@ def convert_volts_to_watts(volts, termination=50.0):
     return watts
 
 
+def volts_squared_to_dbm(v2, termination=TERMINATION, floor=0.0):
+    """Mean-square volts (a power spectral density in V^2/Hz, or a power
+    spectrum in V^2) to dBm, or dBm/Hz.  Volts are peak amplitudes
+    throughout rfmux, so the power is v2 / 2 / termination, the same
+    convention as convert_volts_to_watts.  *floor* clamps the ratio
+    before the log so an empty bin does not give -inf."""
+    watts = np.asarray(v2, dtype=float) / 2.0 / termination
+    ratio = np.maximum(watts / 1e-3, floor)
+    return 10.0 * np.log10(ratio)
+
+
 def convert_volts_to_dbm(volts, termination=50.0):
     """
     Convenience function for converting a signal amplitude in
@@ -513,12 +524,7 @@ def spectrum_from_slow_tod(
             psd_c_corrected / ((psd_c_corrected[0]))
         )
     elif reference=='absolute':
-        # absolute => convert V^2 -> W => dBm
-        p_c = psd_c_corrected / 50.0
-        # clamp the ratio p_c/1e-3 to avoid log10(0)
-        ratio = p_c / 1e-3
-        ratio_safe = np.maximum(ratio, eps)
-        psd_dual_sideband_db = 10.0 * np.log10(ratio_safe)        
+        psd_dual_sideband_db = volts_squared_to_dbm(psd_c_corrected, floor=eps)
 
     else: # Keep in counts
         psd_dual_sideband_db = psd_c_corrected
@@ -579,18 +585,8 @@ def spectrum_from_slow_tod(
         psd_i_db = 10.0 * np.log10(psd_i_corrected / carrier)
         psd_q_db = 10.0 * np.log10(psd_q_corrected / carrier)        
     elif reference == 'absolute':
-        # absolute => convert V^2 -> W -> dBm, with zero‑floor
-        p_i = psd_i_corrected / 50.0
-        p_q = psd_q_corrected / 50.0
-    
-        # avoid log10(0)
-        ratio_i = p_i / 1e-3
-        ratio_q = p_q / 1e-3
-        ratio_i = np.maximum(ratio_i, eps)
-        ratio_q = np.maximum(ratio_q, eps)
-
-        psd_i_db = 10.0 * np.log10(ratio_i)
-        psd_q_db = 10.0 * np.log10(ratio_q)
+        psd_i_db = volts_squared_to_dbm(psd_i_corrected, floor=eps)
+        psd_q_db = volts_squared_to_dbm(psd_q_corrected, floor=eps)
     else: # Keep in counts
         psd_i_db = psd_i_corrected
         psd_q_db = psd_q_corrected

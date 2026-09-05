@@ -214,9 +214,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
 
 
-        self.test_noise_samples = {}           ##### debugging purposes 
-        self.noise_count = 0                   ##### debugging purposes 
-        self.phase_shifts = []                 ##### debugging purposes 
 
         self.channel_noise_data = {}
         self.channel_noise_panel_count = 0
@@ -1235,15 +1232,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
             # Load data into panel
-            amplitudes = params['parameters'].get('amps')
             for mod in modules_to_run:
-                for i in range(len(amplitudes)):
-                    freqs = np.array(params['modules'][mod][i]['frequency']['values'])
-                    amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
-                    phases = np.array(params['modules'][mod][i]['phase']['values'])
-                    
+                # Each sweep carries its own probe amplitude; pairing by
+                # position would trust the file's ordering instead.
+                sweeps = [v for k, v in params['modules'][mod].items()
+                          if isinstance(k, int)]
+                for sweep in sweeps:
+                    freqs = np.array(sweep['frequency']['values'])
+                    amps = np.array(sweep['magnitude']['counts']['raw'])
+                    phases = np.array(sweep['phase']['values'])
+
                     panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
+                    panel.update_data_with_amp(mod, freqs, amps, phases,
+                                               sweep['sweep_amplitude'])
                 
                 r_freq = params['modules'][mod]['resonances_hz']
                 panel._use_loaded_resonances(mod, r_freq)
@@ -1694,7 +1695,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             amplitudes = []
             phases = []
             channels = []
-            data_rod = {}
             
             for det_idx, det_data in bias_output.items():
                 channel = int(det_data.get("bias_channel", det_idx))
@@ -1705,8 +1705,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 amplitudes.append(amplitude)
                 phase = det_data.get("optimal_phase_degrees", 0)
                 phases.append(phase)
-                if "rotation_tod" in det_data:
-                    data_rod[channel] = det_data["rotation_tod"]
 
             # Apply bias to hardware if CRS is available
             if self.crs is not None:
@@ -1716,12 +1714,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
                 
                 asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
-                    
-                if data_rod:
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod))
-                    #print(f"[Bias] Refining the rotation")
-                    self.noise_count = self.noise_count + 1
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
             else:
                 print("[Offline] Skipping hardware bias application and phase adjustment")
 
@@ -1748,71 +1740,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
 
 
-    async def adjust_phase(self, module, channels, data_rod, refine=False):
-        if self.crs is None: 
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for Bias.") 
-            return
-        else:
-            crs = self.crs
-
-        for channel in channels:
-            samples = await self.collecting_samples_chan(crs, module, channel)
-            
-            phase_shift = self.calculate_shift(data_rod[channel], samples.i, samples.q, refine)
-            
-            self.phase_shifts.append(phase_shift)
-            
-            init_phase = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            mod_phase = phase_shift + init_phase 
-            
-            await crs.set_phase(mod_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees for channel {channel}")            
-            
-    def calculate_shift(self, file_samples, noise_i, noise_q, refine):
-        i_val_file = convert_roc_to_volts(file_samples.real)
-        q_val_file = convert_roc_to_volts(file_samples.imag)
-        phase_file = np.degrees(np.median(np.arctan(q_val_file/i_val_file)))
-
-        
-        i_val_noise = convert_roc_to_volts(np.array(noise_i))
-        q_val_noise = convert_roc_to_volts(np.array(noise_q))
-        phase_noise = np.degrees(np.median(np.arctan(q_val_noise/i_val_noise)))
-
-        phase_shift =  phase_noise - phase_file
-
-        q_noise_m = np.median(q_val_noise)
-        i_noise_m = np.median(i_val_noise)
-
-        q_file_m = np.median(q_val_file)
-        i_file_m = np.median(i_val_file)
-
-
-        if ((q_noise_m/q_file_m) < 0) and ((i_noise_m/i_file_m) < 0): ### incase there are in opposite quadrants
-            print(f"[Bias] Opposite quadrant shifting by 180")
-            phase_shift = phase_shift + 180
-
-        return phase_shift
-        
-    async def collecting_samples_chan(self, crs, module, channel, total=100):
-        samples = await crs.get_samples(total, average=False, channel=channel, module=module)
-
-        if channel not in self.test_noise_samples:
-            self.test_noise_samples[channel] = {}
-
-        self.test_noise_samples[channel][self.noise_count] = np.array(samples.i) + np.array(samples.q) * 1j
-        return samples
-
-    def get_test_noise(self):
-        return self.test_noise_samples
-
-    def get_phase_shift(self):
-        return self.phase_shifts
-            
-    
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)

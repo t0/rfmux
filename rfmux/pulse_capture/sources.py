@@ -383,7 +383,7 @@ async def run_slow_source(
                 pkt = streamer.ReadoutPacket(data)
                 if pkt.module != module - 1:
                     continue
-                raw = np.array(pkt) / 256.0
+                raw = np.array(pkt)          # ADC counts, as get_samples reports them
                 ts = streamer.ts_to_seconds(pkt.ts)
                 if ts is not None and not origin_set:
                     set_origin = getattr(capture_session, "set_time_origin", None)
@@ -508,10 +508,8 @@ async def run_pfb_source(
         # has no usable one, which the session drops and counts.
         times = (seconds[:, None]
                  + np.arange(time_samples) / sample_rate).ravel()
-        # Match the slow stream's 16-bit ADC scale: the packetizer /256
-        # is already out; the second /256 brings the 24-bit datapath
-        # down to ADC counts, the slow readout path's convention.
-        samples = samples / 256.0
+        # The receiver hands back ADC counts on both streams, the scale
+        # get_samples and get_pfb_samples report.
         for ch in channels:
             if ch in slots:
                 row = samples[slots.index(ch)]

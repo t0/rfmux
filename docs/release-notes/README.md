@@ -7,6 +7,7 @@ working on it.
 | --- | --- |
 | Pulse Capture (August 2026) | [2026-08-pulse-capture.md](2026-08-pulse-capture.md): how to use it |
 | Pulse capture branch (September 2026) | [2026-09-pulse-capture-branch.md](2026-09-pulse-capture-branch.md): everything that changed, with the judgement calls and what was not verified |
+| Hardware checks (September 2026) | [2026-09-hardware-checks.md](2026-09-hardware-checks.md): what the branch assumes about a board and how to measure each |
 
 ## Relationship to the other changelogs
 

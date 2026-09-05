@@ -638,6 +638,42 @@ documented contract is an int or a list).
 The full ledger, with every finding's evidence, verdict and outcome, is kept
 outside the repository.
 
+## Transfer-function audit
+
+A separate review inventoried every site where a transfer function or unit
+conversion is applied, 362 of them, traced the main data paths end to end,
+and refuted each suspected defect three ways. Six fixes followed; the rest,
+and what only a board can settle, are in
+[2026-09-hardware-checks.md](2026-09-hardware-checks.md).
+
+- One count scale. The C++ receiver takes the packetizer's factor of 256
+  out once and that is ADC counts, the scale `get_samples` reports (settled
+  by inspection of a board). Periscope's main window and both pulse-capture
+  sources divided by 256 a second time, so on hardware they read 48 dB low
+  against the Noise Spectrum panel and a frequency-basis capture reported
+  hertz 256 times too small; the simulator hid it by emitting its stream 256
+  times hot. Both the second division and the simulator's multiply are gone.
+  Pulse-capture files recorded on hardware before this hold volts and hertz
+  256 times low; simulator files are unchanged in meaning. The simulator's
+  readout-noise default (`udp_noise_level`) moves with its signal, from 10
+  to 0.04 counts, so every stream consumer sees the signal-to-noise it did;
+  the value is provisional until a board's floor is measured.
+- One volts-to-dBm convention. Volts are peak amplitudes throughout, so
+  power is the square over twice the termination. The spectrum paths in
+  `spectrum_from_slow_tod` and `py_get_pfb_samples` omitted the factor of
+  two and read 3 dB high; `volts_squared_to_dbm` in
+  `rfmux.core.transferfunctions` is now the one place the conversion lives.
+- The IQ plot in Real Units mode converted counts to volts twice; the Noise
+  Spectrum panel's fast timestream was converted twice under the default
+  reference. Both convert once.
+- A multi-amplitude network-analysis pickle reloaded every curve on the
+  wrong probe amplitude, because the display's copy of the latest sweep was
+  exported at index 0 and loading paired by position. The export skips the
+  copy and the loader pairs by each sweep's own amplitude tag.
+- Loading a bias file no longer rotates the board's ADC phase after
+  `apply_bias_output` has restored the phase each calibration was measured
+  in; the refinement never rotated the calibrations to match.
+
 ## Known limitations and what was not verified
 
 - The measurement algorithms (network analysis, multisweep, fitting,

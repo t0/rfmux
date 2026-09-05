@@ -189,7 +189,7 @@ MOCK_CONFIG = {
                                    # sweep and the bias (the dialog shows dBm)
 
     # ── Noise (these are the shipped defaults, spelled out) ─────
-    "udp_noise_level": 10.0,       # white readout noise (ADC counts)
+    "udp_noise_level": 0.04,       # white readout noise (ADC counts)
     "nqp_noise_enabled": True,     # quasiparticle generation-recombination
     "nqp_noise_std_factor": 0.01,  # 1% of base quasiparticle density
     "tls_noise_enabled": True,     # TLS 1/f frequency wander

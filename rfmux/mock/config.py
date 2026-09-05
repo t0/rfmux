@@ -130,9 +130,11 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)
     # -------------------------------------------------------------------------
-    # Additive white ADC noise, sigma per slow sample [counts]; the PFB
-    # emitter derives its own sigma from this.
-    "udp_noise_level": 10.0,
+    # Additive white ADC noise, sigma per slow sample [counts] at the
+    # scale get_samples reports; the PFB emitter derives its own sigma
+    # from this.  Provisional until measured on a board (see
+    # docs/release-notes/2026-09-hardware-checks.md).
+    "udp_noise_level": 0.04,
     # scale_factor converts normalized S21 * amplitude to ADC readout counts.
     # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical
     # voltage for 0 dB round-trip gain with default dac_scale = 1.0 dBm and

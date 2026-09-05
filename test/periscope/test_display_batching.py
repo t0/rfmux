@@ -75,7 +75,7 @@ def test_batched_writes_match_per_packet_writes(qt_app, n_packets):
     want = {c: {k: Circular(N) for k in ("I", "Q", "M")} for c in CHANNELS}
     want_t = {c: Circular(N) for c in CHANNELS}
     for pkt, t_rel in packets:
-        samples = np.array(pkt) / 256
+        samples = np.array(pkt)
         for c in CHANNELS:
             s = samples[c - 1]
             want[c]["I"].add(s.real)

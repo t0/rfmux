@@ -3,7 +3,7 @@ Mock stream-scale parity: slow and PFB paths must share one scale.
 
 Real hardware is dec-invariant and stream-invariant — a fixed carrier
 reads the same counts on every CIC stage and on the PFB streamer under
-the uniform consumer convention (np.array(pkt)/256 for both).  This
+the one consumer convention (np.array(pkt), ADC counts, for both).  This
 locks the mock's model to that behavior at every decimation stage.
 
 Carrier-only (no pulses): with QP pulses active the carrier baseline

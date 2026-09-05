@@ -184,7 +184,7 @@ def test_pfb_source_picks_its_channels_from_a_wider_stream(monkeypatch):
                          slots=(3, 7), values=(3 + 0j, 7 + 0j)) for k in range(20)]
     sink = _run_pfb(monkeypatch, blobs, [7], stop_after=1000)
     assert {c[0] for c in sink.calls} == {7}
-    assert all(np.all(c[1] == 7.0 / 256.0) for c in sink.calls)
+    assert all(np.all(c[1] == 7.0) for c in sink.calls)
     assert sum(len(c[1]) for c in sink.calls) == 20 * 50
 
 

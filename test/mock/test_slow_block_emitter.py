@@ -114,9 +114,11 @@ def test_block_carries_the_signal_on_the_biased_channels():
     st._send_slow_packet = spy
     st._emit_slow_block(1, 0.0, 6, 8)
     seen = np.array(seen)
-    noise = crs._physics_config.get("udp_noise_level", 10.0)
-    assert np.all(seen[:, :2] > 20 * noise)      # the two biased tones
-    assert np.all(seen[:, 2:] < 10 * noise)      # unbiased: noise only
+    noise = crs._physics_config["udp_noise_level"]
+    # The stream is at get_samples' count scale, where a -60 dBm tone on
+    # a deep resonance is a few hundred counts, well clear of the noise.
+    assert np.all(seen[:, :2] > 5 * noise)       # the two biased tones
+    assert np.all(seen[:, 2:] < 5 * noise)       # unbiased: noise only
 
 
 @pytest.mark.parametrize("dec", [0, 6])
@@ -132,3 +134,19 @@ def test_unbiased_channels_carry_the_configured_noise_floor(dec):
     x = np.concatenate(seen)
     sigma = crs._physics_config["udp_noise_level"]
     assert np.std(x.real) == pytest.approx(sigma, rel=0.1)
+
+
+def test_stream_counts_are_get_samples_counts():
+    """The receiver's single division leaves ADC counts, the scale
+    get_samples reports; the mock emits its stream at that scale, so a
+    consumer reading either path sees the same number on a biased tone."""
+    import asyncio
+    crs, st = _streamer(6)
+    seen = []
+    st._send_slow_packet = lambda module_num, _dec, samples, t_frame: seen.append(samples[0])
+    st._emit_slow_block(1, 0.0, 6, 8)
+    streamed = np.mean(np.abs(seen))
+    s = asyncio.run(crs.get_samples(50, module=1))
+    i, q = (s["i"], s["q"]) if isinstance(s, dict) else (s.i, s.q)
+    via_rpc = np.mean(np.abs(np.asarray(i[0]) + 1j * np.asarray(q[0])))
+    assert streamed == pytest.approx(via_rpc, rel=0.02)

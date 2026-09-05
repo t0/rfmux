@@ -382,8 +382,15 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Fast TOD
         if self.show_fast_tod and self.plot_fast_tod is not None:
             pfb_ts = self.spectrum_data["pfb_ts"]
-            tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
-            tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+            # As for the slow TOD above: py_get_pfb_samples hands back
+            # volts under the absolute reference and counts under the
+            # relative one.
+            if self.reference == "relative":
+                tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
+                tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+            else:
+                tod_pfb_i_volts = np.array(self.pfb_tod_i, dtype=float)
+                tod_pfb_q_volts = np.array(self.pfb_tod_q, dtype=float)
 
             if self.mean_subtract_enabled:
                 tod_pfb_i_volts = tod_pfb_i_volts - np.mean(tod_pfb_i_volts)

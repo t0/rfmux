@@ -785,7 +785,8 @@ class ServerMockCRS:
 
         cfg = getattr(self, '_physics_config', {}) or {}
         scale_factor = cfg.get('scale_factor', 2 ** 21)
-        noise_level = cfg.get('udp_noise_level', 10.0)
+        noise_level = cfg.get('udp_noise_level',
+                              mock_config.MOCK_DEFAULTS['udp_noise_level'])
         current_time = time.time() - self.mock_start_time
 
         if average:

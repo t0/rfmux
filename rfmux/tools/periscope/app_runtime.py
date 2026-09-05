@@ -765,13 +765,11 @@ class PeriscopeRuntime:
         """A batch (packets, channels) into the display batch and the
         pulse tap.
 
-        Convert 24-bit datapath to 16-bit ADC scale: the packetizer's
-        /256 is already out; the second /256 brings 24-bit values down
-        to 16-bit ADC scale.  The packet width is part of the display
-        batch, so a decimation or packet-mode change flushes rather
-        than trying to stack ragged rows.
+        The receiver hands back ADC counts, the scale get_samples
+        reports; nothing is rescaled here.  The packet width is part of
+        the display batch, so a decimation or packet-mode change flushes
+        rather than trying to stack ragged rows.
         """
-        samples = samples / 256
         width = samples.shape[1]
         if width != self._display_width:
             self._flush_display_batch()
@@ -1244,11 +1242,9 @@ class PeriscopeRuntime:
             item (pg.ImageItem): The ImageItem to update.
             payload: Tuple containing (histogram, (Imin, Imax, Qmin, Qmax)).
         """
-        # convert_roc_to_volts from .utils
+        # The task received display units from _convert_iq_data, so its
+        # bounds are already in them.
         hist, (Imin, Imax, Qmin, Qmax) = payload
-        if self.real_units: # Convert bounds if real units are active
-            Imin, Imax = convert_roc_to_volts(np.array([Imin, Imax], dtype=float))
-            Qmin, Qmax = convert_roc_to_volts(np.array([Qmin, Qmax], dtype=float))
         item.setImage(hist, levels=(0, 255), autoLevels=False) # Update image data
         item.setRect(QtCore.QRectF(float(Imin), float(Qmin), float(Imax - Imin), float(Qmax - Qmin))) # Set image bounds
 
@@ -1260,9 +1256,8 @@ class PeriscopeRuntime:
             item (pg.ScatterPlotItem): The ScatterPlotItem to update.
             payload: Tuple containing (xs, ys, colors) for scatter points.
         """
-        # convert_roc_to_volts, SCATTER_SIZE from .utils
+        # SCATTER_SIZE from .utils; the points are already in display units.
         xs, ys, colors = payload
-        if self.real_units: xs = convert_roc_to_volts(xs); ys = convert_roc_to_volts(ys) # Convert points if real units
         item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE) # Update scatter plot data
 
     @QtCore.pyqtSlot(int, str, int, object)
@@ -2785,8 +2780,6 @@ class PeriscopeRuntime:
     
                 fake_event = FakeClickEvent(90e6)
 
-                self.test_noise_samples = [0]
-                self.phase_shifts = [0]
     
                 multisweep_window._handle_multisweep_plot_double_click(fake_event)
 

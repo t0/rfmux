@@ -159,7 +159,7 @@ def test_the_amplitude_below_the_first_bifurcated_one_is_chosen():
     assert choice.iteration == 1
     assert choice.amplitude == pytest.approx(2e-3)
     assert choice.bifurcated_at == pytest.approx(4e-3)
-    assert not choice.is_bifurcated
+    assert not choice.is_bifurcated_at_bias
 
 
 def test_a_sweep_that_never_bifurcates_is_biased_at_its_loudest_step():
@@ -172,7 +172,7 @@ def test_a_sweep_that_never_bifurcates_is_biased_at_its_loudest_step():
     assert choice.iteration == 2
     assert choice.amplitude == pytest.approx(4e-3)
     assert choice.bifurcated_at is None
-    assert not choice.is_bifurcated
+    assert not choice.is_bifurcated_at_bias
 
 
 def test_bifurcation_at_the_quietest_step_says_so_rather_than_going_below():
@@ -182,7 +182,7 @@ def test_bifurcation_at_the_quietest_step_says_so_rather_than_going_below():
 
     assert choice.iteration == 0
     assert choice.bifurcated_at == pytest.approx(choice.amplitude)
-    assert choice.is_bifurcated
+    assert choice.is_bifurcated_at_bias
 
 
 def test_a_single_multisweep_is_one_amplitude_step():

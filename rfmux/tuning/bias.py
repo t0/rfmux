@@ -215,7 +215,7 @@ class AmplitudeChoice(NamedTuple):
     checks: dict[int, BifurcationCheck]  # by iteration, in the order examined
 
     @property
-    def is_bifurcated(self) -> bool:
+    def is_bifurcated_at_bias(self) -> bool:
         """Is the *chosen* amplitude step itself bifurcated?
 
         True only when there was nothing below it to go back to. See
@@ -657,7 +657,7 @@ def _concern(
     common is that the measurement did not establish the answer, so it is a
     default that was fallen back to rather than something that was found.
     """
-    if choice.is_bifurcated:
+    if choice.is_bifurcated_at_bias:
         return (
             f"the quietest amplitude measured ({choice.amplitude:g}) was already "
             f"bifurcated, so there was nothing below it to fall back to"
@@ -720,7 +720,7 @@ def find_bias_amplitude(
     * If no step bifurcates, the loudest is chosen. The schedule did not reach
       the limit, so the most drive measured is the most drive known to be safe.
     * If the *quietest* step bifurcates there is nothing below it, so it is
-      chosen and :attr:`AmplitudeChoice.is_bifurcated` says so. The schedule
+      chosen and :attr:`AmplitudeChoice.is_bifurcated_at_bias` says so. The schedule
       started too high.
 
     Args:

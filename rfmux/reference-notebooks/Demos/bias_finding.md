@@ -331,10 +331,10 @@ iterations_of_R0001 = collect_amplitude_iterations_for(
 )
 amplitude_choice = find_bias_amplitude(iterations_of_R0001)
 
-print(f"iteration:      {amplitude_choice.iteration}")
-print(f"amplitude:      {amplitude_choice.amplitude}")
-print(f"bifurcated_at:  {amplitude_choice.bifurcated_at}")
-print(f"is_bifurcated:  {amplitude_choice.is_bifurcated}")
+print(f"iteration:              {amplitude_choice.iteration}")
+print(f"amplitude:              {amplitude_choice.amplitude}")
+print(f"bifurcated_at:          {amplitude_choice.bifurcated_at}")
+print(f"is_bifurcated_at_bias:  {amplitude_choice.is_bifurcated_at_bias}")
 ```
 
 So: bifurcation was first seen at 0.008, and the amplitude below it — 0.0045,
@@ -358,7 +358,7 @@ Some quasi-failure modes:
 amplitudes.
 - **If the quietest step already bifurcates**, there is nothing below it to go
   back to. The quietest step is chosen,
-  and `amplitude_choice.is_bifurcated` is `True` . The schedule started too high.
+  and `amplitude_choice.is_bifurcated_at_bias` is `True` . The schedule started too high.
 
 
 

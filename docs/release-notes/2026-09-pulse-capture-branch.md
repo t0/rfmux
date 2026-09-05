@@ -187,6 +187,13 @@ Bugs present on main, with the symptom.
   the next launch bound the port and received nothing. SIGINT now closes the
   windows and quits; a second Ctrl+C leaves at once; the receive thread is
   joined so exit no longer core-dumps.
+- A Noise Spectrum panel holding data could crash the interpreter when
+  dropped: its hover handler owned the panel through the mouse-move proxy,
+  so the panel waited for the cyclic collector, which finalizes Qt objects
+  in arbitrary order. The Multisweep panel's unit buttons held it the same
+  way through lambda slots. The handler holds the panel weakly, the buttons
+  call a bound method, and the teardown test builds the Noise Spectrum
+  panel with data and refuses any panel that needs the collector.
 - Closing a Network Analysis dock then changing units, PSD or channels raised
   `RuntimeError: wrapped C/C++ object of type ClickableViewBox has been
   deleted` from inside pyqtgraph; the registry now forgets closed panels.

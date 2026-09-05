@@ -266,13 +266,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         unit_layout.addWidget(self.rb_dbm)
         unit_layout.addWidget(self.rb_volts)
         
-        # Connect signals for unit changes
-        self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
-        self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
-        self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
-        
+        # Bound-method slots: a lambda closing over self would make the
+        # button own the panel, and a panel in a reference cycle is torn
+        # down by the cyclic collector, which crashes in Qt.
+        self._unit_buttons = {self.rb_counts: "counts", self.rb_dbm: "dbm",
+                              self.rb_volts: "volts"}
+        for rb in self._unit_buttons:
+            rb.toggled.connect(self._on_unit_toggled)
+
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar_layout.addWidget(unit_group)
+
+    def _on_unit_toggled(self, checked: bool):
+        if checked:
+            self._update_unit_mode(self._unit_buttons[self.sender()])
 
     def _setup_zoom_box_control(self, toolbar_layout):
         """Sets up the checkbox to toggle zoom box mode for plots."""

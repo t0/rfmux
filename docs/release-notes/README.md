@@ -5,7 +5,8 @@ working on it.
 
 | Release | Notes |
 | --- | --- |
-| Pulse Capture (August 2026) | [2026-08-pulse-capture.md](2026-08-pulse-capture.md) |
+| Pulse Capture (August 2026) | [2026-08-pulse-capture.md](2026-08-pulse-capture.md): how to use it |
+| Pulse capture branch (September 2026) | [2026-09-pulse-capture-branch.md](2026-09-pulse-capture-branch.md): everything that changed, with the judgement calls and what was not verified |
 
 ## Relationship to the other changelogs
 

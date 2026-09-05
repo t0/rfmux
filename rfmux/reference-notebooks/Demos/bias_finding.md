@@ -30,16 +30,22 @@ There are lots of ways to identify these optimal points. rfmux provides some opt
 which are covered in this document. The inputs for the rfmux methods are amplitude-iterated
 multisweep data, along with a `ResonatorCatalog`.
 
-The bias finding routines produce a **new** `ResonatorCatalog`. Nothing you pass in is
-modified: not the catalog you swept, not the sweep data. That means you can run
-the analysis twice with different settings and compare the two resulting catalogs, and it
-means the catalog you started from is still the catalog you started from.
+The bias finding routines produce a **new** `ResonatorCatalog`. The catalog you
+swept is not modified, and neither are the measured sweeps, so you can run the
+analysis twice with different settings and compare the two resulting catalogs,
+and the catalog you started from is still the catalog you started from.
+
+The one thing that *does* change is the sweep result you hand in: the report is
+written into it under `bias_report`. An operating point then travels with the
+amplitude steps it was derived from, and saving updates that measurement's own
+file rather than leaving a second one beside it.
 
 | Piece | Module |
 |---|---|
 | The bias finding functions used below | `rfmux.tuning.bias` |
 | The multi-amplitude multisweep data used to inform the bias finding routines | `rfmux.algorithms.measurement.multiamp_multisweep` |
 | The `ResonatorCatalog` and related array bookkeeping | `rfmux.core.resonators` |
+| Writing measurements to disk and reading them back | `rfmux.tuning.store` |
 
 <!-- | Reading a sweep result back | `rfmux.tuning.sweep_results` | -->
 
@@ -88,8 +94,6 @@ code cell: put the cursor in it and press **Shift+Enter** to execute it.
 ```python
 %matplotlib inline
 
-import copy
-import pickle
 from dataclasses import replace
 from pathlib import Path
 
@@ -100,48 +104,62 @@ from matplotlib.colors import LogNorm
 import rfmux
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
+from rfmux.tuning import store
 
-MODULE = 1
+# The module the sweep below came off. Nothing in this notebook needs a board,
+# so this is only here for the sketches of board-side calls in sections 5 and 6.
+MODULE = 2
 
 # The recorded sweep this notebook analyses, found through the package rather
 # than by a relative path, so it works whichever directory the kernel started
-# in.
+# in. Matched by pattern rather than named outright, because `store` puts the
+# date and time of the writing into every filename it makes — your own sweeps
+# land in `store.output_directory()` under names of exactly this shape.
 DEMOS = Path(rfmux.__file__).parent / "reference-notebooks" / "Demos"
-MULTISWEEP_PKL = DEMOS / "bias_finding_multisweep.pkl"
+MULTISWEEP_PKL = max(DEMOS.glob("multiamp_multisweep_*_demo_biasfind1.pkl"))
 
 print(MULTISWEEP_PKL)
 ```
 
 ## 1. Start with a previously-measured multisweep
 
-Bias finding is purely analysis: it takes sweeps that already exist and works on them.
- So rather than spend the first two minutes of
-this notebook using mock mode to simulate a new multisweep measurement,
- we load a multi-amplitude sweep that was
-measured once and saved.
+Bias finding is purely analysis: it takes sweeps that already exist and works on
+them. So rather than spend the first few minutes of this notebook taking a
+measurement, we load a multi-amplitude sweep that was taken once and saved.
 
-The file holds the pickled output of `crs.multiamp_multisweep`: four simulated resonators, 
-six amplitude steps a
-factor of two apart, using both sweep directions. The script that produced it is
-`make_bias_finding_multisweep.py`, next to this notebook, and it is worth a look
-if you want to see the measurement that is being stood in for. On a real board
-the same data comes from one call, and everything below this section is
-unchanged:
+**This one is real data**, off a real array on a real board — not mock mode.
+That matters more here than in the other notebooks: bias finding is entirely
+about recognizing what a resonator does when you drive it too hard, and the
+simulator's resonators do not bifurcate the way physical ones do. In particular
+mock mode computes each sweep point independently, so its upward and downward
+traces come out identical up to noise, and the hysteresis test in section 2
+would have nothing to find.
+
+The file is nothing special otherwise: it is an ordinary measurement file, the
+kind `multiamp_multisweep` writes for itself, holding five resonators swept over
+five amplitude steps from 0.0008 to 0.008, in both directions. Getting it was one
+call, which saved itself into `store.output_directory()` on the way out, and
+everything below this section is unchanged by the fact that it happened
+yesterday rather than in the cell above:
 
     multiamp_ms = await crs.multiamp_multisweep(
         catalog,
-        span_hz=60e3,
-        npoints_per_sweep=201,
+        span_hz=75e3,
+        npoints_per_sweep=101,
         nsamps=10,
-        amp_schedule=AmplitudeSchedule.multiplicative(1.0, 32.0, 6),
+        amp_schedule=AmplitudeSchedule.multiplicative(0.8, 8.0, 5),
         directions=("upward", "downward"),
     )
 
-
+`store.load` is `pickle.load` plus one correction: the path the file recorded
+about itself when it was written is replaced with where the file has actually
+turned out to be. Demo data that shipped inside a package, or a sweep copied off
+the acquisition machine — as this one was — can then still save itself back to
+the file *you* opened rather than to a path on a computer you may not even be
+on.
 
 ```python
-with MULTISWEEP_PKL.open("rb") as f:
-    multiamp_ms = pickle.load(f)
+multiamp_ms = store.load(MULTISWEEP_PKL)
 
 # A sweep comes back keyed by module identifier, and every function below takes
 # one module's value out of it. Ours only has the one.
@@ -155,6 +173,20 @@ print(f"amplitude steps: {list(multiamp_module_results['results'])}")
 print(f"directions:      {list(multiamp_module_results['results'][0])}")
 print(f"resonators:      {list(multiamp_module_results['results'][0]['upward'])}")
 ```
+
+Every saved measurement also carries a `file_metadata` block saying what it is,
+when it was taken, what wrote it, and where it lives. It is stamped inside each
+module's envelope rather than at the top of the file, so you reach it wherever
+you happen to be already working:
+
+```python
+for key, value in multiamp_module_results["file_metadata"].items():
+    print(f"{key:<18} {value}")
+```
+
+That `path` is what lets an analysis write its results back into the measurement
+it read, without anyone having to carry a filename around — which is exactly
+what `find_bias_points` does in section 5.
 
 ### The catalog that was swept
 
@@ -172,8 +204,9 @@ swept_catalog = ResonatorCatalog.from_dict(
 print(swept_catalog)
 ```
 
-Four resonators, all with bias amplitudes listed as 0.001 in normalized DAC units — the amplitude the
-array was found and first swept at. 
+Five resonators, all with bias amplitudes listed as 0.001 in normalized DAC units — the amplitude the
+array was found and first swept at. The amplitude steps below are *relative* to
+that, which is why the ladder runs 0.0008 to 0.008 rather than 0.8 to 8.
 
 ### Take a look at the data
 
@@ -304,8 +337,8 @@ print(f"bifurcated_at:  {amplitude_choice.bifurcated_at}")
 print(f"is_bifurcated:  {amplitude_choice.is_bifurcated}")
 ```
 
-So: bifurcation was first seen at 0.004, and the amplitude below it — 0.002,
-step 1 — is where this resonator should sit. 
+So: bifurcation was first seen at 0.008, and the amplitude below it — 0.0045,
+step 3 — is where this resonator should sit. 
 
 `checks` holds the verdict on each step it actually examined. The search stops
 at the first bifurcated step, so the steps above it were never looked at and
@@ -387,13 +420,13 @@ def plot_arc_speed(results, name, iterations_to_show, direction="upward"):
     plt.show()
 
 
-plot_arc_speed(multiamp_module_results, "R0001", [0, 1, 2, 3])
+plot_arc_speed(multiamp_module_results, "R0001", [0, 1, 2, 3, 4])
 ```
 
 The bifurcation test uses the bottom panel, which shows the point-to-point change 
 in the arc speed -- effectively the second derivative of I and Q with frequency.
 At low amplitudes the change
-from point to point is small. At step 2 — the one that was called
+from point to point is small. At step 4 — the one that was called
 bifurcated — there is a sharp positive spike with a negative spike immediately
 after it: the trace jumping onto the other state and dropping back off it again.
 
@@ -425,7 +458,7 @@ clean step and the first bifurcated one, at that default:
 ```python
 from rfmux.tuning import bifurcated_by_derivative
 
-for iteration in (1, 2):
+for iteration in (3, 4):
     check = bifurcated_by_derivative(iterations_of_R0001[iteration])
     print(f"step {iteration}: {check}")
 ```
@@ -438,7 +471,7 @@ SPIKE_PROMINENCE_FACTOR = 0.5
 
 fig, axes = plt.subplots(1, 2, figsize=(11, 3.4), constrained_layout=True)
 
-for panel, iteration in zip(axes, (1, 2)):
+for panel, iteration in zip(axes, (3, 4)):
     entry = iterations_of_R0001[iteration]["upward"]
     frequencies, speed = normalized_arc_speed(entry)
     jumps = np.diff(speed)
@@ -467,9 +500,9 @@ axes[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
 plt.show()
 ```
 
-Step 1 clearly has a spike, but it's too small to meet the threshold we set with
+Step 3 clearly has a spike, but it's too small to meet the threshold we set with
 the `spike_prominence_factor`, so it does not flag as bifurcated.
- On step 2 the spike is much larger, and exceeds the threshold set.
+ On step 4 the spike is much larger, and exceeds the threshold set.
  
 `rfmux.tuning.BifurcationCheck` reports the numbers it compared as well
 as its verdict based on them, to facilitate troubleshooting
@@ -513,13 +546,12 @@ plt.show()
 ```
 
 <!-- #region -->
-All four cross the line together between 0.002 and 0.004, which is the drive at
-which this simulated array starts jumping. Note the margin either side of the
-crossing: about 0.5 below and about 1.9 above, so a factor of two rather than
-the orders of magnitude you might hope for. And R0003 at the quietest amplitude
-sits just over the line without being called bifurcated, held back only by the
-adjacency rule. The factor has not been calibrated against real hardware, so
-read your own array before trusting the default on it.
+All five cross the line together between 0.0045 and 0.008, which is the drive at
+which this array starts jumping. Note the margin either side of the crossing:
+under 0.9 below and 1.6 or more above, so roughly a factor of two rather than
+the orders of magnitude you might hope for. The factor has not been calibrated
+across arrays, so read your own before trusting the default on it — this is one
+array on one cooldown, and the plot above is exactly how you would read it.
 
 ### Bifurcation detection method #2 `"hysteresis"`
 
@@ -533,10 +565,9 @@ the upward and downward frequency sweeps *begin* to differ.
 | `entries` | required | one amplitude step, `{direction: entry}`, where `"upward"` and `"downward"` are required |
 | `max_discrepancy` | `0.25` | how far apart the two traces may be, in units of the IQ loop's radius, before the step is called bifurcated |
 
-Unfortunately, mock mode computes each sweep point independently, so upward and
-downward traces are identical up to noise, at every drive. This test is therefore not so useful
-when using a simulated array, but we'll walk through it anyway to demonstrate the calls.
-
+The metric is the **largest separation between the two traces, in units of the
+IQ loop's own radius**, so it means the same thing for a deep resonator and a
+shallow one.
 <!-- #endregion -->
 
 ```python
@@ -549,50 +580,29 @@ for iteration, entry in iterations_of_R0001.items():
           f"threshold={check.threshold}")
 ```
 
-Every step sits at a few percent, which is the noise floor of this measurement
-rather than a resonator doing anything, and none of them come near the default
-threshold of 0.25. On this data the hysteresis search therefore finds no
-bifurcation at all and picks the loudest step — the correct answer to the
-question it was asked, and the wrong operating point.
+The four quiet steps sit at a percent or less, which is the noise floor of this
+measurement rather than a resonator doing anything. Then the loudest step jumps
+to well over a full loop radius — two orders of magnitude of separation between
+"these are the same trace" and "these are not", which is a far more comfortable
+margin than the derivative test's factor of two.
 
-The metric is the **largest separation between the two traces, in units of the
-IQ loop's own radius**, so it means the same thing for a deep resonator and a
-shallow one. To see what firing looks like, we can displace one direction by a
-known amount. This is imposed rather than simulated — real hysteresis appears
-over the band between the two jump points, not across the whole sweep — but it
-shows what the number is measuring. Expect the metric to come back a little over
-a third, since the traces were not exactly on top of each other to begin with:
-
-```python
-pretend_hysteretic_step = copy.deepcopy(iterations_of_R0001[1])
-up = pretend_hysteretic_step["upward"]["iq_counts"]
-loop_radius = np.max(np.abs(up - up.mean()))
-
-# Push the downward trace a third of a loop radius away from the upward one,
-# over a band of frequencies near the resonance. Reversed on the way in,
-# because a downward sweep's points are stored high frequency first.
-displacement = np.zeros_like(up)
-displacement[95:115] = loop_radius / 3
-pretend_hysteretic_step["downward"]["iq_counts"] = (
-    pretend_hysteretic_step["downward"]["iq_counts"] + displacement[::-1]
-)
-
-print(f"as measured:  {bifurcated_by_hysteresis(iterations_of_R0001[1])}")
-print(f"displaced:    {bifurcated_by_hysteresis(pretend_hysteretic_step)}")
-```
+Here are the two traces the test compares, at the last clean step and at the one
+that fired:
 
 ```python
 fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.2), constrained_layout=True)
 
-for panel, (title, amplitude_step) in zip(
-    axes,
-    [("as measured", iterations_of_R0001[1]),
-     ("displaced by hand", pretend_hysteretic_step)],
-):
+for panel, iteration in zip(axes, (3, 4)):
+    amplitude_step = iterations_of_R0001[iteration]
     for direction, style in (("upward", "-"), ("downward", "--")):
         iq = amplitude_step[direction]["iq_counts"]
         panel.plot(iq.real, iq.imag, style, lw=1.2, label=direction)
-    panel.set_title(title, fontsize=10)
+
+    check = bifurcated_by_hysteresis(amplitude_step)
+    panel.set_title(f"step {iteration}, amp "
+                    f"{amplitude_step['upward']['sweep_amplitude']:.4f}\n"
+                    f"bifurcated={check.bifurcated}, "
+                    f"metric={check.metric:.3f}", fontsize=9)
     panel.set_xlabel("I [counts]", fontsize=8)
     panel.set_aspect("equal")
     panel.legend(fontsize=8)
@@ -601,6 +611,33 @@ axes[0].set_ylabel("Q [counts]", fontsize=8)
 fig.suptitle("The hysteresis test compares these two", fontsize=11)
 plt.show()
 ```
+
+On the left the two directions lie on top of each other. On the right they do
+not: the sweep jumps off the resonance at a different frequency depending on
+which way it is walking, so the two traces enclose the region between the jump
+points. That is the physical signature of bifurcation, and it is the thing mock
+mode cannot produce — the simulator evaluates each sweep point independently, so
+its two directions are the same trace twice at every drive.
+
+The two tests do not have to agree, and here they do not, quite:
+
+```python
+print(f"{'name':<8}{'derivative':>22}{'hysteresis':>22}")
+for name in resonator_names:
+    iterations = collect_amplitude_iterations_for(multiamp_module_results, name)
+    by_derivative = find_bias_amplitude(iterations)
+    by_hysteresis = find_bias_amplitude(iterations, method="hysteresis")
+    print(f"{name:<8}"
+          f"{by_derivative.amplitude:>15.4f} (step {by_derivative.iteration})"
+          f"{by_hysteresis.amplitude:>15.4f} (step {by_hysteresis.iteration})")
+```
+
+Three of the five land in the same place. On R0004 and R0005 the hysteresis test
+sees nothing at any amplitude, so it has no limit to step back from and returns
+the loudest step it was given — the correct answer to the question it was asked,
+and the wrong operating point. `find_bias_points` flags exactly that case, which
+is section 5's business; the point here is that the two detectors read different
+evidence and a resonator can show one and not the other.
 
 <!-- #region -->
 
@@ -677,7 +714,11 @@ plt.show()
 
 The two answers will generally be close but not identical.
 
-
+Note also that this is a frequency **for one amplitude**, not for the resonator.
+Driving a KID harder pulls its resonance down, so the answer moves as you climb
+the ladder — which is why the bias frequency has to be read off the step you
+actually chose, and why moving the tone invalidates the calibration measured at
+the old one. Over this schedule R0004 walks the better part of 20 kHz:
 
 ```python
 iterations_of_R0004 = collect_amplitude_iterations_for(
@@ -891,7 +932,7 @@ result.
 
 | Argument | Default | Does |
 |---|---|---|
-| `sweeps` | required | **one module's** `multiamp_multisweep` outputs, i.e. `multiamp_ms[crs.module[MODULE].index()]`. e |
+| `sweeps` | required | **one module's** `multiamp_multisweep` outputs, i.e. `multiamp_ms[crs.module[MODULE].index()]` |
 | `catalog` | `None` | the resonators to bias, which must match the catalog used to make the above multisweeps. `None` uses the one recorded in the sweep's `call_params`, which is the usual case. |
 | `amplitude_method` | `"derivative"` | which bifurcation test the amplitude search uses — section 2. `"hysteresis"` requires the sweeps to have been taken in both directions. |
 | `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
@@ -899,14 +940,20 @@ result.
 | `spike_prominence_factor` | `0.5` | passed to `rfmux.tuning.bifurcated_by_derivative` — section 2 |
 | `max_discrepancy` | `0.25` | passed to `rfmux.tuning.bifurcated_by_hysteresis` — section 2 |
 | `max_distance_hz` | `None` | how far from the sweep centre a resonance may come out before the bias frequency is rejected. Past this, the tone is left where the sweep was centred and the finding is flagged. Useful for handling densely packed arrays or collisions. |
+| `save` | `None` | write the sweeps — which now carry the report — back to the file they came from. `None` does whatever `rfmux.tuning.store.autosave_enabled()` says, which is on unless you turned it off. Sweeps that have never been in a file get a new one |
+| `label` | `None` | your name for that file, used only when these sweeps are being written for the first time. A re-save keeps the name the file already has |
 
-The function 
+We pass `save=False` below for one reason that has nothing to do with bias
+finding: this notebook's ladder is the demo file that ships inside the rfmux
+package, and re-saving it would edit the copy every other reader gets. Your own
+sweeps came out of your own measurement, so leave `save` alone and the report
+lands in the file beside the data it describes.
 <!-- #endregion -->
 
 ```python
 from rfmux.tuning import find_bias_points
 
-bias_report = find_bias_points(multiamp_module_results)
+bias_report = find_bias_points(multiamp_module_results, save=False)
 
 print(bias_report)
 print(bias_report.catalog)
@@ -943,10 +990,12 @@ print(f"the catalog we started from is still: {swept_catalog['R0001'].bias}")
 
 ```
 
-The report does go into the sweeps it was found from, under `bias_report`, so
-that an operating point travels with the data it was derived from — and so that
-saving updates the ladder's own file rather than leaving a second one beside it.
-Re-running replaces it, the same way re-running a fit replaces that fit:
+The sweep result itself is a different matter: the report goes into it under
+`bias_report`, so that an operating point travels with the amplitude steps it
+was derived from. It is stored as plain builtins rather than as the class, which
+is what keeps the file readable by anything with `pickle` and outlives a rename
+of `BiasReport`. Re-running replaces it, the same way re-running a fit replaces
+that fit:
 
 ```python
 from rfmux.tuning import BiasReport
@@ -955,9 +1004,15 @@ print(BiasReport.from_dict(multiamp_module_results["bias_report"]))
 
 ```
 
+That happens whether or not you save. `save=` is only the question of whether
+the file on disk is brought up to date to match — and had we left it alone here,
+this would have rewritten the `multiamp_multisweep_*_bias_finding.pkl` the
+notebook loaded, in place, report and all. That is the point of it: the ladder
+and the operating point read off it stay one file.
+
 ### The report
 
-The function also return one
+The function also returns one
 `rfmux.tuning.BiasFinding` per resonator, which says how that resonator's bias
 point was
 arrived at:
@@ -995,6 +1050,21 @@ print(f"biased:  {len(bias_report)}")
 print(f"good:    {len(bias_report.good)}")
 print(f"flagged: {len(bias_report.flagged)}")
 ```
+
+Nothing is flagged here, because every resonator on this array bifurcated inside
+the schedule and had a step to fall back to. The hysteresis run from section 2 is
+where this array does produce flags — R0004 and R0005 showed that detector
+nothing at any drive, so it returned the loudest step rather than a limit it had
+found, and the report says so rather than leaving you to notice:
+
+```python
+print(find_bias_points(multiamp_module_results,
+                       amplitude_method="hysteresis", save=False))
+```
+
+Each flagged finding carries the sentence in `flagged_because`, so what you read
+here is per resonator and specific — not a bit that says something went wrong
+somewhere.
 
 
 ## 6. Applying the bias points
@@ -1045,11 +1115,13 @@ call to be retried.
   third `frequency_method` is a small job; the methods take a whole sweep entry
   rather than two arrays precisely so that one of them can read the entry's
   `fits`.
-- **Thresholds that have met a real array.** `spike_prominence_factor` is the
-  GUI's bar restated as a multiplication, and `max_discrepancy` was picked to be
-  roughly right; neither has been calibrated against hardware that is known to
-  bifurcate. Read `metric` and `threshold` across your own amplitude steps
-  before trusting the defaults.
+- **Thresholds that have met more than one array.** `spike_prominence_factor` is
+  the GUI's bar restated as a multiplication, and `max_discrepancy` was picked to
+  be roughly right. Both get the right answer on the array above, which is one
+  array on one cooldown — and the derivative test got it with a margin of about a
+  factor of two either side, which is not much to spend on a different array with
+  a different noise floor. Read `metric` and `threshold` across your own
+  amplitude steps, the way section 2 does, before trusting the defaults on them.
 
 
 

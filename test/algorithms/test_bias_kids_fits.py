@@ -75,6 +75,19 @@ class _SlopeBoard(_Board):
         return _Samples(np.full(n, z.real), np.full(n, z.imag))
 
 
+class _ResonanceBoard(_Board):
+    """Samples that follow the same resonance the entry was swept from,
+    so a stepped-tone calibration meets curvature."""
+    def __init__(self, qr):
+        super().__init__()
+        self.qr = qr
+
+    async def get_samples(self, n, channel=None, module=None, average=False):
+        z = nonlinear_iq(np.array([NCO + self.freq.get(1, 0.0)]), FR, self.qr,
+                         0.6, 0.1, 0.0, 1.0, 0.2)[0] / VOLTS_PER_ROC
+        return _Samples(np.full(n, z.real), np.full(n, z.imag))
+
+
 @pytest.mark.asyncio
 async def test_calibration_is_measured_where_the_detector_sits():
     board = _SlopeBoard()
@@ -82,11 +95,31 @@ async def test_calibration_is_measured_where_the_detector_sits():
     out = await bk.bias_kids(board, {1: entry}, module=1)
     expect = 1.0 / (SLOPE * VOLTS_PER_ROC)
     assert out[1]["df_calibration_source"] == "measured"
-    assert out[1]["df_calibration"] == pytest.approx(expect, rel=1e-6)
+    # A straight trajectory has no curvature; the fit's correction for
+    # its own resonance at a twentieth of a linewidth is under a percent.
+    assert out[1]["df_calibration"] == pytest.approx(expect, rel=1e-2)
     assert "df_calibration_fit" in out[1]
-    # The tone is back where it was biased.
-    bias_rel = [f for kind, ch, f in board.log if kind == "frequency"][0]
-    assert board.freq[1] == bias_rel
+    # The tone is back where it was biased, and it stepped by a
+    # twentieth of the fitted 20 kHz linewidth.
+    freqs = [f for kind, ch, f in board.log if kind == "frequency"]
+    assert board.freq[1] == freqs[0]
+    assert freqs[1] - freqs[0] == pytest.approx(-1000.0, rel=0.05)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("qr", [1.0e6, 5.0e4])
+async def test_measured_calibration_holds_for_a_narrow_resonator(qr):
+    # At Qr = 1e6 the linewidth is 1 kHz and the step 50 Hz; the
+    # curvature correction is a percent or two either way.
+    entry = _entry(qr=qr, span=20e3 if qr > 1e5 else 200e3)
+    board = _ResonanceBoard(qr)
+    out = await bk.bias_kids(board, {1: entry}, module=1)
+    f_bias = out[1]["bias_frequency"]
+    h = 1e-2
+    z = nonlinear_iq(np.array([f_bias - h, f_bias + h]), FR, qr, 0.6, 0.1, 0.0, 1.0, 0.2)
+    true = 1.0 / ((z[1] - z[0]) / (2 * h))
+    assert out[1]["df_calibration_source"] == "measured"
+    assert abs(out[1]["df_calibration"] / true - 1) < 0.03
 
 
 @pytest.mark.asyncio
@@ -120,11 +153,11 @@ async def test_no_variation_means_no_phase():
     assert phases[1] == (0.0, 0.0)
 
 
-def _entry(a=0.0, amplitude=0.01, n=101, span=200e3):
+def _entry(a=0.0, amplitude=0.01, n=101, span=200e3, qr=QR):
     """A multisweep result entry, its bias frequency on the raw grid
     two steps above the resonance, as a noisy max-diq might put it."""
     f = np.linspace(FR - span / 2, FR + span / 2, n)
-    z = nonlinear_iq(f, FR, QR, 0.6, 0.1, a, 1.0, 0.2) / VOLTS_PER_ROC
+    z = nonlinear_iq(f, FR, qr, 0.6, 0.1, a, 1.0, 0.2) / VOLTS_PER_ROC
     return {"frequencies": f, "iq_complex": z, "original_center_frequency": FR,
             "bias_frequency": float(f[n // 2 + 2]), "recalculation_method_applied": "max-diq",
             "sweep_amplitude": amplitude, "amplitude": amplitude, "direction": "upward",

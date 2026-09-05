@@ -7,7 +7,7 @@ import numpy as np
 import asyncio
 import warnings
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
-                             ensure_fits)
+                             ensure_fits, fitted_linewidth, step_slope_correction)
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
 
@@ -154,20 +154,21 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
 
 
 async def measure_calibrations_by_step(crs, bias_configs: Dict[int, Dict], module: int,
-                                       step_hz: float = 300.0, num_samples: int = 100
+                                       steps: Dict[int, float], num_samples: int = 100
                                        ) -> Dict[int, complex]:
     """The df calibration of every detector in *bias_configs*, measured
-    where it sits: each tone steps *step_hz* down, then up, in lockstep,
-    one read of the module at each, and the calibration is the inverse
-    of the complex slope, in hertz per volt.  The ADC phase in force
-    applies to the samples, so the result is in the frame the detector
-    is read in.  Detectors whose samples do not move are left out."""
+    where it sits: each tone steps its own *steps* entry (hertz) down,
+    then up, in lockstep, one read of the module at each, and the
+    calibration is the inverse of the complex slope, in hertz per volt.
+    The ADC phase in force applies to the samples, so the result is in
+    the frame the detector is read in.  Detectors whose samples do not
+    move are left out."""
     from ...core.transferfunctions import convert_roc_to_volts
     z = {}
     for sign in (-1.0, 1.0):
         async with crs.tuber_context() as ctx:
-            for config in bias_configs.values():
-                ctx.set_frequency(config['frequency'] + sign * step_hz,
+            for det, config in bias_configs.items():
+                ctx.set_frequency(config['frequency'] + sign * steps[det],
                                   channel=config['channel'], module=module)
             await ctx()
         samples = await crs.get_samples(num_samples, channel=None, module=module, average=False)
@@ -180,7 +181,7 @@ async def measure_calibrations_by_step(crs, bias_configs: Dict[int, Dict], modul
         await ctx()
     out = {}
     for det in bias_configs:
-        slope = convert_roc_to_volts((z[1.0][det] - z[-1.0][det]) / (2.0 * step_hz))
+        slope = convert_roc_to_volts((z[1.0][det] - z[-1.0][det]) / (2.0 * steps[det]))
         if np.isfinite(slope) and slope != 0:
             out[det] = complex(1.0 / slope)
     return out
@@ -229,7 +230,7 @@ async def bias_kids(
     num_phase_samples: int = 300,
     fit_method: str = "nonlinear",
     measure_calibration: bool = True,
-    calibration_step_hz: float = 300.0,
+    calibration_step: float = 0.05,
     *,
     module: Optional[Union[int, List[int]]] = None,
     progress_callback: Optional[Callable] = None
@@ -270,13 +271,16 @@ async def bias_kids(
         fit_method (str): "nonlinear" (default) or "skewed": the resonance fit the
                         amplitude choice and bias frequency come from.
         measure_calibration (bool): Measure the df calibration where each detector
-                        ends up, by stepping every tone calibration_step_hz down and
-                        up in lockstep and reading the samples: two reads for the
-                        module, no model.  On the simulator the direction is within
-                        0.7 degrees of truth where the fit's is within 4.  The fit's
-                        calibration is kept as 'df_calibration_fit'.  Defaults to True.
-        calibration_step_hz (float): Half the tone step for that measurement, well
-                        inside a linewidth.  Defaults to 300 Hz.
+                        ends up, by stepping every tone down and up in lockstep and
+                        reading the samples: two reads for the module, no model
+                        beyond a curvature correction.  On the simulator the
+                        direction is within 0.7 degrees of truth where the fit's is
+                        within 4.  The fit's calibration is kept as
+                        'df_calibration_fit'.  Defaults to True.
+        calibration_step (float): Each detector's half-step as a fraction of its
+                        fitted linewidth.  At the default 0.05 the central
+                        difference is within 2% of the slope before the curvature
+                        correction from the fit.  300 Hz for a detector with no fit.
         module (int | list[int], optional): Target module(s). If None, extracted from results.
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         
@@ -356,7 +360,7 @@ async def bias_kids(
                     num_phase_samples=num_phase_samples,
                     fit_method=fit_method,
                     measure_calibration=measure_calibration,
-                    calibration_step_hz=calibration_step_hz,
+                    calibration_step=calibration_step,
                     module=mod_num,
                     progress_callback=progress_callback
                 )
@@ -375,8 +379,6 @@ async def bias_kids(
 
     nco_freq = await crs.get_nco_frequency(module=module)
     
-    # Base frequency (Nyquist frequency) for quantization
-    base_freq = 298.0232238769531  # Hz
     
     # Set default bandpass parameters if not provided
     if bandpass_params is None:
@@ -407,7 +409,9 @@ async def bias_kids(
             channel = det_idx
             
             # Quantize the absolute bias frequency to nearest multiple of base frequency
-            quantized_bias_freq = round(bias_freq / base_freq) * base_freq
+            # The tone goes exactly where the fit put it: the board's
+            # frequency resolution is far finer than any bias choice.
+            quantized_bias_freq = float(bias_freq)
             
             # Calculate channel frequency relative to NCO
             channel_freq = quantized_bias_freq - nco_freq
@@ -487,9 +491,17 @@ async def bias_kids(
         await ctx()
     measured = {}
     if measure_calibration and bias_configs:
+        steps = {}
+        for det_idx, config in bias_configs.items():
+            lw = fitted_linewidth(multisweep_results[det_idx], fit_method)
+            steps[det_idx] = calibration_step * lw if lw else 300.0
         try:
-            measured = await measure_calibrations_by_step(crs, bias_configs, module,
-                                                          step_hz=calibration_step_hz)
+            measured = await measure_calibrations_by_step(crs, bias_configs, module, steps)
+            for det_idx in list(measured):
+                correction = step_slope_correction(
+                    multisweep_results[det_idx], bias_configs[det_idx]['quantized_bias_frequency'],
+                    steps[det_idx], fit_method)
+                measured[det_idx] = complex(measured[det_idx] * correction)
         except Exception as exc:
             warnings.warn(f"Module {module}: measuring the df calibration failed "
                           f"({exc}); using the fit's")

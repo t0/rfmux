@@ -64,13 +64,15 @@ tests an arbitrary basis instead: at 45 degrees each one sees the pulse
 divided by the square root of two while carrying the full noise.
 
 The calibration is the slope of the resonance at the bias point. `bias_kids`
-measures it where each detector ends up: every tone steps 300 Hz down and up
-in lockstep, two reads for the module, and the inverse of the complex slope
-is the calibration, with no model in between. On the simulator its direction
-is within 0.7 degrees of a true frequency step; a fitted resonance's slope is
-within 4. The fit's version is kept alongside as `df_calibration_fit`, and
-`bias_kids` warns when the two disagree by more than 5 degrees or 40 percent.
-Pass `measure_calibration=False` to use the fit's. For the amplitude choice
+measures it where each detector ends up: every tone steps a twentieth of its
+fitted linewidth down and up in lockstep, two reads for the module, and the
+inverse of the complex slope is the calibration. The fit supplies only a
+curvature correction of a percent or two. On the simulator the measured
+direction is within 0.7 degrees of a true frequency step; a fitted resonance's
+slope is within 4. The fit's version is kept alongside as
+`df_calibration_fit`, and `bias_kids` warns when the two disagree by more than
+5 degrees or 40 percent. Pass `measure_calibration=False` to use the fit's;
+`calibration_step` sets the fraction. For the amplitude choice
 and the bias frequency `bias_kids` works from one fit, chosen with
 `fit_method`: the nonlinear IQ fit (the default) or the skewed Lorentzian.
 Sweeps that already carry that fit (from Periscope's multisweep fit

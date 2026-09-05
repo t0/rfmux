@@ -28,7 +28,8 @@ from .fitting import identify_bifurcation
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
            "df_calibration_for_entry", "bias_frequency_from_fit",
-           "ensure_fits", "fits_present"]
+           "ensure_fits", "fits_present", "fitted_linewidth",
+           "step_slope_correction"]
 
 
 def _finite(v) -> bool:
@@ -144,6 +145,50 @@ def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     if method == "min-s21":
         return float(grid[np.argmin(np.abs(z))])
     return float(grid[np.argmax(np.abs(np.gradient(z, grid)))])
+
+
+def fitted_linewidth(entry, prefer="nonlinear"):
+    """fr / Qr from the fit the entry carries (the *prefer*red one
+    first), in hertz, or None without a fit."""
+    order = ("skewed", "nonlinear") if prefer == "skewed" else ("nonlinear", "skewed")
+    for fit in order:
+        if fit == "nonlinear" and _has_nonlinear_fit(entry):
+            p = entry["nonlinear_fit_params"]
+            return float(p["fr"]) / max(float(p["Qr"]), 1.0)
+        if fit == "skewed" and _has_skewed_fit(entry):
+            p = entry["fit_params"]
+            return float(p["fr"]) / max(float(p["Qr"]), 1.0)
+    return None
+
+
+def step_slope_correction(entry, f_bias, step_hz, prefer="nonlinear"):
+    """What a central difference over +-*step_hz* at *f_bias* reads,
+    relative to the true slope there, on the fitted resonance: the
+    complex ratio to divide a stepped measurement by.  The step is a
+    fraction of the linewidth, so this is a second-order correction
+    and the fit only has to have the curvature about right.  1 without
+    a fit."""
+    order = ("skewed", "nonlinear") if prefer == "skewed" else ("nonlinear", "skewed")
+    for fit in order:
+        if fit == "nonlinear" and _has_nonlinear_fit(entry):
+            from .fitting_nonlinear import nonlinear_iq
+            nl = entry["nonlinear_fit_params"]
+            p = [nl[k] for k in ("fr", "Qr", "amp", "phi", "a", "i0", "q0")]
+            model = lambda ff: nonlinear_iq(np.asarray(ff, dtype=np.float64), *p)
+            break
+        if fit == "skewed" and _has_skewed_fit(entry):
+            model = _skewed_model(*_sorted_sweep(entry), entry["fit_params"])
+            break
+    else:
+        return 1.0 + 0j
+    lw = fitted_linewidth(entry, prefer)
+    h = 1e-4 * lw
+    z = model(np.array([f_bias - step_hz, f_bias + step_hz, f_bias - h, f_bias + h]))
+    stepped = (z[1] - z[0]) / (2 * step_hz)
+    true = (z[3] - z[2]) / (2 * h)
+    if not (np.isfinite(stepped) and np.isfinite(true)) or true == 0:
+        return 1.0 + 0j
+    return complex(stepped / true)
 
 
 def df_calibration_for_entry(entry, *, prefer="nonlinear"):

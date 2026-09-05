@@ -374,12 +374,13 @@ async def _run_single(result, host, channels, module, streamer_mode,
             stream.elapsed_s = await run_slow_source(
                 capture_session, host, module=module, duration_s=duration_s)
     finally:
+        trained = bool(capture_session.noise_stats)
         capture_session.stop()
 
     stream.noise = dict(capture_session.noise_stats)
     setattr(result, "fast" if is_fast else "slow", stream)
 
-    if capture_session.state.name == "ESTIMATING" and verbose:
+    if not trained and verbose:
         print("[trigger_capture] noise training never completed — the "
               "stream ended first; try a longer time_run or a smaller "
               "max_pulse_ms")

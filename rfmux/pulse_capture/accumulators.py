@@ -176,6 +176,18 @@ class PulseHistogramSet:
         # Per-channel accumulators: {channel: {metric: HistogramAccumulator}}
         self.histograms: Dict[int, Dict[str, HistogramAccumulator]] = {}
 
+    def size_amplitude_to_noise(self, sigma: float, sigmas: float = 100.0) -> None:
+        """Span the amplitude bins from zero to *sigmas* times *sigma*, in
+        the units the pulses arrive in.  The default span is for ADC
+        counts; a session storing volts or hertz would put every pulse
+        in the first bin, and the range only grows.  Nothing changes
+        once a pulse has been binned."""
+        if not (np.isfinite(sigma) and sigma > 0) or self.total_pulses():
+            return
+        self.amp_edges = np.linspace(0.0, sigmas * sigma, len(self.amp_edges))
+        for h in self.histograms.values():
+            h["amplitude"] = HistogramAccumulator(self.amp_edges.copy())
+
     def _ensure_channel(self, channel: int) -> None:
         """Create histogram accumulators for a channel if not yet present."""
         if channel not in self.histograms:

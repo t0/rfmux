@@ -1088,6 +1088,10 @@ class TestPulseCaptureConfig:
             assert key in d
         assert d["buf_mb_total"] == pytest.approx(
             2 * d["buf_mb_per_channel"])
+        # What the session actually allocates: three doubled rings.
+        from rfmux.pulse_capture.detection import Circular
+        ring = Circular(d["buf_samples"]).buf.nbytes
+        assert d["buf_mb_per_channel"] == pytest.approx(3 * ring / 1e6)
 
     def test_edge_and_hard_stop_follow_max_pulse(self):
         """Both new time scales derive from max_pulse_ms — no knobs."""
@@ -2207,3 +2211,66 @@ def test_window_by_time_skips_samples_without_a_timestamp():
     w = pc.get_window_by_time(1, 3e-3, 8e-3)
     assert list(w["Time"]) == [3e-3, 4e-3, 6e-3, 7e-3, 8e-3]
     assert pc.get_window_by_time(1, 1.0, 2.0) is None
+
+
+# ───────────────────── Amplitude bins in stored units ───────────────
+
+
+class TestAmplitudeBinsFollowStoredUnits:
+    def test_volts_pulses_spread_over_the_amplitude_bins(self, tmp_path):
+        """Samples reach the histograms in volts (or hertz), not counts;
+        the amplitude bins are sized from the noise sigma in those
+        units once it is known, so pulses of different heights land in
+        different bins instead of all in the first."""
+        from rfmux.pulse_capture.capture_session import PulseCaptureSession
+
+        fs = 19073.486328125
+        cfg = PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=50.0)
+        session = PulseCaptureSession(channels=[1], sample_rate=fs,
+                                      hdf5_path=tmp_path / "c.h5",
+                                      **cfg.session_kwargs(fs))
+        session.start()
+        rng = np.random.default_rng(1)
+        n_train = cfg.noise_samples(fs)
+        k = 0
+        for _ in range(n_train + 50):
+            session.feed_sample(1, 100.0 + rng.normal(), rng.normal(), k / fs); k += 1
+        # Two pulses of clearly different height, in counts.
+        for height in (200.0, 800.0):
+            for i in range(60):
+                session.feed_sample(1, 100.0 + height * np.exp(-i / 15) + rng.normal(),
+                                    rng.normal(), k / fs); k += 1
+            for _ in range(400):
+                session.feed_sample(1, 100.0 + rng.normal(), rng.normal(), k / fs); k += 1
+        session.stop()
+
+        acc = session.histograms.get_channel_histograms(1)["amplitude"]
+        assert acc.total == 2
+        assert acc.counts[0] == 0, "no pulse in the first bin: the range is in stored units"
+        assert np.count_nonzero(acc.counts) == 2, "different heights, different bins"
+
+    def test_sizing_leaves_a_histogram_in_use_alone(self):
+        hist = PulseHistogramSet(amp_range=(0, 200), amp_bins=10, threshold_sigma=5.0)
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        hist.add_pulse(1, _make_decay_pulse(amp_sigma=20.0), ns)
+        edges = hist.amp_edges.copy()
+        hist.size_amplitude_to_noise(1e-6)
+        assert np.array_equal(hist.amp_edges, edges)
+
+
+class TestTriggerCaptureTooShort:
+    def test_a_run_that_never_trains_says_so(self, monkeypatch, capsys):
+        """A time_run shorter than the noise training returns nothing;
+        the caller is told, rather than handed an empty result."""
+        import asyncio
+        from rfmux.algorithms.measurement import trigger_capture as tc
+
+        async def ends_at_once(session, *a, **k):
+            return 0.01
+        monkeypatch.setattr(tc, "run_slow_source", ends_at_once)
+        result = tc.PulseCaptureResult(streamer_mode="slow", config=PulseCaptureConfig(),
+                                       channels=[1], module=1)
+        asyncio.run(tc._run_single(result, "127.0.0.1", [1], 1, "slow", 596.0,
+                                   0.01, None, None, True))
+        assert "noise training never completed" in capsys.readouterr().out
+        assert result.slow.noise == {}

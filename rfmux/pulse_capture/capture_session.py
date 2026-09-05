@@ -404,8 +404,10 @@ class PulseCaptureConfig:
             "noise_train_actual_ms":
                 self.noise_samples(sample_rate) / sample_rate * 1e3,
             "buf_samples": buf,
-            "buf_mb_per_channel": buf * 3 * 8 / 1e6,
-            "buf_mb_total": buf * 3 * 8 * n_channels / 1e6,
+            # Three rings per channel, each allocated at twice its
+            # length so any window reads as one contiguous slice.
+            "buf_mb_per_channel": buf * 3 * 2 * 8 / 1e6,
+            "buf_mb_total": buf * 3 * 2 * 8 * n_channels / 1e6,
             "max_recordable_ms": buf / sample_rate * 1e3,
             "baseline_window": self.baseline_window_samples(sample_rate),
             "baseline_window_ms":
@@ -1030,6 +1032,8 @@ class PulseCaptureSession(_CallbackHost):
             samples, self.channels, jump_lag=self.edge_lookback,
             baseline_block=block)
 
+        self.histograms.size_amplitude_to_noise(max(
+            (max(s.std_I, s.std_Q) for s in self.noise_stats.values()), default=0.0))
         if self.pcap is None:
             self._build_engine_and_writer()
         else:

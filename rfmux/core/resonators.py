@@ -203,10 +203,15 @@ class ResonatorCatalog:
     themselves are an unordered collection, so ``resonators()`` and ``names()``
     take the order you want to pull them out in.
 
-    Frequency collisions are checked when a resonator joins the catalog, which
-    is where a duplicate from ``find_resonances`` shows up. How close is too
-    close is ``min_separation_hz``, and setting it to ``None`` turns the check
-    off entirely for the deliberate case of two tones on one frequency.
+    Frequency collisions are checked when a resonator joins the catalog, if you
+    ask for the check: ``min_separation_hz`` says how close is too close, and
+    defaults to ``None``, which lets any spacing through, including none at all.
+    A duplicate out of ``find_resonances`` is what this catches, and the
+    separation cut there is the first place to make it — pass a threshold here
+    when you want the catalog to hold the line as well. Every constructor takes
+    it, so ``from_frequencies``, ``from_dict`` and ``from_csv`` can each be
+    given one.
+
     Retuning through ``Resonator.set_bias`` is not re-checked — two tones can be
     walked onto one frequency after the fact. Worth a ``validate()`` pass once
     there is a caller that retunes in bulk.
@@ -223,26 +228,32 @@ class ResonatorCatalog:
     rather than on the catalog.
     """
 
-    # Stamped into to_dict output and required exactly by from_dict, so a file
-    # written by a future (or past) version of this module fails loudly instead
-    # of being half-understood. Bump it whenever the dict shape changes in a
-    # way from_dict cannot absorb.
-    SCHEMA_VERSION = 1
+    # Stamped into to_dict output and checked by from_dict, so a file written by
+    # a version of this module that shaped things differently fails loudly
+    # instead of being half-understood. Bump it whenever the dict shape changes.
+    SCHEMA_VERSION = 2
+
+    # Older shapes from_dict can still read. Version 1 stored `resonators` as a
+    # list of entries each carrying its own `name`; 2 keys them by name, so a
+    # reader can look one up instead of scanning. That is a shape change and so
+    # a version bump, but the old shape is unambiguous — no reason to strand
+    # files already on disk over it.
+    READABLE_SCHEMA_VERSIONS = (1, 2)
 
     def __init__(
         self,
         resonators: Iterable[Resonator],
         module: int,
-        min_separation_hz: float | None = 0.0,
+        min_separation_hz: float | None = None,
     ):
         """
         Args:
             resonators: the members; names and channels must be unique.
             module: the readout module these channel numbers refer to.
             min_separation_hz: reject bias frequencies this close together or
-                closer. The default, 0.0, rejects only exactly equal
-                frequencies; ``None`` allows any spacing, including none at
-                all. See ``_check_frequency``.
+                closer. The default, ``None``, allows any spacing, including
+                none at all; 0.0 rejects only exactly equal frequencies. See
+                ``_check_frequency``.
         """
         if min_separation_hz is not None and min_separation_hz < 0:
             raise ValueError(
@@ -262,23 +273,23 @@ class ResonatorCatalog:
     def _check_frequency(self, r: Resonator):
         """Reject a bias frequency that collides with one already present.
 
-        Two tones on one frequency is normally a hardware conflict, not a
-        bookkeeping nicety, so the default threshold of 0.0 Hz still rejects
-        exactly equal floats. Because bias frequencies arrive quantized, that
-        now also catches the realistic symptom of ``find_resonances`` splitting
-        one resonator: two peaks a hair apart land on one grid point, which is
-        exactly what the hardware would have done with them. It stays a weak
-        check past one grid step — set ``min_separation_hz`` to something
+        The default, ``min_separation_hz=None``, skips this altogether. Nothing
+        downstream depends on frequencies being distinct — the cost of two tones
+        on one frequency is that the two channels read the same thing, which is
+        fine when you meant it, and a caller who has already made their
+        separation cut in ``find_resonances`` should not have to argue with a
+        second one here.
+
+        ``min_separation_hz=0.0`` rejects exactly equal floats. Because bias
+        frequencies arrive quantized, that also catches the realistic symptom of
+        ``find_resonances`` splitting one resonator: two peaks a hair apart land
+        on one grid point, which is exactly what the hardware would have done
+        with them. It stays a weak check past one grid step — set something
         physically motivated for anything wider.
 
         Comparison is inclusive — a pair exactly ``min_separation_hz`` apart
         collides — which is what makes 0.0 mean "no two tones share a
         frequency", and matches ``find_resonances``' separation pass.
-
-        ``min_separation_hz=None`` skips the check altogether, for the caller
-        who means to park two tones on one frequency. Nothing downstream
-        depends on frequencies being distinct; the cost is that the two channels
-        read the same thing, which is only useful if you know that.
         """
         threshold = self.min_separation_hz
         if threshold is None:
@@ -287,8 +298,8 @@ class ResonatorCatalog:
             gap = abs(other.bias.frequency_hz - r.bias.frequency_hz)
             if gap <= threshold:
                 rule = (
-                    "Each resonator needs a distinct frequency; pass "
-                    "min_separation_hz=None to allow duplicates."
+                    "min_separation_hz=0.0 asks for distinct frequencies; drop "
+                    "it, or pass None, to allow duplicates."
                     if threshold == 0
                     else f"This catalog requires more than {threshold:g} Hz "
                     f"between bias frequencies; these are {gap:g} Hz apart."
@@ -469,49 +480,72 @@ class ResonatorCatalog:
     # -- persistence ----------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Plain builtins only — files never contain these classes."""
+        """Plain builtins only — files never contain these classes.
+
+        ``resonators`` is keyed by name, the same way the catalog itself is, so
+        a reader that wants one resonator says ``d["resonators"]["R0007"]``
+        rather than scanning for it. The name is the key and so is not repeated
+        inside the entry. Insertion is in frequency order, which dicts keep,
+        but nothing needs to lean on that — ``from_dict`` takes the order back
+        off the frequencies, the same as everywhere else.
+        """
         return {
             "schema_version": self.SCHEMA_VERSION,
             "module": self.module,
             "min_separation_hz": self.min_separation_hz,
-            "resonators": [
-                {
-                    "name": r.name,
+            "resonators": {
+                r.name: {
                     "channel": r.channel,
                     "bias": asdict(r.bias),
                     "notes": dict(r.notes),
                 }
                 for r in self
-            ],
+            },
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> ResonatorCatalog:
-        if d.get("schema_version") != cls.SCHEMA_VERSION:
+    def from_dict(cls, d: dict, **kwargs) -> ResonatorCatalog:
+        """Rebuild a catalog from ``to_dict`` output.
+
+        Catalog settings are taken from the file, and a keyword given here wins
+        over the stored value — ``from_dict(d, min_separation_hz=1e3)`` reads an
+        old catalog under a new rule, and raises if it does not meet it.
+        """
+        version = d.get("schema_version")
+        if version not in cls.READABLE_SCHEMA_VERSIONS:
+            readable = ", ".join(str(v) for v in cls.READABLE_SCHEMA_VERSIONS)
             raise ValueError(
-                f"Unsupported schema_version {d.get('schema_version')!r}; "
-                f"this module writes {cls.SCHEMA_VERSION}."
+                f"Unsupported schema_version {version!r}; this module writes "
+                f"{cls.SCHEMA_VERSION} and reads {readable}."
             )
+        stored = d["resonators"]
+        # schema_version 1 wrote a list of entries, each with its own name.
+        entries = (
+            stored.items()
+            if isinstance(stored, dict)
+            else ((rd["name"], rd) for rd in stored)
+        )
         resonators = [
             Resonator(
-                name=rd["name"],
+                name=name,
                 channel=rd["channel"],
                 bias=BiasPoint(**rd["bias"]),
                 notes=rd.get("notes", {}),
             )
-            for rd in d["resonators"]
+            for name, rd in entries
         ]
+        # The separation rule is absent in files written before it was
+        # persisted. Those went out under the old default of 0.0, but every
+        # frequency in one already passed that check on the way in, so reading
+        # them back under the current default of None cannot let anything
+        # through that the writer would have caught.
+        kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
+
         # A file written while the catalog still carried an NCO frequency has
         # that key and it is ignored, which is why removing the field did not
         # need a schema bump: neither direction of the round trip loses a
         # resonator over it.
-        return cls(
-            resonators,
-            module=d["module"],
-            # Absent in files written before the rule was persisted; those were
-            # written under the old default, which is this one.
-            min_separation_hz=d.get("min_separation_hz", 0.0),
-        )
+        return cls(resonators, module=d["module"], **kwargs)
 
     # -- CSV ------------------------------------------------------------------
     #

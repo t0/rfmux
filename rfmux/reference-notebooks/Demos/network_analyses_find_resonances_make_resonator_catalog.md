@@ -635,9 +635,16 @@ print(f".quantize(): {unquantized_bias.quantize().frequency_hz:.6f} Hz")
 
 ### Invariants, and what they refuse
 
-Names and channels must be unique, channels are 1-based, and you probably don't
-want to have two resonators (tones) sitting at exactly the same frequency (but this can be allowed; see the Resonator object class).
-These are checked when a resonator joins the catalog.
+Names and channels must be unique, and channels are 1-based. These are checked
+when a resonator joins the catalog.
+
+Bias frequencies are not policed unless you ask: `min_separation_hz` defaults to
+`None`, which lets any spacing through, including two tones at exactly the same
+frequency. Pass `min_separation_hz=0.0` to refuse an exact duplicate — a
+resonance that `find_resonances` split in two lands there once the frequencies
+are quantized — or a wider number when you know the separation below which your
+readout cannot operate two detectors. Every constructor takes it, including
+`from_dict` and `from_csv`.
 
 ```python
 def refused(what, thunk):
@@ -652,9 +659,11 @@ refused("duplicate channel", lambda: ResonatorCatalog(
     [Resonator("a", 1, BiasPoint(1.01e9, 0.01)),
      Resonator("b", 1, BiasPoint(1.02e9, 0.01))], module=2))
 
-refused("identical frequencies", lambda: ResonatorCatalog(
-    [Resonator("a", 1, BiasPoint(1.01e9, 0.01)),
-     Resonator("b", 2, BiasPoint(1.01e9, 0.01))], module=2))
+refused("identical frequencies, with a separation rule asked for",
+        lambda: ResonatorCatalog(
+            [Resonator("a", 1, BiasPoint(1.01e9, 0.01)),
+             Resonator("b", 2, BiasPoint(1.01e9, 0.01))],
+            module=2, min_separation_hz=0.0))
 
 refused("amplitude in dBm, not DAC units",
         lambda: BiasPoint(1.01e9, amplitude=-30.0))
@@ -673,11 +682,18 @@ Catalog objects into other standard classes and file formats.
 and `new_catalog_from_dict = ResonatorCatalog.from_dict(a_dictionary)` rebuilds it. Being plain builtins, the result will go into a pickle,
 a JSON file or HDF5 attributes equally happily.
 
+The `resonators` entry is itself keyed by name, like the catalog, so reading one
+detector out of a saved file is `a_dictionary['resonators']['R0007']` and not a
+search. `from_dict` takes the same keyword arguments as the other constructors,
+so you can load under a rule the file was not written with — say
+`ResonatorCatalog.from_dict(a_dictionary, min_separation_hz=100e3)`.
+
 ```python
 catalog_dict = by_hand_catalog.to_dict()
 print(f"schema_version : {catalog_dict['schema_version']}")
 print(f"top-level keys : {list(catalog_dict)}")
-print(f"one resonator  : {catalog_dict['resonators'][2]}")
+print(f"resonator names: {list(catalog_dict['resonators'])}")
+print(f"one resonator  : {catalog_dict['resonators']['red']}")
 
 restored_catalog = ResonatorCatalog.from_dict(catalog_dict)
 print(f"\nround trip: {len(restored_catalog)} resonators, "

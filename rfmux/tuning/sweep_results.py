@@ -429,11 +429,16 @@ def _bias_amplitude_of(results: Mapping, name: str) -> float:
             "amplitude. Pass amplitude= explicitly."
         )
 
-    for r in catalog["resonators"]:
-        if r["name"] == name:
-            return float(r["bias"]["amplitude"])
+    # Keyed by name since catalog schema_version 2, and a list of entries each
+    # carrying their own name before that. Absorbing the old shape is why the
+    # snapshot changing did not have to move RESULTS_SCHEMA_VERSION.
+    resonators = catalog["resonators"]
+    if not isinstance(resonators, dict):
+        resonators = {rd["name"]: rd for rd in resonators}
 
-    raise KeyError(
-        f"{name!r} is not in the catalog this result was swept from. Its "
-        f"resonators are {_named([r['name'] for r in catalog['resonators']])}."
-    )
+    if name not in resonators:
+        raise KeyError(
+            f"{name!r} is not in the catalog this result was swept from. Its "
+            f"resonators are {_named(list(resonators))}."
+        )
+    return float(resonators[name]["bias"]["amplitude"])

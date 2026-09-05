@@ -281,27 +281,38 @@ def test_duplicate_channels_rejected():
         )
 
 
+def test_identical_frequencies_pass_by_default():
+    """No separation rule unless one is asked for."""
+    m = ResonatorCatalog.from_frequencies([1e9, 1e9], module=1, amplitude=0.01)
+    assert len(m) == 2
+
+
 def test_identical_frequencies_rejected():
     with pytest.raises(ValueError, match="collides"):
-        ResonatorCatalog.from_frequencies([1e9, 1e9], module=1, amplitude=0.01)
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=0.0
+        )
 
 
-def test_sub_grid_duplicates_are_caught_by_default():
-    """Quantizing does what the 0.0 Hz default could not on its own.
+def test_sub_grid_duplicates_are_caught_by_a_zero_hz_rule():
+    """Quantizing does what a 0.0 Hz rule could not on its own.
 
     Two peaks a microhertz apart are the realistic symptom of
-    ``find_resonances`` splitting one resonator. They used to slip past the
-    default check as distinct floats; now they land on one grid point, which is
-    the truth of it — the hardware cannot tell them apart either.
+    ``find_resonances`` splitting one resonator. They would slip past a
+    float-equality check as distinct numbers; instead they land on one grid
+    point, which is the truth of it — the hardware cannot tell them apart
+    either.
     """
     with pytest.raises(ValueError, match="collides"):
-        ResonatorCatalog.from_frequencies([1e9, 1e9 + 1e-6], module=1, amplitude=0.01)
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9 + 1e-6], module=1, amplitude=0.01, min_separation_hz=0.0
+        )
 
 
-def test_duplicates_within_a_grid_step_still_pass_by_default():
-    """The default remains weak, just less so: a step apart is still distinct."""
+def test_duplicates_within_a_grid_step_still_pass_a_zero_hz_rule():
+    """0.0 Hz remains a weak check, just less so: a step apart is distinct."""
     m = ResonatorCatalog.from_frequencies(
-        [1e9, 1e9 + BASE_FREQUENCY], module=1, amplitude=0.01
+        [1e9, 1e9 + BASE_FREQUENCY], module=1, amplitude=0.01, min_separation_hz=0.0
     )
     assert len(m) == 2
 
@@ -531,14 +542,23 @@ def test_copy_is_independent():
 
 def test_copy_preserves_catalog_metadata():
     m = ResonatorCatalog.from_frequencies(
-        [1e9], module=3, amplitude=0.01, min_separation_hz=None
+        [1e9], module=3, amplitude=0.01, min_separation_hz=1e3
     )
     c = m.copy()
     assert c.module == 3
-    assert c.min_separation_hz is None
+    assert c.min_separation_hz == 1e3
 
 
 # ─── persistence ──────────────────────────────────────────────────────────────
+
+
+def test_to_dict_keys_resonators_by_name():
+    """A catalog is looked up by name; so is its dict."""
+    d = a_catalog().to_dict()
+    assert list(d["resonators"]) == a_catalog().names()
+    assert d["resonators"]["R0002"]["channel"] == 2
+    # The name is the key, not a field repeated inside the entry.
+    assert "name" not in d["resonators"]["R0002"]
 
 
 def test_dict_round_trip():
@@ -581,7 +601,7 @@ def test_dict_round_trip_preserves_an_opted_out_frequency():
 
 def test_from_dict_quantizes_files_written_before_the_flag_existed():
     d = a_catalog().to_dict()
-    for rd in d["resonators"]:
+    for rd in d["resonators"].values():
         del rd["bias"]["bias_frequency_quantized"]
     assert ResonatorCatalog.from_dict(d)["R0001"].bias.bias_frequency_quantized is True
 
@@ -607,7 +627,7 @@ def test_to_dict_holds_only_builtins():
 def test_to_dict_notes_are_copied_not_aliased():
     m = a_catalog()
     d = m.to_dict()
-    d["resonators"][0]["notes"]["injected"] = True
+    d["resonators"]["R0001"]["notes"]["injected"] = True
     assert m["R0001"].notes == {}
 
 
@@ -616,6 +636,22 @@ def test_from_dict_rejects_unknown_schema_version():
     d["schema_version"] = 999
     with pytest.raises(ValueError, match="Unsupported schema_version"):
         ResonatorCatalog.from_dict(d)
+
+
+def test_from_dict_reads_a_schema_version_1_file():
+    """Version 1 listed the resonators, with the name inside each entry."""
+    m = a_catalog()
+    m["R0002"].notes["flagged"] = "noisy"
+    d = m.to_dict()
+    d["schema_version"] = 1
+    d["resonators"] = [
+        {"name": name, **entry} for name, entry in d["resonators"].items()
+    ]
+
+    back = ResonatorCatalog.from_dict(d)
+    assert back.names() == m.names()
+    assert back["R0002"].bias == m["R0002"].bias
+    assert back["R0002"].notes == {"flagged": "noisy"}
 
 
 def test_dict_round_trip_preserves_module():
@@ -637,19 +673,33 @@ def test_a_file_carrying_the_retired_nco_field_still_loads():
 
 
 def test_dict_round_trip_preserves_the_separation_rule():
-    """Without this a duplicate-frequency catalog saves but cannot be reloaded."""
+    """The rule is a property of the catalog, not of the session that built it."""
     m = ResonatorCatalog.from_frequencies(
-        [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
     )
     back = ResonatorCatalog.from_dict(m.to_dict())
-    assert back.min_separation_hz is None
+    assert back.min_separation_hz == 1e3
     assert [r.bias.frequency_hz for r in back] == [r.bias.frequency_hz for r in m]
 
 
 def test_from_dict_defaults_the_separation_rule_for_older_files():
     d = a_catalog().to_dict()
     del d["min_separation_hz"]
-    assert ResonatorCatalog.from_dict(d).min_separation_hz == 0.0
+    assert ResonatorCatalog.from_dict(d).min_separation_hz is None
+
+
+def test_from_dict_takes_a_separation_rule_over_the_stored_one():
+    """Reading an old catalog under a new rule, like every other constructor."""
+    d = ResonatorCatalog.from_frequencies([1e9, 2e9], module=1, amplitude=0.01).to_dict()
+    assert ResonatorCatalog.from_dict(d, min_separation_hz=1e3).min_separation_hz == 1e3
+
+
+def test_from_dict_applies_the_separation_rule_it_is_given():
+    d = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9 + 500.0], module=1, amplitude=0.01
+    ).to_dict()
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_dict(d, min_separation_hz=1e3)
 
 
 # ─── CSV ──────────────────────────────────────────────────────────────────────

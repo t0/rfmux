@@ -402,6 +402,21 @@ def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
         assert find_iteration_matching_amplitude(result, name) == 2
 
 
+def test_a_sweep_holding_an_older_catalog_snapshot_still_answers():
+    """Catalog schema_version 1 listed its resonators instead of keying them."""
+    catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
+    result = packed(
+        schedule=AmplitudeSchedule.multiplicative(0.25, 4.0, 5), catalog=catalog
+    )
+    snapshot = result["call_params"]["catalog"]
+    snapshot["schema_version"] = 1
+    snapshot["resonators"] = [
+        {"name": name, **entry} for name, entry in snapshot["resonators"].items()
+    ]
+
+    assert find_iteration_matching_amplitude(result, "R0002") == 2
+
+
 def test_a_relative_ladder_gives_each_resonator_its_own_answer():
     """Which is why the reader takes a name: R0001 and R0002 share an iteration
     number and nothing else."""

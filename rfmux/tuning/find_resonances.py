@@ -13,6 +13,15 @@ Two entry points, and the split between them is the point of the module:
     A convenience wrapper over the above: it unpacks what ``crs.take_netanal()``
     returned — one module or several — and hands back results in the same shape.
 
+A third function comes at the same question from the other end, once the array
+has been swept properly:
+
+``find_sweeps_with_nearby_resonances(module_sweeps, min_separation_hz)``
+    Which multisweep sections turned out to hold more than one dip. A netanal
+    search can only separate what one coarse trace resolved; the finer sweep
+    around each candidate is where a collided pair hiding inside a single dip
+    finally comes apart, and this names the ones to cull.
+
 The search is a dip finder. Convert ``|S21|`` to dB, give the inverted trace to
 :func:`scipy.signal.find_peaks` with a prominence floor and Q-derived width
 limits, then run the optional rejection passes. Every rejected candidate is
@@ -58,12 +67,14 @@ from scipy import signal
 from ..core.resonators import ResonatorCatalog
 from . import store
 from .store import plain
+from .sweep_results import _refuse_container
 
 __all__ = [
     "ResonanceCandidate",
     "ResonanceSearch",
     "find_resonances",
     "find_resonances_in_netanal",
+    "find_sweeps_with_nearby_resonances",
     "magnitude_db",
 ]
 
@@ -623,3 +634,178 @@ def find_resonances_in_netanal(
         module=netanal.get(store.METADATA_KEY, {}).get("module"),
     )
     return search
+
+
+# ─── Collided resonances inside a multisweep section ──────────────────────────
+
+
+def find_sweeps_with_nearby_resonances(
+    module_sweeps,
+    min_separation_hz: float,
+    *,
+    min_prominence_db: float = 1.0,
+    min_dip_spacing_hz: float = 1e3,
+    iq_key: str = "iq_counts",
+    iteration: int | None = None,
+    direction: str | None = None,
+) -> list[str]:
+    """Which multisweep sections swept a second resonance alongside their own.
+
+    The netanal search this module starts with resolves only what one coarse
+    trace could. A pair that sat inside a single dip there gets its own fine
+    sweep afterwards, and comes apart in it — so this is the same collision cut
+    as :func:`_separation_pass`, run again on better data.
+
+    A section holding two dips is a section whose fit, bias frequency and bias
+    amplitude are all answering the wrong question, so what to do with the names
+    it returns is drop them: ``for name in culled: catalog.remove(name)``. As
+    there, both members of a collided pair go — parking a tone on either one
+    still reads the other.
+
+    Parameters
+    ----------
+    module_sweeps : dict
+        One module's sweep result — ``sweeps[module_id]``, what ``multisweep``
+        or ``multiamp_multisweep`` returned for a single module.
+    min_separation_hz : float
+        The separation two dips have to clear to be allowed as distinct
+        resonances; anything closer is a collision and the section is culled.
+        Comparison is inclusive, as in :func:`_separation_pass`: a pair exactly
+        this far apart is cut. Pass ``float("inf")`` for "any second dip
+        anywhere in the sweep window disqualifies the section".
+    min_prominence_db : float, optional
+        Prominence floor, in dB, for a dip to count as a dip at all. Raise it to
+        stop noise wiggles counting. Default 1.0.
+    min_dip_spacing_hz : float, optional
+        How close two minima may be and still be found as two dips, rather than
+        one dip split into several. This is the finder's resolving power, so it
+        also floors what *min_separation_hz* can act on: a pair closer together
+        than this is never seen as a pair, and so is never culled. Keep it well
+        below *min_separation_hz*. Default 1e3.
+    iq_key : str, optional
+        Which of the sweep's arrays to read, ``"iq_counts"`` or ``"iq_volts"``.
+        Either answers the question — the dB magnitude only shifts by a constant
+        between them. Default ``"iq_counts"``.
+    iteration : int or None, optional
+        Look only at this amplitude iteration. The default, ``None``, looks at
+        all of them and culls a name if *any* amplitude shows the collision. A
+        bifurcated sweep at the top of an amplitude ladder can occasionally
+        split into two minima, so pass ``0`` if that turns up as a false hit.
+    direction : str or None, optional
+        Look only at this sweep direction. Default ``None``, both.
+
+    Returns
+    -------
+    list of str
+        The section names to cull, in the order they were swept. Empty if
+        nothing collided.
+
+    Raises
+    ------
+    ValueError
+        On out-of-range parameters, or if *iteration* or *direction* selected
+        nothing — a typo there would otherwise report an array with no
+        collisions in it, which is the dangerous direction to be wrong in.
+    """
+    # -- validate ------------------------------------------------------------
+    if min_separation_hz < 0:
+        raise ValueError(
+            f"min_separation_hz={min_separation_hz}: must be a separation in "
+            f"Hz (>= 0). Use float('inf') to cull on any second dip at all."
+        )
+    if min_prominence_db <= 0:
+        raise ValueError(f"min_prominence_db={min_prominence_db}: must be positive.")
+    if min_dip_spacing_hz <= 0:
+        raise ValueError(f"min_dip_spacing_hz={min_dip_spacing_hz}: must be positive.")
+
+    _refuse_container(module_sweeps)
+    try:
+        results = module_sweeps["results"]
+    except (TypeError, KeyError):
+        raise TypeError(
+            "Expected one module's sweep result (with 'results' and "
+            "'call_params'), not one of its parts."
+        ) from None
+
+    culled: list[str] = []
+    examined = 0
+
+    for step, by_direction in results.items():
+        if iteration is not None and step != iteration:
+            continue
+
+        for swept_direction, sections in by_direction.items():
+            if direction is not None and swept_direction != direction:
+                continue
+
+            for name, sweep in sections.items():
+                examined += 1
+                # Already condemned by another amplitude or direction. One
+                # collision is enough; the rest of its sweeps say nothing new.
+                if name in culled:
+                    continue
+                if iq_key not in sweep:
+                    raise KeyError(
+                        f"{name!r} has no {iq_key!r}. Its sweep holds "
+                        f"{', '.join(repr(k) for k in sweep)}."
+                    )
+                if _has_collided_pair(
+                    sweep,
+                    min_separation_hz=min_separation_hz,
+                    min_prominence_db=min_prominence_db,
+                    min_dip_spacing_hz=min_dip_spacing_hz,
+                    iq_key=iq_key,
+                ):
+                    culled.append(name)
+
+    if not examined:
+        raise ValueError(
+            f"iteration={iteration}, direction={direction} selected no sweeps. "
+            f"This result has iterations {sorted(results)} and directions "
+            f"{sorted({d for by_direction in results.values() for d in by_direction})}."
+        )
+
+    return culled
+
+
+def _has_collided_pair(
+    sweep, *, min_separation_hz, min_prominence_db, min_dip_spacing_hz, iq_key
+) -> bool:
+    """Does one sweep hold two dips within ``min_separation_hz`` of each other?
+
+    ``distance=`` is handed to :func:`~scipy.signal.find_peaks` here, which the
+    search proper deliberately does not do (see :func:`_separation_pass`). The
+    objection there was that a sample count means a different frequency at every
+    sweep resolution, and that ``distance`` keeps the deepest of a close group
+    and silently drops the rest. Neither applies to this use: the count is
+    computed from the section's own step size, so it is a frequency; and it is
+    doing the opposite job — not cutting candidates, but keeping one broad dip's
+    shoulders from being counted as its neighbours. The cut is the separation
+    test below, on frequencies.
+    """
+    frequencies = np.asarray(sweep["frequencies"], dtype=float)
+    iq = np.asarray(sweep[iq_key])
+
+    # A dead channel is all zeros, which is no evidence of a collision rather
+    # than a trace to search — and magnitude_db would rightly refuse it.
+    if frequencies.size < 3 or not np.any(np.abs(iq) > 0):
+        return False
+
+    mag_db = magnitude_db(iq)
+
+    # Median step, so a downward sweep (descending frequencies) or a stray
+    # duplicated point does not set the scale.
+    step_hz = float(np.median(np.abs(np.diff(frequencies))))
+    spacing_points = max(1, int(round(min_dip_spacing_hz / step_hz)))
+
+    # Resonances are dips in |S21|, so they are peaks in the inverted trace.
+    dips, _ = signal.find_peaks(
+        -mag_db, prominence=min_prominence_db, distance=spacing_points
+    )
+    if len(dips) < 2:
+        return False
+
+    # Sorted, so the closest pair is an adjacent pair — and sorting is what lets
+    # a downward sweep be read with the same test as an upward one.
+    dip_frequencies = np.sort(frequencies[dips])
+    return bool(np.any(np.diff(dip_frequencies) <= min_separation_hz))

@@ -389,6 +389,25 @@ comes back low, the first thing to change is `npoints`, not the thresholds — a
 if you already know roughly where the array is, sweeping a narrower band at the
 same `npoints` buys the same resolution for less time.
 
+### The collisions this sweep cannot see
+
+`min_separation_hz` above can only cut pairs the survey sweep managed to
+separate. Two resonators closer together than its resolution arrive as a single
+candidate, and nothing here can tell you that is what happened — the collision
+cut has one dip to look at and no reason to complain about it.
+
+Where they come apart is the multisweep, which sweeps a narrow span around each
+candidate at a resolution the survey could not afford. So the same cut is worth
+running again on that data, and
+`rfmux.tuning.find_sweeps_with_nearby_resonances` is the function for it: hand it
+one module's multisweep result and a `min_separation_hz`, and it hands back the
+names whose section turned out to hold a second dip. Drop them from the catalog
+the way section 5 does — both members, since a tone on either one still reads the
+other.
+
+It is not demonstrated here because it needs multisweep data, which this notebook
+does not take; `multisweep.md` in this folder is where that data comes from.
+
 ## 4. Seed a resonator catalog
 
 `rfmux.tuning.ResonanceSearch.to_catalog()` is where anonymous dips become tracked

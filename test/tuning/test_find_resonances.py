@@ -14,6 +14,7 @@ from rfmux.tuning import (
     ResonanceSearch,
     find_resonances,
     find_resonances_in_netanal,
+    find_sweeps_with_nearby_resonances,
 )
 
 pytestmark = pytest.mark.portable
@@ -295,6 +296,168 @@ def test_all_zero_response_raises():
     frequencies, _ = a_sweep()
     with pytest.raises(ValueError, match="zero everywhere"):
         find_resonances(frequencies, np.zeros(len(frequencies)))
+
+
+# ─── the collision cut, run again on multisweep data ──────────────────────────
+
+
+def a_section(dips=(1.0e9,), span_hz=60e3, npoints=201, q=2e5, depth=0.7):
+    """One multisweep section: a fine sweep about 1 GHz holding *dips*."""
+    frequencies = np.linspace(1e9 - span_hz / 2, 1e9 + span_hz / 2, npoints)
+    magnitude = np.ones(npoints)
+    for f0 in dips:
+        magnitude += lorentzian_dip(frequencies, f0, q, depth)
+    return {
+        "frequencies": frequencies,
+        "iq_counts": magnitude.astype(complex) * 1e6,
+        "sweep_amplitude": 1e-3,
+    }
+
+
+def a_multisweep(sections, iteration=0, direction="upward"):
+    """One module's sweep result, holding the given ``{name: section}``."""
+    return {"call_params": {}, "results": {iteration: {direction: sections}}}
+
+
+PAIR_8KHZ = (1e9 - 4e3, 1e9 + 4e3)
+
+
+def test_a_section_with_one_resonance_is_kept():
+    sweeps = a_multisweep({"R0001": a_section()})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == []
+
+
+def test_a_section_holding_two_resonances_is_culled():
+    sweeps = a_multisweep({"R0001": a_section(), "R0002": a_section(PAIR_8KHZ)})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == ["R0002"]
+
+
+def test_a_pair_wider_than_the_cut_is_left_alone():
+    sweeps = a_multisweep({"R0002": a_section(PAIR_8KHZ)})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 5e3) == []
+
+
+def test_the_cut_is_inclusive():
+    """A pair exactly min_separation_hz apart goes, as in _separation_pass.
+
+    The dips sit on sweep samples and are narrow enough not to drag each other's
+    minima inward, so the separation the finder measures is the 7800 Hz planted.
+    """
+    sweeps = a_multisweep({"R0002": a_section((1e9 - 3900, 1e9 + 3900), q=1e6)})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 7800) == ["R0002"]
+    assert find_sweeps_with_nearby_resonances(sweeps, 7799) == []
+
+
+def test_an_infinite_cut_asks_only_whether_a_second_dip_exists():
+    sweeps = a_multisweep({"R0002": a_section((1e9 - 25e3, 1e9 + 25e3))})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == []
+    assert find_sweeps_with_nearby_resonances(sweeps, float("inf")) == ["R0002"]
+
+
+def test_a_downward_sweep_reads_the_same_as_an_upward_one():
+    """Descending frequencies are the same trace, so they give the same answer."""
+    section = a_section(PAIR_8KHZ)
+    reversed_section = {
+        "frequencies": section["frequencies"][::-1],
+        "iq_counts": section["iq_counts"][::-1],
+    }
+    sweeps = a_multisweep({"R0002": reversed_section}, direction="downward")
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == ["R0002"]
+
+
+def test_one_collided_amplitude_is_enough_to_cull():
+    """The dips only separate at some amplitudes; any one of them condemns."""
+    sweeps = {
+        "call_params": {},
+        "results": {
+            0: {"upward": {"R0002": a_section()}},
+            1: {"upward": {"R0002": a_section(PAIR_8KHZ)}},
+        },
+    }
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == ["R0002"]
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3, iteration=0) == []
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3, iteration=1) == ["R0002"]
+
+
+def test_a_name_is_culled_once_however_many_sweeps_show_it():
+    sweeps = {
+        "call_params": {},
+        "results": {
+            i: {d: {"R0002": a_section(PAIR_8KHZ)} for d in ("upward", "downward")}
+            for i in (0, 1)
+        },
+    }
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == ["R0002"]
+
+
+def test_names_come_back_in_the_order_they_were_swept():
+    sweeps = a_multisweep(
+        {name: a_section(PAIR_8KHZ) for name in ("R0003", "R0001", "R0002")}
+    )
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == [
+        "R0003",
+        "R0001",
+        "R0002",
+    ]
+
+
+def test_a_dead_channel_is_not_a_collision():
+    """All zeros is no evidence, and must not take the whole scan down with it."""
+    section = a_section()
+    section["iq_counts"] = np.zeros(len(section["frequencies"]), dtype=complex)
+    sweeps = a_multisweep({"R0001": section, "R0002": a_section(PAIR_8KHZ)})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3) == ["R0002"]
+
+
+def test_dips_closer_than_the_finder_resolves_are_not_seen():
+    """min_dip_spacing_hz floors what min_separation_hz can act on."""
+    sweeps = a_multisweep({"R0002": a_section(PAIR_8KHZ)})
+
+    assert find_sweeps_with_nearby_resonances(sweeps, 20e3, min_dip_spacing_hz=1e3) == [
+        "R0002"
+    ]
+    assert (
+        find_sweeps_with_nearby_resonances(sweeps, 20e3, min_dip_spacing_hz=30e3) == []
+    )
+
+
+def test_a_selection_that_matches_no_sweep_raises():
+    """A typo'd direction must not read as an array with nothing to cull."""
+    sweeps = a_multisweep({"R0002": a_section(PAIR_8KHZ)})
+
+    with pytest.raises(ValueError, match="selected no sweeps"):
+        find_sweeps_with_nearby_resonances(sweeps, 20e3, direction="up")
+    with pytest.raises(ValueError, match="selected no sweeps"):
+        find_sweeps_with_nearby_resonances(sweeps, 20e3, iteration=7)
+
+
+def test_a_negative_separation_raises_here_too():
+    with pytest.raises(ValueError, match="min_separation_hz"):
+        find_sweeps_with_nearby_resonances(a_multisweep({"R0001": a_section()}), -1)
+
+
+def test_the_whole_container_is_refused():
+    sweeps = a_multisweep({"R0001": a_section()})
+
+    with pytest.raises(TypeError, match="crs0000_rmod1"):
+        find_sweeps_with_nearby_resonances({"crs0000_rmod1": sweeps}, 20e3)
+
+
+def test_a_missing_iq_key_says_what_the_sweep_holds():
+    sweeps = a_multisweep({"R0001": a_section()})
+
+    with pytest.raises(KeyError, match="iq_volts"):
+        find_sweeps_with_nearby_resonances(sweeps, 20e3, iq_key="iq_volts")
 
 
 # ─── netanal wrapper ──────────────────────────────────────────────────────────

@@ -62,6 +62,7 @@ from .find_resonances import (
     ResonanceSearch,
     find_resonances,
     find_resonances_in_netanal,
+    find_sweeps_with_nearby_resonances,
     magnitude_db,
 )
 from .fits import (
@@ -111,6 +112,7 @@ __all__ = [
     "ResonanceSearch",
     "find_resonances",
     "find_resonances_in_netanal",
+    "find_sweeps_with_nearby_resonances",
     "magnitude_db",
     "MODELS",
     "FitFailed",

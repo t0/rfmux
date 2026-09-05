@@ -62,8 +62,20 @@ class TestDescribe:
         # this configuration looked like it fitted.
         assert d["total_mbps"] == pytest.approx(641.9, rel=0.01)
 
+    def test_empty_module_list_streams_nothing(self):
+        d = describe(StreamerConfig(dec_stage=3, short_packets=False,
+                                    modules=[]))
+        assert d["n_modules"] == 0
+        assert d["slow_mbps"] == 0
+
 
 class TestValidate:
+    def test_empty_module_list_is_not_over_budget(self):
+        # Four long-packet modules at stage 3 exceed the link; none do not.
+        issues = validate(StreamerConfig(dec_stage=3, short_packets=False,
+                                         modules=[]))
+        assert "error" not in _severities(issues)
+
     def test_long_below_stage3_is_error(self):
         issues = validate(StreamerConfig(dec_stage=0, short_packets=False))
         assert "error" in _severities(issues)

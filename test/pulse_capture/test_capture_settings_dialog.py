@@ -165,16 +165,13 @@ def test_end_floor_is_exposed_and_round_trips(qt_app):
 
 
 def test_df_basis_needs_a_calibration(qt_app):
-    """Without a df calibration the rotated basis cannot be chosen, and
-    a config that asked for it comes back on the quadratures."""
-    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    """Without a df calibration the rotated basis cannot be chosen."""
     dlg = PulseCaptureSettingsDialog(
-        config=PulseCaptureConfig(trigger_basis="df"), sample_rate=596.0,
+        config=PulseCaptureConfig(trigger_basis="iq"), sample_rate=596.0,
         df_available=False)
     assert dlg.basis_combo.currentIndex() == 0
     assert not dlg.basis_combo.model().item(1).isEnabled()
     assert "calibration" in dlg.basis_combo.model().item(1).toolTip()
-    dlg.basis_combo.setCurrentIndex(1)
     assert dlg.get_config().trigger_basis == "iq"
     dlg.close()
 
@@ -183,6 +180,22 @@ def test_df_basis_needs_a_calibration(qt_app):
     assert dlg.basis_combo.currentIndex() == 1
     assert dlg.basis_combo.model().item(1).isEnabled()
     assert dlg.get_config().trigger_basis == "df"
+    dlg.close()
+
+
+def test_stored_df_basis_survives_the_dialog_without_a_calibration(qt_app):
+    """The default basis is df; a round trip through the dialog before
+    any channel is calibrated must not rewrite it to iq, or the panel's
+    later captures would store volts where headless stores hertz.  The
+    combo shows what get_config returns, and the user can still drop to
+    the quadratures."""
+    dlg = PulseCaptureSettingsDialog(
+        config=PulseCaptureConfig(trigger_basis="df"), sample_rate=596.0,
+        df_available=False)
+    assert dlg.basis_combo.currentIndex() == 1
+    assert dlg.get_config().trigger_basis == "df"
+    dlg.basis_combo.setCurrentIndex(0)
+    assert dlg.get_config().trigger_basis == "iq"
     dlg.close()
 
 
@@ -199,4 +212,38 @@ def test_the_tail_setting_defaults_off(qt_app):
     assert not dlg.end_confirmed_check.isChecked()
     out = dlg.get_config()
     assert out.save_to_end_confirmed is False
+    dlg.close()
+
+
+def test_max_pulse_tooltip_follows_the_margin_fraction(qt_app):
+    """The lookback the tooltip cites is margin fraction × max pulse, so
+    it must track the margin spin rather than quote the default; the
+    other ratios come from the config's constants."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
+    tip = dlg.max_pulse_spin.toolTip()
+    for piece in ("1.5×", "1.2×", "20×", "10%"):
+        assert piece in tip, piece
+    dlg.margin_spin.setValue(0.2)
+    assert "20%" in dlg.max_pulse_spin.toolTip()
+    assert "10%" not in dlg.max_pulse_spin.toolTip()
+    dlg.close()
+
+
+def test_margin_tooltip_names_the_lookback(qt_app):
+    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
+    assert "lookback" in dlg.margin_spin.toolTip()
+    dlg.close()
+
+
+def test_noise_training_row_shows_the_length_actually_used(qt_app):
+    """On the PFB stream the training record is memory-capped, and the
+    row must agree with the derived table rather than quote the uncapped
+    ratio as fact."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=2441406.25, mode="fast")
+    d = dlg.get_config().describe(dlg.sample_rate, dlg.n_channels)
+    assert d["noise_train_actual_ms"] < d["noise_train_span_ms"]
+    label = dlg.noise_label.text()
+    assert label.startswith("819 ms")
+    assert "capped" in label
+    assert "noise training 819 ms" in _plain(dlg.pulse_derived_label)
     dlg.close()

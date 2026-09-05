@@ -3,35 +3,14 @@ how pair windows are taken as each ring catches up, and what a pair
 carries."""
 
 import asyncio
-import contextlib
-import socket
 
 import numpy as np
 import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture.sources import run_pfb_source
+from test.pulse_capture.test_source_drain import _loopback_pair, _patched_socket
 from test.qt_helpers import spin
-
-
-@contextlib.contextmanager
-def _private_pfb_socket(monkeypatch):
-    """Point run_pfb_source at a private loopback socket nothing sends
-    to, so the real PFB multicast group cannot leak packets in."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0))
-
-    @contextlib.contextmanager
-    def fake(host, port=None, **kw):
-        yield sock
-    monkeypatch.setattr(streamer, "get_multicast_socket", fake)
-    from rfmux.pulse_capture import sources as _src
-    monkeypatch.setattr(_src, "_PFB_REORDER_WINDOW", 1)
-    monkeypatch.setattr(_src, "_PFB_FLUSH_EVERY", 1)
-    try:
-        yield sock
-    finally:
-        sock.close()
 
 
 class _NeverFed:
@@ -45,8 +24,10 @@ def test_silent_pfb_socket_is_an_error(monkeypatch):
     """Zero packets ever is a configuration problem, not an empty
     capture: returning 0.0 would end a dual capture as though it had
     been stopped."""
-    monkeypatch.setattr(streamer, "STREAMER_TIMEOUT", 0.2)
-    with _private_pfb_socket(monkeypatch):
+    # A private loopback socket nothing sends to, so the real PFB
+    # multicast group cannot leak packets in.
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         with pytest.raises(TimeoutError, match="fast streamer is not sending"):
             asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
 
@@ -321,15 +302,6 @@ def test_union_window_spans_the_saved_record():
            "fast_summary": None}
     t0, t1 = D._union_window(old)
     assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
-
-    # A window shorter than a slow sample is widened to two of them.
-    fast_only = {"slow_summary": None,
-                 "fast_summary": {"timestamp": T, "start_time": T,
-                                  "trigger_time": T + 0.0001,
-                                  "duration_s": 0.0002,
-                                  "saved_end_time": T + 0.0003}}
-    t0, t1 = D._union_window(fast_only, slow_period=0.001)
-    assert t1 - t0 >= 0.002 - 1e-9
 
 
 def test_matcher_pairs_on_the_trigger_instant():

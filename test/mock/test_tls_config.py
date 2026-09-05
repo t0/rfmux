@@ -6,12 +6,9 @@ Every mock config key must survive nine hand-written touch points
 widget, load, reset, get_configuration).  These tests walk that path.
 """
 
-import os
-
 import pytest
 
-
-from rfmux.mock import config as mock_config  # noqa: E402
+from rfmux.mock import config as mock_config
 
 TLS_KEYS = ("tls_noise_enabled", "tls_fractional_rms", "tls_alpha",
             "tls_corner_hz")
@@ -56,20 +53,6 @@ class TestDefaults:
 
 
 class TestDialog:
-    # staticmethod, not an instance method: pytest 10 drops support for
-    # class-scoped fixtures defined as instance methods, because the fixture runs
-    # once per class while each test gets a fresh instance — so anything it set
-    # on self would be invisible to the tests. This one only yields, so the
-    # behaviour was already correct; this just silences the deprecation without
-    # pretending self was ever used.
-    @pytest.fixture(scope="class")
-    @staticmethod
-    def qt_app():
-        pytest.importorskip("PyQt6")
-        from PyQt6 import QtWidgets
-        yield QtWidgets.QApplication.instance() \
-            or QtWidgets.QApplication([])
-
     def test_round_trip(self, qt_app):
         from rfmux.tools.periscope.mock_configuration_dialog import (
             MockConfigurationDialog,

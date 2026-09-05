@@ -4,8 +4,8 @@ A toolbar of twenty controls in one row forces a window wider than a
 1080p display; a label carrying a file path forces it wider still.
 ``FlowLayout`` wraps its items into as many rows as the width needs,
 ``labelled`` keeps a caption with its control so the two wrap
-together, and ``ElidedLabel`` shows what fits of a long text and the
-rest on hover.
+together, and ``ElidedLabel`` shows what fits of a long text; the
+caller puts the full text in its tooltip.
 """
 from __future__ import annotations
 

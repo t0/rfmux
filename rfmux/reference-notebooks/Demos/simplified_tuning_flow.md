@@ -35,8 +35,9 @@ Section 1 is the exception: it offers three ways to initialize a CRS object.
 This format saves no outputs, so every number you see is one you just produced.
 The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
 
-**This notebook changes the board's state.** It sets the cable length and
-programs channels, which on a shared board is not a private setting.
+**This notebook changes the board's state.** It sets the cable length,
+programs channels and, while measuring the calibration in section 8, steps
+the biased tones, which on a shared board is not a private setting.
 
 ```python
 %matplotlib inline
@@ -144,7 +145,7 @@ replace with the real flow, so we don't take it.
 `resonator_random_seed` fixes the array: same ten detectors on every run, so a
 number that changes between runs is your change, not the simulation's.
 
-> ⚠️ **This cell refuses to run if something is already streaming.** Two
+> **This cell refuses to run if something is already streaming.** Two
 > simulations send to the same UDP port, so a receiver gets both interleaved —
 > no exception, no dropped packets, just samples from two unrelated detectors in
 > one trace. If Periscope is in mock mode, attach to *its* simulation with
@@ -213,7 +214,7 @@ The first measurement is a wide sweep: step a comb of tones across the band and
 record the transmitted amplitude and phase at each frequency. Resonators appear
 as narrow dips in |S21| — each one is absorbing power at its resonant frequency.
 
-The sweep is much faster than a VNA because it is more than one tone active simultaneously.
+The sweep is much faster than a VNA because more than one tone is active simultaneously.
 `take_netanal` uses up to `max_chans` channels at once and re-tunes the NCO for each `max_span`-wide chunk,
 stitching the chunks together with a phase rotation computed from the one
 frequency they share. That is why `npoints` can be 50,000 and still finish in
@@ -280,7 +281,7 @@ plt.tight_layout(); plt.show()
 
 A signal that takes τ seconds to travel out and back arrives with a phase that
 advances linearly with frequency: `φ = -2πfτ`. Over a 500 MHz sweep with a few
-metres of coax that is many full turns, and it the resulting phase ramps can
+metres of coax that is many full turns, and the resulting phase ramps can
 swamp the phase structure of the resonances themselves.
 
 This can be measured and compensated for in hardware.
@@ -346,8 +347,8 @@ both directions:
 - **`min_Q` / `max_Q`** — converted into an allowed *width* for the dip. A
   feature broader than `min_Q` allows is not a resonator; one narrower than
   `max_Q` allows is a spike.
-- **`min_resonance_separation_hz`** — Does not presently guarantee no collisions,
-  just that the selected resonances are separated by more than this minimum.
+- **`min_resonance_separation_hz`** — Does not guarantee no collisions, just
+  that the selected resonances are separated by more than this minimum.
 
 ```python
 FIND_RES_PARAMS = {
@@ -393,7 +394,7 @@ plt.tight_layout(); plt.show()
 
 ## 6. Multisweep
 
-The wide sweep located the resonators, but hhas not resolved them. At 50,000 points
+The wide sweep located the resonators, but has not resolved them. At 50,000 points
 across 500 MHz you get one point every 10 kHz, and a Q of 10⁵ at 1 GHz has a
 linewidth of 10 kHz — the whole resonance is a couple of samples.
 
@@ -404,7 +405,7 @@ because the tones are simultaneous it costs about the same wall-clock time as
 sweeping one.
 
 It also determines a likely bias frequency for that power level.
-`bias_frequency_method` decides which frequency the carrier is biased at:
+`bias_frequency_method` decides which frequency the tone is biased at:
 
 - **`"max-diq"`** (default) — the point of steepest IQ motion, |d(I+jQ)/df|. This
   is where a small frequency shift produces the largest change in the signal,
@@ -558,17 +559,27 @@ plt.tight_layout(); plt.show()
 
 `bias_kids` is what turns a characterised array into a working detector array.
 For each resonator it picks an operating point, then programs the hardware:
-channel frequency, amplitude, and phase rotation.
+channel frequency and amplitude (and an ADC phase, with `optimize_phase=True`).
 
-When given sweeps at several amplitudes it chooses the **highest amplitude that
-is not bifurcated and has `a` below `nonlinear_threshold`** — as much signal as
-you can take without entering the bistable regime. With a single amplitude, as
-here, it takes what it has and reports what it found.
+`fit_method` names the resonance fit it works from — `"nonlinear"` (default)
+or `"skewed"` — fitting any sweep that does not already carry it. When given
+sweeps at several amplitudes it chooses the **highest amplitude that is not
+bifurcated and has `a` below `nonlinear_threshold`** — as much signal as you
+can take without entering the bistable regime. With a single amplitude, as
+here, it takes what it has and reports what it found. The bias frequency is
+the multisweep's `max-diq` or `min-s21` point read off the fitted curve
+rather than the raw sweep grid.
 
-It also computes **`df_calibration`**: the complex factor that converts IQ motion
-(in volts) into frequency shift plus dissipation. That is what makes a detector's
-output physical — counts become hertz — and it is the same number pulse capture
-needs to report pulse heights in Hz.
+It also returns **`df_calibration`**: the complex factor that converts IQ
+motion (in volts) into frequency shift plus dissipation. That is what makes a
+detector's output physical — counts become hertz — and it is the same number
+pulse capture needs to report pulse heights in Hz. By default
+(`measure_calibration=True`) it is *measured* where each detector ends up:
+every biased tone steps a twentieth of its fitted linewidth down and up in
+lockstep, two reads for the module, so this step briefly moves the tones.
+The fit's own value is kept alongside as `df_calibration_fit`, and
+`df_calibration_source` says which one `df_calibration` is. Pass
+`measure_calibration=False` to use the fit's.
 
 ```python
 _shown[0] = -25.0
@@ -587,17 +598,18 @@ bias_results = await bias_kids(
 n_biased = sum(1 for d in bias_results.values() if d.get("bias_successful"))
 print(f"\n{n_biased}/{len(bias_results)} detectors biased\n")
 print(f"{'det':>4} {'ch':>3} {'bias freq (MHz)':>16} {'offset (kHz)':>13} "
-      f"{'|df_cal| (Hz/V)':>16}")
+      f"{'|df_cal| (Hz/V)':>16} {'source':>9}")
 for det in sorted(bias_results):
     d = bias_results[det]
     offset = (d["bias_frequency"] - d["original_center_frequency"]) / 1e3
     cal = d.get("df_calibration")
     cal_str = f"{abs(cal):16.3e}" if cal is not None else " " * 16
     print(f"{det:>4} {d.get('bias_channel', '?'):>3} "
-          f"{d['bias_frequency']/1e6:16.4f} {offset:13.2f} {cal_str}")
+          f"{d['bias_frequency']/1e6:16.4f} {offset:13.2f} {cal_str} "
+          f"{d.get('df_calibration_source', ''):>9}")
 ```
 
-The offsets are worth a look: they are how far `max-diq` moved the carrier from
+The offsets are worth a look: they are how far `max-diq` moved the tone from
 the dip that `find_resonances` reported. A detector whose offset is a large
 fraction of the sweep span is one whose sweep did not contain its own resonance —
 usually the sign that `span_hz` is too small, or that the wide sweep mislocated

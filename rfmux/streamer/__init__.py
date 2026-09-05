@@ -96,13 +96,11 @@ from .socket import (
 def resolve_host(hostname):
 	"""Map a CRS hostname to the address its packets actually arrive on.
 
-	A mock CRS created from a serial number alone gets the synthesized
+	A mock CRS built from a serial number alone reports the synthesized
 	hostname ``rfmux0000.local`` (see ``CRS.tuber_hostname``), which
-	resolves nowhere — the mock streamer sends to loopback.  Callers
-	that opened a socket on the unmapped name simply received nothing.
-
-	It lives next to ``get_multicast_socket``, which is the only thing
-	the answer is ever used for.
+	resolves nowhere: return ``127.0.0.1`` for it, port suffix stripped,
+	and any other host unchanged.  Pass the result to
+	``get_multicast_socket``.
 	"""
 	if not hostname:
 		return hostname
@@ -178,8 +176,28 @@ class MulticastCheck(_NamedTuple):
 _MULTICAST_PROBE = b"rfmux-multicast-probe"
 
 
-def check_multicast_loopback(*, group: str | None = None,
-                             timeout: float = 0.5) -> MulticastCheck:
+def loopback_multicast_sender() -> _socket.socket:
+	"""A UDP socket that multicasts to this host only.
+
+	Loopback delivery on, TTL 0 so nothing leaves the machine (the mock
+	shares the group real boards stream to), interface pinned to
+	127.0.0.1 rather than left for the kernel to route.  Raises OSError
+	if the interface cannot be set; ``check_multicast_loopback`` turns
+	that into its report.
+	"""
+	sender = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+	sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_LOOP, 1)
+	sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_TTL, 0)
+	try:
+		sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_IF,
+		                  _socket.inet_aton("127.0.0.1"))
+	except OSError:
+		sender.close()
+		raise
+	return sender
+
+
+def check_multicast_loopback(*, timeout: float = 0.5) -> MulticastCheck:
 	"""Can a multicast packet reach a listener on this machine?
 
 	Real hardware always multicasts, so the mock does too — what you
@@ -197,7 +215,7 @@ def check_multicast_loopback(*, group: str | None = None,
 	Uses an ephemeral port, so it neither disturbs nor consumes a live
 	stream on the streamer port.
 	"""
-	group = group or MULTICAST_GROUP
+	group = MULTICAST_GROUP
 	steps = []
 	sender = None
 	receiver = None
@@ -209,14 +227,8 @@ def check_multicast_loopback(*, group: str | None = None,
 	scratch.close()
 
 	try:
-		sender = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
-		sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_LOOP, 1)
-		# TTL 0 means "never leaves this host". The mock must not put
-		# simulated detectors on the group real boards stream to.
-		sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_TTL, 0)
 		try:
-			sender.setsockopt(_socket.IPPROTO_IP, _socket.IP_MULTICAST_IF,
-			                  _socket.inet_aton("127.0.0.1"))
+			sender = loopback_multicast_sender()
 		except OSError as exc:
 			steps.append(("interface", False,
 			              f"could not point multicast at loopback ({exc})"))
@@ -249,7 +261,10 @@ def check_multicast_loopback(*, group: str | None = None,
 			                      _MULTICAST_ESCAPE_HINT.format(group=group))
 
 		try:
-			receiver = get_multicast_socket("127.0.0.1", port=port)
+			# A small receive buffer: one 21-byte probe, and the default
+			# 16 MB request warns wherever rmem_max clamps it.
+			receiver = get_multicast_socket("127.0.0.1", port=port,
+			                                buffer_size=65536)
 			steps.append(("join", True, f"joined {group} on loopback"))
 		except OSError as exc:
 			steps.append(("join", False,
@@ -348,22 +363,26 @@ def find_competing_receiver(host: str = "127.0.0.1", *,
                             port: int | None = None) -> str | None:
 	"""Another receiver that would take our packets, or None.
 
-	Reported only where it actually costs data, which is the loopback
-	(mock) case, because the two transports behave differently:
+	Reported only where it costs data, because the two transports behave
+	differently:
 
-	The mock sends UNICAST to 127.0.0.1 -- ``sendto((self.host, port))``
-	in rfmux/mock/udp_streamer.py, whatever its "(multicast)" log line
-	says. The kernel hands each unicast datagram to exactly ONE of the
-	sockets bound with ``SO_REUSEPORT``, picked by hash of the sender's
-	4-tuple. Measured over 20 sender ports: 6 to the first listener, 14
-	to the second, never once split. So a second receiver does not share
-	the stream, it takes all of it, and the loser sees nothing at all --
-	no packets, no loss, no error.
+	Multicast, which a real board always sends and the mock sends when
+	``check_multicast_loopback`` passes, delivers a copy to every socket
+	joined to the group: measured 200 of 200 to both of two listeners.
+	Multiple readers are fine and expected, so nothing is reported.
 
-	A real board MULTICASTS to the group, and every socket joined to it
-	gets its own copy: measured 200 of 200 to both of two listeners.
-	Multiple readers are fine and expected there, so this returns None
-	for a non-loopback host rather than crying wolf on every launch.
+	Unicast to 127.0.0.1, the mock's fallback when multicast does not
+	work on this machine (``select_stream_destination`` in
+	rfmux/mock/udp_streamer.py), goes to exactly ONE of the sockets
+	bound with ``SO_REUSEPORT``, picked by hash of the sender's 4-tuple.
+	Measured over 20 sender ports: 6 to the first listener, 14 to the
+	second, never once split. A second receiver does not share the
+	stream, it takes all of it, and the loser sees nothing at all -- no
+	packets, no loss, no error. That is what gets reported.
+
+	The receiver cannot see which the mock chose, so it asks the same
+	question the mock did; the multicast check runs only once a second
+	reader has been found, so the routine launch costs one bind.
 	"""
 	if not _is_loopback(host):
 		return None
@@ -372,9 +391,12 @@ def find_competing_receiver(host: str = "127.0.0.1", *,
 	why = _port_has_receiver(port)
 	if why is None:
 		return None
+	if check_multicast_loopback().ok:
+		return None
 	return (f"Another process is already receiving on port {port} ({why}). "
-	        f"The mock stream is unicast, so the kernel gives every packet "
-	        f"to just one receiver -- this one may see nothing.")
+	        f"Multicast does not work on this machine, so the mock streams "
+	        f"unicast and the kernel gives every packet to just one "
+	        f"receiver -- this one may see nothing.")
 
 
 def find_streamer_conflict(host: str = "127.0.0.1", *,
@@ -390,18 +412,17 @@ def find_streamer_conflict(host: str = "127.0.0.1", *,
 
 	Two probes, because neither sees everything:
 
-	1. A PLAIN bind, no socket options, which fails if anyone is RECEIVING.
-	   The streamer's readers set ``SO_REUSEPORT``, so a probe that also set
-	   it would bind happily alongside them and report the port free — which
-	   is exactly the condition being looked for. Costs microseconds and
+	1. A PLAIN bind, no socket options, which fails if anyone is RECEIVING
+	   (see ``_port_has_receiver`` for why no options). Costs microseconds and
 	   consumes nothing.
 	2. A short read, which sees anyone SENDING even with no receiver
 	   attached — a mock server outliving the kernel that made it, say. This
 	   one does consume a datagram; at the default 596 Hz that is one packet
 	   in six hundred.
 
-	``timeout`` bounds only the second probe. Packets arrive every ~1.9 ms at
-	the slowest decimation, so the 50 ms default has ~26x of margin.
+	``timeout`` bounds only the second probe. Stage 6, the default and the
+	slowest decimation, is 596 Hz: a packet every ~1.7 ms, so the 50 ms
+	default has ~30x of margin.
 
 	Checks the slow readout port, which every stream uses; pass ``port`` for
 	the PFB one, which is only busy when PFB streaming is switched on.
@@ -458,7 +479,9 @@ __all__ = [
 	# Socket utilities
 	'get_multicast_socket',
 	'get_local_ip',
+	'resolve_host',
 	'ip_mreq_source',
+	'loopback_multicast_sender',
 	'find_streamer_conflict',
 	'find_competing_receiver',
 	'check_multicast_loopback',
@@ -466,6 +489,9 @@ __all__ = [
 
 	# Timestamp helpers
 	'ts_to_seconds',
+	'ts_day_epoch',
+	'day_epoch',
+	'epoch_to_utc',
 
 	# Constants
 	'MULTICAST_GROUP',
@@ -473,9 +499,6 @@ __all__ = [
 	'PFB_PACKET_MAGIC',
 	'STREAMER_PORT',
 	'PFB_STREAMER_PORT',
-	'ts_day_epoch',
-	'day_epoch',
-	'epoch_to_utc',
 	'LONG_PACKET_SIZE',
 	'SHORT_PACKET_SIZE',
 	'LONG_PACKET_CHANNELS',

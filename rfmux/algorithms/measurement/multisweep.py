@@ -10,7 +10,6 @@ import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import convert_roc_to_volts
 from .fitting import center_resonance_iq_circle, identify_bifurcation
 from typing import Optional, Tuple # Added for type hinting
 
@@ -153,20 +152,29 @@ async def multisweep(
                       'applied_rotation_degrees': Optional[float], # Rotation applied to sweep data
                       'sweep_direction': str, # "upward" or "downward"
                       'sweep_amplitude': float, # Normalized amplitude used in sweep
-                      'is_bifurcated': bool, # The sweep jumps: too much amplitude for this resonance
-                      'df_calibration': None, # bias_kids fills this in, from a resonance fit
-                      
-                      # Added onto the same dicts by the fit steps
-                      # (fit_skewed_multisweep, fit_nonlinear_iq_multisweep,
-                      # bias_kids) when they run:
-                      'skewed_fit_applied': bool,
-                      'skewed_fit_success': bool,
-                      'fit_params': Optional[dict], # Skewed fit parameters if successful
-                      'skewed_model_mag': Optional[np.ndarray], # Skewed fit model
-                      'nonlinear_fit_applied': bool,
+                      'is_bifurcated': bool, # The sweep jumps: too much amplitude for this
+                                             # resonance (identify_bifurcation at its default, 5 sigma)
+
+                      # Added onto the same dicts when a fit step runs on them:
+                      # fit_skewed_multisweep:
+                      'fit_params': Optional[dict],
+                      'iq_centered': Optional[np.ndarray],
+                      # fit_nonlinear_iq_multisweep:
+                      'nonlinear_fit_params': Optional[dict],
+                      'nonlinear_fit_errors': Optional[dict],
+                      'nonlinear_fit_residual': float,
                       'nonlinear_fit_success': bool,
-                      'nonlinear_fit_params': Optional[dict], # Nonlinear fit parameters if successful
-                      'nonlinear_model_iq': Optional[np.ndarray], # Nonlinear fit model
+                      'gain_complex': complex,
+                      'iq_gain_corrected': np.ndarray,
+                      # bias_kids (ensure_fits): the fit it chose, as above, with
+                      # the status and model-curve keys Periscope's fit step
+                      # records, so the digest reads either the same way:
+                      'skewed_fit_applied': bool, 'skewed_fit_success': bool,
+                      'skewed_model_mag': np.ndarray,
+                      'nonlinear_fit_applied': bool, 'nonlinear_model_iq': np.ndarray,
+                      'bias_frequency': float, # moved onto the fitted resonance
+                      'bias_frequency_source': str,
+                      # The df calibration is on bias_kids' own result, not here.
                   },
                   ...
               }
@@ -539,14 +547,10 @@ async def multisweep(
         # look, and at thousands of resonances a fit per sweep is tens of
         # seconds.  bias_kids fits what it needs and calibrates then.
         # Whether the sweep jumps needs no fit, and both bias_kids and
-        # the digest read it.
+        # the digest read it.  In counts: the detector's floors are
+        # absolute, and a small signal in volts would sit under them.
         sort_idx = np.argsort(data_entry['frequencies'])
-        data_entry['is_bifurcated'] = identify_bifurcation(
-            convert_roc_to_volts(final_iq_complex[sort_idx]))
-        if data_entry['is_bifurcated']:
-            warnings.warn(
-                f"resonance at {bias_freq / 1e6:.3f} MHz: the sweep jumps, so "
-                f"it is bifurcated at this amplitude", stacklevel=2)
+        data_entry['is_bifurcated'] = identify_bifurcation(final_iq_complex[sort_idx])
         result_dict = {
             'frequencies': data_entry['frequencies'],
             'iq_complex': final_iq_complex,
@@ -559,7 +563,6 @@ async def multisweep(
             'sweep_direction': sweep_direction,
             'sweep_amplitude': amp,  # Store the amplitude used in the sweep
             'is_bifurcated': data_entry['is_bifurcated'],
-            'df_calibration': None,
         }
         results_by_index[idx] = result_dict
     

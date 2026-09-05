@@ -1,16 +1,20 @@
 """
-Background worker bridging the Periscope slow-stream tap to a
-:class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`.
+Background worker running a
+:class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession` for
+Periscope.
 
 Architecture: all capture logic (noise estimation, detection, HDF5,
 histograms) lives in :mod:`rfmux.pulse_capture`, which knows nothing
 about Qt.  This QThread only
 
-1. drains a thread-safe queue that the GUI-thread tap fills
-   (:meth:`PulseCaptureTask.enqueue_packet`),
-2. assembles those packets into per-channel blocks and feeds
-   :meth:`PulseCaptureSession.feed_block` from its own thread
-   (h5py writes must stay on one thread), and
+1. feeds the session from its own thread (h5py writes must stay on
+   one thread): in slow mode by draining the queue the GUI-thread tap
+   fills (:meth:`PulseCaptureTask.enqueue_packet`) into
+   :meth:`PulseCaptureSession.feed_block`; in fast mode by running the
+   shared PFB socket source; in both mode by running the shared dual
+   source with the tap as its slow side,
+2. services control requests (re-estimate, waveform fetch) from the
+   same queue, and
 3. re-emits the session callbacks as Qt signals.
 
 Waveforms never cross threads through signals — ``pulse_detected``
@@ -28,6 +32,7 @@ import time
 
 import numpy as np
 from collections import OrderedDict
+from dataclasses import replace
 from typing import Any, Dict, Optional, Tuple
 
 from PyQt6 import QtCore
@@ -59,7 +64,7 @@ class PulseCaptureSignals(QtCore.QObject):
 
 
 class PulseCaptureTask(QtCore.QThread):
-    """Drains tap samples into a PulseCaptureSession in a worker thread.
+    """Runs a PulseCaptureSession in a worker thread.
 
     Parameters
     ----------
@@ -69,9 +74,10 @@ class PulseCaptureTask(QtCore.QThread):
     signals : PulseCaptureSignals
         Signal bundle constructed by the caller.
     queue_size : int
-        Bounded queue capacity, counted in packets.  8k is ~0.2 s of
-        backlog at decimation stage 0; overflow drops packets and
-        counts the samples lost.
+        Bounded queue capacity in tap batches, each up to
+        ``SlowIngest.DEFAULT_MAX_PACKETS`` packets or
+        ``SlowIngest.DEFAULT_MAX_AGE_S`` of arrivals.  On overflow the
+        batch is dropped and ``error`` reports it once.
     waveform_cache : int
         Number of recent pulse waveforms kept for :meth:`get_pulse`.
     """
@@ -96,7 +102,7 @@ class PulseCaptureTask(QtCore.QThread):
         self.host = host
         self.module = module
         self.sample_queue: "queue.Queue" = queue.Queue(maxsize=queue_size)
-        self.dropped_overflow = 0
+        self._overflow_reported = False
 
         # Tap batch, filled on the GUI thread (see enqueue_packet).
         self._tap_channels = None
@@ -114,43 +120,47 @@ class PulseCaptureTask(QtCore.QThread):
         self._pair_cache: "OrderedDict[Tuple[int, int], dict]" = OrderedDict()
 
         # Route session callbacks through Qt signals (called in run() thread)
+        session.on_stats = lambda s: self.signals.stats_updated.emit(s)
+        session.on_error = lambda msg: self.signals.error.emit(msg)
         if mode == "both":
             session.on_noise = lambda stream, ns: \
                 self.signals.noise_estimated.emit(
-                    {"stream": stream, "stats": dict(ns)})
+                    {"stream": stream, "stats": self._noise_snapshot(ns)})
             session.on_pulse = self._on_stream_pulse
             session.on_pair = self._on_pair
-            session.on_stats = lambda s: self.signals.stats_updated.emit(s)
             session.on_histograms = lambda stream, d: \
                 self.signals.histograms_updated.emit(
                     {"stream": stream, "data": d})
             session.on_templates = lambda stream, d: \
                 self.signals.templates_updated.emit(
                     {"stream": stream, "data": d})
-            session.on_error = lambda msg: self.signals.error.emit(msg)
             for inner in (session.slow, session.fast):
                 inner.on_progress = lambda p, s=inner.streamer_mode: \
                     self.signals.noise_progress.emit({**p, "stream": s})
         else:
             session.on_noise = lambda ns: \
-                self.signals.noise_estimated.emit(dict(ns))
+                self.signals.noise_estimated.emit(self._noise_snapshot(ns))
             session.on_progress = lambda p: \
                 self.signals.noise_progress.emit(p)
             session.on_pulse = self._on_pulse
-            session.on_stats = lambda s: self.signals.stats_updated.emit(s)
             session.on_histograms = lambda d: \
                 self.signals.histograms_updated.emit(d)
             session.on_templates = lambda d: \
                 self.signals.templates_updated.emit(d)
-            session.on_error = lambda msg: self.signals.error.emit(msg)
+
+    @staticmethod
+    def _noise_snapshot(noise_stats: dict) -> dict:
+        """Copies: the engine re-centres the live objects on every
+        baseline refresh, and the GUI shows the estimate it was told."""
+        return {c: replace(ns) for c, ns in noise_stats.items()}
 
     # ── GUI-thread API ────────────────────────────────────────────
 
     #: Rows gathered before one hand-off to the worker: a queue put per
-    #: packet contends with the worker's get.
-    _TAP_BATCH_PACKETS = 256
-    #: ...but 256 packets is 430 ms at stage 6, so cap the wait too.
-    _TAP_BATCH_MAX_S = 0.05
+    #: packet contends with the worker's get.  SlowIngest's gather
+    #: limits, which exist for the same reason.
+    _TAP_BATCH_PACKETS = SlowIngest.DEFAULT_MAX_PACKETS
+    _TAP_BATCH_MAX_S = SlowIngest.DEFAULT_MAX_AGE_S
 
     def enqueue_packet(self, channels, values: np.ndarray, timestamp,
                        day_epoch: Optional[float] = None) -> None:
@@ -198,12 +208,16 @@ class PulseCaptureTask(QtCore.QThread):
         try:
             self.sample_queue.put_nowait(item)
         except queue.Full:
-            self.dropped_overflow += sum(v.shape[0] for v in item[1]) * len(item[0])
+            if not self._overflow_reported:
+                self._overflow_reported = True
+                self.signals.error.emit(
+                    "Capture worker queue full; tap samples are being "
+                    "dropped — the worker is not keeping up")
 
     def request_stop(self) -> None:
         """Ask the worker to finish; session.stop() runs in the worker."""
         # Whatever is still gathered belongs to the capture; the worker
-        # is about to stop reading, so hand it over first.
+        # drains the queue once it sees the flag, so hand it over first.
         self.flush_tap()
         self._stop_requested = True
         self.requestInterruption()
@@ -251,13 +265,14 @@ class PulseCaptureTask(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            self.session.start()
             if self.mode == "fast":
                 asyncio.run(self._run_fast())
             elif self.mode == "both":
                 asyncio.run(self._run_both())
             else:
-                self._run_slow_loop()
+                self.session.start()
+                asyncio.run(self._slow_tap_pump(self._should_stop,
+                                                self.session.feed_block))
         except Exception as e:
             self.signals.failed.emit(f"Pulse capture worker failed: {e}")
         finally:
@@ -267,41 +282,32 @@ class PulseCaptureTask(QtCore.QThread):
                 self.signals.error.emit(f"Session stop failed: {e}")
             self.signals.finished.emit()
 
-    def _run_slow_loop(self) -> None:
-        """Drain the tap-fed queue (slow mode) into per-channel blocks.
-
-        Everything past "here is a packet" is SlowIngest, shared with
-        the headless socket source, so the GUI is a caller rather than
-        a second implementation.  Only the transport differs: this
-        process already holds the packets.
-        """
-        ingest = SlowIngest(self.session.feed_block)
-        while not (self._stop_requested or self.isInterruptionRequested()):
-            try:
-                item = self.sample_queue.get(timeout=0.02)
-            except queue.Empty:
-                ingest.flush()   # don't strand a partial block when idle
-                self.session.flush_progress()
-                continue
-            if self._handle_control(item):
-                continue
-            channels, values, stamps = item
-            for block, block_stamps in zip(values, stamps):
-                ingest.add_block(channels, block, block_stamps)
-        ingest.flush()
-
     async def _pfb_mismatch(self, channels) -> Optional[str]:
         return await pfb_streamer_mismatch(self.crs, self.module, channels)
 
-    async def _run_fast(self) -> None:
-        """PFB capture: check the fast streamer carries these channels,
-        run the shared source, keep servicing control requests."""
-        from ...pulse_capture.sources import run_pfb_source
+    async def _start_after_streamer_check(self) -> Optional[list]:
+        """The channels to capture once the fast streamer is confirmed to
+        carry them, or None with ``failed`` emitted.
 
+        The session starts only after the check: a dual session opens
+        its HDF5 file on start, and a capture that cannot run must not
+        replace the previous file with an empty one.
+        """
         channels = list(self.session.channels)
         problem = await self._pfb_mismatch(channels)
         if problem:
             self.signals.failed.emit(problem)
+            return None
+        self.session.start()
+        return channels
+
+    async def _run_fast(self) -> None:
+        """PFB capture: run the shared source, keep servicing control
+        requests."""
+        from ...pulse_capture.sources import run_pfb_source
+
+        channels = await self._start_after_streamer_check()
+        if channels is None:
             return
         stop = self._should_stop
         pump = asyncio.ensure_future(self._control_pump())
@@ -330,17 +336,17 @@ class PulseCaptureTask(QtCore.QThread):
             run_dual_source,
         )
 
-        channels = list(self.session.channels)
-        problem = await self._pfb_mismatch(channels)
-        if problem:
-            self.signals.failed.emit(problem)
+        channels = await self._start_after_streamer_check()
+        if channels is None:
             return
         stop = self._should_stop
         watchdog = asyncio.ensure_future(self._dual_watchdog(stop))
         try:
             await run_dual_source(
                 self.session, self.host, channels, module=self.module,
-                should_stop=stop, slow_source=self._slow_tap_pump)
+                should_stop=stop,
+                slow_source=lambda stop: self._slow_tap_pump(
+                    stop, self.session.feed_slow_block))
         finally:
             watchdog.cancel()
 
@@ -370,9 +376,17 @@ class PulseCaptureTask(QtCore.QThread):
                 + ". Check that the stream is being sent and that its "
                 "training length fits the capture.")
 
-    async def _slow_tap_pump(self, stop) -> float:
-        """Drain tap-fed slow samples + control items into the dual
-        session.  Warns once if no slow samples arrive at all.
+    async def _slow_tap_pump(self, stop, feed) -> float:
+        """Drain the tap-fed queue into *feed* (the session's slow block
+        feed) until *stop*, then whatever is still queued: request_stop
+        hands the gathered tail over before raising the flag, and the
+        worker may be mid-item when it does.  Warns once if no slow
+        samples arrive at all.
+
+        Everything past "here is a packet" is SlowIngest, shared with
+        the headless socket source, so the GUI is a caller rather than
+        a second implementation.  Only the transport differs: this
+        process already holds the packets.
 
         Returns the sample time SlowIngest accumulated, on the same
         clock the socket source uses -- so run_dual_source's
@@ -381,7 +395,7 @@ class PulseCaptureTask(QtCore.QThread):
         fed = 0
         warned = False
         t_start = time.monotonic()
-        ingest = SlowIngest(self.session.feed_slow_block)
+        ingest = SlowIngest(feed)
         while not stop():
             try:
                 item = self.sample_queue.get_nowait()
@@ -396,14 +410,25 @@ class PulseCaptureTask(QtCore.QThread):
                         "5 s — is the slow stream running?")
                 await asyncio.sleep(0.02)
                 continue
-            if self._handle_control(item):
-                continue
-            channels, values, stamps = item
-            for block, block_stamps in zip(values, stamps):
-                ingest.add_block(channels, block, block_stamps)
-            fed += len(values)
+            fed += self._ingest_item(ingest, item)
+        while True:
+            try:
+                item = self.sample_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._ingest_item(ingest, item)
         ingest.flush()
         return ingest.elapsed
+
+    def _ingest_item(self, ingest: SlowIngest, item) -> int:
+        """One queue item: a control request, or tap blocks into
+        *ingest*.  Returns the number of blocks fed."""
+        if self._handle_control(item):
+            return 0
+        channels, values, stamps = item
+        for block, block_stamps in zip(values, stamps):
+            ingest.add_block(channels, block, block_stamps)
+        return len(values)
 
     async def _control_pump(self) -> None:
         """Service control items (see _handle_control) while a socket
@@ -419,8 +444,13 @@ class PulseCaptureTask(QtCore.QThread):
     def _handle_control(self, item) -> bool:
         """Handle a control tuple; returns True when consumed."""
         if item[0] == "__reestimate__":
-            if self.session.state is CaptureState.CAPTURING:
+            # The session owns the rule: the dual one retrains each
+            # stream that is capturing, the single one refuses outside
+            # CAPTURING -- and a refused request is reported, not lost.
+            try:
                 self.session.re_estimate_noise()
+            except RuntimeError as e:
+                self.signals.error.emit(str(e))
             return True
         if item[0] == "__day__":
             self.session.set_time_origin(item[1])
@@ -432,8 +462,7 @@ class PulseCaptureTask(QtCore.QThread):
                         f"Pair read failed for ch{ch} pair {idx}", ch, idx)
             return True
         if item[0] == "__fetch__":
-            _, ch, idx, stream = (item if len(item) == 4
-                                  else (*item, None))
+            _, ch, idx, stream = item
             self._fetch(self._cache, (stream, ch, idx),
                         lambda w: (w.read_pulse(stream, ch, idx)
                                    if self.mode == "both"
@@ -461,21 +490,19 @@ class PulseCaptureTask(QtCore.QThread):
 
     def _on_pulse(self, channel: int, pulse_idx: int,
                   summary: Dict[str, Any], pulse_data: dict) -> None:
-        with self._cache_lock:
-            self._cache[(None, channel, pulse_idx)] = pulse_data
-            while len(self._cache) > self._cache_size:
-                self._cache.popitem(last=False)
-        self.signals.pulse_detected.emit(channel, pulse_idx, dict(summary))
+        self._on_stream_pulse(None, channel, pulse_idx, summary, pulse_data)
 
-    def _on_stream_pulse(self, stream: str, channel: int, pulse_idx: int,
-                         summary: Dict[str, Any],
+    def _on_stream_pulse(self, stream: Optional[str], channel: int,
+                         pulse_idx: int, summary: Dict[str, Any],
                          pulse_data: dict) -> None:
         with self._cache_lock:
             self._cache[(stream, channel, pulse_idx)] = pulse_data
             while len(self._cache) > self._cache_size:
                 self._cache.popitem(last=False)
-        self.signals.pulse_detected.emit(
-            channel, pulse_idx, {**summary, "stream": stream})
+        summary = dict(summary)
+        if stream is not None:
+            summary["stream"] = stream
+        self.signals.pulse_detected.emit(channel, pulse_idx, summary)
 
     def _on_pair(self, pair: dict) -> None:
         key = (pair["channel"], pair["pair_idx"])

@@ -11,6 +11,11 @@ from rfmux.core.transferfunctions import VOLTS_PER_ROC
 FR, QR = 1.0e9, 1.5e5
 PARAMS = {"fr": FR, "Qr": QR, "amp": 0.6, "phi": 0.1, "a": 0.0,
           "i0": 1.0, "q0": 0.2}
+BATCH_FITTER = "rfmux.algorithms.measurement.fitting_nonlinear.fit_nonlinear_iq_multisweep"
+
+
+def _never_fit(monkeypatch):
+    monkeypatch.setattr(BATCH_FITTER, lambda *a, **k: pytest.fail("should not fit"))
 
 
 def _entry(span=20e3, n=41):
@@ -33,8 +38,7 @@ def test_nonlinear_params_are_used_without_fitting(monkeypatch):
     # the gain carrying the scale.
     entry["nonlinear_fit_params"] = dict(PARAMS)
     entry["gain_complex"] = 1.0 / VOLTS_PER_ROC
-    monkeypatch.setattr(dc, "fit_for_calibration",
-                        lambda *a, **k: pytest.fail("should not fit"))
+    _never_fit(monkeypatch)
     cal = dc.df_calibration_for_entry(entry)
     assert cal is not None
     # The stored parameters are the truth here, up to the counts-to-volts
@@ -45,8 +49,7 @@ def test_nonlinear_params_are_used_without_fitting(monkeypatch):
 def test_skewed_params_are_the_fallback(monkeypatch):
     entry = _entry()
     entry["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
-    monkeypatch.setattr(dc, "fit_for_calibration",
-                        lambda *a, **k: pytest.fail("should not fit"))
+    _never_fit(monkeypatch)
     cal = dc.df_calibration_for_entry(entry)
     assert cal is not None and np.isfinite(cal)
     assert abs(cal) / abs(_exact(entry)) == pytest.approx(1.0, rel=0.1)
@@ -63,8 +66,7 @@ def test_bias_frequency_from_fit_uses_stored_params(monkeypatch):
     entry = _entry(n=40)
     entry["nonlinear_fit_params"] = dict(PARAMS)
     entry["gain_complex"] = 1.0
-    monkeypatch.setattr(dc, "fit_for_calibration",
-                        lambda *a, **k: pytest.fail("should not fit"))
+    _never_fit(monkeypatch)
     step = entry["frequencies"][1] - entry["frequencies"][0]
     assert abs(dc.bias_frequency_from_fit(entry) - FR) < step / 20
     # |S21| is least on resonance only without the mismatch angle.
@@ -88,8 +90,8 @@ def test_prefer_skewed_wins_when_both_fits_exist(monkeypatch):
     entry = _entry()
     entry["nonlinear_fit_params"] = dict(PARAMS)
     entry["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
-    monkeypatch.setattr(dc, "slope_from_nonlinear",
-                        lambda *a, **k: pytest.fail("nonlinear slope used"))
+    monkeypatch.setattr(dc, "nonlinear_iq",
+                        lambda *a, **k: pytest.fail("nonlinear model used"))
     assert np.isfinite(dc.df_calibration_for_entry(entry, prefer="skewed"))
 
 
@@ -100,8 +102,7 @@ def test_ensure_fits_fits_only_what_lacks_the_fit(monkeypatch):
         seen.append(sorted(batch))
         return {k: {"nonlinear_fit_params": dict(PARAMS), "nonlinear_fit_success": True,
                     "gain_complex": 1.0} for k in batch}
-    monkeypatch.setattr("rfmux.algorithms.measurement.fitting_nonlinear."
-                        "fit_nonlinear_iq_multisweep", fake_batch)
+    monkeypatch.setattr(BATCH_FITTER, fake_batch)
     fitted, bare = _entry(), _entry()
     fitted["nonlinear_fit_params"] = dict(PARAMS)
     assert dc.ensure_fits([fitted, bare], "nonlinear") == 1
@@ -115,3 +116,59 @@ def test_bias_frequency_from_fit_declines_unknown_method():
     entry = _entry()
     entry["nonlinear_fit_params"] = dict(PARAMS)
     assert dc.bias_frequency_from_fit(entry, None) is None
+
+
+def _fitted_at(a):
+    entry = _entry()
+    entry["nonlinear_fit_params"] = dict(PARAMS, a=a)
+    entry["nonlinear_fit_success"] = True
+    return entry
+
+
+@pytest.mark.parametrize("a", [dc.BIFURCATION_A, 0.9])
+def test_a_fit_at_or_past_bifurcation_is_not_read(a):
+    # The model is multivalued there: no bias point, linewidth, curvature
+    # or calibration comes from such a fit.
+    entry = _fitted_at(a)
+    assert dc.bias_frequency_from_fit(entry) is None
+    assert dc.fitted_linewidth(entry) is None
+    assert dc.step_slope_correction(entry, FR, 300.0) == 1.0
+    assert dc.df_calibration_for_entry(entry) is None
+    assert dc.fits_present([entry]) == set()
+
+
+def test_a_fit_below_bifurcation_is_read():
+    entry = _fitted_at(dc.BIFURCATION_A - 1e-3)
+    assert dc.bias_frequency_from_fit(entry) is not None
+    assert dc.df_calibration_for_entry(entry) is not None
+
+
+def test_ensure_fits_leaves_a_fit_past_bifurcation_alone(monkeypatch):
+    # Refitting is deterministic and lands in the same place.
+    _never_fit(monkeypatch)
+    assert dc.ensure_fits([_fitted_at(0.9)]) == 0
+
+
+def test_ensure_fits_records_what_the_fit_step_records(monkeypatch):
+    # The digest gates its tables on these keys and draws the model
+    # from the cached, gain-free curve.
+    monkeypatch.setattr(BATCH_FITTER, lambda batch, parallel=True: {
+        k: {"nonlinear_fit_params": dict(PARAMS), "nonlinear_fit_success": True,
+            "gain_complex": 2.0} for k in batch})
+    entry = _entry()
+    dc.ensure_fits([entry])
+    assert entry["nonlinear_fit_applied"] is True
+    expect = nonlinear_iq(entry["frequencies"], *[PARAMS[k] for k in dc.NONLINEAR_PARAMS])
+    np.testing.assert_allclose(entry["nonlinear_model_iq"], expect)
+
+
+def test_ensure_fits_records_the_skewed_fit_the_same_way(monkeypatch):
+    fit_params = {"fr": FR, "Qr": QR, "Qc": QR / 0.6, "Qi": QR / 0.4,
+                  "Qcre": QR / 0.6, "Qcim": 0.0, "A": 1.0}
+    monkeypatch.setattr("rfmux.algorithms.measurement.fitting.fit_skewed_multisweep",
+                        lambda batch: {k: {"fit_params": dict(fit_params)} for k in batch})
+    entry = _entry()
+    assert dc.ensure_fits([entry], "skewed") == 1
+    assert entry["skewed_fit_applied"] is True
+    assert entry["skewed_fit_success"] is True
+    assert len(entry["skewed_model_mag"]) == len(entry["frequencies"])

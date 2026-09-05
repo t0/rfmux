@@ -143,10 +143,12 @@ CRS Hardware → UDP Multicast → Streamer (C++) → Python API → Periscope
 ```python
 from rfmux.core.hardware_map import macro
 
-@macro(CRS)
+@macro(CRS, register=True)
 async def my_algorithm(crs, module, channels, **params):
     # Called as: await crs.my_algorithm(module=1, channels=[1,2])
 ```
+Without `register=True` the function is not attached to `CRS`: import it
+and call `await my_algorithm(crs, module=1, channels=[1,2])`.
 
 ### Results Data Structure
 `results_by_detector`: `{detector_id: {iteration_index: {data + amplitude, direction}}}`
@@ -185,6 +187,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 - Mock slow stream is generated a ~50 ms block of frames at a time (one
   physics call, one packet per frame): 100 tones run at real time this
   way and at a quarter of it frame by frame
+- Mock slow stream carries every module 1-4 with a configured channel
+  (frequency, amplitude or phase set), module 1 if none; the mock PFB
+  stream carries the module passed to `set_pfb_streamer`
 - Mock streams to the same multicast group as hardware, with TTL 0 so it
   cannot leave the host. If multicast does not work on the machine it
   falls back to loopback unicast and prints which step failed —
@@ -206,27 +211,28 @@ rfmux/
 │   └── periscope/  # GUI panels, dialogs, tasks, utils
 ├── mock/           # MockCRS, resonator physics
 ├── streamer/       # C++ packet receiver
-├── tuber/          # RPC framework
 └── mr_resonator/   # Numba physics (subset of external lib)
 ```
 
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 696 tests, ~1 min, zero skips
-pytest --tier=portable              # No CRS, no GUI: 37 tests, ~9 s
-pytest --tier=full                  # All 717 that run without a board, ~4 min
-pytest --tier=acquisition           # MockCRS server + real UDP: 21 tests, ~3 min (inside full)
+pytest --tier=quick                 # Edit loop: 823 tests, ~1 min
+pytest --tier=portable              # No CRS, no GUI: 40 tests, ~9 s
+pytest --tier=full                  # All 843 that run without a board, ~4 min
+pytest --tier=acquisition           # MockCRS server + real UDP: 20 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope
 ```
 
-`--tier` (defined in `test/conftest.py`) names an invocation; every tier but
-`hardware`/`all` excludes the board tests, so they report zero skips. Markers
-tag tests: `portable`, `slow_acquisition`, `hardware` — the last applied
-automatically to anything using the `crs`/`live_session`/`serial` fixtures,
-so don't add it by hand. A bare `pytest` still runs 717 + ~75 hardware skips.
+`--tier` (defined in the root `conftest.py`) names an invocation; every tier
+but `hardware`/`all` excludes the board tests, so they report zero skips.
+Markers tag tests: `portable`, `slow_acquisition`, `hardware` — the last
+applied automatically to anything using the `crs`/`live_session`/`serial`
+fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus
+~75 hardware skips: `addopts` in `pyproject.toml` deselects the acquisition
+tests.
 `full` contains `acquisition`; running both pays the slow set twice.
 
 `test/` is organized into subdirectories mirroring the package under test
@@ -247,7 +253,7 @@ Mock mode: `periscope --mock` or configure via Mock Configuration dialog
 
 ### Add a new CRS algorithm
 1. Create function in `rfmux/algorithms/measurement/`
-2. Decorate with `@macro(CRS)`
+2. Decorate with `@macro(CRS, register=True)`
 3. Add to `__all__` in `algorithms/__init__.py`
 
 ### Debug pulse capture

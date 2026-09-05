@@ -95,8 +95,8 @@ async def create_mock_crs(
         if verbose:
             print(f"3. Generating {merged['num_resonances']} simulated resonators...")
         
-        resonator_count = await crs.generate_resonators(merged)
-        
+        resonator_count, _ = await crs.generate_resonators(merged)
+
         if verbose:
             print(f"   ✓ Generated {resonator_count} resonators")
         
@@ -121,52 +121,10 @@ async def create_mock_crs(
         raise Exception(error_msg) from e
 
 
-async def reconfigure_mock_crs(
-    crs: CRS,
-    config: Optional[Dict[str, Any]] = None,
-    verbose: bool = True
-) -> int:
-    """
-    Reconfigure an existing MockCRS with new parameters.
-    
-    This is useful for changing resonator parameters without recreating
-    the entire CRS object.
-    
-    Args:
-        crs: An existing MockCRS instance
-        config: Configuration dict with parameters to update
-        verbose: Whether to print status messages
-        
-    Returns:
-        int: Number of resonators generated
-        
-    Raises:
-        Exception: If reconfiguration fails
-    """
-    merged = mc.apply_overrides(config or mc.defaults())
-    
-    if verbose:
-        print("\nReconfiguring Mock CRS...")
-        print(f"New parameters: {len(merged)} settings")
-    
-    try:
-        resonator_count = await crs.generate_resonators(merged)
-        
-        if verbose:
-            print(f"✓ Regenerated {resonator_count} resonators")
-        
-        return resonator_count
-        
-    except Exception as e:
-        error_msg = f"Failed to reconfigure Mock CRS: {str(e)}"
-        if verbose:
-            print(f"❌ Error: {error_msg}")
-        raise Exception(error_msg) from e
-
-
 # ── Bringing a running mock to a new configuration ────────────────
 
 _PULSE_PREFIX = "pulse_"
+_SEED = "resonator_random_seed"
 
 
 def _same(a, b) -> bool:
@@ -178,12 +136,14 @@ def _same(a, b) -> bool:
 def config_changes(previous: Dict[str, Any], config: Dict[str, Any]) -> set:
     """Keys *config* changes against *previous*.
 
-    A key *config* lacks, or carries as None, is not a change: the
-    dialog only edits what it shows and hands back None for the rest.
-    Floats that have been through a text field compare with tolerance.
+    A key *config* lacks, or carries as None, is not a change, except
+    resonator_random_seed: there None asks for a new random array, so
+    it is a change against a pinned seed.  Floats that have been
+    through a text field compare with tolerance.
     """
     return {k for k, v in config.items()
-            if v is not None and not _same(previous.get(k), v)}
+            if (v is not None or k == _SEED)
+            and not _same(previous.get(k), v)}
 
 
 def merged(previous: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -216,7 +176,9 @@ async def apply_mock_config(crs: CRS, config: Dict[str, Any],
     which the stream stalls, so only what changed against *previous*
     decides; with no *previous*, everything counts as changed.  A
     regeneration pins a random seed into *config* first, so the client
-    and the server agree on the array that was built.
+    and the server agree on the array that was built.  What the server
+    receives is the configuration in force with *config* on top, taken
+    through mc.apply_overrides so its clamps hold for dialog input too.
 
     Returns ``(outcome, resonator_count)`` with outcome one of
     ``"unchanged"``, ``"pulses"``, ``"regenerated"``; the count is None
@@ -226,14 +188,15 @@ async def apply_mock_config(crs: CRS, config: Dict[str, Any],
     if changed is not None and pulse_only_change(changed):
         if not changed:
             return "unchanged", None
-        full = merged(previous, config)
+        full = mc.apply_overrides(merged(previous, config))
         await crs.set_pulse_mode(full.get("pulse_mode", "none"),
                                  **pulse_mode_kwargs(full))
         return "pulses", None
-    if config.get("resonator_random_seed") is None:
+    if config.get(_SEED) is None:
         import random
-        config["resonator_random_seed"] = random.randint(0, 2**31 - 1)
-    count = await crs.generate_resonators(config)
+        config[_SEED] = random.randint(0, 2**31 - 1)
+    full = mc.apply_overrides(merged(previous or {}, config))
+    count, _ = await crs.generate_resonators(full)
     return "regenerated", count
 
 

@@ -11,14 +11,16 @@ refuses OK while any error-tier issue exists.  Applying runs
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
+from typing import Awaitable, List, Optional, Tuple
 
 from PyQt6 import QtCore, QtWidgets
 
 from .utils import apply_issue_banner
 from PyQt6.QtCore import pyqtSignal
 
+from ...algorithms.measurement.channel_selection import parse_channel_spec
 from ...algorithms.measurement.streamer_config import (
+    LINK_MBPS,
     StreamerConfig,
     describe,
     read_streamer_config,
@@ -27,49 +29,31 @@ from ...algorithms.measurement.streamer_config import (
 )
 
 
-class StreamerStateFetcher(QtCore.QThread):
-    """Async read of the current board streamer state (non-blocking)."""
-
-    state_ready = pyqtSignal(dict)
-
-    def __init__(self, crs, pfb_module: int = 1, parent=None):
-        super().__init__(parent)
-        self.crs = crs
-        self.pfb_module = pfb_module
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        try:
-            state = loop.run_until_complete(
-                read_streamer_config(self.crs, pfb_module=self.pfb_module))
-        except Exception:
-            state = {}
-        finally:
-            loop.close()
-        self.state_ready.emit(state)
-
-
-class ApplyStreamerConfigTask(QtCore.QThread):
-    """Apply a StreamerConfig off the GUI thread."""
+class _CoroutineThread(QtCore.QThread):
+    """Run one coroutine on its own event loop off the GUI thread."""
 
     success = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, crs, cfg: StreamerConfig, parent=None):
+    def __init__(self, coro: Awaitable[dict], parent=None):
         super().__init__(parent)
-        self.crs = crs
-        self.cfg = cfg
+        self._coro = coro
 
     def run(self):
         loop = asyncio.new_event_loop()
         try:
-            info = loop.run_until_complete(
-                apply_streamer_config(self.crs, self.cfg))
-            self.success.emit(info)
+            self.success.emit(loop.run_until_complete(self._coro))
         except Exception as e:
             self.error.emit(str(e))
         finally:
             loop.close()
+
+
+class ApplyStreamerConfigTask(_CoroutineThread):
+    """Apply a StreamerConfig off the GUI thread."""
+
+    def __init__(self, crs, cfg: StreamerConfig, parent=None):
+        super().__init__(apply_streamer_config(crs, cfg), parent)
 
 
 class StreamerConfigDialog(QtWidgets.QDialog):
@@ -84,15 +68,17 @@ class StreamerConfigDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.crs = crs
         self._updating = False
-        self.fetcher: Optional[StreamerStateFetcher] = None
+        self.fetcher: Optional[_CoroutineThread] = None
 
         self._setup_ui(current_dec, current_short, module)
         self._connect_signals()
         self._update_dependent_values()
 
         if crs is not None:
-            self.fetcher = StreamerStateFetcher(crs, pfb_module=module)
-            self.fetcher.state_ready.connect(self._on_state_ready)
+            self.fetcher = _CoroutineThread(
+                read_streamer_config(crs, pfb_module=module), parent=self)
+            self.fetcher.success.connect(self._on_state_ready)
+            self.fetcher.error.connect(lambda _: self._on_state_ready({}))
             self.fetcher.start()
 
     # ── UI ────────────────────────────────────────────────────────
@@ -121,12 +107,15 @@ class StreamerConfigDialog(QtWidgets.QDialog):
         self.short_check.setChecked(bool(current_short))
         self.short_check.setToolTip(
             "Short packets carry channels 1-128 at ~1/8 the bandwidth. "
-            "Mandatory below stage 3.")
+            "Locked on at the stages where long packets would exceed "
+            "the link.")
         form.addRow("Packet format:", self.short_check)
 
         self.modules_edit = QtWidgets.QLineEdit(str(module))
         self.modules_edit.setToolTip(
-            "Comma-separated modules to stream (blank = all)")
+            "Modules to stream, e.g. \"1,2\" or \"1-4\"; blank or \"all\" = "
+            "every module. Starts at the current module because below "
+            "stage 5 streaming is validated one module at a time.")
         form.addRow("Modules:", self.modules_edit)
 
         self.pfb_check = QtWidgets.QCheckBox(
@@ -137,7 +126,8 @@ class StreamerConfigDialog(QtWidgets.QDialog):
         pfb_form = QtWidgets.QFormLayout(self.pfb_group)
         pfb_form.setContentsMargins(20, 0, 0, 0)
         self.pfb_channels_edit = QtWidgets.QLineEdit("1")
-        self.pfb_channels_edit.setToolTip("Up to 4 channels of one module")
+        self.pfb_channels_edit.setToolTip(
+            "Up to 4 channels of one module, e.g. \"1,2\" or \"1-4\"")
         pfb_form.addRow("PFB channels:", self.pfb_channels_edit)
         self.pfb_module_spin = QtWidgets.QSpinBox()
         self.pfb_module_spin.setRange(1, 8)
@@ -196,39 +186,68 @@ class StreamerConfigDialog(QtWidgets.QDialog):
 
     # ── Config assembly / live math ───────────────────────────────
 
-    def _parse_int_list(self, text: str):
-        try:
-            return [int(t) for t in text.replace(" ", "").split(",") if t]
-        except ValueError:
-            return None
+    def _read_fields(self) -> Tuple[StreamerConfig, List[Tuple[str, str]]]:
+        """The configuration the fields describe, plus an error-tier issue
+        for each text field that does not parse.
 
-    def get_config(self) -> StreamerConfig:
-        modules = self._parse_int_list(self.modules_edit.text())
-        pfb_channels = None
+        The dialog states the whole streamer configuration: an unchecked
+        PFB box means no PFB streamer (``[]``, which apply disables).  A
+        PFB field that does not parse leaves ``pfb_channels`` None while
+        the error keeps OK disabled.
+        """
+        issues: List[Tuple[str, str]] = []
+        modules = None
+        if self.modules_edit.text().strip():
+            try:
+                modules = parse_channel_spec(self.modules_edit.text())
+            except ValueError:
+                issues.append(("error",
+                               "Modules must be a list like \"1,2\" or "
+                               "\"1-4\" (blank = all)."))
+        pfb_channels: Optional[List[int]] = []
         if self.pfb_check.isChecked():
-            pfb_channels = self._parse_int_list(
-                self.pfb_channels_edit.text()) or []
-        return StreamerConfig(
+            pfb_channels = None
+            try:
+                pfb_channels = parse_channel_spec(
+                    self.pfb_channels_edit.text())
+                if pfb_channels is None:
+                    raise ValueError("list up to 4 channels explicitly.")
+            except ValueError as e:
+                issues.append(("error", f"PFB channels: {e}"))
+        cfg = StreamerConfig(
             dec_stage=int(self.dec_spin.value()),
             short_packets=self.short_check.isChecked(),
-            modules=modules if modules else None,
+            modules=modules,
             pfb_channels=pfb_channels,
             pfb_module=int(self.pfb_module_spin.value()),
         )
+        return cfg, issues
+
+    def get_config(self) -> StreamerConfig:
+        return self._read_fields()[0]
+
+    @staticmethod
+    def _long_packets_refused(stage: int) -> bool:
+        # With zero modules the link budget is zero, so the packet-format
+        # rule is the only error validate() can raise: the stage threshold
+        # lives in streamer_config alone.
+        probe = StreamerConfig(dec_stage=stage, short_packets=False,
+                               modules=[])
+        return any(sev == "error" for sev, _ in validate(probe))
 
     def _update_dependent_values(self):
         if self._updating:
             return
         self._updating = True
         try:
-            # Below stage 3, short packets are mandatory — force + lock
-            if self.dec_spin.value() < 3:
+            # Where long packets are refused, short packets are forced + locked
+            if self._long_packets_refused(self.dec_spin.value()):
                 self.short_check.setChecked(True)
                 self.short_check.setEnabled(False)
             else:
                 self.short_check.setEnabled(True)
 
-            cfg = self.get_config()
+            cfg, issues = self._read_fields()
             d = describe(cfg)
             fs = d["sample_rate_hz"]
             self.rate_label.setText(
@@ -238,15 +257,10 @@ class StreamerConfigDialog(QtWidgets.QDialog):
             bw = (f"slow {d['slow_mbps']:.0f} Mbps"
                   + (f" + PFB {d['pfb_mbps']:.0f} Mbps" if d["pfb_mbps"]
                      else "")
-                  + f" = {d['total_mbps']:.0f} / 1000 Mbps")
+                  + f" = {d['total_mbps']:.0f} / {LINK_MBPS:.0f} Mbps")
             self.bandwidth_label.setText(bw)
 
-            issues = validate(cfg)
-            if self._parse_int_list(self.modules_edit.text()) is None \
-                    and self.modules_edit.text().strip():
-                issues.append(("error",
-                               "Modules must be a comma-separated list "
-                               "of integers."))
+            issues += validate(cfg)
             apply_issue_banner(
                 self.status_label,
                 self.buttons.button(

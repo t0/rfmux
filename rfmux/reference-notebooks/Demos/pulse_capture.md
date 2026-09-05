@@ -171,7 +171,7 @@ The noise is deliberately not idealised:
   scattering samples around it. That slow movement is what the trigger in
   section 4 has to cope with; a fixed baseline would trigger on it endlessly.
 
-> ⚠️ **This cell refuses to run if something is already streaming.** Two
+> **This cell refuses to run if something is already streaming.** Two
 > simulations send to the same UDP port, so a receiver gets both interleaved —
 > no exception, no dropped packets, just samples from two unrelated detectors in
 > one trace. Rather than leave that to be noticed later, the cell checks and
@@ -302,8 +302,8 @@ info
 
 ```python
 if IS_MOCK:
-    # The simulated streamer needs a moment to fill after a rate change.
-    await crs.start_udp_streaming()
+    # The simulated stream, already running, needs a moment to settle
+    # after a rate change.
     await asyncio.sleep(2.0)
 ```
 
@@ -322,8 +322,7 @@ for spec in ("1,2", "2-19", "1,5-8,20"):
 `all` (or `*`) is deliberately *not* a list — it means "ask the board", which
 only the board can answer, so the parser returns `None` and leaves the question
 to `get_biased_channels`. That reads every channel's amplitude in one batched
-round trip rather than one RPC per channel, and drops any channel the packet
-cannot carry:
+round trip and drops any channel the packet cannot carry:
 
 ```python
 print(f"{'all'!r:12} -> {parse_channel_spec('all')}   (resolve against the board)")
@@ -365,8 +364,8 @@ How pulse detection works:
 - **The baseline is a rolling median**, re-estimated continuously over
   `baseline_window` samples. A median rather than a mean because it ignores
   pulses as long as they stay a minority of the window. The trained σ is the
-  samples' scatter about a block-median baseline of about three pulse
-  lengths, so a slow drift is not counted as noise.
+  samples' scatter about a block-median baseline of three capture limits
+  (about 3.6 × `max_pulse_ms`), so a slow drift is not counted as noise.
 - **`max_pulse_ms` is the primary control.** It sizes the ring buffer at 1.5× the
   longest pulse, leaving room for the samples before the trigger and the tail
   after it, and sets the floor under the baseline window and the noise training
@@ -390,12 +389,14 @@ runs to the end-of-pulse confirmation instead, keeping the whole decay tail. Tho
 already in the ring, so this costs disk rather than acquisition. Off, files
 are shorter, and window length becomes a property of the pulse rather
 than of the baseline, since how long the confirmation takes depends on where the
-baseline was wandering. On the mock at 19 kHz with a 1 ms decay, keeping the tail
-makes windows about 40% longer.
+baseline was wandering. On the mock at 19 kHz with a 1 ms decay, identical
+pulses gave windows of 3.2–17.8 ms with the tail kept, while their threshold
+crossings stayed within 3.0–4.0 ms.
 
-Worth turning off for PFB captures, where windows already carry ~64× the samples,
-and at high count rates, where longer windows overlap and more events get flagged
-as pileup.
+Worth leaving off for PFB captures, where windows already carry many times the
+slow stream's samples (about 128× at this notebook's slow rate), and at high
+count rates, where longer windows overlap and more events get flagged as
+pileup.
 
 `duration_ms` does not change either way: it is measured from the threshold
 crossings, not from the length of the saved window.

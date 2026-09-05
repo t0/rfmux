@@ -7,12 +7,12 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 37 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 696 | ~1 min | Default while editing. |
-| `pytest --tier=acquisition` | 21 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 717 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 40 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 823 | ~1 min | Default while editing. |
+| `pytest --tier=acquisition` | 20 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 843 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 792 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 918 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -34,8 +34,12 @@ fail, so a CI runner missing it stops covering them without going red.
   `requires-python = ">=3.10"` honest. The floor is 3.10 because
   `rfmux/core/crs.py` uses `match`.
 - **quick:** packet decode, mock config plumbing, TLS noise, JIT dispatch,
-  Periscope panels and dialogs, pulse detection and analysis. Fast because it
-  never spawns a server: Qt runs offscreen, detection runs on synthetic arrays.
+  Periscope panels and dialogs, pulse detection and analysis. Fast because
+  no MockCRS streams: Qt runs offscreen, detection runs on synthetic arrays,
+  and the receiver tests feed themselves hand-built packets over loopback. A
+  MockCRS server spawned for its RPC surface alone (`load_session` on the
+  `rfmux.mock` flavour, as in `test_channel_selection.py`) stays in this
+  tier; the mock sends UDP only after `start_udp_streaming()`.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
   Covers what no unit test can: streamer config taking effect, the slow
   (~38 kHz) and PFB (~2.44 MHz) sources feeding a session, decimation
@@ -86,7 +90,8 @@ Declared in `pyproject.toml`; the default run applies
 `-m "not slow_acquisition"`.
 
 - `portable`: imports on a bare install (no board, no PyQt6).
-- `slow_acquisition`: spawns a MockCRS server and streams UDP.
+- `slow_acquisition`: streams UDP from a MockCRS server. The stream is the
+  criterion: a server used only for its RPC surface does not need it.
 - `hardware`: needs a board. **Applied automatically** to any test whose
   fixtures include `live_session`, `crs` or `serial`. Don't add it by hand.
 
@@ -128,13 +133,21 @@ test, so run it by hand when its notebook changes.
 A handful of tests skip on macOS or Windows because they pin behaviour that only
 exists elsewhere: `recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT`
 (absent on Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT`
-to a process group). On Linux every tier below `hardware` reports zero skips.
+to a process group). `test/test_fastrx_file.py` skips at collection unless the
+fastrx extension was built, which happens only on Linux and only when clang,
+libxdp, libbpf and liburing were present at install time
+(`rfmux/streamer/CMakeLists.txt`). With fastrx built and the test group
+installed, every tier below `hardware` reports zero skips on Linux.
 
 ## CI
 
 `.github/workflows/periscope-tests.yml` runs the quick tier and the acquisition
 tier on ubuntu, windows and macos, with `fail-fast: false`. Between them that is
-every test that does not need a board.
+every test that does not need a board, with one exception: no workflow runs
+`test/test_fastrx_file.py`. `periscope-tests.yml` installs neither libxdp,
+libbpf nor liburing, so the file skips at collection there, and `build.yml`
+builds fastrx with `FASTRX_REQUIRED=ON` but runs only
+`test/streamer/test_packets.py`.
 
 It triggers on push and pull request against `main`, plus `workflow_dispatch`. A
 long-lived branch gets **no CI until it opens a PR**, so run the tiers locally

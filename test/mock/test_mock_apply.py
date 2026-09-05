@@ -18,8 +18,10 @@ class _FakeCRS:
         self.calls.append(("set_pulse_mode", mode, kwargs))
 
     async def generate_resonators(self, config):
+        """The server's shape: the count and the resonance frequencies."""
         self.calls.append(("generate_resonators", dict(config)))
-        return config["num_resonances"]
+        n = config["num_resonances"]
+        return n, [1.0e9] * n
 
 
 def test_turning_pulses_on_is_pulse_only():
@@ -45,8 +47,9 @@ def test_pulse_only_apply_uses_the_merged_config():
     from_dialog = dict(prev, pulse_period=0.05, pulse_mode=None)
     outcome, _ = asyncio.run(apply_mock_config(crs, from_dialog, prev))
     assert outcome == "pulses"
-    assert crs.calls == [("set_pulse_mode", "periodic",
-                          {"period": 0.05, "tau_decay": 25e-3})]
+    [(call, mode, kwargs)] = crs.calls
+    assert (call, mode) == ("set_pulse_mode", "periodic")
+    assert kwargs["period"] == 0.05 and kwargs["tau_decay"] == 25e-3
 
 
 def test_anything_else_regenerates():
@@ -65,8 +68,9 @@ def test_apply_takes_pulses_live_and_regenerates_the_rest():
     crs = _FakeCRS()
     new = dict(BASE, pulse_mode="periodic", pulse_period=0.05)
     assert asyncio.run(apply_mock_config(crs, new, BASE)) == ("pulses", None)
-    assert crs.calls == [("set_pulse_mode", "periodic",
-                          {"period": 0.05, "tau_decay": 25e-3})]
+    [(call, mode, kwargs)] = crs.calls
+    assert (call, mode) == ("set_pulse_mode", "periodic")
+    assert kwargs["period"] == 0.05 and kwargs["tau_decay"] == 25e-3
 
     crs = _FakeCRS()
     assert asyncio.run(apply_mock_config(crs, dict(BASE), BASE)) == \
@@ -87,3 +91,36 @@ def test_no_previous_regenerates_and_pins_a_seed():
     assert outcome == "regenerated" and count == 100
     assert cfg["resonator_random_seed"] is not None
     assert crs.calls[0][1]["resonator_random_seed"] == cfg["resonator_random_seed"]
+
+
+def test_clearing_the_seed_regenerates_with_a_fresh_pinned_seed():
+    """An emptied seed field asks for a new random array: it is a
+    change against the pinned seed, and the seed the server builds
+    from is pinned back into the config."""
+    crs = _FakeCRS()
+    cfg = dict(BASE, resonator_random_seed=None)
+    assert config_changes(BASE, cfg) == {"resonator_random_seed"}
+    outcome, count = asyncio.run(apply_mock_config(crs, cfg, BASE))
+    assert (outcome, count) == ("regenerated", 100)
+    seed = cfg["resonator_random_seed"]
+    assert seed is not None and seed != BASE["resonator_random_seed"]
+    assert crs.calls[0][1]["resonator_random_seed"] == seed
+
+
+def test_regeneration_sends_the_normalized_config():
+    """The server gets the dialog's values through apply_overrides'
+    clamps, on top of the configuration in force."""
+    crs = _FakeCRS()
+    cfg = dict(BASE, tls_alpha=5.0)
+    del cfg["bias_amplitude"]
+    asyncio.run(apply_mock_config(crs, cfg, BASE))
+    sent = crs.calls[0][1]
+    assert sent["tls_alpha"] == 2.0
+    assert sent["bias_amplitude"] == BASE["bias_amplitude"]
+
+
+def test_pulse_settings_go_live_normalized():
+    crs = _FakeCRS()
+    new = dict(BASE, pulse_mode="random", pulse_random_tau_min=-1.0)
+    assert asyncio.run(apply_mock_config(crs, new, BASE)) == ("pulses", None)
+    assert crs.calls[0][2]["random_tau_min"] == 1e-6

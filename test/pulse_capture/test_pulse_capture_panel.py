@@ -9,7 +9,6 @@ finalized HDF5 file.
 
 
 import numpy as np
-import pyqtgraph as pg
 import pytest
 
 from test.qt_helpers import spin, spin_until  # noqa: E402
@@ -18,6 +17,7 @@ from test.qt_helpers import spin, spin_until  # noqa: E402
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+import pyqtgraph as pg  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402

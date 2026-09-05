@@ -5,7 +5,8 @@ import asyncio
 import numpy as np
 import pytest
 
-from rfmux.mock.udp_streamer import MockCRSStreamer, PFB_BATCH, PFB_RATE
+from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+from rfmux.mock.udp_streamer import MockCRSStreamer, PFB_BATCH
 
 
 def _streamer(dec, channels):
@@ -61,7 +62,7 @@ def test_one_physics_call_per_frame_and_hardware_sized_packets(dec, channels, mo
     assert len(stamps) == expected
     # Contiguous: each packet is stamped one packet-span after the last.
     t = np.array([t for _, t in stamps])
-    assert np.allclose(np.diff(t), (per_packet // n_groups) / PFB_RATE, rtol=1e-9)
+    assert np.allclose(np.diff(t), (per_packet // n_groups) / PFB_SAMPLING_FREQ, rtol=1e-9)
     assert t[0] == 0.0
     assert st.pfb_packets_sent == expected
 
@@ -76,7 +77,7 @@ def test_pulse_triggers_stay_on_the_sub_batch_grid():
     for k in range(3):
         st._emit_pfb_frame(k * frame_time, 6)
     starts = sorted({p["start_time"] for p in model.pulse_events})
-    sub = PFB_BATCH / PFB_RATE
+    sub = PFB_BATCH / PFB_SAMPLING_FREQ
     assert starts, "no pulse triggered"
     for s in starts:
         assert abs(s / sub - round(s / sub)) < 1e-6, f"start {s} off the grid"

@@ -363,7 +363,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("Qr", "", "Total quality factor (typical: 1e3-1e6)"),
             ("Qc", "", "Coupling quality factor (typical: 1e3-1e7)"),
             ("Qi", "", "Internal quality factor (typical: 1e4-1e7)"),
-            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, so the same as the skewed table's")
+            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, independent of the fit")
         ]
         
         self.skewed_table.setRowCount(len(params))
@@ -383,11 +383,11 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("Qr_nl", "", "Total quality factor (typical: 1e3-1e6)"),
             ("Qc_nl", "", "Coupling quality factor (typical: 1e3-1e7)"),
             ("Qi_nl", "", "Internal quality factor (typical: 1e4-1e7)"),
-            ("a", "", "Nonlinearity parameter (bifurcation at ~0.77)"),
+            ("a", "", "Nonlinearity parameter; at a >= 0.77 (4√3/9) the fitted resonance is multivalued"),
             ("φ", "deg", "Impedance mismatch phase"),
             ("I0", "", "Complex gain offset (real part)"),
             ("Q0", "", "Complex gain offset (imaginary part)"),
-            ("Bifurcation", "", "Bifurcation status")
+            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, independent of the fit")
         ]
         
         self.nl_table.setRowCount(len(params))

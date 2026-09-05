@@ -12,7 +12,7 @@ for i in range(len(channel)):
     plt.show()
 '''
 
-from typing import Union, List, Optional
+from typing import Union, List
 import asyncio
 import numpy as np
 import time
@@ -23,12 +23,14 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from tuber.codecs import TuberResult
 from ...core.transferfunctions import PFB_SAMPLING_FREQ, VOLTS_PER_ROC
+
+#: How long stale packet timestamps are tolerated before the capture
+#: raises: IRIG-B takes about a second to decode after set_timestamp_port,
+#: and packets stamped before that can still be in flight.
+STALE_TIMESTAMP_GRACE_S = 5.0
 from ... import streamer
 
 from .py_get_pfb_samples import apply_pfb_correction
-
-
-# ── Timestamp → absolute seconds-of-day ───────────────────────────
 
 
 @macro(CRS, register=True)
@@ -59,12 +61,13 @@ async def py_run_pfb_streamer(crs : CRS,
          PFB droop correction.
       6. Disables PFB streaming before returning results.
 
-    **Sample-time semantics:** ``time_run`` specifies the capture duration in
-    terms of *elapsed time in the sample domain* (derived from packet
-    timestamps).  For real hardware sample time ≡ wall time, so behaviour is
-    unchanged.  For mock/simulated streamers where physics throughput may be
-    slower than real time, this ensures deterministic coverage of simulation
-    time.
+    **Sample-time semantics:** ``time_run`` is the capture duration in
+    *sample time*, elapsed time in the data stream as the packet
+    timestamps measure it.  On hardware that is wall time; on the mock,
+    whose physics can run slower than real time, it is simulation time.
+    The timestamps have to be disciplined: a board without a timestamp
+    source stamps every packet stale, and the capture then raises rather
+    than run forever, as ``py_get_samples`` does.
 
     Parameters
     ----------
@@ -80,8 +83,8 @@ async def py_run_pfb_streamer(crs : CRS,
 
     time_run : float, keyword-only
         Duration in seconds of **sample time** (elapsed time in the data
-        stream).  For real hardware this equals wall time.  For mock streamers
-        this is simulation time.
+        stream, from the packet timestamps); wall time on hardware,
+        simulation time on the mock.
 
     binlim : float, keyword-only
         Frequency span limit used during spectrum calculation.
@@ -147,32 +150,31 @@ async def py_run_pfb_streamer(crs : CRS,
             async def receive_attempt():
                 """Capture packets until *sample time* reaches ``time_run``.
 
-                Sample time is derived from packet timestamps so that the
-                capture is deterministic w.r.t. the data stream — essential
-                for mock/simulated streamers where wall time ≠ simulation
-                time.
-
-                When mock/slow-sim mode is detected (wall time >> sample
-                time), periodic progress updates and an ETA are printed.
+                Sample time comes from the packet timestamps, so the
+                capture covers the same stretch of the data stream whether
+                it arrives at real time or (the mock at many tones) slower.
+                Stale timestamps are tolerated for STALE_TIMESTAMP_GRACE_S,
+                the time IRIG-B needs after set_timestamp_port; past that
+                the capture raises.  When the stream is arriving slower
+                than real time, progress and an ETA are printed.
                 """
 
                 slot_lists = [[] for _ in range(n_groups)]
-                
-                # Sample-time tracking
-                _start_time_ref: Optional[float] = None
+
                 elapsed_sample_time: float = 0.0
                 wall_start = time.monotonic()
+                sample_time_origin = None
+                stale_since = None
 
                 # Progress estimation state
-                _mock_mode_detected = False
+                _slow_stream = False
                 _last_progress_frac = 0.0      # Last reported progress fraction
                 _progress_step = 0.10           # Report every 10%
                 _warmup_wall = 2.0              # Seconds before first throughput check
-                _throughput_ratio = 1.0         # sim_time / wall_time (1.0 = real-time)
+                _throughput_ratio = 1.0         # sample_time / wall_time (1.0 = real-time)
 
                 print(f"[Pfb streaming] Capturing for {time_run}s of sample time...")
 
-                # Terminate on sample time, not wall time
                 while elapsed_sample_time < time_run:
                     data = await asyncio.wait_for(
                         loop.sock_recv(sock, streamer.PFB_PACKET_SIZE),
@@ -186,32 +188,40 @@ async def py_run_pfb_streamer(crs : CRS,
                     for lst, sl in zip(slot_lists, slices):
                         lst.extend(p[sl])
 
-                    # Track elapsed sample time from packet timestamps
                     ts_sec = streamer.ts_to_seconds(p.ts)
-                    if ts_sec is not None:
-                        if _start_time_ref is None:
-                            _start_time_ref = ts_sec
-                        # Account for all time-domain samples in packet
-                        time_samples_in_pkt = p.num_samples // max(n_groups, 1)
-                        elapsed_sample_time = (ts_sec - _start_time_ref
-                                               + (time_samples_in_pkt - 1) / PFB_SAMPLING_FREQ)
+                    if ts_sec is None:
+                        stale_since = stale_since or time.monotonic()
+                        if time.monotonic() - stale_since > STALE_TIMESTAMP_GRACE_S:
+                            raise RuntimeError(
+                                "Packet timestamps are not recent, so sample "
+                                "time cannot be measured. Do you have a valid "
+                                "timestamp source? Set one with "
+                                "crs.set_timestamp_port(...) and try again.")
+                        continue
+                    stale_since = None
+                    if sample_time_origin is None:
+                        sample_time_origin = ts_sec
+                    time_samples_in_pkt = p.num_samples // max(n_groups, 1)
+                    elapsed_sample_time = (ts_sec - sample_time_origin
+                                           + (time_samples_in_pkt - 1) / PFB_SAMPLING_FREQ)
 
-                    # ── Progress estimation (mock-mode aware) ─────
+                    # ── Progress estimation ─────
                     wall_elapsed = time.monotonic() - wall_start
                     if (elapsed_sample_time > 0 and wall_elapsed > _warmup_wall
-                            and not _mock_mode_detected):
+                            and not _slow_stream):
                         _throughput_ratio = elapsed_sample_time / wall_elapsed
                         if _throughput_ratio < 0.5:
-                            _mock_mode_detected = True
+                            _slow_stream = True
                             est_total_wall = time_run / _throughput_ratio
                             print(
-                                f"[Pfb streaming] Mock/sim mode detected: "
-                                f"simulation runs at {_throughput_ratio*100:.1f}% of real time. "
+                                f"[Pfb streaming] Stream arriving at "
+                                f"{_throughput_ratio*100:.1f}% of real time "
+                                f"(the mock at many tones). "
                                 f"Estimated wall time for {time_run}s of sample data: "
                                 f"~{est_total_wall:.1f}s"
                             )
 
-                    if _mock_mode_detected and time_run > 0:
+                    if _slow_stream and time_run > 0:
                         frac = elapsed_sample_time / time_run
                         if frac - _last_progress_frac >= _progress_step:
                             _last_progress_frac = frac

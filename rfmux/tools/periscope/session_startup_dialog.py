@@ -40,9 +40,10 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
     SESS_LOAD = 2
     SESS_NONE = 3
 
-    #: The only module the mock ever streams -- _auto_bias_kids in
-    #: rfmux/mock/crs.py hardcodes it, and the mock streamer emits just
-    #: the modules that have configured channels.
+    #: The mock streams every module 1-4 that carries a tone, and
+    #: _auto_bias_kids in rfmux/mock/crs.py tones only module 1, so out
+    #: of the box this is the module that streams.  The hidden spinbox
+    #: must not override it.
     MOCK_MODULE = 1
     
     def __init__(self, parent=None, prefill: dict | None = None):
@@ -350,9 +351,9 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.crs_serial = None  # Mock doesn't need serial
             # NOT module_input: that spinbox is hidden in mock mode, so
             # whatever it holds is a leftover from hardware use that the
-            # user cannot see or correct.  Restoring a module the mock
-            # never streams gives a permanently blank viewer reporting
-            # zero packets and zero loss, with no error anywhere.
+            # user cannot see or correct.  Restoring a module nothing has
+            # toned gives a permanently blank viewer reporting zero
+            # packets and zero loss, with no error anywhere.
             self.module = self.MOCK_MODULE
             
         elif self.rb_offline.isChecked():

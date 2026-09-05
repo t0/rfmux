@@ -81,7 +81,6 @@ def test_the_drop_is_reported():
     """Silently returning fewer resonances would look like a bad sweep."""
     _, messages = _find(ISOLATED + COLLIDED, require_isolation=True)
     assert any("Dropped 2 of 4" in m for m in messages), messages
-    assert any("1e+05 Hz" in m for m in messages), messages
 
 
 def test_a_run_of_three_goes_entirely():

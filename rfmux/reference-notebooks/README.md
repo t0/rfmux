@@ -24,9 +24,10 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
   streaming HDF5, histograms and matched slow+fast capture.
 
 Each has a `.py` counterpart beside it showing the same sequence as a plain
-script. This is intended as a reference for writing your own code against the API.
-It is also a quick way to smoke-test a change against `MOCK`, by hand: the
-notebooks are executed by the test suite, the scripts are not.
+script, as a reference for writing your own code against the API. Both
+notebooks and `simplified_tuning_flow.py` run against `MOCK` in the
+acquisition tier (`pytest --tier=acquisition`); `pulse_capture_flow.py` is not
+executed by any test, so run it by hand to smoke-test a change.
 
 ## Connecting
 

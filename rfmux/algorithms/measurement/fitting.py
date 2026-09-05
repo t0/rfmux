@@ -434,7 +434,7 @@ def find_resonances(
         `min_resonance_separation_hz`, by default False.
 
         False is `distance` in `scipy.signal.find_peaks`: of any group closer
-        than the separation, the most prominent is kept and the rest are
+        than the separation, the deepest dip is kept and the rest are
         discarded. The returned list obeys the separation, but a survivor can
         still have a real resonance beside it -- the one that was discarded.
         Biasing it reads two detectors at once.

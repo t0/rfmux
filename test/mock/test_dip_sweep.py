@@ -84,3 +84,25 @@ def test_sweep_leaves_lekid_state_alone():
     before = [(k.Lk, k.R, k.L) for k in m.mr_lekids]
     m.s21_sweep(np.linspace(f0 - 3e6, f0 + 3e6, 50), 0.01)
     assert [(k.Lk, k.R, k.L) for k in m.mr_lekids] == before
+
+
+def test_dense_array_biases_each_resonator_on_its_own_dip():
+    """Twelve resonators over 30 MHz: the dip sits 1.5 MHz above
+    compute_fr, so a window open to the nearest neighbour's dip can
+    pick that dip instead and leave two channels on one resonator."""
+    from rfmux.mock.config import BIAS_DBM, bias_amplitude_from_dbm
+    from rfmux.mock.crs import ServerMockCRS
+    crs = ServerMockCRS("0000")
+    with contextlib.redirect_stdout(io.StringIO()):
+        asyncio.run(crs.generate_resonators(
+            {"num_resonances": 12, "freq_start": 1.30e9, "freq_end": 1.33e9,
+             "resonator_random_seed": 7, "auto_bias_kids": False}))
+    m = crs._resonator_model
+    m.nqp_noise_enabled = False
+    m._tls_generator = None
+    amp = bias_amplitude_from_dbm(BIAS_DBM)
+    nominal = np.array(sorted(m.resonator_frequencies))
+    assert np.diff(nominal).min() > 1e6, \
+        "the fixture should be dense but resolvable"
+    found = np.array([crs._find_s21_dip_frequency(f, amp) for f in nominal])
+    assert np.all(np.diff(found) > 0), (nominal, found)

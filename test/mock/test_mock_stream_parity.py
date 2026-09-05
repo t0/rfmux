@@ -27,8 +27,6 @@ import asyncio
 import numpy as np
 import pytest
 
-pytestmark = pytest.mark.slow_acquisition  # heavy resonator generation
-
 
 @pytest.fixture(scope="module")
 def model():

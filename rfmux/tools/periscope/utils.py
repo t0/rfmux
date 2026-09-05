@@ -4,8 +4,7 @@
 do ``from .utils import *`` and a dozen more pull names out of it
 explicitly, so most of the imports below are re-exports rather than
 things this file uses itself.  A linter will call them unused; deleting
-them breaks the GUI at startup with an ImportError, and no unit test
-imports enough of the package to notice.
+them breaks the GUI at startup with an ImportError.
 
 Before removing any import here, check that nothing else reads it
 through this module::
@@ -121,9 +120,9 @@ DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
 DEFAULT_MIN_Q = 1e4
 DEFAULT_MAX_Q = 1e7
 DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
-# Off keeps the historical meaning of the separation -- thin crowded
-# peaks down to the most prominent.  On makes it a guarantee that
-# nothing is beside what comes back.
+# Off thins crowded peaks to the most prominent; on drops every member
+# of a crowded group, so nothing returned has a neighbour within the
+# separation.
 DEFAULT_REQUIRE_ISOLATION = False
 DEFAULT_DATA_EXPONENT = 2.0
 
@@ -514,9 +513,9 @@ class UnitConverter:
             return f"{volts:.3f} V"
 
 # ───────────────────────── Validation banner ─────────────────────────
-#: Severity colours for the dialog issue banner.  Fixed light-mode by
-#: intent, matching what both dialogs shipped with; theming it is
-#: separate work.
+#: Severity colours for the dialog issue banner.  A fixed light-mode
+#: palette shared by the pulse-capture settings and streamer-config
+#: dialogs; not themed.
 _BANNER_CSS = {
     "error": "background-color: #f8d7da; color: #721c24; "
              "padding: 5px; border-radius: 6px;",
@@ -579,8 +578,8 @@ class ClickableViewBox(pg.ViewBox):
     # A weak reference keeps the back-pointer working for as long as anyone could
     # use it — the panel owns the ViewBox through Qt's parent-child tree, so it
     # always outlives it — while removing the upward strong edge that closed the
-    # cycle.  Callers are unchanged; ``getattr(vb, 'parent_window', None)`` still
-    # works, and now simply reads None once the panel is gone.
+    # cycle.  ``getattr(vb, 'parent_window', None)`` reads None once the panel
+    # is gone.
     #
     # Pinned by test/periscope/test_viewbox_lifetime.py.
     @property

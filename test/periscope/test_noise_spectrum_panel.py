@@ -8,30 +8,16 @@ assert instead, and cover the detector navigation the panel adds on top of
 plain construction.
 """
 
-import os
-import time
-
 import pytest
 
-from test.qt_helpers import spin, spin_until  # noqa: E402
+from test.qt_helpers import spin
 
 
 pytest.importorskip("PyQt6")
 
-from PyQt6 import QtWidgets  # noqa: E402
-
 from rfmux.tools.periscope.noise_spectrum_panel import (  # noqa: E402
     NoiseSpectrumPanel,
 )
-
-
-
-def spin(qt_app, seconds=0.05):
-    """Let Qt drain deferred deletions after closing a panel."""
-    deadline = time.monotonic() + seconds
-    while time.monotonic() < deadline:
-        qt_app.processEvents()
-        time.sleep(0.005)
 
 
 TWO_DETECTORS = {

@@ -10,7 +10,6 @@ other file dialog was opened most recently — which is how it ends up pointing
 at a temp directory nobody chose.
 """
 
-import os
 import types
 from unittest.mock import MagicMock
 
@@ -22,17 +21,6 @@ pytest.importorskip("PyQt6")
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope import settings  # noqa: E402
-
-
-
-@pytest.fixture(autouse=True)
-def _restore_settings():
-    """These write the real per-user QSettings, so put them back."""
-    directory = settings.get_last_session_directory()
-    path = settings.get_last_session_path()
-    yield
-    settings.set_last_session_directory(directory)
-    settings.set_last_session_path(path)
 
 
 def _capture_dialog(monkeypatch, returns):

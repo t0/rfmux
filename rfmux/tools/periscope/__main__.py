@@ -30,6 +30,8 @@ import asyncio
 import click
 from PyQt6 import QtCore
 
+from rfmux.mock.helpers import apply_mock_config
+
 
 #: Arrays this size and under build in about a second; the progress
 #: window is for the ones that take long enough to wonder about.
@@ -49,14 +51,13 @@ def _build_with_progress(crs_obj, config, loop, module):
     """The mock build in a worker thread, with a progress window on the
     main thread showing where it is.
 
-    The build is seconds at many tones: generate_resonators (one RPC
-    the server reports on through get_build_progress) and then, when
-    the array was biased, the df calibration sweep, which the client
-    drives point by point.  Blocking the GUI thread on either left a
-    window that answered no events, which the window manager reports
-    as hung; the worker keeps the event loop alive, and the main thread
-    polls on *loop* (idle while the worker runs) to fill one bar with
-    the four stages.
+    The build is seconds at many tones: apply_mock_config (one RPC the
+    server reports on through get_build_progress) and then, when the
+    array was biased, the df calibration sweep, which the client drives
+    point by point.  The worker keeps the event loop alive, and the main
+    thread polls on *loop* (idle while the worker runs) to fill one bar
+    with the stages: generating alone, or generating, biasing, warming
+    and calibrating when the array is biased.
 
     Returns ``(resonator_count, df_calibrations)``.
     """
@@ -83,8 +84,8 @@ def _build_with_progress(crs_obj, config, loop, module):
         worker_loop = asyncio.new_event_loop()
         asyncio.set_event_loop(worker_loop)
         try:
-            result["count"] = worker_loop.run_until_complete(
-                crs_obj.generate_resonators(config))
+            _, result["count"] = worker_loop.run_until_complete(
+                apply_mock_config(crs_obj, config))
             if biasing:
                 local.update(stage="calibrating", done=0, total=1)
                 result["cals"] = worker_loop.run_until_complete(
@@ -397,24 +398,18 @@ def main():
             
             # Apply the mock configuration (either from dialog or loaded from session)
             if initial_mock_config:
-                # Ensure a concrete random seed exists before sending to server.
-                # generate_resonators() is a tuber RPC — mutations on the server
-                # side don't propagate back.  By fixing the seed here, the client's
-                # config dict (which gets saved to the session) already contains the
-                # concrete seed, so restoring the session reproduces the same resonators.
-                if initial_mock_config.get('resonator_random_seed') is None:
-                    import random as _rng
-                    initial_mock_config['resonator_random_seed'] = _rng.randint(0, 2**31 - 1)
-
                 try:
                     # Apply configuration to the server.  Seconds at many
                     # tones, before there is a window: show one.  A small
-                    # array is done before it would be read.
+                    # array is done before it would be read.  Either way
+                    # apply_mock_config pins the seed into the config the
+                    # session saves, so a restore rebuilds the same array.
                     if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
                         resonator_count, initial_df_calibrations = _build_with_progress(
                             crs_obj, initial_mock_config, loop, args.module)
                     else:
-                        resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
+                        _, resonator_count = loop.run_until_complete(
+                            apply_mock_config(crs_obj, initial_mock_config))
                     if load_mock_config_from_session:
                         print(f"[Session] Mock configuration restored: {resonator_count} resonators generated")
                     #else:
@@ -692,11 +687,9 @@ def periscope_excepthook(exctype, value, tb):
     """Report unhandled exceptions without taking the window down.
 
     KeyboardInterrupt is the exception: it is a request to quit, not a
-    fault to log and continue past.  Swallowing it left the window up
-    with the receive thread still holding UDP 9876, and because
-    get_multicast_socket sets SO_REUSEPORT the next launch bound the
-    same port happily and then lost the whole stream to the process the
-    user thought they had killed.
+    fault to log and continue past.  A window left up keeps the receive
+    thread on UDP 9876; with SO_REUSEPORT the next launch binds the
+    same port and shares the stream with it.
     """
     if issubclass(exctype, KeyboardInterrupt):
         print("\n[Periscope] Interrupted - shutting down", file=sys.stderr)

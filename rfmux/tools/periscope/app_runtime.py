@@ -49,9 +49,8 @@ class PeriscopeRuntime:
             df_cal = self.df_calibrations[self.module].get(ch_val)
             if df_cal is not None:
                 # (I + jQ) * calibration, the rotation convert_iq_to_df
-                # defines.  Shared with pulse capture rather than written
-                # twice: the second copy of this got the conjugate, which
-                # sends a pure frequency excursion into both axes.
+                # defines; apply_iq_conversion is the one implementation
+                # the display and pulse capture share.
                 return apply_iq_conversion(
                     convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ),
                     df_cal)
@@ -184,6 +183,9 @@ class PeriscopeRuntime:
         modes_active = self._get_active_modes() # Renamed modes
         self.plots = []
         self.curves = []
+        # Histogram ranges are smoothed across frames; a rebuild changes
+        # units or channels, so they start over rather than decaying.
+        self._hist_ranges = {}
         font = QFont() # QFont from .utils
         font.setPointSize(UI_FONT_SIZE) # UI_FONT_SIZE from .utils
         single_colors = self._get_single_channel_colors()
@@ -327,7 +329,10 @@ class PeriscopeRuntime:
             else:
                 pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "H":
-            pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
+            if self.unit_mode == "df" and all_have_calibration:
+                pw.setLabel("bottom", "Amplitude", units="Hz or unitless")
+            else:
+                pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
             pw.setLabel("left", "Bin Count (log)")
         elif mode_key == "S":
             pw.setLogMode(x=True, y=not self.real_units)
@@ -608,17 +613,11 @@ class PeriscopeRuntime:
                 if panel and hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
-        # Update Pulse Capture panels (in docks).  Entries survive dock
-        # closure, so skip (and drop) panels whose C++ object is gone.
-        if hasattr(self, 'pulse_capture_windows'):
-            for key in list(self.pulse_capture_windows.keys()):
-                window_data = self.pulse_capture_windows.get(key) or {}
-                panel = window_data.get('window')
-                if panel is None or sip.isdeleted(panel):
-                    self.pulse_capture_windows.pop(key, None)
-                    continue
-                if hasattr(panel, 'apply_theme'):
-                    panel.apply_theme(self.dark_mode)
+        # Update Pulse Capture panels (in docks)
+        for window_data in self._live_pulse_capture_windows():
+            panel = window_data.get('window')
+            if hasattr(panel, 'apply_theme'):
+                panel.apply_theme(self.dark_mode)
 
     def _toggle_real_units(self, checked: bool):
         """
@@ -693,40 +692,20 @@ class PeriscopeRuntime:
         """Drain the queue a batch at a time until it is empty or the
         deadline passes.  A backlog left behind is bounded by the C++
         queue and surfaces as packet loss in the status bar, never as
-        a frozen window.  A receiver built without the batched getter
-        is drained a packet at a time, which the batched path is held
-        equal to.
+        a frozen window.  A queue without the batched getter has no
+        stream to drain.
         """
         if self.receiver.queue is None:
             return
 
-        deadline = time.monotonic() + self._DRAIN_DEADLINE_S
         pop_batch = getattr(self.receiver.queue, "pop_readout_batch", None)
         if pop_batch is not None:
+            deadline = time.monotonic() + self._DRAIN_DEADLINE_S
             while True:
                 batch = pop_batch(self._DRAIN_BATCH_MAX)
                 if batch is None:
                     break
                 self._ingest_batch(*batch)
-                if time.monotonic() >= deadline:
-                    self.drain_overruns += 1
-                    break
-        else:
-            while not self.receiver.queue.empty():
-                packet = self.receiver.queue.try_pop()
-                if packet is None:
-                    break
-                pkt = packet.to_python()
-                self.pkt_cnt += 1
-                # Bit 3 of fir_stage flags a short (128-channel) packet;
-                # bits 2-0 are the decimation stage.
-                if hasattr(pkt, "fir_stage"):
-                    self.actual_dec_stage = pkt.fir_stage & 0x7
-                    self.is_short_packet = bool(pkt.fir_stage & 0x8)
-                t_rel = self._calculate_relative_timestamp(pkt)
-                self._update_buffers(pkt, t_rel)
-                if self.is_mock_mode and t_rel is not None:
-                    self._update_sim_time_tracking(t_rel)
                 if time.monotonic() >= deadline:
                     self.drain_overruns += 1
                     break
@@ -743,8 +722,8 @@ class PeriscopeRuntime:
     def _ingest_batch(self, samples: np.ndarray, seconds: np.ndarray,
                       recent: np.ndarray, fir_stage: np.ndarray,
                       _seq: np.ndarray, year: int, yday: int) -> None:
-        """One popped batch: what the per-packet loop does per packet,
-        done once for the batch."""
+        """One popped batch: packet count, decimation stage, relative
+        time, rings and pulse tap, once for the batch."""
         n = samples.shape[0]
         self.pkt_cnt += n
         stage = int(fir_stage[-1])
@@ -764,37 +743,16 @@ class PeriscopeRuntime:
             self._update_sim_time_tracking(
                 float(t_rel[np.flatnonzero(recent)[-1]]))
 
-    def _calculate_relative_timestamp(self, pkt) -> float | None:
-        """
-        Calculate a relative timestamp for a packet.
-
-        If the packet's timestamp is recent, it's adjusted slightly and
-        converted to seconds relative to the first packet's timestamp.
-
-        Args:
-            pkt: The incoming packet object.
-
-        Returns:
-            float | None: Relative timestamp in seconds, or None if not recent.
-        """
-        # streamer from .utils
-        ts = pkt.ts
-        if ts.recent:
-            # Apply a small offset to ensure timestamps are strictly increasing for plotting
-            ts.ss += int(0.02 * _streamer.SS_PER_SECOND); ts.renormalize()
-            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / _streamer.SS_PER_SECOND
-            if self.start_time is None: self.start_time = t_now
-            return t_now - self.start_time
-        return None
-
     def _update_buffers(self, pkt, t_rel: float | None):
         """One packet into the display batch and the pulse tap: the
-        batch form with one row.  The per-packet reference path."""
+        batch form with one row.  The reference the batched writer is
+        held equal to."""
         samples = np.array(pkt)                 # packetizer gain out
         ts = pkt.ts
         recent = bool(ts.recent)
-        seconds = (ts.h * 3600 + ts.m * 60 + ts.s
-                   + ts.ss / _streamer.SS_PER_SECOND) if recent else np.nan
+        seconds = _streamer.ts_to_seconds(ts)
+        if seconds is None:
+            seconds = np.nan
         self._update_buffers_batch(
             samples[None, :],
             np.array([np.nan if t_rel is None else t_rel]),
@@ -937,18 +895,10 @@ class PeriscopeRuntime:
         if "H" in rowCurves and ch_val in rowCurves["H"]:
             cset = rowCurves["H"][ch_val]
             try:
-                nbins = getattr(self, "hist_nbins", 128)
-        
                 if "I" in cset and not sip.isdeleted(cset["I"]) and cset["I"].isVisible():
-                    self._set_hist_bargraph_dynamic(
-                        ch_val, "I", cset["I"], I_data, nbins=nbins
-                    )
-        
+                    self._set_hist_bargraph_dynamic(ch_val, "I", cset["I"], I_data)
                 if "Q" in cset and not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible():
-                    self._set_hist_bargraph_dynamic(
-                        ch_val, "Q", cset["Q"], Q_data, nbins=nbins
-                    )
-        
+                    self._set_hist_bargraph_dynamic(ch_val, "Q", cset["Q"], Q_data)
             except RuntimeError:
                 pass
 
@@ -1014,27 +964,29 @@ class PeriscopeRuntime:
         self._hist_ranges[key] = (slo, shi)
         return slo, shi
 
-    def _set_hist_bargraph_dynamic(self, ch_val, which, item, data, nbins=128):
+    #: Bins in the amplitude histogram.
+    HIST_NBINS = 128
+
+    def _set_hist_bargraph_dynamic(self, ch_val, which, item, data):
         """
         Update a 1D histogram plot with dynamically computed amplitude ranges.
-    
+
         Computes the true data range, applies temporal smoothing, and updates
         the associated BarGraphItem for real-time visualization.
-    
+
         Args:
             ch_val (int): Channel ID associated with the histogram.
             which (str): Data selector (e.g., "I" or "Q").
             item (pg.BarGraphItem): Histogram plot item to update.
             data (np.ndarray): Input data used to build the histogram.
-            nbins (int): Number of histogram bins.
         """
         lo, hi = self._true_minmax(data)
         if lo is None:
             return
-    
+
         lo, hi = self._smooth_range((ch_val, which), lo, hi, alpha=0.2, pad_frac=0.05)
-    
-        counts, edges = np.histogram(data, bins=nbins, range=(lo, hi))
+
+        counts, edges = np.histogram(data, bins=self.HIST_NBINS, range=(lo, hi))
         counts_display = np.log10(counts + 1.0)
         centers = 0.5 * (edges[:-1] + edges[1:])
         width = edges[1] - edges[0]
@@ -1225,7 +1177,6 @@ class PeriscopeRuntime:
             self.frame_cnt = 0; self.pkt_cnt = 0; self.t_last = now
             self.prev_missing = missing
             self.prev_qdrops = qdrops
-            self.prev_drop = missing + qdrops
             self.prev_receive = received
             
 
@@ -1389,9 +1340,11 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
-        # The startup df-calibration worker, if still sweeping.
+        # The startup df-calibration worker, if still sweeping: ask it
+        # to stop, then wait.
         task = getattr(self, "_df_cal_task", None)
         if task is not None and task.isRunning():
+            task.requestInterruption()
             task.wait(2000)
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:

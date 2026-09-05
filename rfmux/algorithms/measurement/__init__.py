@@ -6,7 +6,7 @@ import time, which is what makes ``await crs.multisweep(...)`` and the
 rest resolve.  Drop one and its macro quietly stops existing.
 
 ``__all__`` says so explicitly, so a linter reports them as re-exports
-rather than as sixteen unused imports to be tidied away.
+rather than as unused imports to be tidied away.
 """
 
 from . import py_get_samples

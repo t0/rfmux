@@ -7,7 +7,6 @@
 #include <pybind11/numpy.h>
 #include <fmt/format.h>
 #include <cmath>
-#include <limits>
 
 #include "packets.hpp"
 
@@ -21,6 +20,48 @@ static inline std::complex<double> iq_at(const int32_t* raw, py::ssize_t k) {
 }
 static inline std::complex<double> iq_at(const std::vector<int32_t>& raw, py::ssize_t k) {
 	return iq_at(raw.data(), k);
+}
+
+/* Up to max_packets popped under one lock with the GIL released, all
+ * of one layout: *same* judges each against the first, and the first
+ * it refuses stays queued. */
+template <class Same>
+static std::vector<Packet> pop_batch(PacketQueue& self, size_t max_packets, Same same) {
+	std::vector<Packet> got;
+	got.reserve(std::min<size_t>(max_packets, 4096));
+	py::gil_scoped_release release;
+	self.pop_while(got, max_packets, [&](const Packet& p) {
+		return got.empty() || same(p, got.front());
+	});
+	return got;
+}
+
+/* The per-packet timestamp columns of a batch: seconds of day (NaN
+ * when the stamp is not disciplined), recent, seq, and the year/yday
+ * of the first disciplined stamp, 0 when none. */
+struct StampColumns {
+	py::array_t<double> seconds;
+	py::array_t<bool> recent;
+	py::array_t<uint32_t> seq;
+	int32_t year = 0, yday = 0;
+};
+
+static StampColumns stamp_columns(const std::vector<Packet>& got) {
+	const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+	StampColumns c{py::array_t<double>(n), py::array_t<bool>(n),
+	               py::array_t<uint32_t>(n)};
+	auto T = c.seconds.mutable_unchecked<1>();
+	auto R = c.recent.mutable_unchecked<1>();
+	auto Q = c.seq.mutable_unchecked<1>();
+	bool have_day = false;
+	for (py::ssize_t i = 0; i < n; i++) {
+		const Timestamp ts = got[i].timestamp();
+		R(i) = ts.is_recent();
+		T(i) = ts.seconds_of_day();
+		Q(i) = got[i].seq();
+		if (ts.is_recent() && !have_day) { c.year = ts.y; c.yday = ts.d; have_day = true; }
+	}
+	return c;
 }
 
 PYBIND11_MODULE(_receiver, m) {
@@ -483,48 +524,32 @@ PYBIND11_MODULE(_receiver, m) {
 			 *   year/yday of the first disciplined stamp, 0 when none
 			 * A batch holds one packet width: it stops short at a size
 			 * change, which stays queued for the next call. */
-			std::vector<Packet> got;
-			got.reserve(std::min<size_t>(max_packets, 4096));
-			{
-				py::gil_scoped_release release;
-				self.pop_while(got, max_packets, [&got](const Packet& p) {
-					return got.empty() || p.size() == got.front().size();
+			const std::vector<Packet> got = pop_batch(self, max_packets,
+				[](const Packet& p, const Packet& first) {
+					return p.size() == first.size();
 				});
-			}
 			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
 			if (n == 0)
 				return py::none();
-			const size_t size = got.front().size();
-			const py::ssize_t width = (size == LONG_PACKET_SIZE)
+			const py::ssize_t width = (got.front().size() == LONG_PACKET_SIZE)
 				? LONG_PACKET_CHANNELS : SHORT_PACKET_CHANNELS;
 
 			py::array_t<std::complex<double>> samples({n, width});
-			py::array_t<double> seconds(n);
-			py::array_t<bool> recent(n);
 			py::array_t<uint8_t> fir(n);
-			py::array_t<uint32_t> seq(n);
 			auto S = samples.mutable_unchecked<2>();
-			auto T = seconds.mutable_unchecked<1>();
-			auto R = recent.mutable_unchecked<1>();
 			auto F = fir.mutable_unchecked<1>();
-			auto Q = seq.mutable_unchecked<1>();
-			int32_t year = 0, yday = 0;
-			bool have_day = false;
 			for (py::ssize_t i = 0; i < n; i++) {
 				const char* data = static_cast<const char*>(got[i].data());
 				const auto* hdr = reinterpret_cast<const readout_packet_header*>(data);
 				const auto* raw = reinterpret_cast<const int32_t*>(
 					data + sizeof(readout_packet_header));
-				const Timestamp ts = got[i].timestamp();
 				for (py::ssize_t ch = 0; ch < width; ch++)
 					S(i, ch) = iq_at(raw, ch);
-				R(i) = ts.is_recent();
-				T(i) = ts.seconds_of_day();
 				F(i) = hdr->fir_stage;
-				Q(i) = hdr->seq;
-				if (ts.is_recent() && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
 			}
-			return py::make_tuple(samples, seconds, recent, fir, seq, year, yday);
+			const StampColumns st = stamp_columns(got);
+			return py::make_tuple(samples, st.seconds, st.recent, fir, st.seq,
+			                      st.year, st.yday);
 		}, "max_packets"_a = 4096,
 		   "Pop up to max_packets readout packets demuxed into arrays")
 		.def("pop_pfb_batch", [](PacketQueue& self, size_t max_packets) -> py::object {
@@ -538,22 +563,19 @@ PYBIND11_MODULE(_receiver, m) {
 			 *               the stamp is not disciplined; recent bool
 			 *   seq         uint32 per packet
 			 *   mode/slots/num_samples of the batch, shared by every
-			 *               packet in it; year/yday of the first stamp
+			 *               packet in it; year/yday of the first
+			 *               disciplined stamp, 0 when none
 			 * A batch holds one layout: it stops short where the mode,
 			 * slots or sample count change, which stays queued. */
-			std::vector<Packet> got;
-			got.reserve(std::min<size_t>(max_packets, 4096));
 			auto layout = [](const Packet& p) {
 				const auto* h = static_cast<const pfb_packet_header*>(p.data());
 				return std::make_tuple(h->mode, h->slot1, h->slot2, h->slot3,
 				                       h->slot4, h->num_samples);
 			};
-			{
-				py::gil_scoped_release release;
-				self.pop_while(got, max_packets, [&got, &layout](const Packet& p) {
-					return got.empty() || layout(p) == layout(got.front());
+			const std::vector<Packet> got = pop_batch(self, max_packets,
+				[&layout](const Packet& p, const Packet& first) {
+					return layout(p) == layout(first);
 				});
-			}
 			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
 			if (n == 0)
 				return py::none();
@@ -564,33 +586,19 @@ PYBIND11_MODULE(_receiver, m) {
 
 			py::array_t<std::complex<double>> samples({static_cast<py::ssize_t>(groups),
 			                                           n * time_samples});
-			py::array_t<double> seconds(n);
-			py::array_t<bool> recent(n);
-			py::array_t<uint32_t> seq(n);
 			auto S = samples.mutable_unchecked<2>();
-			auto T = seconds.mutable_unchecked<1>();
-			auto R = recent.mutable_unchecked<1>();
-			auto Q = seq.mutable_unchecked<1>();
-			int32_t year = 0, yday = 0;
-			bool have_day = false;
 			for (py::ssize_t i = 0; i < n; i++) {
-				const char* data = static_cast<const char*>(got[i].data());
-				const auto* hdr = reinterpret_cast<const pfb_packet_header*>(data);
 				const auto* raw = reinterpret_cast<const int32_t*>(
-					data + sizeof(pfb_packet_header));
-				const Timestamp ts = got[i].timestamp();
+					static_cast<const char*>(got[i].data()) + sizeof(pfb_packet_header));
 				for (py::ssize_t k = 0; k < time_samples * groups; k++)
 					S(k % groups, i * time_samples + k / groups) = iq_at(raw, k);
-				R(i) = ts.is_recent();
-				T(i) = ts.seconds_of_day();
-				Q(i) = hdr->seq;
-				if (ts.is_recent() && !have_day) { year = ts.y; yday = ts.d; have_day = true; }
 			}
-			return py::make_tuple(samples, seconds, recent, seq,
+			const StampColumns st = stamp_columns(got);
+			return py::make_tuple(samples, st.seconds, st.recent, st.seq,
 			                      static_cast<int>(first->mode),
 			                      py::make_tuple(first->slot1, first->slot2,
 			                                     first->slot3, first->slot4),
-			                      static_cast<int>(num_samples), year, yday);
+			                      static_cast<int>(num_samples), st.year, st.yday);
 		}, "max_packets"_a = 256,
 		   "Pop up to max_packets PFB packets demuxed into arrays")
 		.def("drop_pfb_before", [](PacketQueue& self, double t_target, size_t limit) -> size_t {

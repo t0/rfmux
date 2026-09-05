@@ -41,7 +41,6 @@ from rfmux.algorithms.measurement.streamer_config import (
     validate,
 )
 from rfmux.streamer import find_streamer_conflict
-from rfmux.mock.config import bias_amplitude_from_dbm
 
 # ── What to capture ───────────────────────────────────────────────
 MODULE = 1
@@ -65,7 +64,6 @@ MOCK_CONFIG = {
     "num_resonances": 2,
     "resonator_random_seed": 42,
     "auto_bias_kids": True,
-    "bias_amplitude": bias_amplitude_from_dbm(-55.0),
     "pulse_mode": "periodic",
     "pulse_period": 0.05,
     "pulse_tau_rise": 1e-6,
@@ -79,8 +77,7 @@ async def connect(serial: str):
     if serial.upper() == "MOCK":
         # Refuse to be the second simulation on the port. Mock streamers all
         # send to 127.0.0.1:9876, so a reader gets both interleaved and every
-        # pulse count below is quietly wrong. Cheap to check, and the
-        # alternative is noticing it in the numbers days later.
+        # pulse count below is quietly wrong.
         conflict = find_streamer_conflict()
         if conflict:
             raise RuntimeError(
@@ -123,10 +120,11 @@ async def run_capture_flow(crs, host, is_mock) -> int:
         print(f"[{severity}] {message}")
 
     # ── Step 3. Configure the slow streamer ────────────────────────
+    # create_mock_crs already started the simulated stream; it needs a
+    # moment to settle after the rate change.
     await crs.configure_streamer(dec, short=cfg.short_packets,
                                  modules=[MODULE])
     if is_mock:
-        await crs.start_udp_streaming()
         await asyncio.sleep(2.0)
     print(f"slow stream: stage {dec}, {fs:.0f} Hz, "
           f"channels {CHANNELS} on module {MODULE}")

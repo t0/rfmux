@@ -61,7 +61,12 @@ class TLSNoiseGenerator:
     seed : int, optional
         Seeded for reproducibility (mock runs must be repeatable).
     max_history_s : float
-        Grid samples older than this are discarded to bound memory.
+        How far behind the latest query the grid is kept; older rows
+        are discarded and queries there clamp to the oldest row.  The
+        mock only ever looks back one slow block (50 ms), the slow
+        frames emitted after the PFB frames of the same block, so a
+        second is a wide margin; the buffer is ``max_history_s / dt``
+        rows per resonator.
     """
 
     def __init__(
@@ -73,7 +78,7 @@ class TLSNoiseGenerator:
         decades: float = 3.0,
         n_poles: int = 6,
         seed: int | None = None,
-        max_history_s: float = 120.0,
+        max_history_s: float = 1.0,
     ):
         self.n_resonators = int(n_resonators)
         self.fractional_rms = float(fractional_rms)
@@ -164,10 +169,14 @@ class TLSNoiseGenerator:
         n_steps = max(needed, self.CHUNK)
         self._values = np.concatenate(
             (self._values, self._step(n_steps)), axis=0)
-        self._trim()
 
     def _trim(self) -> None:
-        """Drop rows older than max_history_s BEFORE the last query."""
+        """Drop rows older than max_history_s before the last query.
+
+        Called after a batch has been interpolated, never between its
+        extension and its interpolation, so a batch longer than the
+        window still gets exact values throughout.
+        """
         cutoff = self._last_query - self.max_history_s
         drop = int((cutoff - self._t0) / self.dt)
         if drop > 0:
@@ -182,33 +191,17 @@ class TLSNoiseGenerator:
 
         Queries before the retained history clamp to the oldest sample;
         queries ahead of the grid extend it.  Repeated or out-of-order
-        queries always return the same value.
+        queries return the same value, to rounding once the grid origin
+        has moved by a trim.
         """
         if self._memo_t is not None and t == self._memo_t:
             return self._memo_v
-        if t > self._last_query:
-            self._last_query = t
-        self._extend_to(t)
-        if t <= self._t0:
-            value = self._values[0].copy()
-        else:
-            pos = (t - self._t0) / self.dt
-            k = int(pos)
-            if k >= len(self._values) - 1:
-                value = self._values[-1].copy()
-            else:
-                frac = pos - k
-                value = (self._values[k] * (1.0 - frac)
-                         + self._values[k + 1] * frac)
-        self._memo_t, self._memo_v = t, value
-        return value
+        return self.values_at(np.array([t]))[0]
 
     def values_at(self, times: np.ndarray) -> np.ndarray:
-        """Vectorised :meth:`value_at` — returns ``(len(times), n_res)``.
+        """Wander per resonator at each of *times*: ``(len(times), n_res)``.
 
-        Row by row the same arithmetic as value_at, so batched and
-        sequential queries agree bit for bit; the memo is left as if
-        the last time had been queried alone.
+        The memo is left as if the last time had been queried alone.
         """
         times = np.asarray(times, dtype=np.float64)
         if times.size == 0:
@@ -217,9 +210,7 @@ class TLSNoiseGenerator:
         # calls would, so the grid grows in the same chunks and holds
         # the same draws.
         for t in np.sort(times[times > self.t_end]):
-            if t > self.t_end:
-                self._last_query = max(self._last_query, float(t))
-                self._extend_to(float(t))
+            self._extend_to(float(t))
         self._last_query = max(self._last_query, float(times.max()))
         vals = self._values
         last = len(vals) - 1
@@ -230,5 +221,6 @@ class TLSNoiseGenerator:
         out = np.where((times <= self._t0)[:, None], vals[0][None, :],
                        np.where((pos.astype(np.int64) >= last)[:, None],
                                 vals[last][None, :], interp))
+        self._trim()
         self._memo_t, self._memo_v = float(times[-1]), out[-1].copy()
         return out

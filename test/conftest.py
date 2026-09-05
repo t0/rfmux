@@ -1,5 +1,4 @@
 import pytest
-import time
 import rfmux
 import os
 import socket

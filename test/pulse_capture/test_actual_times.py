@@ -105,3 +105,15 @@ def test_a_pair_reads_back_with_its_windows(tmp_path):
     assert "fast_tod" not in back
     assert w.read_match(1, 2) is None
     w.finalize()
+
+
+def test_a_one_sided_pair_reads_back_with_no_time_offset(tmp_path):
+    """The matcher emits ``time_offset=None`` for a one-sided pair; the
+    file hands back the same, not the NaN it is stored as."""
+    from rfmux.pulse_capture.hdf5 import DualPulseHDF5Writer
+    w = DualPulseHDF5Writer(tmp_path / "p.h5", [1],
+                            capture_params={"streamer_mode": "both"})
+    w.append_match(1, {"pair_idx": 1, "channel": 1, "slow_idx": 2,
+                       "fast_idx": None, "time_offset": None})
+    assert w.read_match(1, 1)["time_offset"] is None
+    w.finalize()

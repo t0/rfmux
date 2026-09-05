@@ -22,6 +22,7 @@ import re
 import math
 import numpy as np
 from rfmux.mock import config as mc
+from rfmux.mock.helpers import merged
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
@@ -245,7 +246,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         left = QtWidgets.QVBoxLayout()
         left.setSpacing(2)
         left.addWidget(self._make_collapsible_section(
-            "Material & Operating Point", self._create_material_section()))
+            "Material & Operating Point", self._create_physics_driven_page()))
         left.addWidget(self._make_collapsible_section(
             "Geometry", self._create_geometry_section()))
         left.addWidget(self._make_collapsible_section(
@@ -276,11 +277,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.advanced_container.setVisible(not vis)
         self.advanced_toggle.setText("▼ Advanced Parameters" if not vis else "▶ Advanced Parameters")
 
-    # ── Individual section builders (formerly nested inside _create_mkids_group) ──
-
-    def _create_material_section(self) -> QtWidgets.QWidget:
-        """Material & Operating Point — extracted from the old MKIDs group."""
-        return self._create_physics_driven_page()
+    # ── Section builders ──
 
     def _create_geometry_section(self) -> QtWidgets.QWidget:
         """Geometry inputs: width, thickness, length and derived volume."""
@@ -315,7 +312,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         return page
 
     def _create_circuit_section(self) -> QtWidgets.QWidget:
-        """Circuit Design Parameters — extracted from old MKIDs group."""
+        """Circuit design parameters."""
         page = QtWidgets.QWidget()
         grid = QtWidgets.QGridLayout(page)
         grid.setContentsMargins(6, 2, 6, 2)
@@ -449,8 +446,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         
         # Load materials into combo box
         self._refresh_material_list()
-        
-        # Geometry is now a separate collapsible section (_create_geometry_section)
         return page
     
     def _refresh_material_list(self):
@@ -920,28 +915,45 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         return group
 
     def _reset_to_defaults(self):
-        cfg = mc.defaults()
+        self._populate(mc.defaults())
+
+    def _load_current_values(self):
+        # None in the configuration means "not set": the default holds.
+        self._populate(merged(mc.defaults(), self.current_config))
+
+    def _populate(self, cfg):
+        """Every control from *cfg*, a fully defaulted configuration."""
         # Basic
         self.num_resonances_spin.setValue(int(cfg["num_resonances"]))
         self.freq_start_spin.setValue(float(cfg["freq_start"]) / 1e9)
         self.freq_end_spin.setValue(float(cfg["freq_end"]) / 1e9)
-        self.random_seed_edit.setText("" if cfg["resonator_random_seed"] is None else str(cfg["resonator_random_seed"]))
+        seed = cfg["resonator_random_seed"]
+        self.random_seed_edit.setText("" if seed in (None, "") else str(int(seed)))
+
         # Bias
         self.auto_bias_check.setChecked(bool(cfg["auto_bias_kids"]))
         self.bias_amplitude_spin.setValue(
             mc.bias_dbm_from_amplitude(float(cfg["bias_amplitude"])))
-        # Physics-driven mode
+
+        # Material and operating point
         self.T_edit.setText(str(cfg["T"]))
         self.Popt_edit.setText(str(cfg["Popt"]))
-        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
-        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
+        self.width_edit.setText(str(round(cfg["width"] * 1e6, 6)))  # m to µm
+        self.thickness_edit.setText(str(round(cfg["thickness"] * 1e9, 6)))  # m to nm
+        self.length_edit.setText(str(round(cfg["length"] * 1e6, 6)))  # m to µm
+        # Entries read "Al (Aluminum)", or a bare name for a custom material.
+        for i in range(self.material_combo.count()):
+            if self.material_combo.itemText(i).split()[0] == cfg["material"]:
+                self.material_combo.setCurrentIndex(i)
+                break
+
         # Circuit
         self.Lg_edit.setText(str(cfg["Lg"] * 1e9))  # H to nH
         self.Cc_edit.setText(str(cfg["Cc"] * 1e15))  # F to fF
         self.L_junk_edit.setText(str(cfg["L_junk"] * 1e9))  # H to nH
         self.C_variation_edit.setText(str(cfg["C_variation"]))
         self.Cc_variation_edit.setText(str(cfg["Cc_variation"]))
+
         # Readout
         self.Vin_edit.setText(str(cfg["Vin"]))
         self.input_atten_edit.setText(str(cfg["input_atten_dB"]))
@@ -953,157 +965,51 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         except Exception:
             glna_db = 0.0
         self.GLNA_db_spin.setValue(glna_db)
+
         # Noise
         self.nqp_noise_enabled_cb.setChecked(bool(cfg["nqp_noise_enabled"]))
         self.nqp_noise_std_edit.setText(str(cfg["nqp_noise_std_factor"]))
-        self.tls_noise_enabled_cb.setChecked(
-            bool(cfg.get("tls_noise_enabled", False)))
-        self.tls_rms_edit.setText(str(cfg.get("tls_fractional_rms", 1e-7)))
-        self.tls_alpha_edit.setText(str(cfg.get("tls_alpha", 1.0)))
-        self.tls_corner_edit.setText(str(cfg.get("tls_corner_hz", 100.0)))
+        self.tls_noise_enabled_cb.setChecked(bool(cfg["tls_noise_enabled"]))
+        self.tls_rms_edit.setText(str(cfg["tls_fractional_rms"]))
+        self.tls_alpha_edit.setText(str(cfg["tls_alpha"]))
+        self.tls_corner_edit.setText(str(cfg["tls_corner_hz"]))
         self.udp_noise_edit.setText(str(cfg["udp_noise_level"]))
-        # Physics Realism & Cache
+
+        # Physics realism and cache
         self.conv_tol_edit.setText(str(cfg["convergence_tolerance"]))
         self.cache_qp_step_edit.setText(str(cfg["cache_qp_step"]))
 
-        # QP Pulses
+        # QP pulses
         self.pulse_period_edit.setText(str(cfg["pulse_period"]))
         self.pulse_probability_edit.setText(str(cfg["pulse_probability"]))
         self.pulse_tau_rise_edit.setText(str(cfg["pulse_tau_rise"]))
         self.pulse_tau_decay_edit.setText(str(cfg["pulse_tau_decay"]))
         self.pulse_amplitude_edit.setText(str(cfg["pulse_amplitude"]))
-        resonators = cfg.get("pulse_resonators", "all")
+        resonators = cfg["pulse_resonators"]
         if isinstance(resonators, list):
             self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
         else:
             self.pulse_resonators_edit.setText(str(resonators))
 
         # Random amplitude distribution
-        ram = str(cfg.get("pulse_random_amp_mode"))
-        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
-        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
-        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
-        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
-        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
-        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
+        self.random_amp_mode_combo.setCurrentIndex(max(
+            0, self.random_amp_mode_combo.findText(str(cfg["pulse_random_amp_mode"]))))
+        self.random_amp_min_edit.setText(str(cfg["pulse_random_amp_min"]))
+        self.random_amp_max_edit.setText(str(cfg["pulse_random_amp_max"]))
+        self.random_amp_logmean_edit.setText(str(cfg["pulse_random_amp_logmean"]))
+        self.random_amp_logsigma_edit.setText(str(cfg["pulse_random_amp_logsigma"]))
         self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
 
         # Random tau_decay distribution
-        rtm = str(cfg.get("pulse_random_tau_mode"))
-        idx_rtm = max(0, self.random_tau_mode_combo.findText(rtm))
-        self.random_tau_mode_combo.setCurrentIndex(idx_rtm)
-        self.random_tau_min_edit.setText(str(cfg.get("pulse_random_tau_min")))
-        self.random_tau_max_edit.setText(str(cfg.get("pulse_random_tau_max")))
-        self.random_tau_logmean_edit.setText(str(cfg.get("pulse_random_tau_logmean")))
-        self.random_tau_logsigma_edit.setText(str(cfg.get("pulse_random_tau_logsigma")))
+        self.random_tau_mode_combo.setCurrentIndex(max(
+            0, self.random_tau_mode_combo.findText(str(cfg["pulse_random_tau_mode"]))))
+        self.random_tau_min_edit.setText(str(cfg["pulse_random_tau_min"]))
+        self.random_tau_max_edit.setText(str(cfg["pulse_random_tau_max"]))
+        self.random_tau_logmean_edit.setText(str(cfg["pulse_random_tau_logmean"]))
+        self.random_tau_logsigma_edit.setText(str(cfg["pulse_random_tau_logsigma"]))
         self._on_random_tau_mode_changed(self.random_tau_mode_combo.currentText())
-        
-        # Trigger derived parameter update
+
         self._update_all_derived()
-
-    def _load_current_values(self):
-        if not self.current_config:
-            self._reset_to_defaults()
-            return
-        cfg = {**mc.defaults(), **self.current_config}  # fill missing with defaults
-
-        # Basic
-        self.num_resonances_spin.setValue(int(cfg.get("num_resonances")))
-        self.freq_start_spin.setValue(float(cfg.get("freq_start")) / 1e9)
-        self.freq_end_spin.setValue(float(cfg.get("freq_end")) / 1e9)
-        seed = cfg.get("resonator_random_seed", None)
-        self.random_seed_edit.setText("" if seed in (None, "") else str(int(seed)))
-
-        # Bias
-        self.auto_bias_check.setChecked(bool(cfg.get("auto_bias_kids")))
-        self.bias_amplitude_spin.setValue(
-            mc.bias_dbm_from_amplitude(float(cfg.get("bias_amplitude"))))
-
-        # Physics-driven mode
-        self.T_edit.setText(str(cfg.get("T")))
-        self.Popt_edit.setText(str(cfg.get("Popt")))
-        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
-        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        
-        # Material selection (if present in config)
-        if 'material' in cfg:
-            mat_name = cfg['material']
-            # Find material in combo (might be "Al (Aluminum)" or just "Al" or custom "Nb")
-            idx = -1
-            for i in range(self.material_combo.count()):
-                combo_text = self.material_combo.itemText(i)
-                combo_mat = combo_text.split()[0]
-                if combo_mat == mat_name:
-                    idx = i
-                    break
-            if idx >= 0:
-                self.material_combo.setCurrentIndex(idx)
-
-        # Circuit
-        self.Lg_edit.setText(str(cfg.get("Lg") * 1e9))  # H to nH
-        self.Cc_edit.setText(str(cfg.get("Cc") * 1e15))  # F to fF
-        self.L_junk_edit.setText(str(cfg.get("L_junk") * 1e9))  # H to nH
-        self.C_variation_edit.setText(str(cfg.get("C_variation")))
-        self.Cc_variation_edit.setText(str(cfg.get("Cc_variation")))
-
-        # Readout
-        self.Vin_edit.setText(str(cfg.get("Vin")))
-        self.input_atten_edit.setText(str(cfg.get("input_atten_dB")))
-        self.system_termination_edit.setText(str(cfg.get("system_termination")))
-        self.ZLNA_edit.setText(str(cfg.get("ZLNA")))
-        try:
-            glna_val = float(cfg.get("GLNA"))
-            glna_db = 20.0 * math.log10(glna_val) if glna_val > 0 else 0.0
-        except Exception:
-            glna_db = 0.0
-        self.GLNA_db_spin.setValue(glna_db)
-
-        # Noise
-        self.nqp_noise_enabled_cb.setChecked(bool(cfg.get("nqp_noise_enabled")))
-        self.nqp_noise_std_edit.setText(str(cfg.get("nqp_noise_std_factor")))
-        self.tls_noise_enabled_cb.setChecked(
-            bool(cfg.get("tls_noise_enabled", False)))
-        self.tls_rms_edit.setText(str(cfg.get("tls_fractional_rms", 1e-7)))
-        self.tls_alpha_edit.setText(str(cfg.get("tls_alpha", 1.0)))
-        self.tls_corner_edit.setText(str(cfg.get("tls_corner_hz", 100.0)))
-        self.udp_noise_edit.setText(str(cfg.get("udp_noise_level")))
-
-        # Physics Realism & Cache
-        self.conv_tol_edit.setText(str(cfg.get("convergence_tolerance")))
-        self.cache_qp_step_edit.setText(str(cfg.get("cache_qp_step")))
-
-        # QP Pulses
-        self.pulse_period_edit.setText(str(cfg.get("pulse_period")))
-        self.pulse_probability_edit.setText(str(cfg.get("pulse_probability")))
-        self.pulse_tau_rise_edit.setText(str(cfg.get("pulse_tau_rise")))
-        self.pulse_tau_decay_edit.setText(str(cfg.get("pulse_tau_decay")))
-        self.pulse_amplitude_edit.setText(str(cfg.get("pulse_amplitude")))
-        resonators = cfg.get("pulse_resonators", "all")
-        if isinstance(resonators, list):
-            self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
-        else:
-            self.pulse_resonators_edit.setText(str(resonators))
-
-        # Random amplitude distribution
-        ram = str(cfg.get("pulse_random_amp_mode"))
-        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
-        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
-        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
-        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
-        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
-        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
-        self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
-
-        # Random tau_decay distribution
-        rtm = str(cfg.get("pulse_random_tau_mode"))
-        idx_rtm = max(0, self.random_tau_mode_combo.findText(rtm))
-        self.random_tau_mode_combo.setCurrentIndex(idx_rtm)
-        self.random_tau_min_edit.setText(str(cfg.get("pulse_random_tau_min")))
-        self.random_tau_max_edit.setText(str(cfg.get("pulse_random_tau_max")))
-        self.random_tau_logmean_edit.setText(str(cfg.get("pulse_random_tau_logmean")))
-        self.random_tau_logsigma_edit.setText(str(cfg.get("pulse_random_tau_logsigma")))
-        self._on_random_tau_mode_changed(self.random_tau_mode_combo.currentText())
 
     def _validate_and_accept(self):
         # Frequency range

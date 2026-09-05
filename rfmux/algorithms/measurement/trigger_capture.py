@@ -104,14 +104,22 @@ class PulseCaptureResult:
     config: PulseCaptureConfig
     channels: List[int]
     module: int
-    #: Wall-clock (``time.time()``) at which the capture started, matching
-    #: the ``capture_start`` attribute in the HDF5 file.  Note the ``Time``
-    #: arrays inside each pulse are in the *sample* domain
-    #: (seconds-of-day from packet timestamps), not this one — use
-    #: :attr:`first_pulse_time` to locate the capture on that axis.
+    #: Wall-clock (``time.time()``) at which the source started streaming.
+    #: The HDF5 file's ``capture_start`` is stamped when its writer opens:
+    #: after noise training for a single-stream file, at session
+    #: construction for a dual file.  Note the ``Time`` arrays inside
+    #: each pulse are in the *sample* domain (seconds-of-day from packet
+    #: timestamps), not this one — use :attr:`first_pulse_time` to locate
+    #: the capture on that axis.
     start_time: Optional[float] = None
     slow: Optional[StreamResult] = None
     fast: Optional[StreamResult] = None
+    #: ``"both"`` mode only: seconds added to every slow timestamp
+    #: (pulse ``Time`` arrays and summaries) to put the CIC-delayed slow
+    #: clock on the fast stream's axis.  Subtract it to compare against
+    #: raw packet timestamps.  Same value as the file's
+    #: ``slow_time_offset_s`` attribute.
+    slow_time_offset_s: Optional[float] = None
     #: Matched slow/fast pairs; each carries ``slow_idx``/``fast_idx``,
     #: the two summaries, ``time_offset``, and the union-window TOD from
     #: both ring buffers.  Empty unless ``streamer_mode="both"``.
@@ -232,12 +240,15 @@ async def trigger_capture(
         Write a capture file as well (pulses, histograms, templates).
     df_calibrations : dict[int, complex], optional
         ``{channel: calibration}`` from
-        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids`, stored
-        in the capture file so amplitudes can be read as Δf in Hz instead
-        of ADC counts.  Keyed by readout channel, not detector index --
-        ``bias_kids`` reports both, and ``bias_channel`` is the one that
-        matches the channels captured here.  Uncalibrated channels stay
-        in counts rather than being given a scale of 1.
+        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids`.  Under
+        ``trigger_basis="df"`` (the default) a calibrated channel is
+        rotated into the frequency basis and its samples stored as Δf in
+        hertz; a channel without a calibration, or any channel under
+        ``"iq"``, is stored in volts on the quadratures.  The file
+        records the calibrations and each channel's ``stored_units``.
+        Keyed by readout channel, not detector index -- ``bias_kids``
+        reports both, and ``bias_channel`` is the one that matches the
+        channels captured here.
     trigger_basis : str
         ``"iq"`` tests the raw quadratures; ``"df"`` rotates each channel
         with its df calibration first and tests frequency and
@@ -403,6 +414,7 @@ async def _run_dual(result, host, channels, module, slow_rate,
         on_pair=result.pairs.append,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None)
+    result.slow_time_offset_s = capture_session.slow_time_offset_s
     capture_session.start()
     result.start_time = time.time()
     try:

@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
@@ -153,11 +153,9 @@ class _CallbackHost:
     def _to_writer(self, method: str, *args, what: str = "") -> None:
         """Call *method* on the HDF5 writer, if there is one.
 
-        Ten copies of ``if self.writer is not None: try: ... except:
-        self._error(...)`` said the same thing ten times, and one of the
-        writer calls had been left unguarded.  A failing write must not
-        take the capture down: the samples keep flowing and the error is
-        reported, which is the same rule :meth:`_callback` follows.
+        A failing write must not take the capture down: the samples keep
+        flowing and the error is reported, the rule :meth:`_callback`
+        follows.
         """
         if self.writer is None:
             return
@@ -326,7 +324,7 @@ class PulseCaptureConfig:
         triggers under the budget at this rate.
 
         Deriving it rather than fixing it is what lets one setting work
-        across a 2000x span of stream rates: at 596 Hz the answer is 1,
+        across a 4000x span of stream rates: at 596 Hz the answer is 1,
         at 38 kHz and above it is 2.
         """
         if self.trigger_samples > 0:
@@ -345,7 +343,7 @@ class PulseCaptureConfig:
         length.  Real samples are correlated by the CIC/PFB response so
         this understates the confirmed rate, but the single-sample
         figure is exact and is the one that bites: at 5 sigma it is
-        ~1.4 Hz per channel on the PFB stream.
+        ~2.8 Hz per channel on the PFB stream (1.4 Hz per quadrature).
         """
         return (sample_rate
                 * self._cross_prob() ** self.trigger_samples_for(sample_rate))
@@ -631,7 +629,7 @@ class PulseCaptureSession(_CallbackHost):
         #: "V" otherwise.  One capture can hold both, because a channel
         #: without a calibration cannot be rotated.
         self.stored_units: Dict[int, str] = {}
-        self._store_coeff: Dict[int, tuple] = {}
+        self._store_coeff: Dict[int, complex] = {}
         self.histogram_flush_every = int(histogram_flush_every)
         self.histogram_flush_interval_s = float(histogram_flush_interval_s)
         self._last_flush_t = 0.0
@@ -737,20 +735,38 @@ class PulseCaptureSession(_CallbackHost):
 
     # ── Sample ingestion ──────────────────────────────────────────
 
-    def _storage_coeffs(self, channel: int):
-        """Cached (cos, sin) taking *channel* from raw counts to storage.
+    def _storage_coeffs(self, channel: int) -> complex:
+        """Cached complex factor taking *channel* from raw counts to
+        storage (a rotation and a scale in one multiply).
 
         Computed once per channel: the calibration cannot change inside
-        a capture, and this runs per sample on a 2.44 MHz stream.
+        a capture, and this runs per block on a 2.44 MHz stream.
         """
         co = self._store_coeff.get(channel)
         if co is None:
             cal = (self.df_calibrations or {}).get(channel)
-            factor, units = storage_transform(cal, self.trigger_basis)
+            co, units = storage_transform(cal, self.trigger_basis)
             self.stored_units[channel] = units
-            co = factor
             self._store_coeff[channel] = co
         return co
+
+    def storage_description(self) -> Dict[str, Any]:
+        """capture_params saying what the stored samples are: the basis
+        requested, their units, and the counts-to-volts constant they
+        were converted with.  A file that carries its own conversion
+        factors can be read years later without matching the library
+        version that produced it.  Fills ``stored_units`` for every
+        channel; that per-channel record says whether each channel was
+        actually rotated, since one without a calibration cannot be.
+        """
+        for ch in self.channels:
+            self._storage_coeffs(ch)
+        units = set(self.stored_units.values())
+        return {
+            "trigger_basis": self.trigger_basis,
+            "stored_units": units.pop() if len(units) == 1 else "mixed",
+            "volts_per_count": VOLTS_PER_ROC,
+        }
 
     def _to_trigger_basis(self, channel: int, i_vals, q_vals):
         """Samples as they are triggered on, and as they are stored.
@@ -778,32 +794,20 @@ class PulseCaptureSession(_CallbackHost):
     ) -> None:
         """Ingest one I/Q sample.  Dispatches on the session state.
 
-        During ESTIMATING, samples accumulate for the noise fit
-        (timestamps are not needed).  During CAPTURING, samples with a
-        None/NaN timestamp are dropped and counted — all pulse timing
-        derives from these timestamps, so NaN would silently poison
+        During ESTIMATING the sample goes down :meth:`feed_block`'s path
+        as a one-element block (timestamps are not needed).  During
+        CAPTURING it goes to :meth:`PulseCapture.process_sample`, the
+        per-sample reference the block path is held to; a None/NaN
+        timestamp is dropped and counted, because all pulse timing
+        derives from these timestamps and NaN would silently poison
         durations and tau.
         """
         i_val, q_val = self._to_trigger_basis(channel, i_val, q_val)
         if self.state is CaptureState.ESTIMATING:
-            buf = self._noise_buf.get(channel)
-            n = self._noise_n.get(channel, 0)
-            if buf is None or n >= self.noise_samples:
-                self._maybe_finish_estimation()
-                return
-            buf[n] = complex(i_val, q_val)
-            n += 1
-            self._noise_n[channel] = n
-            # Same rule as _absorb_noise: a channel that has just filled
-            # always reports, otherwise the wall clock decides.  Two
-            # different rate limits for one callback was one too many.
-            self._progress_dirty = True
-            if (n >= self.noise_samples
-                    or time.monotonic() - self._last_progress_t
-                    >= self.progress_interval_s):
-                self._emit_progress()
-            if n >= self.noise_samples:
-                self._maybe_finish_estimation()
+            self._feed_block_prepared(
+                channel, np.array([i_val]), np.array([q_val]),
+                np.array([np.nan if timestamp is None else timestamp],
+                         dtype=np.float64))
             return
 
         if self.state is not CaptureState.CAPTURING or self.pcap is None:
@@ -846,15 +850,9 @@ class PulseCaptureSession(_CallbackHost):
         self._feed_block_prepared(channel, I, Q, T)
 
     def _feed_block_prepared(self, channel: int, I, Q, T) -> None:
-        """feed_block's body, for samples already in the trigger basis.
-
-        Split out because the tail held across the end of noise training
-        is drained back through here.  Routing that through feed_block
-        applied the basis transform to it a second time -- for the one
-        block after the transition, on the one channel that filled its
-        quota early.  Which is why it needed several channels to show
-        up at all.
-        """
+        """feed_block's body, for samples already in the trigger basis;
+        the tail held across the end of noise training re-enters here so
+        it is not transformed twice."""
         n = I.shape[0]
         if not (n == Q.shape[0] == T.shape[0]):
             raise ValueError("feed_block needs equal-length arrays")
@@ -897,16 +895,23 @@ class PulseCaptureSession(_CallbackHost):
 
     def _hold_post_noise(self, channel: int, I: np.ndarray, Q: np.ndarray,
                          T: np.ndarray) -> None:
-        """Stash a block tail until the session starts capturing."""
+        """Stash a block tail until the session starts capturing.
+
+        Bounded at a training span or the block that just arrived,
+        whichever is longer, keeping the newest samples: a channel the
+        stream never delivers would otherwise grow the other channels'
+        holds for as long as the session runs.  The newest so that what
+        is drained runs on into the live stream with no gap for the edge
+        detector to read as a jump.
+        """
+        cap = max(self.noise_samples, I.shape[0])
         held = self._pending_post_noise.get(channel)
-        if held is None:
-            self._pending_post_noise[channel] = (I.copy(), Q.copy(),
-                                                 T.copy())
-        else:
-            self._pending_post_noise[channel] = (
-                np.concatenate((held[0], I)),
-                np.concatenate((held[1], Q)),
-                np.concatenate((held[2], T)))
+        if held is not None:
+            I, Q, T = (np.concatenate((held[0], I)),
+                       np.concatenate((held[1], Q)),
+                       np.concatenate((held[2], T)))
+        self._pending_post_noise[channel] = (
+            I[-cap:].copy(), Q[-cap:].copy(), T[-cap:].copy())
 
     def _drain_post_noise(self) -> None:
         """Feed everything held during training, now that we capture."""
@@ -1000,8 +1005,8 @@ class PulseCaptureSession(_CallbackHost):
     # ── Internals ─────────────────────────────────────────────────
 
     def _build_templates(self) -> None:
-        """Size the trigger-aligned stacking window from the ring, so it
-        covers the longest expected pulse without unbounded memory."""
+        """Trigger-aligned stacking window: half the ring, capped at
+        20000 samples so a PFB template stays bounded in memory."""
         post = max(64, min(self.buf_size // 2, 20000))
         self.templates = PulseTemplateSet(
             pre_samples=max(8, post // 10), post_samples=post,
@@ -1043,8 +1048,8 @@ class PulseCaptureSession(_CallbackHost):
             # against the new one.
             self.pcap.noise_stats = self.noise_stats
             self.pcap.reset_edge_history()
-            if self.writer is not None:
-                self.writer.update_noise_stats(self.noise_stats)
+            self._to_writer("update_noise_stats", self.noise_stats,
+                            what="noise update")
             self.pcap.freeze_triggers = False
 
         self.state = CaptureState.CAPTURING
@@ -1076,20 +1081,7 @@ class PulseCaptureSession(_CallbackHost):
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
                 capture_params[key] = self.sample_rate
-            # Written so the file describes itself: the basis and units
-            # of the stored samples, and the counts-to-volts constant
-            # they were converted with.  A capture that carries its own
-            # conversion factors can be read years later without
-            # matching the library version that produced it.
-            capture_params.setdefault("trigger_basis", self.trigger_basis)
-            for ch in self.channels:          # fills stored_units
-                self._storage_coeffs(ch)
-            units = set(self.stored_units.values())
-            capture_params.setdefault(
-                "stored_units",
-                units.pop() if len(units) == 1 else "mixed")
-            capture_params.setdefault("volts_per_count",
-                                      VOLTS_PER_ROC)
+            capture_params.update(self.storage_description())
             try:
                 self.writer = PulseHDF5Writer(
                     self.hdf5_path,
@@ -1164,7 +1156,7 @@ class _Pending:
 
 
 class IncrementalPulseMatcher:
-    """Streaming version of trigger_capture's ``_match_pulses``.
+    """Pairs pulses from the two streams by trigger time as they arrive.
 
     Pulses from the two streams are paired per channel when their
     trigger times fall within ``window_s`` (best match wins).  A pulse
@@ -1344,7 +1336,11 @@ class DualPulseCaptureSession(_CallbackHost):
             -decimated_stream_delay_s(sampling_to_decimation(slow_rate))
             if slow_time_offset_s is None else slow_time_offset_s)
         # Both the writer and the per-stream sessions need these: the
-        # writer records them, the sessions rotate with them.
+        # writer records them, the sessions rotate with them.  One
+        # calibration serves both streams because the PFB source scales
+        # its samples to the slow stream's ADC counts (sources.py); that
+        # scale is checked in mock and on loopback, not yet on a board
+        # (tag checkpoint-validate-pfb-receiver).
         self.df_calibrations = df_calibrations
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
@@ -1358,40 +1354,6 @@ class DualPulseCaptureSession(_CallbackHost):
 
         self.writer = None
         self.time_origin_epoch: Optional[float] = None
-        if hdf5_path is not None:
-            # The same self-description a single-stream file carries:
-            # both streams store in the basis and units the calibration
-            # decides, converted with the same constant.
-            basis = self.config.trigger_basis
-            cals = df_calibrations or {}
-            stored_units = {ch: storage_transform(cals.get(ch), basis)[1]
-                            for ch in self.channels}
-            units = set(stored_units.values())
-            try:
-                self.writer = DualPulseHDF5Writer(
-                    hdf5_path, self.channels,
-                    capture_params={
-                        "streamer_mode": "both",
-                        "threshold_sigma": self.config.threshold_sigma,
-                        "end_sigma": self.config.end_sigma,
-                        "margin_fraction": self.config.margin_fraction,
-                        "enable_pileup": self.config.enable_pileup,
-                        "save_to_end_confirmed":
-                            self.config.save_to_end_confirmed,
-                        "module": module,
-                        "sample_rate_slow": slow_rate,
-                        "sample_rate_fast": fast_rate,
-                        "slow_time_offset_s": self.slow_time_offset_s,
-                        "trigger_basis": basis,
-                        "stored_units": (units.pop() if len(units) == 1
-                                         else "mixed"),
-                        "volts_per_count": VOLTS_PER_ROC,
-                    },
-                    df_calibrations=df_calibrations,
-                    stored_units=stored_units)
-            except Exception as e:
-                self._error(f"Could not open HDF5 file "
-                            f"{hdf5_path}: {e}")
 
         # One event triggers both streams at its edge.  The fast stream
         # dates it to the sample; the slow stream's CIC spreads the
@@ -1453,7 +1415,8 @@ class DualPulseCaptureSession(_CallbackHost):
         # (single-trigger expiry): the ring must cover the full window
         # PLUS the grace, or the extraction races the ring.
         grace = self.matcher.grace_s
-        min_buf = int((self.config.max_pulse_ms / 1e3 * 1.5
+        min_buf = int((self.config.max_pulse_ms / 1e3
+                       * self.config.BUFFER_SAFETY
                        + grace + 0.1) * sample_rate)
         kwargs["buf_size"] = max(kwargs["buf_size"], min_buf)
         return PulseCaptureSession(
@@ -1478,12 +1441,55 @@ class DualPulseCaptureSession(_CallbackHost):
     # ── Lifecycle / feeding ───────────────────────────────────────
 
     def start(self) -> None:
+        """Begin both streams' noise estimation and open the file.
+
+        The file is opened here rather than at construction so that an
+        open failure reaches an ``on_error`` installed after
+        construction, as the single-stream session's does; the state
+        check in the streams' start() runs first, so a second start()
+        raises before it could truncate the file.
+        """
         self.slow.start()
         self.fast.start()
+        if self.hdf5_path is None:
+            return
+        # The rate-independent detection parameters; the per-stream ones
+        # differ by rate and have no slot in the dual file.
+        capture_params = {
+            "streamer_mode": "both",
+            "threshold_sigma": self.config.threshold_sigma,
+            "end_sigma": self.config.end_sigma,
+            "margin_fraction": self.config.margin_fraction,
+            "enable_pileup": self.config.enable_pileup,
+            "save_to_end_confirmed": self.config.save_to_end_confirmed,
+            "min_end_samples": self.config.min_end_samples,
+            "module": self.module,
+            "sample_rate_slow": self.slow.sample_rate,
+            "sample_rate_fast": self.fast.sample_rate,
+            "slow_time_offset_s": self.slow_time_offset_s,
+            # Both streams store in the basis and units the calibration
+            # decides, so either stream describes the file.
+            **self.slow.storage_description(),
+        }
+        try:
+            self.writer = DualPulseHDF5Writer(
+                self.hdf5_path, self.channels, capture_params,
+                df_calibrations=self.df_calibrations,
+                stored_units=self.slow.stored_units)
+            if self.time_origin_epoch is not None:
+                self.writer.set_time_origin(self.time_origin_epoch)
+        except Exception as e:
+            self.writer = None
+            self._error(f"Could not open HDF5 file {self.hdf5_path}: {e}")
+
+    def _slow_clock(self, t):
+        """Slow-stream timestamp(s) moved onto the shared time axis."""
+        if t is None or not self.slow_time_offset_s:
+            return t
+        return t + self.slow_time_offset_s
 
     def feed_slow(self, ch: int, i: float, q: float, t) -> None:
-        if t is not None and self.slow_time_offset_s:
-            t = t + self.slow_time_offset_s
+        t = self._slow_clock(t)
         self.slow.feed_sample(ch, i, q, t)
         self._advance_matcher("slow", t)
 
@@ -1501,18 +1507,12 @@ class DualPulseCaptureSession(_CallbackHost):
 
     def _feed_block(self, stream: str, session, ch: int, i_vals, q_vals,
                     timestamps) -> None:
-        """Feed one stream a block and advance its clock once.
-
-        Matcher time advances off the last usable timestamp in the
-        block rather than per sample -- _advance_matcher is throttled to
-        20 ms of stream time anyway, so the per-sample calls bought
-        nothing.
-        """
-        if stream == "slow" and self.slow_time_offset_s:
-            timestamps = (np.asarray(timestamps, dtype=np.float64)
-                          + self.slow_time_offset_s)
-        session.feed_block(ch, i_vals, q_vals, timestamps)
+        """Feed one stream a block and advance its clock once, off the
+        last usable timestamp in the block."""
         stamps = np.asarray(timestamps, dtype=np.float64)
+        if stream == "slow":
+            stamps = self._slow_clock(stamps)
+        session.feed_block(ch, i_vals, q_vals, stamps)
         usable = stamps[np.isfinite(stamps)]
         if usable.size:
             self._advance_matcher(stream, float(usable[-1]))

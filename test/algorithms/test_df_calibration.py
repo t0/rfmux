@@ -32,7 +32,7 @@ class _Board:
         return self.nco
 
     async def get_frequency(self, channel, module=1):
-        return self.freq[channel]
+        return self.freq.get(channel)
 
     def tuber_context(self):
         board = self
@@ -66,7 +66,12 @@ class _Board:
             else:
                 i.append([0.0] * n)
                 q.append([0.0] * n)
-        return {"i": i, "q": q}
+        return _Samples(i, q)
+
+
+class _Samples:
+    def __init__(self, i, q):
+        self.i, self.q = i, q
 
 
 def _measure(board, **kw):
@@ -107,7 +112,7 @@ def test_a_bifurcated_channel_is_warned_about_and_still_reported():
         s = await real_get(n, channel=channel, module=module)
         # Channel 2 lands on the other branch past the bias point.
         if board.freq[2] > FR[2]:
-            s["q"][1] = [v + 6e5 for v in s["q"][1]]
+            s.q[1] = [v + 6e5 for v in s.q[1]]
         return s
     board.get_samples = jumping
     with pytest.warns(UserWarning, match="channel 2.*bifurcated"):
@@ -136,7 +141,17 @@ def test_fitted_slope_is_exact_on_a_resonance(span, n, skew, off_fr):
 
     def s21(ff):
         return (1 + skew * (ff - fr) / 1e5) * (1 - 0.7 / (1 + 2j * (ff - fr) / lw))
-    got = 1.0 / df_calibration_from_sweep(f, s21(f), fb)
+    # The sweep is handed over in counts; the calibration is per volt.
+    got = 1.0 / df_calibration_from_sweep(f, s21(f) / VOLTS_PER_ROC, fb)
     exact = (s21(fb + 0.01) - s21(fb - 0.01)) / 0.02
     assert abs(got) / abs(exact) == pytest.approx(1.0, abs=1e-2)
     assert abs(np.degrees(np.angle(got / exact))) < 0.5
+
+
+def test_a_channel_with_no_tone_is_skipped_with_a_warning():
+    board = _Board(5)
+    with pytest.warns(UserWarning, match="channel 3 has no tone"):
+        cals = asyncio.run(measure_df_calibrations.__wrapped__(
+            board, channels=[1, 3], module=1))
+    assert set(cals) == {1}
+    assert board.freq == {1: FR[1], 2: FR[2]}, "no channel was moved but 1"

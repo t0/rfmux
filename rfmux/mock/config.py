@@ -130,7 +130,9 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)
     # -------------------------------------------------------------------------
-    "udp_noise_level": 10.0,   # Additive ADC noise [counts]
+    # Additive white ADC noise, sigma per slow sample [counts]; the PFB
+    # emitter derives its own sigma from this.
+    "udp_noise_level": 10.0,
     # scale_factor converts normalized S21 * amplitude to ADC readout counts.
     # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical
     # voltage for 0 dB round-trip gain with default dac_scale = 1.0 dBm and
@@ -138,6 +140,11 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Formula: 1880796.46 * 10**((dac_scale_dbm - adc_ref_dbm) / 20)
     #        = 1880796.46 * 10**(2.75 / 20) ≈ 2_580_128
     "scale_factor": 1880796.4604246316 * 10**(2.75 / 20.0),
+    # How a block of samples is evaluated: "hoisted" (per-batch
+    # invariants computed once) or "reference", the sample-by-sample
+    # loop the hoisted path is checked against in
+    # test/mock/test_batch_physics_parity.py.  Not a user knob.
+    "physics_batch_mode": "hoisted",
 
     # -------------------------------------------------------------------------
     # Quasiparticle pulse parameters (time-dependent nqp)
@@ -150,14 +157,14 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_amplitude": 2.0,       # multiplicative factor relative to base nqp
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 
-    # Random pulse amplitude distribution (random mode only)
+    # Pulse amplitude distribution (periodic and random modes)
     "pulse_random_amp_mode": "fixed",  # "fixed" | "uniform" | "lognormal"
     "pulse_random_amp_min": 1.1,        # for uniform mode (>= 1.0)
     "pulse_random_amp_max": 1.5,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode
     "pulse_random_amp_logsigma": 0.3,   # for lognormal mode (>= 0)
 
-    # Random pulse tau_decay distribution
+    # Pulse tau_decay distribution (periodic and random modes)
     # In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
     # while tau_decay (QP recombination) varies with QP density, temperature, etc.
     "pulse_random_tau_mode": "fixed",    # "fixed" | "uniform" | "lognormal"
@@ -349,7 +356,7 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
     cfg["pulse_random_tau_logsigma"] = tau_logsigma
 
     # ── TLS 1/f frequency noise ───────────────────────────────────
-    cfg["tls_noise_enabled"] = bool(cfg.get("tls_noise_enabled", False))
+    cfg["tls_noise_enabled"] = bool(cfg["tls_noise_enabled"])
     try:
         tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
     except Exception:

@@ -95,20 +95,23 @@ class BiasKidsDialog(QDialog):
         )
         basic_layout.addRow("Nonlinear Threshold:", self.nonlinear_threshold_spin)
 
-        # Which resonance fit the bias point, amplitude choice and df
-        # calibration come from.  Preselect the one the sweeps carry;
-        # bias_kids runs the chosen fit for sweeps that lack it.
+        # Which resonance fit the bias point and amplitude choice come
+        # from.  Preselect the one the sweeps carry; bias_kids runs the
+        # chosen fit for sweeps that lack it.
         self.fit_method_combo = QtWidgets.QComboBox()
         self.fit_method_combo.addItem("Nonlinear fit", "nonlinear")
         self.fit_method_combo.addItem("Skewed Lorentzian fit", "skewed")
         if "nonlinear" not in self._fits_present and "skewed" in self._fits_present:
             self.fit_method_combo.setCurrentIndex(1)
         self.fit_method_combo.setToolTip(
-            "The resonance fit the bias frequency, the amplitude choice and the\n"
-            "df calibration are read from.  Sweeps that do not carry it are\n"
-            "fitted now (about 20 ms each for the nonlinear fit, 4 ms for the\n"
-            "skewed).  The skewed fit has no nonlinearity parameter, so with it\n"
-            "only a jump in the sweep rules an amplitude out."
+            "The resonance fit the bias frequency and the amplitude choice are\n"
+            "read from.  Sweeps that do not carry it are fitted now (about 20 ms\n"
+            "each for the nonlinear fit, 4 ms for the skewed).  The skewed fit\n"
+            "has no nonlinearity parameter, so with it only a jump in the sweep\n"
+            "rules an amplitude out.\n"
+            "The df calibration is measured by stepping each tone at its bias\n"
+            "point (bias_kids' default, not adjustable here); this fit supplies\n"
+            "the curvature correction and stands in if the measurement fails."
         )
         basic_layout.addRow("Bias point from:", self.fit_method_combo)
         # The threshold reads the nonlinear fit's parameter; the skewed
@@ -180,7 +183,7 @@ class BiasKidsDialog(QDialog):
         self.apply_bandpass_checkbox = QCheckBox("Apply Bandpass Filter")
         self.apply_bandpass_checkbox.setChecked(True)
         self.apply_bandpass_checkbox.setToolTip(
-            "Apply a bandpass filter to the Q timestream before calculating variance.\n"
+            "Bandpass I and Q before finding their principal axis.\n"
             "This can help isolate the signal of interest from noise."
         )
         phase_layout.addRow("", self.apply_bandpass_checkbox)

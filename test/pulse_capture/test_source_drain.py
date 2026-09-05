@@ -36,9 +36,10 @@ def _loopback_pair():
 class _Sink:
     """What a source needs of a capture session, and what it fed."""
 
-    def __init__(self, channels=(1,)):
+    def __init__(self, channels=(1,), stream_lag=None):
         self.channels = list(channels)
         self.source = {}
+        self.stream_lag = stream_lag              # None: no lag bound
         self.calls = []                       # (channel, I values, stamps)
         self.count = 0
         self.stamps = []
@@ -114,7 +115,11 @@ def test_many_datagrams_per_wake(monkeypatch):
         time.sleep(0.1)              # let the kernel land them all
 
         awaited = {"n": 0}
-        loop_cls = asyncio.SelectorEventLoop
+        # The class asyncio.run builds on this platform (the proactor
+        # loop on Windows), so the patch cannot be inert.
+        probe = asyncio.new_event_loop()
+        loop_cls = type(probe)
+        probe.close()
         orig = loop_cls.sock_recv
 
         async def counting_sock_recv(self, sock, n):
@@ -132,8 +137,9 @@ def test_many_datagrams_per_wake(monkeypatch):
 
     assert sink.count == N, f"only {sink.count}/{N} packets arrived"
     # One awaited receive gets the first datagram; the drain takes the
-    # rest synchronously.  One per wake would need ~N.
-    assert awaited["n"] <= 3, \
+    # rest synchronously.  One per wake would need ~N; zero means the
+    # patch missed the loop in use.
+    assert 1 <= awaited["n"] <= 3, \
         f"{awaited['n']} awaited receives for {N} packets"
 
 
@@ -148,18 +154,12 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
                         ("127.0.0.1", port))
         time.sleep(0.1)
 
-        class _Sink:
-            channels = [1]
-            fed = 0                           # samples
-
-            def feed_block(self, ch, i, q, t):
-                _Sink.fed += len(i)
-
+        sink = _Sink()
         deadline = time.monotonic() + 3.0
         asyncio.run(src.run_pfb_source(
-            _Sink(), "127.0.0.1", [1], module=2,
-            should_stop=lambda: time.monotonic() > deadline or _Sink.fed >= 600))
-    assert _Sink.fed == 600                   # six packets of 100
+            sink, "127.0.0.1", [1], module=2,
+            should_stop=lambda: time.monotonic() > deadline or sink.count >= 600))
+    assert sink.count == 600                  # six packets of 100
 
 
 def _run_pfb(monkeypatch, blobs, channels, stop_after):
@@ -244,25 +244,17 @@ def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
             calls.append(1)
             return 1e-3 if len(calls) == 1 else 0.0
 
-        class _Sink:
-            channels = [1]
-            source = {}
-            stream_lag = staticmethod(lag)
-            fed = 0
-
-            def feed_block(self, ch, i, q, t):
-                _Sink.fed += len(i)
-
+        sink = _Sink(stream_lag=lag)
         deadline = time.monotonic() + 2.0
         monkeypatch.setattr(src, "_PFB_POP_MAX", 20)   # pops small enough to see
         asyncio.run(src.run_pfb_source(
-            _Sink(), "127.0.0.1", [1], module=2, max_lag_s=0.5e-3,
+            sink, "127.0.0.1", [1], module=2, max_lag_s=0.5e-3,
             should_stop=lambda: time.monotonic() > deadline))
-    flushed = _Sink.source["flushed_packets"]
+    flushed = sink.source["flushed_packets"]
     # 1 ms behind with a 0.5 ms bound: drop until within 0.25 ms, which
     # is 0.75 ms of packets at one per 41 us.
     assert 15 <= flushed <= 22, flushed
-    assert _Sink.fed == (200 - flushed) * 100
+    assert sink.count == (200 - flushed) * 100
 
 
 def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
@@ -293,3 +285,84 @@ def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
     assert sink.count == N * 100
     # 40 packets in pops of at most 8: one turn after each pop.
     assert yields["n"] >= math.ceil(N / 8), f"{yields['n']} yields"
+
+
+def test_slow_source_refuses_a_channel_beyond_the_packet_width(monkeypatch):
+    """A short packet carries 128 channels; asking for channel 200 of
+    it is an error naming the channel and the width, not a capture that
+    trains forever on samples that never come."""
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
+        monkeypatch.setattr(src, "_flush", lambda sock: None)
+        send.sendto(bytes(readout_packet(0, version=streamer.SHORT_PACKET_VERSION)),
+                    ("127.0.0.1", port))
+        time.sleep(0.05)
+        with pytest.raises(ValueError, match=r"\[200\].*128"):
+            asyncio.run(src.run_slow_source(_Sink([1, 200]), "127.0.0.1",
+                                            module=1))
+
+
+def test_pfb_receive_thread_waits_on_a_quiet_socket(monkeypatch):
+    """On a quiet stream each receive waits out its timeout instead of
+    returning at once: a handful of calls over the streamer timeout,
+    not hundreds of thousands."""
+    calls = {"n": 0}
+
+    class Counting(streamer.PFBPacketReceiver):
+        def receive_batch(self, *a, **kw):
+            calls["n"] += 1
+            return super().receive_batch(*a, **kw)
+
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src.streamer, "PFBPacketReceiver", Counting)
+        with pytest.raises(TimeoutError):
+            asyncio.run(src.run_pfb_source(_Sink(), "127.0.0.1", [1], module=1))
+    # 0.3 s of quiet at a 50 ms receive timeout is about six calls.
+    assert calls["n"] < 50, f"{calls['n']} receive_batch calls"
+
+
+def test_pfb_source_raises_its_receivers_error(monkeypatch):
+    """A receiver thread that dies ends the capture with its error,
+    rather than as a stream gone quiet."""
+    class Failing(streamer.PFBPacketReceiver):
+        def receive_batch(self, *a, **kw):
+            raise RuntimeError("recvmmsg failed: boom")
+
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        monkeypatch.setattr(src.streamer, "PFBPacketReceiver", Failing)
+        with pytest.raises(RuntimeError, match="boom"):
+            asyncio.run(src.run_pfb_source(_Sink(), "127.0.0.1", [1], module=1))
+
+
+def test_dual_source_cancels_the_other_side_on_failure(monkeypatch):
+    """When one stream fails, the other is cancelled before the error
+    propagates, so it cannot go on feeding a stopped session."""
+    slow_state = {"cancelled": False}
+
+    async def slow(stop):
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            slow_state["cancelled"] = True
+            raise
+        return 0.0
+
+    async def failing_fast(*a, **kw):
+        raise TimeoutError("No PFB packets")
+
+    monkeypatch.setattr(src, "run_pfb_source", failing_fast)
+
+    class Session:
+        slow_feed = fast_feed = None
+
+    async def main():
+        # Checked inside the loop: asyncio.run cancels leftover tasks
+        # at shutdown, which would mask a side left running.
+        with pytest.raises(TimeoutError):
+            await src.run_dual_source(Session(), "127.0.0.1", [1],
+                                      slow_source=slow)
+        return slow_state["cancelled"]
+
+    assert asyncio.run(main())

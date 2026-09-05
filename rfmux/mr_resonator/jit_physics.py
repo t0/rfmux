@@ -16,9 +16,12 @@ All functions are JIT-compiled for 10-25x speedup over pure Python.
 
 Numba is a required dependency for this module.
 """
-import numpy as np
-from numba import jit, prange
+import platform
 import types as _types
+
+import numpy as np
+import numba
+from numba import jit, prange
 
 
 # ============================================================================
@@ -46,8 +49,7 @@ def _serial_twin(dispatcher, name, **jit_kwargs):
                                py.__defaults__, py.__closure__)
     twin.__qualname__ = name
     return jit(nopython=True, parallel=False, cache=True, **jit_kwargs)(twin)
-import platform
-import numba
+
 
 # Physical constants
 H = 6.626e-34  # Planck constant

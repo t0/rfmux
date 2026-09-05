@@ -282,24 +282,23 @@ namespace packets {
 	void PacketQueue::push(Packet&& packet) {
 		std::lock_guard<std::mutex> lock(mutex_);
 
-		// Check for sequence gaps
-		uint32_t seq = packet.seq();
-		if (stats_.packets_received > 0 && stats_.last_seq != 0) {
-			uint32_t expected_seq = stats_.last_seq + 1;
-			if (seq != expected_seq) {
-				stats_.sequence_gaps++;
-				// Unsigned subtraction wraps, so a counter rollover
-				// still yields the true distance. A reordered or
-				// duplicated packet looks like a gap of nearly 2^32
-				// instead; the reorder window already handles ordering,
-				// so treat anything in the top half as "not a loss"
-				// rather than adding billions to the tally.
-				uint32_t missing = seq - expected_seq;
-				if (missing < (1u << 31))
-					stats_.packets_missing += missing;
-			}
+		// Sequence accounting.  last_seq is a high-water mark, so a
+		// packet that arrives past the reorder window fills a hole
+		// already counted: it takes one back from packets_missing and
+		// moves nothing else.  Unsigned subtraction wraps, so a counter
+		// rollover still yields the true distance ahead, and a late or
+		// duplicated packet lands in the top half.
+		const uint32_t seq = packet.seq();
+		const uint32_t ahead = seq - (stats_.last_seq + 1);   // 0 in order
+		if (stats_.packets_received == 0 || stats_.last_seq == 0 || ahead == 0) {
+			stats_.last_seq = seq;
+		} else if (ahead < (1u << 31)) {
+			stats_.sequence_gaps++;
+			stats_.packets_missing += ahead;
+			stats_.last_seq = seq;
+		} else if (stats_.packets_missing > 0) {
+			stats_.packets_missing--;
 		}
-		stats_.last_seq = seq;
 		stats_.packets_received++;
 
 		// Check if queue is full

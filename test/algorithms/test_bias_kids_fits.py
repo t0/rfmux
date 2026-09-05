@@ -217,3 +217,67 @@ async def test_amplitude_choice_comes_from_the_fitted_nonlinearity():
     out = await bk.bias_kids(_Board(), results, module=1)
     assert out[1]["selected_amplitude"] == 0.01
     assert out[1]["nonlinear_fit_params"]["a"] == pytest.approx(0.2, abs=0.05)
+
+
+@pytest.mark.asyncio
+async def test_a_fit_past_bifurcation_leaves_the_raw_bias_point(monkeypatch):
+    # The fit is neither refit nor read: the tone goes where the raw
+    # sweep put it, while the amplitude guard still sees the fitted a.
+    monkeypatch.setattr("rfmux.algorithms.measurement.fitting_nonlinear."
+                        "fit_nonlinear_iq_multisweep",
+                        lambda *a, **k: pytest.fail("nonlinear fit ran"))
+    entry = _entry(a=0.9, amplitude=0.03)
+    entry["nonlinear_fit_params"] = {"fr": FR, "Qr": QR, "amp": 0.6, "phi": 0.1,
+                                     "a": 0.9, "i0": 1.0, "q0": 0.2}
+    entry["nonlinear_fit_success"] = True
+    raw = entry["bias_frequency"]
+    with pytest.warns(UserWarning, match=r"No suitable amplitude.*a=0\.900"):
+        out = await bk.bias_kids(_Board(), {1: entry}, module=1)
+    assert out[1]["bias_frequency"] == raw
+    assert "bias_frequency_source" not in out[1]
+
+
+@pytest.mark.asyncio
+async def test_skewed_choice_ignores_the_fitted_nonlinearity():
+    # Both sweeps carry a nonlinear fit, the louder one above the
+    # threshold; the skewed choice reads only the jump detector.
+    entries = {}
+    for k, (amp, a) in enumerate([(0.01, 0.2), (0.03, 0.9)]):
+        e = _entry(a=a, amplitude=amp)
+        e["nonlinear_fit_params"] = {"fr": FR, "Qr": QR, "amp": 0.6, "phi": 0.1,
+                                     "a": a, "i0": 1.0, "q0": 0.2}
+        e["nonlinear_fit_success"] = True
+        e["fit_params"] = {"fr": FR, "Qr": QR, "Qcre": QR / 0.6, "Qcim": 0.0}
+        entries[k] = e
+    out = await bk.bias_kids(_Board(), {"results_by_detector": {1: entries}},
+                             module=1, fit_method="skewed")
+    assert out[1]["selected_amplitude"] == 0.03
+
+
+@pytest.mark.asyncio
+async def test_a_failed_step_measurement_puts_the_tone_back():
+    class _FailingBoard(_Board):
+        reads = 0
+
+        async def get_samples(self, n, channel=None, module=None, average=False):
+            self.reads += 1
+            if self.reads == 2:
+                raise RuntimeError("board went away")
+            return _Samples(np.zeros(n), np.zeros(n))
+
+    board = _FailingBoard()
+    with pytest.warns(UserWarning, match="measuring the df calibration failed"):
+        out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    freqs = [f for kind, ch, f in board.log if kind == "frequency"]
+    assert board.freq[1] == freqs[0]
+    assert out[1]["df_calibration_source"] == "fit"
+
+
+@pytest.mark.asyncio
+async def test_legacy_format_entries_receive_the_fit():
+    entry = _entry()
+    results = {"results_by_iteration": [{"iteration": 0, "amplitude": 0.01,
+                                         "direction": "upward", "data": {1: entry}}]}
+    await bk.bias_kids(_Board(), results, module=1)
+    assert entry["nonlinear_fit_success"]
+    assert entry["bias_frequency_source"] == "nonlinear"

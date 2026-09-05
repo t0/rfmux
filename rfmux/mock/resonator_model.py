@@ -11,6 +11,7 @@ from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
 
 # Import JIT-compiled physics functions (numba is required)
 from ..mr_resonator import jit_physics
+from .config import defaults
 
 
 class MockResonatorModel:
@@ -29,10 +30,8 @@ class MockResonatorModel:
             An instance of the MockCRS to access its state (frequencies, amplitudes, etc.)
         """
         self.mock_crs = mock_crs  # Store a reference to the main MockCRS instance
-        
-        # Import default configuration from Single Source of Truth
-        from .config import defaults as get_defaults
-        default_config = get_defaults()
+
+        default_config = defaults()
 
         # Store persistent mr_resonator objects to avoid memory leaks
         self.mr_lekids = []  # List of persistent MR_LEKID objects
@@ -47,22 +46,11 @@ class MockResonatorModel:
         # Noise configuration from SoT
         self.nqp_noise_enabled = default_config['nqp_noise_enabled']
         self.nqp_noise_std_factor = default_config['nqp_noise_std_factor']
-        # TLS (1/f) frequency wander — built in generate_resonators once
-        # the resonator count is known; None disables it entirely.
-        self._tls_generator = None
-        self._nqp_sens_cache = None
-        self._nqp_state_t = None
-        self._nqp_state_noise = None
-        self._nqp_state_values = []
-        self._nqp_const_arrays = None
-        self._nqp_tiled_cache = None
-        self._cache_key_params = {}
-        self.tls_noise_enabled = default_config.get('tls_noise_enabled',
-                                                    False)
-        self.tls_fractional_rms = default_config.get('tls_fractional_rms',
-                                                     1e-7)
-        self.tls_alpha = default_config.get('tls_alpha', 1.0)
-        self.tls_corner_hz = default_config.get('tls_corner_hz', 100.0)
+        self._reset_derived_state()
+        self.tls_noise_enabled = default_config['tls_noise_enabled']
+        self.tls_fractional_rms = default_config['tls_fractional_rms']
+        self.tls_alpha = default_config['tls_alpha']
+        self.tls_corner_hz = default_config['tls_corner_hz']
         
         # Current effects (affects Lk only, applied after physics-based base params)
         self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
@@ -175,7 +163,20 @@ class MockResonatorModel:
             self.L_junk_array[i] = lekid.L_junk
         
         self._param_arrays_cached = True
-    
+
+    def _reset_derived_state(self):
+        """Drop what depends on the resonator set: the TLS generator is
+        rebuilt once the count is known (None disables it), the QP-state
+        memo and its arrays refill from the new parameters."""
+        self._tls_generator = None
+        self._nqp_sens_cache = None
+        self._nqp_state_t = None
+        self._nqp_state_noise = None
+        self._nqp_state_values = []
+        self._nqp_const_arrays = None
+        self._nqp_tiled_cache = None
+        self._cache_key_params = {}
+
     # --- MR_Resonator Methods ---
     def generate_resonators(self, num_resonances=2, config=None,
                             progress=None):
@@ -187,10 +188,8 @@ class MockResonatorModel:
         Regeneration empties mr_lekids / mr_complex_resonators /
         base_nqp_values and refills them one resonator at a time.  The
         streamer thread reads those lists under _physics_lock, so without
-        holding it here it can sample a half-built set — e.g. 4 lekids
-        against 3 complex resonators, which crashed the streamer's noise
-        perturbation with a broadcast error.  RLock, so any re-entrant
-        s21 call made during generation is fine.
+        holding it here it can sample a half-built set.  RLock, so any
+        re-entrant s21 call made during generation is fine.
         """
         with self._physics_lock:
             return self._generate_resonators_locked(num_resonances, config,
@@ -214,7 +213,6 @@ class MockResonatorModel:
             if getattr(self.mock_crs, '_physics_config', None):
                 config = self.mock_crs._physics_config
             else:
-                from .config import defaults
                 config = defaults()
         
         print('Using config:', {k: v for k, v in config.items() if k in ['num_resonances', 'freq_start', 'freq_end', 'T', 'Popt']})
@@ -313,24 +311,17 @@ class MockResonatorModel:
         self.last_pulse_time = {}
         self.last_update_time = 0  # Reset time tracking so pulses work after reconfiguration
         
-        # Configure noise parameters from config
-        # Uses defaults from mock_crs_helper.py if not specified
-        self.tls_noise_enabled = config.get('tls_noise_enabled', False)
-        self.tls_fractional_rms = config.get('tls_fractional_rms', 1e-7)
-        self.tls_alpha = config.get('tls_alpha', 1.0)
-        self.tls_corner_hz = config.get('tls_corner_hz', 100.0)
-        self._tls_generator = None  # rebuilt below once count is known
-        self._nqp_sens_cache = None  # depends on resonator params
-        self._nqp_state_t = None
-        self._nqp_state_noise = None
-        self._nqp_state_values = []
-        self._nqp_const_arrays = None
-        self._nqp_tiled_cache = None
-        self._cache_key_params = {}
+        # Noise parameters: *config* always carries every key (the CRS
+        # merges it over defaults()).
+        self.tls_noise_enabled = config['tls_noise_enabled']
+        self.tls_fractional_rms = config['tls_fractional_rms']
+        self.tls_alpha = config['tls_alpha']
+        self.tls_corner_hz = config['tls_corner_hz']
+        self._reset_derived_state()
 
-        self.nqp_noise_enabled = config.get('nqp_noise_enabled', True)
-        self.nqp_noise_std_factor = config.get('nqp_noise_std_factor', 0.001)  # Default 0.1% noise if not in config
-        
+        self.nqp_noise_enabled = config['nqp_noise_enabled']
+        self.nqp_noise_std_factor = config['nqp_noise_std_factor']
+
         # Update tolerance settings from config (keep existing if not specified or None)
         self._tolerance_config['cache_freq_tolerance'] = config.get('cache_freq_tolerance', self._tolerance_config['cache_freq_tolerance'])
         self._tolerance_config['cache_amp_tolerance'] = config.get('cache_amp_tolerance', self._tolerance_config['cache_amp_tolerance'])
@@ -340,28 +331,11 @@ class MockResonatorModel:
               f"amp={self._tolerance_config['cache_amp_tolerance']}, "
               f"QP threshold={self._tolerance_config['qp_change_threshold']*100:.1f}%")
 
-        # Update pulse configuration with all pulse parameters from config
-        # This ensures tau values persist through reconfiguration
-        self.pulse_config.update({
-            'mode': config.get('pulse_mode', 'none'),
-            'period': config.get('pulse_period', 10.0),
-            'probability': config.get('pulse_probability', 0.001),
-            'tau_rise': config.get('pulse_tau_rise', 1e-6),
-            'tau_decay': config.get('pulse_tau_decay', 5e-3),
-            'amplitude': config.get('pulse_amplitude', 2.0),
-            'resonators': config.get('pulse_resonators', 'all'),
-            'random_amp_mode': config.get('pulse_random_amp_mode', 'fixed'),
-            'random_amp_min': config.get('pulse_random_amp_min', 1.5),
-            'random_amp_max': config.get('pulse_random_amp_max', 3.0),
-            'random_amp_logmean': config.get('pulse_random_amp_logmean', 0.7),
-            'random_amp_logsigma': config.get('pulse_random_amp_logsigma', 0.3),
-            'random_tau_mode': config.get('pulse_random_tau_mode', 'fixed'),
-            'random_tau_min': config.get('pulse_random_tau_min', 5e-4),
-            'random_tau_max': config.get('pulse_random_tau_max', 5e-3),
-            'random_tau_logmean': config.get('pulse_random_tau_logmean', -6.9),
-            'random_tau_logsigma': config.get('pulse_random_tau_logsigma', 0.5),
-        })
-        
+        # Every pulse setting, so tau values survive a reconfiguration.
+        # pulse_config's keys are the config's pulse_* keys, prefix off.
+        self.pulse_config.update(
+            {k: config['pulse_' + k] for k in self.pulse_config})
+
         print(f"Pulse config updated: tau_rise={self.pulse_config['tau_rise']}, tau_decay={self.pulse_config['tau_decay']}, random_tau_mode={self.pulse_config['random_tau_mode']}")
 
         # Step 1: Create a reference MR_complex_resonator to compute Lk and R from T and Popt
@@ -610,31 +584,6 @@ class MockResonatorModel:
         else:
             self._tls_generator = None
 
-        # Configure pulse events if specified in config
-        pulse_mode = config.get('pulse_mode', 'none')
-        if pulse_mode != 'none':
-            self.set_pulse_mode(
-                pulse_mode,
-                period=config.get('pulse_period', 10.0),
-                probability=config.get('pulse_probability', 0.001),
-                tau_rise=config.get('pulse_tau_rise', 1e-6),
-                tau_decay=config.get('pulse_tau_decay', 1e-3),
-                amplitude=config.get('pulse_amplitude', 2.0),
-                resonators=config.get('pulse_resonators', 'all'),
-                # Random amplitude distribution
-                random_amp_mode=config.get('pulse_random_amp_mode', 'fixed'),
-                random_amp_min=config.get('pulse_random_amp_min', 1.5),
-                random_amp_max=config.get('pulse_random_amp_max', 3.0),
-                random_amp_logmean=config.get('pulse_random_amp_logmean', 0.7),
-                random_amp_logsigma=config.get('pulse_random_amp_logsigma', 0.3),
-                # Random tau_decay distribution
-                random_tau_mode=config.get('pulse_random_tau_mode', 'fixed'),
-                random_tau_min=config.get('pulse_random_tau_min', 5e-4),
-                random_tau_max=config.get('pulse_random_tau_max', 5e-3),
-                random_tau_logmean=config.get('pulse_random_tau_logmean', -6.9),
-                random_tau_logsigma=config.get('pulse_random_tau_logsigma', 0.5),
-            )
-        
         self.invalidate_caches()
 
     def s21_lc_response(self, frequency, amplitude=1.0, pulse_time=None):
@@ -998,7 +947,8 @@ class MockResonatorModel:
         """Noise-free |S21| over *frequencies*, the state re-converged at
         each point as it is when the tone actually sits there.
 
-        The dip search wants thousands of points.  Through s21_lc_response
+        The dip search sweeps a few hundred points per resonator (about
+        130 coarse, then 101 fine), times the array.  Through s21_lc_response
         each one pays the whole single-point path (lock, cache lookup,
         list rebuilds), eight times the two kernels it comes down to; and
         the state cannot be converged once for the grid, since a frozen
@@ -1344,21 +1294,22 @@ class MockResonatorModel:
 
     def _sample_random_pulse_amplitude(self):
         """Sample a pulse amplitude based on configured distribution.
-        
-        Works in all pulse modes (periodic, random, manual).
-        Returns the config default when random_amp_mode is 'fixed'.
+
+        Called by the periodic and random triggers; a manual pulse takes
+        the amplitude its caller passes, else the configured one.  Returns
+        the config default when random_amp_mode is 'fixed'.
         """
-        mode = self.pulse_config.get('random_amp_mode', 'fixed')
+        mode = self.pulse_config['random_amp_mode']
         if mode == 'uniform':
-            amin = float(self.pulse_config.get('random_amp_min', 1.5))
-            amax = float(self.pulse_config.get('random_amp_max', 3.0))
+            amin = float(self.pulse_config['random_amp_min'])
+            amax = float(self.pulse_config['random_amp_max'])
             amp = np.random.uniform(amin, amax)
         elif mode == 'lognormal':
-            mu = float(self.pulse_config.get('random_amp_logmean', 0.7))
-            sigma = float(self.pulse_config.get('random_amp_logsigma', 0.3))
+            mu = float(self.pulse_config['random_amp_logmean'])
+            sigma = float(self.pulse_config['random_amp_logsigma'])
             amp = np.random.lognormal(mean=mu, sigma=sigma)
         else:
-            amp = float(self.pulse_config.get('amplitude', 2.0))
+            amp = float(self.pulse_config['amplitude'])
         # Enforce non-decreasing QP unless explicitly configured otherwise
         return max(1.0, amp)
 
@@ -1368,21 +1319,22 @@ class MockResonatorModel:
         In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
         while tau_decay (QP recombination) varies with QP density, temperature,
         material defects, etc.  This method randomises tau_decay only.
-        
-        Works in all pulse modes (periodic, random, manual).
-        Returns the config default when random_tau_mode is 'fixed'.
+
+        Called by the periodic and random triggers; a manual pulse takes
+        the configured tau_decay.  Returns the config default when
+        random_tau_mode is 'fixed'.
         """
-        mode = self.pulse_config.get('random_tau_mode', 'fixed')
+        mode = self.pulse_config['random_tau_mode']
         if mode == 'uniform':
-            tmin = float(self.pulse_config.get('random_tau_min', 5e-4))
-            tmax = float(self.pulse_config.get('random_tau_max', 5e-3))
+            tmin = float(self.pulse_config['random_tau_min'])
+            tmax = float(self.pulse_config['random_tau_max'])
             tau = np.random.uniform(tmin, tmax)
         elif mode == 'lognormal':
-            mu = float(self.pulse_config.get('random_tau_logmean', -6.9))
-            sigma = float(self.pulse_config.get('random_tau_logsigma', 0.5))
+            mu = float(self.pulse_config['random_tau_logmean'])
+            sigma = float(self.pulse_config['random_tau_logsigma'])
             tau = np.random.lognormal(mean=mu, sigma=sigma)
         else:
-            tau = float(self.pulse_config.get('tau_decay', 5e-3))
+            tau = float(self.pulse_config['tau_decay'])
         # tau_decay must be strictly positive
         return max(1e-9, tau)
 

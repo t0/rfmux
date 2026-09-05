@@ -258,12 +258,8 @@ namespace packets {
 		size_t queue_max_size_;
 		size_t flush_threshold_;
 
-		// recvmmsg scratch, allocated once and reused. Built per call
-		// it cost batch_size * max_packet_size of allocation EVERY
-		// call -- 17 MB at batch_size 2048 -- which is what kept the
-		// batch small, which in turn made the receive thread reacquire
-		// the GIL every few packets and lose half the stream under
-		// load. Only ever touched by the single thread that calls
+		// recvmmsg scratch, reused across calls (why: see
+		// receive_batch). Touched only by the thread that calls
 		// receive_batch.
 #ifdef __linux__
 		std::vector<struct mmsghdr> rx_msgs_;

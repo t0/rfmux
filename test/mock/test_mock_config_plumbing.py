@@ -1,7 +1,7 @@
 """
 Mock config plumbing regressions.
 
-Two bugs found while designing the TLS/1-f noise model:
+Three bugs found while designing the TLS/1-f noise model:
 
 1. Several sites read ``mock_crs.physics_config`` (no underscore) — an
    attribute that does not exist — so the dialog's cache-tuning

@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from rfmux.mock.udp_streamer import MockCRSStreamer
-from rfmux.streamer import SS_PER_SECOND
+from rfmux.streamer import ts_to_seconds
 
 
 def _streamer(dec, n_res=2):
@@ -23,10 +23,6 @@ def _streamer(dec, n_res=2):
     st.slow_socket = None               # build, stamp, count; do not send
     st.start_datetime = datetime(2026, 1, 1)
     return crs, st
-
-
-def _seconds(ts):
-    return ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / SS_PER_SECOND
 
 
 @pytest.mark.parametrize("dec", [6, 0])
@@ -51,10 +47,10 @@ def test_one_physics_call_per_block_and_one_packet_per_frame(monkeypatch):
     stamps = []
     real_send = st._send_slow_packet
 
-    def spy(module_num, dec, samples):
-        real_send(module_num, dec, samples)
+    def spy(module_num, dec, samples, t_frame):
+        real_send(module_num, dec, samples, t_frame)
         stamps.append((st.seq_counters[module_num] - 1,
-                       _seconds(crs._last_timestamp)))
+                       ts_to_seconds(crs._last_timestamp)))
     monkeypatch.setattr(st, "_send_slow_packet", spy)
 
     rate = 625e6 / 256 / 64 / 2 ** 6
@@ -90,9 +86,9 @@ def test_pulses_starting_inside_a_block_reach_its_frames():
     seen = []
     real_send = st._send_slow_packet
 
-    def spy(module_num, dec, samples):
+    def spy(module_num, dec, samples, t_frame):
         seen.append(samples[0])
-        real_send(module_num, dec, samples)
+        real_send(module_num, dec, samples, t_frame)
     st._send_slow_packet = spy
     t = 0.0
     for _ in range(20):                      # 1 s of stream
@@ -112,12 +108,27 @@ def test_block_carries_the_signal_on_the_biased_channels():
     seen = []
     real_send = st._send_slow_packet
 
-    def spy(module_num, dec, samples):
+    def spy(module_num, dec, samples, t_frame):
         seen.append(np.abs(samples[:4]).copy())
-        real_send(module_num, dec, samples)
+        real_send(module_num, dec, samples, t_frame)
     st._send_slow_packet = spy
     st._emit_slow_block(1, 0.0, 6, 8)
     seen = np.array(seen)
     noise = crs._physics_config.get("udp_noise_level", 10.0)
     assert np.all(seen[:, :2] > 20 * noise)      # the two biased tones
     assert np.all(seen[:, 2:] < 10 * noise)      # unbiased: noise only
+
+
+@pytest.mark.parametrize("dec", [0, 6])
+def test_unbiased_channels_carry_the_configured_noise_floor(dec):
+    """udp_noise_level is the slow stream's sigma at every stage; the
+    PFB emitter scales its own noise up from this same floor, so the
+    two streams' noise ratio is pinned once this end is."""
+    crs, st = _streamer(dec)
+    seen = []
+    st._send_slow_packet = lambda module_num, _dec, samples, t_frame: \
+        seen.append(samples[2:].copy())              # no tone on these
+    st._emit_slow_block(1, 0.0, dec, 8)
+    x = np.concatenate(seen)
+    sigma = crs._physics_config["udp_noise_level"]
+    assert np.std(x.real) == pytest.approx(sigma, rel=0.1)

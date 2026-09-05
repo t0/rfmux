@@ -30,6 +30,7 @@ import time
 import threading
 import signal
 import atexit
+import traceback
 from datetime import datetime, timedelta
 import numpy as np
 import platform
@@ -43,7 +44,8 @@ from ..streamer import (
     STREAMER_PORT, PFB_STREAMER_PORT,
 )
 from ..core.transferfunctions import (
-    PFB_SAMPLING_FREQ, decimated_stream_delay_s)
+    CIC1_DECIMATION, PFB_SAMPLING_FREQ, decimated_stream_delay_s,
+    decimation_to_sampling)
 
 # ── Global cleanup registry ──────────────────────────────────────
 
@@ -75,41 +77,42 @@ def _register_global_cleanup():
 
 # ── Constants ─────────────────────────────────────────────────────
 
-PFB_RATE = PFB_SAMPLING_FREQ   # ≈2.44 MHz per PFB channel
 PFB_BATCH = 64              # PFB samples per dec-0 slow sample (fundamental quantum)
+
+#: Wire mode for each channel count the PFB packet can express.
+PFB_MODE_FOR_CHANNELS = {1: 0, 2: 1, 4: 2}
 
 
 class MockCRSStreamer(threading.Thread):
-    """Unified mock streamer: emits slow and/or PFB packets from one thread.
-
-    Always emits slow ReadoutPackets at the decimation-determined cadence.
-    When PFB is enabled (via ``enable_pfb()``), also generates each slow
-    frame's PFB samples in one physics call and sends them as
-    1000-sample PFBPackets.  Both packet types share one simulation
-    clock, so their timestamps agree.
-    """
+    """One thread, one simulation clock: slow ReadoutPackets always, PFBPackets when enabled."""
 
     def __init__(self, mock_crs, host='239.192.0.2', port=STREAMER_PORT,
-                 modules_to_stream=None, use_multicast=True):
+                 modules_to_stream=None):
         super().__init__(daemon=True)
         self.mock_crs = mock_crs
         self.host = host
         self.port = port
-        self.use_multicast = use_multicast
         self.modules_to_stream = modules_to_stream
 
         # ── Slow state ────────────────────────────────────────
         self.slow_socket = None
-        self.seq_counters = {m: 0 for m in range(1, 5)}
+        self.seq_counters = {m: 0 for m in range(1, 5)}   # wire sequence numbers
         self.packets_sent = 0
+        self._failing = set()       # streams (module number or "PFB") in an outage
 
-        # ── PFB state (toggled at runtime) ────────────────────
+        # ── PFB state (owned by the streamer thread) ──────────
         self.pfb_enabled = False
         self.pfb_channels: list = []
         self.pfb_module: int = 1
         self.pfb_socket = None
         self.pfb_seq = 0
         self.pfb_packets_sent = 0
+        # enable_pfb() is called from the server thread; it leaves its
+        # (channels, module) here and the streamer thread adopts it at
+        # its next block, so a frame is never cut with one channel set
+        # and stamped with another.
+        self._pfb_request = None
+        self._pfb_adopted = None
         # Samples generated but not yet sent, and the time of the first
         # of them: a frame's physics is one call, packets are cut from
         # it at the hardware's size.
@@ -117,9 +120,11 @@ class MockCRSStreamer(threading.Thread):
         self._pfb_buf_t0 = 0.0
 
         # ── Timing ────────────────────────────────────────────
+        # Stream seconds at the start of the next block.  The physics,
+        # the slow stamps and the PFB stamps all read it, so the streams
+        # agree whichever modules carry tones.
         self.start_datetime = None
-        self.frame_index = 0
-        self.total_elapsed_time = {m: 0.0 for m in range(1, 5)}
+        self.t_stream = 0.0
         self.last_decimation = None
 
         # ── Lifecycle ─────────────────────────────────────────
@@ -127,13 +132,13 @@ class MockCRSStreamer(threading.Thread):
         _active_streamers.append(self)
         _register_global_cleanup()
 
-        mode = "multicast" if use_multicast else "unicast"
-        print(f"[Streamer] MockCRSStreamer initialized ({mode}) → {host}:{port}")
+        print(f"[Streamer] MockCRSStreamer initialized → {host}:{port}")
 
     # ── Socket management ─────────────────────────────────────
 
     def _make_multicast_socket(self):
-        """Create a UDP socket configured for multicast on loopback."""
+        """UDP send socket; the multicast options are inert for a
+        unicast destination."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
         sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_LOOP, 1)
         # TTL 0 means "never leaves this host". The mock streams to the
@@ -186,17 +191,30 @@ class MockCRSStreamer(threading.Thread):
     # ── PFB toggle (called from MockUDPManager) ──────────────
 
     def enable_pfb(self, channels, module):
-        """Enable PFB packet emission (safe to call while thread is running)."""
-        self.pfb_channels = list(channels)[:4]
-        self.pfb_module = module
+        """Request PFB emission of *channels* on *module*; the streamer
+        thread adopts it at its next block."""
+        if len(channels) not in PFB_MODE_FOR_CHANNELS:
+            raise ValueError(f"PFB packets carry 1, 2 or 4 channels, not "
+                             f"{len(channels)}")
+        self._init_pfb_socket()
+        self._pfb_request = (tuple(channels), module)
+        self.pfb_enabled = True
+        print(f"[Streamer] PFB enabled — PFB{len(channels)} ch={list(channels)} "
+              f"module={module}")
+
+    @property
+    def pfb_adopted(self):
+        return self._pfb_request is self._pfb_adopted
+
+    def _adopt_pfb_request(self):
+        req = self._pfb_request
+        if req is None or req is self._pfb_adopted:
+            return
+        self._pfb_adopted = req
+        self.pfb_channels, self.pfb_module = list(req[0]), req[1]
         self.pfb_seq = 0
         self.pfb_packets_sent = 0
         self._pfb_buf = None
-        self._init_pfb_socket()
-        self.pfb_enabled = True
-        n = len(self.pfb_channels)
-        mode_str = {1: 'PFB1', 2: 'PFB2', 4: 'PFB4'}.get(n, f'PFB{n}')
-        print(f"[Streamer] PFB enabled — {mode_str} ch={self.pfb_channels} module={module}")
 
     def disable_pfb(self):
         """Disable PFB packet emission (safe to call while thread is running)."""
@@ -229,71 +247,23 @@ class MockCRSStreamer(threading.Thread):
 
         try:
             while self.running:
+                t_wall_start = time.perf_counter()
                 try:
-                    t_wall_start = time.perf_counter()
-
-                    # ── Read current decimation ───────────────
-                    dec = self.mock_crs._fir_stage
-                    if dec is None:
-                        dec = 6
-                    slow_rate = 625e6 / 256 / 64 / (2 ** dec)
-                    frame_time = 1.0 / slow_rate
-
-                    # Track decimation changes for continuous timestamps
-                    if dec != self.last_decimation:
-                        if self.last_decimation is not None:
-                            old_rate = 625e6 / 256 / 64 / (2 ** self.last_decimation)
-                            for m in self.seq_counters:
-                                self.total_elapsed_time[m] += self.seq_counters[m] / old_rate
-                            # Reset sequence counters for new rate
-                            self.seq_counters = {m: 0 for m in range(1, 5)}
-                        print(f"[Streamer] Decimation → stage {dec}, "
-                              f"slow rate {slow_rate:.1f} Hz")
-                        self.last_decimation = dec
-                        self._pfb_buf = None
-
-                    # Simulation time for this block of frames
-                    t_frame = (self.total_elapsed_time.get(1, 0.0)
-                               + self.seq_counters.get(1, 0) / slow_rate)
-                    n_block = self.slow_block_len(dec)
-
-                    # ── PFB samples, one frame at a time (if enabled) ──
-                    if self.pfb_enabled and self.pfb_channels:
-                        for k in range(n_block):
-                            if not self.running:
-                                break
-                            self._emit_pfb_frame(t_frame + k / slow_rate, dec)
-                    else:
-                        self._pfb_buf = None
-
-                    # ── Slow packets (always) ─────────────────
-                    if self.modules_to_stream:
-                        modules = self.modules_to_stream
-                    else:
-                        modules = self._get_configured_modules()
-
-                    for module_num in modules:
-                        if not self.running:
-                            break
-                        self._emit_slow_block(module_num, t_frame, dec,
-                                              n_block)
-
-                    self.frame_index += n_block
-
-                    # ── Pace to real time ─────────────────────
-                    elapsed = time.perf_counter() - t_wall_start
-                    sleep_dur = frame_time * n_block - elapsed
-                    if sleep_dur > 0:
-                        time.sleep(sleep_dur)
-
+                    stream_seconds = self._run_block()
                 except KeyboardInterrupt:
                     break
                 except Exception as e:
-                    if self.running:
-                        print(f"[Streamer] Error in main loop: {e}")
-                        import traceback
-                        traceback.print_exc()
-                        time.sleep(0.01)
+                    if not self.running:
+                        break
+                    print(f"[Streamer] Error in main loop: {e}")
+                    traceback.print_exc()
+                    stream_seconds = self.SLOW_BLOCK_SECONDS
+
+                # Pace to real time whether or not the block succeeded,
+                # so a failure cannot speed up the streams that work.
+                sleep_dur = stream_seconds - (time.perf_counter() - t_wall_start)
+                if sleep_dur > 0:
+                    time.sleep(sleep_dur)
 
         finally:
             print(f"[Streamer] Stopped. Slow packets: {self.packets_sent}, "
@@ -301,6 +271,100 @@ class MockCRSStreamer(threading.Thread):
             self._cleanup_sockets()
             if self in _active_streamers:
                 _active_streamers.remove(self)
+
+    def _run_block(self):
+        """One block of frames on every stream; returns the stream
+        seconds it covered."""
+        dec = self.mock_crs._fir_stage
+        if dec is None:
+            dec = 6
+        slow_rate = decimation_to_sampling(dec)
+
+        if dec != self.last_decimation:
+            # Sequence numbers restart with the rate; the clock runs on.
+            self.seq_counters = {m: 0 for m in range(1, 5)}
+            print(f"[Streamer] Decimation → stage {dec}, "
+                  f"slow rate {slow_rate:.1f} Hz")
+            self.last_decimation = dec
+            self._pfb_buf = None
+
+        t_block = self.t_stream
+        n_block = self.slow_block_len(dec)
+        # The clock advances before anything is emitted: a stream that
+        # fails must not hold the others at a repeated block time.
+        self.t_stream = t_block + n_block / slow_rate
+
+        self._adopt_pfb_request()
+        pfb = self.pfb_enabled and bool(self.pfb_channels)
+        if pfb:
+            # Schedule the block's pulses on the PFB trigger grid before
+            # either stream is evaluated.  advance_pulses_to keeps only
+            # the pulses alive at the start of the span it is given, and
+            # the slow block, evaluated from t_block, must see every
+            # pulse the PFB frames do.
+            dt = PFB_BATCH / PFB_SAMPLING_FREQ
+            n_steps = n_block * 2 ** dec
+            self.mock_crs._resonator_model.advance_pulses_to(
+                t_block + (n_steps - 1) * dt, n_steps, dt)
+        else:
+            self._pfb_buf = None
+
+        modules = self.modules_to_stream or self._get_configured_modules()
+        for module_num in modules:
+            if not self.running:
+                break
+            self._emit_guarded(module_num, self._emit_slow_block,
+                               module_num, t_block, dec, n_block)
+
+        if pfb:
+            for k in range(n_block):
+                if not self.running:
+                    break
+                if not self._emit_guarded("PFB", self._emit_pfb_frame,
+                                          t_block + k / slow_rate, dec):
+                    break
+
+        return n_block / slow_rate
+
+    def _emit_guarded(self, stream, emit, *args):
+        """Run one stream's emitter; a failure is said once per outage
+        and leaves the other streams their pace.  True on success."""
+        try:
+            emit(*args)
+        except Exception as e:
+            if stream not in self._failing:
+                self._failing.add(stream)
+                print(f"[Streamer] {stream} physics failed, its packets "
+                      f"stop until it succeeds: {e!r}")
+            return False
+        self._failing.discard(stream)
+        return True
+
+    # ── Shared packet pieces ──────────────────────────────────
+
+    def _timestamp_at(self, seconds):
+        pkt_dt = self.start_datetime + timedelta(seconds=seconds)
+        return Timestamp(
+            y=int(pkt_dt.year % 100),
+            d=int(pkt_dt.timetuple().tm_yday),
+            h=int(pkt_dt.hour),
+            m=int(pkt_dt.minute),
+            s=int(pkt_dt.second),
+            ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
+            c=0, sbs=0,
+            source=TimestampSource.TEST,
+            recent=True,
+        )
+
+    def _serial(self):
+        serial = self.mock_crs._serial
+        return int(serial) if serial and serial.isdigit() else 0
+
+    def _scale_and_noise(self):
+        """(full scale of a unit response in counts, slow-stream noise sigma)."""
+        cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
+        return (cfg.get('scale_factor', 2 ** 21) * 256.0,
+                cfg.get('udp_noise_level', 10.0))
 
     # ── Slow packet emission ──────────────────────────────────
 
@@ -316,9 +380,9 @@ class MockCRSStreamer(threading.Thread):
 
     @classmethod
     def slow_block_len(cls, dec) -> int:
-        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
         return max(1, min(cls.SLOW_BLOCK_MAX,
-                          int(round(cls.SLOW_BLOCK_SECONDS * slow_rate))))
+                          int(round(cls.SLOW_BLOCK_SECONDS
+                                    * decimation_to_sampling(dec)))))
 
     def _emit_slow_block(self, module_num, t_frame, dec, n):
         """*n* consecutive slow frames for *module_num* from one physics
@@ -328,26 +392,21 @@ class MockCRSStreamer(threading.Thread):
             num_channels = SHORT_PACKET_CHANNELS
         else:
             num_channels = LONG_PACKET_CHANNELS
-        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
-
-        # ── Physics ───────────────────────────────────────────
-        cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
-        scale_factor = cfg.get('scale_factor', 2 ** 21)
-        full_scale = scale_factor * 256.0
-        noise_level = cfg.get('udp_noise_level', 10.0)
+        slow_rate = decimation_to_sampling(dec)
+        full_scale, noise_level = self._scale_and_noise()
 
         model = self.mock_crs._resonator_model
-        # Pulses that would start inside the block are scheduled on
-        # the frame grid first, as the PFB emitter does for its frame.
+        # Pulses that would start inside the block are scheduled first,
+        # on the frame grid; with PFB on, _run_block has already
+        # scheduled them on the finer PFB grid and this only prunes.
         if n > 1:
             model.advance_pulses_to(t_frame + (n - 1) / slow_rate, n,
                                     1.0 / slow_rate)
         # pulse_time is explicit (same escape hatch the PFB emitter uses):
-        # update_qp_densities_for_time is a monotonic ratchet, and with
-        # PFB enabled advance_pulses_to has already moved
-        # last_update_time to the end of the frame — without this the
-        # slow stream would be evaluated at the PFB's time, skewing it
-        # by up to one frame.
+        # update_qp_densities_for_time is a monotonic ratchet, and
+        # advance_pulses_to has already moved last_update_time to the
+        # end of the block — without this the slow stream would be
+        # evaluated there, skewing it by up to one block.
         channel_responses = model.calculate_module_response_coupled(
             module_num, num_samples=n, sample_rate=slow_rate,
             start_time=t_frame, pulse_time=t_frame,
@@ -359,45 +418,27 @@ class MockCRSStreamer(threading.Thread):
         noise = (np.random.normal(0, noise_level, (n, num_channels))
                  + 1j * np.random.normal(0, noise_level, (n, num_channels)))
         for k in range(n):
-            self._send_slow_packet(module_num, dec, signal[k] + noise[k])
+            self._send_slow_packet(module_num, dec, signal[k] + noise[k],
+                                   t_frame + k / slow_rate)
 
-    def _send_slow_packet(self, module_num, dec, channel_samples):
-        """Stamp, build and send one slow packet; advances the module's
-        sequence counter, which is what dates it."""
+    def _send_slow_packet(self, module_num, dec, channel_samples, t_frame):
+        """Stamp, build and send one slow packet whose samples describe
+        stream time *t_frame*; advances the module's sequence number."""
         version = (SHORT_PACKET_VERSION if self.mock_crs._short_packets
                    else LONG_PACKET_VERSION)
         seq = self.seq_counters[module_num]
-        slow_rate = 625e6 / 256 / 64 / (2 ** dec)
 
-        # ── Timestamp ─────────────────────────────────────────
-        total_elapsed = (self.total_elapsed_time.get(module_num, 0.0)
-                         + seq / slow_rate)
         # The samples describe the frame time; the hardware stamps the
         # packet later by the CIC group delay, so the mock does too.
         # TEMPORARY firmware behaviour: delete this term when the RTL
         # timestamps the decimated stream at its filter centroid (and
         # zero the default in DualPulseCaptureSession alongside).
-        total_elapsed += decimated_stream_delay_s(dec)
-        pkt_dt = self.start_datetime + timedelta(seconds=total_elapsed)
-        ts = Timestamp(
-            y=int(pkt_dt.year % 100),
-            d=int(pkt_dt.timetuple().tm_yday),
-            h=int(pkt_dt.hour),
-            m=int(pkt_dt.minute),
-            s=int(pkt_dt.second),
-            ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
-            c=0, sbs=0,
-            source=TimestampSource.TEST,
-            recent=True,
-        )
+        ts = self._timestamp_at(t_frame + decimated_stream_delay_s(dec))
 
-        # ── Build and send packet ─────────────────────────────
         pkt = ReadoutPacket(
             magic=STREAMER_MAGIC,
             version=version,
-            serial=(int(self.mock_crs._serial)
-                    if self.mock_crs._serial and self.mock_crs._serial.isdigit()
-                    else 0),
+            serial=self._serial(),
             num_modules=1,
             flags=0,
             fir_stage=dec | (0x8 if self.mock_crs._short_packets else 0),
@@ -445,18 +486,18 @@ class MockCRSStreamer(threading.Thread):
         n_groups = len(channels)
         n_sub = 2 ** dec
         n_time = n_sub * PFB_BATCH
-        cfg = getattr(self.mock_crs, '_physics_config', {}) or {}
-        scale_factor = cfg.get('scale_factor', 2 ** 21)
-        noise_level = cfg.get('udp_noise_level', 10.0)
-        pfb_noise_scale = cfg.get('pfb_noise_scale', 64.0)
-        full_scale = scale_factor * 256.0
+        full_scale, noise_level = self._scale_and_noise()
+        # The slow stream is this one decimated by CIC1_DECIMATION *
+        # 2**dec, so for white readout noise the PFB sigma is root that
+        # many times the slow floor udp_noise_level names.
+        pfb_noise = noise_level * np.sqrt(CIC1_DECIMATION * n_sub)
         model = self.mock_crs._resonator_model
-        model.advance_pulses_to(t_frame + (n_sub - 1) * PFB_BATCH / PFB_RATE,
-                                n_sub, PFB_BATCH / PFB_RATE)
+        model.advance_pulses_to(t_frame + (n_sub - 1) * PFB_BATCH / PFB_SAMPLING_FREQ,
+                                n_sub, PFB_BATCH / PFB_SAMPLING_FREQ)
         responses = model.calculate_module_response_coupled(
             self.pfb_module,
             num_samples=n_time,
-            sample_rate=PFB_RATE,
+            sample_rate=PFB_SAMPLING_FREQ,
             start_time=t_frame,
             pulse_time=t_frame,
         )
@@ -470,11 +511,8 @@ class MockCRSStreamer(threading.Thread):
                 slot_data = sig * full_scale
             else:
                 slot_data = np.zeros(n_time, dtype=np.complex128)
-            slot_noise = (
-                np.random.normal(0, noise_level * pfb_noise_scale, n_time)
-                + 1j * np.random.normal(0, noise_level * pfb_noise_scale,
-                                        n_time)
-            )
+            slot_noise = (np.random.normal(0, pfb_noise, n_time)
+                          + 1j * np.random.normal(0, pfb_noise, n_time))
             interleaved[slot_idx::n_groups] = slot_data + slot_noise
         if self._pfb_buf is None or len(self._pfb_buf) == 0:
             self._pfb_buf = interleaved
@@ -486,22 +524,17 @@ class MockCRSStreamer(threading.Thread):
             self._send_pfb_packet(self._pfb_buf[:per_packet],
                                   self._pfb_buf_t0)
             self._pfb_buf = self._pfb_buf[per_packet:]
-            self._pfb_buf_t0 += (per_packet // n_groups) / PFB_RATE
+            self._pfb_buf_t0 += (per_packet // n_groups) / PFB_SAMPLING_FREQ
 
     def _send_pfb_packet(self, interleaved, t_first):
         """Build and send one PFBPacket holding *interleaved* samples,
         stamped with the time of its first sample."""
         channels = self.pfb_channels
-        n_groups = len(channels)
         pkt = PFBPacket()
         pkt.magic = PFB_PACKET_MAGIC
         pkt.version = 1
-        pkt.mode = {1: 0, 2: 1, 4: 2}.get(n_groups, 2)
-        pkt.serial = (
-            int(self.mock_crs._serial)
-            if self.mock_crs._serial and self.mock_crs._serial.isdigit()
-            else 0
-        )
+        pkt.mode = PFB_MODE_FOR_CHANNELS[len(channels)]
+        pkt.serial = self._serial()
         # Slot fields are 0-indexed on the wire, like the module field.
         pkt.slot1 = channels[0] - 1 if len(channels) > 0 else 0
         pkt.slot2 = channels[1] - 1 if len(channels) > 1 else 0
@@ -515,19 +548,7 @@ class MockCRSStreamer(threading.Thread):
             + 1j * np.clip(interleaved.imag, -8388608, 8388607)
         )
         pkt[:] = clipped
-        # ── Timestamp ─────────────────────────────────────────
-        pkt_dt = self.start_datetime + timedelta(seconds=t_first)
-        ts = Timestamp(
-            y=int(pkt_dt.year % 100),
-            d=int(pkt_dt.timetuple().tm_yday),
-            h=int(pkt_dt.hour),
-            m=int(pkt_dt.minute),
-            s=int(pkt_dt.second),
-            ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
-            c=0, sbs=0,
-            source=TimestampSource.TEST,
-            recent=True,
-        )
+        ts = self._timestamp_at(t_first)
         pkt.ts = ts
         self.mock_crs._last_timestamp = ts
         if self.pfb_socket:
@@ -553,7 +574,7 @@ class MockCRSStreamer(threading.Thread):
 LOOPBACK_UNICAST = "127.0.0.1"
 
 
-def select_stream_destination(port, *, use_multicast=True):
+def select_stream_destination(*, use_multicast=True):
     """Multicast if this machine can, loopback unicast if it cannot.
 
     Real hardware always multicasts. Mock mode streams the same way so
@@ -613,14 +634,11 @@ class MockUDPManager:
             return False
 
         if host is None:
-            host = select_stream_destination(port, use_multicast=use_multicast)
+            host = select_stream_destination(use_multicast=use_multicast)
 
         try:
             self._streaming_active = True
-            self._streamer = MockCRSStreamer(
-                self.mock_crs, host=host, port=port,
-                use_multicast=use_multicast,
-            )
+            self._streamer = MockCRSStreamer(self.mock_crs, host=host, port=port)
             self._streamer.start()
             await asyncio.sleep(0.1)
             print(f"[Manager] Streaming started → {host}:{port}")
@@ -663,25 +681,25 @@ class MockUDPManager:
             return False
 
     def get_udp_streaming_status(self):
-        """Return status dict for both slow and PFB streams."""
         s = self._streamer
         return {
             "active": self._streaming_active,
             "thread_alive": s is not None and s.is_alive(),
-            "pfb_active": s.pfb_enabled if s else False,
-            "pfb_thread_alive": s is not None and s.is_alive() and s.pfb_enabled,
         }
 
     # ── PFB toggle (no thread restart) ───────────────────────
 
-    async def start_pfb_streaming(self, channels, module, host=None,
-                                   port=None, use_multicast=True):
+    async def start_pfb_streaming(self, channels, module):
         """Enable PFB packet emission on the already-running streamer."""
         if not self._streaming_active or not self._streamer:
             raise RuntimeError("Cannot enable PFB: slow streamer not running. "
                                "Call start_udp_streaming() first.")
         self._streamer.enable_pfb(channels, module)
-        await asyncio.sleep(0.05)
+        # Return once the streamer thread has adopted the request, so
+        # readers of its state see the new channel set.
+        deadline = time.monotonic() + 0.5
+        while not self._streamer.pfb_adopted and time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
         return True
 
     async def stop_pfb_streaming(self):

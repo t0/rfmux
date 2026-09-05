@@ -33,7 +33,8 @@ for ch in result.channels:
 The call estimates the noise on each channel first, then triggers at
 `threshold_sigma` above that baseline. Nothing needs to be known in advance
 about the pulse height. Training takes twenty times `max_pulse_ms`, five
-seconds at the default, and is not charged against `time_run`. The σ it
+seconds at the default on the slow stream, and is not charged against
+`time_run`. The σ it
 learns is the samples' scatter about a block-median baseline, measured
 directly rather than inferred from adjacent differences, so it is right for
 the correlated samples the decimators produce as well as for white noise.
@@ -45,8 +46,8 @@ run keeps whatever it had already seen.
 ## Units, calibration and the frequency basis
 
 Samples are stored in physical units, never in ADC counts. Without a df
-calibration a channel is stored in volts, on the I and Q axes. With one it is
-stored in hertz, along the frequency direction:
+calibration a channel is stored in volts, on the I and Q axes. With one, in
+the default df basis, it is stored in hertz, along the frequency direction:
 
 ```python
 result = await crs.trigger_capture(
@@ -67,7 +68,8 @@ The calibration is the slope of the resonance at the bias point. `bias_kids`
 measures it where each detector ends up: every tone steps a twentieth of its
 fitted linewidth down and up in lockstep, two reads for the module, and the
 inverse of the complex slope is the calibration. Tones, biased or stepped,
-sit on multiples of 298 Hz, the slow stream's frame rate at decimation 7, so
+sit on multiples of 625 MHz / 2^21, about 298 Hz, half the slow stream's
+frame rate at the default decimation stage 6, so
 their intermodulation products land on that grid too and stay out of the
 measurements; a step is never less than one such multiple, and the fit
 supplies a curvature correction, a percent or two except for resonators
@@ -76,11 +78,17 @@ linewidth. On the simulator the measured
 direction is within 0.7 degrees of a true frequency step; a fitted resonance's
 slope is within 4. The fit's version is kept alongside as
 `df_calibration_fit`, and `bias_kids` warns when the two disagree by more than
-5 degrees or 40 percent. Pass `measure_calibration=False` to use the fit's;
+5 degrees or their magnitude ratio falls outside 0.7 to 1.4. Pass
+`measure_calibration=False` to use the fit's;
 `calibration_step` sets the fraction. For the amplitude choice
 and the bias frequency `bias_kids` works from one fit, chosen with
 `fit_method`: the nonlinear IQ fit (the default) or the skewed Lorentzian.
-Sweeps that already carry that fit (from Periscope's multisweep fit
+The nonlinear fit's `a` is the Swenson et al. 2013 (eq. 13) nonlinearity,
+`y = yg + a / (1 + 4 y^2)`: the stored energy pulls the dip below `fr`, and at
+`a = 4 sqrt(3) / 9`, about 0.77, the relation becomes multivalued, which is
+where `nonlinear_threshold` defaults. Fits from earlier rfmux releases used
+a relation that pulls the other way with a different critical value, so
+their `a` is not comparable with this one. Sweeps that already carry that fit (from Periscope's multisweep fit
 checkboxes, or `fit_skewed_multisweep` / `fit_nonlinear_iq_multisweep`
 headless) are used as they are; the rest are fitted then, about 20 ms each
 for the nonlinear fit and 4 ms for the skewed. `multisweep` itself never
@@ -99,9 +107,10 @@ axis lies along Q, from one set of samples, and turns the calibration to
 match, so samples times calibration is the same frequency shift either way.
 
 Rotating before thresholding is therefore the default wherever a calibration
-exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway. A
-channel with no calibration cannot be rotated, so it stays on the quadratures
-and in volts, and one capture can hold both kinds.
+exists. Pass `trigger_basis="iq"` to threshold the raw quadratures anyway;
+every channel is then stored in volts, calibrated or not. A channel with no
+calibration cannot be rotated, so it stays on the quadratures and in volts,
+and one capture can hold both kinds.
 
 
 | Attribute | Where | Meaning |
@@ -231,12 +240,14 @@ result = await crs.trigger_capture(
 The PFB stream runs at `PFB_SAMPLING_FREQ`, 2.44 MHz per channel, roughly
 sixty times the fastest slow-stream rate. Four channels at once is the
 firmware's limit, not a software one. It is also a lot of data, so a quarter
-of a second is usually enough.
+of a second is usually enough. The noise training record is held whole, so on
+this stream it is capped at 2 M samples per channel, about 0.82 s.
 
 The receiver keeps up with that rate in C++, but the detection engine behind
-it can still fall behind on a busy host. Rather than let the lag grow, the
-source discards fast packets more than a quarter of a second old and counts
-them: `lost_packets` and `flushed_packets` in the session's `source`
+it can still fall behind on a busy host. Rather than let the lag grow, once
+the backlog exceeds a quarter of a second the source discards fast packets
+back to an eighth of a second old, and counts what it dropped:
+`lost_packets` and `flushed_packets` in the session's `source`
 statistics, shown on the panel's status line alongside how busy the source
 is. A capture that receives no fast packets at all raises `TimeoutError`
 instead of waiting.
@@ -282,8 +293,10 @@ lost fast packets look like.
 
 ## Check the link budget before you configure
 
-Streaming two PFB channels alongside four modules of slow data does not fit in
-1 GbE. `streamer_config` works out whether a configuration fits:
+A PFB channel costs about 157 Mbps whatever the decimation, so two of them
+add 315 Mbps to the slow stream, which ranges from 157 Mbps (four modules at
+stage 6) to 1.3 Gbps (four modules at stage 0, short packets), past 1 GbE on
+its own. `streamer_config` works out whether a configuration fits:
 
 ```python
 from rfmux.algorithms.measurement.streamer_config import StreamerConfig, validate

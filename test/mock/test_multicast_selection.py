@@ -20,7 +20,8 @@ import pytest
 
 from rfmux.mock.udp_streamer import (LOOPBACK_UNICAST, MockCRSStreamer,
                                      select_stream_destination)
-from rfmux.streamer import (MULTICAST_GROUP, MulticastCheck,
+from rfmux.streamer import (MULTICAST_GROUP, PFB_STREAMER_PORT,
+                            STREAMER_PORT, MulticastCheck,
                             check_multicast_loopback)
 
 
@@ -59,7 +60,7 @@ def test_a_failure_explains_itself():
 def test_multicast_is_used_when_it_works(monkeypatch):
     monkeypatch.setattr("rfmux.streamer.check_multicast_loopback",
                         lambda **kw: MulticastCheck(True, [("receive", True, "ok")], ""))
-    assert select_stream_destination(9876) == MULTICAST_GROUP
+    assert select_stream_destination() == MULTICAST_GROUP
 
 
 @pytest.mark.portable
@@ -70,7 +71,7 @@ def test_falls_back_to_unicast_and_says_why(monkeypatch, capsys):
             False, [("receive", False, "nothing came back")],
             "  sudo ip link set lo multicast on"),
     )
-    assert select_stream_destination(9876) == LOOPBACK_UNICAST
+    assert select_stream_destination() == LOOPBACK_UNICAST
 
     out = capsys.readouterr().out
     assert "falling back" in out.lower()
@@ -86,7 +87,7 @@ def test_multicast_can_be_switched_off_without_probing(monkeypatch):
         raise AssertionError("probed despite use_multicast=False")
 
     monkeypatch.setattr("rfmux.streamer.check_multicast_loopback", explode)
-    assert select_stream_destination(9876, use_multicast=False) == LOOPBACK_UNICAST
+    assert select_stream_destination(use_multicast=False) == LOOPBACK_UNICAST
 
 
 @pytest.mark.portable
@@ -108,17 +109,21 @@ def test_mock_traffic_cannot_leave_this_host():
 
 
 @pytest.mark.portable
-def test_the_probe_does_not_eat_the_real_stream():
-    """It runs on an ephemeral port, so a live capture is untouched."""
-    listener = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):   # POSIX-only
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    listener.bind(("", 9876))
-    listener.setblocking(False)
-    try:
-        check_multicast_loopback()
-        with pytest.raises(BlockingIOError):
-            listener.recv(4096)
-    finally:
-        listener.close()
+def test_the_probe_does_not_eat_the_real_stream(monkeypatch):
+    """It runs on an ephemeral port, so a live capture is untouched.
+
+    Checked by recording the ports the probe binds rather than by
+    holding the streamer port: with SO_REUSEPORT a second listener on
+    9876 would take a share of any stream running on this machine.
+    """
+    ports = []
+    real_bind = socket.socket.bind
+
+    def recording_bind(self, address):
+        ports.append(address[1])
+        return real_bind(self, address)
+    monkeypatch.setattr(socket.socket, "bind", recording_bind)
+
+    check_multicast_loopback()
+    assert ports, "the probe bound nothing, so nothing was checked"
+    assert STREAMER_PORT not in ports and PFB_STREAMER_PORT not in ports

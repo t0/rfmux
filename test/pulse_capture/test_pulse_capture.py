@@ -2274,3 +2274,45 @@ class TestTriggerCaptureTooShort:
                                    0.01, None, None, True))
         assert "noise training never completed" in capsys.readouterr().out
         assert result.slow.noise == {}
+
+
+class TestMalformedDfCalibration:
+    """A calibration that is not a number (the module-keyed mapping
+    where the flat {channel: calibration} one is expected) is treated as
+    absent: the channel stays in the quadratures and in volts, and the
+    display transform declines, so the first fed sample cannot take the
+    session down."""
+
+    def test_storage_transform_falls_back_to_volts(self):
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        from rfmux.pulse_capture.analysis import storage_transform
+        with pytest.warns(UserWarning, match="df_calibration"):
+            factor, units = storage_transform({1: 42.5}, "df")
+        assert units == "V"
+        assert factor == complex(VOLTS_PER_ROC)
+
+    def test_display_transform_declines_instead_of_raising(self):
+        from rfmux.pulse_capture.analysis import display_transform
+        assert display_transform({1: 42.5}, "iq", "V", "df", "Hz") is None
+
+
+class TestPostNoiseHoldIsBounded:
+    def test_hold_keeps_at_most_one_training_span(self):
+        """A channel the stream never delivers keeps the session in
+        ESTIMATING; the other channels' post-quota samples are held for
+        the transition, but only the newest training span of them."""
+        from rfmux.pulse_capture.capture_session import PulseCaptureSession
+
+        s = PulseCaptureSession(channels=[1, 2], sample_rate=1e4,
+                                noise_samples=500, buf_size=1000)
+        s.start()
+        rng = np.random.default_rng(0)
+        k = 0
+        for _ in range(20):
+            t = np.arange(k, k + 300) / 1e4
+            s.feed_block(1, rng.normal(size=300), rng.normal(size=300), t)
+            k += 300
+        assert s.state.name == "ESTIMATING"
+        held_I, _held_Q, held_T = s._pending_post_noise[1]
+        assert held_I.shape[0] == s.noise_samples
+        assert held_T[-1] == pytest.approx((k - 1) / 1e4), "the newest are kept"

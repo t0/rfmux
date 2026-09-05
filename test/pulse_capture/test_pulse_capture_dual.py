@@ -325,27 +325,30 @@ def test_streams_start_capturing_together():
 
 def test_stream_feeds_present_the_source_facade():
     """run_slow_source/run_pfb_source read ``channels`` and call
-    ``feed_sample``; the dual session's facades must satisfy exactly
-    that, and must route through feed_slow/feed_fast so stream time
-    advances the matcher.  Only the socket sources exercise this path,
-    and those need the acquisition tier — so pin the contract here."""
+    ``feed_block``; the dual session's facades must satisfy exactly
+    that, and must route through the per-stream block feeds so stream
+    time advances the matcher.  Only the socket sources exercise this
+    path, and those need the acquisition tier — so pin the contract
+    here."""
     dual = DualPulseCaptureSession(
         channels=[1, 2], slow_rate=1000.0, fast_rate=10000.0,
         config=PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=100.0),
         slow_time_offset_s=0.0)   # routing is under test, not the clock
     dual.start()
 
+    stamps = np.array([1.0, 1.5, 2.0])
     for feed, session in ((dual.slow_feed, dual.slow),
                           (dual.fast_feed, dual.fast)):
         assert feed.channels == [1, 2]
         before = session._noise_n[1]
-        feed.feed_sample(1, 0.5, -0.5, 1.0)
-        assert session._noise_n[1] == before + 1, \
+        feed.feed_block(1, np.full(3, 0.5), np.full(3, -0.5), stamps)
+        assert session._noise_n[1] == before + 3, \
             "the facade must reach the underlying session"
 
-    # ...and through feed_slow/feed_fast, so the matcher clock moved.
-    assert dual._last_advance["slow"] == 1.0
-    assert dual._last_advance["fast"] == 1.0
+    # ...and through the per-stream feeds, so the matcher clock moved
+    # to the block's last stamp.
+    assert dual._last_advance["slow"] == 2.0
+    assert dual._last_advance["fast"] == 2.0
     dual.stop()
 
 
@@ -388,3 +391,32 @@ def test_a_partner_released_at_the_hard_stop_still_pairs():
     d.matcher.add("slow", 1, 1, {"trigger_time": T, "duration_s": 0.3})
     assert d.matcher.matched == 1
     d.stop()
+
+
+def test_dual_open_failure_reaches_an_on_error_installed_after_construction(tmp_path):
+    """Periscope installs on_error on the task after the session exists,
+    so the file has to open in start(), where that callback is wired."""
+    errors = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, slow_time_offset_s=0.0,
+                                hdf5_path=tmp_path / "missing" / "dual.h5")
+    d.on_error = errors.append
+    d.start()
+    assert d.writer is None
+    assert errors and "Could not open HDF5 file" in errors[0]
+    d.stop()
+
+
+def test_dual_file_records_the_end_confirmation_floor(tmp_path):
+    """min_end_samples is a sample count on both streams alike, so the
+    dual file records it as the single-stream file does."""
+    import h5py
+    cfg = PulseCaptureConfig(min_end_samples=7, noise_train_ms=10.0)
+    path = tmp_path / "dual.h5"
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, slow_time_offset_s=0.0,
+                                config=cfg, hdf5_path=path)
+    d.start()
+    d.stop()
+    with h5py.File(path, "r") as f:
+        assert f["metadata"].attrs["min_end_samples"] == 7

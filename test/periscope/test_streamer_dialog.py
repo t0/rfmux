@@ -87,3 +87,36 @@ def test_bad_modules_text_is_error_not_crash(qt_app):
     dlg.modules_edit.setText("1")
     assert _ok_button(dlg).isEnabled()
     dlg.close()
+
+
+@pytest.mark.parametrize("text", ["", "1;2", "all"])
+def test_unparseable_pfb_field_never_disables_streamer(qt_app, text):
+    dlg = StreamerConfigDialog(current_dec=6, current_short=False, module=1)
+    dlg.pfb_check.setChecked(True)
+    dlg.pfb_channels_edit.setText(text)
+    assert not _ok_button(dlg).isEnabled()
+    assert "PFB channels" in dlg.status_label.text()
+    assert dlg.get_config().pfb_channels is None
+    dlg.close()
+
+
+def test_channel_fields_accept_ranges(qt_app):
+    dlg = StreamerConfigDialog(current_dec=6, current_short=False, module=1)
+    dlg.pfb_check.setChecked(True)
+    dlg.pfb_channels_edit.setText("1-3")
+    dlg.modules_edit.setText("1-2")
+    cfg = dlg.get_config()
+    assert cfg.pfb_channels == [1, 2, 3]
+    assert cfg.modules == [1, 2]
+    assert _ok_button(dlg).isEnabled()
+    dlg.close()
+
+
+def test_unchecked_pfb_box_means_no_pfb_streamer(qt_app):
+    """The dialog states the whole streamer configuration: an unchecked
+    PFB box disables the PFB streamer rather than leaving it as it was."""
+    dlg = StreamerConfigDialog(current_dec=6, current_short=False, module=1)
+    assert not dlg.pfb_check.isChecked()
+    assert dlg.get_config().pfb_channels == []
+    assert _ok_button(dlg).isEnabled()
+    dlg.close()

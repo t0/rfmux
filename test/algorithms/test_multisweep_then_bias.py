@@ -57,7 +57,7 @@ def test_multisweep_without_a_fit_selected_runs_no_fit(swept, monkeypatch):
     assert len(res) == N
     for entry in res.values():
         assert "nonlinear_fit_params" not in entry
-        assert entry["df_calibration"] is None
+        assert "df_calibration" not in entry
         assert isinstance(entry["is_bifurcated"], (bool, np.bool_))
         assert np.isfinite(entry["bias_frequency"])
 

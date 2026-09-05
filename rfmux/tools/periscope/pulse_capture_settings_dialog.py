@@ -15,9 +15,14 @@ from PyQt6 import QtWidgets
 
 from .utils import apply_issue_banner
 
+from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
+
+
+def _ms(ms: float) -> str:
+    return f"{ms/1000:.3g} s" if ms >= 1000 else f"{ms:.3g} ms"
 
 
 def _rows_html(rows) -> str:
@@ -33,7 +38,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None, *,
                  config: PulseCaptureConfig | None = None,
-                 sample_rate: float = 596.0464477539062,
+                 sample_rate: float = decimation_to_sampling(6),
                  mode: str = "slow",
                  n_channels: int = 2,
                  df_available: bool = True):
@@ -81,13 +86,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.max_pulse_spin.setRange(0.1, 60_000.0)
         self.max_pulse_spin.setDecimals(1)
         self.max_pulse_spin.setValue(config.max_pulse_ms)
-        self.max_pulse_spin.setToolTip(
-            "Longest pulse you expect — every time scale in pulse "
-            "detection derives from this.  Estimate generously.\n"
-            "Sets the ring buffer (1.5×), the hard stop that "
-            "force-ends a stuck capture (1.2×), the noise-training "
-            "length (20×), the rolling-baseline median span, and the "
-            "edge-detector lookback (10%).")
+        # Tooltip is built in _update_dependent_values: its ratios come
+        # from the config's constants and the live margin fraction.
         form.addRow("Max pulse (ms):", self.max_pulse_spin)
 
         # Training is derived, not chosen: what matters is that the
@@ -124,7 +124,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "1/min per channel at this stream rate.\n"
             "How much evidence one sample is depends entirely on the "
             "rate: at 5σ noise alone crosses ~2.5 times per HOUR at "
-            "596 Hz but ~1.4 times per SECOND on the PFB stream.  "
+            "596 Hz but ~2.8 times per SECOND on the PFB stream.  "
             "Forcing 2 everywhere would reject real pulses on a heavily "
             "decimated slow stream, where a fast pulse spans less than "
             "one sample.")
@@ -167,6 +167,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "Fraction of the pulse length kept before the trigger, and "
             "the adaptive end-confirmation count: the bucket must exceed "
             "max(end floor, this × the pulse's length above threshold).\n"
+            "Also the edge-detector lookback: this × the max pulse "
+            "length.\n"
             "Also sets the saved tail after the pulse drops below "
             "threshold — but only when 'Save the full tail' is off, "
             "which is what that tail is a substitute for.")
@@ -200,7 +202,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "than of the baseline.\n\n"
             "The samples are already buffered either way, so this costs "
             "disk, not acquisition.  Turn it off for PFB captures "
-            "(windows already carry ~64x the samples) or at high count "
+            "(windows already carry far more samples) or at high count "
             "rates (longer windows overlap and raise the pileup "
             "fraction).\n\n"
             "Reported pulse duration is measured from the threshold "
@@ -212,10 +214,13 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.basis_combo.addItems(["I/Q (quadratures)",
                                    "df/dissipation (rotated)"])
         self.basis_combo.setCurrentIndex(
-            1 if config.trigger_basis == "df" and self.df_available else 0)
+            1 if config.trigger_basis == "df" else 0)
         if not self.df_available:
             # Nothing to rotate with: the item stays visible so the
-            # option is known, but cannot be chosen.
+            # option is known, but cannot be chosen.  A stored "df"
+            # keeps showing (and reading back) as df, so the setting
+            # survives the dialog and applies once a calibration exists;
+            # a channel without one stays on the quadratures anyway.
             item = self.basis_combo.model().item(1)
             item.setEnabled(False)
             item.setToolTip(
@@ -275,7 +280,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             w.valueChanged.connect(self._update_dependent_values)
         for c in (self.pileup_check, self.end_confirmed_check):
             c.toggled.connect(self._update_dependent_values)
-        adv_box.setChecked(False)
         adv_box.toggled.emit(False)
         self.setMinimumWidth(520)
         self._update_dependent_values()
@@ -292,7 +296,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             save_to_end_confirmed=self.end_confirmed_check.isChecked(),
             min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
-                           and self.df_available else "iq"),
+                           else "iq"),
         )
 
     def _update_dependent_values(self):
@@ -302,22 +306,42 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         try:
             cfg = self.get_config()
             d = cfg.describe(self.sample_rate, self.n_channels)
+            self.max_pulse_spin.setToolTip(
+                "Longest pulse you expect — every time scale in pulse "
+                "detection derives from this.  Estimate generously.\n"
+                f"Sets the ring buffer ({cfg.BUFFER_SAFETY:g}×), the hard "
+                "stop that force-ends a stuck capture "
+                f"({cfg.HARD_STOP_FACTOR:g}×), the noise-training length "
+                f"({cfg.NOISE_TRAIN_PULSES}×), the rolling-baseline "
+                "median span, and the edge-detector lookback (margin "
+                f"fraction × max pulse: {cfg.margin_fraction:.0%}).")
+            # The training span is a ratio of the pulse length, but the
+            # record is memory-bounded at fast rates and floored at slow
+            # ones; the label says which length is actually used.
             span = d["noise_train_span_ms"]
+            n_noise = d["noise_samples"]
+            wanted = round(span * 1e-3 * self.sample_rate)
+            ratio = f"{cfg.NOISE_TRAIN_PULSES}× the max pulse length"
+            if abs(n_noise - wanted) <= 1:
+                note = ratio
+            elif n_noise < wanted:
+                note = (f"capped at {n_noise:,} samples; {ratio} would "
+                        f"be {_ms(span)}")
+            else:
+                note = (f"floor of {n_noise:,} samples; {ratio} is only "
+                        f"{_ms(span)}")
             self.noise_label.setText(
-                f"{span/1000:.3g} s "
-                f"({cfg.NOISE_TRAIN_PULSES}× the max pulse length)")
+                f"{_ms(d['noise_train_actual_ms'])} ({note})")
             acc = d["accidental_per_min"]
             acc_str = (f"{acc:,.0f}/min" if acc >= 1 else
                        f"{acc*60:.2g}/hr" if acc >= 0.001 else "negligible")
-
-            def _ms(ms):
-                return f"{ms/1000:.3g} s" if ms >= 1000 else f"{ms:.3g} ms"
 
             rows = [
                 ("ring buffer", f"{d['buf_samples']:,} samples "
                                 f"({d['buf_mb_per_channel']:.2f} MB/ch, "
                                 f"{d['buf_mb_total']:.2f} MB total)"),
-                ("hard stop", f"{_ms(d['max_capture_ms'])} (1.2×; a stuck "
+                ("hard stop", f"{_ms(d['max_capture_ms'])} "
+                              f"({cfg.HARD_STOP_FACTOR:g}×; a stuck "
                               "capture is saved and flagged truncated)"),
                 ("noise training", f"{_ms(d['noise_train_actual_ms'])} "
                                    f"({d['noise_samples']:,} samples)"),

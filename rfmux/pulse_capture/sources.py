@@ -7,12 +7,10 @@ demo scripts share this code — the GUI adds only Qt signal plumbing on
 top.
 
 Periscope drives :class:`SlowIngest` from its GUI tap rather than
-calling :func:`run_slow_source`, because its process already holds
-every slow packet and a second socket would cost kernel copies and
-another drain thread in a GUI that is GIL-bound at stage 0.  Only the
-transport differs: blocking, sample-time accounting and the duration
-stop all live in :class:`SlowIngest`, so the GUI is a caller rather
-than a second implementation.
+calling :func:`run_slow_source` (see :class:`SlowIngest` for why).
+Only the transport differs: blocking, sample-time accounting and the
+duration stop all live in :class:`SlowIngest`, so the GUI is a caller
+rather than a second implementation.
 
 Usage (fast/PFB capture, headless)::
 
@@ -33,10 +31,10 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import struct
 import sys
 import threading
 import time
-import warnings
 from typing import Awaitable, Callable, List, Optional, Tuple
 
 import numpy as np
@@ -241,11 +239,6 @@ def _flush(sock) -> None:
 #: bounded batch per wake makes throughput a function of the data rate
 #: instead; the cap bounds how long one wake holds the loop.
 _SLOW_DRAIN_CAP = 256
-#: Bytes per second of a four-channel PFB stream, for the socket's
-#: receive buffer in seconds: 1000 samples per packet, so four
-#: channels at 2.44 MHz are 78 MB/s.  The socket asks for the largest
-#: buffer the host allows; the kernel charges memory only for packets
-#: actually queued.
 #: The most the fast stream is let fall behind the slow one, in stream
 #: time, where the session measures the two clocks.  Past this the
 #: source discards packets by their stamps until the fast clock is
@@ -265,8 +258,16 @@ _PFB_REORDER_WINDOW = 64
 _PFB_FLUSH_EVERY = 16
 _PFB_QUEUE_MAX = 8192
 _PFB_POP_MAX = 256
+#: Bytes per second of a four-channel PFB stream, for the socket's
+#: receive buffer in seconds: 1000 samples per packet, so four
+#: channels at 2.44 MHz are 78 MB/s.  The socket asks for the largest
+#: buffer the host allows; the kernel charges memory only for packets
+#: actually queued.
 _PFB_BYTES_PER_SECOND = (4 * PFB_SAMPLING_FREQ / streamer.PFBPACKET_NSAMP_MAX
                          * streamer.PFB_PACKET_SIZE)
+#: How long the PFB receive thread waits on a quiet socket before it
+#: looks at the stop flag again.
+_PFB_RECEIVE_TIMEOUT_S = 0.05
 
 
 def _rcvbuf_request() -> Optional[int]:
@@ -294,7 +295,24 @@ def _pfb_buffer_seconds(sock) -> float:
     if sys.platform == "linux":
         held //= 2                     # Linux reports double the request
     return held / _PFB_BYTES_PER_SECOND
-#: Channel groups a packet interleaves, by its mode field.
+
+
+def _set_receive_timeout(sock, seconds: float) -> None:
+    """Bound every receive on a blocking *sock* to *seconds*.
+
+    SO_RCVTIMEO, not ``settimeout``: the latter makes the fd
+    non-blocking, on which recvmmsg returns EAGAIN at once (its own
+    timeout is consulted only between datagrams), so a quiet stream
+    would spin the receive thread.  The non-Linux receiver waits in
+    select() with its own timeout, so ``settimeout`` serves there.
+    """
+    if sys.platform != "linux":
+        sock.settimeout(seconds)
+        return
+    sock.setblocking(True)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVTIMEO,
+                    struct.pack("ll", int(seconds),
+                                int(seconds % 1 * 1_000_000)))
 
 
 def _drain(sock, first: bytes, size: int, cap: int) -> list:
@@ -330,9 +348,14 @@ async def run_slow_source(
         Stop after this much *sample time* (from packet timestamps).
         None = run until ``should_stop`` returns True.
     should_stop : callable, optional
-        Polled once per packet; return True to stop.
+        Polled once per receive batch (up to _SLOW_DRAIN_CAP packets);
+        return True to stop.
 
     Returns the sample time covered (seconds).
+
+    Raises ``ValueError`` when the packets are too narrow to carry a
+    requested channel: a short packet carries 128, and a capture that
+    waited on channel 200 of one would train forever.
     """
     origin_set = False
     loop = asyncio.get_running_loop()
@@ -373,6 +396,15 @@ async def run_slow_source(
                     # blocking.
                     width = len(pkt)
                     columns = columns_for_width(requested, width)
+                    missing = [c for c in requested if c not in columns[0]]
+                    if missing:
+                        mode = ("; short-packet mode"
+                                if width == streamer.SHORT_PACKET_CHANNELS
+                                else "")
+                        raise ValueError(
+                            f"Channels {missing} are beyond the slow "
+                            f"packet width ({width} channels{mode}); the "
+                            "stream cannot carry them.")
                 if columns[0]:
                     ingest.add(columns[0], raw[columns[1]], ts)
                 else:
@@ -410,8 +442,9 @@ async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
         return None
     have = f"streaming channels {active}" if active else "off"
     return (f"The PFB streamer on module {module} is {have}; this "
-            f"capture needs channels {list(channels)}.  Set it under "
-            "Streamer Configuration, then start again.")
+            f"capture needs channels {list(channels)}.  Set it with "
+            "configure_streamer (Streamer Configuration in Periscope), "
+            "then start again.")
 
 
 async def run_pfb_source(
@@ -496,22 +529,25 @@ async def run_pfb_source(
         _flush(sock)
         # The receiver reads, validates, and orders packets on its own
         # thread without the interpreter lock; this coroutine pops them
-        # demuxed, a batch at a time.  The socket timeout is what lets
+        # demuxed, a batch at a time.  The receive timeout is what lets
         # the thread notice a stop on a quiet stream.
-        sock.settimeout(0.05)
+        _set_receive_timeout(sock, _PFB_RECEIVE_TIMEOUT_S)
         receiver = streamer.PFBPacketReceiver(
             sock, reorder_window=_PFB_REORDER_WINDOW,
             queue_max_size=_PFB_QUEUE_MAX, flush_threshold=_PFB_FLUSH_EVERY)
         stop_rx = threading.Event()
+        rx_error: List[BaseException] = []   # the coroutine raises it
 
         def receive() -> None:
             while not stop_rx.is_set():
                 try:
-                    receiver.receive_batch(batch_size=2048, timeout_ms=50)
-                except Exception:
-                    if stop_rx.is_set():
-                        return
-                    raise
+                    receiver.receive_batch(
+                        batch_size=2048,
+                        timeout_ms=int(_PFB_RECEIVE_TIMEOUT_S * 1000))
+                except Exception as e:
+                    if not stop_rx.is_set():
+                        rx_error.append(e)
+                    return
 
         rx = threading.Thread(target=receive, name="pfb-receive",
                               daemon=True)
@@ -538,10 +574,15 @@ async def run_pfb_source(
                           backlog_peak_s=0.0, lost_packets=0,
                           flushed_packets=0, busy=0.0)
         done = False
+        stopped = False          # the loop ended by stop or duration
         try:
             while not done:
                 if should_stop is not None and should_stop():
                     break
+                if rx_error:
+                    # A dead receiver would otherwise read as a stream
+                    # gone quiet, and end only at the streamer timeout.
+                    raise rx_error[0]
                 if queue is None:
                     queue = find_queue()
                 if not got_any and (queue is None or queue.empty()):
@@ -596,6 +637,7 @@ async def run_pfb_source(
                 # An explicit turn for whatever shares the loop -- in a
                 # dual capture, the slow stream.
                 await asyncio.sleep(0)
+            stopped = True
         finally:
             stop_rx.set()
             rx.join(1.0)
@@ -604,7 +646,8 @@ async def run_pfb_source(
             receiver.flush_all()
             if queue is None:
                 queue = find_queue()
-            if queue is not None and not done:
+            # Not after a failure: feeding the tail would only fail again.
+            if queue is not None and stopped and not done:
                 while True:
                     batch = queue.pop_pfb_batch(_PFB_POP_MAX)
                     if batch is None:
@@ -650,14 +693,16 @@ async def run_dual_source(
         facades so stream time advances the matcher.
     slow_source : callable, optional
         Override for the slow side, called with a stop predicate and
-        awaited.  Periscope passes its tap pump here because its
-        process already holds every slow packet: a second socket would
-        cost kernel copies and another drain thread in a GUI that is
-        GIL-bound at stage 0.  Both routes drive :class:`SlowIngest`,
-        so only the transport differs.  Headless there is nothing to
-        reuse and the default socket source is right.
+        awaited.  Periscope passes its tap pump here (see
+        :class:`SlowIngest` for why); both routes drive
+        :class:`SlowIngest`, so only the transport differs.  Headless
+        there is nothing to reuse and the default socket source is
+        right.
 
     Returns ``(slow_elapsed, fast_elapsed)`` in seconds of sample time.
+
+    A failure on one side cancels the other before it propagates, so
+    neither stream outlives the capture it was feeding.
     """
     finished = False
 
@@ -684,5 +729,14 @@ async def run_dual_source(
         finally:
             finished = True
 
-    slow_elapsed, fast_elapsed = await asyncio.gather(_slow(), _fast())
+    sides = (asyncio.ensure_future(_slow()), asyncio.ensure_future(_fast()))
+    try:
+        slow_elapsed, fast_elapsed = await asyncio.gather(*sides)
+    except BaseException:
+        # gather propagates the first failure and leaves the other side
+        # running; it would feed a session the caller has stopped.
+        for side in sides:
+            side.cancel()
+        await asyncio.gather(*sides, return_exceptions=True)
+        raise
     return slow_elapsed, fast_elapsed

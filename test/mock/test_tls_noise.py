@@ -170,3 +170,35 @@ def test_history_trim_keeps_the_queried_region():
     gen.value_at(5.0)
     assert np.array_equal(gen.value_at(1.0), early), \
         "a still-recent query was trimmed away"
+
+
+def test_streaming_retains_a_block_of_history_not_the_run():
+    """The emitters ask for each block's PFB frames ahead of its slow
+    frames.  The slow frames must get the values the PFB frames got at
+    the same instants (to rounding: trimming moves the grid origin),
+    and what is retained must not grow with the length of the stream."""
+    gen = TLSNoiseGenerator(n_resonators=2, corner_hz=50.0, seed=43)
+    slow_fs, n_block, pfb_per_frame = 596.0, 30, 64
+    t_block = 0.0
+    while t_block < 20.0:
+        t_slow = t_block + np.arange(n_block) / slow_fs
+        from_pfb = np.array([
+            gen.values_at(t + np.arange(pfb_per_frame)
+                          / (slow_fs * pfb_per_frame))[0]
+            for t in t_slow])
+        assert np.allclose(gen.values_at(t_slow), from_pfb,
+                           rtol=0, atol=1e-15)
+        t_block += n_block / slow_fs
+    assert len(gen._values) * gen.dt < 2.0, \
+        f"{len(gen._values) * gen.dt:.1f} s of grid retained"
+
+
+def test_batch_longer_than_history_is_exact_throughout():
+    """One query spanning more than max_history_s is interpolated before
+    anything is trimmed, so its early times are not clamped."""
+    short = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=47,
+                              max_history_s=0.05)
+    long = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=47,
+                             max_history_s=100.0)
+    t = np.arange(int(5.0 / short.dt)) * short.dt
+    assert np.array_equal(short.values_at(t), long.values_at(t))

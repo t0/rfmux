@@ -58,8 +58,9 @@ def nonlinear_iq(f: np.ndarray, fr: float, Qr: float, amp: float, phi: float,
         Rotation parameter for impedance mismatch between KID and readout 
         circuit (radians)
     a : float
-        Nonlinearity parameter. Bifurcation occurs at a = 4*sqrt(3)/9 ≈ 0.77.
-        For linear resonators, a ≈ 0.
+        Nonlinearity parameter. Bifurcation occurs at a = 4*sqrt(3)/9 ≈ 0.7698;
+        above it the relation is multivalued and the S21 curve has a step
+        where get_y_nonlinear changes branch. For linear resonators, a ≈ 0.
     i0 : float
         I (real) gain factor
     q0 : float
@@ -100,7 +101,9 @@ def get_y_nonlinear(yg: Union[float, np.ndarray], a: float) -> Union[float, np.n
     with one root there: bisection on that bracket always converges,
     and Newton steps from the narrowed bracket finish it quickly.
     Above bifurcation the bracket holds up to three roots and the one
-    found is whichever the bisection lands on.
+    found is whichever the bisection lands on, so the model curve jumps
+    where the branch changes and a derivative across the jump is
+    meaningless; consumers decline fits with a at or above 4*sqrt(3)/9.
 
     Parameters
     ----------
@@ -271,7 +274,14 @@ def fit_nonlinear_iq(f: np.ndarray, z: np.ndarray,
     z : np.ndarray
         Complex S21 data (gain-corrected)
     bounds : tuple of lists, optional
-        Lower and upper bounds for parameters
+        Lower and upper bounds for [fr, Qr, amp, phi, a, i0, q0]. The
+        default box is fr in [f.min(), f.max()], Qr in [1e3, 1e7], amp in
+        [0.01, 0.99], phi in [-pi/2, pi/2], a in [0, 0.9], i0 and q0 in
+        [-1e2, 1e2]. The upper bound on a sits above the bifurcation value
+        4*sqrt(3)/9 ≈ 0.7698 so that a is recorded for the amplitude
+        guard; a fit landing between them is returned as-is, in the
+        regime where the model is multivalued, and the caller compares a
+        to the threshold before using fr or the model curve.
     p0 : list, optional
         Initial parameter guesses [fr, Qr, amp, phi, a, i0, q0]
     fit_nonlinearity : bool, optional
@@ -546,7 +556,9 @@ def fit_nonlinear_iq_multisweep(
         - 'nonlinear_fit_params': Dict with fit parameters
         - 'nonlinear_fit_errors': Dict with parameter uncertainties
         - 'nonlinear_fit_residual': Fitting residual
-        - 'nonlinear_fit_success': Boolean success flag
+        - 'nonlinear_fit_success': residual < 0.1. This does not consider
+          a: a fit with a >= 4*sqrt(3)/9 can carry success=True, and
+          consumers (df_calibration._has_nonlinear_fit) decline it on a.
     """
     # Handle multi-module case
     if isinstance(multisweep_data, list):

@@ -57,12 +57,12 @@ _SQRT2 = math.sqrt(2.0)
 # PulseCapture(buf_size=...) and a config-driven one resolve different
 # lags from the same intent.
 
-#: Ring headroom over the longest expected pulse.  The pre-trigger
-#: margin and the end-confirmation tail share the ring with the pulse.
 #: End-of-pulse threshold, in sigma: the one definition the engine, the
 #: session and the config share.
 DEFAULT_END_SIGMA = 1.0
 
+#: Ring headroom over the longest expected pulse.  The pre-trigger
+#: margin and the end-confirmation tail share the ring with the pulse.
 BUFFER_SAFETY: float = 1.5
 
 #: Fraction of the ring a capture may fill before the hard stop.  With
@@ -96,12 +96,8 @@ class Circular:
         ring: only the last N survive, but they land at the position the
         full sequence would have left them at.
 
-        This is also the GUI's display path, which is why it exists:
-        Periscope writes one sample per channel per packet, and done one
-        ``add`` at a time that was the dominant per-packet cost at
-        decimation stage 0 -- 84% of packets lost at 128 channels
-        displayed, none once batched (see
-        ``PeriscopeRuntime._flush_display_batch``).
+        Also Periscope's display path: a batch of samples lands in one
+        call rather than one ``add`` per sample.
 
         Values are coerced to the buffer's dtype, so a ``None``
         timestamp becomes NaN exactly as ``add`` leaves it.  Dropping
@@ -167,13 +163,13 @@ class _ChState:
     end_ptr_count: int = 0
     trig_abs: Optional[int] = None
     # When the trigger FIRED, as opposed to where the window is dated
-    # (trig_abs may sit up to a lookback earlier when drift had parked
+    # (trig_abs may sit up to a lookback earlier when drift had held
     # the run above threshold).  Capture-relative edge references clip
     # to this, so they can never reach past the physical pulse onset.
     fire_abs: int = 0
     # Pre-pulse level snapshot (median of the edge taps at fire time):
     # a baseline-free end reference.  The rolling median can lag 1/f by
-    # several σ, leaving the amplitude test parked above threshold for
+    # several σ, leaving the amplitude test above threshold for
     # a whole capture — but returning to the level the pulse ROSE FROM
     # is decisive evidence the pulse is over, however stale the mean.
     anchor_I: float = 0.0
@@ -232,13 +228,13 @@ class PulseCapture:
     delay nothing: the pulse ends when the signal is back where it
     started.
 
-    How much of that is SAVED is ``save_to_end_confirmed``.  On (the
-    default) keeps every sample the state machine saw.  Off ends the
-    window at the below-threshold instant plus a ``margin_fraction``
-    tail — where the eye puts the end of the pulse, rather than where
-    the confirmation finished — which keeps window length a property
-    of the pulse instead of the baseline, at the cost of the tail.
-    Either way ``duration_ms`` is measured from the threshold
+    How much of that is SAVED is ``save_to_end_confirmed``.  Off (the
+    default) ends the window at the below-threshold instant plus a
+    ``margin_fraction`` tail — where the eye puts the end of the pulse,
+    rather than where the confirmation finished — which keeps window
+    length a property of the pulse instead of the baseline, at the cost
+    of the tail.  On keeps every sample the state machine saw,
+    confirmation tail included.  Either way ``duration_ms`` is measured from the threshold
     crossings, so it does not move with this setting.
 
     Parameters
@@ -265,7 +261,7 @@ class PulseCapture:
         Consecutive samples that must exceed ``threshold_sigma`` before
         a capture starts.  1 restores single-sample triggering; 2 (the
         default) removes essentially all accidental triggers, which
-        otherwise arrive at ~1.4 Hz per channel on the PFB stream at
+        otherwise arrive at ~2.8 Hz per channel on the PFB stream at
         5 sigma.  The capture is still dated to the first sample of the
         run, so nothing is lost from the rising edge.
     enable_pileup : bool
@@ -313,9 +309,6 @@ class PulseCapture:
     #: memory do not scale with the window: a decimated reservoir tracks
     #: the full-stream median to ~0.01 sigma.
     _BASELINE_RESERVOIR: int = 4096
-
-    #: Module constant, re-exported for callers that reach for it here.
-    HARD_STOP_RING_FRACTION: float = HARD_STOP_RING_FRACTION
 
     @staticmethod
     def default_edge_lookback(buf_size: int,
@@ -393,8 +386,8 @@ class PulseCapture:
         # unsatisfiable because the signal never returns inside a band
         # centred on a stale mean.
         #
-        # sigma comes from the training record, via a diff/MAD estimator
-        # that drift cannot corrupt.  The mean is re-estimated as a
+        # sigma comes from the training record, as the MAD about a
+        # block-median baseline, which drift cannot corrupt.  The mean is re-estimated as a
         # running median over a window long compared with a pulse: a
         # median because it ignores pulses rather than being pulled by
         # them, holding to ~0.15 sigma at 10% pulse duty.
@@ -846,8 +839,8 @@ class PulseCapture:
         # consecutive samples.  A single sample is not evidence of a
         # pulse: at 5 sigma on two quadratures the per-sample false
         # rate is ~1.1e-6, which is one spurious trigger every ~23 s
-        # per channel on the slow stream and about 1.4 PER SECOND on
-        # the PFB stream.  Requiring two consecutive samples costs a
+        # per channel on the slow stream at decimation stage 0 and
+        # about 2.8 PER SECOND on the PFB stream.  Requiring two consecutive samples costs a
         # real pulse nothing — anything above threshold for a single
         # sample carries no measurable rise or decay anyway — while
         # cutting the accidental rate by orders of magnitude.
@@ -872,11 +865,10 @@ class PulseCapture:
         edge_taps = None
         # Only evaluated when it can matter.  Both results are read in
         # exactly one place — the "not capturing and trigger_ok" branch
-        # below — and trigger_ok needs `eligible`, so on any sample that
-        # is neither above threshold nor mid-capture the whole block was
+        # below — and trigger_ok needs `eligible`, so on a sample that
+        # is neither above threshold nor mid-capture the block would be
         # computed and thrown away.  That is nearly every sample of a
-        # quiet stream, and it was the single largest cost in the
-        # engine's hot loop.
+        # quiet stream: the engine's hot loop.
         if self.edge_lookback > 0 and eligible and not st.capturing:
             # The usable lag shortens near the start of the stream and
             # after a statistics epoch reset — a reference from before
@@ -896,7 +888,7 @@ class PulseCapture:
                 # the trigger (min-like), and a tap on a mean-crossing
                 # transit — a pulse traversing a stale mean leaves
                 # near-zero-deviation samples in the ring — must not
-                # fake a rise out of parked drift (max-like).  All taps
+                # fake a rise out of held drift (max-like).  All taps
                 # ride the same 1/f drift, so wander immunity is
                 # unchanged.
                 tap_vals_I: list = []
@@ -921,8 +913,8 @@ class PulseCapture:
         # above-threshold run, not only the sample that completed the
         # confirmation — a rise spread over several samples earns its
         # jump as it grows.  Without the edge detector (edge_lookback
-        # 0, debug only) the legacy fire-once-per-run rule stands in
-        # for it: a run that outlives one capture must not re-fire.
+        # 0, debug only) a fire-once-per-run rule stands in for it: a
+        # run that outlives one capture must not re-fire.
         if self.edge_lookback > 0:
             trigger_ok = eligible and edge_ok
         else:
@@ -944,7 +936,7 @@ class PulseCapture:
             # Date the trigger to where the excursion began, so the
             # pre-trigger margin and the stacking alignment do not
             # slip by the confirmation length.  Capped one lookback
-            # deep: if drift parked the run above threshold long ago,
+            # deep: if drift held the run above threshold long ago,
             # the pulse that fired the edge began within the last K
             # samples, not at the ancient crossing.
             st.trig_abs = st.run_start_abs
@@ -971,7 +963,7 @@ class PulseCapture:
         #     drifted during the capture can push the end_sigma band off
         #     the settled signal; without this bound that capture would
         #     run forever while the ring silently wraps over the rising
-        #     edge.  Worst case is now one max-pulse of dead time.
+        #     edge.  Worst case is one max-pulse of dead time.
         #
         # Counting down rather than resetting is what makes an isolated
         # noisy sample harmless.  That matters most on the PFB stream,
@@ -984,10 +976,10 @@ class PulseCapture:
             # ── Capture-relative edge tests ───────────────────────
             # Taps CLIPPED to samples since the trigger FIRED: a
             # reference reaching further back lands on the previous
-            # pulse — or, when drift parked the run and the window was
+            # pulse — or, when drift held the run and the window was
             # dated a lookback early, on pre-pulse wander — and either
             # reads as false decay evidence or as a false rise.
-            # Unclipped, one split shredded the successor capture
+            # Unclipped, a split re-splits the successor capture
             # sample by sample.
             #
             # decaying_now: the signal sits far below the loudest tap
@@ -1041,7 +1033,7 @@ class PulseCapture:
             # ── Baseline-free return test ─────────────────────────
             # Back at the pre-pulse anchor on BOTH quadratures.  The
             # amplitude tests below compare against the tracked mean,
-            # which can lag 1/f by several σ and park dev above
+            # which can lag 1/f by several σ and hold dev above
             # end_sigma (or even threshold_sigma) for an entire
             # capture; the anchor is where the signal actually sat
             # when this pulse rose, so returning to it ends the
@@ -1108,8 +1100,8 @@ class PulseCapture:
     def _save_pulse(self, channel: int, pileup: bool = False,
                     truncated: bool = False) -> None:
         st = self.state[channel]
-        # Use per-channel sample counter for correct buffer arithmetic
-        # (abs_n is shared across all channels, causing 2x offset with 2 ch)
+        # Buffer arithmetic is per channel: ch_sample_n counts only this
+        # channel's samples, where abs_n counts every channel's.
         raw_post = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
         core = st.active_duration
         if pileup or core is None:
@@ -1142,7 +1134,7 @@ class PulseCapture:
             # after the trigger).  Save margin_fraction of it as tail
             # and drop the slow confirmation stretch: the confirmation
             # count (or max_capture_samples) bounds the STATE MACHINE
-            # only, and no longer stretches the data.  A capture stopped
+            # only, and does not stretch the data.  A capture stopped
             # because drift stalled the confirmation still holds a
             # complete pulse, so it is NOT flagged truncated.
             tail = max(self.min_end_samples,
@@ -1427,7 +1419,8 @@ def estimate_noise_stats(
         # Refine baseline mean using the now-correct σ to clip
         # pulse outliers.  The median can be biased when pulses
         # cross zero (asymmetric contamination), but 3σ clipping
-        # with the correct σ from diff/MAD accurately rejects them.
+        # with the correct σ from the baseline-subtracted MAD rejects
+        # them.
         clip = ((np.abs(arr.real - robust_mean_I) < 3 * robust_std_I) &
                 (np.abs(arr.imag - robust_mean_Q) < 3 * robust_std_Q))
         clean = arr[clip]

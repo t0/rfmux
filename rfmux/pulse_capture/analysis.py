@@ -29,6 +29,7 @@ is a live cross-check, not a precision fit.
 from __future__ import annotations
 
 import numpy as np
+import warnings
 from typing import Dict, Optional
 
 from .detection import ChannelNoiseStats
@@ -212,7 +213,6 @@ def pulse_summary(
     # ``saved_end_time`` is the last saved sample -- not pulse_data's
     # ``end_time``, the confirmation instant, which lies past the saved
     # window when the tail is not kept.
-    trig = pulse_data.get("trigger_time")
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),
@@ -222,8 +222,8 @@ def pulse_summary(
         "duration_ms": duration_s * 1e3,
         "timestamp": timestamp,
         "start_time": timestamp,
-        "trigger_time": (float(trig) if trig is not None
-                         and np.isfinite(trig) else timestamp),
+        "trigger_time": (float(trigger_time) if trigger_time is not None
+                         and np.isfinite(trigger_time) else timestamp),
         "saved_end_time": (float(np.max(valid_times))
                            if len(valid_times) else timestamp),
         "tau_s": tau_s,
@@ -259,15 +259,18 @@ def storage_transform(df_calibration, trigger_basis: str = "iq"):
     this to the same two multiplies per axis either way, which matters
     at 2.44 MHz.
     """
-    volts = VOLTS_PER_ROC
-    if trigger_basis == "df" and df_calibration is not None:
-        cal = complex(df_calibration)
-        if cal != 0:
-            mag = abs(cal)
-            unit = cal / mag
-            scale = volts * mag
-            return unit * scale, "Hz"
-    return complex(volts), "V"
+    cal = _calibration(df_calibration)
+    if df_calibration is not None and cal is None:
+        warnings.warn(
+            "ignoring df_calibration: expected a number, got "
+            f"{type(df_calibration).__name__}.  df_calibrations is the "
+            "flat {channel: calibration} mapping, not one keyed by module.",
+            stacklevel=2)
+    if trigger_basis == "df" and cal:
+        basis, units = "df", "Hz"
+    else:
+        basis, units = "iq", "V"
+    return _basis_units_factor(cal, basis, units), units
 
 
 def display_transform(df_calibration, stored_basis: str, stored_units: str,
@@ -294,9 +297,22 @@ def display_transform(df_calibration, stored_basis: str, stored_units: str,
     return wanted / stored, view_units
 
 
+def _calibration(df_calibration) -> Optional[complex]:
+    """The calibration as one complex number, or ``None`` when it is
+    absent or not a number at all (a mapping keyed by module where the
+    flat ``{channel: calibration}`` one was expected).  Zero passes
+    through; the callers decide what a zero calibration means."""
+    if df_calibration is None:
+        return None
+    try:
+        return complex(df_calibration)
+    except TypeError:
+        return None
+
+
 def _basis_units_factor(df_calibration, basis: str, units: str):
     """One complex number for "rotate into *basis*, scale to *units*"."""
-    cal = None if df_calibration is None else complex(df_calibration)
+    cal = _calibration(df_calibration)
     if basis == "df":
         if cal is None or cal == 0:
             return None                 # nothing to rotate with
@@ -431,3 +447,38 @@ def combine_templates(means, resids, counts):
                              np.sqrt(np.maximum(second - mean ** 2, 0.0)),
                              np.nan)
     return mean, resid, total
+
+
+def summary_from_attrs(attrs: dict) -> Dict[str, float]:
+    """The :func:`pulse_summary` key set rebuilt from a pulse's stored
+    HDF5 attributes, so a reviewed pulse reads like a live one.
+
+    The file keeps seconds (``duration_s``, ``tau_s``); the millisecond
+    twins are derived here.  ``snr`` and ``peak_amp`` fall back to the
+    per-quadrature attributes for files that lack them.  The clock
+    marks (``trigger_utc``, ``trigger_epoch``, ``trigger_time``) pass
+    through when present.
+    """
+    nan = float("nan")
+    snr = float(attrs.get("snr") or max(attrs.get("peak_snr_I", 0.0),
+                                       attrs.get("peak_snr_Q", 0.0)))
+    peak_I = float(attrs.get("peak_I", 0.0))
+    peak_Q = float(attrs.get("peak_Q", 0.0))
+    duration_s = float(attrs.get("duration_s", 0.0))
+    tau_s = float(attrs.get("tau_s", nan))
+    return {
+        "n_samples": int(attrs.get("n_samples", 0)),
+        "pileup": bool(attrs.get("pileup", False)),
+        "truncated": bool(attrs.get("truncated", False)),
+        "peak_I": peak_I,
+        "peak_Q": peak_Q,
+        "peak_amp": float(attrs.get("peak_amp") or max(peak_I, peak_Q)),
+        "snr": snr,
+        "duration_s": duration_s,
+        "duration_ms": duration_s * 1e3,
+        "timestamp": float(attrs.get("timestamp", 0.0)),
+        "tau_s": tau_s,
+        "tau_ms": tau_s * 1e3,
+        **{k: attrs[k] for k in ("trigger_time", "trigger_epoch",
+                                 "trigger_utc") if k in attrs},
+    }

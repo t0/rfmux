@@ -14,6 +14,7 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
 from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alias to avoid conflict if utils also exports 'fitting'
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
+from rfmux.pulse_capture.sources import _set_receive_timeout
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -37,7 +38,8 @@ class UDPReceiver(QtCore.QThread):
         # Ask BEFORE binding: the probe is a plain bind, which our own
         # socket would then fail. Loopback only -- see
         # find_competing_receiver for why a second reader is fatal for
-        # the mock's unicast stream and harmless for a board's multicast.
+        # the mock's unicast fallback and harmless for multicast, which
+        # a board always sends and the mock sends when it can.
         self._port_conflict = streamer.find_competing_receiver(host)
         if self._port_conflict:
             print(f"[UDP] {self._port_conflict}")
@@ -52,9 +54,13 @@ class UDPReceiver(QtCore.QThread):
         # call blocks forever. The thread then never reaches the
         # queue-discovery loop below, so Periscope draws nothing and
         # reports "0 packets received" with no error to explain it.
-        # With SO_RCVTIMEO the call returns EAGAIN, which receive_batch
-        # already treats as "no packets this time".
-        self.sock.settimeout(0.5)
+        # SO_RCVTIMEO on a socket left blocking: the call waits up to
+        # 0.5 s, then returns EAGAIN, which receive_batch already treats
+        # as "no packets this time". settimeout() would not do: it makes
+        # the fd non-blocking, so an empty socket returns EAGAIN at once
+        # and run() spins, retaking the GIL on every call. The 0.5 s
+        # also bounds how long stop() waits for the thread.
+        _set_receive_timeout(self.sock, 0.5)
         self.receiver = streamer.ReadoutPacketReceiver(self.sock,
                                                        reorder_window=256,
                                                        queue_max_size=50000,
@@ -94,8 +100,9 @@ class UDPReceiver(QtCore.QThread):
         loss, no error -- while the receiver is in fact working
         perfectly.  That is indistinguishable from a dead stream unless
         something says otherwise, and it is not a rare mistake: the
-        startup dialog restores the last-used module, and the mock only
-        ever streams module 1, so going from hardware to mock lands here.
+        startup dialog restores the last-used module, and the mock streams
+        only the modules that carry a tone -- at startup, module 1 -- so
+        going from hardware to mock lands here.
         """
         if not streaming_modules:
             self._module_mismatch = None   # nothing streaming yet
@@ -144,12 +151,6 @@ class UDPReceiver(QtCore.QThread):
         if self.queue is not None:
             return self.queue.get_stats().packets_dropped
         return self.packets_dropped
-
-    def get_loss_bursts(self):
-        """Discontinuity events — how bursty the missing packets were."""
-        if self.queue is not None:
-            return self.queue.get_stats().sequence_gaps
-        return 0
 
     def get_dropped_packets(self):
         """Everything lost, however it was lost.
@@ -213,8 +214,8 @@ class DfCalibrationTask(QtCore.QThread):
     """Runs one df-calibration measurement off the GUI thread.
 
     *measure* is a callable returning the coroutine to run; the app
-    hands in the get_biased_channels + measure_df_calibrations pair,
-    tests hand in whatever they like.  Mock mode measures at startup
+    hands in crs.measure_df_calibrations for the module, tests hand in
+    whatever they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """
 

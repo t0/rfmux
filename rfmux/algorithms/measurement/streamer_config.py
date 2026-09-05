@@ -50,12 +50,12 @@ class StreamerConfig:
     """
     dec_stage: int = 6
     short_packets: bool = False
-    modules: Optional[List[int]] = None      # None = all active modules
+    modules: Optional[List[int]] = None      # None = all active; [] = none
     pfb_channels: Optional[List[int]] = None
     pfb_module: int = 1
 
     def n_modules(self, default: int = 4) -> int:
-        return len(self.modules) if self.modules else default
+        return len(self.modules) if self.modules is not None else default
 
 
 def describe(cfg: StreamerConfig) -> Dict[str, Any]:
@@ -69,9 +69,8 @@ def describe(cfg: StreamerConfig) -> Dict[str, Any]:
     slow_mbps = packet_bytes * 8 * fs * n_mod / 1e6
 
     n_pfb = len(cfg.pfb_channels) if cfg.pfb_channels else 0
-    # PFB packets carry 1000 interleaved samples in PFB_PACKET_SIZE bytes
     pfb_mbps = (streamer.PFB_PACKET_SIZE * 8 * PFB_SAMPLING_FREQ * n_pfb
-                / 1000.0 / 1e6)
+                / streamer.PFBPACKET_NSAMP_MAX / 1e6)
 
     return {
         "sample_rate_hz": fs,
@@ -169,9 +168,7 @@ async def apply_streamer_config(crs, cfg: StreamerConfig) -> Dict[str, Any]:
         raise ValueError("Invalid streamer configuration:\n- "
                          + "\n- ".join(errors))
 
-    # 'module' (singular) is the firmware spelling as of r1.6.0; it takes
-    # None, an int, or a list.  r1.5.6 spelled it 'modules' -- see the
-    # firmware/CHANGES entry for r1.6.0.
+    # 'module' takes None, an int, or a list (firmware r1.6.0+).
     await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
                              module=cfg.modules)
 
@@ -213,19 +210,26 @@ async def configure_streamer(
     *,
     short: bool = False,
     modules: Optional[List[int]] = None,
-    pfb_channels: Optional[List[int]] = None,
+    pfb_channels: Optional[List[int]] = (),
     pfb_module: int = 1,
 ) -> Dict[str, Any]:
-    """Configure the slow (and optionally fast/PFB) streamers.
+    """Configure the slow and fast (PFB) streamers.
+
+    The call states the whole streamer configuration, as the Streamer
+    Configuration dialog does: ``pfb_channels`` left at its default (or
+    ``[]``) disables the PFB streamer, a list enables it on those
+    channels, and ``None`` leaves it untouched for a caller that manages
+    it separately.
 
     Usage::
 
         info = await crs.configure_streamer(1, short=True, modules=[1])
         info = await crs.configure_streamer(6, pfb_channels=[1, 2])
-        await crs.configure_streamer(6, pfb_channels=[])   # disable PFB
 
     Returns the derived-quantities dict (sample rate, bandwidth, ...).
     """
+    if pfb_channels is not None:
+        pfb_channels = list(pfb_channels)
     cfg = StreamerConfig(dec_stage=dec_stage, short_packets=short,
                          modules=modules, pfb_channels=pfb_channels,
                          pfb_module=pfb_module)

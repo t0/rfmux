@@ -68,13 +68,14 @@ def capture_window_anatomy(path):
     confirmed = end + 0.45 * (end - trig)
 
     # What the detector saves by default: margin_fraction of the core
-    # before the trigger, and the same past the below-threshold instant,
-    # floored at min_end_samples.  The end confirmation bounds the state
-    # machine, not the record; save_to_end_confirmed=True extends the
-    # window to it.
+    # past the below-threshold instant, floored at min_end_samples; then
+    # margin_fraction of that saved post-trigger length (core plus tail)
+    # before the trigger, at least 2 samples.  The end confirmation
+    # bounds the state machine, not the record; save_to_end_confirmed=True
+    # extends the window to it.
     core = below - trig
-    pre = 0.1 * core
     tail = max(0.1 * core, 2.0)
+    pre = max(0.1 * (core + tail), 2.0)
     ax.axvspan(trig - pre, below + tail, color="#3366CC", alpha=0.10,
                zorder=0)
     ax.axvline(trig, color="#CC6633", lw=1.6, zorder=4)

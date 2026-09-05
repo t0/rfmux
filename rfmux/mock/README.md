@@ -111,10 +111,12 @@ await crs.stop_udp_streaming()
 ### Quasiparticle Pulses
 ```python
 # Enable periodic pulses
-await crs.set_pulse_mode('periodic', 
-    pulse_period=2.0,
-    pulse_amplitude=2.0,
-    pulse_tau_decay=5e-3)
+await crs.set_pulse_mode('periodic',
+    period=2.0,
+    amplitude=2.0,
+    tau_decay=5e-3)
+# From a config dict, with rfmux.mock.helpers.pulse_mode_kwargs:
+await crs.set_pulse_mode(cfg['pulse_mode'], **pulse_mode_kwargs(cfg))
 
 # Add manual pulse event
 await crs.add_pulse_event(resonator_index=0, start_time=time.time(), amplitude=3.0)
@@ -129,7 +131,9 @@ See `config.py` for the complete list of parameters. Key categories:
 - **Readout**: Vin, input_atten_dB, system_termination
 - **Convergence**: convergence_tolerance, cache settings
 - **UDP streaming**: udp_noise_level, scale_factor
-- **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay
+- **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay,
+  and the per-pulse draws pulse_random_amp_* and pulse_random_tau_*
+  (mode, min, max, logmean, logsigma; periodic and random modes)
 
 ## Integration with Periscope
 

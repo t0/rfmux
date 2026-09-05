@@ -4,7 +4,7 @@ Running accumulations over detected pulses: histograms and templates.
 Both structures here follow the same pattern -- a per-channel
 ``*Accumulator`` holding running sums, and a ``*Set`` that owns one per
 channel -- and both are driven the same way: a
-:class:`~.session.PulseCaptureSession` calls ``add_pulse``
+:class:`~.capture_session.PulseCaptureSession` calls ``add_pulse``
 for every pulse it detects and flushes them together to HDF5 and to the
 live view.  They are two products of one stream, so they live in one
 module.
@@ -16,6 +16,7 @@ is what makes them usable on a live capture that runs for hours.
 duration, tau) into fixed bins::
 
     histograms = PulseHistogramSet()
+    histograms.size_amplitude_to_noise(sigma)   # once the noise is known
     for channel, pulse_data in pulse_stream:
         histograms.add_pulse(channel, pulse_data, noise_stats[channel])
     data = histograms.get_histogram_data()
@@ -133,7 +134,10 @@ class PulseHistogramSet:
     Parameters
     ----------
     amp_range : tuple[float, float]
-        Min/max for amplitude histogram bins (in ADC counts or Hz).
+        Min/max for amplitude histogram bins, in the units the pulses
+        are stored in (V or Hz).  A placeholder until
+        :meth:`size_amplitude_to_noise` spans the bins from the measured
+        noise; the range grows on demand but never shrinks.
     amp_bins : int
         Number of amplitude histogram bins.
     duration_range_ms : tuple[float, float]
@@ -177,11 +181,9 @@ class PulseHistogramSet:
         self.histograms: Dict[int, Dict[str, HistogramAccumulator]] = {}
 
     def size_amplitude_to_noise(self, sigma: float, sigmas: float = 100.0) -> None:
-        """Span the amplitude bins from zero to *sigmas* times *sigma*, in
-        the units the pulses arrive in.  The default span is for ADC
-        counts; a session storing volts or hertz would put every pulse
-        in the first bin, and the range only grows.  Nothing changes
-        once a pulse has been binned."""
+        """Span the amplitude bins from zero to *sigmas* times *sigma*, so
+        the range matches the stored units (V or Hz) whatever their
+        scale.  Nothing changes once a pulse has been binned."""
         if not (np.isfinite(sigma) and sigma > 0) or self.total_pulses():
             return
         self.amp_edges = np.linspace(0.0, sigmas * sigma, len(self.amp_edges))

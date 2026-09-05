@@ -239,6 +239,10 @@ print(f"{len(sweep_sections)} sweep sections, keyed by resonator name: "
       f"{list(sweep_sections)[:4]} …")
 ```
 
+The sections are in bias-frequency order, the same order as `catalog.names()`, so a sweep
+result tabulates the same way the array does. The hardware channel each one was measured on
+is recorded in the section itself, so it is never lost.
+
 Yes, this does make for a lot of nested dictionaries. But we have a lot of modules and a lot of resonators and we are going to want to do a lot of iterative multisweeping.
 
 Here is a convenience function to extract the sweep sections of a particular measurement:
@@ -346,9 +350,9 @@ for name in list(mixed_amplitude_sections)[:4]:
     print(f"{name}  swept at {mixed_amplitude_sections[name]['sweep_amplitude']:.5f}")
 ```
 
-Note that a positional *list* of amplitudes is refused if provided alongside a catalog: it
-would silently depend on the catalog ordering, which is not meaningful since the resonators
-are in arbitrary order within the catalog.
+Note that a positional *list* of amplitudes is refused if provided alongside a catalog. A
+catalog is an unordered collection of resonators, so pairing a list to it by position means
+knowing which order it happens to come out in — name the amplitudes instead.
 
 ```python
 try:

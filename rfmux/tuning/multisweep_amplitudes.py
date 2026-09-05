@@ -357,16 +357,17 @@ class AmplitudeSchedule:
         """*target* → its sweep names, the base amplitudes it can supply, and
         whether a positional base is meaningful for it.
 
-        A catalog brings its own amplitudes and its own ordering, so a
-        positional base is refused there for exactly the reason
-        ``multisweep`` refuses a positional ``amp``: the pairing would depend
-        on catalog order, which is not something a caller should have to know.
-        A bare list of names is the caller's own ordering, so there it is fine.
+        A catalog brings its own amplitudes, and a positional base is refused
+        there for exactly the reason ``multisweep`` refuses a positional
+        ``amp``: a catalog is an unordered collection, so pairing to it by
+        position means knowing which order it was pulled out in. A bare list of
+        names is the caller's own ordering, so there it is fine.
         """
         if isinstance(target, ResonatorCatalog):
+            resonators = target.resonators(order="frequency")
             return (
-                target.names(order="channel"),
-                {r.name: float(r.bias.amplitude) for r in target},
+                [r.name for r in resonators],
+                {r.name: float(r.bias.amplitude) for r in resonators},
                 False,
             )
 
@@ -444,10 +445,10 @@ class AmplitudeSchedule:
             if not allow_sequence:
                 raise TypeError(
                     "base cannot be a positional sequence alongside a catalog "
-                    "— the pairing would depend on catalog ordering, which is "
-                    "not something a caller should have to know. Pass a "
-                    "{name: amplitude} mapping, a single number, or None for "
-                    "the catalog's own."
+                    "— a catalog is an unordered collection of resonators, so "
+                    "pairing to it by position means knowing which order it "
+                    "was pulled out in. Pass a {name: amplitude} mapping, a "
+                    "single number, or None for the catalog's own."
                 )
             values = [float(v) for v in base]
             if len(values) != len(names):

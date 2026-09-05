@@ -196,7 +196,9 @@ class ResonatorCatalog:
         find_bias_points(catalog, sweeps)
         await crs.apply_bias(catalog)
 
-    Iteration is in channel order. Lookup is by name.
+    Lookup is by name. Iteration is in bias-frequency order — the members
+    themselves are an unordered collection, so ``resonators()`` and ``names()``
+    take the order you want to pull them out in.
 
     Frequency collisions are checked when a resonator joins the catalog, which
     is where a duplicate from ``find_resonances`` shows up. How close is too
@@ -357,7 +359,7 @@ class ResonatorCatalog:
         return self._by_name[name]
 
     def __iter__(self) -> Iterator[Resonator]:
-        return iter(sorted(self._by_name.values(), key=lambda r: r.channel))
+        return iter(self.resonators())
 
     def __len__(self) -> int:
         return len(self._by_name)
@@ -375,25 +377,35 @@ class ResonatorCatalog:
                 return r
         raise KeyError(f"No resonator on channel {channel}.")
 
-    def names(self, order: Literal["frequency", "channel"] = "frequency") -> list[str]:
-        """The resonator names, low frequency first.
+    def resonators(
+        self, order: Literal["frequency", "channel"] = "frequency"
+    ) -> list[Resonator]:
+        """The members as a list, low bias frequency first.
 
-        Frequency order is the array as you'd plot or tabulate it, and it stays
-        put across retuning and rechannelization. Channel order is what
-        iterating the catalog gives you, and it's what you want when the names
-        have to line up with per-channel data coming back from the board.
+        A catalog is a collection, not a sequence — the resonators in it have
+        no inherent order, and nothing is stored in one. What this does is
+        *extract* them in an order you name.
+
+        Frequency order is the array as you'd plot or tabulate it, and it is
+        what iterating the catalog gives you. Channel order is what you want
+        when the members have to line up with per-channel data coming back from
+        the board.
 
         The two agree for a catalog straight out of ``from_frequencies``, which
         assigns channels 1..N in frequency order, and drift apart as soon as
         resonators are retuned or dropped.
         """
         if order == "frequency":
-            members = sorted(self._by_name.values(), key=lambda r: r.bias.frequency_hz)
+            key = lambda r: r.bias.frequency_hz  # noqa: E731
         elif order == "channel":
-            members = self  # __iter__ already sorts by channel
+            key = lambda r: r.channel  # noqa: E731
         else:
             raise ValueError(f"order={order!r}: expected 'frequency' or 'channel'.")
-        return [r.name for r in members]
+        return sorted(self._by_name.values(), key=key)
+
+    def names(self, order: Literal["frequency", "channel"] = "frequency") -> list[str]:
+        """The resonator names, low bias frequency first. See ``resonators``."""
+        return [r.name for r in self.resonators(order)]
 
     def remove(self, name: str) -> Resonator:
         """Drop a resonator and return it. Channels are left alone.

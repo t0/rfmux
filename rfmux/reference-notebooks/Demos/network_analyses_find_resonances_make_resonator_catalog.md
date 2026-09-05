@@ -509,14 +509,20 @@ print(named_catalog)
 
 ### Reading from a Catalog
 
-Iteration is in channel order; lookup is by name.
+Lookup is by name. The resonators themselves are a collection rather than a
+sequence — they have no inherent order, and none is stored — so pulling them
+out means saying which order you want them in.
 
-`names()` gives you the names alone, low frequency first — the array as you
-would plot or tabulate it. Pass `order="channel"` for iteration's ordering
-instead, which is what you want when the names have to line up with
-per-channel data coming back from the board. The two agree here, and for any
-catalog fresh from `from_frequencies`, which numbers channels 1..N in frequency
-order — they drift apart once resonators are retuned or dropped.
+`catalog.resonators()` and `catalog.names()` do that, sorted by bias frequency
+lowest first, which is the array as you would plot or tabulate it. Iterating
+the catalog (`for resonator in catalog`) gives you the same thing. Pass
+`order="channel"` to either one for hardware channel order instead, which is
+what you want when the members have to line up with per-channel data coming
+back from the board.
+
+The two orderings agree for a catalog fresh from `from_frequencies` or
+`to_catalog`, since channels are assigned 1..N in frequency order. They drift
+apart once resonators are retuned or removed.
 
 ```python
 print(f"len           : {len(named_catalog)}")
@@ -524,9 +530,11 @@ print(f"by name       : "
       f"{named_catalog['middle'].bias.frequency_hz/1e6:.3f} MHz")
 print(f"by channel    : {named_catalog.by_channel(1).name}")
 print(f"'low' present : {'low' in named_catalog}")
-print(f"iteration     : {[r.name for r in named_catalog]}  (channel order)")
+print(f"iteration     : {[r.name for r in named_catalog]}")
 print(f"names()       : {named_catalog.names()}  (frequency order)")
 print(f"names(channel): {named_catalog.names(order='channel')}")
+print(f"resonators()  : {[r.channel for r in named_catalog.resonators()]}  "
+      f"(their channels, in frequency order)")
 print(f"module        : {named_catalog.module}")
 ```
 
@@ -558,22 +566,13 @@ print(f"recalibrated: {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}   <- tone untouched")
 ```
 
-### Dropping a resonator
+### Removing a resonator from the catalog
 
-A resonator that turns out not to be one — a duplicate, or a peak the finder
-should not have accepted — comes out with `remove()`, which hands it back, or
-with `del` if you don't want it.
+This can be done with `catalog.remove('R0001')` or `del catalog['R0001']`.
 
-Channels are left exactly where they were. Dropping channel 2 leaves 1 and 3,
-not a renumbered 1 and 2, so every surviving resonator keeps the channel it was
-measured on and any per-channel data you are holding stays valid. Nothing in
-the catalog requires channels to be contiguous. Renumbering them is a separate
-decision, and if you want it, rebuild the catalog yourself.
-
-The freed channel and the freed frequency both become available again.
-
-We prune a `copy()` here so the catalog the later sections save is untouched —
-the same copy-then-swap discipline a GUI worker thread uses.
+This is akin to removing a key from a dictionary, and thus everything else about
+the catalog is left untouched. In particular, channel numbers are not adjusted to fill
+in the missing one.
 
 ```python
 pruned_catalog = by_hand_catalog.copy()
@@ -596,12 +595,8 @@ To avoid seeing in-band intermodulation distortion products, the hardware is onl
 allowed to place a tone on a multiple of
 `rfmux.core.transferfunctions.BASE_FREQUENCY`.
 
-A `BiasPoint` does that to itself, at construction, always. Every frequency
-above came out already on the grid, and so does every frequency you set later
-through `set_bias`. The reason for doing it here and not at apply-bias is that
-there is then only one number: what you asked for, what gets recorded, and what
-the hardware plays are the same, and no reader downstream has to work out which
-of the three they are holding.
+When adding a bias frequency to a `BiasPoint`, this quantization is applied automatically,
+so there can never be disagreement about what frequency will actually be output to the array.
 
 ```python
 print(f"tone grid: {BASE_FREQUENCY:.6f} Hz")
@@ -642,7 +637,7 @@ print(f".quantize(): {unquantized_bias.quantize().frequency_hz:.6f} Hz")
 ### Invariants, and what they refuse
 
 Names and channels must be unique, channels are 1-based, and you probably don't
-want to have two resonators (tones) sitting at exactly the same frequency.
+want to have two resonators (tones) sitting at exactly the same frequency (but this can be allowed; see the Resonator object class).
 These are checked when a resonator joins the catalog.
 
 ```python
@@ -673,11 +668,10 @@ refused("no such resonator", lambda: named_catalog["nope"])
 To improve usability and compatibility, rfmux provides helpers to translate
 Catalog objects into other standard classes and file formats.
 
-### Dictionaries — the faithful round trip
+### Dictionaries
 
-`to_dict()` reduces a catalog to plain builtins — dicts, strings and floats —
-and `from_dict` rebuilds it. Nothing is lost on the way: calibration, `notes`
-and the NCO all survive. Being plain builtins, the result will go into a pickle,
+`a_dictionary = catalog.to_dict()` reduces a catalog to plain builtins — dicts, strings and floats —
+and `new_catalog_from_dict = ResonatorCatalog.from_dict(a_dictionary)` rebuilds it. Being plain builtins, the result will go into a pickle,
 a JSON file or HDF5 attributes equally happily.
 
 ```python
@@ -694,28 +688,28 @@ print(f"calibration survived: "
       f"notes {restored_catalog['red'].notes}")
 ```
 
-`from_dict` requires the `schema_version` it was written with, so a file from a
-future (or past) version of the module fails loudly instead of being
-half-understood.
+<!-- #region -->
 
-### Pickle — the file on disk
 
-Pickle is the format rfmux tooling reads and writes: Periscope's session exports
-are `.pkl`, and so is everything the multisweep dialog loads. A catalog saved
-this way drops straight into that workflow.
+### Pickle 
+
+Pickle is currently the main file format used for array tuning outputs. This may evolve in future.
+
 
 **Pickle the dictionary, not the catalog object.** `pickle.dump(catalog, f)`
-works, and it is a trap. The file would then record the class's import path, so
-moving or renaming `ResonatorCatalog` later makes every old file unreadable; and
-unpickling rebuilds an instance *without* going through the constructor, so the
-duplicate-name, duplicate-channel and frequency-collision checks never run — a
-file could restore into a state the class would have refused to build. Going
-through `to_dict` / `from_dict` avoids both: the file holds only builtins, and
-loading it is a normal construction with every check in place.
+does work, BUT it is a trap. The file would then record the class's import path, so
+moving or renaming `ResonatorCatalog` later makes every old file unreadable.
+
+Instead, go
+through `to_dict` / `from_dict` !
 
 `rfmux.tuning.store` does the file handling: it picks the folder, names the
 file, and stamps a `file_metadata` block into what it writes saying what the
 file is and where it lives.
+
+Generally, file saving is done automatically by the measurement algorithms, so you
+probably won't need to worry about this part.
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import store
@@ -745,9 +739,10 @@ hand-built one load exactly the same way.
 The usual caution applies: unpickling runs code from the file, so load `.pkl`
 files you produced or trust, not ones that arrived from somewhere unknown.
 
-### CSV — the spreadsheet-editable bias table
+### CSV 
 
-**Deliberately lossy.** It carries the operating point and nothing else:
+**Note that going back and forth from CSV files is deliberately lossy.**
+These files will carry the operating point and nothing else:
 `notes`, `nco_frequency_hz` and every calibration field are dropped. Use it to
 hand someone a bias table they can edit; use `to_dict` when you need everything
 back.
@@ -772,9 +767,9 @@ print(f"\ncalibration after a CSV round trip: "
       f"<- dropped, as documented")
 ```
 
-Hand-editing works, which is the point. Both columns of an operating point are
-required — every resonator has one — so a blank cell is an error naming the
-line, not a resonator with no tone:
+Hand-editing works. Both columns of an operating point are
+required so a blank cell will throw an error naming the
+line:
 
 ```python
 edited_csv_text = "\n".join([

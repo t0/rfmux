@@ -400,9 +400,19 @@ def test_names_are_in_frequency_order_by_default():
     assert a_shuffled_catalog().names() == ["low", "mid", "high"]
 
 
-def test_names_by_channel_matches_iteration():
+def test_iteration_matches_names():
     m = a_shuffled_catalog()
-    assert m.names(order="channel") == [r.name for r in m] == ["high", "mid", "low"]
+    assert [r.name for r in m] == m.names() == ["low", "mid", "high"]
+
+
+def test_names_by_channel():
+    assert a_shuffled_catalog().names(order="channel") == ["high", "mid", "low"]
+
+
+def test_resonators_extracts_members_in_the_order_asked_for():
+    m = a_shuffled_catalog()
+    assert [r.channel for r in m.resonators()] == [3, 2, 1]
+    assert [r.channel for r in m.resonators(order="channel")] == [1, 2, 3]
 
 
 def test_names_orders_agree_for_a_freshly_seeded_catalog():
@@ -413,6 +423,11 @@ def test_names_orders_agree_for_a_freshly_seeded_catalog():
 def test_names_rejects_an_unknown_order():
     with pytest.raises(ValueError, match="expected 'frequency' or 'channel'"):
         a_catalog().names(order="amplitude")
+
+
+def test_resonators_rejects_an_unknown_order():
+    with pytest.raises(ValueError, match="expected 'frequency' or 'channel'"):
+        a_catalog().resonators(order="amplitude")
 
 
 def test_dict_like_access():

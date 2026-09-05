@@ -195,8 +195,9 @@ def test_the_catalogs_channels_are_used_not_a_fresh_1_to_n():
         module=2,
     )
     targets = _resolve_sweep_targets(catalog, None, None, None)
-    # Channel order, so R0002 (channel 3) leads.
-    assert [(t.name, t.channel) for t in targets] == [("R0002", 3), ("R0001", 7)]
+    # Bias-frequency order, so R0001 leads despite sitting on the higher
+    # channel, and each target keeps the channel its resonator was bound to.
+    assert [(t.name, t.channel) for t in targets] == [("R0001", 7), ("R0002", 3)]
 
 
 def test_names_alongside_a_catalog_is_an_error():

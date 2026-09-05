@@ -333,7 +333,7 @@ class BiasReport:
     """What one call to :func:`find_bias_points` concluded, and the catalog.
 
     ``catalog`` is the answer; the findings are how it was reached, one per
-    resonator in channel order. The settings come back here rather than being
+    resonator in bias-frequency order. The settings come back here rather than being
     copied onto a thousand bias points, as with
     :class:`~rfmux.tuning.fits.FitReport` — recording them alongside the data
     is the output folder's job.
@@ -478,7 +478,7 @@ def find_bias_points(
 
     Returns:
         BiasReport: a new catalog carrying the bias points, and one
-        :class:`BiasFinding` per catalog resonator, in channel order, saying
+        :class:`BiasFinding` per catalog resonator, in bias-frequency order, saying
         how each was arrived at. The same report, as builtins, is left in
         ``sweeps["bias_report"]``.
 
@@ -524,8 +524,8 @@ def find_bias_points(
         max_discrepancy=max_discrepancy,
     )
 
-    # One finding per resonator, in channel order, because iterating a catalog
-    # is iterating it in channel order.
+    # One finding per resonator, in bias-frequency order, because that is what
+    # iterating a catalog gives you.
     findings = [
         _bias_one(
             sweeps,

@@ -136,12 +136,12 @@ def _resolve_amplitudes(
     if isinstance(amp, (list, tuple, np.ndarray)):
         if not allow_sequence:
             raise TypeError(
-                "amp cannot be a positional sequence alongside a catalog — the "
-                "pairing would depend on catalog ordering, which is not "
-                "something a caller should have to know. Pass a "
-                "{name: amplitude} mapping, a single number, or None. (A "
-                "positional list *is* accepted alongside center_frequencies, "
-                "where the ordering is your own.)"
+                "amp cannot be a positional sequence alongside a catalog — a "
+                "catalog is an unordered collection of resonators, so pairing "
+                "to it by position means knowing which order it was pulled out "
+                "in. Pass a {name: amplitude} mapping, a single number, or "
+                "None. (A positional list *is* accepted alongside "
+                "center_frequencies, where the ordering is your own.)"
             )
         values = [float(a) for a in amp]
         if len(values) != len(names):
@@ -176,11 +176,14 @@ def _resolve_sweep_targets(
                 "resonators are already named. Rename them in the catalog if "
                 "that is what you meant."
             )
-        catalog_names = catalog.names(order="channel")
+        # Sections come out in bias-frequency order, matching catalog iteration
+        # and `names()`, so a sweep result tabulates the same way the array
+        # does. The channel each one is measured on rides along on the target.
+        catalog_resonators = catalog.resonators(order="frequency")
         amplitudes = _resolve_amplitudes(
-            catalog_names,
+            [r.name for r in catalog_resonators],
             amp,
-            defaults={r.name: float(r.bias.amplitude) for r in catalog},
+            defaults={r.name: float(r.bias.amplitude) for r in catalog_resonators},
             allow_sequence=False,
         )
         return [
@@ -190,7 +193,7 @@ def _resolve_sweep_targets(
                 center_frequency_hz=float(r.bias.frequency_hz),
                 amplitude=amplitudes[r.name],
             )
-            for r in catalog
+            for r in catalog_resonators
         ]
 
     # --- a bare list of frequencies: named S0001…, channelled by position ---
@@ -276,8 +279,9 @@ async def multisweep(
         catalog (ResonatorCatalog, optional): What to sweep. Each resonator
             contributes its ``bias.frequency_hz`` as the sweep centre, its
             ``channel`` as the hardware channel, and — unless *amp* overrides
-            it — its ``bias.amplitude`` as the probe amplitude. Pass this or
-            *center_frequencies*, not both.
+            it — its ``bias.amplitude`` as the probe amplitude. Sections come
+            back in bias-frequency order, matching ``catalog.names()``. Pass
+            this or *center_frequencies*, not both.
         span_hz (float, optional): Total frequency width (Hz) of each sweep.
             Defaults to 100 kHz.
         npoints_per_sweep (int, optional): Number of points to measure within
@@ -292,8 +296,9 @@ async def multisweep(
             - a ``{resonator_name: amplitude}`` mapping: per-resonator, and it
               must name every resonator in the catalog.
 
-            A positional sequence is refused here, because the pairing would
-            depend on catalog ordering.
+            A positional sequence is refused here: a catalog is an unordered
+            collection, so pairing to it by position means knowing which order
+            it was pulled out in.
 
             With *center_frequencies*, where the ordering is the caller's own:
 

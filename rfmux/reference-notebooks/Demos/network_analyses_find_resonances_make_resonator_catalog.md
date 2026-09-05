@@ -389,24 +389,14 @@ comes back low, the first thing to change is `npoints`, not the thresholds — a
 if you already know roughly where the array is, sweeping a narrower band at the
 same `npoints` buys the same resolution for less time.
 
-### The collisions this sweep cannot see
+### Remaining collisions - see multisweep data
 
 `min_separation_hz` above can only cut pairs the survey sweep managed to
-separate. Two resonators closer together than its resolution arrive as a single
-candidate, and nothing here can tell you that is what happened — the collision
-cut has one dip to look at and no reason to complain about it.
-
-Where they come apart is the multisweep, which sweeps a narrow span around each
-candidate at a resolution the survey could not afford. So the same cut is worth
-running again on that data, and
-`rfmux.tuning.find_sweeps_with_nearby_resonances` is the function for it: hand it
-one module's multisweep result and a `min_separation_hz`, and it hands back the
-names whose section turned out to hold a second dip. Drop them from the catalog
-the way section 5 does — both members, since a tone on either one still reads the
-other.
-
-It is not demonstrated here because it needs multisweep data, which this notebook
-does not take; `multisweep.md` in this folder is where that data comes from.
+distinguish as separate resonators. If two resonators are quite close together,
+they may remain. Multisweep data makes these more apparent, but this is the topic 
+of a separate workbook. However, we note here that rfmux provides 
+`rfmux.tuning.find_sweeps_with_nearby_resonances` to prune collided resonances
+using multisweep data. 
 
 ## 4. Seed a resonator catalog
 
@@ -663,7 +653,9 @@ frequency. Pass `min_separation_hz=0.0` to refuse an exact duplicate — a
 resonance that `find_resonances` split in two lands there once the frequencies
 are quantized — or a wider number when you know the separation below which your
 readout cannot operate two detectors. Every constructor takes it, including
-`from_dict` and `from_csv`.
+`from_dict` and `from_csv`, and none of them takes it from anywhere else: a rule
+applies to the catalog in front of you because you asked for it here, not
+because the file you loaded was written under one.
 
 ```python
 def refused(what, thunk):
@@ -704,8 +696,11 @@ a JSON file or HDF5 attributes equally happily.
 The `resonators` entry is itself keyed by name, like the catalog, so reading one
 detector out of a saved file is `a_dictionary['resonators']['R0007']` and not a
 search. `from_dict` takes the same keyword arguments as the other constructors,
-so you can load under a rule the file was not written with — say
-`ResonatorCatalog.from_dict(a_dictionary, min_separation_hz=100e3)`.
+so you can load under whatever separation rule you want to hold this catalog to
+— say `ResonatorCatalog.from_dict(a_dictionary, min_separation_hz=100e3)`. The
+`min_separation_hz` in the file is a record of how the catalog was built and is
+not applied on the way back in, so a catalog comes back unpoliced unless you ask
+here.
 
 ```python
 catalog_dict = by_hand_catalog.to_dict()

@@ -488,6 +488,9 @@ class ResonatorCatalog:
         inside the entry. Insertion is in frequency order, which dicts keep,
         but nothing needs to lean on that — ``from_dict`` takes the order back
         off the frequencies, the same as everywhere else.
+
+        ``min_separation_hz`` is recorded for the reader's information and is
+        not applied on the way back in; see :meth:`from_dict`.
         """
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -507,9 +510,13 @@ class ResonatorCatalog:
     def from_dict(cls, d: dict, **kwargs) -> ResonatorCatalog:
         """Rebuild a catalog from ``to_dict`` output.
 
-        Catalog settings are taken from the file, and a keyword given here wins
-        over the stored value — ``from_dict(d, min_separation_hz=1e3)`` reads an
-        old catalog under a new rule, and raises if it does not meet it.
+        The separation rule is not taken from the file. It is a rule you are
+        applying now rather than a property the resonators carry, so it arrives
+        the way it does everywhere else — ``from_dict(d, min_separation_hz=1e3)``
+        reads a catalog under it, and raises if the file does not meet it. A
+        file that recorded a rule is a record of how it was built, not an
+        instruction to whoever opens it; without the keyword the catalog comes
+        back under the default of ``None`` and no frequency is policed.
         """
         version = d.get("schema_version")
         if version not in cls.READABLE_SCHEMA_VERSIONS:
@@ -534,23 +541,18 @@ class ResonatorCatalog:
             )
             for name, rd in entries
         ]
-        # The separation rule is absent in files written before it was
-        # persisted. Those went out under the old default of 0.0, but every
-        # frequency in one already passed that check on the way in, so reading
-        # them back under the current default of None cannot let anything
-        # through that the writer would have caught.
-        # kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
-
-        # A file written while the catalog still carried an NCO frequency has
-        # that key and it is ignored, which is why removing the field did not
-        # need a schema bump: neither direction of the round trip loses a
+        # `min_separation_hz` in the file goes unread, as above. Anything else
+        # the file carries and __init__ does not take is ignored the same way
+        # — including a file written while the catalog
+        # still carried an NCO frequency, which is why removing that field did
+        # not need a schema bump: neither direction of the round trip loses a
         # resonator over it.
         return cls(resonators, module=d["module"], **kwargs)
 
     # -- CSV ------------------------------------------------------------------
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
-    # operating point and nothing else. `notes`, `min_separation_hz`,
+    # operating point and nothing else. `notes`,
     # `bias_frequency_quantized` and every calibration field (and so
     # df_calibration) are dropped — pass the separation rule to
     # `from_csv` if the table needs it, and note that a row read back comes in

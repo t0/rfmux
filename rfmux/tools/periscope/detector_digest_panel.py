@@ -363,7 +363,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("Qr", "", "Total quality factor (typical: 1e3-1e6)"),
             ("Qc", "", "Coupling quality factor (typical: 1e3-1e7)"),
             ("Qi", "", "Internal quality factor (typical: 1e4-1e7)"),
-            ("Bifurcation", "", "Bifurcation status (from nonlinear fit)")
+            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, so the same as the skewed table's")
         ]
         
         self.skewed_table.setRowCount(len(params))
@@ -916,17 +916,19 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 a_value = nl_params_dict.get('a', 0)
                 self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3f}")
                 
-                # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
-                bifurcation_threshold = 4 * np.sqrt(3) / 9
-                is_bifurcated = a_value > bifurcation_threshold
+                # The sweep's own flag, the same one the skewed table
+                # shows: whether the sweep jumps does not depend on a fit.
+                is_bifurcated = self.active_sweep_data.get('is_bifurcated', False)
                 self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
-                
+
                 self.nl_table.item(NL_PHI_ROW, 1).setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
                 self.nl_table.item(NL_I0_ROW, 1).setText(f"{nl_params_dict.get('i0', 0):.3e}")
                 self.nl_table.item(NL_Q0_ROW, 1).setText(f"{nl_params_dict.get('q0', 0):.3e}")
             else:
                 for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):
                     self.nl_table.item(row, 1).setText("N/A")
+                is_bifurcated = self.active_sweep_data.get('is_bifurcated', False)
+                self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
         else: 
             self.nl_table.item(NL_STATUS_ROW, 1).setText("Not Applied")
             for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):

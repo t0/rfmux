@@ -782,14 +782,20 @@ def plot_sections_at_iteration(results, iteration, direction="upward", ncols=5):
 plot_sections_at_iteration(multiamp_module_results, 2)
 ```
 
-### determine which amplitude step used a particular amplitude
+### get the sweep taken at a particular amplitude
 
+This one comes back in the same `{step: {direction: section}}` shape as
+`collect_amplitude_iterations_for`, one step deep — so the step number is the
+key, and the sweep it found is right there rather than something to go and look
+up.
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
     bias = catalog[name].bias.amplitude
     at_bias = find_iteration_matching_amplitude(multiamp_module_results, name, amplitude=bias)
-    print(f"{name}  bias {bias:.5f}  → step {at_bias}")
+    step, by_direction = next(iter(at_bias.items()))
+    print(f"{name}  bias {bias:.5f}  → step {step}, "
+          f"swept at {by_direction['upward']['sweep_amplitude']:.5f}")
 ```
 
 Ask for a *fixed* amplitude instead and the three part company, which is why the
@@ -809,8 +815,10 @@ for name in ("R0001", "R0002", "R0003"):
 
 print()
 for name in ("R0001", "R0002", "R0003"):
-    step = find_iteration_matching_amplitude(multiamp_module_results, name, 0.002)
-    got = get_amplitudes_at_iteration(multiamp_module_results, step)[name]
+    step, by_direction = next(iter(
+        find_iteration_matching_amplitude(multiamp_module_results, name, 0.002).items()
+    ))
+    got = by_direction["upward"]["sweep_amplitude"]
     print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
@@ -824,12 +832,15 @@ and the other two return their top rung regardless:
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
-    step = find_iteration_matching_amplitude(multiamp_module_results, name, 0.016)
-    got = get_amplitudes_at_iteration(multiamp_module_results, step)[name]
+    step, by_direction = next(iter(
+        find_iteration_matching_amplitude(multiamp_module_results, name, 0.016).items()
+    ))
+    got = by_direction["upward"]["sweep_amplitude"]
     print(f"0.01600 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
-So if the match has to be good, check it as shown above.
+So if the match has to be good, check it as shown above — the amplitude it
+actually landed on is on the section it handed back.
 
 ### sweeping in both directions
 

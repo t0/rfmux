@@ -94,7 +94,7 @@ from scipy.optimize import OptimizeWarning, curve_fit
 
 from . import store
 from .store import plain
-from .sweep_results import _refuse_container, find_iteration_matching_amplitude
+from .sweep_results import _iteration_matching_amplitude, _refuse_container
 
 __all__ = [
     "MODELS",
@@ -455,7 +455,7 @@ def fit_sweeps_at_bias_amplitude(
     all_sections = list(_walk(sweeps))
     wanted = _filter_names(names, {s.name for s in all_sections})
     at_bias = {
-        name: find_iteration_matching_amplitude(sweeps, name, amplitude)
+        name: _iteration_matching_amplitude(sweeps, name, amplitude)
         for name in wanted
     }
     keep_directions = _as_filter(directions, "directions")

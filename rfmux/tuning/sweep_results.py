@@ -371,8 +371,8 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
 
 def find_iteration_matching_amplitude(
     results: Mapping, name: str, amplitude: float | None = None
-) -> int:
-    """Which amplitude iteration probed *name* closest to *amplitude*.
+) -> dict:
+    """The sweep of *name* taken closest to *amplitude*.
 
     Args:
         results: what ``multiamp_multisweep`` returned.
@@ -386,26 +386,47 @@ def find_iteration_matching_amplitude(
             taken where this resonator is actually biased?"
 
     Returns:
-        int: the iteration number, for indexing ``results["results"]``.
+        dict: ``{iteration: {direction: sweep}}``, the one matching rung of
+        what :func:`collect_amplitude_iterations_for` returns. The iteration
+        number is the key rather than the whole answer because the sweep under
+        it is what a caller wants next, and the same loop body reads either
+        function's output.
 
     Nearest wins, and there is always a nearest — floats from a ladder rarely
     compare equal, so matching on equality would find nothing. A caller who
-    needs the match to be close should check it:
-    ``get_amplitudes_at_iteration(results, i)[name]``.
+    needs the match to be close can read it off the entry it got back:
+    ``entry["upward"]["sweep_amplitude"]``.
 
     Raises:
         KeyError: if *name* was not swept.
         ValueError: if *amplitude* is None and there is no catalog to take a
             bias amplitude from, or if nothing was measured.
     """
+    collected = collect_amplitude_iterations_for(results, name)
+    iteration = _iteration_matching_amplitude(results, name, amplitude, collected)
+    return {iteration: collected[iteration]}
+
+
+def _iteration_matching_amplitude(
+    results: Mapping,
+    name: str,
+    amplitude: float | None,
+    collected: Mapping | None = None,
+) -> int:
+    """Just the iteration number, for callers indexing by it.
+
+    The matching itself, kept apart from the entry the public reader hands
+    back: :func:`~rfmux.tuning.fits.fit_sweeps_at_bias` compares one against
+    every section's iteration and has no use for the sweep.
+    """
     if amplitude is None:
         amplitude = _bias_amplitude_of(results, name)
+    if collected is None:
+        collected = collect_amplitude_iterations_for(results, name)
 
     per_iteration = {
         iteration: float(next(iter(entries.values()))["sweep_amplitude"])
-        for iteration, entries in collect_amplitude_iterations_for(
-            results, name
-        ).items()
+        for iteration, entries in collected.items()
     }
     if not per_iteration:
         raise ValueError(f"No sweep sections for {name!r} to match against.")

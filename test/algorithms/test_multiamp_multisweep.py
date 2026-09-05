@@ -673,9 +673,12 @@ async def test_the_readers_work_on_what_the_driver_actually_returns():
     )
 
     # ×1 sits in the middle of the ladder, so that is where each resonator is
-    # at its own bias amplitude.
-    assert find_iteration_matching_amplitude(result, "R0002") == 2
-    assert find_iteration_matching_amplitude(result, "R0002", 0.008) == 4
+    # at its own bias amplitude — and the sweep taken there comes back with it.
+    at_bias = find_iteration_matching_amplitude(result, "R0002")
+    assert list(at_bias) == [2]
+    assert at_bias[2]["upward"]["sweep_amplitude"] == pytest.approx(0.002)
+
+    assert list(find_iteration_matching_amplitude(result, "R0002", 0.008)) == [4]
 
 
 @pytest.mark.asyncio
@@ -694,7 +697,7 @@ async def test_the_readers_work_on_a_frequency_list_result_too():
     )
 
     assert list(collect_amplitude_iterations_for(result, "S0002")) == [0, 1, 2]
-    assert find_iteration_matching_amplitude(result, "S0002", 1e-2) == 2
+    assert list(find_iteration_matching_amplitude(result, "S0002", 1e-2)) == [2]
 
     # No catalog, so no bias amplitude to fall back on.
     with pytest.raises(ValueError, match="no catalog to take one from"):

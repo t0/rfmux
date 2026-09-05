@@ -381,12 +381,36 @@ def test_asking_for_an_iteration_that_does_not_exist_is_an_error():
 # ─── find_iteration_matching_amplitude ─────────────────────────────────
 
 
+def matched_iteration(*args, **kwargs):
+    """The iteration number out of the entry the reader hands back."""
+    matched = find_iteration_matching_amplitude(*args, **kwargs)
+    assert len(matched) == 1
+    return next(iter(matched))
+
+
 def test_the_iteration_nearest_a_given_amplitude():
     result = packed(schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]))
 
-    assert find_iteration_matching_amplitude(result, "R0001", 1e-2) == 1
+    assert matched_iteration(result, "R0001", 1e-2) == 1
     # nearest, not exact — a ladder's floats rarely compare equal
-    assert find_iteration_matching_amplitude(result, "R0001", 9.6e-3) == 1
+    assert matched_iteration(result, "R0001", 9.6e-3) == 1
+
+
+def test_the_match_comes_back_as_the_sweep_that_was_matched():
+    """Keyed by iteration, the same shape one rung of
+    collect_amplitude_iterations_for has — so the sweep is in hand without a
+    second lookup."""
+    result = packed(
+        schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]),
+        directions=("upward", "downward"),
+    )
+
+    matched = find_iteration_matching_amplitude(result, "R0001", 1e-2)
+
+    assert list(matched) == [1]
+    assert set(matched[1]) == {"upward", "downward"}
+    assert matched[1]["upward"]["sweep_amplitude"] == pytest.approx(1e-2)
+    assert matched[1] == collect_amplitude_iterations_for(result, "R0001")[1]
 
 
 def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
@@ -399,7 +423,7 @@ def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
     # multiplicative() puts ×1 in the middle, so every resonator's bias amplitude is
     # iteration 2 — whatever its own amplitude happens to be.
     for name in ("R0001", "R0002", "R0003"):
-        assert find_iteration_matching_amplitude(result, name) == 2
+        assert matched_iteration(result, name) == 2
 
 
 def test_a_sweep_holding_an_older_catalog_snapshot_still_answers():
@@ -414,7 +438,7 @@ def test_a_sweep_holding_an_older_catalog_snapshot_still_answers():
         {"name": name, **entry} for name, entry in snapshot["resonators"].items()
     ]
 
-    assert find_iteration_matching_amplitude(result, "R0002") == 2
+    assert matched_iteration(result, "R0002") == 2
 
 
 def test_a_relative_ladder_gives_each_resonator_its_own_answer():
@@ -423,8 +447,8 @@ def test_a_relative_ladder_gives_each_resonator_its_own_answer():
     catalog = a_catalog(amplitudes=(0.001, 0.01))
     result = packed(schedule=AmplitudeSchedule.multiplicative(1.0, 4.0, 3), catalog=catalog)
 
-    assert find_iteration_matching_amplitude(result, "R0001", 0.004) == 2
-    assert find_iteration_matching_amplitude(result, "R0002", 0.004) == 0
+    assert matched_iteration(result, "R0001", 0.004) == 2
+    assert matched_iteration(result, "R0002", 0.004) == 0
 
 
 def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
@@ -440,4 +464,4 @@ def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
         find_iteration_matching_amplitude(result, "low")
 
     # but an explicit amplitude still works
-    assert find_iteration_matching_amplitude(result, "low", 1e-2) == 1
+    assert matched_iteration(result, "low", 1e-2) == 1

@@ -12,6 +12,9 @@ from rfmux.tools.periscope import __main__ as periscope_main  # noqa: E402
 
 
 class _FakeCRS:
+    async def get_mock_configuration(self):
+        return None   # no array yet: everything counts as changed
+
     def __init__(self):
         self.built = []
 

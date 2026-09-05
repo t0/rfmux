@@ -75,8 +75,8 @@ async def main(serial="MOCK"):
     
     # Multisweep parameters
     MULTISWEEP_PARAMS = {
-        'span_hz': 500e3,             # 500 kHz span around each resonance
-        'npoints_per_sweep': 500,     # 1 kHz per point across a 10 kHz linewidth
+        'span_hz': 200e3,             # the multisweep defaults: 200 kHz span,
+        'npoints_per_sweep': 101,     # 2 kHz per point across a 10 kHz linewidth
         'amp': 0.001,
         'nsamps': 10,
         'module': MODULE,

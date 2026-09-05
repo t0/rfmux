@@ -259,12 +259,13 @@ def ensure_fits(entries, fit="nonlinear") -> int:
     return len(todo)
 
 
-def df_calibration_from_sweep(freqs, iq_counts, f_bias) -> complex:
+def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None) -> complex:
     """The calibration from one sweep in counts: the inverse of the
     nonlinear resonator model's slope at *f_bias*, the model fitted by
     the flow's own fitter.  Differentiating a spline through the points
     instead scatters by a factor of two on real sweeps, so that is the
-    fallback, with a warning, when no fit is usable.
+    fallback when no fit is usable: announced with a warning, or, when
+    *fallbacks* is a list, recorded there for the caller to report once.
     """
     entry = {"frequencies": np.asarray(freqs, dtype=np.float64),
              "iq_complex": np.asarray(iq_counts, dtype=complex),
@@ -272,8 +273,11 @@ def df_calibration_from_sweep(freqs, iq_counts, f_bias) -> complex:
     ensure_fits([entry])
     cal = df_calibration_for_entry(entry)
     if cal is None:
-        warnings.warn("no usable resonance fit; the df calibration is the "
-                      "spline derivative through the sweep points", stacklevel=2)
+        if fallbacks is not None:
+            fallbacks.append(f_bias)
+        else:
+            warnings.warn("no usable resonance fit; the df calibration is the "
+                          "spline derivative through the sweep points", stacklevel=2)
         f, z = _sorted_sweep(entry)
         cal = complex(convert_iq_to_df(np.array([1.0 + 0j]), f_bias, f,
                                        convert_roc_to_volts(z))[0])
@@ -372,6 +376,7 @@ async def measure_df_calibrations(
             await ctx()
 
     out: Dict[int, complex] = {}
+    fell_back: List[int] = []
     for ch in channels:
         if identify_bifurcation(iq[ch]):
             # Too much bias power: the resonance is bifurcated and the
@@ -382,7 +387,11 @@ async def measure_df_calibrations(
                           f"resonance is bifurcated at this bias power and "
                           f"its df calibration is unreliable", stacklevel=2)
         try:
-            cal = df_calibration_from_sweep(bias[ch] + offsets, iq[ch], bias[ch])
+            n_before = len(fell_back)
+            cal = df_calibration_from_sweep(bias[ch] + offsets, iq[ch], bias[ch],
+                                            fallbacks=fell_back)
+            if len(fell_back) > n_before:
+                fell_back[-1] = ch
         except Exception as exc:
             # Skipping one channel is fine -- it simply gets no
             # calibration -- but skipping all of them silently would
@@ -392,4 +401,9 @@ async def measure_df_calibrations(
             continue
         if np.isfinite(cal) and cal != 0:
             out[ch] = complex(cal)
+    if fell_back:
+        warnings.warn(f"{len(fell_back)} of {len(channels)} channels had no "
+                      f"usable resonance fit, so their df calibration is the "
+                      f"spline derivative through the sweep points: "
+                      f"channels {fell_back}", stacklevel=2)
     return out

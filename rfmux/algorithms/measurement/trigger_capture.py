@@ -57,7 +57,8 @@ from ...pulse_capture.capture_session import (
     PulseCaptureSession,
 )
 from ...pulse_capture.detection import ChannelNoiseStats
-from ...pulse_capture.sources import run_dual_source, run_pfb_source, run_slow_source
+from ...pulse_capture.sources import (pfb_streamer_mismatch, run_dual_source,
+                                      run_pfb_source, run_slow_source)
 from ...core.transferfunctions import PFB_SAMPLING_FREQ, decimation_to_sampling
 
 
@@ -337,22 +338,21 @@ async def trigger_capture(
         streamer_mode=streamer_mode, config=config, channels=channels,
         module=module, hdf5_path=hdf5_path)
 
-    use_pfb = streamer_mode in ("fast", "both")
-    if use_pfb:
-        await crs.set_pfb_streamer(channel=channels, module=module)
-        await asyncio.sleep(0.3)  # let the streamer settle before listening
-    try:
-        if streamer_mode == "both":
-            await _run_dual(result, host, channels, module,
-                            slow_rate, duration_s, hdf5_path,
-                            df_calibrations, verbose)
-        else:
-            await _run_single(result, host, channels, module,
-                              streamer_mode, slow_rate, duration_s,
-                              hdf5_path, df_calibrations, verbose)
-    finally:
-        if use_pfb:
-            await crs.set_pfb_streamer(channel=None, module=module)
+    if streamer_mode in ("fast", "both"):
+        # The capture reads what the board streams and never configures
+        # it, as Periscope's does: configure_streamer first, and turn
+        # the PFB streamer off yourself afterwards.
+        problem = await pfb_streamer_mismatch(crs, module, channels)
+        if problem:
+            raise ValueError(problem)
+    if streamer_mode == "both":
+        await _run_dual(result, host, channels, module,
+                        slow_rate, duration_s, hdf5_path,
+                        df_calibrations, verbose)
+    else:
+        await _run_single(result, host, channels, module,
+                          streamer_mode, slow_rate, duration_s,
+                          hdf5_path, df_calibrations, verbose)
 
     if verbose:
         print(f"[trigger_capture] {result!r}")

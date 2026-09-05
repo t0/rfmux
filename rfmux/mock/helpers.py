@@ -174,7 +174,9 @@ async def apply_mock_config(crs: CRS, config: Dict[str, Any],
     Pulse settings are taken live through set_pulse_mode.  Anything
     else regenerates the array, which at many tones is seconds during
     which the stream stalls, so only what changed against *previous*
-    decides; with no *previous*, everything counts as changed.  A
+    decides.  With no *previous* the configuration the array was built
+    with is read from the mock, so a partial *config* changes only what
+    it names; before any array exists everything counts as changed.  A
     regeneration pins a random seed into *config* first, so the client
     and the server agree on the array that was built.  What the server
     receives is the configuration in force with *config* on top, taken
@@ -184,6 +186,8 @@ async def apply_mock_config(crs: CRS, config: Dict[str, Any],
     ``"unchanged"``, ``"pulses"``, ``"regenerated"``; the count is None
     unless the array was regenerated.
     """
+    if previous is None:
+        previous = await crs.get_mock_configuration()
     changed = None if previous is None else config_changes(previous, config)
     if changed is not None and pulse_only_change(changed):
         if not changed:

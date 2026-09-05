@@ -231,11 +231,20 @@ The slow stream tops out at 38 kHz. For pulses faster than that, capture from
 the polyphase filterbank instead:
 
 ```python
-result = await crs.trigger_capture(
-    channel=[1], module=1, streamer_mode="fast",
-    time_run=0.25, hdf5_path="fast.h5",
-)
+await crs.configure_streamer(6, pfb_channels=[1], pfb_module=1)
+try:
+    result = await crs.trigger_capture(
+        channel=[1], module=1, streamer_mode="fast",
+        time_run=0.25, hdf5_path="fast.h5",
+    )
+finally:
+    await crs.configure_streamer(6)          # PFB streamer off
 ```
+
+A capture reads what the board streams and never configures it, headless or
+in Periscope: configure the PFB streamer for the channels first, and turn it
+off yourself afterwards. A capture whose channels the streamer does not carry
+refuses to start and says what to set.
 
 The PFB stream runs at `PFB_SAMPLING_FREQ`, 2.44 MHz per channel, roughly
 sixty times the fastest slow-stream rate. Four channels at once is the
@@ -262,10 +271,14 @@ The socket asks the kernel for the largest receive buffer it allows, so raise
 pulses between them:
 
 ```python
-result = await crs.trigger_capture(
-    channel=[1], module=1, streamer_mode="both",
-    time_run=2.0, hdf5_path="dual.h5",
-)
+await crs.configure_streamer(6, pfb_channels=[1], pfb_module=1)
+try:
+    result = await crs.trigger_capture(
+        channel=[1], module=1, streamer_mode="both",
+        time_run=2.0, hdf5_path="dual.h5",
+    )
+finally:
+    await crs.configure_streamer(6)
 
 print(len(result.pairs), "matched pairs")
 ```

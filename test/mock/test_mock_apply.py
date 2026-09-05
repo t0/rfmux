@@ -11,6 +11,11 @@ BASE = {"num_resonances": 100, "pulse_mode": "none", "pulse_period": 0.25,
 
 
 class _FakeCRS:
+    built = None   # what get_mock_configuration reports
+
+    async def get_mock_configuration(self):
+        return self.built
+
     def __init__(self):
         self.calls = []
 
@@ -124,3 +129,24 @@ def test_pulse_settings_go_live_normalized():
     new = dict(BASE, pulse_mode="random", pulse_random_tau_min=-1.0)
     assert asyncio.run(apply_mock_config(crs, new, BASE)) == ("pulses", None)
     assert crs.calls[0][2]["random_tau_min"] == 1e-6
+
+
+def test_without_previous_the_mock_supplies_the_configuration_in_force():
+    """A headless caller changing one key keeps everything else the mock
+    was built with; a pulse-only change stays live."""
+    crs = _FakeCRS()
+    crs.built = dict(BASE)
+    outcome, _ = asyncio.run(apply_mock_config(crs, {"pulse_mode": "periodic"}))
+    assert outcome == "pulses"
+    crs = _FakeCRS()
+    crs.built = dict(BASE, bias_amplitude=0.0042)
+    outcome, _ = asyncio.run(apply_mock_config(
+        crs, {"num_resonances": BASE["num_resonances"] + 1}))
+    assert outcome == "regenerated"
+    assert crs.calls[-1][1]["bias_amplitude"] == 0.0042
+
+
+def test_before_any_array_everything_counts_as_changed():
+    crs = _FakeCRS()
+    outcome, _ = asyncio.run(apply_mock_config(crs, {"num_resonances": 3}))
+    assert outcome == "regenerated"

@@ -526,11 +526,12 @@ Bugs present on main, with the symptom.
   guards let a capture silently persist nothing.
 - The Python floor is 3.10, what the code has needed since `crs.py` used
   `match`.
-- The Periscope capture never configures the PFB streamer: set it in the
-  Streamer Configuration dialog first, and a mismatch fails before opening a
-  socket, so a capture cannot reconfigure the board underneath the user. The
-  headless `trigger_capture` does configure it for the capture's channels and
-  disables it afterwards, since a script has no dialog to have set it in.
+- A capture never configures the PFB streamer, headless or in Periscope: set
+  it first (`configure_streamer`, or the Streamer Configuration dialog), and a
+  mismatch refuses the capture before a socket opens, so a capture cannot
+  reconfigure the board underneath the user or tear a stream down under
+  another capture. Turn the PFB streamer off yourself afterwards; the how-to
+  shows the line.
 - Streamer configuration is authoritative: applying the dialog, or calling
   `configure_streamer`, sets the whole streamer state it describes, so an
   unchecked PFB box (or the macro's default) disables the PFB streamer rather

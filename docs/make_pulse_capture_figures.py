@@ -5,9 +5,8 @@ Regenerate the static figures embedded in the pulse-capture documentation.
 The notebook (rfmux/reference-notebooks/Demos/pulse_capture.md) produces all
 of its data plots by running code, so the only figures shipped as files are
 diagrams that explain the detector rather than show measurements.  This
-script writes them, so they can be regenerated rather than being an opaque
-binary in the tree -- which is how the saved window came to be drawn ending
-at the wrong place and stayed that way through a policy change.
+script writes them, so a figure is the output of code that can be read
+and rerun rather than an opaque binary in the tree.
 
 Writes every copy of each figure, so the notebook and the release note
 cannot drift apart.

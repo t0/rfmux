@@ -106,3 +106,21 @@ def test_dense_array_biases_each_resonator_on_its_own_dip():
         "the fixture should be dense but resolvable"
     found = np.array([crs._find_s21_dip_frequency(f, amp) for f in nominal])
     assert np.all(np.diff(found) > 0), (nominal, found)
+
+
+def test_dip_shift_is_measured_from_the_built_array():
+    """The coarse window is centred where this array's circuit puts the
+    dip, measured on its most isolated resonator, not on a constant from
+    the default circuit."""
+    crs, m = _model()
+    amp = 0.01
+    crs._measure_dip_shift(amp)
+    measured = crs._dip_shift_fraction
+    assert measured > 0
+    # The default circuit's constant is the right order; a different
+    # coupling would move the measured value and the search with it.
+    assert measured == pytest.approx(crs._DIP_SHIFT_FRACTION, rel=0.5)
+    # Every resonator's dip is then found inside the coarse window.
+    for f0 in m.resonator_frequencies:
+        dip = crs._find_s21_dip_frequency(f0, amp)
+        assert abs(dip / f0 - 1 - measured) < 0.5 * crs._DIP_LOCATE_FRACTION

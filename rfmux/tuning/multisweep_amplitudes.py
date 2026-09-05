@@ -365,7 +365,7 @@ class AmplitudeSchedule:
         """
         if isinstance(target, ResonatorCatalog):
             return (
-                [r.name for r in target],  # channel order
+                target.names(order="channel"),
                 {r.name: float(r.bias.amplitude) for r in target},
                 False,
             )

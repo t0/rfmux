@@ -384,12 +384,122 @@ def test_by_channel_raises_for_unknown():
         a_catalog().by_channel(99)
 
 
+def a_shuffled_catalog() -> ResonatorCatalog:
+    """Channel order and frequency order deliberately disagree."""
+    return ResonatorCatalog(
+        [
+            a_resonator("low", channel=3, frequency_hz=1e9),
+            a_resonator("high", channel=1, frequency_hz=3e9),
+            a_resonator("mid", channel=2, frequency_hz=2e9),
+        ],
+        module=1,
+    )
+
+
+def test_names_are_in_frequency_order_by_default():
+    assert a_shuffled_catalog().names() == ["low", "mid", "high"]
+
+
+def test_names_by_channel_matches_iteration():
+    m = a_shuffled_catalog()
+    assert m.names(order="channel") == [r.name for r in m] == ["high", "mid", "low"]
+
+
+def test_names_orders_agree_for_a_freshly_seeded_catalog():
+    m = a_catalog()
+    assert m.names() == m.names(order="channel") == ["R0001", "R0002", "R0003"]
+
+
+def test_names_rejects_an_unknown_order():
+    with pytest.raises(ValueError, match="expected 'frequency' or 'channel'"):
+        a_catalog().names(order="amplitude")
+
+
 def test_dict_like_access():
     m = a_catalog()
     assert "R0001" in m
     assert "nope" not in m
     assert len(m) == 3
     assert m["R0002"].channel == 2
+
+
+# ─── removal leaves a hole ────────────────────────────────────────────────────
+
+
+def test_remove_returns_the_resonator():
+    m = a_catalog()
+    gone = m.remove("R0002")
+    assert gone.name == "R0002"
+    assert "R0002" not in m
+    assert len(m) == 2
+
+
+def test_remove_leaves_the_other_channels_where_they_were():
+    m = a_catalog()
+    m.remove("R0002")
+    assert [r.channel for r in m] == [1, 3]
+
+
+def test_a_freed_channel_can_be_reused():
+    m = a_catalog()
+    m.remove("R0002")
+    m._add(a_resonator("new", channel=2, frequency_hz=1.07e9))
+    assert m.by_channel(2).name == "new"
+
+
+def test_by_channel_raises_for_a_removed_channel():
+    m = a_catalog()
+    m.remove("R0002")
+    with pytest.raises(KeyError, match="No resonator on channel 2"):
+        m.by_channel(2)
+
+
+def test_a_removed_frequency_stops_colliding():
+    m = a_catalog()
+    gone = m.remove("R0002")
+    m._add(a_resonator("reuse", channel=9, frequency_hz=1.03e9))
+    assert m["reuse"].bias.frequency_hz == gone.bias.frequency_hz
+
+
+def test_del_removes_the_same_way():
+    m = a_catalog()
+    del m["R0002"]
+    assert "R0002" not in m
+    assert [r.channel for r in m] == [1, 3]
+
+
+def test_del_raises_for_unknown():
+    m = a_catalog()
+    with pytest.raises(KeyError, match="No resonator named 'nope'"):
+        del m["nope"]
+
+
+def test_remove_raises_for_unknown_and_names_what_is_there():
+    with pytest.raises(KeyError, match="R0001, R0002, R0003"):
+        a_catalog().remove("nope")
+
+
+def test_remove_bounds_the_names_it_lists():
+    m = ResonatorCatalog.from_frequencies(
+        [1e9 + i * 1e6 for i in range(20)], module=1, amplitude=0.01
+    )
+    with pytest.raises(KeyError, match=r"and 15 more"):
+        m.remove("nope")
+
+
+def test_a_holey_catalog_round_trips_through_a_dict():
+    m = a_catalog()
+    m.remove("R0002")
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back.names() == ["R0001", "R0003"]
+    assert [r.channel for r in back] == [1, 3]
+
+
+def test_remove_does_not_touch_a_copy():
+    m = a_catalog()
+    twin = m.copy()
+    m.remove("R0002")
+    assert "R0002" in twin and len(twin) == 3
 
 
 # ─── copy: the threading rule ─────────────────────────────────────────────────

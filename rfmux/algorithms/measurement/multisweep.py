@@ -176,7 +176,7 @@ def _resolve_sweep_targets(
                 "resonators are already named. Rename them in the catalog if "
                 "that is what you meant."
             )
-        catalog_names = [r.name for r in catalog]  # channel order
+        catalog_names = catalog.names(order="channel")
         amplitudes = _resolve_amplitudes(
             catalog_names,
             amp,

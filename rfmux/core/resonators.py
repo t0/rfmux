@@ -39,7 +39,7 @@ import io
 import math
 from dataclasses import dataclass, field, replace, asdict
 
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Literal
 
 from .transferfunctions import BASE_FREQUENCY
 
@@ -365,11 +365,62 @@ class ResonatorCatalog:
     def __contains__(self, name: str) -> bool:
         return name in self._by_name
 
+    def __delitem__(self, name: str):
+        """``del catalog[name]`` — ``remove`` without the returned resonator."""
+        self.remove(name)
+
     def by_channel(self, channel: int) -> Resonator:
         for r in self._by_name.values():
             if r.channel == channel:
                 return r
         raise KeyError(f"No resonator on channel {channel}.")
+
+    def names(self, order: Literal["frequency", "channel"] = "frequency") -> list[str]:
+        """The resonator names, low frequency first.
+
+        Frequency order is the array as you'd plot or tabulate it, and it stays
+        put across retuning and rechannelization. Channel order is what
+        iterating the catalog gives you, and it's what you want when the names
+        have to line up with per-channel data coming back from the board.
+
+        The two agree for a catalog straight out of ``from_frequencies``, which
+        assigns channels 1..N in frequency order, and drift apart as soon as
+        resonators are retuned or dropped.
+        """
+        if order == "frequency":
+            members = sorted(self._by_name.values(), key=lambda r: r.bias.frequency_hz)
+        elif order == "channel":
+            members = self  # __iter__ already sorts by channel
+        else:
+            raise ValueError(f"order={order!r}: expected 'frequency' or 'channel'.")
+        return [r.name for r in members]
+
+    def remove(self, name: str) -> Resonator:
+        """Drop a resonator and return it. Channels are left alone.
+
+        Removing channel 3 from 1..5 leaves 1, 2, 4, 5 — a hole, deliberately.
+        Every surviving resonator keeps the channel it was measured on, so
+        per-channel data you are already holding stays valid, and so does
+        anything the board has been told. Nothing here requires channels to be
+        contiguous. Repacking them to 1..N-1 is a separate decision and a
+        separate pass; do it by rebuilding the catalog if you want it.
+
+        The freed channel is available again — a later resonator may take it.
+
+        Raises:
+            KeyError: if no resonator goes by that name.
+        """
+        try:
+            return self._by_name.pop(name)
+        except KeyError:
+            # Bounded, so a 500-resonator array's error stays readable.
+            known = self.names()
+            shown = ", ".join(known[:5])
+            if len(known) > 5:
+                shown += f" (and {len(known) - 5} more)"
+            raise KeyError(
+                f"No resonator named {name!r}. This catalog holds {shown}."
+            ) from None
 
     def copy(self) -> ResonatorCatalog:
         """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;

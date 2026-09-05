@@ -511,6 +511,13 @@ print(named_catalog)
 
 Iteration is in channel order; lookup is by name.
 
+`names()` gives you the names alone, low frequency first — the array as you
+would plot or tabulate it. Pass `order="channel"` for iteration's ordering
+instead, which is what you want when the names have to line up with
+per-channel data coming back from the board. The two agree here, and for any
+catalog fresh from `from_frequencies`, which numbers channels 1..N in frequency
+order — they drift apart once resonators are retuned or dropped.
+
 ```python
 print(f"len           : {len(named_catalog)}")
 print(f"by name       : "
@@ -518,6 +525,8 @@ print(f"by name       : "
 print(f"by channel    : {named_catalog.by_channel(1).name}")
 print(f"'low' present : {'low' in named_catalog}")
 print(f"iteration     : {[r.name for r in named_catalog]}  (channel order)")
+print(f"names()       : {named_catalog.names()}  (frequency order)")
+print(f"names(channel): {named_catalog.names(order='channel')}")
 print(f"module        : {named_catalog.module}")
 ```
 
@@ -547,6 +556,38 @@ print(f"tone moved  : {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
 red_resonator.set_bias(iq_rotation_deg=15.0)         # calibration only
 print(f"recalibrated: {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}   <- tone untouched")
+```
+
+### Dropping a resonator
+
+A resonator that turns out not to be one — a duplicate, or a peak the finder
+should not have accepted — comes out with `remove()`, which hands it back, or
+with `del` if you don't want it.
+
+Channels are left exactly where they were. Dropping channel 2 leaves 1 and 3,
+not a renumbered 1 and 2, so every surviving resonator keeps the channel it was
+measured on and any per-channel data you are holding stays valid. Nothing in
+the catalog requires channels to be contiguous. Renumbering them is a separate
+decision, and if you want it, rebuild the catalog yourself.
+
+The freed channel and the freed frequency both become available again.
+
+We prune a `copy()` here so the catalog the later sections save is untouched —
+the same copy-then-swap discipline a GUI worker thread uses.
+
+```python
+pruned_catalog = by_hand_catalog.copy()
+print(f"before : {pruned_catalog.names()} on channels "
+      f"{[r.channel for r in pruned_catalog]}")
+
+dropped_resonator = pruned_catalog.remove("green")
+print(f"dropped: {dropped_resonator.name} from channel {dropped_resonator.channel}")
+
+print(f"after  : {pruned_catalog.names()} on channels "
+      f"{[r.channel for r in pruned_catalog]}   <- channel 2 is a hole, not reused")
+
+del pruned_catalog["blue"]
+print(f"del    : {pruned_catalog.names()}")
 ```
 
 ### Quantizing onto the tone grid
@@ -647,7 +688,7 @@ print(f"one resonator  : {catalog_dict['resonators'][2]}")
 
 restored_catalog = ResonatorCatalog.from_dict(catalog_dict)
 print(f"\nround trip: {len(restored_catalog)} resonators, "
-      f"names {[r.name for r in restored_catalog]}")
+      f"names {restored_catalog.names()}")
 print(f"calibration survived: "
       f"{restored_catalog['red'].bias.iq_rotation_deg} deg, "
       f"notes {restored_catalog['red'].notes}")

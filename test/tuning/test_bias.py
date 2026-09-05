@@ -479,16 +479,18 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
     assert report.catalog.to_dict() != before
 
 
-def test_the_sweeps_come_back_as_they_went_in():
-    """The diagnostics of an analysis do not belong written onto the data the
-    analysis was handed."""
+def test_the_sweep_entries_come_back_as_they_went_in():
+    """The diagnostics of an analysis do not belong written onto the sweeps the
+    analysis was handed. The report itself does, and goes on the envelope."""
     sweeps = a_multiamp_multisweep()
     entry = sweeps["results"][0]["upward"]["R0001"]
     keys = set(entry)
+    envelope_keys = set(sweeps)
 
-    find_bias_points(sweeps)
+    find_bias_points(sweeps, save=False)
 
     assert set(entry) == keys
+    assert set(sweeps) - envelope_keys == {"bias_report"}
 
 
 def test_the_bias_point_carries_the_calibration_measured_at_it():
@@ -816,8 +818,29 @@ def test_a_report_from_another_version_is_refused():
         BiasReport.from_dict(d)
 
 
-def test_bias_finding_writes_its_own_file(tmp_path):
-    """A new catalog is not an annotation on the sweep, so it gets a new file."""
+def test_the_report_goes_into_the_sweeps_it_was_found_from():
+    sweeps = a_multiamp_multisweep()
+
+    report = find_bias_points(sweeps, save=False)
+
+    restored = BiasReport.from_dict(sweeps["bias_report"])
+    assert restored.findings == report.findings
+    assert [r.bias for r in restored.catalog] == [r.bias for r in report.catalog]
+
+
+def test_a_second_analysis_replaces_the_stored_one():
+    sweeps = a_multiamp_multisweep()
+
+    find_bias_points(sweeps, save=False)
+    report = find_bias_points(sweeps, save=False, frequency_method="minimum")
+
+    stored = BiasReport.from_dict(sweeps["bias_report"])
+    assert stored.settings["frequency_method"] == "minimum"
+    assert stored.findings == report.findings
+
+
+def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
+    """The report is part of the sweep now, so the sweep's file is what changes."""
     from rfmux.tuning import store
 
     store.set_output_directory(tmp_path)
@@ -825,11 +848,18 @@ def test_bias_finding_writes_its_own_file(tmp_path):
         sweeps = a_multiamp_multisweep()
         report = find_bias_points(sweeps, save=True, label="cooldown3")
 
-        path = next(store.session_directory().glob("bias_report_*.pkl"))
+        path = next(store.session_directory().glob("multiamp_multisweep_*.pkl"))
         assert path.stem.endswith("_cooldown3")
 
-        restored = BiasReport.from_dict(store.load(path))
+        restored = BiasReport.from_dict(store.load(path)["bias_report"])
         assert len(restored) == len(report)
         assert restored.catalog.module == report.catalog.module
+
+        # And a second analysis updates that file rather than leaving a near
+        # copy of a ladder beside it.
+        find_bias_points(sweeps, save=True, frequency_method="minimum")
+        assert [p.name for p in store.session_directory().glob("*.pkl")] == [
+            path.name
+        ]
     finally:
         store.set_output_directory(None)

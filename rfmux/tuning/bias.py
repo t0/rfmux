@@ -36,9 +36,16 @@ that were found::
     report.catalog["R0001"].bias.frequency_hz
     await crs.apply_bias(report.catalog)
 
-Nothing is modified on the way past: not the catalog that was swept, not the
-sweep entries. A bias point is a claim about one analysis of one set of sweeps,
-and two of them side by side — one from the derivative method, one from
+The report also goes into the sweeps it was found from, as plain builtins,
+under ``sweeps["bias_report"]`` — so an operating point travels with the data
+behind it, and saving updates the sweep's own file rather than leaving a second
+one beside it. ``BiasReport.from_dict(sweeps["bias_report"])`` reads it back.
+One analysis is stored at a time: a second call replaces it, the way re-running
+a fit replaces that model's fit.
+
+Nothing else is modified on the way past: not the catalog that was swept, not
+the sweep entries. A bias point is a claim about one analysis of one set of
+sweeps, and two of them side by side — one from the derivative method, one from
 hysteresis — is a comparison worth being able to make. The catalog you swept is
 still the catalog you swept, and merging is
 the caller's decision.
@@ -92,8 +99,8 @@ Not ported (yet)
   porting on faith.
 * **The diagnostic arrays** the old implementation wrote onto the selected
   sweep entry. What is scalar comes back on the report; the arrays are
-  recomputable from the sweep and the settings, and writing them onto data we
-  were handed is exactly what this module does not do.
+  recomputable from the sweep and the settings, and a sweep entry should still
+  read the way it was measured.
 
 Attribution
 -----------
@@ -460,16 +467,20 @@ def find_bias_points(
             is everything the trace could offer: the answer is a point of the
             trace, so it is inside the span whatever happens, and this only
             means something when it is tighter than the span.
-        save: write the report to the output folder. Unlike fitting, this
-            produces something new — a catalog the sweeps did not have — so it
-            gets its own ``bias_report_*.pkl`` rather than updating the sweep
-            file. Defaults to ``rfmux.tuning.store.autosave_enabled()``.
-        label: your name for the file, appended after the timestamp.
+        save: save the *sweeps*, which now carry the report. It goes into
+            ``sweeps["bias_report"]`` either way; this is only whether the file
+            it came from is updated to match. Sweeps that were never saved get
+            a new file. Defaults to
+            ``rfmux.tuning.store.autosave_enabled()``.
+        label: your name for the file, used only when these sweeps are being
+            written for the first time — a re-save keeps the name the file
+            already has.
 
     Returns:
         BiasReport: a new catalog carrying the bias points, and one
         :class:`BiasFinding` per catalog resonator, in channel order, saying
-        how each was arrived at.
+        how each was arrived at. The same report, as builtins, is left in
+        ``sweeps["bias_report"]``.
 
     Raises:
         TypeError: for the whole container rather than one module's result.
@@ -540,16 +551,13 @@ def find_bias_points(
             "max_distance_hz": max_distance_hz,
         },
     )
-    # to_dict, not the report: a pickled class records its import path and
-    # skips its constructor coming back, so the file would outlive a rename
-    # only by restoring into a state BiasReport would have refused to build.
-    store.maybe_save(
-        report.to_dict(),
-        "bias_report",
-        save=save,
-        label=label,
-        module=sweeps.get("module"),
-    )
+    # Into the sweeps it was found from, so that saving updates that file
+    # rather than starting a second one. to_dict, not the report: a pickled
+    # class records its import path and skips its constructor coming back, so
+    # the file would outlive a rename only by restoring into a state BiasReport
+    # would have refused to build.
+    sweeps["bias_report"] = report.to_dict()
+    store.maybe_save(sweeps, _measurement_type(sweeps), save=save, label=label)
     return report
 
 
@@ -1179,6 +1187,19 @@ def _directions_swept(sweeps) -> set[str]:
         for by_direction in _iterations(sweeps).values()
         for direction in by_direction
     }
+
+
+def _measurement_type(sweeps) -> str:
+    """What to call the file, for sweeps that have never been in one.
+
+    Bias finding writes back into the sweep it read, and that sweep is usually
+    in a file already — in which case this only re-stamps the type it had. What
+    it is for is the sweep taken with ``save=False`` and written for the first
+    time here: it should be named after what it is, and a ladder is the only
+    thing that records an ``amp_schedule``.
+    """
+    schedule = (sweeps.get("call_params") or {}).get("amp_schedule")
+    return "multiamp_multisweep" if schedule else "multisweep"
 
 
 def _catalog_swept(sweeps) -> ResonatorCatalog:

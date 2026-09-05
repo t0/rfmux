@@ -934,12 +934,24 @@ for before, after in zip(swept_catalog, bias_report.catalog):
 ```
 
 
-The catalog that went in is untouched, as are the sweeps. This allows the
+The catalog that went in is untouched, as are the measured sweeps. This allows the
 analysis to be re-run with different settings on the same data as many times as
 you like:
 
 ```python
 print(f"the catalog we started from is still: {swept_catalog['R0001'].bias}")
+
+```
+
+The report does go into the sweeps it was found from, under `bias_report`, so
+that an operating point travels with the data it was derived from — and so that
+saving updates the ladder's own file rather than leaving a second one beside it.
+Re-running replaces it, the same way re-running a fit replaces that fit:
+
+```python
+from rfmux.tuning import BiasReport
+
+print(BiasReport.from_dict(multiamp_module_results["bias_report"]))
 
 ```
 

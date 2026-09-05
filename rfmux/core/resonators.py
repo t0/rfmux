@@ -539,7 +539,7 @@ class ResonatorCatalog:
         # frequency in one already passed that check on the way in, so reading
         # them back under the current default of None cannot let anything
         # through that the writer would have caught.
-        kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
+        # kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
 
         # A file written while the catalog still carried an NCO frequency has
         # that key and it is ignored, which is why removing the field did not

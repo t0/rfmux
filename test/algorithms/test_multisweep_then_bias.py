@@ -124,3 +124,8 @@ def test_calibration_reports_a_tone_step_whatever_the_adc_phase(swept, monkeypat
         assert abs(shift.imag) < 0.5 * step, (det, shift)
         ch = out[det]["bias_channel"]
         assert loop.run_until_complete(crs.get_phase(channel=ch, module=1)) == (adc_phase or 0.0)
+        assert out[det]["df_calibration_source"] == "measured"
+        # The fit's version agrees to a few degrees; the measured one is
+        # what a tone step reads.
+        ratio = out[det]["df_calibration"] / out[det]["df_calibration_fit"]
+        assert abs(np.degrees(np.angle(ratio))) < 6.0

@@ -153,6 +153,39 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
     return results_by_detector, metadata
 
 
+async def measure_calibrations_by_step(crs, bias_configs: Dict[int, Dict], module: int,
+                                       step_hz: float = 300.0, num_samples: int = 100
+                                       ) -> Dict[int, complex]:
+    """The df calibration of every detector in *bias_configs*, measured
+    where it sits: each tone steps *step_hz* down, then up, in lockstep,
+    one read of the module at each, and the calibration is the inverse
+    of the complex slope, in hertz per volt.  The ADC phase in force
+    applies to the samples, so the result is in the frame the detector
+    is read in.  Detectors whose samples do not move are left out."""
+    from ...core.transferfunctions import convert_roc_to_volts
+    z = {}
+    for sign in (-1.0, 1.0):
+        async with crs.tuber_context() as ctx:
+            for config in bias_configs.values():
+                ctx.set_frequency(config['frequency'] + sign * step_hz,
+                                  channel=config['channel'], module=module)
+            await ctx()
+        samples = await crs.get_samples(num_samples, channel=None, module=module, average=False)
+        z[sign] = {det: complex(np.mean(samples.i[config['channel'] - 1]),
+                                np.mean(samples.q[config['channel'] - 1]))
+                   for det, config in bias_configs.items()}
+    async with crs.tuber_context() as ctx:
+        for config in bias_configs.values():
+            ctx.set_frequency(config['frequency'], channel=config['channel'], module=module)
+        await ctx()
+    out = {}
+    for det in bias_configs:
+        slope = convert_roc_to_volts((z[1.0][det] - z[-1.0][det]) / (2.0 * step_hz))
+        if np.isfinite(slope) and slope != 0:
+            out[det] = complex(1.0 / slope)
+    return out
+
+
 def _suitable(det_data: Dict, nonlinear_threshold: float):
     """Whether an amplitude can be biased at: its sweep does not jump
     and, where it carries a nonlinear fit, the fitted nonlinearity is
@@ -195,6 +228,8 @@ async def bias_kids(
     bandpass_params: Optional[Dict[str, float]] = None,
     num_phase_samples: int = 300,
     fit_method: str = "nonlinear",
+    measure_calibration: bool = True,
+    calibration_step_hz: float = 300.0,
     *,
     module: Optional[Union[int, List[int]]] = None,
     progress_callback: Optional[Callable] = None
@@ -233,7 +268,15 @@ async def bias_kids(
         num_phase_samples (int): Number of samples to collect for phase optimization.
                                Defaults to 300.
         fit_method (str): "nonlinear" (default) or "skewed": the resonance fit the
-                        amplitude choice, bias frequency and calibration come from.
+                        amplitude choice and bias frequency come from.
+        measure_calibration (bool): Measure the df calibration where each detector
+                        ends up, by stepping every tone calibration_step_hz down and
+                        up in lockstep and reading the samples: two reads for the
+                        module, no model.  On the simulator the direction is within
+                        0.7 degrees of truth where the fit's is within 4.  The fit's
+                        calibration is kept as 'df_calibration_fit'.  Defaults to True.
+        calibration_step_hz (float): Half the tone step for that measurement, well
+                        inside a linewidth.  Defaults to 300 Hz.
         module (int | list[int], optional): Target module(s). If None, extracted from results.
         progress_callback (callable, optional): Function called with (module, progress_percentage).
         
@@ -248,7 +291,9 @@ async def bias_kids(
         - 'phase_optimization_std': The bandpass-filtered Q std at optimal phase
         - 'bias_frequency': Where the detector was biased; from the fit when
           'bias_frequency_source' names one, else the multisweep's own choice
-        - 'df_calibration': Hz per volt at the bias point, from the fit
+        - 'df_calibration': Hz per volt at the bias point: measured, or from the fit
+        - 'df_calibration_source': "measured" or "fit"
+        - 'df_calibration_fit': the fit's calibration, when both exist
     """
     
     # Detect multi-amplitude format and find optimal bias points
@@ -310,6 +355,8 @@ async def bias_kids(
                     bandpass_params=bandpass_params,
                     num_phase_samples=num_phase_samples,
                     fit_method=fit_method,
+                    measure_calibration=measure_calibration,
+                    calibration_step_hz=calibration_step_hz,
                     module=mod_num,
                     progress_callback=progress_callback
                 )
@@ -429,16 +476,29 @@ async def bias_kids(
         # No optimization - all phases are 0
         optimal_phases = {det_idx: (0.0, None) for det_idx in bias_configs}
     
-    # Apply the optimal phases and create result data
+    # Every channel's phase, then the measurement at the point each
+    # detector now sits at, in the frame it now has.
+    async with crs.tuber_context() as ctx:
+        for det_idx, config in bias_configs.items():
+            optimal_phase = optimal_phases.get(det_idx, (0.0, None))[0]
+            if optimal_phase != 0.0:
+                ctx.set_phase(optimal_phase, units=crs.UNITS.DEGREES, target=crs.TARGET.ADC,
+                              channel=config['channel'], module=module)
+        await ctx()
+    measured = {}
+    if measure_calibration and bias_configs:
+        try:
+            measured = await measure_calibrations_by_step(crs, bias_configs, module,
+                                                          step_hz=calibration_step_hz)
+        except Exception as exc:
+            warnings.warn(f"Module {module}: measuring the df calibration failed "
+                          f"({exc}); using the fit's")
+
+    disagree = []
     for det_idx, config in bias_configs.items():
         try:
             optimal_phase, phase_std = optimal_phases.get(det_idx, (0.0, None))
-            
-            # Set the optimal phase for this channel
-            if optimal_phase != 0.0:
-                await crs.set_phase(optimal_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, 
-                                   channel=config['channel'], module=module)
-            
+
             # Copy the original multisweep data and add bias info
             biased_data = multisweep_results[det_idx].copy()
             biased_data['bias_channel'] = config['channel']
@@ -464,12 +524,33 @@ async def bias_kids(
                 # samples * calibration the same frequency shift.
                 biased_data['df_calibration'] *= np.exp(-1j * np.radians(optimal_phase))
                 biased_data['df_calibration_rotated'] = True
-            
+
+            fit_cal = biased_data.get('df_calibration')
+            meas_cal = measured.get(det_idx)
+            if meas_cal is not None:
+                biased_data['df_calibration'] = meas_cal
+                biased_data['df_calibration_source'] = "measured"
+                if fit_cal is not None:
+                    biased_data['df_calibration_fit'] = fit_cal
+                    ratio = meas_cal / fit_cal
+                    turn = abs(np.degrees(np.angle(ratio)))
+                    if turn > 5.0 or not 0.7 < abs(ratio) < 1.4:
+                        disagree.append((det_idx, turn, abs(ratio)))
+            elif fit_cal is not None:
+                biased_data['df_calibration_source'] = "fit"
+
             successfully_biased[det_idx] = biased_data
             
         except Exception as e:
             warnings.warn(f"Failed to bias detector {det_idx}: {e}")
     
+    if disagree:
+        worst = max(disagree, key=lambda d: d[1])
+        warnings.warn(f"Module {module}: the measured df calibration disagrees "
+                      f"with the fit's on {len(disagree)} of {len(bias_configs)} "
+                      f"detectors (worst: detector {worst[0]}, {worst[1]:.1f} deg, "
+                      f"magnitude ratio {worst[2]:.2f}); the measured one is used")
+
     # Progress callback
     if progress_callback:
         progress_callback(module, 100.0)

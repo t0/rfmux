@@ -14,11 +14,13 @@ FR, QR, NCO = 1.0e9, 5.0e4, 0.9e9
 
 
 class _Ctx:
-    def __init__(self, log):
-        self.log = log
+    def __init__(self, board):
+        self.board = board
+        self.log = board.log
 
     def set_frequency(self, f, channel, module):
         self.log.append(("frequency", channel, f))
+        self.board.freq[channel] = f
 
     def set_amplitude(self, a, channel, module):
         self.log.append(("amplitude", channel, a))
@@ -39,26 +41,61 @@ class _Board:
 
     def __init__(self):
         self.log = []
+        self.freq = {}
 
     async def get_nco_frequency(self, module):
         return NCO
 
     @contextlib.asynccontextmanager
     async def tuber_context(self):
-        yield _Ctx(self.log)
+        yield _Ctx(self)
 
     async def set_phase(self, *a, **k):
         pass
 
-    samples = None
+    samples = None   # unmoving by default: no stepped calibration, the fit's is used
 
     async def get_samples(self, n, channel=None, module=None, average=False):
-        return self.samples
+        return self.samples if self.samples is not None else _Samples(np.zeros(n), np.zeros(n))
 
 
 class _Samples:
     def __init__(self, i, q):
         self.i, self.q = [np.asarray(i)], [np.asarray(q)]
+
+
+SLOPE = 0.4 - 0.3j   # counts per hertz, the board's response to a tone step
+
+
+class _SlopeBoard(_Board):
+    """Samples that move with the channel's frequency: a straight
+    trajectory of slope SLOPE, so a stepped-tone calibration is exact."""
+    async def get_samples(self, n, channel=None, module=None, average=False):
+        z = SLOPE * self.freq.get(1, 0.0)
+        return _Samples(np.full(n, z.real), np.full(n, z.imag))
+
+
+@pytest.mark.asyncio
+async def test_calibration_is_measured_where_the_detector_sits():
+    board = _SlopeBoard()
+    entry = _entry()
+    out = await bk.bias_kids(board, {1: entry}, module=1)
+    expect = 1.0 / (SLOPE * VOLTS_PER_ROC)
+    assert out[1]["df_calibration_source"] == "measured"
+    assert out[1]["df_calibration"] == pytest.approx(expect, rel=1e-6)
+    assert "df_calibration_fit" in out[1]
+    # The tone is back where it was biased.
+    bias_rel = [f for kind, ch, f in board.log if kind == "frequency"][0]
+    assert board.freq[1] == bias_rel
+
+
+@pytest.mark.asyncio
+async def test_unmoving_samples_fall_back_to_the_fit():
+    board = _Board()
+    board.samples = _Samples(np.full(100, 3.0), np.full(100, -2.0))
+    out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    assert out[1]["df_calibration_source"] == "fit"
+    assert np.isfinite(out[1]["df_calibration"])
 
 
 @pytest.mark.asyncio

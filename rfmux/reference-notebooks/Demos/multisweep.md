@@ -783,8 +783,8 @@ plot_sections_at_iteration(multiamp_module_results, 2)
 
 ```python
 for name in ("R0001", "R0002", "R0003"):
-    at_bias = find_iteration_matching_amplitude(multiamp_module_results, name)
     bias = catalog[name].bias.amplitude
+    at_bias = find_iteration_matching_amplitude(multiamp_module_results, name, amplitude=bias)
     print(f"{name}  bias {bias:.5f}  → step {at_bias}")
 ```
 

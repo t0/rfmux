@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 #include <deque>
+#include <functional>
+#include <limits>
 #include <map>
 #include <queue>
 #include <tuple>
@@ -65,6 +67,8 @@ namespace packets {
 		}
 
 		Timestamp normalized() const;
+		// Seconds of day; NaN when the stamp is not disciplined.
+		double seconds_of_day() const;
 		void renormalize() { *this = normalized(); }
 	};
 
@@ -176,6 +180,10 @@ namespace packets {
 
 		std::optional<Packet> pop(std::optional<int> timeout_ms = std::nullopt);
 		std::optional<Packet> try_pop();
+		// Pop up to max_packets into *out* under one lock, stopping
+		// at the first packet *accept* refuses (it is left queued).
+		size_t pop_while(std::vector<Packet>& out, size_t max_packets,
+		                 const std::function<bool(const Packet&)>& accept);
 		void push(Packet&& packet);
 		void clear();
 
@@ -185,8 +193,15 @@ namespace packets {
 
 		struct Stats {
 			uint64_t packets_received = 0;
+			// Queue overflow: the consumer could not keep up.
 			uint64_t packets_dropped = 0;
+			// Discontinuity EVENTS in the sequence numbers. One burst
+			// of a thousand lost packets counts once, so this measures
+			// how bursty the loss is, not how much of it there is.
 			uint64_t sequence_gaps = 0;
+			// Packets that never arrived, counted individually. This is
+			// the one to compare against packets_received.
+			uint64_t packets_missing = 0;
 			uint32_t last_seq = 0;
 		};
 
@@ -210,6 +225,9 @@ namespace packets {
 		PacketReceiver& operator=(const PacketReceiver&) = delete;
 
 		size_t receive_batch(size_t batch_size = 256, std::optional<int> timeout_ms = std::nullopt);
+		// Every held packet to its queue, ordered.  Packets received
+		// afterwards are held again, so call once receive_batch has stopped.
+		void flush_all();
 
 		std::shared_ptr<PacketQueue> get_queue(uint16_t serial, uint8_t module);
 
@@ -231,13 +249,24 @@ namespace packets {
 
 	private:
 		void process_packet(std::vector<char>&& data);
-		void flush_reorder_buffer(uint16_t serial, uint8_t module);
+		// Release all but *keep* of the packets held for (serial, module).
+		void flush_reorder_buffer(uint16_t serial, uint8_t module, size_t keep);
 
 		std::shared_ptr<PacketType> type_;
 		int sockfd_;
 		size_t reorder_window_;
 		size_t queue_max_size_;
 		size_t flush_threshold_;
+
+		// recvmmsg scratch, reused across calls (why: see
+		// receive_batch). Touched only by the thread that calls
+		// receive_batch.
+#ifdef __linux__
+		std::vector<struct mmsghdr> rx_msgs_;
+		std::vector<struct iovec> rx_iovecs_;
+		std::vector<std::vector<char>> rx_buffers_;
+		size_t rx_capacity_ = 0;
+#endif
 
 		using QueueKey = std::tuple<uint16_t, uint8_t>;
 

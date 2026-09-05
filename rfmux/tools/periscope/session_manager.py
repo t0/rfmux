@@ -26,8 +26,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtCore import QUrl
 
 
 class SessionManager(QtCore.QObject):
@@ -565,8 +563,19 @@ class SessionManager(QtCore.QObject):
             file_path: Path to the pickle file
         
         Returns:
-            Data type string (netanal, multisweep, bias, noise) or None if unknown
+            Data type string (netanal, multisweep, bias, noise, pulse)
+            or None if unknown
         """
+        # HDF5 files are never pickles.  The pulse capture reader owns
+        # the file layout: a file it opens with captured channels is one.
+        if str(file_path).lower().endswith(('.h5', '.hdf5')):
+            from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+            try:
+                with PulseHDF5Reader(file_path) as reader:
+                    return 'pulse' if reader.channels else None
+            except Exception:
+                return None
+
         # Try to load the file
         data = self.load_file(file_path)
         if data is None or not isinstance(data, dict):
@@ -606,6 +615,32 @@ class SessionManager(QtCore.QObject):
         # Unknown file type
         return None
 
+
+    def register_external_file(self, filepath: str, data_type: str,
+                               identifier: str = ""):
+        """
+        Register a file written directly into the session folder by a
+        panel/task (e.g. a streamed pulse-capture HDF5 that cannot go
+        through pickle-based export_data).
+
+        Records the file in the session metadata 'exports' list with the
+        same entry shape as export_data, and emits file_exported /
+        session_updated so the browser refreshes.
+        """
+        if not self.is_active or self._session_path is None:
+            return
+
+        path = Path(filepath)
+        self._export_count += 1
+        self._session_metadata.setdefault('exports', []).append({
+            'filename': path.name,
+            'data_type': data_type,
+            'identifier': identifier,
+            'timestamp': datetime.datetime.now().isoformat(),
+        })
+        self._save_metadata()
+        self.file_exported.emit(str(path), data_type)
+        self.session_updated.emit()
 
     def register_screenshot(self, filepath: str):
         """

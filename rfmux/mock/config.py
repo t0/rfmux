@@ -17,7 +17,23 @@ from __future__ import annotations
 
 from typing import Any, Dict
 from copy import deepcopy
+import math
 import re
+
+#: The mock's DAC scale, what a tone power in dBm is normalized against
+#: (set_dac_scale's default on the mock board).
+DAC_SCALE_DBM = 1.0
+#: Tone power the automatic biasing sweeps and biases at.
+BIAS_DBM = -55.0
+
+
+def bias_amplitude_from_dbm(dbm: float) -> float:
+    """Normalized tone amplitude for a power in dBm at the mock's DAC scale."""
+    return 10 ** ((dbm - DAC_SCALE_DBM) / 20)
+
+
+def bias_dbm_from_amplitude(amplitude: float) -> float:
+    return 20 * math.log10(max(amplitude, 1e-12)) + DAC_SCALE_DBM
 
 # =============================================================================
 # Unified Default Configuration
@@ -72,7 +88,18 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Noise configuration
     # -------------------------------------------------------------------------
     "nqp_noise_enabled": True,  # Enable noise on quasiparticle density
-    "nqp_noise_std_factor": 0.001,  # Std dev as fraction of base nqp (0.1%)
+    "nqp_noise_std_factor": 0.01,   # Std dev as fraction of base nqp (1%)
+
+    # TLS (two-level system) 1/f frequency noise.  Real KIDs show
+    # fractional frequency wander with a 1/f**alpha spectrum from TLS in
+    # the surface dielectric; unlike nqp_noise above it is CORRELATED in
+    # time, so it drifts the baseline rather than adding scatter.
+    "tls_noise_enabled": True,      # On: real KIDs drift, and code that
+                                    # cannot survive drift should fail here
+                                    # rather than on hardware
+    "tls_fractional_rms": 1e-7,     # RMS fractional frequency wander df/f
+    "tls_alpha": 1.0,               # Spectral slope: PSD ~ 1/f**alpha
+    "tls_corner_hz": 100.0,         # Upper corner; law spans 3 decades below
 
     # -------------------------------------------------------------------------
     # Convergence parameters
@@ -97,12 +124,17 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Automatic KID biasing parameters
     # -------------------------------------------------------------------------
     "auto_bias_kids": False,   # Enable automatic channel configuration
-    "bias_amplitude": 0.01,    # Bias amplitude in normalized units (≈ -40 dBm)
+    # Normalized units; the dialog shows and edits it in dBm.
+    "bias_amplitude": bias_amplitude_from_dbm(BIAS_DBM),
 
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)
     # -------------------------------------------------------------------------
-    "udp_noise_level": 10.0,   # Additive ADC noise [counts]
+    # Additive white ADC noise, sigma per slow sample [counts] at the
+    # scale get_samples reports; the PFB emitter derives its own sigma
+    # from this.  Provisional until measured on a board (see
+    # docs/release-notes/2026-09-hardware-checks.md).
+    "udp_noise_level": 0.04,
     # scale_factor converts normalized S21 * amplitude to ADC readout counts.
     # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical
     # voltage for 0 dB round-trip gain with default dac_scale = 1.0 dBm and
@@ -110,6 +142,11 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Formula: 1880796.46 * 10**((dac_scale_dbm - adc_ref_dbm) / 20)
     #        = 1880796.46 * 10**(2.75 / 20) ≈ 2_580_128
     "scale_factor": 1880796.4604246316 * 10**(2.75 / 20.0),
+    # How a block of samples is evaluated: "hoisted" (per-batch
+    # invariants computed once) or "reference", the sample-by-sample
+    # loop the hoisted path is checked against in
+    # test/mock/test_batch_physics_parity.py.  Not a user knob.
+    "physics_batch_mode": "hoisted",
 
     # -------------------------------------------------------------------------
     # Quasiparticle pulse parameters (time-dependent nqp)
@@ -118,16 +155,25 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_period": 2.0,          # seconds (periodic mode)
     "pulse_probability": 0.1,     # per-timestep probability (random mode)
     "pulse_tau_rise": 1e-6,       # seconds
-    "pulse_tau_decay": 0.1,       # seconds
+    "pulse_tau_decay": 5e-3,      # seconds
     "pulse_amplitude": 2.0,       # multiplicative factor relative to base nqp
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 
-    # Random pulse amplitude distribution (random mode only)
-    "pulse_random_amp_mode": "fixed",   # "fixed" | "uniform" | "lognormal"
-    "pulse_random_amp_min": 1.5,        # for uniform mode (>= 1.0)
-    "pulse_random_amp_max": 3.0,        # for uniform mode (>= min)
+    # Pulse amplitude distribution (periodic and random modes)
+    "pulse_random_amp_mode": "fixed",  # "fixed" | "uniform" | "lognormal"
+    "pulse_random_amp_min": 1.1,        # for uniform mode (>= 1.0)
+    "pulse_random_amp_max": 1.5,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode
     "pulse_random_amp_logsigma": 0.3,   # for lognormal mode (>= 0)
+
+    # Pulse tau_decay distribution (periodic and random modes)
+    # In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
+    # while tau_decay (QP recombination) varies with QP density, temperature, etc.
+    "pulse_random_tau_mode": "fixed",    # "fixed" | "uniform" | "lognormal"
+    "pulse_random_tau_min": 5e-4,        # 0.5 ms (for uniform mode, > 0)
+    "pulse_random_tau_max": 5e-3,        # 5 ms (for uniform mode, >= min)
+    "pulse_random_tau_logmean": -6.9,    # ln(0.001) ≈ -6.9 → median ~1ms (for lognormal)
+    "pulse_random_tau_logsigma": 0.5,    # spread (for lognormal mode, >= 0)
 }
 
 # =============================================================================
@@ -175,7 +221,10 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         "pulse_tau_rise", "pulse_tau_decay", "pulse_amplitude",
         "pulse_random_amp_min", "pulse_random_amp_max",
         "pulse_random_amp_logmean", "pulse_random_amp_logsigma",
-        "cache_freq_step", "cache_amp_step", "cache_qp_step"
+        "pulse_random_tau_min", "pulse_random_tau_max",
+        "pulse_random_tau_logmean", "pulse_random_tau_logsigma",
+        "cache_freq_step", "cache_amp_step", "cache_qp_step",
+        "tls_fractional_rms", "tls_alpha", "tls_corner_hz"
     ):
         if k in cfg and isinstance(cfg[k], str):
             try:
@@ -263,5 +312,73 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         logsigma = 0.0
     cfg["pulse_random_amp_logmean"] = logmean
     cfg["pulse_random_amp_logsigma"] = logsigma
+
+    # Normalize random tau_decay distribution settings
+    tau_mode = cfg.get("pulse_random_tau_mode", "fixed")
+    if isinstance(tau_mode, str):
+        tau_mode_norm = tau_mode.strip().lower()
+        if tau_mode_norm not in ("fixed", "uniform", "lognormal"):
+            tau_mode_norm = "fixed"
+        cfg["pulse_random_tau_mode"] = tau_mode_norm
+    else:
+        cfg["pulse_random_tau_mode"] = "fixed"
+
+    # Enforce numeric constraints for tau distribution
+    try:
+        tau_min = float(cfg.get("pulse_random_tau_min", 5e-4))
+    except Exception:
+        tau_min = 5e-4
+    try:
+        tau_max = float(cfg.get("pulse_random_tau_max", 5e-3))
+    except Exception:
+        tau_max = 5e-3
+
+    # tau_decay must be positive
+    if tau_min <= 0:
+        tau_min = 1e-6
+    if tau_max <= 0:
+        tau_max = 1e-6
+    # Ensure min <= max
+    if tau_max < tau_min:
+        tau_max = tau_min
+    cfg["pulse_random_tau_min"] = tau_min
+    cfg["pulse_random_tau_max"] = tau_max
+
+    try:
+        tau_logmean = float(cfg.get("pulse_random_tau_logmean", -6.9))
+    except Exception:
+        tau_logmean = -6.9
+    try:
+        tau_logsigma = float(cfg.get("pulse_random_tau_logsigma", 0.5))
+    except Exception:
+        tau_logsigma = 0.5
+    if tau_logsigma < 0.0:
+        tau_logsigma = 0.0
+    cfg["pulse_random_tau_logmean"] = tau_logmean
+    cfg["pulse_random_tau_logsigma"] = tau_logsigma
+
+    # ── TLS 1/f frequency noise ───────────────────────────────────
+    cfg["tls_noise_enabled"] = bool(cfg["tls_noise_enabled"])
+    try:
+        tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
+    except Exception:
+        tls_rms = 1e-7
+    cfg["tls_fractional_rms"] = max(0.0, tls_rms)
+
+    try:
+        tls_alpha = float(cfg.get("tls_alpha", 1.0))
+    except Exception:
+        tls_alpha = 1.0
+    # Outside ~[0, 2] the sum-of-Lorentzians construction stops
+    # approximating a power law usefully.
+    cfg["tls_alpha"] = min(2.0, max(0.0, tls_alpha))
+
+    try:
+        tls_corner = float(cfg.get("tls_corner_hz", 100.0))
+    except Exception:
+        tls_corner = 100.0
+    # The generator's grid step is set by the fastest pole, so a huge
+    # corner would make the grid impractically fine.
+    cfg["tls_corner_hz"] = min(1e5, max(1e-3, tls_corner))
 
     return cfg

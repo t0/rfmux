@@ -12,7 +12,7 @@ capabilities while maintaining separation of concerns.
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Tuple, Optional, Union, cast
+from typing import Tuple, Optional, Union
 
 from .utils import *
 from .dialogs import MultisweepDialog
@@ -164,6 +164,10 @@ class NetworkAnalysisExportMixin:
             meas_idx = 0
             
             for key, data_tuple in data_dict.items():
+                if key == 'default':
+                    # The display's copy of the latest sweep; every sweep
+                    # is also stored under its own amplitude key.
+                    continue
                 # Extract and convert data for export
                 amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
                 
@@ -263,6 +267,10 @@ class NetworkAnalysisExportMixin:
         for module, data_dict in self.raw_data.items():
             idx = 0
             for key, data_tuple in data_dict.items():
+                if key == 'default':
+                    # The display's copy of the latest sweep; every sweep
+                    # is also stored under its own amplitude key.
+                    continue
                 amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
                 
                 # Export data in different unit modes

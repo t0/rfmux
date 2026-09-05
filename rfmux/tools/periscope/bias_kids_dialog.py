@@ -2,10 +2,8 @@
 
 from PyQt6.QtWidgets import (QDialog, QDialogButtonBox, QVBoxLayout, QFormLayout,
                              QSpinBox, QDoubleSpinBox, QCheckBox, QGroupBox, QLabel)
-from PyQt6.QtCore import Qt
-import numpy as np
 
-from .utils import (QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator, QDoubleValidator, QIntValidator)
+from .utils import (QtWidgets, QtCore)
 import pickle
 
 def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -60,8 +58,10 @@ def load_bias_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
 class BiasKidsDialog(QDialog):
     """Dialog for configuring Bias KIDs algorithm parameters."""
     
-    def __init__(self, parent=None, active_module : int | None = None, load_bias = False, loaded_data: dict | None = None):
+    def __init__(self, parent=None, active_module : int | None = None, load_bias = False,
+                 loaded_data: dict | None = None, fits_present: set | None = None):
         super().__init__(parent)
+        self._fits_present = set(fits_present or ())
         self.setWindowTitle("Bias KIDs Configuration")
         self.setModal(True)
         self.setMinimumWidth(400)
@@ -94,6 +94,30 @@ class BiasKidsDialog(QDialog):
             "Detectors with 'a' above this threshold will use fallback amplitude."
         )
         basic_layout.addRow("Nonlinear Threshold:", self.nonlinear_threshold_spin)
+
+        # Which resonance fit the bias point and amplitude choice come
+        # from.  Preselect the one the sweeps carry; bias_kids runs the
+        # chosen fit for sweeps that lack it.
+        self.fit_method_combo = QtWidgets.QComboBox()
+        self.fit_method_combo.addItem("Nonlinear fit", "nonlinear")
+        self.fit_method_combo.addItem("Skewed Lorentzian fit", "skewed")
+        if "nonlinear" not in self._fits_present and "skewed" in self._fits_present:
+            self.fit_method_combo.setCurrentIndex(1)
+        self.fit_method_combo.setToolTip(
+            "The resonance fit the bias frequency and the amplitude choice are\n"
+            "read from.  Sweeps that do not carry it are fitted now (about 20 ms\n"
+            "each for the nonlinear fit, 4 ms for the skewed).  The skewed fit\n"
+            "has no nonlinearity parameter, so with it only a jump in the sweep\n"
+            "rules an amplitude out.\n"
+            "The df calibration is measured by stepping each tone at its bias\n"
+            "point (bias_kids' default, not adjustable here); this fit supplies\n"
+            "the curvature correction and stands in if the measurement fails."
+        )
+        basic_layout.addRow("Bias point from:", self.fit_method_combo)
+        # The threshold reads the nonlinear fit's parameter; the skewed
+        # fit has none.
+        self.fit_method_combo.currentIndexChanged.connect(self._update_threshold_control)
+        self._update_threshold_control()
         
         # Fallback to lowest checkbox
         self.fallback_checkbox = QCheckBox("Fallback to Lowest Amplitude")
@@ -115,8 +139,8 @@ class BiasKidsDialog(QDialog):
         self.optimize_phase_checkbox = QCheckBox("Enable Phase Optimization")
         self.optimize_phase_checkbox.setChecked(False)
         self.optimize_phase_checkbox.setToolTip(
-            "Scan through ADC phases to find the phase that maximizes\n"
-            "the variance in the bandpass-filtered Q timestream."
+            "Set each detector's ADC phase so its timestream's principal\n"
+            "axis lies along Q, from one set of samples."
         )
         phase_layout.addRow("", self.optimize_phase_checkbox)
         
@@ -159,7 +183,7 @@ class BiasKidsDialog(QDialog):
         self.apply_bandpass_checkbox = QCheckBox("Apply Bandpass Filter")
         self.apply_bandpass_checkbox.setChecked(True)
         self.apply_bandpass_checkbox.setToolTip(
-            "Apply a bandpass filter to the Q timestream before calculating variance.\n"
+            "Bandpass I and Q before finding their principal axis.\n"
             "This can help isolate the signal of interest from noise."
         )
         phase_layout.addRow("", self.apply_bandpass_checkbox)
@@ -175,22 +199,9 @@ class BiasKidsDialog(QDialog):
         self.num_samples_spin.setValue(300)
         self.num_samples_spin.setSingleStep(50)
         self.num_samples_spin.setToolTip(
-            "Number of samples to collect at each phase\n"
-            "for variance calculation"
+            "Number of samples the principal axis is found from"
         )
-        phase_layout.addRow("Samples per Phase:", self.num_samples_spin)
-        
-        # Phase step size
-        self.phase_step_spin = QSpinBox()
-        self.phase_step_spin.setRange(1, 45)
-        self.phase_step_spin.setValue(5)
-        self.phase_step_spin.setSingleStep(1)
-        self.phase_step_spin.setSuffix("°")
-        self.phase_step_spin.setToolTip(
-            "Phase step size in degrees for optimization scan.\n"
-            "Smaller steps give finer resolution but take longer."
-        )
-        phase_layout.addRow("Phase Step:", self.phase_step_spin)
+        phase_layout.addRow("Samples:", self.num_samples_spin)
         
         phase_group.setLayout(phase_layout)
         layout.addWidget(phase_group)
@@ -415,6 +426,10 @@ class BiasKidsDialog(QDialog):
             QtWidgets.QMessageBox.critical(self, "Error", f"Could not parse parameters: {str(e)}")
             return None
     
+    def _update_threshold_control(self, *_):
+        self.nonlinear_threshold_spin.setEnabled(
+            self.fit_method_combo.currentData() == "nonlinear")
+
     def _update_phase_controls(self, enabled):
         """Enable/disable phase optimization controls based on checkbox state."""
         self.apply_bandpass_checkbox.setEnabled(enabled)
@@ -422,7 +437,6 @@ class BiasKidsDialog(QDialog):
         self.highcut_spin.setEnabled(enabled and self.apply_bandpass_checkbox.isChecked())
         self.fs_spin.setEnabled(enabled and self.apply_bandpass_checkbox.isChecked())
         self.num_samples_spin.setEnabled(enabled)
-        self.phase_step_spin.setEnabled(enabled)
         
         # Connect the bandpass checkbox to update filter controls
         if enabled:
@@ -443,11 +457,11 @@ class BiasKidsDialog(QDialog):
     def get_parameters(self):
         """Get the configured parameters as a dictionary."""
         params = {
+            'fit_method': self.fit_method_combo.currentData(),
             'nonlinear_threshold': self.nonlinear_threshold_spin.value(),
             'fallback_to_lowest': self.fallback_checkbox.isChecked(),
             'optimize_phase': self.optimize_phase_checkbox.isChecked(),
             'num_phase_samples': self.num_samples_spin.value(),
-            'phase_step': self.phase_step_spin.value()
         }
         
         # Only include bandpass parameters if phase optimization is enabled

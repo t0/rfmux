@@ -59,7 +59,9 @@ else()
     target_compile_options(_receiver PRIVATE
         -Wall -Wextra       # Warnings
         -O3                 # Aggressive optimization with auto-vectorization
-        -ffast-math         # Fast floating-point (convert divisions to multiplications)
+        # No -ffast-math: the batch getters hand back NaN for an
+        # undisciplined timestamp, and under fast-math clang folds a
+        # select against NaN into the other branch.
     )
 endif()
 

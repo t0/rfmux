@@ -1,15 +1,22 @@
 name: Periscope tests
 
+# Only READMEs and docs/ are ignored: the jupytext notebooks under
+# test/notebooks/ and rfmux/reference-notebooks/Demos/ are .md files
+# that the tests execute, so a change to one must run CI.
 on:
   push:
     branches: [ main ]
     paths-ignore:
-     - '**/*.md'
+     - '**/README.md'
+     - 'CLAUDE.md'
+     - 'CHANGELOG.md'
      - 'docs/**'
   pull_request:
     branches: [ main ]
     paths-ignore:
-     - '**/*.md'
+     - '**/README.md'
+     - 'CLAUDE.md'
+     - 'CHANGELOG.md'
      - 'docs/**'
   workflow_dispatch:
 
@@ -42,6 +49,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install scikit-build-core pybind11
+          # The tests that need these guard the import, so a runner without
+          # them skips those tests rather than failing the run — which means
+          # CI would quietly stop covering the notebooks and mock-vs-real
+          # without ever going red.  Install them so that cannot happen.
+          # Declared in pyproject so this list cannot drift.
+          # --group needs pip >= 25.1, which is why pip is upgraded above.
+          pip install --group test
 
       - name: Build package
         run: |
@@ -73,10 +87,10 @@ jobs:
             libxcb-render-util0 \
             libxcb-xinerama0
 
-      - name: Run test_measurement_flow.py
+      - name: Run quick tier (no server, no board)
         run: |
-          pytest -v -s test/test_measurement_flow.py
+          pytest -v --tier=quick test/
 
-      - name: Run test_periscope_flow.py
+      - name: Run acquisition tier (MockCRS servers + UDP streaming)
         run: |
-          pytest -v -s test/test_periscope_flow.py
+          pytest -v -s --tier=acquisition test/

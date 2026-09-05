@@ -49,9 +49,7 @@ import socket
 import sys
 import tempfile
 import termios
-import textwrap
 import threading
-import time
 import tty
 import zlib
 

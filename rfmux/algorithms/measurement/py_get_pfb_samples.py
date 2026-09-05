@@ -12,9 +12,9 @@ both single-sideband and dual-sideband PSD data in either dBc/Hz or dBm/Hz, depe
 """
 
 import numpy as np
-from rfmux.core.transferfunctions import VOLTS_PER_ROC
-from rfmux.core.hardware_map import macro
-from rfmux.core.schema import CRS
+from ...core.transferfunctions import TERMINATION, VOLTS_PER_ROC
+from ...core.hardware_map import macro
+from ...core.schema import CRS
 from tuber.codecs import TuberResult
 from scipy.signal.windows import chebwin
 from scipy.interpolate import interp1d
@@ -96,9 +96,10 @@ def separate_iq_fft_to_i_and_q_linear(freqs, iqfft, fs, U):
     qbatch = np.concatenate([[dc_q], qbatch])
     
 
-    # Factor of 2 for real signals, dividing out 50 ohms * U
-    re_ps = 2 * (np.abs(ibatch) ** 2) / (50.0 * U)
-    im_ps = 2 * (np.abs(qbatch) ** 2) / (50.0 * U)
+    # Factor of 2 for real signals; volts are peak amplitudes, so the
+    # power is V^2 / 2 / termination (volts_squared_to_dbm's convention).
+    re_ps = 2 * (np.abs(ibatch) ** 2) / (2 * TERMINATION * U)
+    im_ps = 2 * (np.abs(qbatch) ** 2) / (2 * TERMINATION * U)
 
     # DC bin fix for real-signal reconstruction
     re_ps[0] /= 2.0
@@ -274,8 +275,8 @@ def apply_pfb_correction(
         if trim:
             ds_freq_local, ds_spec_local = _trim_around_zero(ds_freq_local, ds_spec_local)
 
-        # PSD => ~ (|FFT|^2) / (50*U*fs)
-        ds_ps_lin_local = (np.abs(ds_spec_local) ** 2) / (50.0 * U * fs)
+        # PSD in W/Hz: |FFT|^2 / (2 * termination * U * fs), peak volts
+        ds_ps_lin_local = (np.abs(ds_spec_local) ** 2) / (2 * TERMINATION * U * fs)
 
         if reference.lower()=='relative' and len(ds_freq_local) > 0:
             # Record the DC bin amplitude for later normalization in linear

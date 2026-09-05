@@ -1,11 +1,24 @@
-"""Utility functions and helpers for the Periscope viewer."""
+"""Utility functions and helpers for the Periscope viewer.
 
-import argparse, textwrap
-import math
+**This module is also Periscope's shared import surface.**  Eight panels
+do ``from .utils import *`` and a dozen more pull names out of it
+explicitly, so most of the imports below are re-exports rather than
+things this file uses itself.  A linter will call them unused; deleting
+them breaks the GUI at startup with an ImportError.
+
+Before removing any import here, check that nothing else reads it
+through this module::
+
+    grep -rn 'from .utils import' rfmux/tools/periscope/
+
+``test/periscope/test_module_imports.py`` imports every panel, which is
+what turns that kind of breakage into a test failure instead of a
+crash on the user's next launch.
+"""
+
 import os
 import threading
 import queue
-import socket
 import sys, warnings, ctypes.util, ctypes, platform
 import time
 import random
@@ -13,9 +26,9 @@ import pickle
 import traceback
 import csv
 import datetime
-from typing import Dict, List, Optional, Any, Tuple
+import weakref
+from typing import Dict, List, Optional
 import numpy as np
-import concurrent.futures
 
 # Create session
 import asyncio
@@ -107,6 +120,10 @@ DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
 DEFAULT_MIN_Q = 1e4
 DEFAULT_MAX_Q = 1e7
 DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
+# Off thins crowded peaks to the most prominent; on drops every member
+# of a crowded group, so nothing returned has a neighbour within the
+# separation.
+DEFAULT_REQUIRE_ISOLATION = False
 DEFAULT_DATA_EXPONENT = 2.0
 
 # Sampling settings
@@ -190,9 +207,11 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
-    EFFECTIVE_PROPAGATION_SPEED, 
 )
 from rfmux.algorithms.measurement import fitting # Adjusted import
+#: Re-exported: the display path and the pulse detector share one
+#: ring buffer, so extend()'s wrap arithmetic exists in one place.
+from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
 # CRS is already imported from rfmux.core.schema
 
@@ -387,7 +406,7 @@ def mode_title(mode: str) -> str:
     """
     mode_titles = {
         "T": "Timestream", "IQ": "IQ", "F": "Raw FFT",
-        "S": "Single Sideband PSD", "D": "Dual Sideband PSD", "NA": "Network Analysis"
+        "S": "Single Sideband PSD", "D": "Dual Sideband PSD", "NA": "Network Analysis", "H": "Histogram"
     }
     return mode_titles.get(mode, mode)
 
@@ -493,29 +512,84 @@ class UnitConverter:
         else:
             return f"{volts:.3f} V"
 
-# ───────────────────────── Lock‑Free Ring Buffer ─────────────────────────
-class Circular:
-    def __init__(self, size: int, dtype=float) -> None:
-        self.N = size; self.buf = np.zeros(size * 2, dtype=dtype)
-        self.ptr = 0; self.count = 0
-    def add(self, value):
-        self.buf[self.ptr] = value; self.buf[self.ptr + self.N] = value
-        self.ptr = (self.ptr + 1) % self.N; self.count = min(self.count + 1, self.N)
-    def data(self) -> np.ndarray:
-        return self.buf[: self.count] if self.count < self.N else self.buf[self.ptr : self.ptr + self.N]
+# ───────────────────────── Validation banner ─────────────────────────
+#: Severity colours for the dialog issue banner.  A fixed light-mode
+#: palette shared by the pulse-capture settings and streamer-config
+#: dialogs; not themed.
+_BANNER_CSS = {
+    "error": "background-color: #f8d7da; color: #721c24; "
+             "padding: 5px; border-radius: 6px;",
+    "warning": "background-color: #fff3cd; color: #856404; "
+               "padding: 5px; border-radius: 6px;",
+    "info": "background-color: #d1ecf1; color: #0c5460; "
+            "padding: 5px; border-radius: 6px;",
+}
+
+
+def apply_issue_banner(label, ok_button, issues) -> bool:
+    """Render ``validate()`` output into *label*; gate *ok_button* on errors.
+
+    ``issues`` is the ``[(severity, message), ...]`` list the config
+    validators return.  Returns True when there were no errors, which is
+    also what the OK button ends up enabled to.
+    """
+    errors = [m for s, m in issues if s == "error"]
+    worst = ("error" if errors else
+             "warning" if any(s == "warning" for s, _ in issues)
+             else "info" if issues else None)
+    if worst:
+        label.setText("\n".join(m for _, m in issues))
+        label.setStyleSheet(_BANNER_CSS[worst])
+    else:
+        label.setText("")
+        label.setStyleSheet("")
+    if ok_button is not None:
+        ok_button.setEnabled(not errors)
+    return not errors
+
 
 # ───────────────────────── Custom Plot Controls ─────────────────────────
 class ClickableViewBox(pg.ViewBox):
     # Signal to emit the mouse event on double click, allowing connected slots to accept it.
     doubleClickedEvent = pyqtSignal(object)
     # Declare attributes that are dynamically assigned elsewhere to satisfy Pylance
-    parent_window: Optional[QtWidgets.QWidget] = None
     module_id: Optional[int] = None
     plot_role: Optional[str] = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.setMouseMode(pg.ViewBox.RectMode)
+
+    # ── parent_window: a WEAK back-pointer.  Do not make this a plain attribute.
+    #
+    # Panels assign ``vb.parent_window = self`` (noise_spectrum_panel,
+    # network_analysis_panel, detector_digest_panel, multisweep_panel).  Held
+    # strongly, that closes a reference cycle — ViewBox -> panel -> PlotWidget ->
+    # ViewBox — so tearing a panel down goes through Python's *cyclic* collector,
+    # which finalizes a graph of PyQt objects in arbitrary order and frees C++
+    # objects out from under live wrappers.  The mild symptom is pyqtgraph's
+    # "wrapped C/C++ object of type QComboBox has been deleted" on stderr; the
+    # real one is a segfault.  Building and dropping a single NoiseSpectrumPanel
+    # in a bare script was enough:
+    #
+    #     p = NoiseSpectrumPanel(...); p.close(); del p; gc.collect()
+    #     -> Segmentation fault
+    #
+    # A weak reference keeps the back-pointer working for as long as anyone could
+    # use it — the panel owns the ViewBox through Qt's parent-child tree, so it
+    # always outlives it — while removing the upward strong edge that closed the
+    # cycle.  ``getattr(vb, 'parent_window', None)`` reads None once the panel
+    # is gone.
+    #
+    # Pinned by test/periscope/test_viewbox_lifetime.py.
+    @property
+    def parent_window(self) -> Optional[QtWidgets.QWidget]:
+        ref = getattr(self, "_parent_window_ref", None)
+        return None if ref is None else ref()
+
+    @parent_window.setter
+    def parent_window(self, window: Optional[QtWidgets.QWidget]) -> None:
+        self._parent_window_ref = None if window is None else weakref.ref(window)
 
     def enableZoomBoxMode(self, enable=True):
         self.setMouseMode(pg.ViewBox.RectMode if enable else pg.ViewBox.PanMode)

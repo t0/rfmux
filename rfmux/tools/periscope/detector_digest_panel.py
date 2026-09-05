@@ -111,8 +111,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._update_plots()
 
         self.setWindowTitle(f"Detector Digest: Detector {self.detector_id}  ({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        # Note: No longer setting WindowType.Window or resize — this panel is now
-        # embedded as a sub-tab within MultisweepPanel rather than a standalone dock/window.
+        # Embedded as a sub-tab of MultisweepPanel, not a standalone
+        # window, so it sets no window flags or geometry.
 
     
     def _setup_ui(self):
@@ -363,7 +363,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("Qr", "", "Total quality factor (typical: 1e3-1e6)"),
             ("Qc", "", "Coupling quality factor (typical: 1e3-1e7)"),
             ("Qi", "", "Internal quality factor (typical: 1e4-1e7)"),
-            ("Bifurcation", "", "Bifurcation status (from nonlinear fit)")
+            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, independent of the fit")
         ]
         
         self.skewed_table.setRowCount(len(params))
@@ -383,11 +383,11 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("Qr_nl", "", "Total quality factor (typical: 1e3-1e6)"),
             ("Qc_nl", "", "Coupling quality factor (typical: 1e3-1e7)"),
             ("Qi_nl", "", "Internal quality factor (typical: 1e4-1e7)"),
-            ("a", "", "Nonlinearity parameter (bifurcation at ~0.77)"),
+            ("a", "", "Nonlinearity parameter; at a >= 0.77 (4√3/9) the fitted resonance is multivalued"),
             ("φ", "deg", "Impedance mismatch phase"),
             ("I0", "", "Complex gain offset (real part)"),
             ("Q0", "", "Complex gain offset (imaginary part)"),
-            ("Bifurcation", "", "Bifurcation status")
+            ("Bifurcation", "", "Whether the sweep jumps; from the sweep itself, independent of the fit")
         ]
         
         self.nl_table.setRowCount(len(params))
@@ -914,19 +914,21 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Nonlinearity parameter 'a'
                 a_value = nl_params_dict.get('a', 0)
-                self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3e}")
+                self.nl_table.item(NL_A_ROW, 1).setText(f"{a_value:.3f}")
                 
-                # Bifurcation threshold is 4*sqrt(3)/9 ≈ 0.77
-                bifurcation_threshold = 4 * np.sqrt(3) / 9
-                is_bifurcated = a_value > bifurcation_threshold
+                # The sweep's own flag, the same one the skewed table
+                # shows: whether the sweep jumps does not depend on a fit.
+                is_bifurcated = self.active_sweep_data.get('is_bifurcated', False)
                 self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
-                
+
                 self.nl_table.item(NL_PHI_ROW, 1).setText(f"{np.degrees(nl_params_dict.get('phi', 0)):.2f}")
                 self.nl_table.item(NL_I0_ROW, 1).setText(f"{nl_params_dict.get('i0', 0):.3e}")
                 self.nl_table.item(NL_Q0_ROW, 1).setText(f"{nl_params_dict.get('q0', 0):.3e}")
             else:
                 for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):
                     self.nl_table.item(row, 1).setText("N/A")
+                is_bifurcated = self.active_sweep_data.get('is_bifurcated', False)
+                self.nl_table.item(NL_BIFURCATION_ROW, 1).setText("Yes" if is_bifurcated else "No")
         else: 
             self.nl_table.item(NL_STATUS_ROW, 1).setText("Not Applied")
             for row in range(NL_FR_ROW, NL_BIFURCATION_ROW + 1):

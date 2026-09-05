@@ -9,6 +9,8 @@ inside DetectorDigestPanel, but adapted to be a standalone QWidget.
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets, QtGui
@@ -382,8 +384,15 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Fast TOD
         if self.show_fast_tod and self.plot_fast_tod is not None:
             pfb_ts = self.spectrum_data["pfb_ts"]
-            tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
-            tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+            # As for the slow TOD above: py_get_pfb_samples hands back
+            # volts under the absolute reference and counts under the
+            # relative one.
+            if self.reference == "relative":
+                tod_pfb_i_volts = convert_roc_to_volts(np.array(self.pfb_tod_i))
+                tod_pfb_q_volts = convert_roc_to_volts(np.array(self.pfb_tod_q))
+            else:
+                tod_pfb_i_volts = np.array(self.pfb_tod_i, dtype=float)
+                tod_pfb_q_volts = np.array(self.pfb_tod_q, dtype=float)
 
             if self.mean_subtract_enabled:
                 tod_pfb_i_volts = tod_pfb_i_volts - np.mean(tod_pfb_i_volts)
@@ -572,25 +581,34 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_noise_spectrum.addItem(self.hover_label)
         self.hover_label.hide()
 
+        # The proxy below owns this handler, and the panel owns the proxy,
+        # so the handler must not own the panel: a cycle would leave the
+        # panel to the cyclic collector, which finalizes Qt objects in
+        # arbitrary order and crashes on teardown.
+        panel_ref = weakref.ref(self)
+
         def on_mouse_move(evt):
+            panel = panel_ref()
+            if panel is None:
+                return
             pos = evt[0]  # current mouse position in scene coordinates
-            if self.plot_noise_spectrum.sceneBoundingRect().contains(pos):
+            if panel.plot_noise_spectrum.sceneBoundingRect().contains(pos):
                 mouse_point = vb.mapSceneToView(pos)
 
                 log_x = mouse_point.x()
                 x = 10 ** log_x
 
-                summary_rect = self.summary_label.boundingRect()
-                summary_rect = self.summary_label.mapRectToScene(summary_rect)
+                summary_rect = panel.summary_label.boundingRect()
+                summary_rect = panel.summary_label.mapRectToScene(summary_rect)
                 if summary_rect.contains(pos):
                     # Mouse is over text box — disable hover update
                     return
 
-                if self.exp_binning_enabled:
+                if panel.exp_binning_enabled:
                     # Use the binned frequency and PSD data
-                    freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if self.show_fast_tod else [])), 1e-12, None))
-                    psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if self.show_fast_tod else []))
-                    psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if self.show_fast_tod else []))
+                    freq_i = np.log10(np.clip(np.concatenate((f_bin_i, pfb_f_bin_i if panel.show_fast_tod else [])), 1e-12, None))
+                    psd_i_vals = np.concatenate((psd_i_bin, pfb_psd_i_bin if panel.show_fast_tod else []))
+                    psd_q_vals = np.concatenate((psd_q_bin, pfb_psd_q_bin if panel.show_fast_tod else []))
                     psd_dual_vals = pfb_psd_mag_bin
                     freq_l = pfb_f_bin_mag
                 else:
@@ -602,45 +620,45 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
                     freq_l = freq_lin_comb
 
 
-                if self.show_fast_tod:
+                if panel.show_fast_tod:
                     if x > max(freq_l) if len(freq_l) > 0 else True:
-                        self.hover_label.hide()
+                        panel.hover_label.hide()
                         return
 
 
-                if self.show_fast_tod:
+                if panel.show_fast_tod:
                     if len(freq_i) > 0 and log_x < max(freq_i):
                         y_i = np.interp(log_x, freq_i, psd_i_vals)
                         y_q = np.interp(log_x, freq_i, psd_q_vals)
                         y_d = np.interp(log_x, np.log10(np.clip(freq_l, 1e-12, None)), psd_dual_vals) if len(freq_l) > 0 else 0
-                        self.hover_label.setHtml(
+                        panel.hover_label.setHtml(
                             f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
                             f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
                             f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
                             f"<span style='color:yellow'>Freq: {x:.3f} Hz</span>"
                         )
-                        self.hover_label.setPos(mouse_point.x(), mouse_point.y())
+                        panel.hover_label.setPos(mouse_point.x(), mouse_point.y())
                     else:
                         y_d = np.interp(log_x, np.log10(np.clip(freq_l, 1e-12, None)), psd_dual_vals) if len(freq_l) > 0 else 0
-                        self.hover_label.setHtml(
+                        panel.hover_label.setHtml(
                             f"<span style='color:red'>{h_label}: {y_d:.3f}</span><br>"
                             f"<span style='color:yellow'> Freq: {x:.3f} Hz</span>"
                         )
-                        self.hover_label.setPos(mouse_point.x(), mouse_point.y())
+                        panel.hover_label.setPos(mouse_point.x(), mouse_point.y())
                 else:
                     if len(freq_i) > 0 and log_x < max(freq_i):
                         y_i = np.interp(log_x, freq_i, psd_i_vals)
                         y_q = np.interp(log_x, freq_i, psd_q_vals)
-                        self.hover_label.setHtml(
+                        panel.hover_label.setHtml(
                             f"<span style='color:{IQ_COLORS['I']}'>I: {y_i:.3f}</span><br>"
                             f"<span style='color:{IQ_COLORS['Q']}'>Q: {y_q:.3f}</span><br>"
                             f"<span style='color:yellow'>Freq: {x:.3f} Hz</span>"
                         )
-                        self.hover_label.setPos(mouse_point.x(), mouse_point.y())
+                        panel.hover_label.setPos(mouse_point.x(), mouse_point.y())
 
-                self.hover_label.show()
+                panel.hover_label.show()
             else:
-                self.hover_label.hide()
+                panel.hover_label.hide()
 
         self.proxy = pg.SignalProxy(self.plot_noise_spectrum.scene().sigMouseMoved, rateLimit=60, slot=on_mouse_move)
 

@@ -7,7 +7,7 @@ to create grids of per-detector sweep plots.
 
 import numpy as np
 import pyqtgraph as pg
-from PyQt6 import QtWidgets, QtCore
+from PyQt6 import QtWidgets
 
 from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,

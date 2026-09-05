@@ -10,9 +10,10 @@ import traceback
 import time
 
 # Imports from within the 'periscope' subpackage
+from .layouts import FlowLayout, grouped
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
     ScreenshotMixin
 )
 from .detector_digest_panel import DetectorDigestPanel
@@ -159,8 +160,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Creates and configures the toolbar with controls (using QWidget instead of QToolBar)."""
         # Use QWidget container instead of QToolBar for QWidget compatibility
         toolbar = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
-        toolbar_layout.setContentsMargins(5, 5, 5, 5)
+        # Wraps into rows as the panel narrows; the batch controls and
+        # the subplot controls each stay together.
+        toolbar_layout = FlowLayout(toolbar)
 
         # Export Data Button
         self.export_btn = QtWidgets.QPushButton("💾")
@@ -188,45 +190,41 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
-        # Spacer to push subsequent items to the right
-        toolbar_layout.addStretch(1)
-        
         # Batch navigation controls (for sweep tabs)
         self.batch_label = QtWidgets.QLabel("Batch:")
-        toolbar_layout.addWidget(self.batch_label)
         
         self.prev_batch_btn = QtWidgets.QPushButton("◀")
         self.prev_batch_btn.setToolTip("Previous batch")
         self.prev_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.prev_batch_btn.clicked.connect(self._prev_batch)
-        toolbar_layout.addWidget(self.prev_batch_btn)
         
         self.batch_info_label = QtWidgets.QLabel("1 of 1")
         self.batch_info_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.batch_info_label.setMinimumWidth(40)
-        toolbar_layout.addWidget(self.batch_info_label)
         
         self.next_batch_btn = QtWidgets.QPushButton("▶")
         self.next_batch_btn.setToolTip("Next batch")
         self.next_batch_btn.setMaximumWidth(30)  # Shrink to 1/3 width
         self.next_batch_btn.clicked.connect(self._next_batch)
-        toolbar_layout.addWidget(self.next_batch_btn)
-        
+        # The batch controls wrap as one item, and hide as one.
+        self.batch_nav = grouped(self.batch_label, self.prev_batch_btn,
+                                 self.batch_info_label, self.next_batch_btn)
+        toolbar_layout.addWidget(self.batch_nav)
+
         self.batch_size_label = QtWidgets.QLabel("Subplots:")
-        toolbar_layout.addWidget(self.batch_size_label)
         
         self.batch_size_spin = QtWidgets.QSpinBox()
         self.batch_size_spin.setRange(1, 200)
         self.batch_size_spin.setValue(self.batch_size)
         self.batch_size_spin.setSingleStep(1)
         self.batch_size_spin.setToolTip("Detectors per batch (press Update to apply)")
-        # Note: No longer connects to immediate redraw
-        toolbar_layout.addWidget(self.batch_size_spin)
         
         self.batch_update_btn = QtWidgets.QPushButton("Update")
         self.batch_update_btn.setToolTip("Apply new batch size and regenerate plots")
         self.batch_update_btn.clicked.connect(self._apply_batch_size)
-        toolbar_layout.addWidget(self.batch_update_btn)
+        self.subplot_controls = grouped(
+            self.batch_size_label, self.batch_size_spin, self.batch_update_btn)
+        toolbar_layout.addWidget(self.subplot_controls)
 
         # Normalization Checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
@@ -268,13 +266,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         unit_layout.addWidget(self.rb_dbm)
         unit_layout.addWidget(self.rb_volts)
         
-        # Connect signals for unit changes
-        self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
-        self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
-        self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
-        
+        # Bound-method slots: a lambda closing over self would make the
+        # button own the panel, and a panel in a reference cycle is torn
+        # down by the cyclic collector, which crashes in Qt.
+        self._unit_buttons = {self.rb_counts: "counts", self.rb_dbm: "dbm",
+                              self.rb_volts: "volts"}
+        for rb in self._unit_buttons:
+            rb.toggled.connect(self._on_unit_toggled)
+
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, QtWidgets.QSizePolicy.Policy.Preferred)
         toolbar_layout.addWidget(unit_group)
+
+    def _on_unit_toggled(self, checked: bool):
+        if checked:
+            self._update_unit_mode(self._unit_buttons[self.sender()])
 
     def _setup_zoom_box_control(self, toolbar_layout):
         """Sets up the checkbox to toggle zoom box mode for plots."""
@@ -515,13 +520,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
         is_sweep_tab = index in (0, 1)
         
-        self.batch_label.setVisible(is_sweep_tab)
-        self.prev_batch_btn.setVisible(is_sweep_tab)
-        self.batch_info_label.setVisible(is_sweep_tab)
-        self.next_batch_btn.setVisible(is_sweep_tab)
-        self.batch_size_label.setVisible(is_sweep_tab)
-        self.batch_size_spin.setVisible(is_sweep_tab)
-        self.batch_update_btn.setVisible(is_sweep_tab)
+        self.batch_nav.setVisible(is_sweep_tab)
+        self.subplot_controls.setVisible(is_sweep_tab)
         
         # Redraw the active tab's plots if we have data
         if self.results_by_detector:
@@ -2179,7 +2179,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         from .bias_kids_dialog import BiasKidsDialog
         
         # Show dialog to get parameters
-        dialog = BiasKidsDialog(self, self.target_module)
+        dialog = BiasKidsDialog(self, self.target_module,
+                                fits_present=self._fits_present())
         if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
             return  # User cancelled
         
@@ -2226,6 +2227,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Could update a progress indicator if desired
         pass
     
+    def _fits_present(self) -> set:
+        """Which resonance fits the current results carry, for the Bias
+        KIDs dialog to preselect from."""
+        from rfmux.algorithms.measurement.df_calibration import fits_present
+        return fits_present(entry for iterations in self.results_by_detector.values()
+                            for entry in iterations.values())
+
     def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
         """Handle completion of the bias_kids task."""
         # Store the output

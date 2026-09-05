@@ -1,0 +1,422 @@
+"""
+Tests for dual (slow+fast) pulse capture: the incremental matcher, the
+DualPulseCaptureSession composition, and the dual HDF5 layout.
+
+All synthetic — no sockets: samples are fed directly into the dual
+session's two streams with a shared clock.
+"""
+
+import numpy as np
+import pytest
+
+from rfmux.pulse_capture.capture_session import (
+    DualPulseCaptureSession,
+    IncrementalPulseMatcher,
+)
+from rfmux.pulse_capture.capture_session import (
+    CaptureState,
+    PulseCaptureConfig,
+)
+
+from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+
+
+def _summary(t, dur=0.001):
+    return {"timestamp": t, "duration_s": dur}
+
+
+class TestIncrementalMatcher:
+    def test_pairs_within_window(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.000))
+        assert pairs == []
+        m.add("fast", 1, 1, _summary(1.010))
+        assert len(pairs) == 1
+        p = pairs[0]
+        assert p["slow_idx"] == 1 and p["fast_idx"] == 1
+        assert p["time_offset"] == pytest.approx(-0.010, abs=1e-6)
+        assert m.matched == 1
+
+    def test_best_candidate_wins(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, on_pair=pairs.append)
+        m.add("fast", 1, 1, _summary(1.040))
+        m.add("fast", 1, 2, _summary(1.005))
+        m.add("slow", 1, 1, _summary(1.000))
+        assert len(pairs) == 1
+        assert pairs[0]["fast_idx"] == 2  # closer midpoint
+
+    def test_outside_window_not_matched(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.add("fast", 1, 1, _summary(1.2))
+        assert pairs == []  # both pending, neither expired yet
+
+    def test_grace_expiry_emits_one_sided(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                    on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        # Slow-stream time alone must NOT expire it — only the OTHER
+        # stream passing the moment proves it was one-sided.
+        m.add("slow", 1, 2, _summary(2.0))
+        assert pairs == []
+        m.advance_time("fast", 1.3)  # fast clock passes mid + grace
+        assert len(pairs) == 1
+        assert pairs[0]["slow_idx"] == 1
+        assert pairs[0]["fast_idx"] is None
+        assert m.unmatched == 1
+
+    def test_flush_drains_everything(self):
+        pairs = []
+        m = IncrementalPulseMatcher(on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.add("fast", 2, 1, _summary(1.0))  # different channel
+        m.flush()
+        assert len(pairs) == 2
+        assert all((p["slow_idx"] is None) != (p["fast_idx"] is None)
+                   for p in pairs)
+
+    def test_channels_are_independent(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.add("fast", 2, 1, _summary(1.0))
+        assert pairs == []  # ch1-slow must not pair with ch2-fast
+
+
+# ───────────────────────── Dual session (synthetic) ─────────────────
+
+SLOW_FS = 20_000.0
+FAST_FS = 100_000.0
+
+
+def _feed_noise(feed, n, rng):
+    for _ in range(n):
+        feed(1, float(rng.normal(0, 1.0)), float(rng.normal(0, 1.0)),
+             None)
+
+
+def _feed_span(feed, fs, t0, t1, rng, pulse_starts=(), amp=50.0,
+               tau_s=1e-3):
+    n = int((t1 - t0) * fs)
+    t = t0 + np.arange(n) / fs
+    sig = rng.normal(0, 1.0, n)
+    for ps in pulse_starts:
+        mask = t >= ps
+        sig[mask] += amp * np.exp(-(t[mask] - ps) / tau_s)
+    for i in range(n):
+        feed(1, float(sig[i]), float(rng.normal(0, 1.0)), float(t[i]))
+
+
+def test_dual_session_end_to_end(tmp_path):
+    events = {"pairs": [], "pulses": [], "errors": []}
+    # max_pulse_ms also sizes the rings — the fast ring must still
+    # cover a one-sided pulse's window when it expires (grace period),
+    # or the cross-stream TOD cannot be extracted.
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=200.0, noise_train_ms=10.0)
+    path = tmp_path / "dual.h5"
+    dual = DualPulseCaptureSession(
+        channels=[1], slow_rate=SLOW_FS, fast_rate=FAST_FS,
+        config=cfg, hdf5_path=path, match_grace_s=0.25,
+        slow_time_offset_s=0.0,   # synthetic streams on one clock
+        on_pair=lambda p: events["pairs"].append(p),
+        on_pulse=lambda s, ch, idx, summ, _d:
+            events["pulses"].append((s, ch, idx)),
+        on_error=lambda m: events["errors"].append(m))
+
+    rng = np.random.default_rng(3)
+    dual.start()
+    _feed_noise(dual.feed_slow, dual.slow.noise_samples + 10, rng)
+    _feed_noise(dual.feed_fast, dual.fast.noise_samples + 10, rng)
+    assert dual.slow.state is CaptureState.CAPTURING
+    assert dual.fast.state is CaptureState.CAPTURING
+
+    # One pulse at t=1.0 visible in BOTH streams (shared clock) …
+    _feed_span(dual.feed_slow, SLOW_FS, 0.9, 1.4, rng,
+               pulse_starts=[1.0])
+    _feed_span(dual.feed_fast, FAST_FS, 0.9, 1.4, rng,
+               pulse_starts=[1.0])
+    # … then a slow-only pulse at t=2.0 (fast stream stays at baseline
+    # but keeps flowing so its ring covers the window) …
+    _feed_span(dual.feed_slow, SLOW_FS, 1.9, 2.4, rng,
+               pulse_starts=[2.0])
+    _feed_span(dual.feed_fast, FAST_FS, 1.9, 2.1, rng)
+    # … and a second slow pulse far later to expire the one above.
+    _feed_span(dual.feed_slow, SLOW_FS, 2.9, 3.4, rng,
+               pulse_starts=[3.0])
+    dual.stop()
+
+    assert not events["errors"], events["errors"]
+    assert ("slow", 1, 1) in events["pulses"]
+    assert ("fast", 1, 1) in events["pulses"]
+
+    matched = [p for p in events["pairs"]
+               if p["slow_idx"] and p["fast_idx"]]
+    one_sided = [p for p in events["pairs"]
+                 if (p["slow_idx"] is None) != (p["fast_idx"] is None)]
+    assert len(matched) == 1
+    assert len(one_sided) == 2  # t=2.0 (expired) + t=3.0 (flushed)
+    assert matched[0]["time_offset"] == pytest.approx(0.0, abs=0.05)
+
+    # Union windows: BOTH streams span the widest trigger window —
+    # the fast trace must not be a clipped slice of the slow one.
+    m = matched[0]
+    assert m.get("slow_tod") is not None
+    assert m.get("fast_tod") is not None
+    slow_dur = m["slow_summary"]["duration_s"]
+    fast_t = np.asarray(m["fast_tod"]["Time"], float)
+    fast_span = float(np.max(fast_t) - np.min(fast_t))
+    assert fast_span >= 0.9 * slow_dur, \
+        f"fast union window {fast_span*1e3:.2f} ms < slow trigger " \
+        f"window {slow_dur*1e3:.2f} ms"
+
+    # The expired t=2.0 pulse should carry a fast-stream TOD window
+    expired = [p for p in one_sided
+               if p["slow_summary"]
+               and abs(p["slow_summary"]["timestamp"] - 2.0) < 0.05]
+    assert expired and expired[0].get("fast_tod") is not None
+    assert len(expired[0]["fast_tod"]["Amp_I"]) > 0
+
+    stats = dual.stats()
+    assert stats["pairs_matched"] == 1
+    assert stats["pairs_unmatched"] == 2
+    assert stats["slow"]["total_pulses"] == 3
+    assert stats["fast"]["total_pulses"] == 1
+
+    # ── Dual file round-trip ──────────────────────────────────────
+    with PulseHDF5Reader(path) as reader:
+        assert reader.dual
+        assert reader.streams == ["slow", "fast"]
+        assert reader.metadata["streamer_mode"] == "both"
+        assert reader.pulse_count(1, "slow") == 3
+        assert reader.pulse_count(1, "fast") == 1
+        wf = reader.get_pulse(1, 1, stream="fast")
+        assert wf is not None and np.isfinite(wf["snr"])
+        assert reader.pair_count(1) == 3
+        pairs = list(reader.iter_matches(1))
+        assert sum(1 for p in pairs
+                   if p["slow_idx"] and p["fast_idx"]) == 1
+        assert any("fast_tod" in p for p in pairs)
+        assert np.sum(reader.get_histograms("slow")
+                      ["amplitude_counts_ch1"]) == 3
+        ns = reader.noise_stats(1, "slow")
+        assert ns.std_I > 0
+        # A dual file describes its own samples the way a single-stream
+        # file does: no calibration here, so volts on the quadratures,
+        # and the constant they were converted with.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert reader.trigger_basis() == cfg.trigger_basis
+        assert reader.stored_units(1, "slow") == "V"
+        assert reader.stored_units(1, "fast") == "V"
+        assert reader.metadata["stored_units"] == "V"
+        assert reader.volts_per_count() == VOLTS_PER_ROC
+
+
+class TestAdvanceTime:
+    def test_other_stream_time_drives_expiry(self):
+        pairs = []
+        m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                    on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("fast", 1.2)
+        assert pairs == []          # still within grace
+        m.advance_time("fast", 1.3)
+        assert len(pairs) == 1      # expired by stream time alone
+        assert pairs[0]["fast_idx"] is None
+
+    def test_own_stream_time_never_expires_own_pulses(self):
+        """Stream skew safety: if the fast socket stalls, slow pulses
+        must stay pending rather than being declared one-sided."""
+        pairs = []
+        m = IncrementalPulseMatcher(grace_s=0.25, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("slow", 100.0)
+        assert pairs == []
+        m.add("fast", 1, 1, _summary(1.01))  # late partner still matches
+        assert len(pairs) == 1
+        assert pairs[0]["fast_idx"] == 1
+
+    def test_advance_ignores_backwards_and_nan(self):
+        pairs = []
+        m = IncrementalPulseMatcher(grace_s=0.25, on_pair=pairs.append)
+        m.add("slow", 1, 1, _summary(1.0))
+        m.advance_time("fast", float("nan"))
+        m.advance_time("fast", 0.5)
+        assert pairs == []
+
+
+def test_one_sided_emits_live_with_cross_tod(tmp_path):
+    """A one-sided pulse must surface ~grace after the event from
+    baseline stream time alone (no later pulse, no stop) — with the
+    other stream's TOD window while its ring still covers it."""
+    events = {"pairs": []}
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=200.0, noise_train_ms=10.0)
+    dual = DualPulseCaptureSession(
+        channels=[1], slow_rate=SLOW_FS, fast_rate=FAST_FS,
+        config=cfg, hdf5_path=None, match_grace_s=0.25,
+        on_pair=lambda p: events["pairs"].append(p))
+    rng = np.random.default_rng(5)
+    dual.start()
+    _feed_noise(dual.feed_slow, dual.slow.noise_samples + 10, rng)
+    _feed_noise(dual.feed_fast, dual.fast.noise_samples + 10, rng)
+
+    # Slow-only pulse at t=1.0; then BASELINE ONLY on both streams
+    _feed_span(dual.feed_slow, SLOW_FS, 0.9, 1.2, rng,
+               pulse_starts=[1.0])
+    _feed_span(dual.feed_fast, FAST_FS, 0.9, 1.2, rng)
+    assert events["pairs"] == []  # within grace so far
+
+    _feed_span(dual.feed_slow, SLOW_FS, 1.2, 1.5, rng)
+    _feed_span(dual.feed_fast, FAST_FS, 1.2, 1.5, rng)
+
+    assert len(events["pairs"]) == 1, \
+        "one-sided pair must emit from stream time, not at stop"
+    pair = events["pairs"][0]
+    assert pair["slow_idx"] == 1 and pair["fast_idx"] is None
+    assert pair.get("fast_tod") is not None, \
+        "cross-stream TOD must be captured while the ring covers it"
+    assert len(pair["fast_tod"]["Amp_I"]) > 0
+    dual.stop()
+
+
+def test_streams_start_capturing_together():
+    """The fast stream reaches its training target far sooner (more
+    samples per second, and a cap on top), so left alone it triggers
+    into a partner with no ring yet and every pair comes out one-sided
+    with 'window unavailable'."""
+    import numpy as np
+    from rfmux.pulse_capture.capture_session import (
+        CaptureState)
+
+    dual = DualPulseCaptureSession(
+        channels=[1], slow_rate=1000.0, fast_rate=10000.0,
+        config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                                  max_pulse_ms=20.0, noise_train_ms=100.0))
+    dual.start()
+    rng = np.random.default_rng(0)
+
+    # Feed the fast stream alone until it finishes training.
+    k = 0
+    while dual.fast.state is not CaptureState.CAPTURING and k < 200_000:
+        dual.feed_fast(1, float(rng.normal(0, 1)), float(rng.normal(0, 1)),
+                       k * 1e-4)
+        k += 1
+    assert dual.fast.state is CaptureState.CAPTURING
+    assert dual.slow.state is CaptureState.ESTIMATING
+    assert dual.fast.pcap.freeze_triggers, \
+        "fast must hold until its partner has a ring"
+
+    # Now bring the slow stream up; both should be live afterwards.
+    j = 0
+    while dual.slow.state is not CaptureState.CAPTURING and j < 200_000:
+        dual.feed_slow(1, float(rng.normal(0, 1)), float(rng.normal(0, 1)),
+                       j * 1e-3)
+        j += 1
+    assert dual.slow.state is CaptureState.CAPTURING
+    assert not dual.fast.pcap.freeze_triggers
+    assert not dual.slow.pcap.freeze_triggers
+    dual.stop()
+
+
+def test_stream_feeds_present_the_source_facade():
+    """run_slow_source/run_pfb_source read ``channels`` and call
+    ``feed_block``; the dual session's facades must satisfy exactly
+    that, and must route through the per-stream block feeds so stream
+    time advances the matcher.  Only the socket sources exercise this
+    path, and those need the acquisition tier — so pin the contract
+    here."""
+    dual = DualPulseCaptureSession(
+        channels=[1, 2], slow_rate=1000.0, fast_rate=10000.0,
+        config=PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=100.0),
+        slow_time_offset_s=0.0)   # routing is under test, not the clock
+    dual.start()
+
+    stamps = np.array([1.0, 1.5, 2.0])
+    for feed, session in ((dual.slow_feed, dual.slow),
+                          (dual.fast_feed, dual.fast)):
+        assert feed.channels == [1, 2]
+        before = session._noise_n[1]
+        feed.feed_block(1, np.full(3, 0.5), np.full(3, -0.5), stamps)
+        assert session._noise_n[1] == before + 3, \
+            "the facade must reach the underlying session"
+
+    # ...and through the per-stream feeds, so the matcher clock moved
+    # to the block's last stamp.
+    assert dual._last_advance["slow"] == 2.0
+    assert dual._last_advance["fast"] == 2.0
+    dual.stop()
+
+
+def test_triggers_pair_within_half_the_cic_response():
+    """The slow trigger can lead or lag the fast one by up to three
+    slow samples, half of CIC2's six-sample response; further apart
+    they are two events."""
+    pairs = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, on_pair=pairs.append,
+                                slow_time_offset_s=0.0)
+    assert d.match_window_s == pytest.approx(0.003)
+    T = 43000.0
+    d.matcher.add("slow", 1, 1, {"trigger_time": T - 0.0029, "duration_s": 0.005})
+    d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
+    assert d.matcher.matched == 1
+    d.matcher.add("slow", 1, 2, {"trigger_time": T + 0.100, "duration_s": 0.005})
+    d.matcher.add("fast", 1, 2, {"trigger_time": T + 0.104, "duration_s": 0.001})
+    assert d.matcher.matched == 1
+    d.matcher.flush()
+    assert d.matcher.unmatched == 2
+    d.stop()
+    assert d.stats()["match_window_s"] == pytest.approx(0.003)
+
+
+def test_a_partner_released_at_the_hard_stop_still_pairs():
+    """A capture whose end confirmation stalls is released at the hard
+    stop, 0.3 s after its trigger with the default settings; the other
+    stream's pulse must still be waiting for it then."""
+    pairs = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, on_pair=pairs.append,
+                                slow_time_offset_s=0.0)
+    hard_stop = d.config.max_capture_samples(1000.0) / 1000.0
+    assert d.match_grace_s == pytest.approx(hard_stop + 0.05)
+    T = 43000.0
+    d.matcher.add("fast", 1, 1, {"trigger_time": T, "duration_s": 0.001})
+    d.matcher.advance_time("slow", T + hard_stop - 0.01)   # still capturing
+    assert d.matcher.unmatched == 0
+    d.matcher.add("slow", 1, 1, {"trigger_time": T, "duration_s": 0.3})
+    assert d.matcher.matched == 1
+    d.stop()
+
+
+def test_dual_open_failure_reaches_an_on_error_installed_after_construction(tmp_path):
+    """Periscope installs on_error on the task after the session exists,
+    so the file has to open in start(), where that callback is wired."""
+    errors = []
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, slow_time_offset_s=0.0,
+                                hdf5_path=tmp_path / "missing" / "dual.h5")
+    d.on_error = errors.append
+    d.start()
+    assert d.writer is None
+    assert errors and "Could not open HDF5 file" in errors[0]
+    d.stop()
+
+
+def test_dual_file_records_the_end_confirmation_floor(tmp_path):
+    """min_end_samples is a sample count on both streams alike, so the
+    dual file records it as the single-stream file does."""
+    import h5py
+    cfg = PulseCaptureConfig(min_end_samples=7, noise_train_ms=10.0)
+    path = tmp_path / "dual.h5"
+    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
+                                fast_rate=10000.0, slow_time_offset_s=0.0,
+                                config=cfg, hdf5_path=path)
+    d.start()
+    d.stop()
+    with h5py.File(path, "r") as f:
+        assert f["metadata"].attrs["min_end_samples"] == 7

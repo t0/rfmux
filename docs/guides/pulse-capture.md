@@ -17,9 +17,10 @@ A capture estimates the noise on each channel first, then triggers when a
 sample leaves `threshold_sigma` and rose that far within the edge lookback,
 faster than the baseline drifts. It closes when both axes are back inside
 `end_sigma` of the baseline or of the level the pulse rose from. The saved
-window starts before the trigger, so the rising edge is kept, and ends on
-the sample that confirmed the end. A capture still open at 1.2 times
-`max_pulse_ms` is closed there and flagged `truncated`. Two pulses that
+window starts before the trigger, so the rising edge is kept, and ends
+where the pulse settled; the confirmation that follows only verifies that
+it stayed there. A capture still open at 1.2 times `max_pulse_ms` is
+closed there and flagged `truncated`. Two pulses that
 overlap are split when the signal rises sharply again on the tail of the
 first, and both fragments are flagged `pileup`. The figure is the engine's
 own output on a synthetic pulse and a piled-up pair.
@@ -53,8 +54,9 @@ saw.
 
 The left pane lists every pulse with its length, signal-to-noise and trigger
 time. **Pulse View** stacks the two axes against a common time axis with
-marks for the trigger, the drop below threshold, the settled point and the
-end. Left and Right move through the pulses, Home and End jump to the first and
+marks for the trigger, the drop below threshold and the settled point that
+ends the record. Left and Right move through the pulses, Home and End jump
+to the first and
 last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
@@ -135,7 +137,7 @@ toolbar follows.
   that confirm the end. For long pulses the count grows to **Margin
   fraction** of the time above threshold. It counts down while the signal
   is out of band, so one noisy sample does not restart it. The saved
-  window ends on the sample that confirms the end.
+  window ends where the pulse settled; the confirmation only verifies it.
 - **Margin fraction** (0.10): the fraction of the saved window kept before
   the trigger, the confirmation count as a fraction of the time above
   threshold, and the edge lookback as a fraction of the max pulse.

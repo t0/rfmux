@@ -170,9 +170,9 @@ def pulse_summary(
 
         ``duration`` is trigger → settled, the first sample of the
         in-band run that confirmed the end; not the length of the saved
-        window, which also carries the pre-trigger margin and the
-        confirmation tail.  A split or a hard stop never saw the pulse
-        settle, so it falls back to the window span.
+        window, which also carries the pre-trigger margin.  A split or
+        a hard stop never saw the pulse settle, so it falls back to the
+        window span.
     """
     peaks = pulse_peaks(pulse_data, noise_stats)
 
@@ -180,9 +180,8 @@ def pulse_summary(
     valid_times = times[np.isfinite(times)]
     timestamp = float(np.min(valid_times)) if len(valid_times) else 0.0
 
-    # Duration is trigger → settled, NOT the length of the saved window:
-    # the window also holds the pre-trigger margin and the confirmation
-    # tail, whose length depends on the noise rather than the pulse.
+    # Duration is trigger → settled, NOT the length of the saved window,
+    # which also holds the pre-trigger margin.
     # Files written before the settled instant was recorded carry only
     # the below-threshold instant; a confirmed end there measures to it.
     trigger_time = pulse_data.get("trigger_time")
@@ -210,8 +209,9 @@ def pulse_summary(
     # the event, the anchor for anything aligned across streams, since
     # each stream's record start sits its own margin before it.
     # ``saved_end_time`` is the last saved sample; pulse_data's
-    # ``end_time`` is the sample the state machine ended on, which for a
-    # split lies one past the data.
+    # ``end_time`` is the sample the capture was released on, past the
+    # data for a confirmed end (the record stops where the pulse
+    # settled) and for a split.
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),

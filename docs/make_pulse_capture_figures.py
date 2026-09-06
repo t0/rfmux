@@ -138,13 +138,13 @@ def _one_pulse(ax, t, trace, rec):
                 xy=(below, CONFIG.threshold_sigma), xytext=(below + 4, 9.8),
                 fontsize=7.5, color=RED, va="center",
                 arrowprops=dict(arrowstyle="->", color=RED, lw=1))
-    ax.annotate("settled: both axes back\ninside end_sigma\n"
-                "(duration_ms ends here)",
+    ax.annotate("settled: both axes back\ninside end_sigma; the\n"
+                "record and duration_ms\nend here",
                 xy=(settled, 2.4), xytext=(settled - 4, -3.2),
                 fontsize=7.5, color=TEAL, va="top", ha="right",
                 arrowprops=dict(arrowstyle="->", color=TEAL, lw=1))
     ax.annotate("saved window:\nmargin_fraction of it\n"
-                "before the trigger,\nto the end confirmation",
+                "before the trigger,\nto the settled sample",
                 xy=(saved[0], -1.8), xytext=(-29.5, -2.4),
                 ha="left", va="top", fontsize=7.5, color=BLUE,
                 weight="bold",
@@ -158,7 +158,8 @@ def _one_pulse(ax, t, trace, rec):
                 "max(min_end_samples,\n"
                 "margin_fraction × time\n"
                 "above threshold).\n"
-                "The window ends here.",
+                "Verifies the settled point;\n"
+                "lies past the record.",
                 xy=(confirmed, 1.6), xytext=(confirmed + 1.5, 16.4),
                 fontsize=7.5, color=GREEN, va="top", ha="left",
                 arrowprops=dict(arrowstyle="->", color=GREEN, lw=1))

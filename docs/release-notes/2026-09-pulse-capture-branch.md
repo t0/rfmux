@@ -174,10 +174,10 @@ Old values are main at the merge base (e46fc41).
 - Networking guide: one `rmem_max` value, 268435456 (256 MB, about three
   seconds of the four-channel PFB stream).
 - Pulse capture record: the saved window runs from the pre-trigger margin to
-  the sample the end was confirmed on, or to the hard stop, and a hard stop
-  always flags `truncated`. `duration_ms` runs from the trigger to the
-  settled instant, the first sample of the in-band run that confirmed the
-  end, carried in the record as `settled_index` and `settled_time`; the
+  the sample the pulse settled on, the first of the in-band run the end
+  confirmation then verifies, or to the hard stop, and a hard stop always
+  flags `truncated`. `duration_ms` runs from the trigger to that settled
+  sample, carried in the record as `settled_index` and `settled_time`; the
   drop below threshold stays as `below_threshold_index` and
   `below_threshold_time` and feeds the decay constant. The Pulse View marks
   all four. `save_to_end_confirmed` is gone from `PulseCaptureConfig`,

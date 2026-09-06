@@ -2082,16 +2082,18 @@ class TestDecisionMarks:
         # …and it is where the signal is largest, not somewhere in noise.
         assert abs(d["Amp_I"][d["trigger_index"]]) > 20
 
-    def test_window_runs_to_the_end_confirmation(self):
-        """The window ends exactly where the state machine did: the end
-        mark is the last sample, with the threshold drop and the settled
-        instant inside it."""
+    def test_window_ends_where_the_pulse_settled(self):
+        """The settled sample is the last one saved, with the threshold
+        drop inside the window; the end confirmation that verified it
+        lies past the data."""
         d = self._run()
         n = len(d["Amp_I"])
-        assert d["end_index"] == n - 1
-        assert d["end_time"] == pytest.approx(d["Time"][-1])
+        assert d["settled_index"] == n - 1
+        assert d["settled_time"] == pytest.approx(d["Time"][-1])
         assert d["trigger_index"] < d["below_threshold_index"] \
-            < d["settled_index"] < n - 1
+            < d["settled_index"]
+        assert d["end_index"] > n - 1
+        assert d["end_time"] > d["Time"][-1]
 
     def test_duration_is_trigger_to_settled(self):
         """Duration measures to where the pulse settled inside the end

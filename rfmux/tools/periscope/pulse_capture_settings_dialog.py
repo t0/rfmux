@@ -151,9 +151,10 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "lets an isolated noisy sample pass without restarting the "
             "count.\n\n"
             "For a short pulse the floor is what ends it, so this sets "
-            "how far past the pulse's settling the saved window runs.  "
-            "It is a sample count: the same number is 17 ms at 596 Hz "
-            "and 4 µs on the PFB stream."
+            "how long after the pulse settles the capture is released.  "
+            "The record itself ends where the pulse settled.  It is a "
+            "sample count: the same number is 17 ms at 596 Hz and 4 µs "
+            "on the PFB stream."
             "\n\nAlso how far back the pileup test looks for the pulse's "
             "own recent level: a rise of threshold sigma over this many "
             "samples, after decay evidence, splits the capture.")

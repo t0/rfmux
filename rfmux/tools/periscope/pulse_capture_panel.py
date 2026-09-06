@@ -631,9 +631,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Mark where the engine triggered, where the pulse dropped below
         threshold and settled, and where the capture ended.
 
-        A mark past the last saved sample is not drawn: a split's end is
-        the split sample, one past its data, and a file written before
-        the window ran to the confirmation stops short of it.
+        A mark past the last saved sample is not drawn: the confirmation
+        of a settled end lies past the settled sample that ends the
+        record, and a split's end is the split sample, one past its data.
         """
         t = np.asarray(wf.get("Time"), dtype=np.float64)
         if not len(t):

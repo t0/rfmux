@@ -364,10 +364,12 @@ How pulse detection works:
 The figure is the engine's own output on a synthetic pulse and a piled-up
 pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
 saved: from `margin_fraction` of the window before the trigger (10% by
-default), so the record keeps pre-trigger baseline, to the sample the end was
-confirmed on. `duration_ms` runs from the trigger to where the pulse settled
-inside the end band. The drop below `threshold_sigma` is kept as a mark and
-feeds the fit-free decay constant.
+default), so the record keeps pre-trigger baseline, to the sample the pulse
+settled on inside the end band. The end confirmation, at least
+`min_end_samples` later, only verifies that it stayed there and lies past
+the record. `duration_ms` runs from the trigger to the settled sample. The
+drop below `threshold_sigma` is kept as a mark and feeds the fit-free decay
+constant.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.

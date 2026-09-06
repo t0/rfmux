@@ -233,10 +233,10 @@ class PulseCapture:
     started.
 
     The saved window runs from a ``margin_fraction`` pre-trigger margin
-    to the sample the end was confirmed on, or to the hard stop.  The
-    pulse's duration is trigger to the first sample of the in-band run
-    that confirmed the end; the below-threshold instant is kept as a
-    mark and feeds the fit-free decay constant.
+    to the sample the pulse settled on, the first of the in-band run the
+    end confirmation then verifies, or to the hard stop.  The pulse's
+    duration is trigger to that settled sample; the below-threshold
+    instant is kept as a mark and feeds the fit-free decay constant.
 
     Parameters
     ----------
@@ -1108,13 +1108,13 @@ class PulseCapture:
         st = self.state[channel]
         # Buffer arithmetic is per channel: ch_sample_n counts only this
         # channel's samples, where abs_n counts every channel's.
-        # The window keeps every sample the state machine saw: raw_post
-        # counts samples since the trigger and the window end is
-        # exclusive, so +1 takes in the sample the end was confirmed on
-        # or the hard stop fell on.  A split ends one sample earlier:
-        # the split sample begins the next fragment.
+        # raw_post counts samples since the trigger; the window end is
+        # exclusive.  A confirmed end keeps the record through the
+        # sample the pulse settled on: the confirmation that follows
+        # only verifies that point and lies past the data.  A hard stop
+        # keeps everything through the stop sample.  A split ends one
+        # sample earlier: the split sample begins the next fragment.
         raw_post = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
-        post = raw_post if pileup else raw_post + 1
         # Where the pulse settled, in samples since the trigger: only a
         # confirmed end has one.  A split or a hard stop never saw the
         # pulse settle, whatever the bucket held.
@@ -1123,6 +1123,12 @@ class PulseCapture:
                 and st.trig_abs is not None
                 and st.settled_abs >= st.trig_abs):
             settled = st.settled_abs - st.trig_abs
+        if settled is not None:
+            post = settled + 1
+        elif pileup:
+            post = raw_post
+        else:
+            post = raw_post + 1
 
         if post <= 0 or st.trig_abs is None:
             self._reset(channel)
@@ -1156,9 +1162,11 @@ class PulseCapture:
 
         # Where the state machine actually acted, so a capture can be
         # read back against the decisions that produced it.  end_index
-        # is the last saved sample for a confirmed end or a hard stop;
-        # for a split it is the split sample, one past the data.  Times
-        # are carried alongside the indices for that case.
+        # is the sample the capture was released on: the last saved
+        # sample for a hard stop, past the data for a confirmed end
+        # (the record stops where the pulse settled) and for a split
+        # (the split sample begins the next fragment).  Times are
+        # carried alongside the indices for those cases.
         ts_all = self.buf[channel]["ts"].data()
         trigger_index = trig_fifo - start
         end_index = (L - 1) - start

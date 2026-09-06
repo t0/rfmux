@@ -2,8 +2,8 @@
 
 A capture ends once the confirmation bucket exceeds
 ``max(min_end_samples, margin_fraction * core)``.  For a short pulse the
-floor wins, so it alone decides how far past below-threshold the saved
-window runs.
+floor wins, so it alone decides how long after the pulse settled the
+capture is released.
 """
 
 import numpy as np
@@ -89,11 +89,13 @@ def _short_pulse_summary():
     return got[0]
 
 
-def test_saved_extent_runs_to_the_confirmation():
-    """The saved data ends on the sample the end was confirmed on."""
+def test_saved_extent_ends_where_the_pulse_settled():
+    """The saved data ends on the settled sample; the confirmation that
+    verified it lies past the record."""
     summ, data = _short_pulse_summary()
     assert summ["saved_end_time"] == pytest.approx(float(np.max(data["Time"])))
-    assert summ["saved_end_time"] == pytest.approx(data["end_time"])
+    assert summ["saved_end_time"] == pytest.approx(data["settled_time"])
+    assert summ["saved_end_time"] < data["end_time"]
 
 
 def test_duration_runs_from_the_trigger_to_the_settled_instant():

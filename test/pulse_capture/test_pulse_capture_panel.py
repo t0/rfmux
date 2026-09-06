@@ -957,12 +957,11 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
                  if isinstance(it, pg.InfiniteLine)]
         # Vertical only — the horizontal band lines are curves now.
         verticals = [it for it in lines if it.angle == 90]
-        assert len(verticals) == 4, f"{name}: {len(verticals)} markers"
+        assert len(verticals) == 3, f"{name}: {len(verticals)} markers"
         labels = [getattr(it, "label", None) for it in verticals]
         if name == "I":
             texts = [lb.textItem.toPlainText() for lb in labels if lb]
-            assert set(texts) == {"trigger", "below threshold", "settled",
-                                  "end confirmed"}, texts
+            assert set(texts) == {"trigger", "below threshold", "settled"}, texts
         else:
             # x-linked, so repeating the labels underneath is noise
             assert all(lb is None for lb in labels)

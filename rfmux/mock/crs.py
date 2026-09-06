@@ -319,7 +319,8 @@ class ServerMockCRS:
             resonator_count = len(self._resonator_model.mr_lekids)
             resonance_frequencies = self._resonator_model.resonator_frequencies.copy()
 
-            auto_bias = active_config.get('auto_bias_kids', True)
+            auto_bias = active_config.get(
+                'auto_bias_kids', mock_config.MOCK_DEFAULTS['auto_bias_kids'])
             if auto_bias and resonance_frequencies:
                 await self._auto_bias_kids(active_config, resonance_frequencies)
                 # One pulse through the block path now, behind the

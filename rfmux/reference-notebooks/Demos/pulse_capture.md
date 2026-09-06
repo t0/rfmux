@@ -9,22 +9,19 @@ jupyter:
 # Pulse Capture
 
 End-to-end pulse capture from the Python API: configure the streamers, detect
-pulses live, persist them, and analyse them — **without opening Periscope**.
+pulses live, save them, and analyze them, without opening Periscope.
 
-Everything here is the same code path Periscope's *Pulse Capture* panel drives.
-The panel builds a `PulseCaptureSession`, feeds the slow stream from its own
-packet tap and the fast stream from `run_pfb_source`, and draws the callbacks;
-this notebook builds the same session, feeds it with the source functions, and
-prints or plots instead. There is no capability in the GUI that is unavailable
-here.
+This is the code path Periscope's *Pulse Capture* panel drives. The panel
+builds a `PulseCaptureSession`, feeds it from its own packet receiver and from
+`run_pfb_source`, and draws the callbacks. This notebook builds the same
+session, feeds it with the source functions, and prints or plots.
 
-Everything under `rfmux.pulse_capture` is also re-exported from the package
-itself, so `from rfmux.pulse_capture import PulseCaptureSession` works and is
-what the import cell below uses. The per-module paths are listed for orientation.
+`rfmux.pulse_capture` re-exports every class and function of its submodules,
+so one import line covers them. The table gives the module each lives in.
 
 | Piece | Module |
 |---|---|
-| Streamer setup + link-budget math | `rfmux.algorithms.measurement.streamer_config` |
+| Streamer setup and link budget | `rfmux.algorithms.measurement.streamer_config` |
 | Detection engine (ring buffer, triggering) | `rfmux.pulse_capture.detection` |
 | Live capture orchestration | `rfmux.pulse_capture.capture_session` |
 | Concurrent slow+fast with matching | `rfmux.pulse_capture.capture_session` |
@@ -35,10 +32,10 @@ what the import cell below uses. The per-module paths are listed for orientation
 ## How to use this document
 
 Run the cells in order; later ones use variables the earlier ones defined.
-Section 1 is the exception: it offers three ways to get a CRS, and you run only
-the one that fits.
+Sections 1 and 2 are the exception: run only the one option (1A, 1B or 2)
+that fits.
 
-This format saves no outputs, so every number you see is one you just produced.
+This format saves no outputs, so every number you see comes from your own run.
 The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
 
 Captures are written to `OUTPUT_DIR`, printed by the next cell. Section 7 reads
@@ -68,10 +65,8 @@ from rfmux.algorithms.measurement.streamer_config import (
     StreamerConfig, describe, validate,
 )
 
-# Captures are written here. Reference notebooks are provisioned to a
-# read-only directory, so writing next to the notebook would fail for anyone
-# who opened it from Periscope — default to a writable scratch directory and
-# say where it is. Override with RFMUX_DEMO_OUTPUT.
+# Reference notebooks are provisioned read-only, so captures go to a
+# scratch directory; override it with RFMUX_DEMO_OUTPUT.
 OUTPUT_DIR = Path(os.environ.get(
     "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_pulse_capture"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -92,14 +87,14 @@ Everything below needs a CRS. **Run exactly one** of the three options:
 
 | | When to use it | Where |
 |---|---|---|
-| **A. An existing Mock or Real Periscope session is already running** | Periscope launched the Jupyter environment you are viewing this notebook within, and it is already configured for either a real board or a mock instance | below |
+| **A. Periscope is running** | Periscope launched this Jupyter session and is driving a board or a simulation | below |
 | **B. Starting from scratch with real hardware** | You have a CRS and this notebook is being viewed separately from Periscope | below |
 | **C. Start a new simulated environment** | No Periscope GUI instance already, and nothing already running | section 2 |
 
-### A. Attach to a real or mock CRS instance that is already loaded with Periscope
+### A. Attach to the CRS Periscope is driving
 
-Use this when Periscope is driving a board — real or simulated — and you want to
-work with *that* one rather than starting your own.
+Use this when Periscope is driving a board, real or simulated, and you want
+that one rather than your own.
 
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
 the cell finds the board with no configuration from you.
@@ -143,40 +138,31 @@ else:
 
 ## 2. Mock mode configuration
 
-**Skip this section entirely if section 1 already gave you a CRS** — the cell
-below no-ops in that case.
+**Skip this section if section 1 gave you a CRS.** The cell below does
+nothing in that case.
 
-If you have no hardware, this stands up a simulated CRS: two resonators
-biased and carrying tones, and periodic quasiparticle pulses to detect.
-`auto_bias_kids` is what biases them: the simulation sweeps each resonator at
-`bias_amplitude` (a tone power, -55 dBm by default) and biases it at the S21
-minimum it finds, the way a tuning flow would. It gives biased resonators,
-not a df calibration; section 7 measures that separately.
+With no hardware, this cell creates a simulated CRS with two biased resonators
+and periodic pulses. `auto_bias_kids` sweeps each resonator at
+`bias_amplitude` (-55 dBm by default) and biases it at the S21 minimum. That
+gives biased resonators, not a df calibration; section 7 measures one.
 
 Pulse heights are drawn uniformly between `pulse_random_amp_min` and
 `pulse_random_amp_max`, so the amplitude histogram in section 7 shows a
 distribution rather than a single spike.
 
-The noise is deliberately not idealised:
+Three noise sources are on:
 
-- **White readout noise** (`udp_noise_level`): the flat floor the σ thresholds
-  are measured against.
-- **Quasiparticle number fluctuations** (`nqp_noise_enabled`): physical
-  generation–recombination noise in the resonator itself. It dominates the
-  slow-stream floor at these settings, so `threshold_sigma` is measured against
-  real detector noise rather than a readout artefact.
-- **TLS 1/f frequency noise** (`tls_noise_enabled`): two-level systems in the
-  substrate make the resonant frequency wander with a `1/f**alpha` spectrum.
-  Being correlated rather than white, it moves the baseline slowly instead of
-  scattering samples around it. That slow movement is what the trigger in
-  section 4 has to cope with; a fixed baseline would trigger on it endlessly.
+- **White readout noise** (`udp_noise_level`): the flat floor.
+- **Quasiparticle number fluctuations** (`nqp_noise_enabled`):
+  generation-recombination noise in the resonator.
+- **TLS 1/f frequency noise** (`tls_noise_enabled`): the resonant frequency
+  wanders with a `1/f**alpha` spectrum, so the baseline moves slowly. The
+  trigger in section 4 tracks it.
 
 > **This cell refuses to run if something is already streaming.** Two
-> simulations send to the same UDP port, so a receiver gets both interleaved —
-> no exception, no dropped packets, just samples from two unrelated detectors in
-> one trace. Rather than leave that to be noticed later, the cell checks and
-> stops, and the message says which case you are in. If Periscope is in mock
-> mode, attach to *its* simulation with option 1A instead.
+> simulations send to the same UDP port and a receiver gets both interleaved,
+> with no error. The message says which case you are in. If Periscope is in
+> mock mode, attach to its simulation with option 1A.
 
 ```python
 from rfmux.mock.config import bias_amplitude_from_dbm
@@ -208,7 +194,7 @@ MOCK_CONFIG = {
 }
 
 if crs is not None:
-    print("already connected — skip this cell")
+    print("already connected: skip this cell")
 else:
     from rfmux.streamer import find_streamer_conflict
 
@@ -222,7 +208,7 @@ else:
     conflict = find_streamer_conflict()
     if conflict:
         raise RuntimeError(
-            f"Something is already using the streamer port — {conflict}.\n"
+            f"Something is already using the streamer port: {conflict}.\n"
             "A second simulation would send to that same port, and a reader "
             "would get both streams interleaved with nothing to say so.\n"
             "Attach to what is running with option 1A, or stop it, then re-run "
@@ -252,22 +238,20 @@ print(f"CRS       {crs.tuber_hostname}")
 print(f"streamers {host}")
 print(f"module {MODULE}, channels {CHANNELS}")
 print("simulation created by this notebook" if IS_MOCK
-      else "pre-existing board — this notebook will not tear it down")
+      else "pre-existing board: this notebook will not tear it down")
 ```
 
 ## 3. Configure the streamers
 
 Two streams carry data off the board:
 
-- the **slow** readout stream, decimated in stages from ~38 kHz down to ~596 Hz,
-  carrying up to 1024 channels per module (port 9876);
-- the **fast** PFB stream at ~2.44 MHz, limited to 4 channels of one module
-  (port 9877).
+- the **slow** readout stream: 38 kHz at stage 0 down to 596 Hz at stage 6,
+  up to 1024 channels per module, port 9876;
+- the **fast** PFB stream: 2.44 MHz, up to 4 channels of one module, port 9877.
 
-Which of these streams, and at what decimation, you choose depends on the detector
-properties. You want roughly **10 or more samples across one pulse decay constant**,
-or else the decay is too sparsely sampled to fit. Below that the pulse is a spike; 
-far above it you are oversampling the pulse.
+Choose the stream and decimation from the pulse: aim for **10 or more samples
+across one decay constant**. Fewer and the decay cannot be fitted; many more
+and you are oversampling.
 
 `validate()` reports the hardware rules (long packets need stage ≥ 3, the 1 GbE
 budget, OS receive-buffer advice) as `(severity, message)` pairs. `describe()`
@@ -275,7 +259,8 @@ returns the derived rates and link budget.
 
 > If you attached to Periscope's CRS in section 1, remember the streamer is a
 > shared resource: changing the decimation here changes it for Periscope's plots
-> too, exactly as the *Streamer…* dialog would. 
+> too, and this call also switches the PFB streamer off. Pass
+> `pfb_channels=None` to leave it as it is.
 
 ```python
 PULSE_TAU_S = 1e-3          # expected decay constant
@@ -319,87 +304,70 @@ for spec in ("1,2", "2-19", "1,5-8,20"):
     print(f"{spec!r:12} -> {parse_channel_spec(spec)}")
 ```
 
-`all` (or `*`) is deliberately *not* a list — it means "ask the board", which
-only the board can answer, so the parser returns `None` and leaves the question
-to `get_biased_channels`. That reads every channel's amplitude in one batched
-round trip and drops any channel the packet cannot carry:
+For `all` (or `*`) the parser returns `None`: resolve it with
+`get_biased_channels`, which reads every channel's amplitude in one batched
+round trip. Pass `max_channels` as the packet width you are streaming; a
+channel above it is in no packet.
 
 ```python
 print(f"{'all'!r:12} -> {parse_channel_spec('all')}   (resolve against the board)")
 
-# 128 is the short-packet width: a channel above it is in no packet, however
-# it is biased.  Pass the width you are actually streaming.
-biased = await crs.get_biased_channels(MODULE, max_channels=128)
+# The packet width the streamer is configured for (128 short, 1024 long).
+biased = await crs.get_biased_channels(
+    MODULE, max_channels=budget["channels_per_module"])
 print(f"biased on module {MODULE}: {len(biased)} channel(s)")
 print(f"  {biased[:12]}{' ...' if len(biased) > 12 else ''}")
 ```
 
-Whatever you choose, `CHANNELS` below is just a list of ints — set it from a
-spec, from `get_biased_channels`, or by hand.
+`CHANNELS` is a list of ints. Set it from a spec, from `get_biased_channels`,
+or by hand.
 
 ## 4. Choose the detection parameters
 
 `PulseCaptureConfig` holds every user-facing parameter in **physical units**
-(σ and milliseconds). It converts them to samples for whatever stream rate you
-hand it, which is what lets one configuration work unchanged across a 4000×
-span of rates from the decimated slow stream to the PFB stream.
+(σ and milliseconds). It converts them to samples for the stream rate you hand
+it, so one configuration works unchanged from 596 Hz to 2.44 MHz.
 
 How pulse detection works:
 
-- **A capture opens on either axis, and closes only when both have settled.**
-  The axes are df and dissipation for a channel with a calibration (section 7),
-  I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and closes
-  when both are back inside ±`end_sigma` for at least `min_end_samples`.
-  `end_sigma` must sit below `threshold_sigma`, or a capture would end where it
-  began.
-- **Triggers must be confirmed.** `trigger_samples` consecutive samples have to
-  clear the threshold. Left at 0 it is *derived from the stream rate* to hold
-  accidental triggers under `max_accidental_per_min`: at 596 Hz one sample is
-  ample evidence, at 2.44 MHz it is not.
-- **A trigger also needs a fast rise.** As well as crossing the threshold, the
-  signal must be higher than it was `edge_lookback` samples ago. That compares
-  two raw samples instead of measuring against the baseline, so a slow drift
-  cancels out of it: only a fast rise can trigger, however far behind the
-  baseline estimate has fallen.
-- **The baseline is a rolling median**, re-estimated continuously over
-  `baseline_window` samples. A median rather than a mean because it ignores
-  pulses as long as they stay a minority of the window. The trained σ is the
-  samples' scatter about a block-median baseline of three capture limits
-  (about 3.6 × `max_pulse_ms`), so a slow drift is not counted as noise.
-- **`max_pulse_ms` is the primary control.** It sizes the ring buffer at 1.5× the
-  longest pulse, leaving room for the samples before the trigger and the tail
-  after it, and sets the floor under the baseline window and the noise training
-  length. Estimate it *generously*: a
-  capture that outlasts the ring silently loses its own rising edge.
-- **A capture that never ends is cut off.** A capture still open at
-  1.2 × `max_pulse_ms` stops there. It is flagged `truncated` only if the
-  signal had not yet come back below `threshold_sigma`; one that was merely
-  waiting for the end confirmation holds a complete pulse and is not.
+- **A capture opens on either axis and closes when both have settled.** The
+  axes are df and dissipation for a channel with a calibration (section 7),
+  I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and
+  closes when both are back inside ±`end_sigma` for `min_end_samples`, or
+  `margin_fraction` of the pulse's length if that is longer. `end_sigma` must
+  sit below `threshold_sigma`.
+- **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
+  the threshold. Left at 0 it is derived from the stream rate to hold
+  accidental triggers under `max_accidental_per_min`: 1 sample at 596 Hz, 2 on
+  the PFB stream.
+- **A trigger needs a fast rise.** The deviation must have grown by more than
+  `threshold_sigma` jump-σ within the last `edge_lookback` samples. That is a
+  difference of raw samples, so baseline drift cancels out of it: only a fast
+  rise triggers.
+- **The baseline is a rolling median** over `baseline_window` samples, which
+  ignores pulses as long as they are a minority of the window. The noise σ is
+  the samples' scatter about a block-median baseline, three hard-stop lengths
+  per block, so a slow drift is not counted as noise.
+- **`max_pulse_ms` sizes everything.** The ring buffer is 1.5× it, the hard
+  stop 1.2×, and it sets the floor under the baseline window and the training
+  length. Estimate it generously: a pulse that outlasts the buffer loses its
+  rising edge.
+- **A capture that never ends is cut off** at the hard stop. It is flagged
+  `truncated` only if the signal had not yet come back below
+  `threshold_sigma`.
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
 The shaded region is what gets saved. It opens `margin_fraction` of the window
-before the trigger — 10% by default, too small to draw legibly here — so the
-record keeps some pre-trigger baseline to measure against rather than starting
-exactly at the crossing.
+before the trigger (10% by default; the figure exaggerates it), so the record
+keeps pre-trigger baseline.
 
-Where it *closes* is `save_to_end_confirmed`, off by default: the window stops a
-`margin_fraction` tail past the below-threshold instant. Turned on, the window
-runs to the end-of-pulse confirmation instead, keeping the whole decay tail. Those samples are
-already in the ring, so this costs disk rather than acquisition. Off, files
-are shorter, and window length becomes a property of the pulse rather
-than of the baseline, since how long the confirmation takes depends on where the
-baseline was wandering. On the mock at 19 kHz with a 1 ms decay, identical
-pulses gave windows of 3.2–17.8 ms with the tail kept, while their threshold
-crossings stayed within 3.0–4.0 ms.
-
-Worth leaving off for PFB captures, where windows already carry many times the
-slow stream's samples (about 128× at this notebook's slow rate), and at high
-count rates, where longer windows overlap and more events get flagged as
-pileup.
-
-`duration_ms` does not change either way: it is measured from the threshold
-crossings, not from the length of the saved window.
+`save_to_end_confirmed` (off by default) sets where the window closes. Off, it
+stops a `margin_fraction` tail past the below-threshold instant. On, it runs to
+the end-of-pulse confirmation and keeps the whole decay tail, at the cost of
+disk only. Leave it off for PFB captures and at high count rates, where long
+windows overlap. `duration_ms` is measured from the threshold crossings either
+way.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.
@@ -409,8 +377,7 @@ capture_config = PulseCaptureConfig(
     threshold_sigma=5.0,    # trigger when I or Q leaves ±5σ
     end_sigma=1.0,          # close when BOTH are back inside ±1σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
-    max_pulse_ms=50.0,      # longest recordable pulse — sizes the ring
-    noise_train_ms=50.0,    # 0 would derive this from max_pulse_ms
+    max_pulse_ms=50.0,      # longest recordable pulse; sizes the buffer
     enable_pileup=True,     # split piled-up events on a sharp re-rise
 )
 
@@ -434,8 +401,8 @@ print(f"  edge lookback   {d['edge_lookback']} samples "
 print(f"  capture limit   {d['max_capture_ms']:.0f} ms")
 ```
 
-Note how the confirmation length changes on its own with the rate — this is the
-mechanism that makes one config portable across streams:
+The confirmation length follows the rate, which is what makes one config
+portable across streams:
 
 ```python
 for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
@@ -448,9 +415,10 @@ for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
 
 ## 5. One-shot capture
 
-`trigger_capture` is an in-memory version of pulse capture.
-It is suitable for bounded runs that can be held entirely within RAM, but
-quickly becomes unsuitable for long capture sessions.
+`trigger_capture` runs a session for `time_run` seconds of sample time and
+returns every pulse in memory. Pass `hdf5_path=` to write the capture file as
+well. For a capture too long to hold in memory, drive a session directly
+(section 6).
 
 `streamer_mode` is `"slow"`, `"fast"` (PFB, ≤ 4 channels) or `"both"`. Noise
 training runs first and is *not* charged against `time_run`.
@@ -474,11 +442,6 @@ res
 No calibration was passed, so the samples are in volts on the I and Q axes;
 section 7 shows what a calibration changes.
 
-Because it is a session underneath, `hdf5_path=` makes the one-shot call write a
-real capture file, which includes pulses, histograms and templates, openable in Periscope.
-Use a session directly (next section) when a capture is long enough that holding
-every pulse in memory stops being reasonable.
-
 Each pulse comes with its metrics already computed. `res.summaries[ch][idx]` is
 `pulse_summary()` output.
 
@@ -498,26 +461,25 @@ plt.xlabel("time (ms)"); plt.ylabel("V")
 plt.title("One captured pulse"); plt.legend(); plt.show()
 ```
 
-The derived τ is worth understanding, because it is not a fit. It uses two
-well-measured points on the falling edge — the peak, and the moment the envelope
-falls back through the trigger threshold:
+The derived τ is not a fit. It uses two points on the falling edge, the peak
+and the moment the envelope falls back through the trigger threshold:
 
 $$\tau = \frac{t_{\rm thr} - t_{\rm peak}}{\ln(\mathrm{SNR}_{\rm peak} / \sigma_{\rm thr})}$$
 
-Taking the *ratio* of amplitudes cancels the unknown event energy, so for a
-detector with one decay time every energy line collapses onto a single τ. It is
-a live cross-check, not a precision measurement: the discrete crossing sample
-lands slightly below the true crossing, so it runs a few percent low.
+The ratio of amplitudes cancels the unknown event energy, so a detector with
+one decay time gives one τ at every energy. It is a live cross-check, not a
+precision measurement: the discrete crossing sample lands slightly below the
+true crossing, so it runs a few percent low.
 
 ## 6. Live capture with streaming persistence
 
-`PulseCaptureSession` is what the panel actually runs. It trains on noise, then
-detects, and as each pulse closes it appends to HDF5, updates running histograms
-and stacks a trigger-aligned template. Since this is incremental, memory stays flat
-no matter how long you capture.
+`PulseCaptureSession` is what the panel runs. It trains on noise, then
+detects, and as each pulse closes it appends to HDF5, updates the histograms
+and stacks a trigger-aligned template. Memory stays flat however long you
+capture.
 
-You feed it from `run_slow_source` / `run_pfb_source`, or from any sample source
-of your own: the session's interface is just `feed_sample(channel, I, Q, t)`.
+Feed it from `run_slow_source` / `run_pfb_source`, or from any sample source
+of your own through `feed_sample(channel, I, Q, t)`.
 
 `on_pulse` is the callback the GUI uses to update its display. Here it prints.
 
@@ -601,10 +563,9 @@ plt.tight_layout(); plt.show()
 ### Trigger-aligned template
 
 Every pulse is stacked on its **trigger crossing**, not on the start of its
-window — window starts carry a pre-margin that varies with pulse length, so
-stacking on them would smear the template. The mean beats the noise down as
-1/√N; the shaded band is the per-bin RMS spread, which is what separates real
-pulse-to-pulse variation from measurement noise.
+window: the pre-trigger margin varies with pulse length and would smear the
+stack. The mean beats the noise down as 1/√N; the shaded band is the per-bin
+RMS spread, which separates pulse-to-pulse variation from measurement noise.
 
 ```python
 tmpl = reader.get_templates()
@@ -627,19 +588,19 @@ plt.title("Trigger-aligned template"); plt.legend(); plt.show()
 ### Calibrated amplitudes
 
 Samples are stored in physical units, not ADC counts: volts, or hertz for a
-channel rotated into the frequency basis. Counts belong to the I and Q axes, so
-a count projected onto the frequency axis is a combination of two ADC readings
-and means nothing on its own.
+channel rotated into the frequency basis.
 
 The calibration comes from `bias_kids`, which returns a complex
-`df_calibration` per detector. Its magnitude is hertz per volt and its phase
-is the angle between the quadratures and the frequency direction. Hand them
-to the session and they are written into the file with the pulses:
+`df_calibration` per detector. Its magnitude is hertz per volt; its phase is
+minus the angle of the frequency direction in the (I, Q) plane, so multiplying
+by it turns that direction onto the real axis. Key the calibrations by readout
+channel and hand them to the session; they are written into the file with the
+pulses:
 
     bias_results = await bias_kids(crs=crs, multisweep_results=...,
                                    module=MODULE)
-    df_cals = {ch: d["df_calibration"] for ch, d in bias_results.items()
-               if "df_calibration" in d}
+    df_cals = {d["bias_channel"]: d["df_calibration"]
+               for d in bias_results.values() if "df_calibration" in d}
 
     capture_session = PulseCaptureSession(..., df_calibrations=df_cals)
 
@@ -649,16 +610,17 @@ between two by an angle nothing controls. A channel without a calibration
 stays on the quadratures, and in volts. Pass `trigger_basis="iq"` to threshold
 the raw quadratures even where a calibration exists.
 
-`auto_bias_kids` puts tones on the resonances but does not produce a
-calibration, so a simulated array has none yet. `measure_df_calibrations` is
-that measurement on its own: a narrow sweep around each bias point, every
-channel stepping together, with a resonance fitted to the sweep and
-differentiated at the bias point, the same estimate `bias_kids` uses. It is
-host-side and uses only `set_frequency` and `get_samples`, so it runs against a
-board too — though on hardware you would normally take the calibration from
-`bias_kids` rather than sweep a tuned array again. With no channel list it
-measures every channel the module reports as biased, which is what Periscope
-does at startup in mock mode.
+`auto_bias_kids` biases the resonators but does not produce a calibration, so
+a simulated array has none yet. `measure_df_calibrations` is that measurement
+on its own: a narrow sweep around each bias point, every channel stepping
+together, with a resonance fitted to the sweep and differentiated at the bias
+point. This is the estimate `bias_kids` keeps as `df_calibration_fit`; its
+`df_calibration` is measured by stepping each tone. It uses only ordinary CRS
+calls (`get_frequency`, `set_frequency`, `get_samples`), so it runs against a
+board too. On hardware take the calibration from `bias_kids` instead of
+sweeping a tuned array again. With no channel list it measures every channel
+the module reports as biased, which is what Periscope does at startup in mock
+mode.
 
 ```python
 df_cals = await crs.measure_df_calibrations(module=MODULE)
@@ -667,30 +629,44 @@ for ch, cal in sorted(df_cals.items()):
           f"{np.degrees(np.angle(cal)):+.1f} deg")
 ```
 
-Every capture is self-describing — the units per channel, the counts-to-volts
-constant and the calibration are all in the file, so nothing has to assume
-this library's constants. Dual files (section 9) carry the same attributes:
+A capture with these calibrations triggers in the frequency basis and stores
+each calibrated channel in hertz:
 
 ```python
-print(f"trigger basis: {reader.trigger_basis()}   "
-      f"volts per count: {reader.volts_per_count():.4g}")
-for ch in reader.channels:
-    units = reader.stored_units(ch)
-    cal = reader.df_calibration(ch)
-    first = next(reader.iter_pulse_metadata(ch), {})
-    peak = first.get("peak_amp", float("nan"))
-    note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/V"
-    print(f"  ch{ch}: peak {peak:.4g} {units}   ({note})")
-
 reader.close()
+
+res = await crs.trigger_capture(
+    channel=CHANNELS, module=MODULE, streamer_mode="slow", time_run=2.0,
+    threshold_sigma=5.0, end_sigma=1.0,
+    df_calibrations=df_cals,
+    hdf5_path=str(OUTPUT_DIR / "pulse_capture_calibrated.h5"),
+)
+for ch in res.channels:
+    peaks = [s["peak_amp"] for s in res.summaries[ch].values()]
+    print(f"ch{ch}: {len(peaks)} pulses, mean peak {np.mean(peaks):.4g} Hz")
+```
+
+Every file records the units per channel, the counts-to-volts constant and
+the calibration. Dual files (section 9) carry the same attributes:
+
+```python
+with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_calibrated.h5") as r:
+    print(f"trigger basis: {r.trigger_basis()}   "
+          f"volts per count: {r.volts_per_count():.4g}")
+    for ch in r.channels:
+        units = r.stored_units(ch)
+        cal = r.df_calibration(ch)
+        first = next(r.iter_pulse_metadata(ch), {})
+        peak = first.get("peak_amp", float("nan"))
+        note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/V"
+        print(f"  ch{ch}: peak {peak:.4g} {units}   ({note})")
 ```
 
 ## 8. Fast (PFB) capture
 
-The fast streamer carries up to **4 channels of one module** at ~2.44 MHz —
-about 128× the slow stream here, enough to resolve a rise time the slow stream
-sees as a single sample. Enable it through `configure_streamer`, and always tear
-it down in a `finally` so a failed capture doesn't leave it running.
+The fast streamer carries up to **4 channels of one module** at 2.44 MHz,
+128× the slow stream here. Enable it through `configure_streamer` and turn it
+off in a `finally`.
 
 The same `PulseCaptureConfig` is reused: `session_kwargs(PFB_SAMPLING_FREQ)`
 re-derives the buffer, training length and confirmation count for the new rate.
@@ -718,26 +694,24 @@ finally:
 
 ## 9. Both streams at once, with matched pairs
 
-`DualPulseCaptureSession` runs two independent pulse detection engines for fast
-and slow samples, each with its own noise training and rate-appropriate
-parameters, and matches their pulses by trigger time: two triggers pair when
-they fall within three slow samples of each other, half the slow stream's
-filter response. A trigger with no partner is held until the longest capture
-could have closed, plus 50 ms, then released as a one-sided pair.
-`run_dual_source` drives both sockets concurrently; whichever side finishes
-first stops the other, since a matcher fed by one stream alone just
-accumulates one-sided pulses.
+`DualPulseCaptureSession` runs one detection engine per stream, each with its
+own noise training, and matches pulses by trigger time. Two triggers pair when
+they fall within three slow samples of each other. A trigger with no partner
+is held until the longest capture could have closed, plus 50 ms, then released
+as a one-sided pair. `run_dual_source` drives both sockets; whichever side
+finishes first stops the other.
 
-Every pair, one-sided or not, stores both streams over one common interval:
-the union of the two saved records, recorded as `window_t0`/`window_t1`. That
-gives you the same event at 19 kHz and at 2.44 MHz over the same interval,
-which is what makes the two comparable. Metrics are still computed from each
-stream's own triggered samples, so the wider span does not affect them.
+Every pair stores both streams over one common interval, the union of the two
+saved records, recorded as `window_t0`/`window_t1`: the same event at both
+rates over the same interval. A one-sided pair gets the other stream's window
+when that buffer still covers it; after `pair_window_wait_s` (3 s) the pair is
+written without it. Metrics are computed from each stream's own triggered
+samples.
 
-The slow stream's timestamps are late by its decimation filter's group delay
-while the fast stream's are not, so the session shifts the slow clock back by
-that delay before matching and before writing. The shift is in the file as
-`slow_time_offset_s`; add it back if you compare against raw packet stamps.
+The slow stream's timestamps are late by its decimation filter's group delay.
+The session shifts the slow clock back by that delay before matching and
+writing; the shift is in the file as `slow_time_offset_s`. Add it back if you
+compare against raw packet stamps.
 
 ```python
 pairs = []
@@ -768,8 +742,7 @@ print(f"fast {stats['fast']['total_pulses']} pulses over {fast_elapsed:.2f} s")
 print(f"matched {stats['pairs_matched']}, unmatched {stats['pairs_unmatched']}")
 ```
 
-Plotting one pair shows the point of the exercise — the same event, sampled two
-ways, on a shared time axis:
+One pair, plotted: the same event sampled two ways on a shared time axis.
 
 ```python
 two_sided = [p for p in pairs
@@ -789,15 +762,13 @@ if two_sided:
                  marker="." if key == "slow_tod" else None,
                  ms=4, lw=1, label=label)
     plt.xlabel("time (ms)"); plt.ylabel("I (V)")
-    plt.title(f"ch{p['channel']} pair #{p['pair_idx']} — "
+    plt.title(f"ch{p['channel']} pair #{p['pair_idx']}: "
               f"trigger offset {(p.get('time_offset') or 0.0)*1e6:+.0f} µs")
     plt.legend(); plt.show()
 ```
 
-Budget for the file size: every pair stores that common span from *both* rings,
-and at 2.44 MHz that window is thousands of samples. The capture above averages
-roughly 200 kB per pair — about 16 MB for two seconds at this (very high) mock
-pulse rate.
+Every pair stores that common span from both streams, thousands of samples at
+2.44 MHz, so check the file size before a long dual capture.
 
 The dual file keeps the two streams in separate groups plus a match table.
 `PulseHDF5Reader` reports `dual=True` and takes a `stream=` argument:
@@ -813,8 +784,7 @@ with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_dual.h5") as r:
 
 ## 10. Where this maps in Periscope
 
-If you also use the GUI, the correspondence is exact. The panel sets the same
-objects this notebook does:
+The panel sets the same objects this notebook does:
 
 | Periscope control | API equivalent |
 |---|---|
@@ -822,18 +792,18 @@ objects this notebook does:
 | **Channels** field: `1,2`, `2-19`, `1,5-8,20` | `parse_channel_spec(...)` |
 | **Channels** field: `all` / `*` | `crs.get_biased_channels(module)` |
 | **Settings…** dialog | `PulseCaptureConfig` fields |
-| Threshold σ / End σ / Pileup | `threshold_sigma`, `end_sigma`, `enable_pileup` |
+| **Thresh σ** / **End σ** / **Pileup** | `threshold_sigma`, `end_sigma`, `enable_pileup` |
 | Mode: slow / fast / both | `run_slow_source` / `run_pfb_source` / `run_dual_source` |
 | **▶ Start** | `capture_session.start()` + a source coroutine |
-| (how the GUI tap feeds the session) | `SlowIngest` — the same class `run_slow_source` uses, so the GUI and this notebook block, keep sample time and stop on duration identically |
+| (how the GUI feeds the session) | `SlowIngest`, the class `run_slow_source` uses too |
 | **⟳ Re-estimate Noise** | `capture_session.re_estimate_noise()` |
 | Live pulse / histogram / template plots | `on_pulse`, `on_histograms`, `on_templates` callbacks |
 | **Plot** field: `1,2,4`, `1-5`, `*` | `plot_groups(...)`, `combine_histograms(...)`, `combine_templates(...)` in `rfmux.pulse_capture.analysis` |
-| View basis / units controls | `display_transform(...)` |
+| **Units** control | `display_transform(...)` |
 | Output `.h5` + Session Browser review | `hdf5_path=` + `PulseHDF5Reader` |
 
-The same sequence as a plain script, for writing your own or smoke-testing against MOCK:
-`pulse_capture_flow.py` in this folder:
+`pulse_capture_flow.py` in this folder runs the same sequence as a plain
+script, to copy from or to run against MOCK:
 
     python pulse_capture_flow.py MOCK      # simulated CRS
     python pulse_capture_flow.py 0042      # real board
@@ -845,5 +815,5 @@ if IS_MOCK:
     await crs.stop_udp_streaming()
     print("simulated streamer stopped")
 else:
-    print("left the streamer running — it is not ours to stop")
+    print("left the streamer running: it is not ours to stop")
 ```

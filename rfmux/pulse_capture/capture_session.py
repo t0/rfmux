@@ -529,8 +529,10 @@ class PulseCaptureSession(_CallbackHost):
     hdf5_path : str or Path, optional
         When given, a :class:`PulseHDF5Writer` streams every pulse to
         this file; when None, no file is written.
-    df_calibrations : dict[int, float], optional
-        Per-channel Hz-per-count calibration, stored in the HDF5 file.
+    df_calibrations : dict[int, complex], optional
+        Per-channel df calibration as ``bias_kids`` reports it: magnitude
+        in hertz per volt, phase minus the angle of the frequency
+        direction in the (I, Q) plane.  Stored in the HDF5 file.
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
@@ -580,7 +582,7 @@ class PulseCaptureSession(_CallbackHost):
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
-        df_calibrations: Optional[Dict[int, float]] = None,
+        df_calibrations: Optional[Dict[int, complex]] = None,
         trigger_basis: str = "df",
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
@@ -1305,7 +1307,7 @@ class DualPulseCaptureSession(_CallbackHost):
         fast_rate: float = PFB_SAMPLING_FREQ,
         config: Optional[PulseCaptureConfig] = None,
         hdf5_path=None,
-        df_calibrations: Optional[Dict[int, float]] = None,
+        df_calibrations: Optional[Dict[int, complex]] = None,
         match_window_s: Optional[float] = None,
         match_grace_s: Optional[float] = None,
         pair_window_wait_s: float = 3.0,

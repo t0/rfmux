@@ -281,13 +281,15 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
 
     # Enforce numeric constraints and sane defaults
     try:
-        minv = float(cfg.get("pulse_random_amp_min", 1.5))
+        minv = float(cfg.get("pulse_random_amp_min",
+                             MOCK_DEFAULTS["pulse_random_amp_min"]))
     except Exception:
-        minv = 1.5
+        minv = MOCK_DEFAULTS["pulse_random_amp_min"]
     try:
-        maxv = float(cfg.get("pulse_random_amp_max", 3.0))
+        maxv = float(cfg.get("pulse_random_amp_max",
+                             MOCK_DEFAULTS["pulse_random_amp_max"]))
     except Exception:
-        maxv = 3.0
+        maxv = MOCK_DEFAULTS["pulse_random_amp_max"]
     
     # Pulses should not reduce nqp unless explicitly desired; enforce >= 1.0
     if minv < 1.0:

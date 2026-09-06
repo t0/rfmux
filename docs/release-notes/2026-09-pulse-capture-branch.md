@@ -3,38 +3,41 @@
 Branch `buffer_exploration`, PR 78, September 2026.
 
 This release adds pulse capture to rfmux: a detection engine that triggers on
-a detector timestream at a threshold set from its own measured noise, records
-each pulse to HDF5 as it arrives with its summary statistics, and pairs
-events seen on the slow readout stream and the fast PFB stream. It runs
+a detector timestream at a threshold set from its own measured noise and
+records each pulse to HDF5 as it arrives, with its summary statistics. It
+pairs events seen on the slow readout stream and the fast PFB stream. It runs
 headlessly as the `trigger_capture` macro and interactively as a Periscope
 panel, and the two share one engine, one ingest path and one file format.
 Samples are stored in physical units, volts or hertz, never in ADC counts,
 and the file carries the constants and calibration that produced them. The
-how-to for the feature is docs/release-notes/2026-08-pulse-capture.md; this
-document is the account of everything else that changed on the branch.
+how-to for the feature is [2026-08-pulse-capture.md](2026-08-pulse-capture.md).
+This document is for people working on rfmux: what else changed and what to
+change when upgrading. What only a board can settle is in
+[2026-09-hardware-checks.md](2026-09-hardware-checks.md).
 
-Around the feature, the branch reworked what it leaned on. The df calibration
-moved from a spline through the multisweep into a resonance fit, and then
-into a measurement `bias_kids` makes by stepping every tone; the nonlinear
-resonator model was corrected to Swenson et al. 2013 eq. 13. The simulator
-gained 1/f frequency wander, streams over multicast like a board, generates
-its slow stream a block at a time, and biases a hundred resonators in seconds
-where it took over a minute. The C++ receiver hands Periscope and the fast source
-demuxed arrays instead of packets, and Periscope stopped losing packets to its
-own receive path. The test suite is organised by subsystem and asked for by
-tier, and CI runs every test that does not need a board on three platforms.
+The df calibration is measured by `bias_kids`, which steps every biased tone
+and reads the slope. The nonlinear resonator model is Swenson et al. 2013
+eq. 13. The simulator has 1/f frequency wander, streams over multicast like a
+board and generates its slow stream a block at a time. The C++ receiver hands
+Periscope and the fast source demuxed arrays. Tests are organised by
+subsystem and run by tier; CI runs every test that does not need a board on
+three platforms.
+
 The C++ extension changed: rebuild after merging with
-`source .venv/bin/activate && uv pip install -e .`.
+`source .venv/bin/activate && uv pip install -e .`. Pulse-capture files
+recorded on hardware before this branch hold volts and hertz 256 times low;
+simulator files are unchanged in meaning.
 
 ## New
 
 - `rfmux.pulse_capture`: a top-level package holding the detection engine,
-  its compiled walk, the analysis helpers, the histogram and template
-  accumulators, the HDF5 writers and reader, the stream sources and the
-  single- and dual-stream capture sessions.
-- `crs.trigger_capture(channel, module, streamer_mode, time_run, config,
-  hdf5_path, df_calibrations, trigger_basis)`: one-shot capture in slow,
-  fast or both modes.
+  its compiled per-sample walk (`walk.py`), the analysis helpers, the
+  histogram and template accumulators, the HDF5 writers and reader, the
+  stream sources and the single- and dual-stream capture sessions.
+- `crs.trigger_capture(channel, module, streamer_mode="slow", time_run=10.0,
+  config, threshold_sigma, end_sigma, max_pulse_ms, hdf5_path,
+  df_calibrations, trigger_basis)`: one-shot capture in slow, fast or both
+  modes.
 - The result carries the pulses per channel, the pairs and the per-stream
   results; with `hdf5_path` the same content is written as the capture runs.
 - Noise training before every capture: the threshold is `threshold_sigma`
@@ -42,9 +45,10 @@ The C++ extension changed: rebuild after merging with
   baseline, so it holds for the correlated samples the decimators produce.
   Training lasts twenty times `max_pulse_ms` and is not charged against
   `time_run`.
-- Frequency-basis triggering: with a df calibration a channel is rotated so
-  the pulse lies along one axis before thresholding, and stored in hertz;
-  without one it stays on the quadratures in volts. The file records
+- Triggering in the frequency basis (`trigger_basis="df"`): with a df
+  calibration a channel is rotated so the pulse lies along one axis before
+  thresholding, and stored in hertz; without one it stays on the quadratures
+  in volts. The file records
   `trigger_basis`, `volts_per_count`, and per channel `stored_units` and
   `df_calibration`.
 - Per-pulse timing from the packet clock: `trigger_epoch` and `trigger_utc`
@@ -67,7 +71,7 @@ The C++ extension changed: rebuild after merging with
 - `crs.get_biased_channels(module)` and `parse_channel_spec`: "all", "1,2",
   "2-19" and mixtures, in the Channels field and in scripts.
 - `crs.measure_df_calibrations(channels=None, module=1, span_hz=20e3,
-  resolution_hz=500)`: a lockstep sweep of every channel (all biased channels
+  resolution_hz=500)`: a sweep of every channel at once (all biased channels
   by default), one batched frequency write and one module read per point, the
   calibration from a resonance fitted to each sweep.
 - `bias_kids(fit_method=, measure_calibration=, calibration_step=)`: the
@@ -84,7 +88,7 @@ The C++ extension changed: rebuild after merging with
 - Streamer helpers: `resolve_host`, `find_streamer_conflict`,
   `find_competing_receiver`, `check_multicast_loopback`, `ts_to_seconds`,
   `day_epoch`; C++ `pop_readout_batch`, `pop_pfb_batch`, `drop_pfb_before`,
-  `PacketReceiver.flush_all`, `Timestamp.seconds_of_day`, and a
+  `PacketReceiver.flush_all`, and a
   `packets_missing` counter that counts packets rather than gaps.
 - `rfmux.core.transferfunctions`: `PFB_NYQUIST_FREQ` beside the existing
   `PFB_SAMPLING_FREQ`, stated as not a rate; the CIC parameters as constants;
@@ -115,27 +119,28 @@ Old values are main at the merge base (e46fc41).
   sample set instead of a 72-phase scan); `fit_method` ("nonlinear" default,
   or "skewed"), `measure_calibration` (True) and `calibration_step` (0.05 of
   the fitted linewidth) added. The calibration was the multisweep's spline
-  slope; it is now measured by a tone step, in hertz per volt.
+  slope; it is measured by a tone step, in hertz per volt.
 - Nonlinear resonator model: `yg = y + a/(1+y^2)` solved by Newton, to
   `y = yg + a/(1+4y^2)` (Swenson 2013 eq. 13) solved by bisection with a
   Newton finish. Fitted `a` values from earlier releases are not comparable.
 - Simulator defaults: `nqp_noise_std_factor` 0.001 to 0.01; TLS wander absent
   to on (1e-7 fractional RMS, alpha 1.0, corner 100 Hz); `pulse_tau_decay`
-  0.1 s to 5 ms; `pulse_random_amp_min`/`max` 1.5/3.0 to 1.1/1.5;
+  0.1 s to 5 ms; `pulse_random_amp_min`/`max` 1.5/3.0 to 1.1/1.5.
   `bias_amplitude` 0.01 (about -40 dBm) to `bias_amplitude_from_dbm(-55)`,
-  about 0.0016, with `DAC_SCALE_DBM` (1 dBm) and `BIAS_DBM` (-55 dBm) in
+  about 0.0016. `DAC_SCALE_DBM` (1 dBm) and `BIAS_DBM` (-55 dBm) live in
   `rfmux.mock.config`.
 - Simulator transport: unicast to 127.0.0.1 with multicast TTL 1, to
   multicast on the hardware group with TTL 0, falling back to loopback unicast
   and printing the failing step when the host cannot multicast.
 - Simulator auto-bias: capped at 256 channels, to as many as a packet carries.
 - Simulator dip search: a 2000-point sweep over +/-10 MHz per resonator, to a
-  50 kHz pass over +/-0.25% then a 200 kHz, 101-point pin.
+  50 kHz pass over +/-0.25% then a 101-point sweep over 200 kHz.
 - Simulator physics: the multi-sample path evaluated one sample at a time, to
-  a hoisted batch path (`physics_batch_mode` "hoisted"; "reference" keeps the
-  loop); the slow stream generated one frame per call, to about 50 ms of
-  frames per call; PFB packets of 64 samples, one per physics sub-batch, to
-  1000-sample packets, the hardware's size.
+  a batch path that evaluates the shared terms once per instant
+  (`physics_batch_mode` "hoisted"; "reference" keeps the loop). The slow
+  stream generated one frame per call, to about 50 ms of frames per call.
+  PFB packets of 64 samples, one per physics sub-batch, to 1000-sample
+  packets, the hardware's size.
 - Simulator kernels: numba `parallel=True` unconditionally, to parallel only
   from `PARALLEL_MIN_N` (1024) resonators.
 - Simulator API: `set_analog_bank(high_bank=)` to `set_analog_bank(high=)`,
@@ -162,31 +167,31 @@ Old values are main at the merge base (e46fc41).
   `pulse_capture/`, `notebooks/`).
 - Test selection: the `offline` marker is `portable`; `--tier` and `--serial`
   are declared in a root `conftest.py` so they work from the repo root; a bare
-  `pytest` applied no marker expression and now applies
-  `-m "not slow_acquisition"`.
+  `pytest` applies `-m "not slow_acquisition"`.
 - CI: two named test files to the quick and acquisition tiers on ubuntu,
   windows and macos with the test dependency group installed; `paths-ignore`
-  `**/*.md` to READMEs, `CLAUDE.md` and `CHANGELOG.md` only, so the jupytext
-  demos trigger it.
-- Networking guide: `rmem_max` differed across sections (64 MB and 128 MB)
-  and is now one value, 268435456 (256 MB, about three seconds of the
-  four-channel PFB stream).
+  covers READMEs, `CLAUDE.md`, `CHANGELOG.md` and `docs/**`, so the jupytext
+  demos trigger CI and changes under `docs/` do not.
+- Networking guide: one `rmem_max` value, 268435456 (256 MB, about three
+  seconds of the four-channel PFB stream).
 
 ## Fixed
 
 Bugs present on main, with the symptom.
 
 - Periscope lost packets to its own receive path: at stage 0 a 128-channel
-  capture with one channel on screen reported 38% to 52% loss as "net", and
-  widening a capture to a few hundred channels froze the window in an
-  unbounded queue drain. The receive thread reads up to 2048 datagrams per
-  call over a scratch allocated once, the display writes a frame at a time,
-  the tap hands the capture worker whole packets, and the drain stops at a
-  250 ms backstop. On the board: 128 channels at stage 0 with nothing dropped.
+  capture with one channel on screen reported 38% to 52% loss as "net".
+  Widening a capture to a few hundred channels froze the window in an
+  unbounded read of the receive queue. The receive thread reads up to 2048
+  datagrams per call over a scratch allocated once, the display writes a
+  frame at a time, Periscope's packet hand-off gives the capture worker whole
+  packets, and each pass over the queue stops after 250 ms. On the board
+  (serial 156, module 2, stage 0): 128 channels at stage 0 with nothing
+  dropped.
 - Ctrl+C did not exit Periscope: the window stayed up holding UDP 9876, and
-  the next launch bound the port and received nothing. SIGINT now closes the
+  the next launch bound the port and received nothing. SIGINT closes the
   windows and quits; a second Ctrl+C leaves at once; the receive thread is
-  joined so exit no longer core-dumps.
+  joined before exit.
 - A Noise Spectrum panel holding data could crash the interpreter when
   dropped: its hover handler owned the panel through the mouse-move proxy,
   so the panel waited for the cyclic collector, which finalizes Qt objects
@@ -207,7 +212,7 @@ Bugs present on main, with the symptom.
   and no message; the receiver names the module it watches and the modules
   arriving, in the status bar and on stderr.
 - Another process taking the mock's unicast stream left a flat zero with no
-  explanation; Periscope now says another receiver holds the port.
+  explanation; Periscope says another receiver holds the port.
 - The session dialogs opened at Qt's process-global last directory and never
   saved the choice; they open at and record the last session directory. A
   test run had also written a `/tmp/pytest-...` path into the user's
@@ -246,18 +251,18 @@ Bugs present on main, with the symptom.
 ## Simulator
 
 - Slow stream generated in blocks of about 50 ms of frames per physics call,
-  one packet per frame with its own sequence number and stamp: 100 tones ran
-  at a quarter of real time and now run at real time with pulses off.
-- Hoisted batch physics: pulse sum, QP noise draw, nqp to (R, Lk) kernel and
+  one packet per frame with its own sequence number and stamp: 100 tones run
+  at real time with pulses off.
+- Batch physics (`physics_batch_mode="hoisted"`): pulse sum, QP noise draw, nqp to (R, Lk) kernel and
   TLS lookup evaluated once per instant of a batch, convergence-cache
   decisions in the reference order, parity with the reference loop at 1e-9.
 - Coupled pairs found through the sorted tones instead of every observer/tone
-  pair: a 1023-channel `get_samples` chunk from 314 ms to 29 ms.
+  pair: a 1023-channel `get_samples` chunk on the mock takes 29 ms.
 - TLS wander is a per-resonator capacitance perturbation, a pure function of
   absolute time so the slow and PFB streams stay common-mode; a sum of
   Ornstein-Uhlenbeck processes with log-spaced corners.
 - White QP noise is applied after the convergence-cache restore through a
-  sensitivity linearisation, so it no longer defeats the cache.
+  sensitivity linearisation, so the cache still applies.
 - The dip search runs the S21 kernels over a grid (`s21_sweep`), re-converging
   at each point; the S21 minimum sits above the impedance resonance by the
   coupling shift, so the coarse pass covers +/-0.25% of the nominal frequency.
@@ -274,37 +279,18 @@ Bugs present on main, with the symptom.
 
 ## Periscope
 
-- Pulse Capture panel: Start/Stop, Re-estimate Noise, mode (slow/fast/both),
-  Channels (with "all" and ranges), threshold and end sigma, a Settings
-  dialog for the rest, a Streamer button, a Units control (counts, volts, df
-  in hertz) that drives the waveforms, histograms and templates together.
-- Pulse list: length, SNR, trigger time in UTC; columns size to content until
-  the user drags one; Left/Right, Home/End, Space and Ctrl+E for navigation,
-  tab cycling and export.
-- Pulse view: I and Q, or df and dissipation, as two x-linked plots, each
-  with its own baseline and bands drawn from the band the decision was made
-  against; marks for the trigger, the below-threshold return and, when the
-  tail is saved, the end confirmation; the info line names the quadrature
-  that fired.
-- Histograms of SNR, amplitude, duration and derived decay constant with
-  auto-expanding ranges; a Plot field ("1,2,4", "1-5", "*") combines
-  channels; templates combine as the count-weighted stack.
-- Both-mode view: the fast trace in purple/red over the slow in blue/orange,
-  the pair's trigger offset, per-stream bands, a status line that turns amber
-  and red as the fast stream falls behind, with the cause and remedy in the
-  tooltip.
-- Review mode: opening a `.h5` restores the capture parameters into locked
-  controls and serves pulses, pairs, histograms and templates from the file;
-  double-clicking a capture in the Session Browser opens it, or focuses the
-  live panel if the capture is still running.
+The Pulse Capture panel is described in the how-to. Beyond it:
+
+- Pulse view: each axis has its own baseline and bands drawn from the band
+  the decision was made against; the info line names the quadrature that
+  fired.
 - The capture reads the board's PFB streamer state and never sets it; a
   mismatch between streamed and requested channels fails before a socket
   opens, naming both and where to change it.
 - Streamer Configuration dialog: decimation, short packets (forced below
   stage 3), modules, PFB channels; derived rate, Nyquist, channels per packet
   and Mbps against the 1 GbE budget; the validation tiers in a banner.
-- Toolbars are flow layouts: the main window fits 236 px, the multisweep
-  panel 389, network analysis 228, pulse capture 354.
+- Toolbars are flow layouts that wrap at a laptop width.
 - Mock startup: a framed progress window for arrays above 25 resonators; the
   df calibration sweep runs in a `DfCalibrationTask` while the window streams,
   reporting on the status bar; picking df units mid-sweep says so rather than
@@ -325,19 +311,20 @@ Bugs present on main, with the symptom.
 ## Algorithms and calibration
 
 - `bias_kids` fits the sweeps that lack the chosen fit with the flow's own
-  batch fitter (about 20 ms per sweep nonlinear, 4 ms skewed), writes the fit
-  and the bias frequency back onto the entries, and reads the bias frequency
-  (max-diq or min-s21) off the fitted curve.
+  batch fitter (on the simulator about 20 ms per sweep nonlinear, 4 ms
+  skewed) and writes the fit back onto the entries. It reads the bias
+  frequency (max-diq or min-s21) off the fitted curve and writes that back
+  too.
 - The measured calibration: every tone steps `calibration_step` of its
-  fitted linewidth down and up in lockstep, two module reads, the inverse of
+  fitted linewidth down and up together, two module reads, the inverse of
   the complex slope; a step is never less than one grid step and the fit
   supplies a curvature correction. Samples that do not move, or a failed
   read, fall back to the fit; one warning names detectors where fit and
   measurement disagree by more than 5 degrees or a magnitude ratio outside
   0.7 to 1.4.
-- Tones stay on multiples of `TONE_GRID_HZ` (625 MHz / 2^21, about 298 Hz),
-  as on main; the rounding now says why (intermodulation products land on the
-  grid) and applies to the calibration step too.
+- Tones stay on multiples of `TONE_GRID_HZ` (625 MHz / 2^21, about 298 Hz)
+  because intermodulation products land on the grid; the calibration step is
+  rounded to it too.
 - The ADC phase: with `optimize_phase=True` the principal axis of (I, Q) goes
   to Q from one sample set, and the calibration turns by minus the phase; the
   multisweep zeroes the ADC phase on the channels it sweeps.
@@ -353,9 +340,9 @@ Bugs present on main, with the symptom.
 - `require_isolation` in `find_resonances` runs before the
   `expected_resonances` trimming and warns when it drops peaks; isolation is
   judged against the peaks the search returned.
-- `streamer_config.validate`: stage 0-6; long packets need stage 3 or above;
-  more than 1000 Mbps is an error and more than 800 Mbps (the firmware's
-  derating) a warning; stage 1 and below advise on the OS buffer; more than
+- `streamer_config.validate`: stage 0-6; long packets need stage 3 or above.
+  More than 1000 Mbps is an error and more than 800 Mbps (the firmware's
+  derating) a warning. Stage 1 and below advise on the OS buffer; more than
   one module below stage 5 is noted as unvalidated; PFB channels at most four.
 - `apply_streamer_config` sends `module=` (firmware r1.6 spelling); the mock
   mirrors the firmware signature so the next rename fails in tests.
@@ -366,9 +353,10 @@ Bugs present on main, with the symptom.
 ## Streamer and packets
 
 - `pop_readout_batch(max_packets)`: samples as a (packets, channels) complex
-  array with the packetizer gain out, seconds of day per packet (NaN when not
-  disciplined), recent flag, stage, sequence numbers, and the day from the
-  first disciplined stamp; one packet width per batch.
+  array with the packetizer gain out, one packet width per batch. Beside
+  them: seconds of day per packet (NaN when the timestamp is not locked to a
+  source), recent flag, stage, sequence numbers, and the day from the first
+  locked stamp.
 - `pop_pfb_batch(max_packets)`: one layout per batch as a (groups, samples)
   complex array, seconds of day, sequence numbers and the layout fields;
   `drop_pfb_before(t, limit)` discards by stamp without demuxing.
@@ -380,9 +368,9 @@ Bugs present on main, with the symptom.
 - `packets_missing` counts packets by unsigned sequence distance, ignoring a
   reordered packet's near-2^32 gap; `sequence_gaps` still counts bursts.
 - The slow ingest (`SlowIngest`) blocks up to 256 packets or 50 ms and is
-  shared by `run_slow_source` and the Periscope tap.
+  shared by `run_slow_source` and Periscope's capture hand-off.
 - Slow packets are fed in timestamp order, the newest four held back for
-  stragglers at each flush; the sample clock is monotonic across a
+  late packets at each flush; the sample clock is monotonic across a
   decimation change and the day boundary.
 - The PFB source picks its channels from the packet's slot fields, so any
   subset of the streamed channels can be captured, and keeps only its
@@ -390,21 +378,23 @@ Bugs present on main, with the symptom.
 - PFB packets are released in sequence order through a 64-packet window and
   fed in blocks of sixteen packets per channel.
 - The PFB socket asks for the largest receive buffer the host allows
-  (`net.core.rmem_max` on Linux) and warns when what it got holds under a
-  second of stream.
+  (`net.core.rmem_max` on Linux) and reports the seconds it holds as
+  `buffer_s` in the source stats.
 - Past a 0.25 s lag between the slow and fast clocks the fast source discards
   packets by stamp until it is within 0.125 s, counting them as
-  `flushed_packets`; `lost_packets` comes from the queue's own sequence
-  accounting; `busy` is processing time over wall time.
+  `flushed_packets`. `lost_packets` comes from the queue's own sequence
+  accounting. `busy` is processing time over wall time.
 - The dual session shifts every slow timestamp by minus the CIC group delay
-  (about 2.9 slow samples at any stage, 4.99 ms at stage 6) before the
-  engine, the matcher and the file; recorded as `slow_time_offset_s`, 0 when
-  not applied; pass `slow_time_offset_s=0.0` to opt out.
+  (2.8 to 3.0 slow samples at stages 3 to 6, 1.5 at stage 0; 4.99 ms at
+  stage 6) before the engine, the matcher and the file. The shift is
+  recorded as `slow_time_offset_s`, 0 when not applied; pass
+  `slow_time_offset_s=0.0` to opt out.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)
-  plus 50 ms before going out one-sided.
-- Each stream's window is taken when its own ring covers it; a stream that
+  plus 50 ms before it is reported without a partner.
+- Each stream's window is taken when its own ring buffer covers it; a stream
+  that
   never delivers one is given `pair_window_wait_s` (3 s).
 - PFB slot fields are 0-indexed on the wire, like the module field.
 - The rate: the PFB stream is `PFB_SAMPLING_FREQ`, 625 MHz / 256, about
@@ -412,68 +402,23 @@ Bugs present on main, with the symptom.
 
 ## Tests and CI
 
-- `test/` mirrors the package: `core/`, `streamer/`, `mock/`, `algorithms/`,
-  `periscope/`, `pulse_capture/`, `notebooks/`; helpers in
-  `test/packet_helpers.py` and `test/qt_helpers.py`; one `qt_app` fixture in
-  `test/conftest.py`.
-- Tiers: `portable` (no PyQt6, no board; what tox runs), `quick` (the edit
-  loop, no streaming), `acquisition` (MockCRS server plus real UDP),
-  `full` (acquisition included), `hardware --serial`, `all`. Passing both
-  `--tier` and `-m` is an error.
-- Markers: `portable`, `slow_acquisition`, and `hardware` applied
-  automatically from the `crs`, `live_session` and `serial` fixtures.
-- A session guard refuses to start the acquisition tier while 9876/9877 are
-  held, naming the ports and the `ss` command; `--allow-busy-streamer-ports`
-  overrides. Streaming tests own their sockets from a fixture so a failure
-  does not strand a reader.
-- Contract tests: block ingest against per-sample ingest bitwise; the
-  compiled walk against the loop and the uncompiled walk; the batched getter
-  against the per-packet conversion through a real receiver on loopback; the
-  CIC delay sign against a synthetically late-stamped slow stream; mock batch
-  physics against the reference loop at 1e-9; the mock's carrier parity
-  across decimation stages.
-- Platform skips are stated: `recvmmsg` blocking (Linux only),
-  `SO_REUSEPORT` (absent on Windows), `SIGINT` (Windows delivers
-  `CTRL_C_EVENT`); `test_fastrx_file.py` skips unless fastrx was built.
-- Both demo notebooks execute in the acquisition tier; a demo writes to a
-  temp directory because the shipped copies are read-only.
-- CI: `periscope-tests.yml` runs quick and acquisition on ubuntu, windows and
-  macos with `fail-fast: false` and the test group installed;
-  `test_mock_vs_real.py` guards its imports so a hardware-only module cannot
-  abort collection; `build.yml` builds fastrx and runs `test_packets.py`.
-- `test_embedded_console.py` executes code through a real in-process
-  qtconsole kernel so the `ipykernel<7` pin cannot be relaxed unnoticed.
-- Periscope run output lives in `outputs/` (ignored); `test/.gitignore`
-  refuses `session_*/` anywhere under the test tree, so run data cannot be
-  committed from either place.
+Tiers, markers, layout, platform skips and CI triggers are in
+`test/README.md`. Contract tests on the branch:
+
+- block ingest against per-sample ingest, bitwise;
+- the compiled per-sample walk (`walk.py`) against the Python loop and the
+  uncompiled walk;
+- the batched getter against the per-packet conversion through a real
+  receiver on loopback;
+- the CIC delay sign against a synthetically late-stamped slow stream;
+- mock batch physics against the reference loop at 1e-9;
+- the mock's carrier parity across decimation stages.
 
 ## Documentation
 
-- docs/release-notes/2026-08-pulse-capture.md, the how-to, with a README
-  explaining how these notes relate to `CHANGELOG.md` and `firmware/CHANGES`.
-- `rfmux/reference-notebooks/Demos/pulse_capture.md` and
-  `simplified_tuning_flow.md`: jupytext notebooks with minimal headers, three
-  labelled ways in (attach, own board, simulate), a streamer-conflict check
-  before creating a simulation, and IS_MOCK-guarded teardown.
-- `pulse_capture_flow.py` and `simplified_tuning_flow.py` are code references
-  in execution order; the tuning script runs against MOCK in the acquisition
-  tier, the capture script by hand.
-- docs/make_release_note_screenshots.py and
-  docs/make_pulse_capture_figures.py regenerate the screenshots and the
-  capture-window anatomy figure; the release note's mock config is the one
-  the script uses.
-- docs/guides/getting-started.md: examples that run; `create_mock_crs` shown;
-  one simulation per machine; the `periscope` entry point.
-- docs/guides/networking.md: one `rmem_max` value and why.
-- README.md: a layout that matches the repository (`mock/`, `pulse_capture/`,
-  `reference-notebooks/`, `streamer/`; no `packets/`, `tuber/` or `home/`).
-- `rfmux/reference-notebooks/README.md` is the landing page for notebooks
-  shipped inside an installed rfmux, not for a board's JupyterLab.
-- CLAUDE.md: the project reference for contributors, with the review pass
-  every change gets; test/README.md: tiers, markers, layout, notebook
-  conventions, the one-run-at-a-time rule and CI triggers.
-- Vocabulary: docs say "bias the resonator", the API's word; "edge test",
-  "end confirmation" and "capture limit" replace branded names; comments say
-  what the code does, not how it got there.
-- Screenshots are dark-mode captures from the mock in the frequency basis.
-
+- How-to: [2026-08-pulse-capture.md](2026-08-pulse-capture.md).
+- Notebooks: `rfmux/reference-notebooks/README.md`.
+- Tests: `test/README.md`.
+- `docs/make_release_note_screenshots.py` and
+  `docs/make_pulse_capture_figures.py` regenerate the figures from the mock
+  configuration they name.

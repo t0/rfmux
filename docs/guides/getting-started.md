@@ -43,13 +43,9 @@ from rfmux.mock.helpers import create_mock_crs
 crs = await create_mock_crs(module=1, config={"num_resonances": 10})
 ```
 
-**Note:** a simulated CRS is created, not discovered. Its RPC port is assigned
-at startup, so a second `create_mock_crs()` gives you a second, unrelated
-simulation. Both stream to the same UDP port, and a reader receives the two
-interleaved with no error.
-
-Start one simulation per machine. Attach to it by hostname if another process
-needs it.
+Start one simulation per machine: a second `create_mock_crs()` is a second,
+unrelated simulation streaming to the same UDP port. Attach to a running one
+by hostname.
 
 Mock mode emulates:
 - KID non-linear inductance
@@ -118,13 +114,8 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 ### Biasing KIDs
 
-`bias_kids` picks an operating point per detector and programs the hardware. It
-works from multisweep results, since it needs each resonator characterised
-before it can choose a bias frequency. It is the last step of the tuning
-sequence, not a standalone call.
-
-It is one of the algorithms that is *not* registered on `CRS`, so unlike the
-calls above it is imported and takes `crs` as an argument:
+`bias_kids` takes multisweep results and biases each detector. It is not
+registered on `CRS`: import it and pass `crs`.
 
 ```python
 from rfmux.algorithms.measurement.bias_kids import bias_kids
@@ -195,10 +186,6 @@ For reliable data streaming, you may need to increase UDP receive buffer sizes a
 - [Configure networking](networking.md) for optimal data streaming
 - [Flash firmware](firmware.md) to update CRS boards
 - Work through the runnable reference notebooks in
-  `rfmux/reference-notebooks/Demos/`:
-  - `simplified_tuning_flow.md`: sweep, find, fit, bias and measure noise
-  - `pulse_capture.md`: detect and record detector pulses
-
-  These are jupytext markdown, not `.ipynb`. Periscope's Jupyter panel opens
-  them as notebooks on double-click; in your own JupyterLab use right-click →
-  *Open With* → *Notebook*.
+  `rfmux/reference-notebooks/Demos/` (`simplified_tuning_flow.md`,
+  `pulse_capture.md`); `rfmux/reference-notebooks/README.md` says how to
+  open them.

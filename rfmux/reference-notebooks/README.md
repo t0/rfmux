@@ -23,11 +23,10 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 - **`Demos/pulse_capture.md`**: detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture.
 
-Each has a `.py` counterpart beside it showing the same sequence as a plain
-script, as a reference for writing your own code against the API. Both
-notebooks and `simplified_tuning_flow.py` run against `MOCK` in the
-acquisition tier (`pytest --tier=acquisition`); `pulse_capture_flow.py` is not
-executed by any test, so run it by hand to smoke-test a change.
+Each has a `.py` counterpart beside it: the same sequence as a plain script,
+to copy from. Both notebooks and `simplified_tuning_flow.py` run in the
+acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
+changing its notebook.
 
 ## Connecting
 
@@ -39,7 +38,5 @@ import rfmux
 s = rfmux.load_session('!HardwareMap [ !CRS { serial: "0033" } ]') # Replace with your board serial
 crs = s.query(rfmux.CRS).one()
 await crs.resolve()
-await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
+await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)  # the fast stream needs a timestamp source
 ```
-
-Both demos can also run in mock mode with simulated hardware.

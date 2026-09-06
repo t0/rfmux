@@ -153,7 +153,7 @@ there; slow-stream captures keep up.
 
 - [Pulse Capture notebook](../../rfmux/reference-notebooks/Demos/pulse_capture.md):
   the headless how-to, cell by cell.
-- [What changed on the branch](2026-09-pulse-capture-branch.md): the
-  full list of behaviour, judgement calls and what was not verified.
+- [What changed on the branch](2026-09-pulse-capture-branch.md): what
+  else changed and what to change when upgrading.
 - [Networking Guide](../guides/networking.md): UDP buffer sizing for long
   captures.

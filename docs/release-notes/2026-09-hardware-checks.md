@@ -1,20 +1,19 @@
 # Hardware checks for the pulse-capture branch
 
-What the branch assumes about a real CRS that only a board can confirm,
-each with the measurement that settles it and what to change if it comes
-out the other way. Run these against one board streaming to one host, with
-Periscope closed so nothing else holds the streamer ports.
+Each check states what the code assumes about a real CRS, the measurement
+that settles it, and what to change if it comes out the other way. Run these
+against one board streaming to one host, with Periscope closed so nothing
+else holds the streamer ports.
 
-Settled already, by inspection of a board: `crs.get_samples` and
-`py_get_samples` agree in counts, so the C++ receiver's single division by
-256 leaves ADC counts on the slow stream; all voltages in rfmux are peak
-amplitudes, not rms.
+Known from a board: `crs.get_samples` and `py_get_samples` agree in counts,
+so the receiver's single division by 256 leaves ADC counts on the slow
+stream. All voltages in rfmux are peak amplitudes, not rms.
 
 ## 1. The count scale on the fast stream
 
-The branch now applies one division by 256 (the receiver's) to both
-streams and to the simulator, so a stream sample and a `get_samples` or
-`get_pfb_samples` sample carry the same counts.
+One division by 256, the receiver's, applies to both streams and to the
+simulator. A stream sample and a `get_samples` or `get_pfb_samples` sample
+carry the same counts.
 
 - Bias one tone, leave it on. Read the channel's mean through
   `get_pfb_samples` in counts and through the PFB stream
@@ -27,10 +26,9 @@ streams and to the simulator, so a stream sample and a `get_samples` or
   inspection.
 - With Periscope on the same tone in Real Units, expect the IQ plot's level
   and the Noise Spectrum panel's dBm to agree with `get_samples` converted
-  through `convert_roc_to_volts` and `convert_roc_to_dbm`. Periscope's main
-  window divided by 256 a second time until this branch, so a display that
-  matches the old level rather than `get_samples` says the receiver is not
-  yielding counts and the fixes need reversing.
+  through `convert_roc_to_volts` and `convert_roc_to_dbm`. A factor of 256
+  either way means the receiver is not yielding counts; reverse the
+  count-scale changes.
 
 ## 2. The fast-to-slow gain
 
@@ -123,16 +121,15 @@ The mock's competing-receiver warning fires only for a unicast stream.
 ## 10. The readout noise floor, for the simulator
 
 The simulator's white readout noise (`udp_noise_level`, 0.04 counts per
-slow sample) preserves the signal-to-noise it had before the count scale
-was corrected; neither it nor the earlier value came from a board.
+slow sample) is provisional: it did not come from a board.
 
 - With no tone on a channel, record the slow stream's sigma in counts at
   stage 6 (`np.std` of `get_samples(10000)` or of the stream) and the PFB
   stream's sigma on the same channel.
 - Set `udp_noise_level` in `rfmux/mock/config.py` to the slow-stream
-  figure. Expect the PFB figure to be about 64 times larger at stage 6
-  (root of the decimation ratio); a different ratio means the simulator's
-  PFB sigma rule in `_emit_pfb_frame` needs the measured ratio instead.
+  figure. Expect the PFB figure about 64 times larger at stage 6, the
+  square root of the decimation ratio. A different ratio goes into the
+  simulator's PFB sigma rule in `_emit_pfb_frame`.
 - Check the pulse-capture demos and `test/pulse_capture/` still detect at
   their thresholds with the new floor; `threshold_sigma` in the tests was
   tuned to the provisional one.

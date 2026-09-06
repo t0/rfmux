@@ -8,9 +8,9 @@ For reliable long-duration data captures, increase your system's UDP receive buf
 
 The PFB (fast) stream is about 78 MB/s at its four-channel limit. On Linux
 the pulse-capture source asks for a buffer as large as `rmem_max` allows, so
-that limit decides how much of a stall a capture can ride out: 256 MB
-(268435456 bytes) holds about three seconds. The other platforms' values
-below are the ones that have been exercised there.
+that limit sets how long a stall a capture can ride out. 256 MB
+(268435456 bytes) holds about three seconds. On Windows and macOS use the
+values below.
 
 ### Linux
 

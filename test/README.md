@@ -24,7 +24,7 @@ pip install --group test           # nbclient, nbformat, pytest_check
 an error rather than one overriding the other.
 
 **Without the test group** the notebook and mock-vs-real tests skip rather than
-fail, so a CI runner missing it stops covering them without going red.
+fail: a CI runner missing it goes green having not run them.
 
 ## What each tier covers
 
@@ -41,8 +41,8 @@ fail, so a CI runner missing it stops covering them without going red.
   `rfmux.mock` flavour, as in `test_channel_selection.py`) stays in this
   tier; the mock sends UDP only after `start_udp_streaming()`.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
-  Covers what no unit test can: streamer config taking effect, the slow
-  (~38 kHz) and PFB (~2.44 MHz) sources feeding a session, decimation
+  Covers what no unit test can: streamer config taking effect, and the slow
+  (~38 kHz) and PFB (~2.44 MHz) sources feeding a session. Also decimation
   constraints, and end-to-end pulse capture in slow, fast and both modes.
 - **hardware:** the same API against a real CRS. Skipped unless you pass
   `--serial`.
@@ -64,7 +64,7 @@ stage 6 long packets on teardown. Don't point it at a board mid-experiment.
 
 - `test_high_sampling_rate` is the one that fails for environmental reasons. It
   streams at stage 0 (~38 kHz) and demands zero sequence gaps across 1000
-  samples, so a slow machine or an undersized UDP buffer fails it and the
+  samples. A slow machine or an undersized UDP buffer fails it, and the
   failure reads as a code bug. Set `net.core.rmem_max` first.
 - `test/mock/test_mock_vs_real.py --serial <n>` compares every mock attribute
   and signature against a real board, and is the only check that catches the two
@@ -72,8 +72,8 @@ stage 6 long packets on teardown. Don't point it at a board mid-experiment.
   changes. It only reads attributes, so it is safe against a board in use.
 - The measurement algorithms are **not** covered here, or anywhere against
   real hardware: network analysis, multisweep, fitting and `bias_kids` all run
-  against the mock only. `test_mock_vs_real` is what keeps that arbiter
-  trustworthy.
+  against the mock only. `test_mock_vs_real` is what keeps the mock
+  trustworthy as that reference.
 
 ## One acquisition run at a time
 
@@ -105,12 +105,12 @@ Directories mirror the package under test.
 
 | Directory | Covers |
 | --- | --- |
-| `core/` | `rfmux/core/` — API surface, schema, threading |
-| `streamer/` | `rfmux/streamer/` — packet decode, the batched getters, port conflict probes |
-| `mock/` | `rfmux/mock/` — simulator fidelity, config plumbing, TLS noise, JIT dispatch, multicast selection |
-| `algorithms/` | `rfmux/algorithms/measurement/` — measurement flows, streamer config |
-| `periscope/` | `rfmux/tools/periscope/` — panels, dialogs, receiver, shutdown |
-| `pulse_capture/` | `rfmux/pulse_capture/` — detection, session, ingest, HDF5, plus its Periscope panel and task |
+| `core/` | `rfmux/core/`: API surface, schema, threading |
+| `streamer/` | `rfmux/streamer/`: packet decode, the batched getters, port conflict probes |
+| `mock/` | `rfmux/mock/`: simulator fidelity, config plumbing, TLS noise, JIT dispatch, multicast selection |
+| `algorithms/` | `rfmux/algorithms/measurement/`: measurement flows, streamer config |
+| `periscope/` | `rfmux/tools/periscope/`: panels, dialogs, receiver, shutdown |
+| `pulse_capture/` | `rfmux/pulse_capture/`: detection, session, ingest, HDF5, plus its Periscope panel and task |
 | `notebooks/` | Jupyter-based tests |
 
 ## Notebook tests
@@ -130,14 +130,14 @@ test, so run it by hand when its notebook changes.
 
 ## Platform skips
 
-A handful of tests skip on macOS or Windows because they pin behaviour that only
-exists elsewhere: `recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT`
-(absent on Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT`
-to a process group). `test/test_fastrx_file.py` skips at collection unless the
-fastrx extension was built, which happens only on Linux and only when clang,
-libxdp, libbpf and liburing were present at install time
-(`rfmux/streamer/CMakeLists.txt`). With fastrx built and the test group
-installed, every tier below `hardware` reports zero skips on Linux.
+A few tests skip on macOS or Windows because they pin platform behaviour:
+`recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT` (absent on
+Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT` to a
+process group). `test/test_fastrx_file.py` skips at collection unless the
+fastrx extension was built. That needs Linux with clang, libxdp, libbpf and
+liburing present at install time (`rfmux/streamer/CMakeLists.txt`). With
+fastrx built and the test group installed, every tier below `hardware`
+reports zero skips on Linux.
 
 ## CI
 
@@ -152,5 +152,6 @@ builds fastrx with `FASTRX_REQUIRED=ON` but runs only
 It triggers on push and pull request against `main`, plus `workflow_dispatch`. A
 long-lived branch gets **no CI until it opens a PR**, so run the tiers locally
 or dispatch the workflow against the branch by hand. Changes to READMEs,
-`CLAUDE.md` and `CHANGELOG.md` alone do not trigger it; the jupytext demos do,
+`CLAUDE.md`, `CHANGELOG.md` and anything under `docs/` alone do not trigger
+it (the release notes and `docs/make_*.py` included); the jupytext demos do,
 since the acquisition tier executes them.

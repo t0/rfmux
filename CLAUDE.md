@@ -7,7 +7,7 @@
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
 - **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
-- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled walk, the stream sources, the dual-stream session, and the HDF5 record
+- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
@@ -15,7 +15,7 @@
 ## Current State
 
 Pulse capture (dual-stream slow + PFB capture with live pair matching,
-streaming HDF5, histograms and templates, the session browser) is merged.
+streaming HDF5, histograms and templates, the session browser) is in main.
 The C++ PFB receiver path and the count-scale assumptions are verified in
 mock and on loopback only; `docs/release-notes/2026-09-hardware-checks.md`
 lists what a board has to confirm.
@@ -24,7 +24,7 @@ lists what a board has to confirm.
 
 ```bash
 # Requires Python 3.10+, Git LFS
-pip install -e .
+uv pip install -e .   # rebuilds the C++ extension
 
 # Linux: Required for Periscope GUI
 sudo apt-get install libxcb-cursor0
@@ -175,30 +175,29 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 
 ### MockCRS Physics
 - `jit_physics.py` requires Numba; no Python fallback
-- `compute_s21_parallel()` handles attenuation internally — don't double-apply
+- `compute_s21_parallel()` handles attenuation internally: do not apply it again
 - Single convergence loop: `converged_lekid_parameters()`
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
 - Slow stream: ~38 kHz at dec=0, halving per stage, port 9876, `ReadoutPacket`
 - PFB stream: ~2.44 MHz, port 9877, `PFBPacket`
-- The C++ receiver hands Periscope and the PFB source one demuxed array per drain (`pop_readout_batch`, `pop_pfb_batch`); the per-packet conversions remain the reference
-- `get_multicast_socket()` uses `SO_REUSEPORT` — multiple listeners OK
+- The C++ receiver hands Periscope and the PFB source one demuxed array per queue read (`pop_readout_batch`, `pop_pfb_batch`); the per-packet conversions remain the reference
+- `get_multicast_socket()` uses `SO_REUSEPORT`, so several listeners can share the port
 - Mock slow stream is generated a ~50 ms block of frames at a time (one
-  physics call, one packet per frame): 100 tones run at real time this
-  way and at a quarter of it frame by frame
+  physics call, one packet per frame); 100 tones run at real time
 - Mock slow stream carries every module 1-4 with a configured channel
   (frequency, amplitude or phase set), module 1 if none; the mock PFB
   stream carries the module passed to `set_pfb_streamer`
 - Mock streams to the same multicast group as hardware, with TTL 0 so it
   cannot leave the host. If multicast does not work on the machine it
-  falls back to loopback unicast and prints which step failed —
-  `check_multicast_loopback()` in `rfmux/streamer`
+  falls back to loopback unicast and prints which step failed
+  (`check_multicast_loopback()` in `rfmux/streamer`)
 
 ### Threading
 - Periscope: Qt event loop + asyncio integration
 - Long operations: `QThread` with own asyncio loop
-- h5py not thread-safe — write from single thread only
+- h5py is not thread-safe: write from one thread
 
 ## File Structure
 
@@ -227,8 +226,9 @@ python -m rfmux.tools.periscope     # Launch Periscope
 ```
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
-but `hardware`/`all` excludes the board tests, so they report zero skips.
-Markers tag tests: `portable`, `slow_acquisition`, `hardware` — the last
+but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
+the test group installed they report zero skips.
+Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus
 ~75 hardware skips: `addopts` in `pyproject.toml` deselects the acquisition
@@ -259,5 +259,5 @@ Mock mode: `periscope MOCK`, or the mock connection in the startup dialog
 ### Debug pulse capture
 - `pytest test/pulse_capture/` (assertions) or
   `pytest --tier=acquisition` (end to end, real UDP)
-- Check `threshold_sigma` (3-5 typical, 50 is debug artifact)
+- Check `threshold_sigma` (default 5.0; 3-5 typical)
 - Verify noise estimation with `estimate_noise_stats()`

@@ -418,6 +418,6 @@ Tiers, markers, layout, platform skips and CI triggers are in
 - Guide: [docs/guides/pulse-capture.md](../guides/pulse-capture.md).
 - Notebooks: `rfmux/reference-notebooks/README.md`.
 - Tests: `test/README.md`.
-- `docs/make_pulse_capture_screenshots.py` and
-  `docs/make_pulse_capture_figures.py` regenerate the figures from the mock
-  configuration they name.
+- `docs/make_pulse_capture_screenshots.py` regenerates the screenshots from
+  the mock configuration it names; `docs/make_pulse_capture_figures.py`
+  draws the anatomy figure from the engine's output on a synthetic pulse.

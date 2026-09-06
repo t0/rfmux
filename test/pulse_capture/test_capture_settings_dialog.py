@@ -247,3 +247,13 @@ def test_noise_training_row_shows_the_length_actually_used(qt_app):
     assert "capped" in label
     assert "noise training 819 ms" in _plain(dlg.pulse_derived_label)
     dlg.close()
+
+
+def test_advanced_group_sits_between_the_settings_and_the_buttons(qt_app):
+    dlg = PulseCaptureSettingsDialog(
+        config=PulseCaptureConfig(), sample_rate=596.0, mode="slow")
+    dlg.show()
+    dlg.adv_box.setChecked(True)
+    qt_app.processEvents()
+    assert dlg.noise_label.y() < dlg.adv_box.y() < dlg.buttons.y()
+    dlg.close()

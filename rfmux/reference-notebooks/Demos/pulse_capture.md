@@ -333,9 +333,10 @@ How pulse detection works:
 - **A capture opens on either axis and closes when both have settled.** The
   axes are df and dissipation for a channel with a calibration (section 7),
   I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and
-  closes when both are back inside ±`end_sigma` for `min_end_samples`, or
-  `margin_fraction` of the pulse's length if that is longer. `end_sigma` must
-  sit below `threshold_sigma`.
+  closes when both are back inside ±`end_sigma` of the baseline, or of the
+  level the pulse rose from, for `min_end_samples`, or `margin_fraction` of
+  the pulse's length if that is longer. `end_sigma` must sit below
+  `threshold_sigma`.
 - **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
   the threshold. Left at 0 it is derived from the stream rate to hold
   accidental triggers under `max_accidental_per_min`: 1 sample at 596 Hz, 2 on
@@ -355,12 +356,16 @@ How pulse detection works:
 - **A capture that never ends is cut off** at the hard stop. It is flagged
   `truncated` only if the signal had not yet come back below
   `threshold_sigma`.
+- **Piled-up pulses are split.** A fresh rise on the tail of a pulse, after
+  it was seen decaying, starts a new one. Both fragments carry the `pileup`
+  flag: templates skip them, histograms keep them.
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
-The shaded region is what gets saved. It opens `margin_fraction` of the window
-before the trigger (10% by default; the figure exaggerates it), so the record
-keeps pre-trigger baseline.
+The figure is the engine's own output on a synthetic pulse and a piled-up
+pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
+saved. It opens `margin_fraction` of the window before the trigger (10% by
+default), so the record keeps pre-trigger baseline.
 
 `save_to_end_confirmed` (off by default) sets where the window closes. Off, it
 stops a `margin_fraction` tail past the below-threshold instant. On, it runs to

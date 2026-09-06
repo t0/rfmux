@@ -8,13 +8,17 @@ diagrams that explain the detector rather than show measurements.  This
 script writes them, so a figure is the output of code that can be read
 and rerun rather than an opaque binary in the tree.
 
-Writes every copy of each figure, so the notebook and the guide cannot
-drift apart.
+The anatomy figure is the engine's own output: a synthetic pulse, and a
+piled-up pair, are fed through PulseCapture with the PulseCaptureConfig
+defaults, and every shaded window and mark is read from the record it
+saved.  Writes every copy of each figure, so the notebook and the guide
+cannot drift apart.
 
     python docs/make_pulse_capture_figures.py
 """
 
 import pathlib
+import sys
 
 import matplotlib
 matplotlib.use("Agg")
@@ -22,6 +26,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+from rfmux.core.transferfunctions import decimation_to_sampling  # noqa: E402
+from rfmux.pulse_capture import PulseCaptureConfig  # noqa: E402
+from rfmux.pulse_capture.detection import (  # noqa: E402
+    ChannelNoiseStats, PulseCapture)
 
 #: Every place each figure is embedded.  The first is the source of truth;
 #: the rest are copies kept byte-identical by writing them all here.
@@ -30,93 +40,199 @@ ANATOMY_PATHS = (
     ROOT / "docs" / "guides" / "images" / "capture-window-anatomy.png",
 )
 
-THRESH, END = 5.0, 1.0
+#: Decimation stage 3, 4.77 kHz: a 12 ms decay spans tens of samples.
+FS = decimation_to_sampling(3)
+#: Every field but the pulse length at its default.
+CONFIG = PulseCaptureConfig(max_pulse_ms=50.0)
+AMP_SIGMA, TAU_MS, RISE_MS = 14.0, 12.0, 1.0
+SEED = 13
+
+RED, GREEN, ORANGE, BLUE, PURPLE = (
+    "#CC3333", "#33884D", "#CC6633", "#3366CC", "#7A5AA8")
+
+
+def _noise(rng, n):
+    """Unit-sigma noise smoothed over three samples, so neighboring
+    samples are correlated as in a decimated stream rather than
+    independent."""
+    x = np.convolve(rng.normal(0.0, 1.0, n + 2), np.ones(3) / 3, "valid")
+    return x / x.std()
+
+
+def _pulses(t_ms, arrivals):
+    """An exponential pulse of AMP_SIGMA at each arrival time."""
+    x = np.zeros(t_ms.size)
+    for t0 in arrivals:
+        dt = t_ms - t0
+        x += np.where(dt >= 0,
+                      AMP_SIGMA * (1 - np.exp(-dt / RISE_MS))
+                      * np.exp(-dt / TAU_MS), 0.0)
+    return x
+
+
+def _run_engine(t_ms, i_sigma, q_sigma):
+    """Feed one channel through the engine; return the records it saved."""
+    kwargs = CONFIG.session_kwargs(FS)
+    for key in ("trigger_basis", "noise_samples"):
+        kwargs.pop(key)
+    records = []
+    stats = ChannelNoiseStats(mean_I=0.0, std_I=1.0, mean_Q=0.0, std_Q=1.0)
+    pcap = PulseCapture(channels=[1], noise_stats={1: stats},
+                        on_pulse=lambda ch, k, rec: records.append(rec),
+                        **kwargs)
+    for t, i, q in zip(t_ms, i_sigma, q_sigma):
+        pcap.process_sample(1, float(i), float(q), float(t))
+    return records
+
+
+def _bands(ax):
+    ax.axhline(0, color="#888888", lw=0.9)
+    for s, color, label in (
+            (CONFIG.threshold_sigma, RED,
+             f"threshold_sigma = {CONFIG.threshold_sigma:g}σ"),
+            (CONFIG.end_sigma, GREEN,
+             f"end_sigma = {CONFIG.end_sigma:g}σ")):
+        ax.axhline(s, color=color, ls="--", lw=1.2, label=label)
+        ax.axhline(-s, color=color, ls="--", lw=1.2)
+
+
+def _one_pulse(ax, t, trace, rec):
+    """Where each parameter acts on a single pulse."""
+    edge_ms = CONFIG.edge_lookback_samples(FS) / FS * 1e3
+    stop_ms = CONFIG.max_capture_samples(FS) / FS * 1e3
+    trig, below = rec["trigger_time"], rec["below_threshold_time"]
+    confirmed = rec["end_time"]
+    saved = rec["Time"]
+
+    _bands(ax)
+    ax.text(69.5, CONFIG.threshold_sigma + 0.3,
+            f"threshold_sigma = {CONFIG.threshold_sigma:g}σ",
+            ha="right", va="bottom", fontsize=8, color=RED)
+    ax.text(69.5, CONFIG.end_sigma + 0.3,
+            f"end_sigma = {CONFIG.end_sigma:g}σ",
+            ha="right", va="bottom", fontsize=8, color=GREEN)
+    ax.plot(t, trace, color=BLUE, lw=1.1, zorder=3)
+    ax.axvspan(saved[0], saved[-1], color=BLUE, alpha=0.10, zorder=0)
+    ax.axvline(trig, color=ORANGE, lw=1.6, zorder=4)
+    ax.axvline(below, color=RED, lw=1.2, ls=":", zorder=4)
+    ax.axvline(confirmed, color=GREEN, lw=1.2, ls="--", zorder=4)
+    ax.axvline(trig + stop_ms, color=PURPLE, lw=1.4, ls="-.")
+
+    # Edge test: the bracket the trigger looks back across.
+    y = 15.6
+    ax.plot([trig - edge_ms, trig], [y, y], color=ORANGE, lw=1.2)
+    ax.plot([trig - edge_ms] * 2, [y - 0.3, y + 0.3], color=ORANGE, lw=1.2)
+    ax.text(trig - edge_ms - 0.8, y + 0.4,
+            "edge test: rose by more\nthan threshold_sigma\n"
+            "jump-σ across the last\nedge_lookback samples\n"
+            "(margin_fraction ×\nmax_pulse_ms)",
+            ha="right", va="top", fontsize=7.5, color=ORANGE)
+    ax.annotate("trigger: trigger_samples\nabove threshold_sigma,\n"
+                "dated to the first",
+                xy=(trig, CONFIG.threshold_sigma), xytext=(trig - 7, 6.5),
+                ha="right", va="top", fontsize=7.5, color=ORANGE,
+                arrowprops=dict(arrowstyle="->", color=ORANGE, lw=1.1))
+    ax.annotate("back below\nthreshold_sigma\n(duration_ms\nends here)",
+                xy=(below, CONFIG.threshold_sigma), xytext=(below + 4, 9.8),
+                fontsize=7.5, color=RED, va="center",
+                arrowprops=dict(arrowstyle="->", color=RED, lw=1))
+    ax.annotate("saved window: margin_fraction\n"
+                "of it before the trigger;\n"
+                "max(min_end_samples,\n"
+                "margin_fraction × core) past\n"
+                "the drop below threshold_sigma",
+                xy=(saved[0], -1.8), xytext=(-29.5, -2.4),
+                ha="left", va="top", fontsize=7.5, color=BLUE,
+                weight="bold",
+                arrowprops=dict(arrowstyle="->", color=BLUE, lw=1))
+    ax.annotate("end confirmed: both axes\n"
+                "inside end_sigma of the\n"
+                "baseline or of the level\n"
+                "the pulse rose from,\n"
+                "counted up while inside\n"
+                "and down while out, past\n"
+                "max(min_end_samples,\n"
+                "margin_fraction × core).\n"
+                "save_to_end_confirmed=True\n"
+                "saves up to here.",
+                xy=(confirmed, 1.6), xytext=(confirmed + 1.5, 16.4),
+                fontsize=7.5, color=GREEN, va="top", ha="left",
+                arrowprops=dict(arrowstyle="->", color=GREEN, lw=1))
+    ax.text(trig + stop_ms + 0.8, 14.6,
+            "hard stop\n(1.2 × max_pulse_ms)\ncloses it anyway;\n"
+            "truncated only if\nstill above\nthreshold_sigma",
+            ha="left", va="top", fontsize=7.5, color=PURPLE)
+    ax.set_title("Anatomy of one capture window")
+    ax.set_ylim(-7.0, 17.0)
+
+
+def _pileup(ax, t, trace, first, second):
+    """Two pulses in one window are split on the second's rise."""
+    _bands(ax)
+    ax.plot(t, trace, color=BLUE, lw=1.1, zorder=3)
+    for rec, color in ((first, BLUE), (second, ORANGE)):
+        saved = rec["Time"]
+        ax.axvspan(saved[0], saved[-1], color=color, alpha=0.10, zorder=0)
+        ax.axvline(rec["trigger_time"], color=ORANGE, lw=1.6, zorder=4)
+    split = second["trigger_time"]
+    ax.annotate("pileup split: a fresh rise above the\n"
+                "pulse's own recent level, after it was\n"
+                "seen decaying (enable_pileup)",
+                xy=(split, 6.0), xytext=(split + 14, 8.8),
+                fontsize=7.5, color=ORANGE, va="top",
+                arrowprops=dict(arrowstyle="->", color=ORANGE, lw=1.1))
+    ax.text((first["Time"][0] + first["Time"][-1]) / 2, -2.6,
+            "first fragment:\nends at the split,\nflagged pileup",
+            ha="center", va="top", fontsize=7.5, color=BLUE, weight="bold")
+    ax.text(second["Time"][-1] + 1.0, -2.6,
+            "second fragment: sits on the first's tail,\n"
+            "flagged pileup; templates skip both,\nhistograms keep them",
+            ha="left", va="top", fontsize=7.5, color=ORANGE, weight="bold")
+    ax.set_title("Two pulses piled up")
+    ax.set_ylim(-7.0, 17.0)
 
 
 def capture_window_anatomy(path):
-    """Where each PulseCaptureConfig parameter acts on a real capture."""
-    rng = np.random.default_rng(4)
-    # max_pulse_ms = 50 for this illustration, so the hard stop sits at 60 ms.
-    max_pulse_ms, hard_stop = 50.0, 60.0
-    t = np.linspace(-20, 80, 700)               # ms
-    tau, t0 = 12.0, 0.0
-    pulse = np.where(t >= t0, 9.0 * np.exp(-(t - t0) / tau), 0.0)
-    trace = pulse + rng.normal(0, 0.45, t.size)
+    rng = np.random.default_rng(SEED)
+    t = np.arange(-30e-3, 95e-3, 1 / FS) * 1e3         # ms
+    stop_ms = CONFIG.max_capture_samples(FS) / FS * 1e3
 
-    fig, ax = plt.subplots(figsize=(9.5, 4.2))
+    single = _pulses(t, [0.0]) + _noise(rng, t.size)
+    recs = _run_engine(t, single, _noise(rng, t.size))
+    assert len(recs) == 1, [r["trigger_time"] for r in recs]
+    assert not recs[0]["pileup"] and not recs[0]["truncated"]
+    assert recs[0]["end_time"] < recs[0]["trigger_time"] + stop_ms - 1
 
-    bands = ((THRESH, "#CC3333", f"threshold_sigma = {THRESH:g}σ"),
-             (END, "#33884D", f"end_sigma = {END:g}σ"))
-    for s, color, label in bands:
-        ax.axhline(s, color=color, ls="--", lw=1.2, label=label)
-        ax.axhline(-s, color=color, ls="--", lw=1.2)
-    ax.axhline(0, color="#888888", lw=0.9)
+    pair = _pulses(t, [0.0, 18.0]) + _noise(rng, t.size)
+    pair_recs = _run_engine(t, pair, _noise(rng, t.size))
+    assert len(pair_recs) == 2, [r["trigger_time"] for r in pair_recs]
+    assert all(r["pileup"] for r in pair_recs)
+    assert (pair_recs[1]["end_time"]
+            < pair_recs[1]["trigger_time"] + stop_ms - 1)
 
-    ax.plot(t, trace, color="#3366CC", lw=1.1, zorder=3)
-
-    # Trigger: first sample above threshold, then confirmation.
-    trig = t[np.argmax(trace > THRESH)]
-    # Back below threshold: one past the last sample above it.
-    above = np.where((trace > THRESH) & (t >= trig))[0]
-    below = t[above[-1] + 1]
-    # End band: back inside end_sigma and staying there.
-    back = np.where((np.abs(trace) < END) & (t > trig))[0]
-    end = t[back[0]] if len(back) else t[-1]
-    # The confirmation count needs a stretch of samples inside the band
-    # before it calls the pulse over.  Drawn generously here.
-    confirmed = end + 0.45 * (end - trig)
-
-    # What the detector saves by default: margin_fraction of the core
-    # past the below-threshold instant, floored at min_end_samples; then
-    # margin_fraction of that saved post-trigger length (core plus tail)
-    # before the trigger, at least 2 samples.  The end confirmation
-    # bounds the state machine, not the record; save_to_end_confirmed=True
-    # extends the window to it.
-    core = below - trig
-    tail = max(0.1 * core, 2.0)
-    pre = max(0.1 * (core + tail), 2.0)
-    ax.axvspan(trig - pre, below + tail, color="#3366CC", alpha=0.10,
-               zorder=0)
-    ax.axvline(trig, color="#CC6633", lw=1.6, zorder=4)
-    ax.axvline(below, color="#CC3333", lw=1.2, ls=":", zorder=4)
-    ax.axvline(end, color="#33884D", lw=1.6, ls=":", zorder=4)
-    ax.axvline(confirmed, color="#33884D", lw=1.2, ls="--", zorder=4)
-
-    ax.text((trig - pre + below + tail) / 2, -3.3, "saved\nwindow",
-            ha="center", fontsize=9, color="#3366CC", weight="bold")
-    ax.annotate("trigger", xy=(trig, THRESH), xytext=(trig - 15, 8.2),
-                fontsize=9, color="#CC6633",
-                arrowprops=dict(arrowstyle="->", color="#CC6633", lw=1.1))
-    ax.annotate("back below\nthreshold_sigma", xy=(below, THRESH),
-                xytext=(below + 5, 7.6), fontsize=8, color="#CC3333",
-                va="center",
-                arrowprops=dict(arrowstyle="->", color="#CC3333", lw=1))
-    ax.annotate("both axes back\ninside end_sigma", xy=(end, END),
-                xytext=(confirmed + 3.5, 3.2), fontsize=8, color="#33884D",
-                va="top",
-                arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
-    ax.annotate("end confirmed\n(save_to_end_confirmed=True\n"
-                "extends the window to here)",
-                xy=(confirmed, 5.4), xytext=(confirmed + 2.0, 5.6),
-                fontsize=8, color="#33884D", va="top",
-                arrowprops=dict(arrowstyle="->", color="#33884D", lw=1))
-
-    ax.axvline(hard_stop, color="#7A5AA8", lw=1.4, ls="-.")
-    ax.annotate("hard stop\n(1.2 x max_pulse_ms)\ncloses it anyway;\n"
-                "truncated only if\nstill above threshold",
-                xy=(hard_stop, 9.4), xytext=(hard_stop - 1.5, 9.4),
-                ha="right", va="top", fontsize=8, color="#7A5AA8")
-
-    ax.set_xlabel("time (ms)")
-    ax.set_ylabel("deviation from baseline (σ)")
-    ax.set_title("Anatomy of one capture window")
-    ax.set_xlim(t[0], t[-1])
-    ax.set_ylim(-6.2, 10.5)
-    ax.legend(loc="lower right", fontsize=8, framealpha=0.95)
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(10.0, 8.6),
+                                      sharex=True)
+    _one_pulse(top, t, single, recs[0])
+    _pileup(bottom, t, pair, *pair_recs)
+    for ax in (top, bottom):
+        ax.set_ylabel("deviation from baseline (σ)")
+        ax.set_xlim(t[0], 70.0)
+    bottom.set_xlabel("time (ms)")
     fig.tight_layout()
     fig.savefig(path, dpi=140)
     plt.close(fig)
+
+    rec = recs[0]
     print(f"wrote {path}")
+    print(f"  {FS:.0f} Hz, max_pulse_ms={CONFIG.max_pulse_ms:g}: "
+          f"edge_lookback {CONFIG.edge_lookback_samples(FS)} samples, "
+          f"trigger_samples {CONFIG.trigger_samples_for(FS)}, "
+          f"hard stop {CONFIG.max_capture_samples(FS) / FS * 1e3:.0f} ms")
+    print(f"  saved {rec['Time'][0]:.1f} to {rec['Time'][-1]:.1f} ms, "
+          f"trigger {rec['trigger_time']:.1f}, below threshold "
+          f"{rec['below_threshold_time']:.1f}, end confirmed "
+          f"{rec['end_time']:.1f} ms")
+    print(f"  pileup split at {pair_recs[1]['trigger_time']:.1f} ms")
 
 
 if __name__ == "__main__":

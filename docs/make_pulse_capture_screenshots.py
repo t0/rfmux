@@ -2,14 +2,16 @@
 """Regenerate the Pulse Capture panel screenshots in docs/guides/pulse-capture.md.
 
 Runs a short simulated capture in the frequency basis, opens the panel on
-the resulting file in review mode, and grabs the two tabs the guide shows.
-The anatomy diagram beside them is drawn by make_pulse_capture_figures.py.
+the resulting file in review mode, and grabs the two tabs the guide shows,
+then the two dialogs: the streamer at the stage the capture chose, the
+settings at the defaults the guide states.  The anatomy diagram beside
+them is drawn by make_pulse_capture_figures.py.
 
     python docs/make_pulse_capture_screenshots.py
 
-Both shots are taken in dark mode with the df/dissipation view in hertz:
-the axes are the frequency basis, not the quadratures, and the amplitudes
-carry a real unit.
+Every shot is taken in dark mode.  The panel shows the df/dissipation view
+in hertz: the axes are the frequency basis, not the quadratures, and the
+amplitudes carry a real unit.
 """
 
 import asyncio
@@ -58,7 +60,7 @@ async def _capture(path):
     conflict = find_streamer_conflict()
     if conflict:
         raise SystemExit(
-            f"Something is already using the streamer port — {conflict}. "
+            f"Something is already using the streamer port: {conflict}. "
             "A second simulation would interleave with it.")
 
     crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
@@ -78,25 +80,65 @@ async def _capture(path):
     df_cals = await crs.measure_df_calibrations(channels=CHANNELS,
                                                 module=MODULE)
 
-    # Trigger in the frequency basis: the rotation happens before
-    # thresholding, so a pulse lands on one axis instead of both.
-    capture_config = PulseCaptureConfig(
-        threshold_sigma=5.0, end_sigma=1.0, min_pulse_ms=0.2,
-        max_pulse_ms=150.0, noise_train_ms=400.0, enable_pileup=True,
-        trigger_basis="df")
-
     session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
         sample_rate=fs, hdf5_path=str(path),
         df_calibrations=df_cals,
-        **capture_config.session_kwargs(fs),
+        **_capture_config().session_kwargs(fs),
     )
     session.start()
     covered = await run_slow_source(session, "127.0.0.1", module=MODULE,
                                     duration_s=60.0)
     session.stop()
     print(f"{session.total_pulses} pulses over {covered:.1f} s at {fs:.0f} Hz")
-    return df_cals
+    return df_cals, dec
+
+
+def _capture_config():
+    """Trigger in the frequency basis: the rotation happens before
+    thresholding, so a pulse lands on one axis instead of both."""
+    from rfmux.pulse_capture import PulseCaptureConfig
+    return PulseCaptureConfig(
+        threshold_sigma=5.0, end_sigma=1.0, min_pulse_ms=0.2,
+        max_pulse_ms=150.0, noise_train_ms=400.0, enable_pileup=True,
+        trigger_basis="df")
+
+
+def _shoot_dialogs(dec):
+    """The two dialogs the guide walks through: the streamer with the
+    fast stream enabled on the captured channels, the settings at the
+    defaults with the Advanced group open."""
+    from PyQt6 import QtWidgets
+    from rfmux.core.transferfunctions import decimation_to_sampling
+    from rfmux.pulse_capture import PulseCaptureConfig
+    from rfmux.tools.periscope.pulse_capture_settings_dialog import (
+        PulseCaptureSettingsDialog)
+    from rfmux.tools.periscope.streamer_config_dialog import (
+        StreamerConfigDialog)
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    _dark_chrome(app)
+
+    dlg = StreamerConfigDialog(current_dec=dec, current_short=(dec < 3),
+                               module=MODULE)
+    dlg.pfb_check.setChecked(True)
+    dlg.pfb_channels_edit.setText(",".join(str(c) for c in CHANNELS))
+    _grab(app, dlg, "streamer-configuration-dialog.png")
+
+    dlg = PulseCaptureSettingsDialog(
+        config=PulseCaptureConfig(), sample_rate=decimation_to_sampling(dec),
+        mode="slow", n_channels=len(CHANNELS), df_available=True)
+    dlg.adv_box.setChecked(True)
+    _grab(app, dlg, "pulse-capture-settings-dialog.png")
+
+
+def _grab(app, widget, name):
+    widget.show()
+    for _ in range(5):
+        app.processEvents()
+    widget.grab().save(str(OUT / name))
+    widget.close()
+    print(f"wrote {OUT / name}")
 
 
 def _shoot(path, df_cals):
@@ -175,8 +217,9 @@ def _select_tab(panel, label):
 def main():
     CAPTURE.mkdir(parents=True, exist_ok=True)
     path = CAPTURE / "release_demo.h5"
-    df_cals = asyncio.run(_capture(path))
+    df_cals, dec = asyncio.run(_capture(path))
     _shoot(path, df_cals)
+    _shoot_dialogs(dec)
 
 
 if __name__ == "__main__":

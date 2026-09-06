@@ -107,7 +107,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         adv_box.setCheckable(True)
         adv_box.setChecked(False)
         adv = QtWidgets.QFormLayout(adv_box)
-        outer.addWidget(adv_box)
+        form.addRow(adv_box)
         self.adv_box = adv_box
         adv_box.toggled.connect(
             lambda on: [adv.itemAt(i).widget().setVisible(on)

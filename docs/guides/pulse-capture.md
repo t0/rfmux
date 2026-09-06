@@ -14,13 +14,16 @@ For the headless version, with every step as a runnable cell, open the
 ![Anatomy of one capture window](images/capture-window-anatomy.png)
 
 A capture estimates the noise on each channel first, then triggers when a
-sample leaves `threshold_sigma` and rises faster than the baseline drifts.
-It closes when the signal is back inside `end_sigma`. The saved window
-starts before the trigger, so the rising edge is kept, and ends a short
-margin after the signal drops back below threshold. A capture still open at
-1.2 times `max_pulse_ms` is closed, and flagged `truncated` if the signal had
-not yet come back below threshold. Two pulses that overlap are split when
-the deviation rises sharply again.
+sample leaves `threshold_sigma` and rose that far within the edge lookback,
+faster than the baseline drifts. It closes when both axes are back inside
+`end_sigma` of the baseline or of the level the pulse rose from. The saved
+window starts before the trigger, so the rising edge is kept, and ends a
+short margin after the signal drops back below threshold. A capture still
+open at 1.2 times `max_pulse_ms` is closed, and flagged `truncated` if the
+signal had not yet come back below threshold. Two pulses that overlap are
+split when the signal rises sharply again on the tail of the first, and
+both fragments are flagged `pileup`. The figure is the engine's own output
+on a synthetic pulse and a piled-up pair.
 
 Each pulse carries its signal-to-noise, peak amplitude, duration, derived
 decay constant and trigger time in UTC, decoded from the packet timestamps.
@@ -42,13 +45,11 @@ saw.
    window.
 3. Set **Mode** (slow, fast or both), **Channels** (`1,2`, `2-19`, or `all`
    for every biased channel) and **Module**.
-4. Set **Thresh σ** and **End σ**. **Settings…** holds the rest: the
-   longest pulse you expect, the margin saved around each pulse, the
-   trigger basis.
-5. For fast or both mode, press **Streamer…** and configure the PFB
-   streamer for the channels you will capture. The capture reads what the
-   board streams and never changes it; if the streamed channels do not match
-   the capture, the panel says so and stops.
+4. Set **Thresh σ** and **End σ**. **Settings…** holds the rest; see
+   [Configuring the pulse capture engine](#configuring-the-pulse-capture-engine).
+5. For fast or both mode, press **Streamer…** and put the PFB streamer on
+   the channels you will capture; see
+   [Selecting the stream](#selecting-the-stream).
 6. Choose the output file with **…**, then press **▶ Start**.
 
 The left pane lists every pulse with its length, signal-to-noise and trigger
@@ -61,6 +62,106 @@ Noise** retrains the baseline without stopping.
 **Units** switches the pulse view, histograms and templates between counts,
 volts and df in hertz. Hertz needs a calibrated channel (below). In both
 mode the pair view shows each stream in the units it was stored in.
+
+## Selecting the stream
+
+![Streamer Configuration dialog](images/streamer-configuration-dialog.png)
+
+The capture reads whatever the board streams. **Mode** on the panel picks
+the stream: `slow` for the readout stream, `fast` for the PFB stream, `both`
+for a dual-stream capture (see
+[Fast and dual-stream captures](#fast-and-dual-stream-captures)).
+**Streamer…** opens the Streamer Configuration dialog, the same one the
+main window uses. **OK** applies it to the board at once.
+
+- **Current stream** is what the board streams now, read when the dialog
+  opens.
+- **Decimation stage** sets the slow sample rate (table below). Aim for ten
+  or more samples across one decay constant of your pulses.
+- **Packet format**: short packets carry 128 channels per module, long
+  packets 1024. Below stage 3 only short packets fit the link, and the box
+  is locked on.
+- **Modules** lists the modules the slow stream carries, as `1,2` or `1-4`.
+- **Enable fast (PFB) streamer** turns the 2.44 MHz stream on for up to
+  four **PFB channels** of one **PFB module**. Unchecked, **OK** turns it
+  off. While it runs, `get_pfb_samples` is unavailable.
+
+| Stage | 0 | 1 | 2 | 3 | 4 | 5 | 6 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Slow sample rate | 38.1 kHz | 19.1 kHz | 9.5 kHz | 4.8 kHz | 2.4 kHz | 1.2 kHz | 596 Hz |
+
+The rows below the settings report what they give: the slow sample rate and
+its Nyquist frequency, the channels per module, and the link budget in Mbps
+against the 1 GbE port. The banner lists anything wrong. An error disables
+**OK**: long packets below stage 3, more than four PFB channels, or a
+budget over 1000 Mbps. A warning, such as a budget over 800 Mbps, leaves it
+enabled.
+
+For a fast or both capture, the PFB channels must be the channels you
+capture, on the module you capture. The capture never changes the streamer.
+If the streamed channels do not match, the panel says so and stops.
+
+## Configuring the pulse capture engine
+
+![Pulse Capture Settings dialog with the Advanced group open](images/pulse-capture-settings-dialog.png)
+
+**Thresh σ** (5.0), **End σ** (1.0) and **Pileup** (on) sit on the panel's
+toolbar. **Settings…** opens the Pulse Capture Settings dialog with the
+rest. Both edit one configuration: **OK** applies the dialog and the
+toolbar follows.
+
+- **Stream** is the stream and sample rate the capture will read. The
+  derived values below are computed for it.
+- **Threshold σ** is how significant an event must be. Both trigger tests
+  use it: a sample must leave the baseline by this many σ, and the signal
+  must have risen by this many jump-σ within the edge lookback. The second
+  test is a difference of raw samples, so baseline drift cannot fake it.
+- **Max pulse (ms)** (250) is the longest pulse you expect. It sizes
+  everything else: the ring buffer at 1.5 times it, the hard stop at 1.2,
+  the edge lookback and the noise training. Estimate it generously. A pulse
+  that outlasts the buffer loses its rising edge.
+- **Noise training** is derived: 20 times the max pulse, the record the
+  noise σ and the rolling baseline are estimated from.
+
+**Advanced** opens the rest. The defaults suit most captures.
+
+- **Trigger confirmation (samples)**: consecutive samples that must clear
+  the threshold. `auto` picks the fewest that keep accidental triggers
+  under one per minute per channel at this rate: 1 at 596 Hz, 2 on the PFB
+  stream.
+- **End σ**: a capture ends once both axes are back inside this band, of
+  the baseline or of the level the pulse rose from. It must sit below
+  **Threshold σ**.
+- **End confirmation floor (samples)** (10): the fewest in-band samples
+  that confirm the end. For long pulses the count grows to **Margin
+  fraction** of the pulse's length. It counts down while the signal is out
+  of band, so one noisy sample does not restart it.
+- **Margin fraction** (0.10): the fraction of the pulse saved before the
+  trigger and after the drop below threshold, and the edge lookback as a
+  fraction of the max pulse.
+- **Min pulse (ms)** (0): pulses shorter than this are dropped as
+  glitches. 0 turns the filter off.
+- **Split piled-up events** (on): a fresh rise on the tail of a pulse
+  starts a new one. Both fragments are flagged `pileup`. Templates skip
+  them, histograms keep them.
+- **Save the full tail** (off): keep every sample up to the end
+  confirmation instead of a margin past the drop below threshold. It costs
+  disk only. Leave it off for fast captures and at high rates, where long
+  windows overlap.
+- **Trigger basis**: `df/dissipation (rotated)` triggers in the frequency
+  basis on every channel with a df calibration; a channel without one
+  triggers on I and Q. `I/Q (quadratures)` triggers on the raw quadratures
+  everywhere.
+
+**Max pulse sets** and **Threshold σ sets** show what the settings give at
+this rate. The first lists the ring buffer in samples and megabytes, the
+hard stop, the noise training and baseline spans, the edge lookback, the
+end floor in samples, and the min pulse when one is set. The second lists the confirmation
+length with its accidental rate and the edge test's amplitude floor. The
+banner below lists anything wrong.
+An **End σ** at or above **Threshold σ** is an error and disables **OK**. A
+threshold under 3σ, or a min pulse under two samples at this rate, is a
+warning.
 
 ## Histograms and templates
 
@@ -94,10 +195,9 @@ pulses between them into pairs: the slow stream gives a long clean baseline,
 the fast stream resolves the rise. The pair view draws the fast trace over
 the slow one with the pair's trigger offset.
 
-The **Streamer…** dialog shows the data rate each configuration puts on the
-link against the 1 GbE budget and refuses one that does not fit. A fast
-capture is a lot of data, so the status line turns amber and then red as
-the fast stream falls behind, with the cause and the remedy in its tooltip.
+A fast capture is a lot of data, so the status line turns amber and then
+red as the fast stream falls behind, with the cause and the remedy in its
+tooltip.
 Raise `net.core.rmem_max` before a long fast capture; the
 [Networking Guide](networking.md) has the numbers.
 

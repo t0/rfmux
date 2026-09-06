@@ -12,13 +12,13 @@
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
 
-## Current Active Work
+## Current State
 
-**Branch**: `buffer_exploration`, pulse capture in Periscope: dual-stream
-(slow + PFB) capture with live pair matching, streaming HDF5, histograms
-and templates, and the session browser.  The C++ PFB receiver path is
-verified in mock and on loopback only; tag
-`checkpoint-validate-pfb-receiver` marks where to validate it on a board.
+Pulse capture (dual-stream slow + PFB capture with live pair matching,
+streaming HDF5, histograms and templates, the session browser) is merged.
+The C++ PFB receiver path and the count-scale assumptions are verified in
+mock and on loopback only; `docs/release-notes/2026-09-hardware-checks.md`
+lists what a board has to confirm.
 
 ## Development Setup
 
@@ -240,7 +240,7 @@ tests.
 plus `pulse_capture/` for the subsystem that spans algorithms and Periscope.
 See `test/README.md` for the layout, markers, and Qt/notebook conventions.
 
-Mock mode: `periscope --mock` or configure via Mock Configuration dialog
+Mock mode: `periscope MOCK`, or the mock connection in the startup dialog
 
 ## Common Tasks
 

@@ -191,7 +191,11 @@ class _ChState:
     pileup_child: bool = False
     ch_sample_n: int = 0  # Per-channel sample counter (for buffer arithmetic)
     re_trigger_ready: bool = False  # True once the current pulse is seen decaying (pileup re-arm)
-    active_duration: Optional[int] = None  # Frozen pulse duration (trigger → below threshold) for adaptive end
+    active_duration: Optional[int] = None  # Frozen time above threshold (trigger → below threshold): the adaptive end target
+    # First sample of the in-band run now filling the end bucket, None
+    # while the bucket is empty.  When the bucket confirms the end, this
+    # is where the pulse settled: the end of its duration.
+    settled_abs: Optional[int] = None
     # Run of consecutive above-threshold samples — the trigger is dated
     # to the start of the run, not to the sample that confirmed it.
     above_run: int = 0
@@ -228,14 +232,11 @@ class PulseCapture:
     delay nothing: the pulse ends when the signal is back where it
     started.
 
-    How much of that is SAVED is ``save_to_end_confirmed``.  Off (the
-    default) ends the window at the below-threshold instant plus a
-    ``margin_fraction`` tail — where the eye puts the end of the pulse,
-    rather than where the confirmation finished — which keeps window
-    length a property of the pulse instead of the baseline, at the cost
-    of the tail.  On keeps every sample the state machine saw,
-    confirmation tail included.  Either way ``duration_ms`` is measured from the threshold
-    crossings, so it does not move with this setting.
+    The saved window runs from a ``margin_fraction`` pre-trigger margin
+    to the sample the end was confirmed on, or to the hard stop.  The
+    pulse's duration is trigger to the first sample of the in-band run
+    that confirmed the end; the below-threshold instant is kept as a
+    mark and feeds the fit-free decay constant.
 
     Parameters
     ----------
@@ -251,12 +252,12 @@ class PulseCapture:
         Number of standard deviations — signal must return within this
         to declare pulse end (default 1.0σ).
     margin_fraction : float
-        Fraction of pulse duration kept as pre-trigger margin and as
-        post-pulse tail after the below-threshold instant, and the
-        adaptive end-of-pulse confirmation count.  Default 0.1 (10%).
+        Fraction of the saved length kept as pre-trigger margin, and
+        fraction of the time above threshold that the end-of-pulse
+        confirmation count grows to.  Default 0.1 (10%).
     min_pulse_samples : int
-        Minimum pulse core duration (trigger → end) in samples.
-        Pulses shorter than this are discarded as glitches.  Default 0.
+        Minimum pulse duration (trigger → settled) in samples.  Pulses
+        shorter than this are discarded as glitches.  Default 0.
     trigger_samples : int
         Consecutive samples that must exceed ``threshold_sigma`` before
         a capture starts.  1 restores single-sample triggering; 2 (the
@@ -286,10 +287,8 @@ class PulseCapture:
         wander.  0 disables the edge test: amplitude-only triggering,
         for A/B debugging only.
     max_capture_samples : int, optional
-        Hard stop: any capture reaching this length is saved as-is.  It
-        is flagged ``truncated`` only when the pulse had not yet dropped
-        below threshold — a stop reached because drift stalled the end
-        confirmation still saved a complete pulse.  None (the default)
+        Hard stop: any capture reaching this length is saved as-is and
+        flagged ``truncated``.  None (the default)
         derives it from the ring (~80%, i.e. 1.2x the max pulse the ring
         was sized for), so a capture can never outlive the buffer and
         silently lose its rising edge.  0 disables the stop.
@@ -340,7 +339,6 @@ class PulseCapture:
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
-        save_to_end_confirmed: bool = False,
         min_end_samples: int = 10,
         on_pulse: Optional[Callable[[int, int, dict], None]] = None,
         baseline_window: int = 0,
@@ -355,7 +353,6 @@ class PulseCapture:
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
-        self.save_to_end_confirmed = save_to_end_confirmed
         # Floor under the end-confirmation count.  end_ptr_count counts
         # up while both quadratures are settled and down when they are
         # not, so an isolated noisy sample does not restart the
@@ -654,6 +651,8 @@ class PulseCapture:
         si[_walk.RETRIG] = 1 if st.re_trigger_ready else 0
         si[_walk.ACTIVE_DUR] = (-1 if st.active_duration is None
                                 else st.active_duration)
+        si[_walk.SETTLED] = (-1 if st.settled_abs is None
+                             else st.settled_abs)
         si[_walk.ABOVE_RUN] = st.above_run
         si[_walk.RUN_START] = st.run_start_abs
         si[_walk.EPOCH] = st.epoch_start
@@ -681,6 +680,8 @@ class PulseCapture:
         st.re_trigger_ready = bool(si[_walk.RETRIG])
         st.active_duration = (None if si[_walk.ACTIVE_DUR] < 0
                               else int(si[_walk.ACTIVE_DUR]))
+        st.settled_abs = (None if si[_walk.SETTLED] < 0
+                          else int(si[_walk.SETTLED]))
         st.above_run = int(si[_walk.ABOVE_RUN])
         st.run_start_abs = int(si[_walk.RUN_START])
         st.epoch_start = int(si[_walk.EPOCH])
@@ -769,6 +770,7 @@ class PulseCapture:
         """Open a capture on *st*, keeping the band it was decided against."""
         st.capturing = True
         st.end_ptr_count = 0
+        st.settled_abs = None
         st.fire_abs = st.ch_sample_n
         st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
         st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
@@ -1075,6 +1077,8 @@ class PulseCapture:
             # mean, or back at the pre-pulse anchor.
             if returned or (dev_I < self.end_sigma
                             and dev_Q < self.end_sigma):
+                if st.end_ptr_count == 0:
+                    st.settled_abs = st.ch_sample_n
                 st.end_ptr_count += 1
                 # Also freeze active_duration if not yet frozen —
                 # catches pulses that skip past threshold_sigma.
@@ -1082,6 +1086,8 @@ class PulseCapture:
                     st.active_duration = since_trig
             else:
                 st.end_ptr_count = max(0, st.end_ptr_count - 1)
+                if st.end_ptr_count == 0:
+                    st.settled_abs = None
 
             # Use frozen active_duration for stable end target
             ref_duration = st.active_duration or since_trig
@@ -1102,52 +1108,28 @@ class PulseCapture:
         st = self.state[channel]
         # Buffer arithmetic is per channel: ch_sample_n counts only this
         # channel's samples, where abs_n counts every channel's.
+        # The window keeps every sample the state machine saw: raw_post
+        # counts samples since the trigger and the window end is
+        # exclusive, so +1 takes in the sample the end was confirmed on
+        # or the hard stop fell on.  A split ends one sample earlier:
+        # the split sample begins the next fragment.
         raw_post = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
-        core = st.active_duration
-        if pileup or core is None:
-            # No below-threshold instant to anchor on: a split ends at
-            # the split sample, and a hard stop that never saw the pulse
-            # end keeps everything it has.  Trim off the confirmation
-            # count (less a 5-sample margin) so the window ends near
-            # where the signal settled, not where the counter finished.
-            post = raw_post - max(0, st.end_ptr_count - 5)
-        elif self.save_to_end_confirmed:
-            # Keep everything the state machine saw, confirmation tail
-            # included.  Those samples are already in the ring, so this
-            # trades disk for a decay tail that is otherwise discarded
-            # at the below-threshold instant plus a small margin.
-            #
-            # It does make the window length depend on how long the
-            # confirmation took, which is a baseline property rather
-            # than a pulse property.  That is why duration is measured
-            # from the threshold crossings (below_threshold_time -
-            # trigger_time) and not from the length of this window.
-            #
-            # +1 because the window end is exclusive and raw_post counts
-            # samples SINCE the trigger: without it the sample the end
-            # was confirmed on — the whole point of the policy — is the
-            # one sample left out.
-            post = raw_post + 1
-            truncated = False
-        else:
-            # The pulse visibly ended at below-threshold (core samples
-            # after the trigger).  Save margin_fraction of it as tail
-            # and drop the slow confirmation stretch: the confirmation
-            # count (or max_capture_samples) bounds the STATE MACHINE
-            # only, and does not stretch the data.  A capture stopped
-            # because drift stalled the confirmation still holds a
-            # complete pulse, so it is NOT flagged truncated.
-            tail = max(self.min_end_samples,
-                       int(self.margin_fraction * core))
-            post = min(raw_post, core + tail)
-            truncated = False
+        post = raw_post if pileup else raw_post + 1
+        # Where the pulse settled, in samples since the trigger: only a
+        # confirmed end has one.  A split or a hard stop never saw the
+        # pulse settle, whatever the bucket held.
+        settled = None
+        if (not pileup and not truncated and st.settled_abs is not None
+                and st.trig_abs is not None
+                and st.settled_abs >= st.trig_abs):
+            settled = st.settled_abs - st.trig_abs
 
         if post <= 0 or st.trig_abs is None:
             self._reset(channel)
             return
 
         # Glitch rejection: discard pulses shorter than min_pulse_samples
-        if post < self.min_pulse_samples:
+        if (post if settled is None else settled) < self.min_pulse_samples:
             self._reset(channel)
             return
 
@@ -1159,8 +1141,7 @@ class PulseCapture:
             return
 
         # Pre-trigger margin: margin_fraction of the saved length,
-        # minimum 2 samples to always show trigger context.  The tail
-        # margin after below-threshold was already folded into post.
+        # minimum 2 samples to always show trigger context.
         pre_margin = max(2, int(self.margin_fraction * post))
 
         start = max(0, trig_fifo - pre_margin)
@@ -1174,19 +1155,17 @@ class PulseCapture:
         ts_win = self._window(self.buf[channel]["ts"], start, end)
 
         # Where the state machine actually acted, so a capture can be
-        # read back against the decisions that produced it.
-        #
-        # Under save_to_end_confirmed the end index is the last saved
-        # sample.  Without it the index is normally PAST the window:
-        # the data stops at below-threshold plus the tail margin while
-        # the state machine keeps running until the confirmation count
-        # (or max_capture_samples) releases it.  Times are carried alongside the
-        # indices for exactly that reason.
+        # read back against the decisions that produced it.  end_index
+        # is the last saved sample for a confirmed end or a hard stop;
+        # for a split it is the split sample, one past the data.  Times
+        # are carried alongside the indices for that case.
         ts_all = self.buf[channel]["ts"].data()
         trigger_index = trig_fifo - start
         end_index = (L - 1) - start
         below_index = (trigger_index + st.active_duration
                        if st.active_duration is not None else None)
+        settled_index = (trigger_index + settled
+                         if settled is not None else None)
 
         pulse_data = {
             "Amp_I": np.array(I_win),
@@ -1227,6 +1206,10 @@ class PulseCapture:
             if 0 <= below_index < len(ts_win):
                 pulse_data["below_threshold_time"] = float(
                     ts_win[below_index])
+        if settled_index is not None:
+            pulse_data["settled_index"] = int(settled_index)
+            if 0 <= settled_index < len(ts_win):
+                pulse_data["settled_time"] = float(ts_win[settled_index])
 
         self.pulse_count[channel] += 1
         k = self.pulse_count[channel]
@@ -1303,6 +1286,7 @@ class PulseCapture:
         st.trig_abs = None
         st.re_trigger_ready = False
         st.active_duration = None
+        st.settled_abs = None
         st.pileup_child = False
 
 

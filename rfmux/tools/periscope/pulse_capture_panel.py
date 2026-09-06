@@ -183,6 +183,15 @@ _VIEW_STATES = {
 }
 
 
+def _end_label(wf) -> str:
+    """How the capture ended, for its end mark."""
+    if wf.get("truncated"):
+        return "hard stop"
+    if wf.get("pileup") and wf.get("settled_index") is None:
+        return "split"
+    return "end confirmed"
+
+
 class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     """Live pulse capture with pulse tree, waveform viewer, and histograms."""
 
@@ -608,30 +617,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             parts[0] += f" (on {wf['trigger_quad']})"
         if below is not None:
             parts.append(f"below threshold @ {below}")
+        settled = wf.get("settled_index")
+        if settled is not None:
+            parts.append(f"settled @ {settled}")
         if end is not None:
-            parts.append(f"end confirmed @ {end}")
+            parts.append(f"{_end_label(wf)} @ {end}")
         if got is not None and want is not None:
             parts.append(f"bucket {got}/{want}")
         return "\n" + "   ".join(parts)
 
-    def _saves_full_tail(self) -> bool:
-        """Whether captures keep samples to the end-of-pulse confirmation.
-
-        Live, from the configured capture; in review, restored from the
-        file's capture parameters when it was opened.
-        """
-        return bool(self.capture_config.save_to_end_confirmed)
-
     def _annotate_decisions(self, plot, wf, t0, quad,
                             prefix="") -> None:
-        """Mark where the engine triggered and where the end condition
-        confirmed the end.
+        """Mark where the engine triggered, where the pulse dropped below
+        threshold and settled, and where the capture ended.
 
-        Vertical lines rather than markers on the trace: the end point
-        normally sits PAST the last saved sample, because the window is
-        trimmed back to where the signal returned to baseline rather
-        than where the bucket finished confirming it.  A line still
-        shows that, a data marker could not.
+        A mark past the last saved sample is not drawn: a split's end is
+        the split sample, one past its data, and a file written before
+        the window ran to the confirmation stops short of it.
         """
         t = np.asarray(wf.get("Time"), dtype=np.float64)
         if not len(t):
@@ -653,12 +655,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             ("trigger_index", "trigger_time", "#33CC66", "trigger"),
             ("below_threshold_index", "below_threshold_time", "#CCAA33",
              "below threshold"),
+            ("settled_index", "settled_time", "#33AACC", "settled"),
+            ("end_index", "end_time", "#CC3366", _end_label(wf)),
         ]
-        # The confirmation instant is drawn only when the tail was kept
-        # to it; otherwise it lies past the end of the saved data.
-        if self._saves_full_tail():
-            marks.append(("end_index", "end_time", "#CC3366",
-                          "end confirmed"))
+        t_last = float(t[-1]) - t0
         # Each label sits one step below the last mark's, across both
         # streams, so marks that land close together stay readable.
         n_marks = sum(isinstance(it, pg.InfiniteLine)
@@ -666,7 +666,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for idx_key, time_key, color, label in marks:
             label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
-            if x is None:
+            if x is None or x > t_last:
                 continue
             position = 0.95 - 0.06 * (n_marks % 10)
             n_marks += 1
@@ -1444,10 +1444,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Open an existing pulse-capture HDF5 for browsing."""
         self.reader = PulseHDF5Reader(path)
         meta = self.reader.metadata
-        # The marks drawn over a record depend on the policy that made
-        # it, so an opened file sets it the way a live capture does.
-        self.capture_config.save_to_end_confirmed = bool(
-            meta.get("save_to_end_confirmed", True))
         channels = [int(c) for c in self.reader.channels]
 
         # Restore capture parameters so bands/labels reflect the file

@@ -17,13 +17,12 @@ A capture estimates the noise on each channel first, then triggers when a
 sample leaves `threshold_sigma` and rose that far within the edge lookback,
 faster than the baseline drifts. It closes when both axes are back inside
 `end_sigma` of the baseline or of the level the pulse rose from. The saved
-window starts before the trigger, so the rising edge is kept, and ends a
-short margin after the signal drops back below threshold. A capture still
-open at 1.2 times `max_pulse_ms` is closed, and flagged `truncated` if the
-signal had not yet come back below threshold. Two pulses that overlap are
-split when the signal rises sharply again on the tail of the first, and
-both fragments are flagged `pileup`. The figure is the engine's own output
-on a synthetic pulse and a piled-up pair.
+window starts before the trigger, so the rising edge is kept, and ends on
+the sample that confirmed the end. A capture still open at 1.2 times
+`max_pulse_ms` is closed there and flagged `truncated`. Two pulses that
+overlap are split when the signal rises sharply again on the tail of the
+first, and both fragments are flagged `pileup`. The figure is the engine's
+own output on a synthetic pulse and a piled-up pair.
 
 Each pulse carries its signal-to-noise, peak amplitude, duration, derived
 decay constant and trigger time in UTC, decoded from the packet timestamps.
@@ -54,8 +53,8 @@ saw.
 
 The left pane lists every pulse with its length, signal-to-noise and trigger
 time. **Pulse View** stacks the two axes against a common time axis with
-marks for the trigger, the return below threshold and the end confirmation.
-Left and Right move through the pulses, Home and End jump to the first and
+marks for the trigger, the drop below threshold, the settled point and the
+end. Left and Right move through the pulses, Home and End jump to the first and
 last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
@@ -134,20 +133,17 @@ toolbar follows.
   **Threshold σ**.
 - **End confirmation floor (samples)** (10): the fewest in-band samples
   that confirm the end. For long pulses the count grows to **Margin
-  fraction** of the pulse's length. It counts down while the signal is out
-  of band, so one noisy sample does not restart it.
-- **Margin fraction** (0.10): the fraction of the pulse saved before the
-  trigger and after the drop below threshold, and the edge lookback as a
-  fraction of the max pulse.
+  fraction** of the time above threshold. It counts down while the signal
+  is out of band, so one noisy sample does not restart it. The saved
+  window ends on the sample that confirms the end.
+- **Margin fraction** (0.10): the fraction of the saved window kept before
+  the trigger, the confirmation count as a fraction of the time above
+  threshold, and the edge lookback as a fraction of the max pulse.
 - **Min pulse (ms)** (0): pulses shorter than this are dropped as
   glitches. 0 turns the filter off.
 - **Split piled-up events** (on): a fresh rise on the tail of a pulse
   starts a new one. Both fragments are flagged `pileup`. Templates skip
   them, histograms keep them.
-- **Save the full tail** (off): keep every sample up to the end
-  confirmation instead of a margin past the drop below threshold. It costs
-  disk only. Leave it off for fast captures and at high rates, where long
-  windows overlap.
 - **Trigger basis**: `df/dissipation (rotated)` triggers in the frequency
   basis on every channel with a df calibration; a channel without one
   triggers on I and Q. `I/Q (quadratures)` triggers on the raw quadratures

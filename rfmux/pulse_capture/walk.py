@@ -29,12 +29,12 @@ HARD_STOP = 2       # hard stop on that sample
 SPLIT = 3           # pileup split on that sample: save, then re-arm
 
 # ── Packed state layout ─────────────────────────────────────────────
-# Integers.  trig_abs and active_duration use -1 for None; the two
-# quadrature markers use 0 for "", 1 for "I", 2 for "Q".
+# Integers.  trig_abs, active_duration and settled use -1 for None; the
+# two quadrature markers use 0 for "", 1 for "I", 2 for "Q".
 (CAPTURING, END_PTR, TRIG_ABS, FIRE_ABS, RUN_QUAD, TRIG_QUAD, PILEUP_CHILD,
  CH_N, RETRIG, ACTIVE_DUR, ABOVE_RUN, RUN_START, EPOCH, DECIM_N,
- SINCE_REFRESH) = range(15)
-N_INT = SINCE_REFRESH + 1
+ SINCE_REFRESH, SETTLED) = range(16)
+N_INT = SETTLED + 1
 # Floats.
 (ANCHOR_I, ANCHOR_Q, TMEAN_I, TMEAN_Q, TSTD_I, TSTD_Q, NEAR_I,
  NEAR_Q) = range(8)
@@ -168,6 +168,7 @@ def walk(I, Q, T, start, stop,
         if not capturing and not freeze and trigger_ok:
             si[CAPTURING] = 1
             si[END_PTR] = 0
+            si[SETTLED] = -1
             si[FIRE_ABS] = ch_n
             sf[TMEAN_I] = mean_I
             sf[TMEAN_Q] = mean_Q
@@ -255,11 +256,15 @@ def walk(I, Q, T, start, stop,
                     sf[NEAR_Q] = math.nan
                 break
             if returned or (dev_I < end_sigma and dev_Q < end_sigma):
+                if si[END_PTR] == 0:
+                    si[SETTLED] = ch_n
                 si[END_PTR] += 1
                 if si[ACTIVE_DUR] < 0:
                     si[ACTIVE_DUR] = since_trig
             elif si[END_PTR] > 0:
                 si[END_PTR] -= 1
+                if si[END_PTR] == 0:
+                    si[SETTLED] = -1
             ref_duration = si[ACTIVE_DUR] if si[ACTIVE_DUR] > 0 else since_trig
             adaptive_end = int(margin * ref_duration)
             if adaptive_end < min_end:

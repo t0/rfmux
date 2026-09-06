@@ -103,7 +103,7 @@ class _PulseFileWriter:
         (int, ("min_pulse_samples", "module", "trigger_samples",
                "baseline_window", "edge_lookback", "max_capture_samples",
                "min_end_samples")),
-        (bool, ("enable_pileup", "save_to_end_confirmed")),
+        (bool, ("enable_pileup",)),
     )
 
     def __init__(self, path: str | Path, channels: List[int],
@@ -567,7 +567,7 @@ class PulseHDF5Reader:
         ``timestamp``, ``tau_s``), ``peak_snr_I``/``peak_snr_Q`` and
         whichever decision marks were recorded.  Scalars are as
         :func:`pulse_summary` computed them at capture time, so
-        ``duration_s`` is the time above threshold rather than the span
+        ``duration_s`` is trigger to settled rather than the span
         of the saved window.  Returns ``None`` if the pulse doesn't
         exist.
         """
@@ -684,8 +684,10 @@ class PulseHDF5Reader:
 #: Per-pulse decision attributes, by type: where the engine triggered
 #: and ended, and the bands it decided against.
 _PULSE_INT_MARKS = ("trigger_index", "end_index", "below_threshold_index",
+                    "settled_index",
                     "end_confirm_samples", "end_confirm_target")
 _PULSE_FLOAT_MARKS = ("trigger_time", "end_time", "below_threshold_time",
+                      "settled_time",
                       "trigger_epoch",
                       "trigger_baseline_I", "trigger_baseline_Q",
                       "trigger_sigma_I", "trigger_sigma_Q",

@@ -2,8 +2,8 @@
 
 A capture ends once the confirmation bucket exceeds
 ``max(min_end_samples, margin_fraction * core)``.  For a short pulse the
-floor wins, so it alone decides how far past below-threshold the end
-mark lands.
+floor wins, so it alone decides how far past below-threshold the saved
+window runs.
 """
 
 import numpy as np
@@ -22,8 +22,7 @@ def _end_gap(min_end_samples):
     s = PulseCaptureSession(
         channels=[1], sample_rate=FS, noise_samples=300, hdf5_path=None,
         threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
-        min_end_samples=min_end_samples, save_to_end_confirmed=True,
-        trigger_samples=1,
+        min_end_samples=min_end_samples, trigger_samples=1,
         on_pulse=lambda ch, idx, summ, data: got.append(data))
     s.start()
     rng = np.random.default_rng(2)
@@ -71,13 +70,12 @@ def test_floor_below_one_is_refused():
     assert any(sev == "error" and "floor" in msg for sev, msg in issues)
 
 
-def _short_pulse_summary(save_full_tail):
+def _short_pulse_summary():
     got = []
     s = PulseCaptureSession(
         channels=[1], sample_rate=FS, noise_samples=300, hdf5_path=None,
         threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
-        min_end_samples=10, save_to_end_confirmed=save_full_tail,
-        trigger_samples=1,
+        min_end_samples=10, trigger_samples=1,
         on_pulse=lambda ch, idx, summ, data: got.append((summ, data)))
     s.start()
     rng = np.random.default_rng(2)
@@ -91,16 +89,20 @@ def _short_pulse_summary(save_full_tail):
     return got[0]
 
 
-def test_saved_extent_follows_the_full_tail_setting():
-    """With full-tail saving off the summary's saved extent ends where
-    the saved data ends, before the confirmation instant; with it on,
-    at the confirmation."""
-    summ, data = _short_pulse_summary(save_full_tail=False)
-    last_saved = float(np.max(data["Time"]))
-    assert summ["saved_end_time"] == pytest.approx(last_saved)
-    assert summ["saved_end_time"] < data["end_time"], \
-        "saved extent must stop before end-confirmed when the tail is off"
-
-    summ, data = _short_pulse_summary(save_full_tail=True)
+def test_saved_extent_runs_to_the_confirmation():
+    """The saved data ends on the sample the end was confirmed on."""
+    summ, data = _short_pulse_summary()
     assert summ["saved_end_time"] == pytest.approx(float(np.max(data["Time"])))
     assert summ["saved_end_time"] == pytest.approx(data["end_time"])
+
+
+def test_duration_runs_from_the_trigger_to_the_settled_instant():
+    """The pulse settled the sample after it fell back to baseline, ten
+    samples before the floor confirmed the end; its duration measures
+    to there, not to the confirmation and not to the threshold drop."""
+    summ, data = _short_pulse_summary()
+    assert data["below_threshold_index"] <= data["settled_index"] \
+        < data["end_index"]
+    assert summ["duration_s"] == pytest.approx(
+        data["settled_time"] - data["trigger_time"])
+    assert data["end_index"] - data["settled_index"] == 10

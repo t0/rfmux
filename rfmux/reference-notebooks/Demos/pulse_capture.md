@@ -335,7 +335,7 @@ How pulse detection works:
   I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and
   closes when both are back inside ±`end_sigma` of the baseline, or of the
   level the pulse rose from, for `min_end_samples`, or `margin_fraction` of
-  the pulse's length if that is longer. `end_sigma` must sit below
+  its time above threshold if that is longer. `end_sigma` must sit below
   `threshold_sigma`.
 - **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
   the threshold. Left at 0 it is derived from the stream rate to hold
@@ -353,9 +353,8 @@ How pulse detection works:
   stop 1.2×, and it sets the floor under the baseline window and the training
   length. Estimate it generously: a pulse that outlasts the buffer loses its
   rising edge.
-- **A capture that never ends is cut off** at the hard stop. It is flagged
-  `truncated` only if the signal had not yet come back below
-  `threshold_sigma`.
+- **A capture that never ends is cut off** at the hard stop and flagged
+  `truncated`.
 - **Piled-up pulses are split.** A fresh rise on the tail of a pulse, after
   it was seen decaying, starts a new one. Both fragments carry the `pileup`
   flag: templates skip them, histograms keep them.
@@ -364,15 +363,11 @@ How pulse detection works:
 
 The figure is the engine's own output on a synthetic pulse and a piled-up
 pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
-saved. It opens `margin_fraction` of the window before the trigger (10% by
-default), so the record keeps pre-trigger baseline.
-
-`save_to_end_confirmed` (off by default) sets where the window closes. Off, it
-stops a `margin_fraction` tail past the below-threshold instant. On, it runs to
-the end-of-pulse confirmation and keeps the whole decay tail, at the cost of
-disk only. Leave it off for PFB captures and at high count rates, where long
-windows overlap. `duration_ms` is measured from the threshold crossings either
-way.
+saved: from `margin_fraction` of the window before the trigger (10% by
+default), so the record keeps pre-trigger baseline, to the sample the end was
+confirmed on. `duration_ms` runs from the trigger to where the pulse settled
+inside the end band. The drop below `threshold_sigma` is kept as a mark and
+feeds the fit-free decay constant.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.

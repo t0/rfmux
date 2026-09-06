@@ -168,12 +168,11 @@ def pulse_summary(
         ``timestamp`` (first valid time), ``tau_s``, ``tau_ms`` (NaN when
         not derivable).
 
-        ``duration`` is the time the pulse spent above threshold
-        (trigger → below-threshold), not the length of the saved
-        window, which also carries the pre-trigger margin and a tail
-        whose length depends on the save policy.  It falls back to the
-        window span only for pileup splits and hard stops, which have
-        no below-threshold instant to measure to.
+        ``duration`` is trigger → settled, the first sample of the
+        in-band run that confirmed the end; not the length of the saved
+        window, which also carries the pre-trigger margin and the
+        confirmation tail.  A split or a hard stop never saw the pulse
+        settle, so it falls back to the window span.
     """
     peaks = pulse_peaks(pulse_data, noise_stats)
 
@@ -181,22 +180,22 @@ def pulse_summary(
     valid_times = times[np.isfinite(times)]
     timestamp = float(np.min(valid_times)) if len(valid_times) else 0.0
 
-    # Duration is trigger → below-threshold, NOT the length of the saved
-    # window.  The window also holds the pre-trigger margin and whatever
-    # tail the save policy kept, and under save_to_end_confirmed that
-    # tail runs until the end condition is confirmed: a baseline
-    # property.  Measured on the mock at 19 kHz with tau=1 ms, identical
-    # injected pulses gave windows spanning 3.2-17.8 ms while the
-    # threshold crossings stayed inside 3.0-4.0 ms.  Deriving duration
-    # from the window would put that 5.6x spread into every histogram.
+    # Duration is trigger → settled, NOT the length of the saved window:
+    # the window also holds the pre-trigger margin and the confirmation
+    # tail, whose length depends on the noise rather than the pulse.
+    # Files written before the settled instant was recorded carry only
+    # the below-threshold instant; a confirmed end there measures to it.
     trigger_time = pulse_data.get("trigger_time")
+    settled_time = pulse_data.get("settled_time")
     below_time = pulse_data.get("below_threshold_time")
-    if trigger_time is not None and below_time is not None:
+    ended = not (pulse_data.get("truncated") or pulse_data.get("pileup"))
+    if trigger_time is not None and settled_time is not None:
+        duration_s = float(settled_time) - float(trigger_time)
+    elif ended and trigger_time is not None and below_time is not None:
         duration_s = float(below_time) - float(trigger_time)
     elif len(valid_times) > 1:
-        # Pileup splits and hard stops have no below-threshold instant:
-        # the pulse never demonstrably ended, so the window is the only
-        # evidence of how long it lasted.
+        # A split or a hard stop never saw the pulse settle, so the
+        # window is the only evidence of how long it lasted.
         duration_s = float(np.max(valid_times) - np.min(valid_times))
     else:
         duration_s = 0.0
@@ -210,9 +209,9 @@ def pulse_summary(
     # record start, pre-trigger margin included.  ``trigger_time`` is
     # the event, the anchor for anything aligned across streams, since
     # each stream's record start sits its own margin before it.
-    # ``saved_end_time`` is the last saved sample -- not pulse_data's
-    # ``end_time``, the confirmation instant, which lies past the saved
-    # window when the tail is not kept.
+    # ``saved_end_time`` is the last saved sample; pulse_data's
+    # ``end_time`` is the sample the state machine ended on, which for a
+    # split lies one past the data.
     return {
         "n_samples": int(len(np.asarray(pulse_data["Amp_I"]))),
         "pileup": bool(pulse_data.get("pileup", False)),

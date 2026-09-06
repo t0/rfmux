@@ -935,10 +935,6 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
 
     runtime = _FakeRuntime()
     panel = _make_panel(qt_app, tmp_path, runtime)
-    # The end-confirmed mark is drawn only when the tail is saved.
-    from dataclasses import replace
-    panel.capture_config = replace(panel.capture_config,
-                                   save_to_end_confirmed=True)
     rng = np.random.default_rng(42)
     panel._on_start()
     for _ in range(1000):
@@ -951,6 +947,7 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
 
     info = panel.pulse_info.text()
     assert "trigger @ sample" in info, info
+    assert "settled @" in info, info
     assert "end confirmed @" in info, info
     assert "bucket" in info, info
 
@@ -960,11 +957,11 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
                  if isinstance(it, pg.InfiniteLine)]
         # Vertical only — the horizontal band lines are curves now.
         verticals = [it for it in lines if it.angle == 90]
-        assert len(verticals) == 3, f"{name}: {len(verticals)} markers"
+        assert len(verticals) == 4, f"{name}: {len(verticals)} markers"
         labels = [getattr(it, "label", None) for it in verticals]
         if name == "I":
             texts = [lb.textItem.toPlainText() for lb in labels if lb]
-            assert set(texts) == {"trigger", "below threshold",
+            assert set(texts) == {"trigger", "below threshold", "settled",
                                   "end confirmed"}, texts
         else:
             # x-linked, so repeating the labels underneath is noise

@@ -47,8 +47,8 @@ CONFIG = PulseCaptureConfig(max_pulse_ms=50.0)
 AMP_SIGMA, TAU_MS, RISE_MS = 14.0, 12.0, 1.0
 SEED = 13
 
-RED, GREEN, ORANGE, BLUE, PURPLE = (
-    "#CC3333", "#33884D", "#CC6633", "#3366CC", "#7A5AA8")
+RED, GREEN, ORANGE, BLUE, PURPLE, TEAL = (
+    "#CC3333", "#33884D", "#CC6633", "#3366CC", "#7A5AA8", "#2A8FA8")
 
 
 def _noise(rng, n):
@@ -101,7 +101,7 @@ def _one_pulse(ax, t, trace, rec):
     edge_ms = CONFIG.edge_lookback_samples(FS) / FS * 1e3
     stop_ms = CONFIG.max_capture_samples(FS) / FS * 1e3
     trig, below = rec["trigger_time"], rec["below_threshold_time"]
-    confirmed = rec["end_time"]
+    settled, confirmed = rec["settled_time"], rec["end_time"]
     saved = rec["Time"]
 
     _bands(ax)
@@ -115,6 +115,7 @@ def _one_pulse(ax, t, trace, rec):
     ax.axvspan(saved[0], saved[-1], color=BLUE, alpha=0.10, zorder=0)
     ax.axvline(trig, color=ORANGE, lw=1.6, zorder=4)
     ax.axvline(below, color=RED, lw=1.2, ls=":", zorder=4)
+    ax.axvline(settled, color=TEAL, lw=1.4, ls=":", zorder=4)
     ax.axvline(confirmed, color=GREEN, lw=1.2, ls="--", zorder=4)
     ax.axvline(trig + stop_ms, color=PURPLE, lw=1.4, ls="-.")
 
@@ -132,35 +133,38 @@ def _one_pulse(ax, t, trace, rec):
                 xy=(trig, CONFIG.threshold_sigma), xytext=(trig - 7, 6.5),
                 ha="right", va="top", fontsize=7.5, color=ORANGE,
                 arrowprops=dict(arrowstyle="->", color=ORANGE, lw=1.1))
-    ax.annotate("back below\nthreshold_sigma\n(duration_ms\nends here)",
+    ax.annotate("back below\nthreshold_sigma\n(feeds the fit-free\n"
+                "decay constant)",
                 xy=(below, CONFIG.threshold_sigma), xytext=(below + 4, 9.8),
                 fontsize=7.5, color=RED, va="center",
                 arrowprops=dict(arrowstyle="->", color=RED, lw=1))
-    ax.annotate("saved window: margin_fraction\n"
-                "of it before the trigger;\n"
-                "max(min_end_samples,\n"
-                "margin_fraction × core) past\n"
-                "the drop below threshold_sigma",
+    ax.annotate("settled: both axes back\ninside end_sigma\n"
+                "(duration_ms ends here)",
+                xy=(settled, 2.4), xytext=(settled - 4, -3.2),
+                fontsize=7.5, color=TEAL, va="top", ha="right",
+                arrowprops=dict(arrowstyle="->", color=TEAL, lw=1))
+    ax.annotate("saved window:\nmargin_fraction of it\n"
+                "before the trigger,\nto the end confirmation",
                 xy=(saved[0], -1.8), xytext=(-29.5, -2.4),
                 ha="left", va="top", fontsize=7.5, color=BLUE,
                 weight="bold",
                 arrowprops=dict(arrowstyle="->", color=BLUE, lw=1))
-    ax.annotate("end confirmed: both axes\n"
-                "inside end_sigma of the\n"
-                "baseline or of the level\n"
-                "the pulse rose from,\n"
-                "counted up while inside\n"
-                "and down while out, past\n"
+    ax.annotate("end confirmed: inside\n"
+                "end_sigma of the baseline\n"
+                "or of the level the pulse\n"
+                "rose from, counted up\n"
+                "while inside and down\n"
+                "while out, past\n"
                 "max(min_end_samples,\n"
-                "margin_fraction × core).\n"
-                "save_to_end_confirmed=True\n"
-                "saves up to here.",
+                "margin_fraction × time\n"
+                "above threshold).\n"
+                "The window ends here.",
                 xy=(confirmed, 1.6), xytext=(confirmed + 1.5, 16.4),
                 fontsize=7.5, color=GREEN, va="top", ha="left",
                 arrowprops=dict(arrowstyle="->", color=GREEN, lw=1))
     ax.text(trig + stop_ms + 0.8, 14.6,
-            "hard stop\n(1.2 × max_pulse_ms)\ncloses it anyway;\n"
-            "truncated only if\nstill above\nthreshold_sigma",
+            "hard stop\n(1.2 × max_pulse_ms)\ncloses it anyway,\n"
+            "flagged truncated",
             ha="left", va="top", fontsize=7.5, color=PURPLE)
     ax.set_title("Anatomy of one capture window")
     ax.set_ylim(-7.0, 17.0)
@@ -230,7 +234,8 @@ def capture_window_anatomy(path):
           f"hard stop {CONFIG.max_capture_samples(FS) / FS * 1e3:.0f} ms")
     print(f"  saved {rec['Time'][0]:.1f} to {rec['Time'][-1]:.1f} ms, "
           f"trigger {rec['trigger_time']:.1f}, below threshold "
-          f"{rec['below_threshold_time']:.1f}, end confirmed "
+          f"{rec['below_threshold_time']:.1f}, settled "
+          f"{rec['settled_time']:.1f}, end confirmed "
           f"{rec['end_time']:.1f} ms")
     print(f"  pileup split at {pair_recs[1]['trigger_time']:.1f} ms")
 

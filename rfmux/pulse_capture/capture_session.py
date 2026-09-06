@@ -107,7 +107,6 @@ DETECTION_PARAMS = (
     "min_pulse_samples",
     "trigger_samples",
     "enable_pileup",
-    "save_to_end_confirmed",
     "min_end_samples",
     "baseline_window",
     "edge_lookback",
@@ -214,25 +213,6 @@ class PulseCaptureConfig:
     #: short pulse; it is a sample count, so it is 17 ms at 596 Hz and
     #: 4 us on the PFB stream.
     min_end_samples: int = 10
-    #: Keep samples all the way to the end-of-pulse CONFIRMATION rather
-    #: than stopping a ``margin_fraction`` tail past the below-threshold
-    #: instant.  The extra samples are already in the ring, so this
-    #: costs disk, not acquisition.
-    #:
-    #: Off gives windows whose length tracks the pulse; on gives windows
-    #: whose length also tracks how long the end confirmation took to be
-    #: satisfied, which depends on where the baseline was wandering.  On
-    #: the mock that widens the spread across identical injected pulses
-    #: from roughly 1.3x to 5.6x.
-    #:
-    #: That variability is a property of the saved TAIL and does not
-    #: reach ``duration_ms``, which is measured from the threshold
-    #: crossings.  Default off: window length is then a property of the
-    #: pulse rather than of the baseline, files are shorter, and PFB
-    #: windows (already 64x the samples) and high count rates (longer
-    #: windows overlap and raise the pileup fraction) are not penalised.
-    #: Turn it on to keep the whole decay to the confirmation.
-    save_to_end_confirmed: bool = False
     #: Which basis the trigger tests: ``"iq"`` (the raw quadratures) or
     #: ``"df"`` (frequency and dissipation, rotated with the channel's
     #: df calibration).  A KID pulse moves the resonance frequency, so
@@ -378,7 +358,6 @@ class PulseCaptureConfig:
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
-            "save_to_end_confirmed": self.save_to_end_confirmed,
             "min_end_samples": self.min_end_samples,
             "trigger_basis": self.trigger_basis,
             "buf_size": self.buf_size(sample_rate),
@@ -573,7 +552,6 @@ class PulseCaptureSession(_CallbackHost):
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
-        save_to_end_confirmed: bool = False,
         min_end_samples: int = 10,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
@@ -604,7 +582,6 @@ class PulseCaptureSession(_CallbackHost):
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
-        self.save_to_end_confirmed = save_to_end_confirmed
         self.min_end_samples = max(1, int(min_end_samples))
         self.buf_size = buf_size
         self.sample_rate = sample_rate
@@ -1463,7 +1440,6 @@ class DualPulseCaptureSession(_CallbackHost):
             "end_sigma": self.config.end_sigma,
             "margin_fraction": self.config.margin_fraction,
             "enable_pileup": self.config.enable_pileup,
-            "save_to_end_confirmed": self.config.save_to_end_confirmed,
             "min_end_samples": self.config.min_end_samples,
             "module": self.module,
             "sample_rate_slow": self.slow.sample_rate,
@@ -1720,10 +1696,9 @@ class DualPulseCaptureSession(_CallbackHost):
         """[t0, t1] spanning every available SAVED record + 10% margin.
 
         The saved record rather than the core: ``duration_s`` is
-        trigger-to-below-threshold, a measure of the pulse, not of what
-        was kept.  And the saved record rather than the confirmed end,
-        which lies past the window when the tail is not kept.  A summary
-        without ``saved_end_time`` falls back to the core.
+        trigger-to-settled, a measure of the pulse, not of what was
+        kept.  A summary without ``saved_end_time`` falls back to the
+        core.
 
         A window shorter than one slow sample (a fast event alone) may
         hold no slow sample at all; it is widened to two slow samples

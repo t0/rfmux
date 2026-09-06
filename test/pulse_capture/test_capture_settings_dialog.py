@@ -206,15 +206,6 @@ def test_derived_values_are_one_per_line(qt_app):
     dlg.close()
 
 
-def test_the_tail_setting_defaults_off(qt_app):
-    dlg = PulseCaptureSettingsDialog(config=PulseCaptureConfig(),
-                                     sample_rate=1000.0, mode="slow")
-    assert not dlg.end_confirmed_check.isChecked()
-    out = dlg.get_config()
-    assert out.save_to_end_confirmed is False
-    dlg.close()
-
-
 def test_max_pulse_tooltip_follows_the_margin_fraction(qt_app):
     """The lookback the tooltip cites is margin fraction × max pulse, so
     it must track the margin spin rather than quote the default; the

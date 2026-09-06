@@ -151,9 +151,9 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "lets an isolated noisy sample pass without restarting the "
             "count.\n\n"
             "For a short pulse the floor is what ends it, so this sets "
-            "how far past below-threshold the end mark lands.  It is a "
-            "sample count: the same number is 17 ms at 596 Hz and 4 µs "
-            "on the PFB stream."
+            "how far past the pulse's settling the saved window runs.  "
+            "It is a sample count: the same number is 17 ms at 596 Hz "
+            "and 4 µs on the PFB stream."
             "\n\nAlso how far back the pileup test looks for the pulse's "
             "own recent level: a rise of threshold sigma over this many "
             "samples, after decay evidence, splits the capture.")
@@ -164,14 +164,11 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.margin_spin.setSingleStep(0.05)
         self.margin_spin.setValue(config.margin_fraction)
         self.margin_spin.setToolTip(
-            "Fraction of the pulse length kept before the trigger, and "
+            "Fraction of the saved length kept before the trigger, and "
             "the adaptive end-confirmation count: the bucket must exceed "
-            "max(end floor, this × the pulse's length above threshold).\n"
+            "max(end floor, this × the pulse's time above threshold).\n"
             "Also the edge-detector lookback: this × the max pulse "
-            "length.\n"
-            "Also sets the saved tail after the pulse drops below "
-            "threshold — but only when 'Save the full tail' is off, "
-            "which is what that tail is a substitute for.")
+            "length.")
         adv.addRow("Margin fraction:", self.margin_spin)
 
         self.min_pulse_spin = QtWidgets.QDoubleSpinBox()
@@ -179,8 +176,8 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.min_pulse_spin.setDecimals(3)
         self.min_pulse_spin.setValue(config.min_pulse_ms)
         self.min_pulse_spin.setToolTip(
-            "Completed captures shorter than this are discarded as "
-            "glitches (0 = keep everything)")
+            "Pulses shorter than this, trigger to settled, are discarded "
+            "as glitches (0 = keep everything)")
         adv.addRow("Min pulse (ms):", self.min_pulse_spin)
 
         self.pileup_check = QtWidgets.QCheckBox(
@@ -191,24 +188,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             "edge detector as the trigger.")
         self.pileup_check.setChecked(config.enable_pileup)
         adv.addRow(self.pileup_check)
-
-        self.end_confirmed_check = QtWidgets.QCheckBox(
-            "Save the full tail (to end-of-pulse confirmation)")
-        self.end_confirmed_check.setToolTip(
-            "On: keep every sample the engine saw, so the decay runs "
-            "to where the end condition was confirmed.  Off: stop a "
-            "margin past the point the pulse fell below threshold, "
-            "which keeps window length a property of the pulse rather "
-            "than of the baseline.\n\n"
-            "The samples are already buffered either way, so this costs "
-            "disk, not acquisition.  Turn it off for PFB captures "
-            "(windows already carry far more samples) or at high count "
-            "rates (longer windows overlap and raise the pileup "
-            "fraction).\n\n"
-            "Reported pulse duration is measured from the threshold "
-            "crossings and does not change with this setting.")
-        self.end_confirmed_check.setChecked(config.save_to_end_confirmed)
-        adv.addRow(self.end_confirmed_check)
 
         self.basis_combo = QtWidgets.QComboBox()
         self.basis_combo.addItems(["I/Q (quadratures)",
@@ -278,8 +257,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                   self.min_pulse_spin, self.max_pulse_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
-        for c in (self.pileup_check, self.end_confirmed_check):
-            c.toggled.connect(self._update_dependent_values)
+        self.pileup_check.toggled.connect(self._update_dependent_values)
         adv_box.toggled.emit(False)
         self.setMinimumWidth(520)
         self._update_dependent_values()
@@ -293,7 +271,6 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
-            save_to_end_confirmed=self.end_confirmed_check.isChecked(),
             min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
                            else "iq"),

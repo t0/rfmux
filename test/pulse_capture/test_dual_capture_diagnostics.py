@@ -359,35 +359,45 @@ def _decision_labels(plot):
             if isinstance(item, pg.InfiniteLine) and item.label is not None]
 
 
-def test_end_confirmed_mark_follows_the_full_tail_setting(qt_app):
-    """No confirmation mark when the tail was not saved to it."""
+def test_marks_are_drawn_only_inside_the_saved_data(qt_app):
+    """A file written before the window ran to the confirmation has its
+    end past the data: no end mark.  A current record has it on its
+    last sample, with the settled mark before it."""
     from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
 
     panel = PulseCapturePanel(dark_mode=False)
     T = 43000.0
-    wf = {"Time": T + np.arange(20) / 1000.0,
-          "trigger_index": 2, "trigger_time": T + 0.002,
-          "below_threshold_index": 6, "below_threshold_time": T + 0.006,
-          "end_index": 40, "end_time": T + 0.040}   # past the data
-
-    panel.capture_config.save_to_end_confirmed = False
+    old = {"Time": T + np.arange(20) / 1000.0,
+           "trigger_index": 2, "trigger_time": T + 0.002,
+           "below_threshold_index": 6, "below_threshold_time": T + 0.006,
+           "end_index": 40, "end_time": T + 0.040}   # past the data
     panel.pulse_plot_i.clear()
-    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I")
+    panel._annotate_decisions(panel.pulse_plot_i, old, T, "I")
     labels = _decision_labels(panel.pulse_plot_i)
     assert any("trigger" in l for l in labels)
     assert any("below threshold" in l for l in labels)
     assert not any("end confirmed" in l for l in labels), labels
 
-    panel.capture_config.save_to_end_confirmed = True
+    current = dict(old, settled_index=8, settled_time=T + 0.008,
+                   end_index=19, end_time=T + 0.019)
     panel.pulse_plot_i.clear()
-    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I")
-    assert any("end confirmed" in l for l in _decision_labels(panel.pulse_plot_i))
+    panel._annotate_decisions(panel.pulse_plot_i, current, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("settled" in l for l in labels), labels
+    assert any("end confirmed" in l for l in labels), labels
+
+    stopped = dict(current, truncated=True)
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, stopped, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("hard stop" in l for l in labels), labels
+    assert not any("end confirmed" in l for l in labels), labels
     panel.close()
     spin(qt_app)
 
 
-def test_review_mode_restores_the_full_tail_setting(qt_app, tmp_path):
-    """An opened file sets the policy its records were made under."""
+def test_review_mode_opens_a_file_with_the_old_tail_setting(qt_app, tmp_path):
+    """The stored setting of an older file is ignored, not applied."""
     from rfmux.pulse_capture.detection import ChannelNoiseStats
     from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
     from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
@@ -397,9 +407,8 @@ def test_review_mode_restores_the_full_tail_setting(qt_app, tmp_path):
                     {"streamer_mode": "slow", "sample_rate": 596.0,
                      "save_to_end_confirmed": False}).finalize()
     panel = PulseCapturePanel(dark_mode=False)
-    panel.capture_config.save_to_end_confirmed = True
     panel.load_from_hdf5(path)
-    assert panel._saves_full_tail() is False
+    assert not hasattr(panel.capture_config, "save_to_end_confirmed")
     panel.close()
     spin(qt_app)
 
@@ -470,7 +479,6 @@ def test_decision_labels_step_down_so_they_do_not_overlap(qt_app):
     import pyqtgraph as pg
     from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
     panel = PulseCapturePanel(dark_mode=False)
-    panel.capture_config.save_to_end_confirmed = True
     T = 43000.0
     wf = {"Time": T + np.arange(20) / 1000.0,
           "trigger_index": 2, "trigger_time": T + 0.002,

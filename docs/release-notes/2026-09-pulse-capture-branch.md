@@ -169,7 +169,7 @@ Old values are main at the merge base (e46fc41).
   `pytest` applies `-m "not slow_acquisition"`.
 - CI: two named test files to the quick and acquisition tiers on ubuntu,
   windows and macos with the test dependency group installed; `paths-ignore`
-  covers READMEs, `CLAUDE.md`, `CHANGELOG.md` and `docs/**`, so the jupytext
+  covers READMEs, `AGENTS.md`, `CLAUDE.md`, `CHANGELOG.md` and `docs/**`, so the jupytext
   demos trigger CI and changes under `docs/` do not.
 - Networking guide: one `rmem_max` value, 268435456 (256 MB, about three
   seconds of the four-channel PFB stream).

@@ -8,6 +8,7 @@ on:
     branches: [ main ]
     paths-ignore:
      - '**/README.md'
+     - 'AGENTS.md'
      - 'CLAUDE.md'
      - 'CHANGELOG.md'
      - 'docs/**'
@@ -15,6 +16,7 @@ on:
     branches: [ main ]
     paths-ignore:
      - '**/README.md'
+     - 'AGENTS.md'
      - 'CLAUDE.md'
      - 'CHANGELOG.md'
      - 'docs/**'

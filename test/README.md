@@ -152,6 +152,6 @@ builds fastrx with `FASTRX_REQUIRED=ON` but runs only
 It triggers on push and pull request against `main`, plus `workflow_dispatch`. A
 long-lived branch gets **no CI until it opens a PR**, so run the tiers locally
 or dispatch the workflow against the branch by hand. Changes to READMEs,
-`CLAUDE.md`, `CHANGELOG.md` and anything under `docs/` alone do not trigger
+`AGENTS.md`, `CLAUDE.md`, `CHANGELOG.md` and anything under `docs/` alone do not trigger
 it (the release notes and `docs/make_*.py` included); the jupytext demos do,
 since the acquisition tier executes them.

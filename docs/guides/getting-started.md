@@ -185,6 +185,7 @@ For reliable data streaming, you may need to increase UDP receive buffer sizes a
   `periscope`; `periscope MOCK` runs it on a simulated board)
 - [Configure networking](networking.md) for optimal data streaming
 - [Flash firmware](firmware.md) to update CRS boards
+- [Capture detector pulses](pulse-capture.md) in Periscope or from a script
 - Work through the runnable reference notebooks in
   `rfmux/reference-notebooks/Demos/` (`simplified_tuning_flow.md`,
   `pulse_capture.md`); `rfmux/reference-notebooks/README.md` says how to

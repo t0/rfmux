@@ -8,8 +8,8 @@ diagrams that explain the detector rather than show measurements.  This
 script writes them, so a figure is the output of code that can be read
 and rerun rather than an opaque binary in the tree.
 
-Writes every copy of each figure, so the notebook and the release note
-cannot drift apart.
+Writes every copy of each figure, so the notebook and the guide cannot
+drift apart.
 
     python docs/make_pulse_capture_figures.py
 """
@@ -27,7 +27,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 #: the rest are copies kept byte-identical by writing them all here.
 ANATOMY_PATHS = (
     ROOT / "rfmux" / "reference-notebooks" / "Demos" / "pulse_capture_anatomy.png",
-    ROOT / "docs" / "release-notes" / "images" / "capture-window-anatomy.png",
+    ROOT / "docs" / "guides" / "images" / "capture-window-anatomy.png",
 )
 
 THRESH, END = 5.0, 1.0

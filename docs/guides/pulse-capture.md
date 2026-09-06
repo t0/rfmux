@@ -5,7 +5,7 @@ streams, record each pulse to HDF5 with its summary statistics, and show
 them as they arrive. It runs in Periscope, from a script, and against the
 simulated board.
 
-This note shows what the feature does and how to drive it from Periscope.
+This guide shows what the feature does and how to drive it from Periscope.
 For the headless version, with every step as a runnable cell, open the
 [Pulse Capture notebook](../../rfmux/reference-notebooks/Demos/pulse_capture.md).
 
@@ -99,7 +99,7 @@ link against the 1 GbE budget and refuses one that does not fit. A fast
 capture is a lot of data, so the status line turns amber and then red as
 the fast stream falls behind, with the cause and the remedy in its tooltip.
 Raise `net.core.rmem_max` before a long fast capture; the
-[Networking Guide](../guides/networking.md) has the numbers.
+[Networking Guide](networking.md) has the numbers.
 
 ## Trigger in the frequency basis
 
@@ -111,7 +111,7 @@ volts on the I and Q axes. In Periscope the calibration comes from the Bias
 KIDs step of the tuning flow; in mock mode Periscope measures one for every
 simulated detector at startup.
 
-The screenshots in this note are frequency-basis captures: the axes are df
+The screenshots in this guide are frequency-basis captures: the axes are df
 and dissipation, and the amplitudes are in hertz.
 
 ## From a script
@@ -153,7 +153,7 @@ there; slow-stream captures keep up.
 
 - [Pulse Capture notebook](../../rfmux/reference-notebooks/Demos/pulse_capture.md):
   the headless how-to, cell by cell.
-- [What changed on the branch](2026-09-pulse-capture-branch.md): what
-  else changed and what to change when upgrading.
-- [Networking Guide](../guides/networking.md): UDP buffer sizing for long
+- [What changed on the branch](../release-notes/2026-09-pulse-capture-branch.md):
+  what else changed and what to change when upgrading.
+- [Networking Guide](networking.md): UDP buffer sizing for long
   captures.

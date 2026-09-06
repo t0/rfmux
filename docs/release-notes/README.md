@@ -1,17 +1,12 @@
 # Release Notes
 
-What each release lets you do, written for people using rfmux.
+What changed in each release and what to change when upgrading, written by
+hand for people working on rfmux. How to use a feature is in
+[`docs/guides/`](../guides/).
 
 | Release | Notes |
 | --- | --- |
-| Pulse Capture (August 2026) | [2026-08-pulse-capture.md](2026-08-pulse-capture.md): how to use it |
-
-For people working on rfmux:
-
-| Document | Notes |
-| --- | --- |
-| Pulse capture branch (September 2026) | [2026-09-pulse-capture-branch.md](2026-09-pulse-capture-branch.md): what else changed and what to change when upgrading |
-| Hardware checks (September 2026) | [2026-09-hardware-checks.md](2026-09-hardware-checks.md): what the code assumes about a board and how to measure each |
+| Pulse capture branch (September 2026) | [2026-09-pulse-capture-branch.md](2026-09-pulse-capture-branch.md): what changed and what to change when upgrading |
 
 ## Relationship to the other changelogs
 

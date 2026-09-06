@@ -132,8 +132,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # -------------------------------------------------------------------------
     # Additive white ADC noise, sigma per slow sample [counts] at the
     # scale get_samples reports; the PFB emitter derives its own sigma
-    # from this.  Provisional until measured on a board (see
-    # docs/release-notes/2026-09-hardware-checks.md).
+    # from this.  Provisional until measured on a board.
     "udp_noise_level": 0.04,
     # scale_factor converts normalized S21 * amplitude to ADC readout counts.
     # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical

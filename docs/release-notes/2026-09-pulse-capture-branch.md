@@ -10,10 +10,9 @@ headlessly as the `trigger_capture` macro and interactively as a Periscope
 panel, and the two share one engine, one ingest path and one file format.
 Samples are stored in physical units, volts or hertz, never in ADC counts,
 and the file carries the constants and calibration that produced them. The
-how-to for the feature is [2026-08-pulse-capture.md](2026-08-pulse-capture.md).
-This document is for people working on rfmux: what else changed and what to
-change when upgrading. What only a board can settle is in
-[2026-09-hardware-checks.md](2026-09-hardware-checks.md).
+guide is [docs/guides/pulse-capture.md](../guides/pulse-capture.md). This
+document is for people working on rfmux: what else changed and what to
+change when upgrading.
 
 The df calibration is measured by `bias_kids`, which steps every biased tone
 and reads the slope. The nonlinear resonator model is Swenson et al. 2013
@@ -98,7 +97,7 @@ simulator files are unchanged in meaning.
   mock builds; the mock's df calibrations measured at startup.
 - Two runnable jupytext notebooks, `pulse_capture.md` and
   `simplified_tuning_flow.md`, executed in CI; `pulse_capture_flow.py` as the
-  script twin; the release-note how-to with reproducible screenshots.
+  script twin; the pulse-capture guide with reproducible screenshots.
 - Test tiers by name (`pytest --tier=quick|portable|acquisition|full|hardware|all`).
 
 ## Changed
@@ -416,9 +415,9 @@ Tiers, markers, layout, platform skips and CI triggers are in
 
 ## Documentation
 
-- How-to: [2026-08-pulse-capture.md](2026-08-pulse-capture.md).
+- Guide: [docs/guides/pulse-capture.md](../guides/pulse-capture.md).
 - Notebooks: `rfmux/reference-notebooks/README.md`.
 - Tests: `test/README.md`.
-- `docs/make_release_note_screenshots.py` and
+- `docs/make_pulse_capture_screenshots.py` and
   `docs/make_pulse_capture_figures.py` regenerate the figures from the mock
   configuration they name.

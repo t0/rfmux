@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""Regenerate the Pulse Capture panel screenshots in the release note.
+"""Regenerate the Pulse Capture panel screenshots in docs/guides/pulse-capture.md.
 
 Runs a short simulated capture in the frequency basis, opens the panel on
-the resulting file in review mode, and grabs the two tabs the note shows.
+the resulting file in review mode, and grabs the two tabs the guide shows.
 The anatomy diagram beside them is drawn by make_pulse_capture_figures.py.
 
-    python docs/make_release_note_screenshots.py
+    python docs/make_pulse_capture_screenshots.py
 
-Both shots are taken in dark mode with the df/dissipation view in hertz,
-because that is what the release is about: the axes are the frequency
-basis, not the quadratures, and the amplitudes carry a real unit.
+Both shots are taken in dark mode with the df/dissipation view in hertz:
+the axes are the frequency basis, not the quadratures, and the amplitudes
+carry a real unit.
 """
 
 import asyncio
@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-OUT = ROOT / "docs" / "release-notes" / "images"
+OUT = ROOT / "docs" / "guides" / "images"
 CAPTURE = Path(os.environ.get("RFMUX_SHOT_SCRATCH", "/tmp")) / "release_shots"
 
 MODULE = 1

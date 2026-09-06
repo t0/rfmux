@@ -321,8 +321,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         assert found
 
         # No fast-to-slow amplitude ratio is asserted: the board's gain
-        # between the two streams is a hardware check
-        # (docs/release-notes/2026-09-hardware-checks.md, check 2).
+        # between the two streams is a hardware measurement.
 
 
 def test_macro_stores_df_calibrations(mock_crs, tmp_path):

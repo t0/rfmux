@@ -17,8 +17,7 @@
 Pulse capture (dual-stream slow + PFB capture with live pair matching,
 streaming HDF5, histograms and templates, the session browser) is in main.
 The C++ PFB receiver path and the count-scale assumptions are verified in
-mock and on loopback only; `docs/release-notes/2026-09-hardware-checks.md`
-lists what a board has to confirm.
+mock and on loopback only.
 
 ## Development Setup
 

@@ -9,7 +9,7 @@ Three plots, in the order you would want them::
                                      npoints=20_000, module=1)
     naplots.plot_netanal(netanal)                 # what was measured
 
-    found = find_resonances_in_netanal(netanal)
+    found = find_resonances_in_netanal(netanal[crs.module[1].index()])
     naplots.plot_resonance_search(found)          # where the finder put dips
     naplots.plot_candidate_details(found)         # what it measured at each
 
@@ -18,9 +18,11 @@ expect. It draws the samples as points and the finder's own numbers on top, so
 an unresolved dip — two samples across a resonance the netanal was too coarse
 to see — looks like what it is rather than like a missing resonator.
 
-Every plot takes any of the shapes its producer returns: one trace, a list of
-them, or a dict keyed by module, drawing a figure for each. So the same call
-works whether the sweep ran on one module or eight.
+Every plot takes the netanal or the search one module at a time, and also takes
+a dict of them keyed by module identifier, drawing a figure per entry. So the
+plots of a sweep over eight modules are one call — ``plot_netanal(netanal)`` —
+even though the search that goes with them is eight, one per module, because
+each module's thresholds are its own.
 
 Styling follows hidfmux's plotting modules — large type, a grid on every axes,
 compact bracketed axis labels, and generous panels. It lives in ``PLOT_STYLE``
@@ -40,7 +42,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
-from rfmux.tuning import magnitude_db
+from rfmux.tuning import magnitude_db, netanal_trace
 
 __all__ = [
     "BATCH_SIZE",
@@ -105,18 +107,18 @@ def panels_per_row(count, few=5, many=7):
 def labelled_traces(result, what):
     """``{label: result}``, whatever shape its producer handed back.
 
-    ``take_netanal`` and ``find_resonances_in_netanal`` both return a single
-    result for one module, a list for a list of sweeps, and a dict keyed by
-    module number for several modules. Rather than make you unpack that before
-    plotting, every plotter here runs this first and then draws a figure per
-    entry.
+    ``take_netanal`` returns a dict keyed by module identifier —
+    ``crs0042_rmod2`` — with one entry per module, and one module's output on its
+    own is what you get from ``netanal[module_id]``. Searches arrive one per
+    module, since ``find_resonances_in_netanal`` searches one module at a time,
+    but a dict of them keyed the same way plots as happily. Rather than make you
+    unpack any of that before plotting, every plotter here runs this first and
+    then draws a figure per entry.
     """
-    if isinstance(result, dict) and result and all(
-        isinstance(key, (int, np.integer)) for key in result
+    if isinstance(result, dict) and "results" not in result and all(
+        isinstance(key, str) for key in result
     ):
-        return {f"module {module}": entry for module, entry in result.items()}
-    if isinstance(result, (list, tuple)):
-        return {f"{what} {i}": entry for i, entry in enumerate(result)}
+        return dict(result)
     return {"": result}
 
 
@@ -145,22 +147,25 @@ def _titled(fig, text):
     fig.suptitle("\n".join(lines), y=1 - band / 2, va="center")
 
 
-def _netanal_arrays(netanal):
-    """The three arrays a netanal carries, with a readable error if it is not one."""
-    missing = {"frequencies", "iq_complex"} - set(
-        netanal if isinstance(netanal, dict) else {}
-    )
-    if missing:
-        keys = list(netanal) if isinstance(netanal, dict) else type(netanal).__name__
+def _netanal_arrays(module_netanal):
+    """The two arrays one module's netanal carries, with a readable error if
+    it is not one.
+
+    Phase is not among them: a netanal reports what it measured, and phase is
+    ``np.angle(iq_counts)`` wherever it is wanted — which is what the phase
+    panel below does.
+    """
+    try:
+        trace = netanal_trace(module_netanal)
+    except (TypeError, ValueError) as e:
         raise TypeError(
-            f"Expected a take_netanal result — a dict with 'frequencies' and "
-            f"'iq_complex' — got {keys}. For several modules pass the whole "
-            f"dict take_netanal returned; this unpacks it."
-        )
+            f"Expected one module's netanal — what take_netanal returned, "
+            f"indexed by module. For several modules pass the whole dict it "
+            f"returned; this unpacks it. ({e})"
+        ) from None
     return (
-        np.asarray(netanal["frequencies"]),
-        np.asarray(netanal["iq_complex"]),
-        netanal.get("phase_degrees"),
+        np.asarray(trace["frequencies"]),
+        np.asarray(trace["iq_counts"]),
     )
 
 
@@ -168,9 +173,9 @@ def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title
     """|S21| and phase against frequency, one figure per trace measured.
 
     Args:
-        netanal: what ``crs.take_netanal()`` returned — one module's result, a
-            list of them, or the dict keyed by module number that a list of
-            modules produces. A figure is drawn for each.
+        netanal: what ``crs.take_netanal()`` returned — the dict keyed by
+            module identifier, or one module's output out of it. A figure is
+            drawn for each module in it.
         phase: draw the phase in a second panel under the magnitude. Turn it
             off for magnitude alone, which is what the resonance finder sees.
         reference: the magnitude that maps to 0 dB. The default is the median
@@ -183,11 +188,11 @@ def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title
     Raises:
         TypeError: if handed something that is not a netanal result.
     """
-    for label, trace in labelled_traces(netanal, "sweep").items():
-        frequencies, iq, phase_degrees = _netanal_arrays(trace)
+    for label, module_netanal in labelled_traces(netanal, "sweep").items():
+        frequencies, iq = _netanal_arrays(module_netanal)
 
         with plt.rc_context(PLOT_STYLE):
-            nrows = 2 if (phase and phase_degrees is not None) else 1
+            nrows = 2 if phase else 1
             fig, axes = plt.subplots(
                 nrows, 1, figsize=figsize, sharex=True,
                 constrained_layout=True, squeeze=False,
@@ -198,7 +203,7 @@ def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title
             panels[0].set_ylabel("|S21| [dB, norm.]")
 
             if nrows == 2:
-                panels[1].plot(frequencies / 1e6, np.asarray(phase_degrees), lw=1.0)
+                panels[1].plot(frequencies / 1e6, np.degrees(np.angle(iq)), lw=1.0)
                 panels[1].set_ylabel("phase [deg]")
 
             panels[-1].set_xlabel("frequency [MHz]")
@@ -222,9 +227,9 @@ def plot_resonance_search(
     what it threw away. :func:`plot_candidate_details` is where the reasons are.
 
     Args:
-        search: a :class:`~rfmux.tuning.ResonanceSearch`, or the list or
-            per-module dict that ``find_resonances_in_netanal`` returns for
-            several traces. A figure is drawn for each.
+        search: a :class:`~rfmux.tuning.ResonanceSearch`, or a dict of them
+            keyed by module identifier if you searched several modules and kept
+            them that way. A figure is drawn for each.
         figsize: ``(width, height)`` of the whole figure, in inches.
         title: overrides the figure title.
         mark_rejected: draw the rejected candidates as well as the accepted.
@@ -290,8 +295,8 @@ def plot_candidate_details(
     that.
 
     Args:
-        search: a :class:`~rfmux.tuning.ResonanceSearch`, or the list or
-            per-module dict ``find_resonances_in_netanal`` returns.
+        search: a :class:`~rfmux.tuning.ResonanceSearch`, or a dict of them
+            keyed by module identifier.
         include_rejected: draw the rejected candidates too, each with the
             reason it was dropped printed in its panel. This is the reason the
             plot exists when a count comes out wrong.

@@ -6,10 +6,10 @@ plan), `tuning_multisweep_amplitudes_plan.md` (the amplitude ladder) and
 what a sweep macro returns.
 
 The short version: `multisweep` and `multiamp_multisweep` return the same
-thing — a dict keyed by module identifier, each value a self-describing envelope
-whose `results` are keyed `[iteration][direction][name]`. A single sweep is one
-iteration in one direction, which it genuinely is. Analysis functions take one
-module's envelope, never the container.
+thing — a dict keyed by module identifier, each value one module's
+self-describing output, whose `results` are keyed `[iteration][direction][name]`.
+A single sweep is one iteration in one direction, which it genuinely is.
+Analysis functions take one module's output, never the container.
 
 ---
 
@@ -27,7 +27,7 @@ dicts (`multisweep.py:395`), with nothing but argument order to say which
 element is which module.
 
 **`multiamp_multisweep`** (`algorithms/measurement/multiamp_multisweep.py:106`)
-returns the envelope `pack_results` builds
+returns the per-module output `pack_results` builds
 (`tuning/multisweep_amplitudes.py:688`): `schema_version`, `module`,
 `call_params`, and `results[iteration][direction][name]`. It refuses a module
 list outright, so it is always single-module.
@@ -61,7 +61,7 @@ The cost of the split is concentrated in `tuning/fits.py`, which accepts both:
   same code for one module and for four. A convenience that flattens the
   single-module case would make the common script *differ* from the general
   one, which is the class of thing this revamp keeps deleting.
-* **Analysis and plotting functions take one module's envelope.** Stepping into
+* **Analysis and plotting functions take one module's output.** Stepping into
   the module you mean is the caller's job, and it is one subscript. The
   alternative — passing the container plus a `module=` argument — puts a
   coordinate in a function signature that the data structure already carries,
@@ -73,7 +73,7 @@ The cost of the split is concentrated in `tuning/fits.py`, which accepts both:
 * **`call_params` stays verbatim** — what was asked for, not what was worked out
   from it — as `pack_results` already documents.
 * **Entries keep `sweep_direction` and `sweep_amplitude`** even though the
-  envelope now records direction too. They are what survives an entry being
+  module's output now records direction too. They are what survives an entry being
   lifted out of its nesting, and amplitude is per-resonator regardless.
 
 ---
@@ -231,14 +231,14 @@ currently carries whatever `multisweep` returned.
   and stops telling people to index positionally.
 * `SweepFit.iteration` / `.direction` become plain `int` / `str`; `where` loses
   its branch and always reads `R0001@0 upward`.
-* `FitReport.settings` records the module id, read off the envelope, so a
+* `FitReport.settings` records the module id, read off the output, so a
   printed report says which module without the caller threading it.
 * `_select`'s `bare` guard and `fit_sweeps_at_bias_amplitude`'s `_is_packed`
   refusal were to be left alone, pending a decision each. **The shape change
   made both unreachable, so there was nothing left to decide** — see §11.
 
 **Tests** — `test/algorithms/test_multiamp_multisweep.py:51`'s fake CRS must
-return the envelope shape, or the driver's unwrapping has nothing to unwrap.
+return the packed shape, or the driver's unwrapping has nothing to unwrap.
 `test/algorithms/test_multisweep_channels.py:74` and `:94` index the return.
 `test/tuning/test_fits.py` exercises both input shapes throughout;
 `test_fits.py:387` guards the bias-amplitude refusal and stays until that
@@ -267,7 +267,7 @@ Hand-walking one trace from a plain sweep is six subscripts:
 sweeps["crs0030_rmod1"]["results"][0]["upward"]["R0001"]["iq_counts"]
 ```
 
-That is the accumulated price of the envelope, the unification and the module
+That is the accumulated price of the wrapper, the unification and the module
 layer together. It is worth paying, but it changes what "the supported way to
 read a result" means: the readers in `sweep_results.py` stop being a
 convenience and become the interface. `collect_amplitude_iterations_for` now
@@ -347,8 +347,8 @@ sweep now simply selects its one sweep, and `iterations=99` falls through to the
 generic message, which names the iterations that exist.
 
 **`fit_sweeps_at_bias_amplitude`'s refusal** — `if not _is_packed(sweeps)`,
-where `_is_packed` meant "has `results` and `call_params`". Every envelope has
-both now, whichever macro produced it, so the refusal stopped firing at step 4,
+where `_is_packed` meant "has `results` and `call_params`". Every module's
+output has both now, whichever macro produced it, so the refusal stopped firing at step 4,
 not step 6: a real single-sweep result had already been silently accepted for
 two commits. Deleted with `_is_packed`. Matching a bias amplitude against one
 iteration is nearest-wins over a set of one, which is the behaviour a ladder

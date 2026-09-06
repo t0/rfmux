@@ -42,7 +42,6 @@ import datetime
 import os
 import pickle
 import warnings
-from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -68,7 +67,7 @@ __all__ = [
 
 
 # Bumped when the file_metadata block changes shape in a way a reader cannot
-# absorb. It versions the envelope, not the measurement: what a sweep looks like
+# absorb. It versions the wrapper, not the measurement: what a sweep looks like
 # inside is RESULTS_SCHEMA_VERSION's business, and a catalog's is its own.
 FILE_VERSION = 1
 
@@ -199,7 +198,8 @@ def _save(
 
     ``label`` is your name for this measurement and goes on the end of the
     filename. ``module`` supplies the module number for payloads that do not
-    record it themselves — the netanal ones.
+    record it themselves — a class's ``to_dict()``, say. Every driver's result
+    carries its own, so measurements do not need it.
     """
     existing = _metadata_of(data)
 
@@ -248,13 +248,13 @@ def _save(
 def _spliced(data, target: Path):
     """What actually goes in the file when ``data`` is only part of it.
 
-    :func:`~rfmux.tuning.fits.fit_sweeps` works on **one module's envelope**,
-    ``sweeps[module_id]``, and that envelope carries the path of the file it was
+    :func:`~rfmux.tuning.fits.fit_sweeps` works on **one module's output**,
+    ``sweeps[module_id]``, and that output carries the path of the file it was
     written to — a file holding the whole container, every module of it. Writing
-    the envelope over that path would silently throw the other modules away, and
+    one module over that path would silently throw the other modules away, and
     would leave even a one-module file no longer shaped like a sweep result.
 
-    So a re-save of an envelope reads the container back, puts the envelope in
+    So a re-save of one module's output reads the container back, puts it in
     the place it came from — matched on module number, which
     :func:`~rfmux.tuning.sweep_results.merge_modules` guarantees is unique
     within a container — and writes the whole thing.
@@ -268,15 +268,15 @@ def _spliced(data, target: Path):
         with target.open("rb") as f:
             on_disk = pickle.load(f)
     except Exception:
-        # Unreadable or half-written: the envelope in hand is better than
+        # Unreadable or half-written: the data in hand is better than
         # nothing, and refusing to save it would be the worse failure.
         return data
 
     if not _is_container(on_disk):
         return data
 
-    for module_id, envelope in on_disk.items():
-        if envelope.get("module") == data.get("module"):
+    for module_id, module_output in on_disk.items():
+        if module_output.get("module") == data.get("module"):
             on_disk[module_id] = data
             return on_disk
     return data
@@ -452,47 +452,47 @@ def _metadata_of(data) -> dict:
 def _blocks(data, module):
     """Yield ``(mapping_to_stamp, module_number_or_None)`` for one payload.
 
-    The four shapes a saveable thing arrives in:
+    The three shapes a saveable thing arrives in:
 
-    * a packed sweep container, ``{module_id: envelope}`` — one block per
-      envelope, each of which already records its own module. Stamping inside
-      the envelopes rather than at the top is what keeps
-      :func:`~rfmux.tuning.sweep_results._is_container` true of the result, and
-      keeps ``find_resonances_in_netanal``'s "all-integer keys means modules"
-      test from tripping over a string key.
-    * a list of netanal results, what ``take_netanal(module=[1, 2])`` returns —
-      one block each, numbered from the ``module`` argument, since a netanal
-      result records nothing about which module produced it.
-    * a single netanal result, or any class's ``to_dict()`` — one block, at the
-      top.
+    * a packed measurement container, ``{module_id: output}`` — one block per
+      module, each of which already records its own module. Stamping inside
+      each module's output rather than at the top is what keeps
+      :func:`~rfmux.tuning.sweep_results._is_container` true of the result,
+      which is how every reader tells the container from one module's output.
+    * any other dict — one block, at the top. This is the shape a class's
+      ``to_dict()`` arrives in, and it takes its module from the ``module``
+      argument or from a ``module`` key of its own.
     * anything else — refused, because a payload that cannot be stamped cannot
       be found again, and silently writing one is worse than not writing it.
+
+    There used to be a fourth: a bare list of results, one block each, numbered
+    from a ``module`` argument that had to be passed alongside because the
+    entries could not say which module they were. That was ``take_netanal(
+    module=[1, 2])``'s return, and since schema 4 it returns a container like
+    everything else, so nothing produced the shape any more.
     """
     if _is_container(data):
-        for envelope in data.values():
-            yield envelope, envelope.get("module")
-        return
-
-    if isinstance(data, Sequence) and not isinstance(data, (str, bytes)):
-        modules = module if isinstance(module, (list, tuple)) else None
-        for i, entry in enumerate(data):
-            if not isinstance(entry, dict):
-                raise TypeError(
-                    f"Cannot save a list whose entry {i} is a "
-                    f"{type(entry).__name__} — expected a result dict, as "
-                    f"take_netanal(module=[...]) returns."
-                )
-            yield entry, modules[i] if modules and i < len(modules) else None
+        for module_output in data.values():
+            yield module_output, module_output.get("module")
         return
 
     if isinstance(data, dict):
-        # One module's envelope says which module it is; a netanal result does
+        # One module's output says which module it is; a to_dict() does
         # not, and falls back to whatever the caller passed.
         if isinstance(module, (int, np.integer)):
             yield data, int(module)
         else:
             yield data, data.get("module")
         return
+
+    if isinstance(data, (list, tuple)):
+        raise TypeError(
+            f"Cannot save a {type(data).__name__} of {len(data)}. Several "
+            f"modules come back from a driver as one dict keyed by module "
+            f"identifier, not as a list — if this is an old take_netanal "
+            f"result, re-measure it, and if you assembled it yourself, key it "
+            f"by module."
+        )
 
     raise TypeError(
         f"Cannot save a {type(data).__name__}. Measurement results are dicts, "

@@ -33,7 +33,7 @@ Out: a :class:`BiasReport`, whose ``catalog`` is a **new**
 that were found::
 
     report = find_bias_points(sweeps)
-    report.catalog["R0001"].bias.frequency_hz
+    report.catalog["BOTA"].bias.frequency_hz
     await crs.apply_bias(report.catalog)
 
 The report also goes into the sweeps it was found from, as plain builtins,

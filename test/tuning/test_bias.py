@@ -481,16 +481,16 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
 
 def test_the_sweep_entries_come_back_as_they_went_in():
     """The diagnostics of an analysis do not belong written onto the sweeps the
-    analysis was handed. The report itself does, and goes on the envelope."""
+    analysis was handed. The report itself does, and goes on the output."""
     sweeps = a_multiamp_multisweep()
     entry = sweeps["results"][0]["upward"]["R0001"]
     keys = set(entry)
-    envelope_keys = set(sweeps)
+    output_keys = set(sweeps)
 
     find_bias_points(sweeps, save=False)
 
     assert set(entry) == keys
-    assert set(sweeps) - envelope_keys == {"bias_report"}
+    assert set(sweeps) - output_keys == {"bias_report"}
 
 
 def test_the_bias_point_carries_the_calibration_measured_at_it():

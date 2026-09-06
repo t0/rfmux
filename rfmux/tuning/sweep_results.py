@@ -6,6 +6,11 @@ both ends, because a reader resolving ``ladder[iteration]`` has to agree with
 the packer about what a rung means, and two files agreeing about one contract is
 one file too many.
 
+``take_netanal`` packs through :func:`pack_netanal` into the same shape, so
+every driver in the package returns one container shape. What sits under a
+direction differs — a sweep has a section per resonator, a netanal has the one
+trace it measured — which is what ``measurement`` is in the output to say.
+
 This lived in :mod:`rfmux.tuning.multisweep_amplitudes` while a ladder was the
 only thing that produced it. It is not the ladder's shape any more — it is every
 sweep's — so it has its own file, and the amplitudes module is back to being
@@ -25,6 +30,7 @@ __all__ = [
     "RESULTS_SCHEMA_VERSION",
     "pack_sweep",
     "pack_results",
+    "pack_netanal",
     "merge_modules",
     "collect_amplitude_iterations_for",
     "find_iteration_matching_amplitude",
@@ -45,7 +51,14 @@ __all__ = [
 #    dict keyed by module identifier. A single sweep is one iteration in one
 #    direction — which is what it is — so the nesting no longer says which macro
 #    produced it, and the multi-module form is keyed rather than a bare list.
-RESULTS_SCHEMA_VERSION = 3
+#
+# 4: take_netanal returns this shape too, and a module's output now says which
+#    driver made it in 'measurement'. A netanal measures one trace rather than a
+#    section per resonator, so under a direction it carries the arrays directly
+#    where a sweep carries {name: section} — the one place the two differ, and
+#    the reason a reader has to be able to tell them apart. The netanal's own
+#    'iq_complex'/'phase_degrees' became 'iq_counts'/'iq_volts' on the way in.
+RESULTS_SCHEMA_VERSION = 4
 
 
 # The iteration a plain multisweep's one sweep sits at. Not a placeholder: one
@@ -84,18 +97,32 @@ def _call_params(
     }
 
 
-def _packed(module_id: str, module: int, call_params: dict, results: dict) -> dict:
-    """One module's envelope, in the container both macros return.
+def _packed(
+    module_id: str,
+    module: int,
+    call_params: dict,
+    results: dict,
+    *,
+    measurement: str,
+) -> dict:
+    """One module's output, in the container every driver returns.
 
     Always a container, even for the one module that is the usual case, so a
     caller who writes ``for module_id, module_sweeps in sweeps.items():`` has
     written the same code for one module and for four. A convenience that
     flattened the single-module case would make the common script differ from
     the general one.
+
+    *measurement* names the driver: ``"multisweep"``, ``"multiamp_multisweep"``
+    or ``"netanal"``. Three outputs that are structurally identical down to
+    the direction and then are not — a netanal has no sections — so the readers
+    below need a way to tell that is not sniffing ``call_params`` for
+    ``span_hz``, which is the kind of test this shape exists to delete.
     """
     return {
         module_id: {
             "schema_version": RESULTS_SCHEMA_VERSION,
+            "measurement": measurement,
             "module": int(module),
             "call_params": call_params,
             "results": results,
@@ -141,7 +168,7 @@ def pack_sweep(
             whenever it came from the catalog instead.
 
     Returns:
-        dict: ``{module_id: envelope}``, the envelope holding
+        dict: ``{module_id: output}``, one module's output holding
         ``schema_version``, ``module``, ``call_params`` and ``results``.
     """
     call_params = _call_params(
@@ -161,6 +188,68 @@ def pack_sweep(
         module,
         call_params,
         {SINGLE_SWEEP_ITERATION: {sweep_direction: dict(sections)}},
+        measurement="multisweep",
+    )
+
+
+def pack_netanal(
+    trace: Mapping,
+    *,
+    module_id: str,
+    module: int,
+    sweep_direction: str = "upward",
+    amp: float,
+    fmin: float,
+    fmax: float,
+    npoints: int,
+    nsamps: int,
+    max_chans: int,
+    max_span: float,
+    rotate_phase_to_0: bool,
+    requested_module=None,
+) -> dict:
+    """Assemble what ``take_netanal`` returns.
+
+    The same shape :func:`pack_sweep` builds, holding the one wideband trace a
+    netanal is where a sweep holds a section per resonator. The iteration and
+    direction levels are kept — a netanal is one amplitude sweeping upward in
+    frequency, which is what iteration 0 of ``"upward"`` means — so walking down
+    to a measurement is the same walk whichever driver wrote the file.
+
+    Args:
+        trace: the ``frequencies``/``iq_counts``/``iq_volts`` arrays and the
+            ``sweep_amplitude``/``sweep_direction`` scalars, already assembled.
+        module_id: the board-and-module identifier this comes back under, from
+            ``crs.module[m].index()``.
+        module: the module actually measured — resolved, never None.
+        requested_module: the ``module`` argument as the caller passed it, which
+            is the list itself for a call that fanned out over several. Recorded
+            as-is, because *call_params* says what was asked for and not what
+            was worked out from it.
+
+    Returns:
+        dict: ``{module_id: output}``, one module's output holding
+        ``schema_version``, ``measurement``, ``module``, ``call_params`` and
+        ``results``.
+    """
+    call_params = {
+        "amp": float(amp),
+        "fmin": float(fmin),
+        "fmax": float(fmax),
+        "npoints": int(npoints),
+        "nsamps": int(nsamps),
+        "max_chans": int(max_chans),
+        "max_span": float(max_span),
+        "rotate_phase_to_0": bool(rotate_phase_to_0),
+        "module": requested_module,
+    }
+
+    return _packed(
+        module_id,
+        module,
+        call_params,
+        {SINGLE_SWEEP_ITERATION: {sweep_direction: dict(trace)}},
+        measurement="netanal",
     )
 
 
@@ -178,22 +267,22 @@ def merge_modules(containers) -> dict:
     """
     merged: dict = {}
     for container in containers:
-        for module_id, envelope in container.items():
+        for module_id, output in container.items():
             if module_id in merged:
                 raise ValueError(
                     f"{module_id!r} appears twice. Each module comes back under "
                     f"its own key, so a repeat would overwrite one module's "
                     f"data with another's."
                 )
-            merged[module_id] = envelope
+            merged[module_id] = output
     return merged
 
 
 def _is_container(obj) -> bool:
-    """Is this the whole return, keyed by module, rather than one envelope?
+    """Is this the whole return, keyed by module, rather than one module's?
 
-    An envelope carries ``results`` and ``call_params`` at the top; a container
-    carries envelopes. Recognized only in order to be refused — nothing
+    One module's output carries ``results`` and ``call_params`` at the top; a
+    container carries those. Recognized only in order to be refused — nothing
     dispatches on it, so there is still exactly one accepted input everywhere.
     """
     return (
@@ -207,13 +296,39 @@ def _is_container(obj) -> bool:
     )
 
 
-def _refuse_container(obj) -> None:
-    """Raise if handed the container where one module's envelope was wanted."""
+def _refuse_container(obj, *, what: str = "sweep result", variable: str = "sweeps") -> None:
+    """Raise if handed the container where one module's output was wanted.
+
+    *what* and *variable* name the measurement in the message, since every
+    driver returns this shape: a netanal handed to the resonance finder wants
+    to be told about ``netanal[module_id]``, not ``sweeps[module_id]``.
+    """
     if _is_container(obj):
         keys = list(obj)
         raise TypeError(
-            f"This is the whole sweep result, keyed by module "
-            f"({_named(keys)}). Pass one module's data: sweeps[{keys[0]!r}]."
+            f"This is the whole {what}, keyed by module "
+            f"({_named(keys)}). Pass one module's data: {variable}[{keys[0]!r}]."
+        )
+
+
+def _refuse_netanal(obj) -> None:
+    """Raise if handed a netanal's output where a sweep's was wanted.
+
+    Everything above a direction is identical between the two, and below it a
+    netanal has the arrays where a sweep has ``{name: section}``. So a reader
+    that walked a netanal would find ``frequencies`` and ``iq_counts`` where it
+    expected resonator names and hand back arrays dressed as sweeps — no
+    exception anywhere, just results that are wrong. Hence a guard rather than
+    a docstring: this is the one confusion the shared shape makes possible,
+    and it is silent.
+    """
+    if isinstance(obj, Mapping) and obj.get("measurement") == "netanal":
+        raise TypeError(
+            "This is a netanal, not a sweep. A netanal measures one wideband "
+            "trace rather than a section per resonator, so there is nothing "
+            "here to look up by name — its arrays are "
+            "netanal['results'][0]['upward']. To find resonances in it, use "
+            "rfmux.tuning.find_resonances_in_netanal()."
         )
 
 
@@ -248,7 +363,7 @@ def pack_results(
             Snapshotted with ``to_dict`` for provenance.
 
     Returns:
-        dict: ``{module_id: envelope}``, the envelope holding
+        dict: ``{module_id: output}``, one module's output holding
         ``schema_version``, ``module``, ``call_params`` and ``results``.
 
         ``results`` is keyed by amplitude iteration, numbered from 0 in the
@@ -280,12 +395,14 @@ def pack_results(
         module,
         call_params,
         {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
+        measurement="multiamp_multisweep",
     )
 
 
 def _iterations(results: Mapping) -> dict:
     """The ``results`` block, with a useful error when handed the wrong dict."""
     _refuse_container(results)
+    _refuse_netanal(results)
     try:
         return results["results"]
     except (TypeError, KeyError):
@@ -371,14 +488,14 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
 
 def find_iteration_matching_amplitude(
     results: Mapping, name: str, amplitude: float | None = None
-) -> dict:
+) -> tuple[dict, int]:
     """The sweep of *name* taken closest to *amplitude*.
 
     Args:
         results: what ``multiamp_multisweep`` returned.
         name: whose amplitudes to match against. Required, because a relative
-            ladder gives every resonator its own: R0001 walking 1→2→4 µ and
-            R0002 walking 3→6→12 µ share an iteration number and nothing else,
+            ladder gives every resonator its own: BOTA walking 1→2→4 µ and
+            KOZR walking 3→6→12 µ share an iteration number and nothing else,
             so "the iteration at 4 µ" is only a question about one of them.
         amplitude: the amplitude to match, in normalized DAC units. Defaults to
             *name*'s own bias amplitude, read from the catalog snapshot in
@@ -386,16 +503,16 @@ def find_iteration_matching_amplitude(
             taken where this resonator is actually biased?"
 
     Returns:
-        dict: ``{iteration: {direction: sweep}}``, the one matching rung of
-        what :func:`collect_amplitude_iterations_for` returns. The iteration
-        number is the key rather than the whole answer because the sweep under
-        it is what a caller wants next, and the same loop body reads either
-        function's output.
+        tuple: ``({direction: sweep}, iteration)`` — the matching sweeps, one
+        per direction measured, and the iteration they were taken at. The sweep
+        comes first because it is what a caller wants next; the number is there
+        for indexing anything else by the same rung, and can be dropped with
+        ``sweeps, _ =``.
 
     Nearest wins, and there is always a nearest — floats from a ladder rarely
     compare equal, so matching on equality would find nothing. A caller who
-    needs the match to be close can read it off the entry it got back:
-    ``entry["upward"]["sweep_amplitude"]``.
+    needs the match to be close can read it off the sweeps it got back:
+    ``sweeps["upward"]["sweep_amplitude"]``.
 
     Raises:
         KeyError: if *name* was not swept.
@@ -404,7 +521,7 @@ def find_iteration_matching_amplitude(
     """
     collected = collect_amplitude_iterations_for(results, name)
     iteration = _iteration_matching_amplitude(results, name, amplitude, collected)
-    return {iteration: collected[iteration]}
+    return collected[iteration], iteration
 
 
 def _iteration_matching_amplitude(
@@ -437,10 +554,11 @@ def _iteration_matching_amplitude(
 def _bias_amplitude_of(results: Mapping, name: str) -> float:
     """*name*'s bias amplitude, from the catalog snapshot in call_params."""
     # The one read that does not go through _iterations, so it needs its own
-    # guard: a container has no call_params of its own, and without this it
-    # would be reported as a sweep that had no catalog rather than as the
-    # wrong dict.
+    # guards: a container has no call_params of its own, and a netanal's have no
+    # catalog in them, so without these either would be reported as a sweep that
+    # had no catalog rather than as the wrong dict.
     _refuse_container(results)
+    _refuse_netanal(results)
 
     catalog = results.get("call_params", {}).get("catalog")
     if catalog is None:

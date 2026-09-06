@@ -9,9 +9,13 @@ Two entry points, and the split between them is the point of the module:
     sweep, a sweep loaded from disk, a simulated trace, or data from another
     instrument.
 
-``find_resonances_in_netanal(netanal, ...)``
-    A convenience wrapper over the above: it unpacks what ``crs.take_netanal()``
-    returned — one module or several — and hands back results in the same shape.
+``find_resonances_in_netanal(module_netanal, ...)``
+    A convenience wrapper over the above: it unpacks one module's output out of
+    what ``crs.take_netanal()`` returned — ``netanal[module_id]``, one module at
+    a time as everywhere else in this package — and searches the trace in it. It
+    also writes the search into that output, beside the trace it searched, so
+    saving is an update to the netanal file rather than a second file to keep in
+    step with it.
 
 A third function comes at the same question from the other end, once the array
 has been swept properly:
@@ -75,6 +79,7 @@ __all__ = [
     "find_resonances",
     "find_resonances_in_netanal",
     "find_sweeps_with_nearby_resonances",
+    "netanal_trace",
     "magnitude_db",
 ]
 
@@ -538,101 +543,130 @@ def _count_pass(candidates, expected: int, who: str):
 # ─── Netanal convenience wrapper ──────────────────────────────────────────────
 
 
+def netanal_trace(module_netanal) -> dict:
+    """The one trace inside one module's netanal output.
+
+    A netanal is one amplitude sweeping upward in frequency, so its arrays live
+    at ``results[0]["upward"]`` — the same walk a sweep takes to reach a
+    section, one level shorter because there is nothing to key by name. This is
+    that walk, with an error worth reading when the output is not a netanal's.
+
+    Args:
+        module_netanal: one module's netanal output, ``netanal[module_id]``.
+
+    Returns:
+        dict: ``frequencies``, ``iq_counts``, ``iq_volts``, ``sweep_amplitude``
+        and ``sweep_direction``.
+    """
+    _refuse_container(module_netanal, what="netanal", variable="netanal")
+
+    if not isinstance(module_netanal, dict) or "results" not in module_netanal:
+        got = (
+            list(module_netanal) if isinstance(module_netanal, dict)
+            else type(module_netanal).__name__
+        )
+        raise TypeError(
+            f"Expected one module's netanal — what take_netanal returned, "
+            f"indexed by module — got {got}."
+        )
+    # Strictly, rather than treating a missing 'measurement' as permission: a
+    # sweep's output walks to this same depth and holds {name: section} there,
+    # so a tolerant check would hand back a dict of sections dressed as a trace.
+    if module_netanal.get("measurement") != "netanal":
+        raise TypeError(
+            f"This is a "
+            f"{module_netanal.get('measurement') or 'unlabelled'} result, "
+            f"not a netanal. A sweep's results are keyed by resonator — fit "
+            f"them with rfmux.tuning.fit_sweeps() or read them out with "
+            f"rfmux.tuning.sweep_results."
+        )
+
+    for by_direction in module_netanal["results"].values():
+        for trace in by_direction.values():
+            return trace
+    raise ValueError("This netanal has no trace in it — nothing was measured.")
+
+
 def find_resonances_in_netanal(
-    netanal, *, label: str | None = None, save=None, **kwargs
-):
-    """Run :func:`find_resonances` on the output of ``crs.take_netanal()``.
+    module_netanal, *, label: str | None = None, save=None, **kwargs
+) -> ResonanceSearch:
+    """Run :func:`find_resonances` on **one module's** netanal output.
 
-    Unpacks the netanal container and returns results in the same shape:
-
-    * a single result dict → one :class:`ResonanceSearch`
-    * a list of them (what ``take_netanal(module=[1, 2])`` returns) → a list
-    * a dict keyed by module number → a dict keyed the same way, each result
-      labelled by its module
-
-    ``label`` names the trace in warnings; the multi-trace forms derive one per
-    entry unless you pass your own. It doubles as the name on the saved file,
-    which is why there is not a second label argument to keep straight.
-
-    ``save`` writes the search to the output folder — a new
-    ``find_resonances_*.pkl``, since a search is something the netanal did not
-    already contain, not an annotation on it. One file per call however many
-    traces went in. Defaults to ``rfmux.tuning.store.autosave_enabled()``.
-
-    Remaining keyword arguments go straight through to :func:`find_resonances`::
+    ::
 
         netanal = await crs.take_netanal(module=2, amp=0.001)
-        found = find_resonances_in_netanal(netanal, min_dip_depth_db=0.5)
-        catalog = found.to_catalog(module=2, amplitude=0.001)
+        module_netanal = netanal[crs.module[2].index()]   # "crs0042_rmod2"
+
+        search = find_resonances_in_netanal(module_netanal, min_dip_depth_db=0.5)
+        catalog = search.to_catalog(module=2, amplitude=0.001)
+
+    One module at a time, as :func:`~rfmux.tuning.fits.fit_sweeps` and
+    :func:`~rfmux.tuning.bias.find_bias_points` take one module at a time; the
+    whole dict keyed by module is refused with a message naming the modules it
+    holds. How deep a dip has to be and how wide it may get are properties of
+    the band a module looks at and the resonators sitting in it, so eight
+    modules are eight decisions. Making the caller write the loop is what keeps
+    those decisions visible::
+
+        searches = {
+            module_id: find_resonances_in_netanal(m, min_dip_depth_db=1.0)
+            for module_id, m in netanal.items()
+        }
+
+    The search also goes *into* that module's output, beside the trace it
+    searched, as ``resonance_search`` — the same move
+    :func:`~rfmux.tuning.fits.fit_sweeps` makes with its fits, and for the same
+    reason: a search is about one trace, so it belongs with that trace rather
+    than in a file of its own that has to be kept paired with it. A trace has
+    one search, so searching the same netanal again replaces what the last call
+    left. Reading it back is an index and a ``from_dict``, the same as any
+    stored class::
+
+        trace = netanal_trace(module_netanal)
+        search = ResonanceSearch.from_dict(trace["resonance_search"])
+
+    ``label`` names the trace in warnings, and defaults to the module this
+    output came from, so a script working through eight of them says which one
+    complained. It is also the name a *first* save puts on the file — a netanal
+    that has been saved already keeps the name it has, and the derived module
+    label is never written to a file, only used in messages.
+
+    ``save`` writes the netanal back out. What changed on disk is the netanal,
+    so this updates the file it came from — the whole file, other modules
+    included, when this output was saved as part of a container. A netanal that
+    was never saved gets a new file. Defaults to
+    ``rfmux.tuning.store.autosave_enabled()``.
+
+    Remaining keyword arguments go straight through to :func:`find_resonances`.
 
     The search itself does not need this wrapper — it is here so the common case
     is one call, while the algorithm stays free of any measurement format.
     """
-    if isinstance(netanal, (list, tuple)):
-        searches = [
-            # save=False on the way down: one call is one file, and the
-            # assembled result is saved once below.
-            find_resonances_in_netanal(
-                entry, label=label or f"sweep {i}", save=False, **kwargs
-            )
-            for i, entry in enumerate(netanal)
-        ]
-        store.maybe_save(
-            [s.to_dict() for s in searches],
-            "find_resonances",
-            save=save,
-            label=label,
-        )
-        return searches
+    # Every shape but one module's netanal is refused in here, container first.
+    trace = netanal_trace(module_netanal)
 
-    if not isinstance(netanal, dict):
-        raise TypeError(
-            f"Expected a netanal result dict (or a list/dict of them), got "
-            f"{type(netanal).__name__}."
-        )
-
-    # A dict keyed by module number, each value a netanal result. Distinguished
-    # from a single result by its keys: take_netanal names its arrays with
-    # strings, so integer keys mean modules. The file_metadata key that saving
-    # adds is a string too, so it is stripped before the test rather than left
-    # to make a saved result look like a single trace.
-    keys = [k for k in netanal if k != store.METADATA_KEY]
-    if keys and all(isinstance(k, (int, np.integer)) for k in keys):
-        searches = {
-            module: find_resonances_in_netanal(
-                netanal[module], label=label or f"module {module}",
-                save=False, **kwargs
-            )
-            for module in keys
-        }
-        store.maybe_save(
-            {module: s.to_dict() for module, s in searches.items()},
-            "find_resonances",
-            save=save,
-            label=label,
-        )
-        return searches
-
-    missing = {"frequencies", "iq_complex"} - set(netanal)
-    if missing:
-        raise KeyError(
-            f"This does not look like a take_netanal result: no "
-            f"{' or '.join(sorted(missing))} in it (keys: "
-            f"{', '.join(repr(k) for k in netanal)}). Call find_resonances() "
-            f"with the two arrays directly if your data is in another shape."
-        )
+    module = module_netanal.get("module")
     search = find_resonances(
-        netanal["frequencies"], netanal["iq_complex"], label=label, **kwargs
+        trace["frequencies"],
+        trace["iq_counts"],
+        label=label or (f"module {module}" if module is not None else None),
+        **kwargs,
     )
-    store.maybe_save(
-        search.to_dict(),
-        "find_resonances",
-        save=save,
-        label=label,
-        # The netanal this came off records its own module only in the
-        # file_metadata a save put there, so this is where it comes from.
-        module=netanal.get(store.METADATA_KEY, {}).get("module"),
-    )
+    # In place, before the save: the netanal is what gets written, and the
+    # search is now part of it.
+    #
+    # The whole to_dict, searched trace included, so what goes into the netanal
+    # is a complete ResonanceSearch dict that ResonanceSearch.from_dict reads
+    # with no help. It looks like it duplicates the arrays beside it and mostly
+    # does not: the search's frequencies *are* the trace's array, which pickle
+    # stores once and restores shared, so the file grows by the dB copy of the
+    # magnitudes and nothing else. Cheap enough not to trade for a block that
+    # only means something to a reader who knows to put the arrays back.
+    trace["resonance_search"] = search.to_dict()
+    # label, not the derived one: a module number belongs in a warning, not in
+    # the name of a file that may hold seven other modules. No module= either —
+    # a netanal's output records the module it measured.
+    store.maybe_save(module_netanal, "netanal", save=save, label=label)
     return search
 
 

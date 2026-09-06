@@ -99,10 +99,15 @@ Most measurement algorithms are registered on the CRS object itself, so you call
 them as methods rather than importing them — `module` is keyword-only:
 
 ```python
-# Sweep 600 MHz - 1.1 GHz and return frequencies, iq_complex, phase_degrees
-result = await crs.take_netanal(
+# Sweep 600 MHz - 1.1 GHz
+netanal = await crs.take_netanal(
     amp=0.001, fmin=0.6e9, fmax=1.1e9, npoints=50000, module=1
 )
+
+# Keyed by module, one entry per module swept, the way every measurement
+# algorithm returns its results. Under each module's output is what it measured.
+trace = netanal[crs.module[1].index()]["results"][0]["upward"]
+frequencies, iq_counts = trace["frequencies"], trace["iq_counts"]
 ```
 
 ### Acquiring Samples

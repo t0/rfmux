@@ -7,7 +7,7 @@ Fitting is a separate step, run by hand on data that exists::
 
     module_sweeps = sweeps[crs.module[2].index()]
     report = fit_sweeps(module_sweeps)
-    module_sweeps["results"][0]["upward"]["R0001"]["fits"]["skewed"]["params"]["Qr"]
+    module_sweeps["results"][0]["upward"]["BOTA"]["fits"]["skewed"]["params"]["Qr"]
 
 A sweep result is keyed by module, and everything here takes *one module's*
 value out of it. Stepping into the module you mean is the caller's job: a
@@ -94,7 +94,11 @@ from scipy.optimize import OptimizeWarning, curve_fit
 
 from . import store
 from .store import plain
-from .sweep_results import _iteration_matching_amplitude, _refuse_container
+from .sweep_results import (
+    _iteration_matching_amplitude,
+    _refuse_container,
+    _refuse_netanal,
+)
 
 __all__ = [
     "MODELS",
@@ -185,10 +189,10 @@ class SweepFit:
 
     @property
     def where(self) -> str:
-        """A short label for messages: ``R0001@2 downward``.
+        """A short label for messages: ``BOTA@2 downward``.
 
         Always both coordinates, because every sweep has both — a single one is
-        ``R0001@0 upward``, which is where it was taken.
+        ``BOTA@0 upward``, which is where it was taken.
         """
         return f"{self.name}@{self.iteration} {self.direction}"
 
@@ -658,6 +662,7 @@ def _walk(sweeps):
     being the ladder of length one that it is.
     """
     _refuse_container(sweeps)
+    _refuse_netanal(sweeps)
 
     if not isinstance(sweeps, Mapping):
         raise TypeError(

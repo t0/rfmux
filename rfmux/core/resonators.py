@@ -24,10 +24,10 @@ stored here. Analysis reduces a sweep to the handful of scalars that belong on
 a ``BiasPoint`` and the traces themselves stay with the caller, so the catalog
 is cheap to copy, cheap to save, and cannot disagree with itself.
 
-``reference-notebooks/Demos/network_analyses_find_resonances_make_resonator_catalog.md``
-works through all of this against a simulated array, including what the frozen
-bias point means the first time you retune a detector and find its calibration
-gone. Read that before relying on the invariants here.
+``reference-notebooks/Demos/resonator_catalogs.md`` works through all of this
+against a catalog seeded from a recorded network analysis, including what the
+frozen bias point means the first time you retune a detector and find its
+calibration gone. Read that before relying on the invariants here.
 
 """
 
@@ -39,8 +39,9 @@ import io
 import math
 from dataclasses import dataclass, field, replace, asdict
 
-from typing import Iterable, Iterator, Literal
+from typing import Callable, Iterable, Iterator, Literal, Sequence
 
+from ..resonator_names import syllabic_names
 from .transferfunctions import BASE_FREQUENCY
 
 
@@ -334,7 +335,7 @@ class ResonatorCatalog:
         frequencies_hz: Iterable[float],
         module: int,
         amplitude: float,
-        names: list[str] | None = None,
+        names: list[str] | Callable[[Sequence[float]], list[str]] | None = None,
         **kwargs,
     ) -> ResonatorCatalog:
         """Seed a catalog from found resonances. Channels 1..N in frequency order.
@@ -349,15 +350,49 @@ class ResonatorCatalog:
         a real measurement choice, and there is no value that is right for an
         arbitrary array.
 
-        Supplied ``names`` are paired with ``frequencies_hz`` positionally
-        *before* sorting, so parallel lists stay associated no matter what
-        order they arrive in. Without names, resonators are called R0001… in
-        frequency order.
+        This is where a resonator's name is minted, and it is minted once: from
+        here on the name is the catalog's key, it keys every result dict the
+        measurement algorithms return, and it round-trips through ``to_dict``
+        and ``to_csv``.
+
+        ``names`` is either a list or a namer. A **list** is paired with
+        ``frequencies_hz`` positionally *before* sorting, so parallel lists stay
+        associated no matter what order they arrive in. A **namer** is a
+        function of the sorted frequencies returning one name each, and the
+        default is
+        :func:`~rfmux.resonator_names.syllabic_names` — short made-up words like
+        ``BOTA``, drawn fresh each time::
+
+            from rfmux.resonator_names import (
+                numbered_names, syllabic_names_from_frequency)
+
+            ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
+            ...(names=numbered_names)                   # R0001…
+            ...(names=syllabic_names_from_frequency)    # stable per resonator
+            ...(names=partial(numbered_names, prefix="kid"))
+
+        A drawn name is deliberately not an index. ``R0007`` asserts a position
+        in frequency order, and that assertion goes stale the first time a
+        resonator is removed or retuned while still looking authoritative. The
+        ordering is not lost — ``channel`` records it, and ``resonators()``
+        recomputes it live from the bias frequencies, which is the version that
+        stays true.
         """
         freqs = [float(f) for f in frequencies_hz]
         if names is None:
-            paired = [(f, None) for f in sorted(freqs)]
-            paired = [(f, f"R{i + 1:04d}") for i, (f, _) in enumerate(paired)]
+            names = syllabic_names
+        if callable(names):
+            ordered = sorted(freqs)
+            drawn = names(ordered)
+            if len(drawn) != len(ordered):
+                # getattr, not .__name__: a partial() has no name, and partial
+                # is what the docstring above recommends for a custom prefix.
+                who = getattr(names, "__name__", repr(names))
+                raise ValueError(
+                    f"{who} returned {len(drawn)} names for "
+                    f"{len(ordered)} frequencies."
+                )
+            paired = list(zip(ordered, drawn))
         else:
             if len(names) != len(freqs):
                 raise ValueError(f"{len(names)} names for {len(freqs)} frequencies.")
@@ -483,7 +518,7 @@ class ResonatorCatalog:
         """Plain builtins only — files never contain these classes.
 
         ``resonators`` is keyed by name, the same way the catalog itself is, so
-        a reader that wants one resonator says ``d["resonators"]["R0007"]``
+        a reader that wants one resonator says ``d["resonators"]["BOTA"]``
         rather than scanning for it. The name is the key and so is not repeated
         inside the entry. Insertion is in frequency order, which dicts keep,
         but nothing needs to lean on that — ``from_dict`` takes the order back

@@ -32,7 +32,7 @@ What that costs, next time the tests run:
   failure takes several four-minute runs before it becomes clear the cause is
   not in the repository at all.
 * `multisweep.md` and
-  `network_analyses_find_resonances_make_resonator_catalog.md` pass throughout,
+  `network_analysis_find_resonances.md` pass throughout,
   because they do not stand up a streamer. That split — which notebooks call the
   guard — is the quickest way to recognise this.
 
@@ -319,6 +319,14 @@ is a file that knows its own name and nothing about its siblings, so
 reconstructing "the run that produced this catalog" means reading timestamps.
 Design doc §2 and §11 step 4 describe the folder; `store.py` is where it goes.
 
+One pairing that used to need it does not any more: `find_resonances_in_netanal`
+writes its search into the netanal, under `resonance_search` beside the trace it
+searched, and saves the netanal back over its own file. Analysis that annotates
+a measurement now looks the same wherever you meet it — one module's output in,
+the annotation written into it, the file it came from updated — so `fit_sweeps`
+and the resonance finder are the same shape of call, and there is no
+`find_resonances_*.pkl` to keep matched with the netanal it came from.
+
 Two smaller follow-ups it should pick up:
 
 * **The legacy readers** still inline in `app_runtime.py` — top-level
@@ -330,33 +338,40 @@ Two smaller follow-ups it should pick up:
   `wheel.exclude` would close it properly — it needs >=0.5.0, and
   `pyproject.toml` currently floors at 0.3.3.
 
-## Normalize what `take_netanal` returns onto the sweep container shape
+## Rewire Periscope onto the netanal container shape
 
-`take_netanal` is the only driver that does not return a module-keyed envelope.
-It returns a flat `{frequencies, iq_complex, phase_degrees}` for one module and a
-**bare list** for several (`take_netanal.py:83-114`), and in neither form does it
-record which module produced the data. `multisweep` and `multiamp_multisweep`
-both return `{module_id: {schema_version, module, call_params, results}}` from
-`pack_sweep` / `pack_results`.
+`take_netanal` now returns `{module_id: {schema_version, measurement, module,
+call_params, results}}` like every other driver, with the trace at
+`results[0]["upward"]` and its arrays named `iq_counts`/`iq_volts`. That is a
+breaking change to the shape Periscope reads, and Periscope was deliberately
+left on the old one:
 
-The cost of the difference, in three places:
+* `tools/periscope/tasks.py:447` unpacks `result['frequencies']`,
+  `result['iq_complex']` and `result['phase_degrees']` straight off the top, and
+  `tasks.py:691` reads `iq_complex` out of a stored dict.
+* `network_analysis_panel.py` and `network_analysis_export.py` carry their own
+  `parameters`/`modules` payload, which `call_params` now duplicates.
 
-* `find_resonances_in_netanal` (`tuning/find_resonances.py`) exists largely to
-  sniff which of the three shapes it was handed — flat dict, list, or a dict
-  keyed by module number that nothing actually produces any more.
-* `store.py`'s `_blocks` needs two of its four cases for netanal alone, and has
-  to be *told* the module number by the driver because the payload cannot say.
-* A netanal result on disk records its module only in the `file_metadata` a save
-  put there. Load one that was written before autosave and there is nothing.
+Phase is `np.angle(iq_counts)` at the point of use; the module number is in
+each module's output rather than passed alongside. `store.py`'s `_blocks` has
+already lost its list case, which existed for the old netanal return and had no
+producer left; saving a list now raises and says to key it by module.
 
-Packing netanal through the same envelope would delete all three. It is a
-breaking change to the shape Periscope reads (`tools/periscope/tasks.py`) and to
-`network_analysis_export.py`'s own `parameters`/`modules` payload, so it wants to
-land with the Periscope rewire rather than before it.
+Two smaller things deferred with it:
+
+* **`Demos/simplified_tuning_flow.py`** still reads the old flat shape, and
+  `test/algorithms/test_measurement_flow.py` drives it with `AsyncMock`s that
+  return the old shape too. The mocked tests still pass, since they never reach
+  the real driver; `test_mock_mode_execution` (slow_acquisition) does and will
+  fail until the demo is rewired.
+* **`take_netanal`'s `rotate_phase_to_0`** is the last rotation the measurement
+  applies to its own data — the NCO stitch is gone. It is recorded in
+  `call_params` so a file says whether it ran, but by the same argument that
+  moved rotation out of `multisweep` it belongs in an analysis, not here.
 
 ## Carry the "How to use this document" section into later notebooks
 
-`Demos/network_analyses_find_resonances_make_resonator_catalog.md` opens with a
+`Demos/network_analysis_find_resonances.md` opens with a
 "How to use this document" section covering the things every reader of a jupytext
 demo trips over: run the cells in order, no saved outputs, how to open a `.md` in
 JupyterLab versus VS Code (pair it with jupytext sync), and how to tell which

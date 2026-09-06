@@ -30,7 +30,7 @@ starts:
 
 | You have | You pass | Sweep sections keyed by |
 |---|---|---|
-| Already done a netanal and used `rfmux.tuning.find_resonances` to make a `rfmux.core.resonators.ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"R0001"`) |
+| Already done a netanal and used `rfmux.tuning.find_resonances` to make a `rfmux.core.resonators.ResonatorCatalog` | a `ResonatorCatalog` | resonator name (`"BOTA"`) |
 | A list of frequencies | `center_frequencies=` + `amp=` | section name (`"S0001"`) |
 
 Those names key the sweep sections, which sit a few levels inside what the call
@@ -48,8 +48,9 @@ each resonator's frequency, its probe amplitude and its hardware channel.
 | Finding resonances first | `rfmux.tuning.find_resonances` |
 
 Seeding a catalog from a network analysis is the subject of
-`network_analyses_find_resonances_make_resonator_catalog.md`. If you haven't done
-that yet and are unfamiliar with the workflow, start there, then come back here.
+`network_analysis_find_resonances.md`, and the catalog itself of
+`resonator_catalogs.md`. If you haven't done that yet and are unfamiliar with the
+workflow, start there, then come back here.
 
 One `multisweep` call is always *one* sweep, at one amplitude per resonator, in
 one direction. Iterating the same array over several amplitudes is a layer on
@@ -121,7 +122,7 @@ We'll use ten simulated pre-tuned MKIDs. The mock mode session uses a fixed rand
 so every time we regenerate the array the results will be the same.
 The KIDs are already biased, so we can just read back their bias information to make a `ResonatorCatalog`.
 That is where
-`network_analyses_find_resonances_make_resonator_catalog.md` leaves off, so this
+`network_analysis_find_resonances.md` leaves off, so this
 notebook picks up from there and is about multisweep rather than about finding
 resonances. 
 
@@ -162,8 +163,12 @@ bias_frequencies = [
     for channel in range(1, MOCK_CONFIG["num_resonances"] + 1)
 ]
 
-# from_frequencies sorts by frequency, numbers the resonators R0001… in that
-# order, assigns channels 1..N, and parks every bias point at PROBE_AMPLITUDE.
+# from_frequencies sorts by frequency, assigns channels 1..N in that order,
+# parks every bias point at PROBE_AMPLITUDE, and gives each resonator a short
+# made-up name — BOTA, KOZR, and so on. The names are drawn fresh each run and
+# carry no ordering, which is the point: the ordering lives on the channel and
+# in catalog.names(), where it stays true after a resonator is removed or
+# retuned. See resonator_catalogs.md for the naming schemes on offer.
 catalog = ResonatorCatalog.from_frequencies(
     bias_frequencies,
     module=MODULE,
@@ -171,6 +176,12 @@ catalog = ResonatorCatalog.from_frequencies(
 )
 
 print(catalog)
+
+# This notebook looks closely at three particular resonators. Read their names
+# off the catalog rather than typing them in — which is what your own scripts
+# should do too, drawn names or not.
+first_resonator, second_resonator, third_resonator = catalog.names()[:3]
+print(f"\nlooking at {first_resonator}, {second_resonator} and {third_resonator}")
 ```
 
 ## 2. Do a multisweep using the resonator catalog
@@ -218,7 +229,7 @@ to say what produced it.
 ```python
 module_sweeps = ms[crs.module[MODULE].index()]
 
-print(f"envelope       {list(module_sweeps)}")
+print(f"module output  {list(module_sweeps)}")
 print(f"module         {module_sweeps['module']}")
 print(f"span_hz        {module_sweeps['call_params']['span_hz']}")
 print(f"amplitude steps {list(module_sweeps['results'])}")
@@ -251,7 +262,7 @@ Here is a convenience function to extract the sweep sections of a particular mea
 def sections_of(sweeps, module=MODULE, step=0, direction="upward"):
     """The {name: entry} sweep sections of one sweep, from what a macro returned.
 
-    Analysis functions take *one module's* envelope, never the whole dict, so
+    Analysis functions take *one module's* output, never the whole dict, so
     stepping into the module you mean is deliberate rather than guessed at.
     """
     return sweeps[crs.module[module].index()]["results"][step][direction]
@@ -261,7 +272,7 @@ Within a given multisweep measurement, each data entry under `'results'` holds t
 is:
 
 ```python
-entry = sweep_sections["R0001"]
+entry = sweep_sections[first_resonator]
 for key, value in entry.items():
     if isinstance(value, np.ndarray):
         print(f"{key:<30} ndarray{value.shape} {value.dtype}")
@@ -315,10 +326,10 @@ ms_louder = await crs.multisweep(
     amp=PROBE_AMPLITUDE * 2,
 )
 
-print(f"catalog bias amplitude   {catalog['R0001'].bias.amplitude}")
-print(f"swept at (default)       {sections_of(ms)['R0001']['sweep_amplitude']}")
-print(f"swept at (override)      {sections_of(ms_louder)['R0001']['sweep_amplitude']}")
-print(f"catalog after the sweep  {catalog['R0001'].bias.amplitude}  ← unchanged")
+print(f"catalog bias amplitude   {catalog[first_resonator].bias.amplitude}")
+print(f"swept at (default)       {sections_of(ms)[first_resonator]['sweep_amplitude']}")
+print(f"swept at (override)      {sections_of(ms_louder)[first_resonator]['sweep_amplitude']}")
+print(f"catalog after the sweep  {catalog[first_resonator].bias.amplitude}  ← unchanged")
 
 # call_params records the amp you asked for, verbatim — a number here, None when
 # you let the catalog decide. What each resonator was *actually* probed at is
@@ -333,8 +344,8 @@ Or, using a per-resonator amplitude mapping:
 
 ```python
 per_resonator_amplitude_mapping = {r.name: r.bias.amplitude for r in catalog}
-per_resonator_amplitude_mapping["R0001"] = PROBE_AMPLITUDE * 4
-per_resonator_amplitude_mapping["R0002"] = PROBE_AMPLITUDE / 2
+per_resonator_amplitude_mapping[first_resonator] = PROBE_AMPLITUDE * 4
+per_resonator_amplitude_mapping[second_resonator] = PROBE_AMPLITUDE / 2
 
 mixed_amplitude_ms = await crs.multisweep(
     catalog,
@@ -520,8 +531,8 @@ steps ignore the catalog's amplitudes entirely and apply the same thing to
 all resonators.
 
 ```python
-catalog["R0002"].set_bias(amplitude=PROBE_AMPLITUDE * 4)
-catalog["R0003"].set_bias(amplitude=PROBE_AMPLITUDE / 2)
+catalog[second_resonator].set_bias(amplitude=PROBE_AMPLITUDE * 4)
+catalog[third_resonator].set_bias(amplitude=PROBE_AMPLITUDE / 2)
 
 for r in list(catalog)[:4]:
     print(f"{r.name}  bias amplitude {r.bias.amplitude:.5f}")
@@ -585,7 +596,7 @@ def report(record):
     amplitudes = record["amplitudes"]
     print(f"  [{record['completed']}/{record['total']}] "
           f"step {record['step']} {record['direction']:<8} "
-          f"R0001 at {amplitudes['R0001']:.5f}")
+          f"{first_resonator} at {amplitudes[first_resonator]:.5f}")
 
 multiamp_ms = await crs.multiamp_multisweep(
     catalog,
@@ -619,7 +630,8 @@ print(f"directions            {list(multiamp_module_results['results'][0])}")
 ```python
 first_sweep_iteration_sections = sections_of(multiamp_ms)
 print(f"step 0, upward: {list(first_sweep_iteration_sections)[:4]} …")
-print(f"R0001 swept at {first_sweep_iteration_sections['R0001']['sweep_amplitude']:.5f}")
+print(f"{first_resonator} swept at "
+      f"{first_sweep_iteration_sections[first_resonator]['sweep_amplitude']:.5f}")
 
 print(f"\ncall_params: {list(multiamp_module_results['call_params'])}")
 print(f"schedule as stored: {multiamp_module_results['call_params']['amp_schedule']}")
@@ -650,7 +662,7 @@ from rfmux.tuning import (
 ### Get one resonator across every amplitude
 
 ```python
-iterations_of_a_resonator = collect_amplitude_iterations_for(multiamp_module_results, "R0001")
+iterations_of_a_resonator = collect_amplitude_iterations_for(multiamp_module_results, first_resonator)
 
 for iteration, by_direction in iterations_of_a_resonator.items():
     section = by_direction["upward"] # get the actual sweep section for that resonator at that iteration
@@ -717,7 +729,7 @@ def plot_amplitude_iterations(results, name, direction="upward"):
     plt.show()
 
 
-plot_amplitude_iterations(multiamp_module_results, "R0001")
+plot_amplitude_iterations(multiamp_module_results, first_resonator)
 ```
 
 ### Get every resonator's data at a particular amplitude step
@@ -784,27 +796,26 @@ plot_sections_at_iteration(multiamp_module_results, 2)
 
 ### get the sweep taken at a particular amplitude
 
-This one comes back in the same `{step: {direction: section}}` shape as
-`collect_amplitude_iterations_for`, one step deep — so the step number is the
-key, and the sweep it found is right there rather than something to go and look
-up.
+This one hands back two things: the sweeps it matched, `{direction: section}`
+as they sit under a step, and the step number they were taken at.
 
 ```python
-for name in ("R0001", "R0002", "R0003"):
+for name in (first_resonator, second_resonator, third_resonator):
     bias = catalog[name].bias.amplitude
-    at_bias = find_iteration_matching_amplitude(multiamp_module_results, name, amplitude=bias)
-    step, by_direction = next(iter(at_bias.items()))
+    at_bias, step = find_iteration_matching_amplitude(
+        multiamp_module_results, name, amplitude=bias
+    )
     print(f"{name}  bias {bias:.5f}  → step {step}, "
-          f"swept at {by_direction['upward']['sweep_amplitude']:.5f}")
+          f"swept at {at_bias['upward']['sweep_amplitude']:.5f}")
 ```
 
 Ask for a *fixed* amplitude instead and the three part company, which is why the
-function needs a name at all. `R0001`, `R0002` and `R0003` are walking different
-ranges, so the same amplitude sits at a different iteration step for each:
+function needs a name at all. The three are walking different ranges, so the
+same amplitude sits at a different iteration step for each:
 
 ```python
 print(f"{'':<8}" + "".join(f"{s:>10}" for s in multiamp_module_results["results"]))
-for name in ("R0001", "R0002", "R0003"):
+for name in (first_resonator, second_resonator, third_resonator):
     amplitudes = [
         by_direction["upward"]["sweep_amplitude"]
         for by_direction in collect_amplitude_iterations_for(
@@ -814,11 +825,11 @@ for name in ("R0001", "R0002", "R0003"):
     print(f"{name:<8}" + "".join(f"{a:>10.5f}" for a in amplitudes))
 
 print()
-for name in ("R0001", "R0002", "R0003"):
-    step, by_direction = next(iter(
-        find_iteration_matching_amplitude(multiamp_module_results, name, 0.002).items()
-    ))
-    got = by_direction["upward"]["sweep_amplitude"]
+for name in (first_resonator, second_resonator, third_resonator):
+    matched, step = find_iteration_matching_amplitude(
+        multiamp_module_results, name, 0.002
+    )
+    got = matched["upward"]["sweep_amplitude"]
     print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
@@ -827,15 +838,15 @@ Note that the matching is on *nearest*, not exact.
 The corollary is that there is *always* a nearest, so the function answers even
 when nothing is remotely close.
 
-For example, if you for an amplitude only `R0002` ever reaches
-and the other two return their top rung regardless:
+For example, ask for an amplitude only the second of the three ever reaches, and
+the other two return their top rung regardless:
 
 ```python
-for name in ("R0001", "R0002", "R0003"):
-    step, by_direction = next(iter(
-        find_iteration_matching_amplitude(multiamp_module_results, name, 0.016).items()
-    ))
-    got = by_direction["upward"]["sweep_amplitude"]
+for name in (first_resonator, second_resonator, third_resonator):
+    matched, step = find_iteration_matching_amplitude(
+        multiamp_module_results, name, 0.016
+    )
+    got = matched["upward"]["sweep_amplitude"]
     print(f"0.01600 for {name}  → step {step}  (actually {got:.5f})")
 ```
 
@@ -865,7 +876,8 @@ both_ways_module_results = both_ways[crs.module[MODULE].index()]
 for step, by_direction in both_ways_module_results["results"].items():
     for direction, sections in by_direction.items():
         print(f"step {step}  {direction:<9} "
-              f"R0001 at {sections['R0001']['sweep_amplitude']:.5f}")
+              f"{first_resonator} at "
+              f"{sections[first_resonator]['sweep_amplitude']:.5f}")
 ```
 
 Both directions of one section, on one pair of axes — amplitude as colour,
@@ -905,7 +917,7 @@ def plot_both_directions(results, name):
     plt.show()
 
 
-plot_both_directions(both_ways_module_results, "R0001")
+plot_both_directions(both_ways_module_results, first_resonator)
 ```
 
 A step swept once and a step swept twice have the same shape — the directions

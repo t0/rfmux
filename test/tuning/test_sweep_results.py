@@ -4,8 +4,8 @@ Packing and reading, with no board and no driver in sight — which is most of
 what a consumer of a sweep ever touches. The emphasis is on the properties the
 rest of the codebase leans on: one shape whatever measured it, a module
 identifier at the top even for one module, nothing stored twice to be readable,
-and readers that refuse the container rather than walking it as if it were an
-envelope.
+and readers that refuse the container rather than walking it as if it were one
+module's output.
 """
 
 import pickle
@@ -96,7 +96,7 @@ def container(
 
 
 def packed(**kwargs):
-    """One module's envelope — what every reader and fitter is handed."""
+    """One module's output — what every reader and fitter is handed."""
     return container(**kwargs)[MODULE_ID]
 
 
@@ -202,7 +202,7 @@ def test_one_module_is_still_keyed_by_module():
         assert list(result) == [MODULE_ID]
 
 
-def test_the_envelope_keeps_the_module_number_as_an_int():
+def test_the_output_keeps_the_module_number_as_an_int():
     """The key names the board and module; the int is what goes back into a
     hardware call, and re-parsing it out of the string would be worse."""
     assert swept()[MODULE_ID]["module"] == 2
@@ -255,7 +255,7 @@ def test_the_refusal_names_the_modules_it_found():
         get_amplitudes_at_iteration(whole, 0)
 
 
-def test_one_modules_envelope_is_what_the_readers_take():
+def test_one_modules_output_is_what_the_readers_take():
     """The other half of the refusal above: indexing in is all it takes."""
     whole = container(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
 
@@ -382,10 +382,8 @@ def test_asking_for_an_iteration_that_does_not_exist_is_an_error():
 
 
 def matched_iteration(*args, **kwargs):
-    """The iteration number out of the entry the reader hands back."""
-    matched = find_iteration_matching_amplitude(*args, **kwargs)
-    assert len(matched) == 1
-    return next(iter(matched))
+    """Just the iteration number, for the cases that are only about which."""
+    return find_iteration_matching_amplitude(*args, **kwargs)[1]
 
 
 def test_the_iteration_nearest_a_given_amplitude():
@@ -397,20 +395,20 @@ def test_the_iteration_nearest_a_given_amplitude():
 
 
 def test_the_match_comes_back_as_the_sweep_that_was_matched():
-    """Keyed by iteration, the same shape one rung of
-    collect_amplitude_iterations_for has — so the sweep is in hand without a
-    second lookup."""
+    """The sweeps themselves alongside the number, so a caller reading the
+    amplitude it landed on needs no second lookup."""
     result = packed(
         schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]),
         directions=("upward", "downward"),
     )
 
-    matched = find_iteration_matching_amplitude(result, "R0001", 1e-2)
+    matched, iteration = find_iteration_matching_amplitude(result, "R0001", 1e-2)
 
-    assert list(matched) == [1]
-    assert set(matched[1]) == {"upward", "downward"}
-    assert matched[1]["upward"]["sweep_amplitude"] == pytest.approx(1e-2)
-    assert matched[1] == collect_amplitude_iterations_for(result, "R0001")[1]
+    assert iteration == 1
+    assert set(matched) == {"upward", "downward"}
+    assert matched["upward"]["sweep_amplitude"] == pytest.approx(1e-2)
+    # the same rung collect_amplitude_iterations_for hands back
+    assert matched == collect_amplitude_iterations_for(result, "R0001")[1]
 
 
 def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():

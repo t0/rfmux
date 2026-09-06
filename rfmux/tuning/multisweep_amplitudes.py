@@ -32,7 +32,7 @@ No iteration — one pass — is the plain constructor::
 
     AmplitudeSchedule()                        # each resonator's own amplitude
     AmplitudeSchedule(0.005)                   # one amplitude for all
-    AmplitudeSchedule({"R0001": 0.004, ...})   # per resonator
+    AmplitudeSchedule({"BOTA": 0.004, ...})   # per resonator
 
 and the iterating forms are classmethods::
 
@@ -78,7 +78,7 @@ _MAX_NAMED = 4
 
 
 def _named(names: Sequence[str]) -> str:
-    """``R0001, R0002 (and 3 more)`` — bounded, so a 500-resonator array's
+    """``BOTA, KOZR (and 3 more)`` — bounded, so a 500-resonator array's
     error message stays readable."""
     shown = ", ".join(names[:_MAX_NAMED])
     extra = len(names) - _MAX_NAMED
@@ -179,7 +179,7 @@ class AmplitudeSchedule:
 
         AmplitudeSchedule()         # one pass, at each resonator's own amplitude
         AmplitudeSchedule(0.005)    # one pass, at 0.005 for everything
-        AmplitudeSchedule({"R0001": 0.004, ...})   # one pass, per resonator
+        AmplitudeSchedule({"BOTA": 0.004, ...})   # one pass, per resonator
 
     which is why *base* is the first argument: that is the only field a caller
     sets by hand with any regularity.
@@ -524,7 +524,7 @@ class AmplitudeSchedule:
     ) -> list[tuple[str, str]]:
         """Amplitudes that fall outside the (0, 1] BiasPoint enforces.
 
-        Reported per step and per name, so the answer is "R0007 overshoots at
+        Reported per step and per name, so the answer is "BOTA overshoots at
         step 5" rather than a failure twenty minutes into the run.
         """
         issues: list[tuple[str, str]] = []

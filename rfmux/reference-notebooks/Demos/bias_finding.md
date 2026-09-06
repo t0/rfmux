@@ -52,7 +52,7 @@ file rather than leaving a second one beside it.
 This notebook starts from a multisweep that was measured earlier and saved to
 disk, so it can get straight to the analysis. How that measurement is set up and
 run is covered in `multisweep.md`, and how you get to a catalog in the first
-place in `network_analyses_find_resonances_make_resonator_catalog.md`.
+place in `network_analysis_find_resonances.md`.
 
 ## How to use this document
 
@@ -176,7 +176,7 @@ print(f"resonators:      {list(multiamp_module_results['results'][0]['upward'])}
 
 Every saved measurement also carries a `file_metadata` block saying what it is,
 when it was taken, what wrote it, and where it lives. It is stamped inside each
-module's envelope rather than at the top of the file, so you reach it wherever
+module's output rather than at the top of the file, so you reach it wherever
 you happen to be already working:
 
 ```python

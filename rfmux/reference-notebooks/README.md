@@ -23,12 +23,13 @@ started yourself, right-click → *Open With* → *Notebook*.
 
 ## Where to start
 
-The first three take the tuning flow a step at a time, in this order:
+The first four take the tuning flow a step at a time, in this order:
 
-- **`Demos/network_analyses_find_resonances_make_resonator_catalog.md`** — sweep
-  a band, find the dips, build the resonator catalog everything downstream
-  passes around. Its second half is a tour of the catalog on its own — building
-  one by hand, CSV and dictionary round trips, the invariants — and needs no
+- **`Demos/network_analysis_find_resonances.md`** — sweep a band, find the dips,
+  and seed the resonator catalog everything downstream passes around.
+- **`Demos/resonator_catalogs.md`** — the catalog on its own: building one by
+  hand, reading and amending it, the invariants, and the CSV and dictionary
+  round trips. It picks up from a saved network analysis, so it needs no
   hardware.
 - **`Demos/multisweep.md`** — look at each resonance closely: one narrow sweep
   per resonator, all of them in parallel, and then the same array over a ladder

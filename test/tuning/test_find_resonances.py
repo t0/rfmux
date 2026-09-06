@@ -15,7 +15,9 @@ from rfmux.tuning import (
     find_resonances,
     find_resonances_in_netanal,
     find_sweeps_with_nearby_resonances,
+    netanal_trace,
 )
+from rfmux.tuning.sweep_results import pack_netanal
 
 pytestmark = pytest.mark.portable
 
@@ -463,51 +465,148 @@ def test_a_missing_iq_key_says_what_the_sweep_holds():
 # ─── netanal wrapper ──────────────────────────────────────────────────────────
 
 
-def a_netanal(**kwargs):
-    """The shape take_netanal returns for a single module."""
+def a_module_netanal(module=1, **kwargs):
+    """One module's netanal output, packed the way take_netanal packs it."""
     frequencies, magnitude = a_sweep(**kwargs)
-    return {
-        "frequencies": frequencies,
-        "iq_complex": magnitude.astype(complex),
-        "phase_degrees": np.zeros(len(frequencies)),
-    }
+    iq = magnitude.astype(complex)
+    return pack_netanal(
+        {
+            "frequencies": frequencies,
+            "iq_counts": iq,
+            "iq_volts": iq * 1e-7,
+            "sweep_amplitude": 0.001,
+            "sweep_direction": "upward",
+        },
+        module_id=f"crs0000_rmod{module}",
+        module=module,
+        amp=0.001,
+        fmin=frequencies[0],
+        fmax=frequencies[-1],
+        npoints=len(frequencies),
+        nsamps=10,
+        max_chans=1023,
+        max_span=500e6,
+        rotate_phase_to_0=True,
+        requested_module=module,
+    )[f"crs0000_rmod{module}"]
 
 
-def test_wrapper_unpacks_a_single_netanal_result():
+def a_netanal(module=1, **kwargs):
+    """The container take_netanal returns, for one module."""
+    return {f"crs0000_rmod{module}": a_module_netanal(module, **kwargs)}
+
+
+def test_wrapper_unpacks_one_modules_netanal():
     truth = TRUTH
-    found = find_resonances_in_netanal(a_netanal(resonances=truth), min_Q=1e4, max_Q=1e6)
+    found = find_resonances_in_netanal(
+        a_module_netanal(resonances=truth), min_Q=1e4, max_Q=1e6
+    )
 
     assert matched(found.resonance_frequencies_hz, truth) == len(truth)
 
 
 def test_wrapper_matches_calling_the_search_directly():
-    netanal = a_netanal()
-    direct = find_resonances(netanal["frequencies"], netanal["iq_complex"])
+    module_netanal = a_module_netanal()
+    trace = netanal_trace(module_netanal)
+    direct = find_resonances(trace["frequencies"], trace["iq_counts"])
 
     assert np.array_equal(
-        find_resonances_in_netanal(netanal).resonance_frequencies_hz,
+        find_resonances_in_netanal(module_netanal).resonance_frequencies_hz,
         direct.resonance_frequencies_hz,
     )
 
 
-def test_wrapper_returns_a_list_for_a_multi_module_sweep():
-    """take_netanal(module=[1, 2]) returns a list; results come back as one."""
-    results = find_resonances_in_netanal([a_netanal(), a_netanal()])
+def test_wrapper_refuses_the_whole_netanal_and_names_the_modules():
+    """One module at a time, as the fitters and the bias finder take one."""
+    netanal = a_netanal(1) | a_netanal(2)
 
-    assert isinstance(results, list) and len(results) == 2
-    assert all(len(r) == 4 for r in results)
+    with pytest.raises(TypeError, match="crs0000_rmod1, crs0000_rmod2"):
+        find_resonances_in_netanal(netanal)
+    # And says which index to pass instead.
+    with pytest.raises(TypeError, match=r"netanal\['crs0000_rmod1'\]"):
+        find_resonances_in_netanal(netanal)
 
 
-def test_wrapper_returns_a_dict_for_module_keyed_input():
-    results = find_resonances_in_netanal({1: a_netanal(), 2: a_netanal()})
-
-    assert set(results) == {1, 2}
-    assert results[2].label == "module 2"
+def test_the_search_is_labelled_by_its_module_unless_you_name_it():
+    """A warning from a loop over eight modules has to say which one."""
+    assert find_resonances_in_netanal(a_module_netanal(2)).label == "module 2"
+    assert find_resonances_in_netanal(
+        a_module_netanal(2), label="cold"
+    ).label == "cold"
 
 
 def test_wrapper_says_what_it_looked_for():
-    with pytest.raises(KeyError, match="take_netanal result"):
-        find_resonances_in_netanal({"nothing": "useful"})
+    with pytest.raises(TypeError, match="Expected one module's netanal"):
+        find_resonances_in_netanal([a_module_netanal()])
+
+
+def test_wrapper_refuses_a_sweep():
+    """A sweep's output walks to the same depth and means something else."""
+    module_netanal = (
+        a_multisweep({"R0001": a_section()}) | {"measurement": "multisweep"}
+    )
+
+    with pytest.raises(TypeError, match="not a netanal"):
+        netanal_trace(module_netanal)
+
+
+def test_wrapper_refuses_an_output_that_does_not_say_what_it_is():
+    """Silence is not permission: {name: section} sits where the trace would."""
+    with pytest.raises(TypeError, match="not a netanal"):
+        netanal_trace(a_multisweep({"R0001": a_section()}))
+
+
+# ─── the search left in the netanal ───────────────────────────────────────────
+
+
+def stored_search(module_netanal) -> ResonanceSearch:
+    """The search out of a netanal: an index and a from_dict, as a caller does it."""
+    return ResonanceSearch.from_dict(
+        netanal_trace(module_netanal)["resonance_search"]
+    )
+
+
+def test_the_search_goes_into_the_netanal_beside_the_trace():
+    module_netanal = a_module_netanal()
+    found = find_resonances_in_netanal(module_netanal, save=False)
+
+    trace = netanal_trace(module_netanal)
+    # As builtins and ndarrays, the way everything else in a file is: this goes
+    # into a pickle, and a pickled class records its own import path.
+    assert isinstance(trace["resonance_search"], dict)
+    # And the measurement is still there beside it.
+    assert "iq_counts" in trace
+
+    restored = stored_search(module_netanal)
+    assert restored.candidates == found.candidates
+    assert restored.rejected == found.rejected
+    assert np.array_equal(restored.magnitude_db, found.magnitude_db)
+
+
+def test_a_search_lands_only_in_the_module_that_was_searched():
+    """The loop is the caller's, so the other modules are untouched until it runs."""
+    netanal = a_netanal(1) | a_netanal(2)
+    found = find_resonances_in_netanal(netanal["crs0000_rmod1"], save=False)
+
+    assert stored_search(netanal["crs0000_rmod1"]).candidates == found.candidates
+    assert "resonance_search" not in netanal_trace(netanal["crs0000_rmod2"])
+
+
+def test_searching_again_replaces_the_search_that_was_there():
+    """One trace, one search — not a pile of them keyed by nothing."""
+    module_netanal = a_module_netanal(resonances=TRUTH)
+    find_resonances_in_netanal(module_netanal, min_dip_depth_db=1.0, save=False)
+    shallow = find_resonances_in_netanal(
+        module_netanal, min_dip_depth_db=0.01, save=False
+    )
+
+    stored = stored_search(module_netanal)
+    assert stored.settings["min_dip_depth_db"] == 0.01
+    assert stored.candidates == shallow.candidates
+
+
+def test_an_unsearched_netanal_simply_has_no_search_in_it():
+    assert "resonance_search" not in netanal_trace(a_module_netanal())
 
 
 # ─── handing the result onward ────────────────────────────────────────────────

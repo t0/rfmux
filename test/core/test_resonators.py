@@ -4,6 +4,8 @@ The point of these types is that certain states are unrepresentable, so this
 asserts the invariants rather than the arithmetic.
 """
 
+from functools import partial
+
 import pytest
 
 from rfmux.core.transferfunctions import BASE_FREQUENCY
@@ -12,12 +14,23 @@ from rfmux.core.resonators import (
     Resonator,
     ResonatorCatalog,
 )
+from rfmux.resonator_names import (
+    DEFAULT_LENGTH,
+    numbered_names,
+    syllabic_names_from_frequency,
+)
 
 pytestmark = pytest.mark.portable
 
 
 def a_catalog(freqs=(1.01e9, 1.03e9, 1.05e9), amplitude=0.01, **kwargs) -> ResonatorCatalog:
-    """A seeded catalog: every resonator carries a BiasPoint, as all do."""
+    """A seeded catalog: every resonator carries a BiasPoint, as all do.
+
+    Numbered rather than named, because these tests assert on catalog mechanics
+    and want to say ``catalog["R0001"]`` rather than fish a drawn name out. The
+    default namer gets its own section below.
+    """
+    kwargs.setdefault("names", numbered_names)
     return ResonatorCatalog.from_frequencies(freqs, module=2, amplitude=amplitude, **kwargs)
 
 
@@ -237,7 +250,7 @@ def test_amending_only_calibration_leaves_the_tone_alone():
 
 def test_from_frequencies_sorts_and_assigns_channels():
     m = ResonatorCatalog.from_frequencies(
-        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01, names=numbered_names
     )
     assert [r.name for r in m] == ["R0001", "R0002", "R0003"]
     assert [r.channel for r in m] == [1, 2, 3]
@@ -252,6 +265,93 @@ def test_from_frequencies_seeds_a_bias_with_no_calibration():
     assert r.bias.amplitude == 0.02
     assert r.bias.df_calibration is None
     assert r.bias.iq_rotation_deg is None and r.bias.bifurcated_at is None
+
+
+# ─── how a catalog gets its names ─────────────────────────────────────────────
+
+
+def test_the_default_namer_draws_rather_than_numbers():
+    """Names carry no ordering, so nothing about them can go stale."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
+    )
+    assert len(set(m.names())) == 3
+    assert not any(name.startswith("R0") for name in m.names())
+    assert all(len(name) == DEFAULT_LENGTH for name in m.names())
+
+
+def test_the_ordering_lives_on_the_channel_not_the_name():
+    """What R0001… used to assert is still recorded, just not in the name."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
+    )
+    assert [r.channel for r in m] == [1, 2, 3]
+    assert m.names("frequency") == m.names("channel")
+
+
+def test_a_namer_sees_the_sorted_frequencies():
+    seen = []
+
+    def namer(frequencies_hz):
+        seen.append(list(frequencies_hz))
+        return [f"F{i}" for i in range(len(frequencies_hz))]
+
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01, names=namer
+    )
+    assert seen == [[1.01e9, 1.03e9, 1.05e9]]
+    assert m.names() == ["F0", "F1", "F2"]
+
+
+def test_a_namer_returning_the_wrong_count_is_caught():
+    with pytest.raises(ValueError, match="returned 2 names for 3 frequencies"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9, 3e9], module=2, amplitude=0.01, names=lambda f: ["a", "b"]
+        )
+
+
+def test_a_partial_namer_is_named_in_the_error_not_crashed_on():
+    """partial() has no __name__, and it is what a custom prefix looks like."""
+    with pytest.raises(ValueError, match="returned 1 names for 3 frequencies"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9, 3e9],
+            module=2,
+            amplitude=0.01,
+            names=partial(lambda f, n: ["a"] * n, n=1),
+        )
+
+
+def test_a_partial_namer_works():
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9, 3e9],
+        module=2,
+        amplitude=0.01,
+        names=partial(numbered_names, prefix="kid"),
+    )
+    assert m.names() == ["kid0001", "kid0002", "kid0003"]
+
+
+def test_a_supplied_list_still_pairs_before_sorting():
+    """Parallel lists stay associated however they arrive."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9],
+        module=2,
+        amplitude=0.01,
+        names=["high", "low", "mid"],
+    )
+    assert m.names() == ["low", "mid", "high"]
+
+
+def test_a_frequency_derived_namer_gives_a_catalog_stable_names():
+    """What a demo notebook needs: the same array, the same names."""
+    freqs = [1.01e9, 1.03e9, 1.05e9]
+    first = ResonatorCatalog.from_frequencies(
+        freqs, module=2, amplitude=0.01, names=syllabic_names_from_frequency
+    )
+    second = ResonatorCatalog.from_frequencies(
+        freqs, module=2, amplitude=0.01, names=syllabic_names_from_frequency
+    )
+    assert first.names() == second.names()
 
 
 def test_channels_are_one_based():

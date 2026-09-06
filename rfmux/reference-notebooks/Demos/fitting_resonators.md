@@ -44,7 +44,7 @@ This notebook starts from an array that has already been tuned, i.e. a
 `ResonatorCatalog` whose bias points are set, so that it can get on with the
 fitting. Getting to that point is covered in two other notebooks: run a network
 analysis and find the resonances in
-`network_analyses_find_resonances_make_resonator_catalog.md`, then sweep them in
+`network_analysis_find_resonances.md`, then sweep them in
 `multisweep.md`. If the tuning workflow is unfamiliar, you will probably want to
 read those first.
 
@@ -195,8 +195,15 @@ catalog = ResonatorCatalog.from_frequencies(
     amplitude=PROBE_AMPLITUDE,
 )
 
-catalog["R0002"].set_bias(amplitude=PROBE_AMPLITUDE * 2)
-catalog["R0003"].set_bias(amplitude=PROBE_AMPLITUDE / 2)
+# Each resonator gets a short made-up name — BOTA, KOZR — drawn fresh each run,
+# so read the ones this notebook follows off the catalog rather than typing them
+# in. catalog.names() is in frequency order, lowest first.
+first_resonator, second_resonator, third_resonator, fourth_resonator, *_ = (
+    catalog.names()
+)
+
+catalog[second_resonator].set_bias(amplitude=PROBE_AMPLITUDE * 2)
+catalog[third_resonator].set_bias(amplitude=PROBE_AMPLITUDE / 2)
 
 print(catalog)
 for resonator in catalog:
@@ -375,7 +382,7 @@ def plot_amplitude_iterations(results, name, direction="upward"):
     plt.show()
 
 
-plot_amplitude_iterations(multiamp_results, "R0001")
+plot_amplitude_iterations(multiamp_results, first_resonator)
 ```
 
 <!-- #region -->
@@ -457,7 +464,7 @@ def show_sweep_section(sweep_section, indent=""):
             print(f"{indent}{key:<28} {value!r}")
 
 
-show_sweep_section(sections_of(multiamp_results)["R0001"])
+show_sweep_section(sections_of(multiamp_results)[first_resonator])
 ```
 
 ## 3. Fitting the data
@@ -543,7 +550,7 @@ Here is the same sweep section entry we looked at in section 2, now with one
 extra key on it:
 
 ```python
-fitted_sweep_section = sections_of(multiamp_results)["R0001"]
+fitted_sweep_section = sections_of(multiamp_results)[first_resonator]
 
 show_sweep_section(fitted_sweep_section)
 ```
@@ -574,7 +581,7 @@ multiamp_results
 └── results
     └── 0                                   amplitude step, numbered as measured
         └── "upward"                        sweep direction
-            └── "R0001"                     resonator (or "S0001…" for a bare
+            └── "BOTA"                      resonator (or "S0001…" for a bare
                 │                            frequency list)
                 ├── channel                 ╮
                 ├── frequencies             │
@@ -735,7 +742,8 @@ this one to the more finely sampled sweep.
 ```python
 fit_sweeps(fine_multisweep)
 
-print(f"R0001 fits: {list(sections_of(fine_multisweep)['R0001']['fits'])}")
+print(f"{first_resonator} fits: "
+      f"{list(sections_of(fine_multisweep)[first_resonator]['fits'])}")
 ```
 
 The middle panel below shows what the fitter actually worked with:
@@ -744,8 +752,9 @@ gain value the
 fit estimated and stored.
 
 ```python
-def plot_nonlinear_fit(sections, name="R0001"):
+def plot_nonlinear_fit(sections, name=None):
     """One resonator's nonlinear fit: measured and model, in IQ and in magnitude."""
+    name = next(iter(sections)) if name is None else name
     sweep_section = sections[name]
     nonlinear_fit = sweep_section["fits"]["nonlinear"]
 
@@ -820,8 +829,9 @@ will need to do this before talking about the "phase" direction for a resonator,
 origin of the raw data reflects the readout chain much more then the resonator.
 
 ```python
-def plot_circle_fit(sections, name="R0001"):
+def plot_circle_fit(sections, name=None):
     """The fitted circle, and the loop it recentres."""
+    name = next(iter(sections)) if name is None else name
     sweep_section = sections[name]
     circle_fit = sweep_section["fits"]["circle"]
 
@@ -903,12 +913,12 @@ print(f"fitted so far: {which_are_fitted(unfitted_results)}")
 `names`, `iterations` and `directions` each take either a single value or an
 iterable of them, and `None` (the default) means all of them. Note that a bare
 string counts as one name rather than a sequence of characters, so
-`names="R0001"` does what it looks like.
+`names="BOTA"` does what it looks like.
 
 ```python
 one_trace_report = fit_sweeps(
     unfitted_results,
-    names="R0001",
+    names=first_resonator,
     iterations=0,
     directions="upward",
 )
@@ -931,11 +941,11 @@ Since running one model leaves the other models' results alone, you can fit
 actually need it:
 
 ```python
-fit_sweeps(unfitted_results, names="R0002", iterations=0, models=("skewed",))
-sweep_section = unfitted_results["results"][0]["upward"]["R0002"]
+fit_sweeps(unfitted_results, names=second_resonator, iterations=0, models=("skewed",))
+sweep_section = unfitted_results["results"][0]["upward"][second_resonator]
 print(f"after skewed:            {list(sweep_section['fits'])}")
 
-fit_sweeps(unfitted_results, names="R0002", iterations=0, models=("circle",))
+fit_sweeps(unfitted_results, names=second_resonator, iterations=0, models=("circle",))
 print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept")
 ```
 
@@ -1022,8 +1032,9 @@ actually is. It is the clearest illustration in this notebook of why fitting
 beats reading numbers off the trace.
 
 ```python
-def plot_fitted_traces(results, name="R0001", direction="upward", linewidths=8):
+def plot_fitted_traces(results, name=None, direction="upward", linewidths=8):
     """One resonator at every amplitude, each trace with its skewed fit over it."""
+    name = next(iter(sections_of(results))) if name is None else name
     iterations = collect_amplitude_iterations_for(results, name)
     sections = [by_direction[direction] for by_direction in iterations.values()]
     amplitudes = [s["sweep_amplitude"] for s in sections]
@@ -1140,7 +1151,7 @@ is struggling.
 ```python
 print(f"{'':<8}{'amplitude':>12}{'skewed Qr':>12}{'nonlinear Qr':>14}"
       f"{'a':>8}{'residual':>11}")
-for name in ("R0001", "R0004"):
+for name in (first_resonator, fourth_resonator):
     for by_direction in collect_amplitude_iterations_for(multiamp_results, name).values():
         sweep_section = by_direction["upward"]
         skewed_fit = sweep_section["fits"]["skewed"]
@@ -1184,7 +1195,9 @@ converges on something that does not describe the data well, it is usually more
 useful to be able to see what it converged to than to have it thrown away.
 
 ```python
-rejected_fit = fussy_results["results"][0]["upward"]["R0001"]["fits"]["nonlinear"]
+rejected_fit = (
+    fussy_results["results"][0]["upward"][first_resonator]["fits"]["nonlinear"]
+)
 print(f"failed_because  {rejected_fit['failed_because']}")
 print(f"params          fr {rejected_fit['params']['fr']/1e6:.4f} MHz, "
       f"Qr {rejected_fit['params']['Qr']:.4g}")

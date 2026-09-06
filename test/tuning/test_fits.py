@@ -39,7 +39,7 @@ pytestmark = pytest.mark.portable
 FR = 1.0e9
 QR = 1e4
 
-# The fitters take one module's envelope, so a ladder built here is indexed out
+# The fitters take one module's output, so a ladder built here is indexed out
 # of the container the packer returns.
 MODULE_ID = "crs0030_rmod2"
 

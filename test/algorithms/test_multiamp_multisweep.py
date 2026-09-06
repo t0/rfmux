@@ -106,10 +106,10 @@ class FakeCRS:
 async def drive(crs, catalog=None, **kwargs):
     """The macro's own defaults, minus the two every call needs.
 
-    Returns the one module's envelope rather than the container the macro
+    Returns the one module's output rather than the container the macro
     returns, because these tests are about the driver's loop. That the result is
     keyed by module at all is checked below, and the container's own behaviour —
-    merging, and being refused where an envelope was wanted — lives in
+    merging, and being refused where one module's output was wanted — lives in
     ``test/tuning/test_sweep_results.py``.
     """
     kwargs.setdefault("span_hz", 200e3)
@@ -497,7 +497,16 @@ async def test_the_result_carries_a_schema_version():
     result = await drive(FakeCRS(), a_catalog())
     # A literal, not the constant: bumping the version should mean editing a
     # test, because it is a claim that readers of older files need to know.
-    assert result["schema_version"] == 3
+    assert result["schema_version"] == 4
+
+
+@pytest.mark.asyncio
+async def test_the_result_says_which_driver_made_it():
+    """The shape is shared with multisweep and netanal; this is what tells
+    a reader which of the three is under 'results'."""
+    result = await drive(FakeCRS(), a_catalog())
+
+    assert result["measurement"] == "multiamp_multisweep"
 
 
 @pytest.mark.asyncio
@@ -674,11 +683,11 @@ async def test_the_readers_work_on_what_the_driver_actually_returns():
 
     # ×1 sits in the middle of the ladder, so that is where each resonator is
     # at its own bias amplitude — and the sweep taken there comes back with it.
-    at_bias = find_iteration_matching_amplitude(result, "R0002")
-    assert list(at_bias) == [2]
-    assert at_bias[2]["upward"]["sweep_amplitude"] == pytest.approx(0.002)
+    at_bias, iteration = find_iteration_matching_amplitude(result, "R0002")
+    assert iteration == 2
+    assert at_bias["upward"]["sweep_amplitude"] == pytest.approx(0.002)
 
-    assert list(find_iteration_matching_amplitude(result, "R0002", 0.008)) == [4]
+    assert find_iteration_matching_amplitude(result, "R0002", 0.008)[1] == 4
 
 
 @pytest.mark.asyncio
@@ -697,7 +706,7 @@ async def test_the_readers_work_on_a_frequency_list_result_too():
     )
 
     assert list(collect_amplitude_iterations_for(result, "S0002")) == [0, 1, 2]
-    assert list(find_iteration_matching_amplitude(result, "S0002", 1e-2)) == [2]
+    assert find_iteration_matching_amplitude(result, "S0002", 1e-2)[1] == 2
 
     # No catalog, so no bias amplitude to fall back on.
     with pytest.raises(ValueError, match="no catalog to take one from"):

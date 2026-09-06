@@ -64,8 +64,8 @@ def _resolve_section_names(
     """Name every entry of a bare frequency list.
 
     Without *names*, sections are called ``S0001…`` in the order they were
-    passed — S for section, and visibly not a catalog's ``R0001…``, so a
-    result dict says which of the two it came from at a glance.
+    passed — S for section, and visibly not a catalog's drawn names (``BOTA``,
+    ``KOZR``), so a result dict says which of the two it came from at a glance.
     """
     count = len(center_frequencies)
 
@@ -261,7 +261,7 @@ async def multisweep(
         sweeps = await crs.multisweep(catalog)
 
         module_sweeps = sweeps[crs.module[2].index()]
-        module_sweeps["results"][0]["upward"]["R0001"]["iq_counts"]
+        module_sweeps["results"][0]["upward"]["BOTA"]["iq_counts"]
 
     Or with a bare list of frequencies, for anything that is not a tuned array
     yet::
@@ -321,7 +321,7 @@ async def multisweep(
         names (list[str], optional): Names for the *center_frequencies*, one
             each, in the same order — these are the keys the sweeps come back
             under. Defaults to ``S0001…`` (S for section), which is visibly not
-            a catalog's ``R0001…``, so a result dict says which of the two
+            a catalog's drawn names, so a result dict says which of the two
             produced it. Rejected alongside a *catalog*, whose resonators are
             already named.
         module (int | list[int], optional): The target readout module. Defaults
@@ -352,7 +352,7 @@ async def multisweep(
                     "module": 2,           # resolved, never None
                     "call_params": {...},  # verbatim, as this macro was called
                     "results": {
-                        0: {"upward": {"R0001": {...}, "R0002": {...}}},
+                        0: {"upward": {"BOTA": {...}, "KOZR": {...}}},
                     },
                 },
             }
@@ -362,10 +362,10 @@ async def multisweep(
         sweeps.items():`` has written the same code for one module and for four.
 
         A list of modules sweeps them concurrently and merges the results into
-        one dict of this shape. Each envelope then records its own module in
-        ``call_params["module"]`` rather than the list that was passed: the call
-        that produced it really was a call for that module, and an envelope is
-        meant to stand on its own once lifted out.
+        one dict of this shape. Each module's output then records its own
+        module in ``call_params["module"]`` rather than the list that was
+        passed: the call that produced it really was a call for that module,
+        and one module's output is meant to stand on its own once lifted out.
 
         ``results`` is the shape ``multiamp_multisweep`` returns, and one sweep
         is one iteration in one direction — which is what it is, not a padded

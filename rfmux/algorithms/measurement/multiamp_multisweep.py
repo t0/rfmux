@@ -144,7 +144,7 @@ async def multiamp_multisweep(
         )
 
         module_results = results[crs.module[2].index()]
-        module_results["results"][0]["upward"]["R0001"]["iq_counts"]
+        module_results["results"][0]["upward"]["BOTA"]["iq_counts"]
 
     Omitting *amp_schedule* sweeps the catalog at its own amplitudes, once — so
     the useful degenerate call is an up-and-down pair with nothing else said::
@@ -225,7 +225,7 @@ async def multiamp_multisweep(
             failure: every sweep that finished has already been handed over.
 
             ``data`` is the bare ``{name: entry}`` for that one sweep, not the
-            envelope ``multisweep`` returns — the module, the span and the rest
+            output ``multisweep`` returns — the module, the span and the rest
             are the same for every sweep in the ladder, and a hand-over is not
             a result. The coordinates that *do* vary are the record's own
             ``step`` and ``direction``.
@@ -258,7 +258,7 @@ async def multiamp_multisweep(
         ``results`` is keyed by amplitude iteration, numbered from 0 in the
         order measured, and an iteration holds one entry per direction swept and
         nothing else. Under a direction is what one ``multisweep`` measured:
-        ``{name: entry}``, unwrapped from the envelope it arrived in, since the
+        ``{name: entry}``, unwrapped from the output it arrived in, since the
         module and the sweep parameters are the same for every rung and the
         amplitude is already on each entry.
 
@@ -363,7 +363,7 @@ async def multiamp_multisweep(
 
             # One sweep, in the same shape this driver is about to return: its
             # own module, its one iteration, its one direction. Unwrapped to the
-            # sections rather than nested whole, because the envelope's
+            # sections rather than nested whole, because the output's
             # call_params would then be repeated once per step per direction,
             # differing only in the amplitude the entries already carry.
             data = swept[module_id]["results"][0][direction]

@@ -28,8 +28,10 @@ Typical headless use::
     from rfmux.tuning import find_resonances_in_netanal, fit_sweeps
 
     netanal = await crs.take_netanal(module=2, amp=0.001, fmin=1e9, fmax=2e9)
-    found = find_resonances_in_netanal(netanal, min_dip_depth_db=1.0)
-    catalog = found.to_catalog(module=2, amplitude=0.001)
+    module_netanal = netanal[crs.module[2].index()]
+    search = find_resonances_in_netanal(module_netanal, min_dip_depth_db=1.0)
+    # ^ writes the search into the netanal, beside the trace it searched
+    catalog = search.to_catalog(module=2, amplitude=0.001)
 
     sweeps = await crs.multiamp_multisweep(catalog)
     module_sweeps = sweeps[crs.module[2].index()]
@@ -64,6 +66,7 @@ from .find_resonances import (
     find_resonances_in_netanal,
     find_sweeps_with_nearby_resonances,
     magnitude_db,
+    netanal_trace,
 )
 from .fits import (
     MODELS,
@@ -114,6 +117,7 @@ __all__ = [
     "find_resonances_in_netanal",
     "find_sweeps_with_nearby_resonances",
     "magnitude_db",
+    "netanal_trace",
     "MODELS",
     "FitFailed",
     "FitReport",

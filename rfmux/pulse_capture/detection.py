@@ -196,6 +196,14 @@ class _ChState:
     # while the bucket is empty.  When the bucket confirms the end, this
     # is where the pulse settled: the end of its duration.
     settled_abs: Optional[int] = None
+    # Scatter of the deviation magnitude inside this capture: the last
+    # two magnitudes and an exponential average of the squared second
+    # difference, which a smooth decay cancels and noise does not.  The
+    # tail tests divide by the larger of the trained jump sigma and this,
+    # so noise that grows with the pulse cannot read as a fresh rise.
+    prev_mag: float = 0.0
+    prev2_mag: float = 0.0
+    scatter: float = 0.0
     # Run of consecutive above-threshold samples — the trigger is dated
     # to the start of the run, not to the sample that confirmed it.
     above_run: int = 0
@@ -268,7 +276,9 @@ class PulseCapture:
     enable_pileup : bool
         Enable pileup splitting.  When True, a new pulse arriving during
         the tail of a previous one — a fresh edge after the current pulse
-        was seen decaying — is split into a separate event.  EVERY
+        was seen decaying, judged against the larger of the trained jump
+        sigma and the scatter measured inside the capture — is split
+        into a separate event.  EVERY
         fragment of a split chain carries the ``pileup`` flag (the first
         has its tail cut, the rest sit on a pedestal), so downstream
         consumers can exclude them — templates already do.  Default
@@ -666,6 +676,9 @@ class PulseCapture:
         sf[_walk.TSTD_Q] = st.trig_std_Q
         sf[_walk.NEAR_I] = math.nan
         sf[_walk.NEAR_Q] = math.nan
+        sf[_walk.PREV_MAG] = st.prev_mag
+        sf[_walk.PREV2_MAG] = st.prev2_mag
+        sf[_walk.SCATTER] = st.scatter
         return si, sf
 
     def _unpack_state(self, st: "_ChState", si, sf) -> None:
@@ -693,6 +706,9 @@ class PulseCapture:
         st.trig_mean_Q = float(sf[_walk.TMEAN_Q])
         st.trig_std_I = float(sf[_walk.TSTD_I])
         st.trig_std_Q = float(sf[_walk.TSTD_Q])
+        st.prev_mag = float(sf[_walk.PREV_MAG])
+        st.prev2_mag = float(sf[_walk.PREV2_MAG])
+        st.scatter = float(sf[_walk.SCATTER])
 
     def _walk_block(self, channel: int, st: "_ChState", I: np.ndarray,
                     Q: np.ndarray, T: np.ndarray, start: int,
@@ -771,6 +787,7 @@ class PulseCapture:
         st.capturing = True
         st.end_ptr_count = 0
         st.settled_abs = None
+        st.prev_mag = st.prev2_mag = st.scatter = 0.0
         st.fire_abs = st.ch_sample_n
         st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
         st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
@@ -1013,8 +1030,25 @@ class PulseCapture:
                 if span >= 1:
                     sI = max(ns.std_I, 1e-30)
                     sQ = max(ns.std_Q, 1e-30)
-                    jn = max(js_I / sI, js_Q / sQ, 1e-30)
                     mag = math.hypot(dev_I, dev_Q)
+                    # Local jump sigma of the magnitude from its second
+                    # differences (white noise gives 6 sigma^2 per
+                    # difference, a lag-1 jump 2 sigma^2), averaged over
+                    # min_end_samples.  Taken from the samples before
+                    # this one, so a rise cannot mask itself; each
+                    # difference is clipped at three times the current
+                    # reference, so a step (a pulse's rise) nudges the
+                    # average where a noise increase still reaches it.
+                    jn = max(js_I / sI, js_Q / sQ, 1e-30,
+                             math.sqrt(st.scatter / 3.0))
+                    if since_fire >= 3:
+                        d2 = mag - 2.0 * st.prev_mag + st.prev2_mag
+                        lim = 3.0 * math.sqrt(3.0) * jn
+                        d2 = max(-lim, min(lim, d2))
+                        a = 1.0 / self.min_end_samples
+                        st.scatter = a * d2 * d2 + (1.0 - a) * st.scatter
+                    st.prev2_mag = st.prev_mag
+                    st.prev_mag = mag
                     hi = 0.0
                     for tap in (span, span // 2, span // 4):
                         if tap >= 1:

@@ -184,6 +184,13 @@ Old values are main at the merge base (e46fc41).
   `PulseCaptureSession`, `PulseCapture` and the Settings dialog. A file
   written with it still opens; its stored value is ignored, and its pulses
   keep the duration they had, trigger to the threshold drop.
+- Pileup split test: the rise above the pulse's own recent level, and the
+  decay evidence that arms it, are judged against the larger of the trained
+  jump σ and the scatter measured inside the capture (a clipped average of
+  the deviation magnitude's second differences over `min_end_samples`).
+  At 38 kHz the mock's quasiparticle noise, which grows with the pulse,
+  split every pulse's tail into fragments a few milliseconds long; the
+  decision path is otherwise unchanged and the walk costs the same.
 
 ## Fixed
 

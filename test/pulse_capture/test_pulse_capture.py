@@ -2268,3 +2268,53 @@ class TestPostNoiseHoldIsBounded:
         held_I, _held_Q, held_T = s._pending_post_noise[1]
         assert held_I.shape[0] == s.noise_samples
         assert held_T[-1] == pytest.approx((k - 1) / 1e4), "the newest are kept"
+
+
+class TestInPulseNoise:
+    """Noise that grows with the pulse must not read as pileup."""
+
+    @staticmethod
+    def _noisy_pulse(scale, seed=3, n=6000, tau=190.0, amp=40.0):
+        """One pulse whose noise sigma is 1 + scale * signal, sampled
+        fast enough that the tail hardly decays across the ten-sample
+        near tap: the mock at decimation 0."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=2, edge_lookback=400)
+        rng = np.random.default_rng(seed)
+        for k in range(n):
+            s = amp * np.exp(-(k - 1000) / tau) if k >= 1000 else 0.0
+            sig = 1.0 + scale * s
+            pcap.process_sample(1, float(s + rng.normal(0, sig)),
+                                float(rng.normal(0, sig)), k * 2.6e-5)
+        return pcap
+
+    def test_signal_proportional_noise_does_not_split(self):
+        """The mock at 38 kHz: quasiparticle noise ten times the trained
+        sigma at the peak.  Judged against the baseline sigma the tail
+        splits again and again; against the scatter inside the capture
+        it is one pulse."""
+        for seed in range(4):
+            pcap = self._noisy_pulse(scale=0.25, seed=seed)
+            assert pcap.pulse_count[1] == 1, f"seed {seed}"
+            assert not pcap.pulses["Channel 1"][1]["pileup"], f"seed {seed}"
+
+    def test_a_real_pileup_still_splits_under_that_noise(self):
+        """A second pulse that clears the local scatter is still split."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=2, edge_lookback=400)
+        rng = np.random.default_rng(5)
+        for k in range(6000):
+            s = 40.0 * np.exp(-(k - 1000) / 190.0) if k >= 1000 else 0.0
+            if k >= 1600:
+                s += 60.0 * np.exp(-(k - 1600) / 190.0)
+            sig = 1.0 + 0.25 * s
+            pcap.process_sample(1, float(s + rng.normal(0, sig)),
+                                float(rng.normal(0, sig)), k * 2.6e-5)
+        assert pcap.pulse_count[1] == 2
+        assert all(pcap.pulses["Channel 1"][i]["pileup"] for i in (1, 2))

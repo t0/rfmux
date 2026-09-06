@@ -37,8 +37,8 @@ SPLIT = 3           # pileup split on that sample: save, then re-arm
 N_INT = SETTLED + 1
 # Floats.
 (ANCHOR_I, ANCHOR_Q, TMEAN_I, TMEAN_Q, TSTD_I, TSTD_Q, NEAR_I,
- NEAR_Q) = range(8)
-N_FLT = NEAR_Q + 1
+ NEAR_Q, PREV_MAG, PREV2_MAG, SCATTER) = range(11)
+N_FLT = SCATTER + 1
 
 _SQRT2 = math.sqrt(2.0)
 
@@ -169,6 +169,9 @@ def walk(I, Q, T, start, stop,
             si[CAPTURING] = 1
             si[END_PTR] = 0
             si[SETTLED] = -1
+            sf[PREV_MAG] = 0.0
+            sf[PREV2_MAG] = 0.0
+            sf[SCATTER] = 0.0
             si[FIRE_ABS] = ch_n
             sf[TMEAN_I] = mean_I
             sf[TMEAN_Q] = mean_Q
@@ -211,12 +214,26 @@ def walk(I, Q, T, start, stop,
                 if span >= 1:
                     # On the length of the deviation vector in sigma
                     # units; see process_sample.
+                    mag = math.hypot(dev_I, dev_Q)
                     jn = js_I / sI
                     if js_Q / sQ > jn:
                         jn = js_Q / sQ
                     if jn < 1e-30:
                         jn = 1e-30
-                    mag = math.hypot(dev_I, dev_Q)
+                    local = math.sqrt(sf[SCATTER] / 3.0)
+                    if local > jn:
+                        jn = local
+                    if since_fire >= 3:
+                        d2 = mag - 2.0 * sf[PREV_MAG] + sf[PREV2_MAG]
+                        lim = 3.0 * math.sqrt(3.0) * jn
+                        if d2 > lim:
+                            d2 = lim
+                        elif d2 < -lim:
+                            d2 = -lim
+                        a = 1.0 / min_end
+                        sf[SCATTER] = a * d2 * d2 + (1.0 - a) * sf[SCATTER]
+                    sf[PREV2_MAG] = sf[PREV_MAG]
+                    sf[PREV_MAG] = mag
                     hi = 0.0
                     for tap in (span, span // 2, span // 4):
                         if tap >= 1:

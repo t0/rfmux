@@ -38,6 +38,7 @@ class _Signals:
             def emit(_self, msg):
                 sink.append(msg)
         self.error = _E()
+        self.warning = _E()
 
 
 def _watchdog_task(states):
@@ -150,6 +151,7 @@ def test_a_mode_the_streamer_cannot_feed_fails_before_running(monkeypatch):
     from rfmux.pulse_capture import sources
     t, errors, calls = _task_with_pfb(None)
     t.session = SimpleNamespace(channels=[1])
+    t.mode = "both"
 
     async def never(*a, **k):
         raise AssertionError("must not start a source")
@@ -492,5 +494,125 @@ def test_decision_labels_step_down_so_they_do_not_overlap(qt_app):
     assert len(positions) == 6
     assert len(set(round(p, 3) for p in positions)) == 6
     assert positions == sorted(positions, reverse=True)
+    panel.close()
+    spin(qt_app)
+
+
+# ─────────────── Both mode: fast data for the streamed subset ───────────────
+
+def _both_task(active, channels):
+    """A both-mode task whose session records what the check did to it."""
+    from types import SimpleNamespace
+    t, errors, calls = _task_with_pfb(active)
+    t.mode = "both"
+    warnings_ = []
+    t.signals.warning = type(t.signals.error)()
+    t.signals.warning.emit = warnings_.append
+    log = []
+    t.session = SimpleNamespace(
+        channels=list(channels),
+        set_fast_channels=lambda subset: log.append(("fast", list(subset))),
+        start=lambda: log.append("start"))
+    return t, errors, warnings_, log
+
+
+def test_both_mode_takes_fast_data_for_the_streamed_subset():
+    """Slow on every channel, fast on the ones the PFB streamer carries,
+    and a warning naming them; the capture starts."""
+    t, errors, warned, log = _both_task([2, 1], [1, 2, 3, 4])
+    assert asyncio.run(t._start_after_streamer_check()) == [1, 2, 3, 4]
+    assert log == [("fast", [1, 2]), "start"]
+    assert errors == []
+    assert warned and "[1, 2]" in warned[0] and "2 channel(s)" in warned[0]
+
+
+def test_both_mode_with_every_channel_streamed_warns_nothing():
+    t, errors, warned, log = _both_task([1, 2], [1, 2])
+    assert asyncio.run(t._start_after_streamer_check()) == [1, 2]
+    assert log == [("fast", [1, 2]), "start"] and warned == []
+
+
+def test_both_mode_with_no_streamed_channel_fails_before_starting():
+    t, errors, warned, log = _both_task([7], [1, 2])
+    assert asyncio.run(t._start_after_streamer_check()) is None
+    assert errors and "none of channels [1, 2]" in errors[0]
+    assert log == []
+
+
+def test_fast_mode_still_needs_every_channel_streamed():
+    from types import SimpleNamespace
+    t, errors, calls = _task_with_pfb([1])
+    t.mode = "fast"
+    started = []
+    t.session = SimpleNamespace(channels=[1, 2], start=lambda: started.append(1))
+    assert asyncio.run(t._start_after_streamer_check()) is None
+    assert errors and "needs channels [1, 2]" in errors[0] and not started
+
+
+def test_a_slow_only_channel_pairs_at_once():
+    """A slow pulse on a channel the fast stream does not carry goes out
+    one-sided as soon as the slow ring covers its window, with no wait
+    on the fast stream at all."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=50.0, noise_train_ms=50.0)
+    pairs = []
+    d = DualPulseCaptureSession(
+        channels=[1, 2], fast_channels=[1], module=1, slow_rate=1000.0,
+        fast_rate=100000.0, config=cfg, hdf5_path=None,
+        pair_window_wait_s=3.0, on_pair=pairs.append, on_error=lambda m: None)
+    assert d.fast.channels == [1] and d.fast_feed.channels == [1]
+    assert d.slow.channels == [1, 2]
+    d.start()
+    T = 43000.0
+    for ch in (1, 2):
+        d.feed_slow_block(ch, np.zeros(100), np.zeros(100), T + np.arange(100) / 1000.0)
+    summary = {"trigger_time": T + 0.1, "timestamp": T + 0.09,
+               "duration_s": 0.01, "saved_end_time": T + 0.12}
+    d._on_stream_pulse("slow", 2, 1, summary, {})
+    for ch in (1, 2):
+        d.feed_slow_block(ch, np.zeros(300), np.zeros(300),
+                          T + 0.1 + np.arange(300) / 1000.0)
+    d.stop()
+    assert len(pairs) == 1
+    assert pairs[0]["channel"] == 2 and pairs[0]["fast_idx"] is None
+    assert pairs[0]["slow_idx"] == 1
+
+
+def test_fast_channels_outside_the_capture_are_refused():
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession
+    with pytest.raises(ValueError):
+        DualPulseCaptureSession(channels=[1, 2], fast_channels=[3], module=1,
+                                slow_rate=1000.0, hdf5_path=None)
+
+
+def test_fast_channels_reach_the_file(tmp_path):
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import DualPulseHDF5Writer, PulseHDF5Reader
+    path = tmp_path / "subset.h5"
+    DualPulseHDF5Writer(path, [1, 2], {"streamer_mode": "both",
+                                       "fast_channels": [1]}).finalize()
+    with PulseHDF5Reader(path) as r:
+        assert list(r.metadata["fast_channels"]) == [1]
+        assert list(r.metadata["channels"]) == [1, 2]
+
+
+def test_template_tab_picks_its_own_stream(qt_app):
+    """In both mode the Template tab stacks the stream its own selector
+    names, independent of the histogram tab's."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    slow, fast = {}, {}
+    panel._on_templates({"stream": "slow", "data": slow})
+    panel._on_templates({"stream": "fast", "data": fast})
+    assert panel._template_data is slow
+    panel.template_stream_combo.setCurrentText("fast")
+    assert panel._template_data is fast
+    assert panel.hist_stream_combo.currentText() == "slow"
+    panel._on_templates({"stream": "slow", "data": {}})
+    assert panel._template_data is fast, "the other stream's update is kept, not shown"
     panel.close()
     spin(qt_app)

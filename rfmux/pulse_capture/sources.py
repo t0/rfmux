@@ -421,12 +421,11 @@ async def run_slow_source(
     return ingest.elapsed
 
 
-async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
-    """Why the PFB streamer as configured cannot feed a capture of
-    *channels* on *module*, or None.  A capture never configures the
-    streamer; it reads what the board streams, and every captured
-    channel must be among the streamed ones.  The board reports one
-    channel as an integer and several as a list."""
+async def _active_pfb_channels(crs, module: int
+                               ) -> Tuple[List[int], Optional[str]]:
+    """The channels the PFB streamer on *module* carries, or an error.
+    The board reports one channel as an integer and several as a
+    list."""
     raw = await crs.get_pfb_streamer(module=module)
     active = raw
     if isinstance(active, dict):
@@ -434,10 +433,20 @@ async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
     if isinstance(active, (int, float)):
         active = [active]
     try:
-        active = [int(c) for c in (active or [])]
+        return [int(c) for c in (active or [])], None
     except TypeError:
-        return (f"get_pfb_streamer(module={module}) returned {raw!r}, "
-                "which this capture cannot read as a channel list.")
+        return [], (f"get_pfb_streamer(module={module}) returned {raw!r}, "
+                    "which this capture cannot read as a channel list.")
+
+
+async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
+    """Why the PFB streamer as configured cannot feed a fast capture of
+    *channels* on *module*, or None.  A capture never configures the
+    streamer; it reads what the board streams, and every captured
+    channel must be among the streamed ones."""
+    active, error = await _active_pfb_channels(crs, module)
+    if error:
+        return error
     if set(channels) <= set(active):
         return None
     have = f"streaming channels {active}" if active else "off"
@@ -445,6 +454,31 @@ async def pfb_streamer_mismatch(crs, module: int, channels) -> Optional[str]:
             f"capture needs channels {list(channels)}.  Set it with "
             "configure_streamer (Streamer Configuration in Periscope), "
             "then start again.")
+
+
+async def pfb_streamed_channels(crs, module: int, channels
+                                ) -> Tuple[List[int], Optional[str]]:
+    """The captured *channels* the PFB streamer on *module* carries, for
+    a both-mode capture, with a note.  Every channel captures on the
+    slow stream; only these carry fast data too.  The note is None when
+    all of them do, a warning when some do, and the reason when none
+    do (the list is then empty)."""
+    active, error = await _active_pfb_channels(crs, module)
+    if error:
+        return [], error
+    subset = [c for c in channels if c in set(active)]
+    if not subset:
+        have = f"streaming channels {active}" if active else "off"
+        return [], (f"The PFB streamer on module {module} is {have}; "
+                    f"none of channels {list(channels)} has fast data.  "
+                    "Set it with configure_streamer (Streamer "
+                    "Configuration in Periscope), then start again.")
+    if len(subset) == len(channels):
+        return subset, None
+    return subset, (f"Fast data for channels {subset} only: the PFB "
+                    f"streamer on module {module} carries {active}.  The "
+                    f"other {len(channels) - len(subset)} channel(s) "
+                    "capture on the slow stream alone.")
 
 
 async def run_pfb_source(
@@ -722,7 +756,9 @@ async def run_dual_source(
         nonlocal finished
         try:
             return await run_pfb_source(
-                capture_session.fast_feed, host, channels, module=module,
+                capture_session.fast_feed, host,
+                getattr(capture_session.fast_feed, "channels", channels),
+                module=module,
                 duration_s=duration_s, should_stop=_stop)
         finally:
             finished = True

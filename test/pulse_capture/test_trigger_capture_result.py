@@ -27,7 +27,7 @@ def test_dual_result_reports_the_slow_time_offset(monkeypatch):
     config = PulseCaptureConfig()
     result = tc.PulseCaptureResult(
         streamer_mode="both", config=config, channels=[1], module=1)
-    asyncio.run(tc._run_dual(result, "127.0.0.1", [1], 1, slow_rate,
+    asyncio.run(tc._run_dual(result, "127.0.0.1", [1], [1], 1, slow_rate,
                              0.0, None, None, False))
 
     expected = DualPulseCaptureSession(

@@ -184,6 +184,17 @@ Old values are main at the merge base (e46fc41).
   `PulseCaptureSession`, `PulseCapture` and the Settings dialog. A file
   written with it still opens; its stored value is ignored, and its pulses
   keep the duration they had, trigger to the threshold drop.
+- Both mode with a partial PFB streamer: the capture takes every channel on
+  the slow stream and fast data for the captured channels the PFB streamer
+  carries (`pfb_streamed_channels` in `pulse_capture.sources`), warns which
+  ones on the status line and console, and refuses only when none is
+  streamed. `DualPulseCaptureSession` takes `fast_channels` (or
+  `set_fast_channels` before start); a slow pulse on a channel without fast
+  data is a one-sided pair at once; the file carries `fast_channels`;
+  `PulseCaptureResult.fast_channels` reports it. A fast capture still needs
+  every channel streamed.
+- Periscope Template tab: its own stream selector in both mode; the
+  histogram tab's selector no longer drives the templates.
 - Pileup split test: the rise above the pulse's own recent level, and the
   decay evidence that arms it, are judged against the larger of the trained
   jump σ and the scatter measured inside the capture (a clipped average of

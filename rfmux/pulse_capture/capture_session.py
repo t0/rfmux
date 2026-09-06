@@ -1213,6 +1213,20 @@ class IncrementalPulseMatcher:
 
         self._expire()
 
+    def add_unpaired(self, stream: str, channel: int, pulse_idx: int,
+                     summary: dict) -> None:
+        """A pulse on a channel the other stream does not carry: emitted
+        one-sided at once, with nothing to wait for."""
+        t = summary.get("trigger_time", summary.get("timestamp", 0.0))
+        if math.isfinite(t):
+            latest = self._latest[stream]
+            if latest is None or t > latest:
+                self._latest[stream] = t
+        p = _Pending(pulse_idx, t, summary)
+        self.unmatched += 1
+        self._emit(channel, slow=p if stream == "slow" else None,
+                   fast=p if stream == "fast" else None)
+
     def flush(self) -> None:
         """Emit every remaining pending pulse as one-sided (on stop)."""
         self._expire(force=True)
@@ -1283,6 +1297,7 @@ class DualPulseCaptureSession(_CallbackHost):
         slow_rate: float,
         fast_rate: float = PFB_SAMPLING_FREQ,
         config: Optional[PulseCaptureConfig] = None,
+        fast_channels: Optional[List[int]] = None,
         hdf5_path=None,
         df_calibrations: Optional[Dict[int, complex]] = None,
         match_window_s: Optional[float] = None,
@@ -1298,6 +1313,11 @@ class DualPulseCaptureSession(_CallbackHost):
         on_error: Optional[Callable] = None,
     ):
         self.channels = list(channels)
+        #: The channels the fast stream carries: every channel captures
+        #: on the slow stream, these on both.  The PFB streamer carries
+        #: at most four, a slow packet up to 1024.
+        self.fast_channels = self._checked_fast(
+            self.channels if fast_channels is None else fast_channels)
         self.module = module
         self.config = config or PulseCaptureConfig()
         #: Added to every slow timestamp before it reaches the engine,
@@ -1369,7 +1389,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self._time_offsets: List[float] = []
 
         self.slow = self._make_stream("slow", slow_rate)
-        self.fast = self._make_stream("fast", fast_rate)
+        self.fast = self._make_stream("fast", fast_rate, self.fast_channels)
         #: Source-compatible facades: run_slow_source/run_pfb_source
         #: read ``channels`` and call ``feed_block``, so routing those
         #: names through the per-stream feeds is all it takes for
@@ -1380,15 +1400,35 @@ class DualPulseCaptureSession(_CallbackHost):
                                          feed_block=self.feed_slow_block,
                                          source=self.slow.source,
                                          set_time_origin=self.set_time_origin)
-        self.fast_feed = SimpleNamespace(channels=self.channels,
+        self.fast_feed = SimpleNamespace(channels=self.fast_channels,
                                          feed_sample=self.feed_fast,
                                          feed_block=self.feed_fast_block,
                                          source=self.fast.source,
                                          set_time_origin=self.set_time_origin,
                                          stream_lag=self.stream_lag_s)
 
-    def _make_stream(self, stream: str,
-                     sample_rate: float) -> PulseCaptureSession:
+    def _checked_fast(self, fast_channels) -> List[int]:
+        fast = [int(c) for c in fast_channels]
+        extra = sorted(set(fast) - set(self.channels))
+        if extra:
+            raise ValueError(f"fast_channels {extra} are not captured "
+                             f"channels {self.channels}")
+        return fast
+
+    def set_fast_channels(self, fast_channels) -> None:
+        """Restrict the fast stream to *fast_channels* before start():
+        the ones the PFB streamer turned out to carry."""
+        if self.writer is not None:
+            raise RuntimeError("set_fast_channels must precede start()")
+        self.fast_channels = self._checked_fast(fast_channels)
+        self.fast = self._make_stream("fast", self.fast.sample_rate,
+                                      self.fast_channels)
+        self.fast_feed.channels = self.fast_channels
+        self.fast_feed.source = self.fast.source
+
+    def _make_stream(self, stream: str, sample_rate: float,
+                     channels: Optional[List[int]] = None
+                     ) -> PulseCaptureSession:
         kwargs = self.config.session_kwargs(sample_rate)
         # Union-window extraction happens up to grace_s after a pulse
         # (single-trigger expiry): the ring must cover the full window
@@ -1399,7 +1439,7 @@ class DualPulseCaptureSession(_CallbackHost):
                        + grace + 0.1) * sample_rate)
         kwargs["buf_size"] = max(kwargs["buf_size"], min_buf)
         return PulseCaptureSession(
-            channels=self.channels,
+            channels=self.channels if channels is None else channels,
             module=self.module,
             streamer_mode=stream,
             sample_rate=sample_rate,
@@ -1442,6 +1482,7 @@ class DualPulseCaptureSession(_CallbackHost):
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
             "module": self.module,
+            "fast_channels": list(self.fast_channels),
             "sample_rate_slow": self.slow.sample_rate,
             "sample_rate_fast": self.fast.sample_rate,
             "slow_time_offset_s": self.slow_time_offset_s,
@@ -1610,7 +1651,11 @@ class DualPulseCaptureSession(_CallbackHost):
                         what=f"write for {stream} ch{channel}#{pulse_idx}")
         self._callback(self.on_pulse, stream, channel, pulse_idx,
                        summary, pulse_data)
-        self.matcher.add(stream, channel, pulse_idx, summary)
+        if channel in self.fast_channels:
+            self.matcher.add(stream, channel, pulse_idx, summary)
+        else:
+            # No fast twin can ever arrive: one-sided at once.
+            self.matcher.add_unpaired(stream, channel, pulse_idx, summary)
 
     def _on_stream_histograms(self, stream: str, data: dict) -> None:
         self._to_writer("update_histograms", stream, data,
@@ -1642,7 +1687,10 @@ class DualPulseCaptureSession(_CallbackHost):
         union = self._union_window(pair, 1.0 / self.slow.sample_rate)
         if union is not None:
             pair["window"] = (float(union[0]), float(union[1]))
-        self._pending_pairs.append((pair, union, set()))
+        # A channel the fast stream does not carry has no fast window
+        # to wait for.
+        done = set() if pair["channel"] in self.fast_channels else {"fast"}
+        self._pending_pairs.append((pair, union, done))
         self._release_pairs()
 
     def _release_pairs(self, force: bool = False) -> None:

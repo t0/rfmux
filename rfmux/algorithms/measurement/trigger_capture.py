@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -57,7 +58,8 @@ from ...pulse_capture.capture_session import (
     PulseCaptureSession,
 )
 from ...pulse_capture.detection import ChannelNoiseStats
-from ...pulse_capture.sources import (pfb_streamer_mismatch, run_dual_source,
+from ...pulse_capture.sources import (pfb_streamed_channels,
+                                      pfb_streamer_mismatch, run_dual_source,
                                       run_pfb_source, run_slow_source)
 from ...core.transferfunctions import PFB_SAMPLING_FREQ, decimation_to_sampling
 
@@ -121,6 +123,10 @@ class PulseCaptureResult:
     #: raw packet timestamps.  Same value as the file's
     #: ``slow_time_offset_s`` attribute.
     slow_time_offset_s: Optional[float] = None
+    #: ``"both"`` mode only: the captured channels the PFB streamer
+    #: carried, so the ones with fast data.  The rest captured on the
+    #: slow stream alone.
+    fast_channels: Optional[List[int]] = None
     #: Matched slow/fast pairs; each carries ``slow_idx``/``fast_idx``,
     #: the two summaries, ``time_offset``, and the union-window TOD from
     #: both ring buffers.  Empty unless ``streamer_mode="both"``.
@@ -338,15 +344,26 @@ async def trigger_capture(
         streamer_mode=streamer_mode, config=config, channels=channels,
         module=module, hdf5_path=hdf5_path)
 
-    if streamer_mode in ("fast", "both"):
-        # The capture reads what the board streams and never configures
-        # it, as Periscope's does: configure_streamer first, and turn
-        # the PFB streamer off yourself afterwards.
+    # The capture reads what the board streams and never configures
+    # it, as Periscope's does: configure_streamer first, and turn the
+    # PFB streamer off yourself afterwards.  A fast capture needs every
+    # channel streamed; a both-mode capture takes fast data for the
+    # streamed subset and warns about the rest.
+    if streamer_mode == "fast":
         problem = await pfb_streamer_mismatch(crs, module, channels)
         if problem:
             raise ValueError(problem)
     if streamer_mode == "both":
-        await _run_dual(result, host, channels, module,
+        fast_channels, note = await pfb_streamed_channels(
+            crs, module, channels)
+        if not fast_channels:
+            raise ValueError(note)
+        if note:
+            warnings.warn(note, stacklevel=2)
+            if verbose:
+                print(f"[trigger_capture] {note}")
+        result.fast_channels = fast_channels
+        await _run_dual(result, host, channels, fast_channels, module,
                         slow_rate, duration_s, hdf5_path,
                         df_calibrations, verbose)
     else:
@@ -397,17 +414,17 @@ async def _run_single(result, host, channels, module, streamer_mode,
               "max_pulse_ms")
 
 
-async def _run_dual(result, host, channels, module, slow_rate,
-                    duration_s, hdf5_path, df_calibrations,
+async def _run_dual(result, host, channels, fast_channels, module,
+                    slow_rate, duration_s, hdf5_path, df_calibrations,
                     verbose) -> None:
     slow = StreamResult.for_channels(slow_rate, channels)
-    fast = StreamResult.for_channels(PFB_SAMPLING_FREQ, channels)
+    fast = StreamResult.for_channels(PFB_SAMPLING_FREQ, fast_channels)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
 
     capture_session = DualPulseCaptureSession(
         channels=channels, module=module, slow_rate=slow_rate,
         fast_rate=PFB_SAMPLING_FREQ, config=result.config,
-        hdf5_path=hdf5_path,
+        fast_channels=fast_channels, hdf5_path=hdf5_path,
         df_calibrations=df_calibrations,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),

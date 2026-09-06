@@ -59,6 +59,7 @@ class PulseCaptureSignals(QtCore.QObject):
     templates_updated = pyqtSignal(dict)    # trigger-aligned stack arrays
     waveform_ready = pyqtSignal(int, int)   # channel, pulse_idx (cache warmed)
     error = pyqtSignal(str)
+    warning = pyqtSignal(str)               # the capture runs, with a caveat
     failed = pyqtSignal(str)                # the capture cannot run; finished follows
     finished = pyqtSignal()
 
@@ -287,17 +288,30 @@ class PulseCaptureTask(QtCore.QThread):
 
     async def _start_after_streamer_check(self) -> Optional[list]:
         """The channels to capture once the fast streamer is confirmed to
-        carry them, or None with ``failed`` emitted.
+        carry them, or None with ``failed`` emitted.  A fast capture
+        needs every channel streamed; a both-mode capture takes fast
+        data for the streamed subset and warns about the rest.
 
         The session starts only after the check: a dual session opens
         its HDF5 file on start, and a capture that cannot run must not
         replace the previous file with an empty one.
         """
         channels = list(self.session.channels)
-        problem = await self._pfb_mismatch(channels)
-        if problem:
-            self.signals.failed.emit(problem)
-            return None
+        if self.mode == "both":
+            from ...pulse_capture.sources import pfb_streamed_channels
+            subset, note = await pfb_streamed_channels(
+                self.crs, self.module, channels)
+            if not subset:
+                self.signals.failed.emit(note)
+                return None
+            if note:
+                self.signals.warning.emit(note)
+            self.session.set_fast_channels(subset)
+        else:
+            problem = await self._pfb_mismatch(channels)
+            if problem:
+                self.signals.failed.emit(problem)
+                return None
         self.session.start()
         return channels
 

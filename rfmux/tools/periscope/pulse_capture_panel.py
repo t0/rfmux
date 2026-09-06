@@ -780,6 +780,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         controls.addStretch(1)
         self.template_spec_edit = self._make_plot_spec_edit()
         controls.addWidget(labelled("Plot:", self.template_spec_edit))
+        self.template_stream_combo = QtWidgets.QComboBox()
+        self.template_stream_combo.addItems(["slow", "fast"])
+        self.template_stream_combo.setToolTip(
+            "Which stream's pulses to stack (both mode)")
+        self.template_stream_combo.currentTextChanged.connect(
+            self._on_template_stream_changed)
+        self.template_stream_combo.setVisible(False)  # both-mode only
+        controls.addWidget(self.template_stream_combo)
         self.template_residual_check = QtWidgets.QCheckBox(
             "Show residual RMS")
         self.template_residual_check.setChecked(True)
@@ -807,7 +815,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_templates(self, data: dict) -> None:
         if "stream" in data and "data" in data:
             self._template_data_by_stream[data["stream"]] = data["data"]
-            if data["stream"] != self.hist_stream_combo.currentText():
+            if data["stream"] != self.template_stream_combo.currentText():
                 return
             self._template_data = data["data"]
         else:
@@ -1361,6 +1369,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.templates_updated.connect(self._on_templates, conn)
         self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
         self.signals.error.connect(self._on_error, conn)
+        self.signals.warning.connect(self._on_warning, conn)
         self.signals.failed.connect(self._on_failed, conn)
         self.signals.finished.connect(self._on_task_finished, conn)
 
@@ -1521,14 +1530,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 }
                 self._on_pair_matched(lean)
 
-        shown = self.hist_stream_combo.currentText()
         for stream in ("slow", "fast"):
             self._hist_data_by_stream[stream] = \
                 self.reader.get_histograms(stream)
             self._template_data_by_stream[stream] = \
                 self.reader.get_templates(stream)
-        self._hist_data = self._hist_data_by_stream.get(shown, {})
-        self._template_data = self._template_data_by_stream.get(shown, {})
+        self._hist_data = self._hist_data_by_stream.get(
+            self.hist_stream_combo.currentText(), {})
+        self._template_data = self._template_data_by_stream.get(
+            self.template_stream_combo.currentText(), {})
         self._render_histograms()
         self._render_templates()
         self._enter_review_state(
@@ -1585,6 +1595,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._template_data = {}
         self._template_data_by_stream = {}
         self.hist_stream_combo.setVisible(self._both_mode)
+        self.template_stream_combo.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}
@@ -2210,9 +2221,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if stream in self._hist_data_by_stream:
             self._hist_data = self._hist_data_by_stream[stream]
             self._render_histograms()
-        if stream in self._template_data_by_stream:
-            self._template_data = self._template_data_by_stream[stream]
-            self._render_templates()
+
+    def _on_template_stream_changed(self, stream: str) -> None:
+        self._template_data = self._template_data_by_stream.get(stream, {})
+        self._render_templates()
 
     def _on_histograms(self, data: dict) -> None:
         if "stream" in data and "data" in data:
@@ -2229,6 +2241,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_label.setToolTip(message)
         self._set_status(f"● Error: {message}", "#E5484D")
         print(f"[PulseCapture] ERROR: {message}")
+
+    def _on_warning(self, message: str) -> None:
+        """The capture runs with a caveat: the status line and the
+        console carry it, no dialog."""
+        self.noise_label.setToolTip(message)
+        self._set_status(f"● {message}", "#FFCC33")
+        print(f"[PulseCapture] {message}")
 
     def _on_failed(self, message: str) -> None:
         """The capture cannot run or has died: say so in a dialog, not

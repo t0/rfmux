@@ -98,9 +98,14 @@ against the 1 GbE port. The banner lists anything wrong. An error disables
 budget over 1000 Mbps. A warning, such as a budget over 800 Mbps, leaves it
 enabled.
 
-For a fast or both capture, the PFB channels must be the channels you
-capture, on the module you capture. The capture never changes the streamer.
-If the streamed channels do not match, the panel says so and stops.
+The capture never changes the streamer. A fast capture needs every
+channel it captures among the PFB channels, on the module it captures; if
+they do not match, the panel says so and stops. A both capture takes every
+channel on the slow stream and fast data for the ones the PFB streamer
+carries, so `all` over a hundred channels with four streamed works: the
+status line names the four, the rest capture slow only, and their pulses
+come out as slow-only pairs. If none of the captured channels is streamed,
+the capture stops.
 
 ## Configuring the pulse capture engine
 
@@ -170,7 +175,8 @@ warning.
 The **Histograms** tab accumulates signal-to-noise, peak amplitude, duration
 and decay constant over every pulse, live, with ranges that expand as pulses
 arrive. The **Template** tab stacks the pulses trigger-aligned and shows the
-mean with its residual scatter.
+mean with its residual scatter. In both mode each tab has its own stream
+selector, slow or fast.
 
 The **Plot** field on both tabs takes the same language as **Channels**:
 `1,2,4` draws those channels, `1-5` combines five channels into one

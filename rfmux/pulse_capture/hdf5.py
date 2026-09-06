@@ -120,6 +120,9 @@ class _PulseFileWriter:
                 if k in capture_params:
                     meta.attrs[k] = cast(capture_params[k])
         meta.attrs["channels"] = channels
+        if "fast_channels" in capture_params:
+            meta.attrs["fast_channels"] = [
+                int(c) for c in capture_params["fast_channels"]]
 
     # ── Shared helpers ────────────────────────────────────────────
 

@@ -359,8 +359,10 @@ How pulse detection works:
   it was seen decaying, starts a new one. The rise is judged against the
   larger of the trained jump-σ and the scatter measured inside the capture,
   and must hold for `trigger_samples` consecutive samples, so neither noise
-  that grows with the pulse nor one stray sample splits it. Both fragments
-  carry the `pileup` flag: templates skip them, histograms keep them.
+  that grows with the pulse nor one stray sample splits it. The second
+  fragment is dated at its rise and keeps the first's pre-pulse level as
+  its end reference. Both fragments carry the `pileup` flag: templates skip
+  them, histograms keep them.
 
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 

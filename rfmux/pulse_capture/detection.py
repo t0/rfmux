@@ -681,8 +681,6 @@ class PulseCapture:
         sf[_walk.TMEAN_Q] = st.trig_mean_Q
         sf[_walk.TSTD_I] = st.trig_std_I
         sf[_walk.TSTD_Q] = st.trig_std_Q
-        sf[_walk.NEAR_I] = math.nan
-        sf[_walk.NEAR_Q] = math.nan
         sf[_walk.PREV_MAG] = st.prev_mag
         sf[_walk.PREV2_MAG] = st.prev2_mag
         sf[_walk.SCATTER] = st.scatter
@@ -768,25 +766,21 @@ class PulseCapture:
             elif reason == _walk.SPLIT:
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    anchor = ((float(sf[_walk.NEAR_I]),
-                               float(sf[_walk.NEAR_Q]))
-                              if math.isfinite(sf[_walk.NEAR_I]) else None)
-                    self._rearm_after_split(st, ns, anchor)
+                    self._rearm_after_split(st, ns)
             si, sf = self._pack_state(st)
             pos = k + 1
         return stop
 
-    def _rearm_after_split(self, st: "_ChState", ns: ChannelNoiseStats,
-                           anchor) -> None:
+    def _rearm_after_split(self, st: "_ChState",
+                           ns: ChannelNoiseStats) -> None:
         """Open a capture for the pulse that rose on the tail of the
-        one just saved: dated where the nearest tap saw that tail,
-        anchored on it (it decays onto the previous pulse's tail, not
-        the pre-pulse level), and marked a fragment of a chain."""
+        one just saved: dated at the first sample of the confirmed
+        rise, as a trigger is dated to the first sample of its run;
+        anchored where the parent was, since both pulses return to the
+        same pre-pulse level; and marked a fragment of a chain."""
+        first_rise = st.ch_sample_n - max(0, st.rise_run - 1)
         self._begin_capture(st, ns)
-        st.trig_abs = max(st.run_start_abs,
-                          st.ch_sample_n - max(1, self.min_end_samples))
-        if anchor is not None:
-            st.anchor_I, st.anchor_Q = anchor
+        st.trig_abs = max(st.run_start_abs, first_rise)
         st.pileup_child = True
 
     @staticmethod
@@ -1021,10 +1015,9 @@ class PulseCapture:
             # decay sits below its own recent level by construction.
             decaying_now = False
             rising_above_self = False
-            near_vals = None
-            # Both results, and near_vals with them, feed nothing but
-            # the pileup split below — so with splitting off this is
-            # six ring reads per sample of every capture, discarded.
+            # Both results feed nothing but the pileup split below — so
+            # with splitting off this is six ring reads per sample of
+            # every capture, discarded.
             # Both are judged on the length of the deviation vector,
             # (dev_I, dev_Q) in sigma units, not per quadrature.  A
             # pulse rotates in the IQ plane as it settles -- on the PFB
@@ -1071,10 +1064,9 @@ class PulseCapture:
                     # The pulse's own recent level: min_end_samples
                     # back, as far as the decay evidence had to wait.
                     near = max(1, min(self.min_end_samples, span))
-                    near_vals = (bI.recent(near), bQ.recent(near))
                     near_mag = math.hypot(
-                        (near_vals[0] - ns.mean_I) / sI,
-                        (near_vals[1] - ns.mean_Q) / sQ)
+                        (bI.recent(near) - ns.mean_I) / sI,
+                        (bQ.recent(near) - ns.mean_Q) / sQ)
                     rising_above_self = (
                         (mag - near_mag) / jn > self.threshold_sigma)
             st.rise_run = st.rise_run + 1 if rising_above_self else 0
@@ -1117,7 +1109,7 @@ class PulseCapture:
                     and st.rise_run >= self.trigger_samples):
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    self._rearm_after_split(st, ns, near_vals)
+                    self._rearm_after_split(st, ns)
                 return
 
             # ── Normal end: baseline confirmation ─────────────────

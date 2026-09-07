@@ -2382,3 +2382,39 @@ class TestAnchorTap:
         # second's (28σ) and on its tail (6σ).  The nearest is the 6σ
         # one; the median would be 13σ.
         assert abs(last["end_baseline_I"]) < 8.0
+
+
+class TestSplitChild:
+    """What a split child is dated and anchored on."""
+
+    @staticmethod
+    def _double(second_at=930):
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(9)
+        for k in range(3000):
+            v = rng.normal(0, 1.0)
+            if k >= 800:
+                v += 60.0 * np.exp(-(k - 800) / 40.0)
+            if k >= second_at:
+                v += 60.0 * np.exp(-(k - second_at) / 40.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        return pcap.pulses["Channel 1"]
+
+    def test_the_child_is_dated_at_its_own_rise(self):
+        """Not min_end_samples before the split: at 19 kHz that was half
+        a millisecond early, and the slow child missed its fast twin."""
+        records = self._double(second_at=930)
+        assert len(records) == 2
+        assert records[2]["trigger_time"] == pytest.approx(0.930, abs=2e-3)
+
+    def test_the_child_keeps_the_parent_anchor(self):
+        """Both pulses return to the same pre-pulse level, so the end
+        band and the return test are judged against it, not against the
+        tail level at the split."""
+        records = self._double(second_at=930)
+        assert records[2]["end_baseline_I"] == records[1]["end_baseline_I"]
+        assert abs(records[2]["end_baseline_I"]) < 3.0

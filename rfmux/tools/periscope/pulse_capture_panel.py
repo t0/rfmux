@@ -1817,14 +1817,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         matched = pair["slow_idx"] is not None \
             and pair["fast_idx"] is not None
         complement_missing = False
+        summaries = [s for s in (pair.get("slow_summary"),
+                                 pair.get("fast_summary")) if s]
+        mark = ("\u2298" if any(s.get("truncated") for s in summaries)
+                else "\u26a0" if any(s.get("pileup") for s in summaries)
+                else "\u25c6")
         if matched:
-            label = "◆ slow + fast"
+            label = f"{mark} slow + fast"
             dt = pair.get("time_offset") or 0.0
             detail = f"Δt(trig)={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
             other = "fast" if side == "slow" else "slow"
-            label = f"◆ {side} only"
+            label = f"{mark} {side} only"
             if pair.get(f"has_{other}_tod"):
                 detail = f"+{other} data"
             else:

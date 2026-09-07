@@ -640,3 +640,27 @@ def test_the_dual_file_records_the_pulse_settings(tmp_path):
         assert m["noise_train_ms"] == pytest.approx(50.0)
         assert int(m["trigger_samples_slow"]) == 1
         assert int(m["trigger_samples_fast"]) == 2
+
+
+def test_pair_rows_carry_the_pileup_marker(qt_app):
+    """A both-mode row shows what its summaries hold."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    panel._reset_results([1], started=None)
+    base = {"channel": 1, "slow_idx": 1, "fast_idx": 1, "time_offset": 0.0,
+            "has_slow_tod": True, "has_fast_tod": True}
+    panel._on_pair_matched(dict(base, pair_idx=1,
+                                slow_summary={"timestamp": 43000.0, "snr": 9.0}))
+    panel._on_pair_matched(dict(base, pair_idx=2,
+                                slow_summary={"timestamp": 43000.5, "snr": 9.0,
+                                              "pileup": True}))
+    panel._on_pair_matched(dict(base, pair_idx=3, fast_idx=None,
+                                slow_summary={"timestamp": 43001.0, "snr": 9.0,
+                                              "truncated": True}))
+    ch_item = panel._channel_items[1]
+    texts = [ch_item.child(i).text(0) for i in range(3)]   # newest first
+    assert texts == ["⊘ slow only", "⚠ slow + fast", "◆ slow + fast"]
+    panel.close()
+    spin(qt_app)

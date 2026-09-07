@@ -36,8 +36,8 @@ SPLIT = 3           # pileup split on that sample: save, then re-arm
  SINCE_REFRESH, SETTLED, RISE_RUN) = range(17)
 N_INT = RISE_RUN + 1
 # Floats.
-(ANCHOR_I, ANCHOR_Q, TMEAN_I, TMEAN_Q, TSTD_I, TSTD_Q, NEAR_I,
- NEAR_Q, PREV_MAG, PREV2_MAG, SCATTER) = range(11)
+(ANCHOR_I, ANCHOR_Q, TMEAN_I, TMEAN_Q, TSTD_I, TSTD_Q, PREV_MAG,
+ PREV2_MAG, SCATTER) = range(9)
 N_FLT = SCATTER + 1
 
 _SQRT2 = math.sqrt(2.0)
@@ -214,7 +214,6 @@ def walk(I, Q, T, start, stop,
             since_fire = ch_n - si[FIRE_ABS]
             decaying_now = False
             rising_above_self = False
-            have_near = False
             if enable_pileup and edge_lookback > 0 and since_fire >= 1:
                 span = edge_lookback
                 if since_fire < span:
@@ -261,11 +260,8 @@ def walk(I, Q, T, start, stop,
                     if near < 1:
                         near = 1
                     idx = (rptr - 1 - near) % rN
-                    sf[NEAR_I] = rI[idx]
-                    sf[NEAR_Q] = rQ[idx]
-                    have_near = True
-                    near_mag = math.hypot((sf[NEAR_I] - mean_I) / sI,
-                                          (sf[NEAR_Q] - mean_Q) / sQ)
+                    near_mag = math.hypot((rI[idx] - mean_I) / sI,
+                                          (rQ[idx] - mean_Q) / sQ)
                     rising_above_self = (mag - near_mag) / jn > thr
             if rising_above_self:
                 si[RISE_RUN] += 1
@@ -282,11 +278,8 @@ def walk(I, Q, T, start, stop,
             if (enable_pileup and edge_lookback > 0 and si[RETRIG] != 0
                     and eligible and si[RISE_RUN] >= trigger_samples):
                 # The split: Python saves this capture, then re-arms the
-                # next one with these values.
+                # next one from the state.
                 reason = SPLIT
-                if not have_near:
-                    sf[NEAR_I] = math.nan
-                    sf[NEAR_Q] = math.nan
                 break
             if returned or (dev_I < end_sigma and dev_Q < end_sigma):
                 if si[END_PTR] == 0:

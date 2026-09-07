@@ -169,6 +169,18 @@ FREQUENCY_METHODS = ("iq_derivative", "minimum")
 #: more than one and the caller did not say.
 PREFERRED_DIRECTION = "upward"
 
+#: How many samples apart :func:`bifurcated_by_derivative` will accept its
+#: up-spike and down-spike, at most. ``1`` is a jump crossed in a single
+#: frequency bin, which is what a discontinuity looks like when the sweep grid
+#: happens to straddle it cleanly. ``2`` also accepts the case where a sample
+#: landed partway across the jump, so the trace takes two steps to get over it
+#: and the peak in the arc speed is two samples wide instead of one. That is a
+#: property of where the grid fell rather than of the resonator, so refusing it
+#: loses real bifurcations for no reason. Beyond 2 the pattern stops describing
+#: a discontinuity and starts matching the ordinary rise and fall through a
+#: resonance, so this is not a knob.
+MAX_SPIKE_SEPARATION = 2
+
 
 # ─── Results ──────────────────────────────────────────────────────────────────
 
@@ -463,6 +475,7 @@ def find_bias_points(
     frequency_method: str = "iq_derivative",
     direction: str | None = None,
     spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
     max_distance_hz: float | None = None,
@@ -499,6 +512,11 @@ def find_bias_points(
             the only direction there is otherwise. The amplitude search is
             unaffected — a detector sees every direction of its own step.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative` — how far
+            above a sweep's own noise floor a spike has to stand before it
+            counts. Lower it if real bifurcations are being missed on a noisy
+            array; ``0.0`` switches it off, which is what the test did before
+            the gate existed.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         compare: passed to :func:`bifurcated_by_hysteresis` — what the two
             sweep directions are compared in, from
@@ -568,6 +586,7 @@ def find_bias_points(
     amplitude_settings = dict(
         method=amplitude_method,
         spike_prominence_factor=spike_prominence_factor,
+        noise_gate_factor=noise_gate_factor,
         max_discrepancy=max_discrepancy,
         compare=compare,
     )
@@ -595,6 +614,7 @@ def find_bias_points(
             "frequency_method": frequency_method,
             "direction": direction,
             "spike_prominence_factor": spike_prominence_factor,
+            "noise_gate_factor": noise_gate_factor,
             "max_discrepancy": max_discrepancy,
             "compare": compare,
             "max_distance_hz": max_distance_hz,
@@ -752,6 +772,7 @@ def find_bias_amplitude(
     *,
     method: str = "both",
     spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
 ) -> AmplitudeChoice:
@@ -784,6 +805,7 @@ def find_bias_amplitude(
             the one method that reads all three of the settings below — and
             the one that needs both sweep directions.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         compare: passed to :func:`bifurcated_by_hysteresis`.
 
@@ -804,7 +826,10 @@ def find_bias_amplitude(
     # Each detector takes only its own settings, so a caller passing all of
     # them does not hand the hysteresis test a spike threshold it has no use
     # for. "both" runs the two tests, so it is the one that takes both sets.
-    spikes = {"spike_prominence_factor": spike_prominence_factor}
+    spikes = {
+        "spike_prominence_factor": spike_prominence_factor,
+        "noise_gate_factor": noise_gate_factor,
+    }
     separation = {"max_discrepancy": max_discrepancy, "compare": compare}
     settings = {
         "derivative": spikes,
@@ -852,6 +877,7 @@ def bifurcated_by_derivative(
     entries: Mapping[str, dict],
     *,
     spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
 ) -> BifurcationCheck:
     """Is this sweep bifurcated? Ask the jumps in its IQ arc-length speed.
 
@@ -866,29 +892,44 @@ def bifurcated_by_derivative(
     own range first, and each difference by the frequency spacing it spans, so
     what remains is shape.
 
-    How big a spike has to be is set relative to the sweep itself: a spike has
-    to stand out from its surroundings — scipy's *prominence* — by more than
-    *spike_prominence_factor* times the span of the arc-length speed. The factor
+    A spike has to clear **two** bars, and they ask different questions.
+
+    *spike_prominence_factor* asks whether the spike is large compared to the
+    sweep: it must stand out from its surroundings — scipy's *prominence* — by
+    more than this fraction of the span of the arc-length speed. The factor
     multiplies, so it reads the way it behaves: the default of 0.5 asks a spike
-    to stand a full half of the speed's whole range out of its own
-    neighbourhood, and raising it asks for more, which is less sensitive.
+    to stand half of the speed's whole range out of its own neighbourhood, and
+    raising it asks for more, which is less sensitive.
 
-    It is the same bar the GUI has always applied, but **not the same number**:
-    the GUI *divided* the span by a ``spike_prominence_factor`` of 2.0, so
-    turning its knob up made the test more sensitive. Same argument name, the
-    reciprocal value, arithmetic that no longer runs backwards. The bar itself
-    has not been re-derived here.
+    That bar alone cannot tell a jump from noise, because on a sweep with no
+    visible resonance the span *is* noise. The largest excursion of a noisy
+    trace and the range of that trace are both order statistics of the same
+    scatter, so their ratio lands in the same place — around 0.3 to 0.6 for a
+    hundred-point sweep — no matter how quiet the drive was. A bar set as a
+    fraction of the span is a bar that noise clears by construction, which is
+    why the quiet end of an amplitude ladder used to produce false positives
+    that no choice of factor could remove.
 
-    Scaling off the sweep is what makes one factor portable between resonators,
-    and also what makes this test say yes too readily on a sweep with no
-    resonance in it: the largest noise excursion is then the whole dynamic
-    range, so it clears a threshold set as a fraction of itself. A sweep too
-    coarse to resolve the resonance has the same problem for the opposite
-    reason — a dip crossed in two samples is a discontinuity, and this test
-    cannot tell that from a jump. Both show up as a ``metric`` only just over
-    ``threshold``, which is why they are reported: a resonator that bifurcates
-    has a jump that clears it by a wide margin, and the factor is what you
-    raise when yours does not.
+    *noise_gate_factor* asks the other question: is this spike bigger than what
+    this trace scatters by anyway? The scatter is measured as the median
+    absolute deviation of the differences, scaled to read like a standard
+    deviation. Median absolute deviation rather than a standard deviation on
+    purpose — a jump puts two large samples into the trace and inflates a
+    standard deviation by so much that the ratio barely moves, whereas a median
+    is untroubled by two outliers among a hundred and goes on describing the
+    noise floor rather than the noise floor plus the signal.
+
+    The default of 50 is where the two populations separate most cleanly on the
+    array this was calibrated against: the largest excursion of a noise-only
+    sweep there stood under 10 median-absolute-deviations, and the weakest real
+    jump stood at 152. Anything from roughly 10 to 150 behaves; below that the
+    quiet steps start returning, and above it real jumps start being missed,
+    which is the more expensive error. Pass ``0.0`` to switch the gate off and
+    get the span bar on its own.
+
+    A trace with no scatter at all — quantized, or constant — has a noise floor
+    of zero, which switches the gate off for that trace rather than dividing by
+    it. There is nothing there for a gate to measure against.
 
     Args:
         entries: one amplitude step, ``{direction: entry}``. Every direction
@@ -898,11 +939,14 @@ def bifurcated_by_derivative(
             happened to catch it.
         spike_prominence_factor: the bar a spike has to clear, as a multiple
             of the span of the arc-length speed. Larger is less sensitive.
+        noise_gate_factor: the second bar, as a multiple of the trace's own
+            noise floor. Larger is less sensitive; ``0.0`` disables it.
 
     Returns:
-        BifurcationCheck: with ``threshold`` the bar the spikes had to clear,
-        and ``metric`` the three things this test asks about, from one
-        direction — the same three the verdict is the conjunction of:
+        BifurcationCheck: with ``threshold`` the bar the spikes had to clear —
+        **the higher of the two**, since both are prominences in the same units
+        and clearing both is clearing the larger — and ``metric`` the three
+        things this test asks about, from one direction:
 
         ``"positive_spike_prominence"``
             how far the tallest up-spike stands out of its own neighbourhood.
@@ -910,14 +954,18 @@ def bifurcated_by_derivative(
         ``"negative_spike_prominence"``
             the same for the tallest down-spike.
         ``"adjacency"``
-            whether the spikes that cleared the bar sat next to each other, up
-            first. Its own condition, with no threshold to compare against.
+            whether a spike that cleared the bar was followed within
+            :data:`MAX_SPIKE_SEPARATION` samples by a down-spike that also
+            cleared it. Its own condition, with no threshold to compare against.
 
         The verdict is ``True`` when both prominences clear ``threshold`` *and*
-        ``"adjacency"``, so the three entries say which of those failed. That
-        is what they are for: a prominence just under the bar is a factor to
-        lower, and two prominences well over it with ``"adjacency"`` false is a
-        jump the pattern-matching missed, which is a different problem.
+        ``"adjacency"``, so the three entries say which of those failed. A
+        prominence just under the bar is a factor to lower; two prominences
+        well over it with ``"adjacency"`` false is a jump the pattern-matching
+        missed, which is a different problem. To find out *which* bar was
+        binding, run it again with ``noise_gate_factor=0.0`` and compare the
+        thresholds — or plot them, which is what
+        ``Demos/example_plotting_bias.plot_bifurcation_verdict_map`` is for.
 
         The direction reported is the one that came closest to bifurcating —
         one that fired if any did, and otherwise the one that spiked hardest —
@@ -936,8 +984,12 @@ def bifurcated_by_derivative(
             continue
 
         jumps = np.diff(speed)
-        prominence_threshold = float(
-            spike_prominence_factor * (speed.max() - speed.min())
+        # Both bars measure the same thing — a prominence, in the units of
+        # `jumps` — so requiring a spike to clear both is requiring it to clear
+        # whichever is higher, and one number describes the bar it faced.
+        prominence_threshold = max(
+            float(spike_prominence_factor * (speed.max() - speed.min())),
+            float(noise_gate_factor * _noise_floor(jumps)),
         )
 
         # Every spike with its prominence, then the bar applied as a filter,
@@ -950,15 +1002,7 @@ def bifurcated_by_derivative(
         cleared_up = up[up_prominence >= prominence_threshold]
         cleared_down = down[down_prominence >= prominence_threshold]
 
-        # look for adjacent spikes, with one up before one down:
-        # TODO we are assuming there will only be one spike here - is that okay?
-        # maybe filtering for multiple spikes could cut down on getting tripped up
-        ## by noisy data
-        adjacency = bool(
-            len(cleared_up)
-            and len(cleared_down)
-            and cleared_down[0] == cleared_up[0] + 1
-        )
+        adjacency = _paired(cleared_up, cleared_down)
         verdict = verdict or adjacency
 
         metric = {
@@ -1106,6 +1150,7 @@ def bifurcated_by_either(
     entries: Mapping[str, dict],
     *,
     spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
 ) -> BifurcationCheck:
@@ -1135,6 +1180,7 @@ def bifurcated_by_either(
         entries: one amplitude step, ``{direction: entry}``, with both
             ``"upward"`` and ``"downward"`` present.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         compare: passed to :func:`bifurcated_by_hysteresis`.
 
@@ -1177,7 +1223,9 @@ def bifurcated_by_either(
     """
     parts = {
         "derivative": bifurcated_by_derivative(
-            entries, spike_prominence_factor=spike_prominence_factor
+            entries,
+            spike_prominence_factor=spike_prominence_factor,
+            noise_gate_factor=noise_gate_factor,
         ),
         "hysteresis": bifurcated_by_hysteresis(
             entries, max_discrepancy=max_discrepancy, compare=compare
@@ -1277,6 +1325,45 @@ def _tallest(prominences: np.ndarray) -> float:
     the threshold and plotted across amplitude steps like any other.
     """
     return float(prominences.max()) if len(prominences) else 0.0
+
+
+def _noise_floor(values: np.ndarray) -> float:
+    """How much *values* scatters, without the jump being allowed to say.
+
+    The median absolute deviation, scaled by 1.4826 so that it reads as a
+    standard deviation would on Gaussian noise. That scaling is what lets
+    ``noise_gate_factor`` be thought of in sigmas.
+
+    Robust is the whole point. A bifurcated sweep puts two samples of order the
+    whole span into a hundred-sample trace, which lifts a standard deviation
+    far enough that a jump measured against it comes out barely above where
+    noise does. A median does not move for two samples out of a hundred, so
+    what comes back is the floor the jump stands on rather than the floor plus
+    the jump.
+
+    ``0.0`` for a trace that does not scatter at all, which disables the gate
+    rather than dividing by it.
+    """
+    return float(np.median(np.abs(values - np.median(values))) * 1.4826)
+
+
+def _paired(up: np.ndarray, down: np.ndarray) -> bool:
+    """Did an up-spike get followed closely by a down-spike? Up first.
+
+    *Any* such pair, not the first spike of each list. Filtering by prominence
+    can only ever add spikes as the bar comes down, so asking whether any pair
+    exists makes the verdict monotone in the bar — lowering a threshold cannot
+    take a detection away. Comparing only ``up[0]`` against ``down[0]`` does not
+    have that property: admitting one more spike at a lower index displaces the
+    first, and a pair that was matching stops matching.
+
+    Within :data:`MAX_SPIKE_SEPARATION` samples rather than exactly one, so a
+    jump that a sample landed partway across is still recognized.
+    """
+    if not (len(up) and len(down)):
+        return False
+    separation = down[np.newaxis, :] - up[:, np.newaxis]
+    return bool(((separation >= 1) & (separation <= MAX_SPIKE_SEPARATION)).any())
 
 
 # ─── Which frequency ──────────────────────────────────────────────────────────

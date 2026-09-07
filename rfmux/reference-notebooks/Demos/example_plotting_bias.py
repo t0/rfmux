@@ -14,6 +14,9 @@ draw the report against the sweeps it came from::
     biasplots.plot_bias_points(report, module_sweeps)        # where the tone sits
     biasplots.plot_bifurcation_checks(report, module_sweeps) # why that amplitude
     biasplots.plot_arc_speed_panels(module_sweeps)           # what the tests saw
+    biasplots.plot_bifurcation_verdict_map(module_sweeps)    # how the verdict
+                                                             # depends on the
+                                                             # thresholds
 
 The report carries the conclusions, not the traces, so the first two want the
 sweeps as well as the report.
@@ -50,6 +53,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 from rfmux.tuning import (
     bifurcated_by_derivative,
@@ -72,6 +76,7 @@ __all__ = [
     "plot_arc_speed_panels",
     "plot_bias_points",
     "plot_bifurcation_checks",
+    "plot_bifurcation_verdict_map",
     "square_axes",
 ]
 
@@ -699,6 +704,234 @@ def plot_bifurcation_checks(
                 len(findings), batch_number, len(batches),
             ))
             plt.show()
+
+
+def _verdict_row(entries, factors, noise_gate_factor):
+    """One amplitude step's verdict at every factor, and where the gate binds.
+
+    Returns ``(verdicts, crossover)``. *crossover* is the factor below which the
+    noise gate is the bar that matters — the span bar and the noise bar are
+    equal there, so to the left of it lowering the factor changes nothing. It is
+    read off the detector itself rather than recomputed here: a threshold with
+    only the noise bar switched on, over one with only the span bar, is that
+    ratio. ``None`` when the sweep is unusable.
+    """
+    try:
+        noise_bar = bifurcated_by_derivative(
+            entries, spike_prominence_factor=0.0, noise_gate_factor=noise_gate_factor
+        ).threshold
+        span_bar = bifurcated_by_derivative(
+            entries, spike_prominence_factor=1.0, noise_gate_factor=0.0
+        ).threshold
+        verdicts = [
+            bifurcated_by_derivative(
+                entries,
+                spike_prominence_factor=float(factor),
+                noise_gate_factor=noise_gate_factor,
+            ).bifurcated
+            for factor in factors
+        ]
+    except ValueError:
+        return None, None
+    return verdicts, (noise_bar / span_bar if span_bar else None)
+
+
+def plot_bifurcation_verdict_map(
+    results,
+    names=None,
+    factors=None,
+    noise_gate_factor=50.0,
+    mark_factor=0.5,
+    ncols=1,
+    panel_size=(11.0, 0.55),
+    title=None,
+    batchlen=8,
+):
+    """Every amplitude step's bifurcation verdict, across the whole factor axis.
+
+    One row per amplitude step, one column of pixels per
+    ``spike_prominence_factor``, black where :func:`bifurcated_by_derivative`
+    says the step is bifurcated. It answers the question a single run cannot:
+    not "is this step bifurcated at my threshold" but "how does that answer
+    depend on my threshold", which is the only way to see whether the setting
+    is sitting in the middle of a wide margin or on the edge of a cliff.
+
+    **What a healthy resonator looks like.** One solid black bar in the top
+    row — the loudest step, the one that really did bifurcate — running from the
+    left edge to a clean right-hand edge, with every quieter row white, and the
+    marked factor comfortably inside the bar. Nothing else.
+
+    **What the failures look like.**
+
+    * *Speckle in the lower rows.* Quiet steps flicking on and off as the factor
+      rises are noise being mistaken for a jump. The span bar is a fraction of a
+      quantity that noise itself sets, so on a sweep with no visible resonance
+      it is clearing a bar made out of itself. Raise *noise_gate_factor* until
+      those rows go white.
+    * *The top row's edge landing near the marked factor.* The setting is on a
+      cliff: the same resonator measured again on a slightly different frequency
+      grid will fall the other side of it. Move the factor, or find out why that
+      resonator's jump is weak.
+    * *A top row that is white, or shorter than its neighbours'.* That
+      resonator's jump is not being seen at all. If the other rows are also
+      white the noise gate is too high for this array.
+
+The tinted part of a row is where the noise gate rather than the span bar is
+    the higher of the two, and so the one deciding — one band per sweep
+    direction, since each has its own noise floor. Across the tint the factor is
+    not in play at all, which is exactly the regime the gate was added to
+    control: a quiet step tinted end to end is one the gate is holding down no
+    matter what the factor is set to. No tint means the factor decided the whole
+    row, which is what the loudest step should look like over most of its
+    length.
+
+    This calls the detector once per resonator, step and factor, so the cost is
+    the product of the three. The default factor grid is coarse enough to keep
+    a full array quick and fine enough to see an edge; pass your own for a
+    closer look at one resonator.
+
+    Args:
+        results: one module's sweep results — the value of ``sweeps[module_id]``,
+            the same thing the other plots here take. No report needed: this
+            re-runs the detector rather than reading a recorded verdict, which
+            is what lets it sweep a setting the report was not run with.
+        names: which resonators to draw. ``None`` for every one swept.
+        factors: the ``spike_prominence_factor`` values to test, or ``None`` for
+            80 points from 0.02 to 1.0.
+        noise_gate_factor: held fixed while the factor sweeps, since the point
+            is to see one knob's effect at a time. Run it twice to compare two,
+            which is what ``0.0`` against the default shows.
+        mark_factor: draw a line at this factor — the setting you mean to use.
+            ``None`` for no line.
+        ncols: panels per row of the figure. One is usually right: these panels
+            are wide and short, and stacking them shares the factor axis.
+        panel_size: ``(width, height)`` of one panel, in inches. The height is
+            per resonator, and gets multiplied by the number of steps.
+        title: overrides the figure title. The batch marker is still appended.
+        batchlen: resonators per figure. ``None`` for one figure however big.
+
+    Raises:
+        KeyError: if a requested name was not swept.
+        TypeError: if handed the whole per-module container as *results*.
+    """
+    swept = _section_names(results)
+    wanted = _as_list(names)
+    if wanted is None:
+        wanted = swept
+    missing = [name for name in wanted if name not in swept]
+    if missing:
+        raise KeyError(f"These resonators were not swept: {missing}")
+    if factors is None:
+        factors = np.linspace(0.02, 1.0, 80)
+    factors = np.asarray(factors, dtype=float)
+
+    batches = _batches(list(wanted), batchlen)
+    columns = _columns_for(batches, ncols)
+
+    for batch_number, batch in enumerate(batches, start=1):
+        with plt.rc_context({**PLOT_STYLE, "axes.grid": False}):
+            # A panel is as tall as it has steps, so a five-step ladder is five
+            # readable rows rather than five slivers.
+            iterations = {
+                name: collect_amplitude_iterations_for(results, name)
+                for name in batch
+            }
+            tallest = max(len(steps) for steps in iterations.values())
+            fig, axes, panels = _panel_grid(
+                len(batch), columns,
+                (panel_size[0], panel_size[1] * tallest),
+            )
+
+            drew_a_crossing = False
+            for panel, name in zip(panels, batch):
+                steps = sorted(iterations[name], key=lambda s: _amplitude(
+                    iterations[name][s]))
+                grid, crossings, unusable = [], [], []
+                for row, step in enumerate(steps):
+                    verdicts, crossover = _verdict_row(
+                        iterations[name][step], factors, noise_gate_factor
+                    )
+                    if verdicts is None:
+                        grid.append([False] * len(factors))
+                        unusable.append(row)
+                        continue
+                    grid.append(verdicts)
+                    if crossover is not None:
+                        crossings.append((row, crossover))
+
+                panel.imshow(
+                    np.array(grid),
+                    aspect="auto", origin="lower", cmap="binary",
+                    vmin=0, vmax=1, interpolation="nearest",
+                    extent=(factors[0], factors[-1], -0.5, len(steps) - 0.5),
+                )
+                # How far across the row the noise gate is the binding bar,
+                # tinted rather than marked with a line: a row tinted end to end
+                # is one the gate is holding down everywhere, and an untinted
+                # one is a row the factor alone decided. A tick at the crossover
+                # cannot say either of those when it falls off the axis.
+                for row, crossover in crossings:
+                    if crossover <= factors[0]:
+                        continue
+                    panel.fill_betweenx(
+                        [row - 0.5, row + 0.5], factors[0],
+                        min(crossover, factors[-1]),
+                        color=BIAS_COLOUR, alpha=0.3, lw=0, zorder=3,
+                    )
+                    drew_a_crossing = True
+                # A step whose sweep the detector refused is a gap in the
+                # evidence, not a white "no" — say so rather than drawing blank.
+                for row in unusable:
+                    panel.text(
+                        (factors[0] + factors[-1]) / 2, row, "no usable sweep",
+                        ha="center", va="center", fontsize=11,
+                        color=FLAGGED_COLOUR,
+                    )
+
+                if mark_factor is not None:
+                    panel.axvline(mark_factor, color=FLAGGED_COLOUR, lw=2.0)
+
+                panel.set_yticks(range(len(steps)))
+                panel.set_yticklabels(
+                    [f"{_amplitude(iterations[name][step]):.4f}" for step in steps],
+                    fontsize=11,
+                )
+                panel.set_xlim(factors[0], factors[-1])
+
+            # After _outer_labels, which writes the shared y label into the
+            # first column and would otherwise overwrite the resonator names.
+            _outer_labels(axes, "spike_prominence_factor", "")
+            for panel, name in zip(panels, batch):
+                panel.set_ylabel(name, fontsize=13)
+
+            handles = [Line2D([], [], color="black", lw=8)]
+            labels = ["bifurcated"]
+            if mark_factor is not None:
+                handles.append(Line2D([], [], color=FLAGGED_COLOUR, lw=2.0))
+                labels.append(f"factor = {mark_factor:g}")
+            if drew_a_crossing:
+                handles.append(Patch(color=BIAS_COLOUR, alpha=0.3))
+                labels.append("noise gate is the binding bar")
+            fig.legend(handles, labels, loc="outside lower center",
+                       ncols=len(labels))
+
+            _titled(fig, _batch_title(
+                title,
+                f"derivative verdict vs threshold (rows are drive amplitude), "
+                f"noise_gate_factor={noise_gate_factor:g}",
+                len(wanted), batch_number, len(batches),
+            ))
+            plt.show()
+
+
+def _amplitude(entries):
+    """The drive one amplitude step sat at. Every direction of a step shares
+    it, so the first that carries one answers for the step."""
+    for entry in entries.values():
+        amplitude = entry.get("sweep_amplitude")
+        if amplitude is not None:
+            return amplitude
+    return float("nan")
 
 
 def _arc_quantity(quantity, entry):

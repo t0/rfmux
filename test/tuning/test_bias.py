@@ -31,6 +31,12 @@ from rfmux.tuning.bias import (
     iq_arc_speed,
     iq_derivatives_at,
     normalized_arc_speed,
+    # The pieces of the derivative test that have their own behaviour to pin
+    # down — the noise floor's robustness and the pairing rule's monotonicity
+    # are properties of these two rather than of any one verdict.
+    _noise_floor,
+    _paired,
+    _spikes,
 )
 from rfmux.tuning.fits import nonlinear_iq
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
@@ -293,7 +299,10 @@ def test_a_spike_that_missed_the_bar_still_reports_its_prominence():
     survive the verdict going against it — asking find_peaks for only the
     spikes that cleared would report nothing exactly when it matters."""
     step = a_step(a=JUMPED)
-    demanding = bifurcated_by_derivative(step, spike_prominence_factor=1.5)
+    # 3.0 rather than something just over 1: the spikes either side of this
+    # jump reach nearly twice the span, because each is measured down to the
+    # other, so a bar of 1.5 is one several of them still clear.
+    demanding = bifurcated_by_derivative(step, spike_prominence_factor=3.0)
 
     assert not demanding.bifurcated
     assert demanding.metric["positive_spike_prominence"] > 0.0
@@ -325,6 +334,79 @@ def test_the_direction_reported_is_one_that_fired():
 
     assert check.bifurcated
     assert check.metric["adjacency"]
+
+
+def test_the_noise_gate_throws_out_a_sweep_that_is_only_noise():
+    """The span of a sweep with no resonance in it is set by its own scatter, so
+    a bar that is a fraction of the span is one that noise clears by
+    construction. The gate is the second opinion that does not have that
+    problem, and this is the case it exists for."""
+    rng = np.random.default_rng(0)
+    entry = a_sweep(a=0.0)
+    # Nothing but noise: no dip, no jump, just scatter of one arbitrary size.
+    entry["iq_counts"] = (
+        rng.normal(size=len(entry["frequencies"]))
+        + 1j * rng.normal(size=len(entry["frequencies"]))
+    )
+    noise = {"upward": entry}
+
+    assert bifurcated_by_derivative(noise, noise_gate_factor=0.0).bifurcated
+    assert not bifurcated_by_derivative(noise).bifurcated
+
+
+def test_the_noise_gate_leaves_a_real_jump_alone():
+    """It has to reject noise without rejecting the thing it is protecting: a
+    jump stands orders of magnitude above the floor it sits on, which is the
+    whole reason a gate in noise units can separate them at all."""
+    step = a_step(a=JUMPED)
+
+    assert bifurcated_by_derivative(step).bifurcated
+    assert bifurcated_by_derivative(step, noise_gate_factor=0.0).bifurcated
+
+
+def test_the_noise_floor_is_robust_to_the_jump_it_is_measuring():
+    """A standard deviation is lifted by the jump itself, which is what would
+    make a gate in those units useless. The median absolute deviation is not, so
+    adding a jump to a trace must barely move the floor it reports."""
+    quiet = np.tile([1.0, -1.0], 50)  # scatter of a known size, no jump
+    jumped = quiet.copy()
+    jumped[50] = 500.0  # one enormous sample
+
+    assert _noise_floor(jumped) == pytest.approx(_noise_floor(quiet), rel=0.05)
+    assert np.std(jumped) > 5 * np.std(quiet)
+
+
+def test_a_jump_that_straddles_two_samples_is_still_a_jump():
+    """Where the frequency grid fell relative to the discontinuity decides
+    whether the arc-speed peak is one sample wide or two. That is not a property
+    of the resonator, so both have to count."""
+    speed = np.zeros(40)
+    speed[20] = 1.0  # crossed in one sample
+    straddled = np.zeros(40)
+    straddled[20:22] = [0.5, 1.0]  # a sample landed partway across
+
+    for trace in (speed, straddled):
+        jumps = np.diff(trace)
+        up, up_prominence = _spikes(jumps)
+        down, down_prominence = _spikes(-jumps)
+        bar = 0.4
+        assert _paired(up[up_prominence >= bar], down[down_prominence >= bar])
+
+
+def test_lowering_the_bar_cannot_take_a_detection_away():
+    """Matching any cleared pair rather than the first of each list is what
+    makes the verdict monotone in the bar. Without it, admitting one more spike
+    at a lower index displaces ``cleared_up[0]`` and a matching pair stops
+    matching, so turning the knob down could turn a detection off."""
+    step = a_step(a=JUMPED)
+    factors = np.linspace(0.02, 2.0, 60)
+    verdicts = [
+        bifurcated_by_derivative(step, spike_prominence_factor=float(f)).bifurcated
+        for f in factors
+    ]
+
+    # Monotone: once it stops firing as the bar rises, it never starts again.
+    assert verdicts == sorted(verdicts, reverse=True)
 
 
 def test_a_bigger_prominence_factor_is_what_makes_the_test_less_sensitive():
@@ -582,7 +664,11 @@ def test_a_bar_of_zero_has_no_multiples():
     than the answer wrong: anything at all stands further out than nothing."""
     step = a_step(a=JUMPED, directions=("upward", "downward"))
 
-    check = bifurcated_by_either(step, spike_prominence_factor=0.0)
+    # Both of the derivative test's bars, because its threshold is the higher
+    # of the two and only zeroing one of them leaves the other standing.
+    check = bifurcated_by_either(
+        step, spike_prominence_factor=0.0, noise_gate_factor=0.0
+    )
 
     assert check.metric["derivative_positive_spike_prominence"] == float("inf")
     assert check.bifurcated

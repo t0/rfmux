@@ -99,7 +99,7 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 import rfmux
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
@@ -168,6 +168,7 @@ print(f"modules: {list(multiamp_ms)}")
 multiamp_module_results = multiamp_ms[list(multiamp_ms)[0]]
 
 print(f"schema_version:  {multiamp_module_results['schema_version']}")
+print(f"measurement:     {multiamp_module_results['measurement']}")
 print(f"module:          {multiamp_module_results['module']}")
 print(f"amplitude steps: {list(multiamp_module_results['results'])}")
 print(f"directions:      {list(multiamp_module_results['results'][0])}")
@@ -204,9 +205,10 @@ swept_catalog = ResonatorCatalog.from_dict(
 print(swept_catalog)
 ```
 
-Five resonators, all with bias amplitudes listed as 0.001 in normalized DAC units — the amplitude the
-array was found and first swept at. The amplitude steps below are *relative* to
-that, which is why the ladder runs 0.0008 to 0.008 rather than 0.8 to 8.
+<!-- #region -->
+The array contains five resonators, which currently all have bias amplitudes listed as 0.001, which is the amplitude
+that the resonance finding netanal was performed at.
+
 
 ### Take a look at the data
 
@@ -215,10 +217,7 @@ functions by hand as an exercise, but canned example
 plotting functions can also be found under `Demos/example_plotting_{...}.py`, for the various
 topics covered in these notebooks.
 
-
-```python
-
-```
+<!-- #endregion -->
 
 ```python
 
@@ -231,7 +230,10 @@ for iteration in multiamp_module_results["results"]:
     amplitudes = get_amplitudes_at_iteration(multiamp_module_results, iteration)
     print(f"step {iteration}: {amplitudes}")
 
-AMPLITUDE_CMAP = plt.cm.gnuplot
+
+AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
+    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
+)
 
 
 def amplitude_colours(amplitudes):
@@ -250,37 +252,58 @@ def amplitude_colours(amplitudes):
     return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
 
 
-def offset_khz(entry):
-    """A sweep's frequencies as kHz either side of where it was centred."""
-    return (entry["frequencies"] - entry["original_center_frequency"]) / 1e3
+def offset_khz(entry, frequencies=None):
+    """Frequencies as kHz either side of where the sweep was centred.
+
+    Pass *frequencies* to convert a grid other than the entry's own — the
+    midpoint grid a point-to-point difference lands on, for instance.
+    """
+    if frequencies is None:
+        frequencies = entry["frequencies"]
+    return (frequencies - entry["original_center_frequency"]) / 1e3
 
 
-def plot_amplitude_steps(results, resonator_names, direction="upward"):
-    """Every amplitude step of each resonator, one panel per resonator."""
+def panels_per_resonator(names, width=3.1, height=3.0, **kwargs):
+    """One panel per resonator, in a single row, and the figure holding them.
+
+    Every plot below this point is per-resonator: a detector that is run on the
+    whole array is worth seeing on the whole array, because what you are looking
+    for is the one panel that does not look like the others.
+    """
     fig, axes = plt.subplots(
-        1, len(resonator_names), figsize=(3.1 * len(resonator_names), 3.0),
-        constrained_layout=True, squeeze=False,
+        1, len(names), figsize=(width * len(names), height),
+        constrained_layout=True, squeeze=False, **kwargs
     )
+    return fig, axes[0]
 
-    for panel, name in zip(axes[0], resonator_names):
+
+def plot_amplitude_steps(results, resonator_names, directions=["upward", 'downward']):
+    """Every amplitude step of each resonator, one panel per resonator."""
+    fig, panels = panels_per_resonator(resonator_names)
+
+    linestyles = ['--', '-']
+
+    for panel, name in zip(panels, resonator_names):
         iterations = collect_amplitude_iterations_for(results, name)
-        amplitudes = [e[direction]["sweep_amplitude"] for e in iterations.values()]
+        amplitudes = [e[directions[0]]["sweep_amplitude"] for e in iterations.values()]
         colours, mappable = amplitude_colours(amplitudes)
 
         for (entry, colour) in zip(iterations.values(), colours):
-            sweep = entry[direction]
-            # Divided by its own drive, so the traces can be compared by shape
-            # rather than the loudest simply sitting on top of the others.
-            iq = sweep["iq_counts"] / sweep["sweep_amplitude"]
-            panel.plot(offset_khz(sweep), 20 * np.log10(np.abs(iq)),
-                       lw=1.0, color=colour)
+            for d, direction in enumerate(directions):
+                sweep = entry[direction]
+                # Divided by its own drive, so the traces can be compared by shape
+                # rather than the loudest simply sitting on top of the others.
+                iq = sweep["iq_counts"] / sweep["sweep_amplitude"]
+                panel.plot(offset_khz(sweep), 20 * np.log10(np.abs(iq)),
+                           linestyles[d],
+                        lw=1.0, color=colour)
 
         panel.set_title(name, fontsize=10)
         panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
         panel.tick_params(labelsize=8)
 
-    axes[0][0].set_ylabel("|S21| / drive [dB]", fontsize=8)
-    fig.colorbar(mappable, ax=axes[0], label="drive amplitude")
+    panels[0].set_ylabel("|S21| / drive [dB]", fontsize=8)
+    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
     plt.show()
 
 
@@ -288,11 +311,14 @@ resonator_names = list(multiamp_module_results["results"][0]["upward"])
 plot_amplitude_steps(multiamp_module_results, resonator_names)
 ```
 
-This is a reasonably suitable measurement to use for our bias finding. Each 
+<!-- #region -->
+This is a reasonably suitable measurement to use for our bias finding. Every
 resonator has been swept at a low enough amplitude that it does not appear to be
-perturbed by the readout current, and has also been swept at a high enough amplitude
-that it is clearly bifurcated. This means that a reasonable bias amplitude is bracketed
-somewhere between these two end points.
+perturbed by the readout current, and most of them have also been swept at a high
+enough amplitude that they are clearly bifurcated. That brackets a reasonable bias
+amplitude somewhere between the two end points.
+
+
 
 ## 2. Choosing the bias amplitude
 
@@ -304,7 +330,9 @@ To try to identify the best amplitude to use, we look at the sweeps to find the 
 is bifurcated, and then select one amplitude step below that (the highest amplitude sweep
 which is **not** bifurcated).
 
+We will try two different methods to identify whether a sweep is bifurcated: `derivative` and `hysteresis`.
 
+<!-- #endregion -->
 
 rfmux provides `rfmux.tuning.find_bias_amplitude` to do this process on one
 resonator at a time. Its arguments:
@@ -314,22 +342,23 @@ resonator at a time. Its arguments:
 | `iterations` | required | multiamplitude multisweep measurements of a resonator in the usual form: `{iteration: {direction: entry}}`. This can be extracted using the convenience wrapper `rfmux.tuning.collect_amplitude_iterations_for` |
 | `method` | `"derivative"` | which bifurcation detection method to apply. Options are: `"derivative"` (reads the shape of a single trace and looks for jumps) and `"hysteresis"` (compares the two sweep directions against each other to see when they diverge) |
 | `spike_prominence_factor` | `0.5` | `"derivative"` method only: how far a spike has to stand out from its surroundings to count as a jump, as a multiple of the arc speed's range. Larger is less sensitive |
-| `max_discrepancy` | `0.25` | `"hysteresis"` method only: how far the upward and downward traces may part company, in units of the IQ loop's radius, before the step is called bifurcated |
+| `max_discrepancy` | `0.1` | `"hysteresis"` method only: how far the upward and downward traces may part company, in the units `compare` measures in, before the step is called bifurcated |
+| `compare` | `"magnitude"` | `"hysteresis"` method only: which plane the two directions are compared in — `"magnitude"` for their `\|S21\|` against frequency, `"iq"` for their distance on the IQ plane |
 
-`iterations` is positional; everything after it is keyword-only.
-`spike_prominence_factor` and `max_discrepancy` are handed straight down to
-whichever detector `method` selected, so passing both is harmless — the test
-that has no use for a knob never sees it.
+`spike_prominence_factor`, `max_discrepancy` and `compare` are handed straight
+down to whichever `method` was selected, so passing them all is harmless — the
+test that has no use for a knob never sees it.
 
-Called with nothing but the sweeps, on the first resonator:
+It needs to be called on measurements of one resonator at a time, so below we
+demonstrate calling it on the first resonator in the array:
 
 ```python
 from rfmux.tuning import collect_amplitude_iterations_for, find_bias_amplitude
 
-iterations_of_R0001 = collect_amplitude_iterations_for(
-    multiamp_module_results, "R0001"
+iterations_of_BRUL = collect_amplitude_iterations_for(
+    multiamp_module_results, "BRUL"
 )
-amplitude_choice = find_bias_amplitude(iterations_of_R0001)
+amplitude_choice = find_bias_amplitude(iterations_of_BRUL, method="derivative")
 
 print(f"iteration:              {amplitude_choice.iteration}")
 print(f"amplitude:              {amplitude_choice.amplitude}")
@@ -340,22 +369,33 @@ print(f"is_bifurcated_at_bias:  {amplitude_choice.is_bifurcated_at_bias}")
 So: bifurcation was first seen at 0.008, and the amplitude below it — 0.0045,
 step 3 — is where this resonator should sit. 
 
-`checks` holds the verdict on each step it actually examined. The search stops
-at the first bifurcated step, so the steps above it were never looked at and
-have nothing to report:
+This also returns some of the checks that were done on the data, in an attempt to make it easier to 
+troubleshoot why decisions were made. This is under `amplitude_choice.checks`.
+Note that the search stops
+at the first bifurcated step, so if there were further amplitude steps in the multisweep data,
+they will not have any entries under checks.
 
 ```python
 for iteration, check in amplitude_choice.checks.items():
-    print(f"step {iteration}: bifurcated={check.bifurcated!s:5}  "
-          f"metric={check.metric:.3e}  threshold={check.threshold:.3e}  "
-          f"({check.method})")
+    # `metric` is a dict: one entry per quantity the method examined, named for
+    # what it is. Printing it whole rather than picking an entry out keeps this
+    # loop working whichever method produced the checks.
+    numbers = "  ".join(
+        f"{key}={value:.3e}" if isinstance(value, float) else f"{key}={value}"
+        for key, value in check.metric.items()
+    )
+    print(f"step {iteration}: bifurcated={check.bifurcated!s:5}  {numbers}  "
+          f"threshold={check.threshold:.3e}  ({check.method})")
+
+
+### TODO plot each amplitude for this resonator, and label it with these checks rather than printing them
 ```
 
 <!-- #region -->
 Some quasi-failure modes:
 
 - **If nothing bifurcates**, the loudest step is chosen. Sweep again and include higher
-amplitudes.
+amplitudes. 
 - **If the quietest step already bifurcates**, there is nothing below it to go
   back to. The quietest step is chosen,
   and `amplitude_choice.is_bifurcated_at_bias` is `True` . The schedule started too high.
@@ -384,54 +424,58 @@ points belongs.
 ```python
 from rfmux.tuning import normalized_arc_speed
 
-def plot_arc_speed(results, name, iterations_to_show, direction="upward"):
-    """The normalized arc speed, and its point-to-point change, over a few
-    amplitude steps."""
-    collected = collect_amplitude_iterations_for(results, name)
-    amplitudes = [collected[i][direction]["sweep_amplitude"] for i in iterations_to_show]
-    colours, _ = amplitude_colours(amplitudes)
 
-    fig, axes = plt.subplots(2, 1, figsize=(7.5, 5.5), sharex=True,
-                             constrained_layout=True)
+def plot_derivative_test(results, names, direction="upward"):
+    """What the derivative test differentiates, every resonator, every step.
 
-    for iteration, colour in zip(iterations_to_show, colours):
-        entry = collected[iteration][direction]
-        frequencies, speed = normalized_arc_speed(entry)
-        centre = entry["original_center_frequency"]
-        label = f"step {iteration}, amp {entry['sweep_amplitude']:.4f}"
+    The arc speed itself is not drawn. The test does not read it directly — it
+    differentiates it once more and looks for spikes in *that*, so the
+    point-to-point change is the quantity a threshold means something against.
+    """
+    fig, panels = panels_per_resonator(names, height=3.2, sharey=True)
 
-        axes[0].plot((frequencies - centre) / 1e3, speed, lw=1.0,
-                     color=colour, label=label)
-        # The point-to-point change is what the spikes are looked for in. It sits
-        # between the points above, so its x-axis is their midpoints.
-        midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
-        axes[1].plot((midpoints - centre) / 1e3, np.diff(speed), lw=1.0,
-                     color=colour)
+    for panel, name in zip(panels, names):
+        iterations = collect_amplitude_iterations_for(results, name)
+        amplitudes = [e[direction]["sweep_amplitude"] for e in iterations.values()]
+        colours, mappable = amplitude_colours(amplitudes)
 
-    axes[0].set_ylabel("normalized arc speed [1/Hz]")
-    axes[0].set_yscale("log")
-    axes[0].legend(fontsize=8)
-    axes[1].set_ylabel("point-to-point change")
-    # Symmetric log, so the quiet steps are not a flat line beside the loud
-    # ones — the spikes here are two orders of magnitude apart.
-    axes[1].set_yscale("symlog", linthresh=1e-5)
-    axes[1].set_xlabel("offset from sweep centre [kHz]")
-    fig.suptitle(f"{name}: what the derivative test looks at", fontsize=11)
+        for entry, colour in zip(iterations.values(), colours):
+            sweep = entry[direction]
+            frequencies, speed = normalized_arc_speed(sweep)
+            # The difference between two points belongs between them, so its
+            # x-axis is the midpoints of the arc speed's own grid.
+            midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
+            panel.plot(offset_khz(sweep, midpoints), np.diff(speed),
+                       lw=1.0, color=colour)
+
+        panel.set_title(name, fontsize=10)
+        panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
+        # Symmetric log, so the quiet steps are not a flat line beside the loud
+        # ones — the spikes here are two orders of magnitude apart.
+        panel.set_yscale("symlog", linthresh=1e-5)
+        panel.tick_params(labelsize=8)
+
+    panels[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
+    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
+    fig.suptitle("What the derivative test looks at", fontsize=11)
     plt.show()
 
 
-plot_arc_speed(multiamp_module_results, "R0001", [0, 1, 2, 3, 4])
+plot_derivative_test(multiamp_module_results, resonator_names)
+
+### TODO show the line for the threshold on these plots
 ```
 
-The bifurcation test uses the bottom panel, which shows the point-to-point change 
-in the arc speed -- effectively the second derivative of I and Q with frequency.
-At low amplitudes the change
-from point to point is small. At step 4 — the one that was called
-bifurcated — there is a sharp positive spike with a negative spike immediately
-after it: the trace jumping onto the other state and dropping back off it again.
+<!-- #region -->
+This is the quantity the test actually reads — effectively the second derivative
+of I and Q with frequency. At low amplitudes the change from point to point is
+small and featureless. At the loudest step, four of the five panels grow a sharp
+positive spike with a negative spike immediately after it: the trace jumping onto
+the other state and dropping back off it again.
 
 **Two spikes, adjacent, first positive then negative** is the pattern
 `rfmux.tuning.bifurcated_by_derivative` cues off of.
+
 
 `find_bias_amplitude` calls `bifurcated_by_derivative` on each amplitude step, 
 in both directions (if present). The amplitude step is counted as bifurcated if either
@@ -446,198 +490,237 @@ argument list:
 
 So the default of `0.5` asks a spike to stand a full half of the arc speed's
 range out of its own neighbourhood. The bar is set relative to the sweep
-itself, which is what makes one number portable from one resonator to another.
+itself, which allows a single number to apply to multiple resonators and measurements.
 
-If you are coming from the Periscope GUI, note that this is the same bar under
-the same argument name but **not the same number**: the GUI *divided* the range
-by a `spike_prominence_factor` of `2.0`, so turning its knob up made the test
-more sensitive. Here the factor multiplies, which is what a factor does, and
-`0.5` is the reciprocal that lands on the identical threshold. On the last
-clean step and the first bifurcated one, at that default:
+
+<!-- #endregion -->
 
 ```python
 from rfmux.tuning import bifurcated_by_derivative
 
 for iteration in (3, 4):
-    check = bifurcated_by_derivative(iterations_of_R0001[iteration])
+    check = bifurcated_by_derivative(iterations_of_BRUL[iteration])
     print(f"step {iteration}: {check}")
 ```
 
-Here is that bar drawn on the data, computed the way the detector computes it,
-for the same two steps:
+Here is that threshold drawn on the data, computed the way the detector computes it,
+for every resonator — on the two steps that decided its answer:
 
 ```python
 SPIKE_PROMINENCE_FACTOR = 0.5
 
-fig, axes = plt.subplots(1, 2, figsize=(11, 3.4), constrained_layout=True)
 
-for panel, iteration in zip(axes, (3, 4)):
-    entry = iterations_of_R0001[iteration]["upward"]
-    frequencies, speed = normalized_arc_speed(entry)
-    jumps = np.diff(speed)
-    midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
-    step_centre = entry["original_center_frequency"]
+def plot_prominence_bar(results, names, direction="upward", spike_prominence_factor=SPIKE_PROMINENCE_FACTOR):
+    """The bar each verdict was read off, on the steps that settled it.
 
-    # Exactly what bifurcated_by_derivative computes before calling find_peaks.
-    prominence_threshold = SPIKE_PROMINENCE_FACTOR * (speed.max() - speed.min())
+    Two steps per panel: the one chosen as the bias amplitude, and the first one
+    called bifurcated. Each carries its own bar, because the bar is a fraction of
+    that sweep's own arc speed range rather than one number for the array — which
+    is what makes a single `spike_prominence_factor` portable between resonators.
 
-    panel.plot((midpoints - step_centre) / 1e3, jumps, lw=1.0, color="0.2")
-    for sign in (1, -1):
-        panel.axhline(sign * prominence_threshold, color="tab:red", ls="--",
-                      lw=1.0,
-                      label=f"prominence bar {prominence_threshold:.2e}"
-                      if sign > 0 else None)
+    One bar, drawn positive. Both spikes are held to it — the up-spike and the
+    down-spike after it — so the same line mirrored is what the trough below is
+    judged against. Even then it is a guide rather than the literal comparison:
+    the detector measures a spike's *prominence*, its height above its own
+    neighbourhood, while the trace here is drawn from zero. The margins in the
+    legend are the comparison, and there are two of them because there are two
+    spikes.
 
-    check = bifurcated_by_derivative({"upward": entry})
-    panel.set_title(f"step {iteration}, amp {entry['sweep_amplitude']:.4f}"
-                    f"\nbifurcated={check.bifurcated}, "
-                    f"metric/threshold = {check.metric / check.threshold:.2f}",
-                    fontsize=9)
-    panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
-    panel.legend(fontsize=8)
+    A resonator that never bifurcated has no second step to draw, and the empty
+    half of its panel is the finding.
+    """
+    fig, panels = panels_per_resonator(names, width=3.3, height=3.6, sharey=True)
 
-axes[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
-plt.show()
+    for panel, name in zip(panels, names):
+        iterations = collect_amplitude_iterations_for(results, name)
+        choice = find_bias_amplitude(iterations, method = "derivative",
+            spike_prominence_factor = spike_prominence_factor )
+
+        steps = [(choice.iteration, "0.35", "chosen")]
+        bifurcated_at = next(
+            (i for i, c in choice.checks.items() if c.bifurcated), None
+        )
+        if bifurcated_at is not None:
+            steps.append((bifurcated_at, "tab:red", "bifurcated"))
+
+        for iteration, colour, role in steps:
+            entry = iterations[iteration][direction]
+            frequencies, speed = normalized_arc_speed(entry)
+            midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
+
+            # Exactly what bifurcated_by_derivative computes before find_peaks.
+            # The factor this was called with, not the module default — the
+            # labels come from a search run at it, so bars drawn at anything
+            # else would put margins under 1.0 beside the word "bifurcated".
+            bar = spike_prominence_factor * (speed.max() - speed.min())
+            check = bifurcated_by_derivative(
+                {direction: entry},
+                spike_prominence_factor=spike_prominence_factor,
+            )
+
+            up = check.metric["positive_spike_prominence"] / check.threshold
+            down = check.metric["negative_spike_prominence"] / check.threshold
+            panel.plot(offset_khz(entry, midpoints), np.diff(speed),
+                       lw=1.0, color=colour,
+                       label=f"step {iteration} ({role})\n"
+                             f"margin = {up:.2f} up, {down:.2f} down\n"
+                             f"adjacent = {check.metric['adjacency']}")
+            panel.axhline(bar, color=colour, ls="--", lw=1.0)
+            panel.axhline(-bar, color=colour, ls="--", lw=1.0)
+            panel.axhline(-bar, color=colour, ls="--", lw=1.0)
+
+        panel.set_title(name, fontsize=10)
+        panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
+        panel.set_yscale("symlog", linthresh=1e-5)
+        panel.tick_params(labelsize=8)
+        panel.legend(fontsize=7)
+
+    panels[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
+    fig.suptitle("The prominence bar, and the steps each verdict was read off",
+                 fontsize=11)
+    plt.show()
+
+
+plot_prominence_bar(multiamp_module_results, resonator_names)
 ```
 
-Step 3 clearly has a spike, but it's too small to meet the threshold we set with
-the `spike_prominence_factor`, so it does not flag as bifurcated.
- On step 4 the spike is much larger, and exceeds the threshold set.
+<!-- #region -->
+The amplitude step that is chosen for the bias (grey) does have a visible spike but does not clear its
+dashed bar. This is classified as "not bifurcated" by the search. The red traces have been
+classified as bifurcated.
+
+Note that `MELL` has no red trace, because it was not found to be bifurcated even at the
+highest amplitude used in the sweep. As a result, its bias amplitude has simply been chosen
+to be the highest amplitude used, for lack of a better option.
+However, it does appear quite strongly driven
+at the highest amplitude, and so perhaps we should adjust our threshold.
+
  
-`rfmux.tuning.BifurcationCheck` reports the numbers it compared as well
-as its verdict based on them, to facilitate troubleshooting
+
+Note: `rfmux.tuning.BifurcationCheck` also reports the numbers it compared as well
+as its verdict based on them, to facilitate troubleshooting. These include:
 
 | Field | Is |
 |---|---|
 | `method` | which test produced this, `"derivative"` or `"hysteresis"` |
 | `bifurcated` | the verdict |
-| `metric` | the largest positive jump seen, for `"derivative"` |
-| `threshold` | the bar a spike had to clear, for `"derivative"`: `spike_prominence_factor` times the arc speed's range |
+| `metric` | a dict, one entry per quantity the method examined — see below |
+| `threshold` | the single bar those quantities were held to. For `"derivative"`: `spike_prominence_factor` times the arc speed's range |
+
+`metric` is a dict rather than one number because the verdict is not one
+comparison. `"derivative"` asks three things, and reports all three:
+
+| Key | Is |
+|---|---|
+| `positive_spike_prominence` | how far the tallest up-spike stands out of its own neighbourhood. `0.0` if there is no up-spike at all |
+| `negative_spike_prominence` | the same for the tallest down-spike |
+| `adjacency` | whether the spikes that cleared the bar sat next to each other, up first. A condition, with no threshold of its own |
+
+The verdict is `True` when both prominences clear `threshold` **and**
+`adjacency` — so these three entries tell you which condition decided it. 
 
 
+If we now re-run the bias amplitude identification with a slightly more sensitive threshold:
+
+
+<!-- #endregion -->
 
 ```python
-fig, panel = plt.subplots(figsize=(6.5, 3.4), constrained_layout=True)
-
-for name in resonator_names:
-    iterations_of_this_resonator = collect_amplitude_iterations_for(
-        multiamp_module_results, name
-    )
-    amplitudes, ratios, verdicts = [], [], []
-    for entry in iterations_of_this_resonator.values():
-        check = bifurcated_by_derivative(entry)
-        amplitudes.append(entry["upward"]["sweep_amplitude"])
-        ratios.append(check.metric / check.threshold)
-        verdicts.append(check.bifurcated)
-
-    line, = panel.plot(amplitudes, ratios, "o-", lw=1.0, ms=5,
-                       mfc="white", label=name)
-    panel.plot([a for a, v in zip(amplitudes, verdicts) if v],
-               [r for r, v in zip(ratios, verdicts) if v],
-               "o", ms=5, color=line.get_color())
-
-panel.axhline(1.0, color="0.6", ls="--", lw=1.0)
-panel.set_xscale("log")
-panel.set_xlabel("drive amplitude")
-panel.set_ylabel("measured spike height / threshold spike height")
-panel.set_title("How far over the threshold each amplitude step is", fontsize=10)
-panel.legend(fontsize=8)
-plt.show()
+plot_prominence_bar(multiamp_module_results, resonator_names, spike_prominence_factor=0.45)
 ```
 
+Now `MELL` also is flagged as bifurcated.
+
+In general, you may have to fiddle with the various thresholds and other bias finding settings for a given array.
+
+
 <!-- #region -->
-All five cross the line together between 0.0045 and 0.008, which is the drive at
-which this array starts jumping. Note the margin either side of the crossing:
-under 0.9 below and 1.6 or more above, so roughly a factor of two rather than
-the orders of magnitude you might hope for. The factor has not been calibrated
-across arrays, so read your own before trusting the default on it — this is one
-array on one cooldown, and the plot above is exactly how you would read it.
+
 
 ### Bifurcation detection method #2 `"hysteresis"`
 
 The other test, `rfmux.tuning.bifurcated_by_hysteresis`, looks for the amplitude at which 
 the upward and downward frequency sweeps *begin* to differ.
 
-
+We can do the comparison on either the complex IQ plane, or on magnitude vs frequency.
+Generally the magnitude vs frequency test tends to be more robust, and so it is the default.
 
 | Argument | Default | Does |
 |---|---|---|
 | `entries` | required | one amplitude step, `{direction: entry}`, where `"upward"` and `"downward"` are required |
-| `max_discrepancy` | `0.25` | how far apart the two traces may be, in units of the IQ loop's radius, before the step is called bifurcated |
+| `max_discrepancy` | `0.1` | how far apart the two traces may be, in whatever units `compare` measures in, before the step is called bifurcated |
+| `compare` | `"magnitude"` | the quantity being compared: `"iq"` for the distance on the IQ plane in loop radii, and `"magnitude"` for the difference in `\|S21\|` in dip depths |
 
-The metric is the **largest separation between the two traces, in units of the
-IQ loop's own radius**, so it means the same thing for a deep resonator and a
-shallow one.
+The bifurcation detector reports `metric["max_separation"]`: the
+**largest separation between the two traces, in units of the trace's own
+scale**.
 <!-- #endregion -->
 
 ```python
 from rfmux.tuning import bifurcated_by_hysteresis
 
-for iteration, entry in iterations_of_R0001.items():
-    check = bifurcated_by_hysteresis(entry)
-    print(f"step {iteration}, amp {entry['upward']['sweep_amplitude']:.4f}: "
-          f"bifurcated={check.bifurcated!s:5}  metric={check.metric:.3f}  "
-          f"threshold={check.threshold}")
 ```
-
-The four quiet steps sit at a percent or less, which is the noise floor of this
-measurement rather than a resonator doing anything. Then the loudest step jumps
-to well over a full loop radius — two orders of magnitude of separation between
-"these are the same trace" and "these are not", which is a far more comfortable
-margin than the derivative test's factor of two.
-
-Here are the two traces the test compares, at the last clean step and at the one
-that fired:
 
 ```python
-fig, axes = plt.subplots(1, 2, figsize=(9.5, 4.2), constrained_layout=True)
+def plot_magnitude_hysteresis(results, names, max_discrepancy=0.1):
+    """The two directions' |S21| at the loudest step and their difference.
+    """
+    fig, axes = plt.subplots(
+        2, len(names), figsize=(3.2 * len(names), 5.4),
+        constrained_layout=True, squeeze=False, sharex="col",
+    )
 
-for panel, iteration in zip(axes, (3, 4)):
-    amplitude_step = iterations_of_R0001[iteration]
-    for direction, style in (("upward", "-"), ("downward", "--")):
-        iq = amplitude_step[direction]["iq_counts"]
-        panel.plot(iq.real, iq.imag, style, lw=1.2, label=direction)
+    for column, name in enumerate(names):
+        iterations = collect_amplitude_iterations_for(results, name)
+        amplitude_step = iterations[max(iterations)]
+        top, bottom = axes[0][column], axes[1][column]
 
-    check = bifurcated_by_hysteresis(amplitude_step)
-    panel.set_title(f"step {iteration}, amp "
-                    f"{amplitude_step['upward']['sweep_amplitude']:.4f}\n"
-                    f"bifurcated={check.bifurcated}, "
-                    f"metric={check.metric:.3f}", fontsize=9)
-    panel.set_xlabel("I [counts]", fontsize=8)
-    panel.set_aspect("equal")
-    panel.legend(fontsize=8)
+        # Both directions on one ascending frequency grid — downward sweeps
+        # arrive high-to-low, and the difference below needs them side by side.
+        traces = {}
+        for direction, style in (("upward", "-"), ("downward", "--")):
+            entry = amplitude_step[direction]
+            order = np.argsort(entry["frequencies"])
+            frequencies = entry["frequencies"][order]
+            traces[direction] = (frequencies, np.abs(entry["iq_counts"])[order])
+            top.plot(offset_khz(entry, frequencies), traces[direction][1],
+                     style, lw=1.2, label=direction)
 
-axes[0].set_ylabel("Q [counts]", fontsize=8)
-fig.suptitle("The hysteresis test compares these two", fontsize=11)
-plt.show()
+        (f_up, up), (f_down, down) = traces["upward"], traces["downward"]
+        difference = np.abs(up - np.interp(f_up, f_down, down)) / np.ptp(up)
+        bottom.plot(offset_khz(amplitude_step["upward"], f_up), difference,
+                    lw=1.2, color="C3")
+        bottom.axhline(max_discrepancy, ls=":", color="0.4")
+
+        check = bifurcated_by_hysteresis(amplitude_step, compare="magnitude",
+                                         max_discrepancy=max_discrepancy)
+        top.set_title(f"{name}\nbifurcated={check.bifurcated}, "
+                      f"separation={check.metric['max_separation']:.3f}",
+                      fontsize=9)
+        bottom.set_yscale("log")
+        bottom.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
+        for panel in (top, bottom):
+            panel.tick_params(labelsize=7)
+
+    axes[0][0].set_ylabel("|S21| [counts]", fontsize=8)
+    axes[0][0].legend(fontsize=8)
+    axes[1][0].set_ylabel("separation [dip depths]", fontsize=8)
+    fig.suptitle("The magnitude comparison, at the loudest drive", fontsize=11)
+    plt.show()
+
+
+plot_magnitude_hysteresis(multiamp_module_results, resonator_names,
+                          max_discrepancy=0.1)
 ```
 
-On the left the two directions lie on top of each other. On the right they do
-not: the sweep jumps off the resonance at a different frequency depending on
-which way it is walking, so the two traces enclose the region between the jump
-points. That is the physical signature of bifurcation, and it is the thing mock
-mode cannot produce — the simulator evaluates each sweep point independently, so
-its two directions are the same trace twice at every drive.
+The lower row shows how close each measurement is to the chosen threshold (dashed line).
+Interestingly, although MELL and LALM both look over-driven by eye in the |S21| vs freq
+data, they jump at almost the same point in both directions, and thus don't trigger this
+method of bifurcation detection.
 
-The two tests do not have to agree, and here they do not, quite:
-
-```python
-print(f"{'name':<8}{'derivative':>22}{'hysteresis':>22}")
-for name in resonator_names:
-    iterations = collect_amplitude_iterations_for(multiamp_module_results, name)
-    by_derivative = find_bias_amplitude(iterations)
-    by_hysteresis = find_bias_amplitude(iterations, method="hysteresis")
-    print(f"{name:<8}"
-          f"{by_derivative.amplitude:>15.4f} (step {by_derivative.iteration})"
-          f"{by_hysteresis.amplitude:>15.4f} (step {by_hysteresis.iteration})")
-```
-
-Three of the five land in the same place. On R0004 and R0005 the hysteresis test
-sees nothing at any amplitude, so it has no limit to step back from and returns
-the loudest step it was given — the correct answer to the question it was asked,
-and the wrong operating point. `find_bias_points` flags exactly that case, which
-is section 5's business; the point here is that the two detectors read different
-evidence and a resonator can show one and not the other.
+This emphasizes the importance of using multiple methods to attempt to identify bifurcation
+and a good bias amplitude. Combining the hysteresis method with the derivative method,
+and later on by fitting to the chosen bias points, we should be able to get a decent result.
 
 <!-- #region -->
 
@@ -667,7 +750,7 @@ There are two methods available for deciding at what frequency to bias, within t
 ```python
 from rfmux.tuning import find_bias_frequency, iq_arc_speed
 
-chosen_sweep = iterations_of_R0001[amplitude_choice.iteration]["upward"]
+chosen_sweep = iterations_of_BRUL[amplitude_choice.iteration]["upward"]
 chosen_sweep_centre = chosen_sweep["original_center_frequency"]
 
 for method in ("iq_derivative", "minimum"):
@@ -707,35 +790,71 @@ for panel in axes:
     panel.axvline(0.0, color="0.7", lw=1.0, label="sweep centre")
 
 axes[0].legend(fontsize=8)
-fig.suptitle(f"R0001 at chosen bias amplitude {amplitude_choice.amplitude}: bias frequency selection",
+fig.suptitle(f"BRUL at chosen bias amplitude {amplitude_choice.amplitude}: bias frequency selection",
              fontsize=11)
 plt.show()
 ```
 
 The two answers will generally be close but not identical.
 
-Note also that this is a frequency **for one amplitude**, not for the resonator.
-Driving a KID harder pulls its resonance down, so the answer moves as you climb
-the ladder — which is why the bias frequency has to be read off the step you
-actually chose, and why moving the tone invalidates the calibration measured at
-the old one. Over this schedule R0004 walks the better part of 20 kHz:
+Across the array, each resonator read at *its own* chosen amplitude — which for
+`MELL` is the loudest step rather than one below a limit, so its trace is the
+distorted one:
 
 ```python
-iterations_of_R0004 = collect_amplitude_iterations_for(
-    multiamp_module_results, "R0004"
-)
+def plot_frequency_methods(results, names, direction="upward"):
+    """Where each method puts the tone, for every resonator.
 
-quietest_step_frequencies = iterations_of_R0004[0]["upward"]["frequencies"]
-print(f"the sweep runs to ±"
-      f"{np.ptp(quietest_step_frequencies)/2e3:.0f} kHz "
-      f"either side of its centre\n")
+    Drawn on the arc speed rather than on |S21|, because that is the quantity the
+    default method maximizes: the red line should sit on the peak of the trace
+    beneath it, and if it does not, that is the thing to chase.
+    """
+    fig, panels = panels_per_resonator(names, width=3.2, height=3.4)
 
-for iteration, amplitude_step in iterations_of_R0004.items():
-    entry = amplitude_step["upward"]
-    answer = find_bias_frequency(entry) - entry["original_center_frequency"]
-    print(f"step {iteration}, amp {entry['sweep_amplitude']:.4f}: "
-          f"{answer/1e3:+7.2f} kHz")
+    for panel, name in zip(panels, names):
+        iterations = collect_amplitude_iterations_for(results, name)
+        choice = find_bias_amplitude(iterations)
+        entry = iterations[choice.iteration][direction]
+
+        frequencies, speed = iq_arc_speed(entry)
+        panel.plot(offset_khz(entry, frequencies), speed, ".-", lw=1.0, ms=3,
+                   color="0.2")
+
+        for method, colour, style in (("iq_derivative", "tab:red", "-"),
+                                      ("minimum", "tab:blue", "--")):
+            frequency = find_bias_frequency(entry, method=method)
+            panel.axvline(offset_khz(entry, frequency), color=colour, ls=style,
+                          lw=1.2, label=method)
+        panel.axvline(0.0, color="0.7", lw=1.0, label="sweep centre")
+
+        panel.set_title(f"{name}\nstep {choice.iteration}, "
+                        f"amp {entry['sweep_amplitude']:.4f}", fontsize=9)
+        panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
+        panel.tick_params(labelsize=7)
+
+    panels[0].set_ylabel("|dI/df + j dQ/df|  [counts/Hz]", fontsize=8)
+    panels[0].legend(fontsize=7)
+    fig.suptitle("Where each method puts the tone, at each resonator's chosen "
+                 "amplitude", fontsize=11)
+    plt.show()
+
+
+plot_frequency_methods(multiamp_module_results, resonator_names)
 ```
+
+The two methods land within a point or two of each other on all five, so on this
+array the choice between them barely matters. What does vary is the shape they are
+choosing from. `BRUL` and `LALM` have broad, rounded peaks: the maximum is a
+region, and putting the tone a point either side of it costs almost nothing.
+
+`MELL`'s peak is four times taller than anyone else's and only a couple of points
+wide — the arc speed at a near-discontinuity, which is what its trace at the
+loudest drive has become. Both methods correctly find the top of it. The trouble
+is that the top of a spike that narrow is a fragile place to sit: the resonance
+only has to drift slightly for the tone to be somewhere much less sensitive.
+Nothing in `find_bias_frequency` will tell you that, because it answered the
+question it was asked.
+
 
 <!-- #region -->
 
@@ -835,36 +954,95 @@ for panel, (label, measured, at_bias, slope) in zip(axes, [
     panel.set_ylim(measured.min() - margin, measured.max() + margin)
     panel.legend(fontsize=8)
 
-fig.suptitle("The slopes that become the calibration", fontsize=11)
+fig.suptitle("The slopes used in the calibration", fontsize=11)
 plt.show()
 ```
 
-And on the IQ loop, where the two together are the direction and speed the trace
-is travelling at the bias point:
+The same movement for every resonator, each on its own loop at its own chosen
+amplitude and frequency:
 
 ```python
-MOVEMENT_HZ = 200.0
+ARRAY_MOVEMENT_HZ = 500.0
 
-fig, panel = plt.subplots(figsize=(4.8, 4.6), constrained_layout=True)
 
-panel.plot(chosen_sweep_volts.real, chosen_sweep_volts.imag,
-           ".-", lw=1.0, ms=3, color="0.2")
-panel.plot(i_at_bias, q_at_bias, "o", color="tab:red", ms=7, label="bias point")
+def plot_calibration_arrows(results, names, direction="upward",
+                            movement_hz=ARRAY_MOVEMENT_HZ):
+    """The measured slopes, as an arrow on each resonator's own IQ loop.
 
-# The two derivatives together, as an arrow: where the tone's reading goes if
-# the resonance moves by MOVEMENT_HZ, to scale against the loop.
-tip = (i_at_bias + dI_df * MOVEMENT_HZ, q_at_bias + dQ_df * MOVEMENT_HZ)
-panel.plot(*tip, ".", alpha=0)   # so the arrow stays inside the axes
-panel.annotate("", xytext=(i_at_bias, q_at_bias), xy=tip,
-               arrowprops=dict(arrowstyle="->", color="tab:red", lw=2.0))
+    Repeats what sections 2 to 4 did by hand, for every resonator: choose the
+    amplitude, choose the frequency on that step, quantize it, then read the
+    slopes at the frequency the board will actually output.
 
-panel.set_xlabel("I [V]")
-panel.set_ylabel("Q [V]")
-panel.set_aspect("equal")
-panel.set_title(f"{MOVEMENT_HZ:.0f} Hz of movement, at the bias point", fontsize=10)
-panel.legend(fontsize=8)
-plt.show()
+    Each loop is drawn in units of its own radius rather than in volts. A loop
+    measured at a louder drive is simply a bigger loop, and that is a fact about
+    the drive rather than about the resonator — dividing it out is what makes the
+    arrows comparable from panel to panel.
+    """
+    fig, panels = panels_per_resonator(names, width=3.0, height=3.4)
+
+    for panel, name in zip(panels, names):
+        iterations = collect_amplitude_iterations_for(results, name)
+        choice = find_bias_amplitude(iterations)
+        entry = iterations[choice.iteration][direction]
+
+        bias_frequency = BiasPoint(frequency_hz=find_bias_frequency(entry),
+                                   amplitude=choice.amplitude).frequency_hz
+        dI, dQ = iq_derivatives_at(entry, bias_frequency)
+
+        volts = entry["iq_volts"]
+        centre = complex(np.mean([volts.real.min(), volts.real.max()]),
+                         np.mean([volts.imag.min(), volts.imag.max()]))
+        radius = 0.5 * max(np.ptp(volts.real), np.ptp(volts.imag))
+
+        loop = (volts - centre) / radius
+        at_bias = complex(
+            np.interp(bias_frequency, entry["frequencies"], volts.real),
+            np.interp(bias_frequency, entry["frequencies"], volts.imag),
+        )
+        at_bias = (at_bias - centre) / radius
+
+        panel.plot(loop.real, loop.imag, ".-", lw=1.0, ms=2, color="0.2")
+        panel.plot(at_bias.real, at_bias.imag, "o", color="tab:red", ms=6)
+
+        tip = at_bias + complex(dI, dQ) * movement_hz / radius
+        panel.plot(tip.real, tip.imag, ".", alpha=0)  # keeps the arrow in frame
+        panel.annotate("", xytext=(at_bias.real, at_bias.imag),
+                       xy=(tip.real, tip.imag),
+                       arrowprops=dict(arrowstyle="->", color="tab:red", lw=2.0))
+
+        calibration = abs(BiasPoint(frequency_hz=bias_frequency,
+                                    amplitude=choice.amplitude,
+                                    dI_df=dI, dQ_df=dQ).df_calibration)
+        panel.set_title(f"{name}\n|df_cal| = {calibration/1e6:.3f} MHz/V",
+                        fontsize=9)
+        panel.set_xlabel("I  [loop radii]", fontsize=8)
+        panel.set_aspect("equal")
+        panel.tick_params(labelsize=7)
+
+    panels[0].set_ylabel("Q  [loop radii]", fontsize=8)
+    fig.suptitle(f"{movement_hz:.0f} Hz of movement, at each resonator's bias "
+                 f"point", fontsize=11)
+    plt.show()
+
+
+plot_calibration_arrows(multiamp_module_results, resonator_names)
 ```
+
+Four of the arrows are short and one is not. `MELL` responds with several times
+the reading per hertz that its neighbours do — its `|df_calibration|` is four
+times smaller than the nearest of them, and smaller means more volts per hertz of
+resonance movement.
+
+That is not the array's best detector. It is the resonator biased at 0.008,
+reading its slope off the near-vertical section of a trace that is on the point of
+jumping. The number is a correct measurement of that trace, and the trace only has
+that slope for a kilohertz or two either side; move the resonance past the jump
+and none of it applies. A large `df_calibration` measured at a flagged bias point
+is a reason to look at the flag, not a reason to be pleased.
+
+`LALM`, at the other end, has the shortest arrow and the largest
+`|df_calibration|` — an ordinary, well-behaved operating point on a broad
+resonance, which is what most of these should look like.
 
 ### `df_calibration`
 
@@ -896,25 +1074,6 @@ print(f"so 1 µV along the arrow above is "
       f"{abs(bias_point.df_calibration) * 1e-6:.2f} Hz of resonance movement")
 ```
 
-That `dataclasses.replace` is worth a second look, because it is doing something
-the type
-insists on: **a `BiasPoint` is frozen, and its frequency and its calibration are
-one fact.** You cannot set the slopes on an existing one, you build a new one
-carrying both — which is why bias finding measures the calibration in the same
-step that chooses the frequency, rather than leaving it for later.
-
-The same rule going the other way: move the tone, and the calibration does not
-come along, because a slope measured at the old frequency does not describe the
-new one. `Resonator.set_bias` is the chokepoint that enforces it:
-
-```python
-retuned_resonator = Resonator(name="R0001", channel=1, bias=bias_point)
-print(f"before: df_calibration = {retuned_resonator.bias.df_calibration}")
-
-retuned_resonator.set_bias(frequency_hz=bias_point.frequency_hz + 10e3)
-print(f"after:  df_calibration = {retuned_resonator.bias.df_calibration}")
-```
-
 <!-- #region -->
 
 
@@ -938,7 +1097,8 @@ result.
 | `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
 | `direction` | `None` | which sweep direction to measure the bias frequency and the calibration on. `None` prefers `"upward"`. |
 | `spike_prominence_factor` | `0.5` | passed to `rfmux.tuning.bifurcated_by_derivative` — section 2 |
-| `max_discrepancy` | `0.25` | passed to `rfmux.tuning.bifurcated_by_hysteresis` — section 2 |
+| `max_discrepancy` | `0.1` | passed to `rfmux.tuning.bifurcated_by_hysteresis` — section 2 |
+| `compare` | `"magnitude"` | passed to `rfmux.tuning.bifurcated_by_hysteresis` — section 2 |
 | `max_distance_hz` | `None` | how far from the sweep centre a resonance may come out before the bias frequency is rejected. Past this, the tone is left where the sweep was centred and the finding is flagged. Useful for handling densely packed arrays or collisions. |
 | `save` | `None` | write the sweeps — which now carry the report — back to the file they came from. `None` does whatever `rfmux.tuning.store.autosave_enabled()` says, which is on unless you turned it off. Sweeps that have never been in a file get a new one |
 | `label` | `None` | your name for that file, used only when these sweeps are being written for the first time. A re-save keeps the name the file already has |
@@ -986,7 +1146,7 @@ analysis to be re-run with different settings on the same data as many times as
 you like:
 
 ```python
-print(f"the catalog we started from is still: {swept_catalog['R0001'].bias}")
+print(f"the catalog we started from is still: {swept_catalog['BRUL'].bias}")
 
 ```
 
@@ -1006,7 +1166,7 @@ print(BiasReport.from_dict(multiamp_module_results["bias_report"]))
 
 That happens whether or not you save. `save=` is only the question of whether
 the file on disk is brought up to date to match — and had we left it alone here,
-this would have rewritten the `multiamp_multisweep_*_bias_finding.pkl` the
+this would have rewritten the `multiamp_multisweep_*_demo_biasfind1.pkl` the
 notebook loaded, in place, report and all. That is the point of it: the ladder
 and the operating point read off it stay one file.
 
@@ -1018,17 +1178,17 @@ point was
 arrived at:
 
 ```python
-finding_for_R0001 = bias_report["R0001"]
+finding_for_BRUL = bias_report["BRUL"]
 
-print(f"name           {finding_for_R0001.name}")
-print(f"iteration      {finding_for_R0001.iteration}")
-print(f"amplitude      {finding_for_R0001.amplitude}")
-print(f"bifurcated_at  {finding_for_R0001.bifurcated_at}")
-print(f"frequency_hz   {finding_for_R0001.frequency_hz}")
-print(f"dI_df, dQ_df   {finding_for_R0001.dI_df:.4e}, {finding_for_R0001.dQ_df:.4e}")
-print(f"good           {finding_for_R0001.good}")
-print(f"flagged_because {finding_for_R0001.flagged_because}")
-print(f"\nchecks         {list(finding_for_R0001.checks)}")
+print(f"name           {finding_for_BRUL.name}")
+print(f"iteration      {finding_for_BRUL.iteration}")
+print(f"amplitude      {finding_for_BRUL.amplitude}")
+print(f"bifurcated_at  {finding_for_BRUL.bifurcated_at}")
+print(f"frequency_hz   {finding_for_BRUL.frequency_hz}")
+print(f"dI_df, dQ_df   {finding_for_BRUL.dI_df:.4e}, {finding_for_BRUL.dQ_df:.4e}")
+print(f"good           {finding_for_BRUL.good}")
+print(f"flagged_because {finding_for_BRUL.flagged_because}")
+print(f"\nchecks         {list(finding_for_BRUL.checks)}")
 ```
 
 ```python
@@ -1036,8 +1196,11 @@ print(f"{'name':<7}{'step':>6}{'amplitude':>12}{'bif at':>10}"
       f"{'bias freq [MHz]':>18}{'|df_cal| [MHz/V]':>19}")
 for f in bias_report.findings:
     df_calibration = bias_report.catalog[f.name].bias.df_calibration
+    # `bifurcated_at` is None when no step bifurcated, which is a resonator to
+    # read the flags on rather than a number to format — MELL is the one here.
+    bifurcated_at = "—" if f.bifurcated_at is None else f"{f.bifurcated_at:.4f}"
     print(f"{f.name:<7}{f.iteration:>6}{f.amplitude:>12.4f}"
-          f"{f.bifurcated_at:>10.4f}{f.frequency_hz/1e6:>18.6f}"
+          f"{bifurcated_at:>10}{f.frequency_hz/1e6:>18.6f}"
           f"{abs(df_calibration)/1e6:>19.3f}")
 ```
 
@@ -1051,11 +1214,19 @@ print(f"good:    {len(bias_report.good)}")
 print(f"flagged: {len(bias_report.flagged)}")
 ```
 
-Nothing is flagged here, because every resonator on this array bifurcated inside
-the schedule and had a step to fall back to. The hysteresis run from section 2 is
-where this array does produce flags — R0004 and R0005 showed that detector
-nothing at any drive, so it returned the loudest step rather than a limit it had
-found, and the report says so rather than leaving you to notice:
+Four are good and one is flagged: `MELL`, the resonator whose up-spike came 1.5%
+under the threshold at the loudest drive back in section 2. Its bias amplitude is 0.008 because
+that is the loudest step measured, not because anything established 0.008 as its
+limit — and `bifurcated_at` is `None` in the table above for exactly that reason.
+Nothing else in the report distinguishes it from a resonator that was genuinely
+measured, which is what the flag is for.
+
+That is a bias point you can use, incidentally. It is just one you should decide
+to use, having read that it is a floor rather than a finding — the right response
+being another ladder that goes louder.
+
+Swapping in the hysteresis detector flags `LALM` as well, since that test saw
+nothing on it at any drive either:
 
 ```python
 print(find_bias_points(multiamp_module_results,
@@ -1065,6 +1236,88 @@ print(find_bias_points(multiamp_module_results,
 Each flagged finding carries the sentence in `flagged_because`, so what you read
 here is per resonator and specific — not a bit that says something went wrong
 somewhere.
+
+### The whole answer, on the whole measurement
+
+Everything the report decided, drawn on the sweeps it decided it from. One panel
+per resonator: the full ladder colour-coded by drive, the chosen step picked out
+in bold, and the chosen frequency marked on it.
+
+```python
+def plot_bias_points_on_sweeps(results, report, direction="upward"):
+    """Every sweep in the file, with the operating point read off it.
+
+    The chosen amplitude is the trace drawn in bold; the quieter and louder steps
+    stay thin behind it. The marker is the bias frequency, at the amplitude it was
+    measured at — the pair is the answer, and neither half means much alone.
+
+    Traces are *not* divided by their drive here, unlike the overview in section
+    1. The point of this plot is where the tone ends up on the sweep it was
+    chosen from, so the sweeps are left as they were measured.
+    """
+    names = [finding.name for finding in report.findings]
+    fig, panels = panels_per_resonator(names, width=3.2, height=3.5)
+
+    for panel, finding in zip(panels, report.findings):
+        iterations = collect_amplitude_iterations_for(results, finding.name)
+        amplitudes = [e[direction]["sweep_amplitude"] for e in iterations.values()]
+        colours, mappable = amplitude_colours(amplitudes)
+
+        for iteration, colour in zip(iterations, colours):
+            sweep = iterations[iteration][direction]
+            chosen = iteration == finding.iteration
+            panel.plot(offset_khz(sweep),
+                       20 * np.log10(np.abs(sweep["iq_counts"])),
+                       lw=2.0 if chosen else 0.8,
+                       alpha=1.0 if chosen else 0.55,
+                       color=colour, zorder=3 if chosen else 2)
+
+        chosen_sweep = iterations[finding.iteration][direction]
+        depth_at_bias = np.interp(
+            finding.frequency_hz, chosen_sweep["frequencies"],
+            20 * np.log10(np.abs(chosen_sweep["iq_counts"])),
+        )
+        # Ringed in the flag's colour, so a bias point that is a fallback rather
+        # than a finding is visible here and not only in the printed report.
+        panel.plot(offset_khz(chosen_sweep, finding.frequency_hz), depth_at_bias,
+                   "o", ms=9, zorder=4, color="white",
+                   mec="tab:red" if finding.good else "darkorange", mew=2.0)
+
+        panel.set_title(
+            f"{finding.name}{'' if finding.good else '  (flagged)'}\n"
+            f"amp {finding.amplitude:.4f}, "
+            f"{offset_khz(chosen_sweep, finding.frequency_hz):+.2f} kHz",
+            fontsize=9,
+        )
+        panel.set_xlabel("offset from sweep centre [kHz]", fontsize=8)
+        panel.tick_params(labelsize=7)
+
+    panels[0].set_ylabel("|S21| [dB]", fontsize=8)
+    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
+    fig.suptitle("The chosen bias point, on the ladder it was chosen from",
+                 fontsize=11)
+    plt.show()
+
+
+plot_bias_points_on_sweeps(multiamp_module_results, bias_report)
+```
+
+This is the figure to keep. Everything the notebook worked out by hand is in it,
+per resonator, on the data it came from: which step was chosen out of the ladder,
+where on that step the tone goes, and whether the answer was measured or fallen
+back to.
+
+Four panels show the same thing — the second-loudest step in bold, with the tone a
+little way down the steep flank of it and below the sweep centre, because a harder
+drive has already pulled the resonance down. That is what a bias point is supposed
+to look like.
+
+`MELL`'s panel is titled `(flagged)`, its marker ringed in orange rather than red,
+and its bold trace is the loudest in the ladder rather than one step below a
+limit. The marker sits on a nearly vertical edge. Nothing about that is a
+malfunction — every routine in this notebook did what it was asked — but it is a
+tone placed on the side of a cliff, and one glance at this figure says so where
+five printed tables did not.
 
 <!-- #region -->
 ## 6. Applying the bias points
@@ -1093,12 +1346,15 @@ span more than one NCO bandwidth.
   rather than two arrays precisely so that one of them can read the entry's
   `fits`.
 - **Thresholds that have met more than one array.** `spike_prominence_factor` is
-  the GUI's bar restated as a multiplication, and `max_discrepancy` was picked to
-  be roughly right. Both get the right answer on the array above, which is one
-  array on one cooldown — and the derivative test got it with a margin of about a
-  factor of two either side, which is not much to spend on a different array with
-  a different noise floor. Read `metric` and `threshold` across your own
-  amplitude steps, the way section 2 does, before trusting the defaults on them.
+  the GUI's bar restated as a multiplication, and `max_discrepancy` is a round
+  number picked to sit between the quiet steps and the jumped ones on the array
+  above. There they get four of the five resonators, with
+  a margin of about a factor of two either side — which is not much to spend on a
+  different array with a different noise floor, and `MELL` is what running out of
+  it looks like. Read `metric` and `threshold` across your own amplitude steps,
+  the way section 2 does, before trusting the defaults on them. A ladder that
+  reaches high enough for every resonator to bifurcate is the other half of the
+  answer, and the cheaper half.
 
 
 

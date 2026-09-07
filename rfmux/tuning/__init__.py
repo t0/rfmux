@@ -46,6 +46,7 @@ package is being built out against.
 from .bias import (
     BIFURCATION_METHODS,
     FREQUENCY_METHODS,
+    HYSTERESIS_COMPARISONS,
     AmplitudeChoice,
     BiasFinding,
     BiasReport,
@@ -99,6 +100,7 @@ from .sweep_results import (
 __all__ = [
     "BIFURCATION_METHODS",
     "FREQUENCY_METHODS",
+    "HYSTERESIS_COMPARISONS",
     "AmplitudeChoice",
     "BiasFinding",
     "BiasReport",

@@ -48,7 +48,7 @@ import textwrap
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 
 from rfmux.tuning import (
@@ -104,11 +104,27 @@ PLOT_STYLE = {
 BATCH_SIZE = 50
 
 # gnuplot runs black -> purple -> red -> orange -> yellow, so it stays
-# saturated from end to end and every trace reads against a white background.
-AMPLITUDE_CMAP = plt.cm.gnuplot
+# saturated for most of its length and every trace reads against a white
+# background. The top tenth is the exception: it fades to a pale yellow that
+# vanishes on white, and that is where the loudest drive would land. So the map
+# is truncated before it gets there. Truncating the colormap rather than
+# clamping at the call site keeps the colourbar showing the colours the traces
+# were actually drawn in.
+AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
+    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
+)
 
 BIAS_COLOUR = "royalblue"  # the chosen operating point
 FLAGGED_COLOUR = "darkorange"  # a bias point that is a default, not a finding
+
+#: Colour and marker per metric curve, taken in the order a check reports its
+#: quantities. Long enough for the methods there are; a method that measured
+#: more things than this would need another entry.
+METRIC_STYLES = (
+    ("crimson", "o"),
+    ("rebeccapurple", "^"),
+    ("seagreen", "v"),
+)
 
 # Mirrors ``rfmux.tuning.bias.PREFERRED_DIRECTION``: which direction a bias
 # frequency is measured on when a step has both and the caller did not say.
@@ -356,6 +372,28 @@ def _entry_for(results, name, iteration, direction):
         ) from None
 
 
+def _measured_metrics(checks):
+    """The metric keys worth a curve, in the order the detector reports them.
+
+    A check's ``metric`` holds one entry per quantity its method examined. The
+    ones that are numbers belong on these axes; the ones that are flags — the
+    derivative test's ``adjacency`` — do not. A flag is a condition rather than
+    a measurement, with no threshold to be drawn against, so it gets marked on
+    the steps where it was what failed instead.
+    """
+    first = checks[min(checks)].metric
+    return [key for key, value in first.items() if not isinstance(value, bool)]
+
+
+def _measured_metrics_of(findings):
+    """:func:`_measured_metrics` for a batch — off the first finding that has
+    checks, since one report is all one method and they carry the same keys."""
+    for finding in findings:
+        if finding.checks:
+            return _measured_metrics(finding.checks)
+    return []
+
+
 def plot_bias_points(
     report,
     results,
@@ -496,18 +534,27 @@ def plot_bifurcation_checks(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """Each bifurcation test's metric against its threshold, step by step.
+    """Each bifurcation test's measured quantities against its threshold.
 
-    One panel per resonator: the metric the detector computed at every
-    amplitude step it examined, the threshold it was compared against, and a
-    line at the amplitude that was chosen. Where the two curves cross is where
-    the detector fired, and how far apart they are everywhere else is the
-    margin — which is the number to read off before quoting either detector's
-    defaults as a recommendation.
+    One panel per resonator: every quantity the detector measured at every
+    amplitude step it examined, the threshold they were compared against, and a
+    line at the amplitude that was chosen. Where a curve crosses the threshold
+    is where that condition was met, and how far apart they are everywhere else
+    is the margin — which is the number to read off before quoting either
+    detector's defaults as a recommendation.
 
-    Both series are in the detector's own units, so they belong on one axes.
-    ``derivative`` reports the larger of its two bars as the threshold, since a
-    spike has to clear both.
+    How many curves there are is the method's business. ``hysteresis`` measures
+    one thing and draws one. ``derivative`` measures two, the prominence of the
+    up-spike and of the down-spike, and both have to clear the one threshold —
+    so a panel where only one curve is above it is a resonance whose jump was
+    lopsided, not a bifurcation.
+
+    That test also asks a question that is not a measurement: whether the
+    spikes sat next to each other. Steps where every curve cleared the bar and
+    the verdict was still no are marked with a dotted line, because that is the
+    one case where reading the crossings alone would mislead.
+
+    Every series is in the detector's own units, so they belong on one axes.
 
     Note that a detector stops examining steps once it fires, so a resonator
     that bifurcated part-way up the ladder has fewer points here than it has
@@ -574,13 +621,30 @@ def plot_bifurcation_checks(
                     ]
                     for step in steps
                 ]
-                metrics = [checks[step].metric for step in steps]
-                thresholds = [checks[step].threshold for step in steps]
+                # A check reports one entry per quantity its method examined,
+                # so each measured one gets its own curve. Which keys those are
+                # is the method's business, not this function's — read them off
+                # the checks rather than naming them here.
+                measured = _measured_metrics(checks)
+                for key, (colour, marker) in zip(measured, METRIC_STYLES):
+                    panel.plot(amplitudes,
+                               [checks[step].metric[key] for step in steps],
+                               marker=marker, ms=8, lw=2, color=colour)
 
-                panel.plot(amplitudes, metrics, marker="o", ms=8, lw=2,
-                           color="crimson")
+                thresholds = [checks[step].threshold for step in steps]
                 panel.plot(amplitudes, thresholds, marker="s", ms=8, lw=2,
                            ls="--", color="0.35")
+
+                # A step can clear every bar and still not be called
+                # bifurcated, because the derivative test also asks that the
+                # spikes sit next to each other. Without this the panel would
+                # show curves crossing where nothing fired and look wrong.
+                for step, amplitude in zip(steps, amplitudes):
+                    check = checks[step]
+                    cleared = all(check.metric[k] >= check.threshold
+                                  for k in measured)
+                    if cleared and not check.bifurcated:
+                        panel.axvline(amplitude, color="0.55", lw=1.2, ls=":")
 
                 # Where it fired, and where the search settled — one step
                 # below, which is the whole point of the search.
@@ -605,12 +669,19 @@ def plot_bifurcation_checks(
 
             _outer_labels(axes, "drive amp. [norm.]", f"{method} metric")
 
+            # Built from the keys these checks actually carry, so the legend
+            # names the curves rather than calling all of them "metric".
+            drawn = _measured_metrics_of(batch)
+            handles = [Line2D([], [], color=colour, lw=2, marker=marker)
+                       for _, (colour, marker) in zip(drawn, METRIC_STYLES)]
+            labels = [key.replace("_", " ") for key in drawn]
             fig.legend(
-                [Line2D([], [], color="crimson", lw=2, marker="o"),
+                [*handles,
                  Line2D([], [], color="0.35", lw=2, ls="--", marker="s"),
                  Line2D([], [], color=BIAS_COLOUR, lw=2.5),
-                 Line2D([], [], color=FLAGGED_COLOUR, lw=2.5)],
-                ["metric", "threshold", "chosen", "bifurcated"],
+                 Line2D([], [], color=FLAGGED_COLOUR, lw=2.5),
+                 Line2D([], [], color="0.55", lw=1.2, ls=":")],
+                [*labels, "threshold", "chosen", "bifurcated", "pattern failed"],
                 loc="outside lower center", ncols=4,
             )
             _titled(fig, _batch_title(

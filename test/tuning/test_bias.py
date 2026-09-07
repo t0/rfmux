@@ -16,6 +16,7 @@ real discontinuity in it rather than a spike pasted in by hand.
 
 import numpy as np
 import pytest
+from scipy.signal import find_peaks
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
@@ -253,7 +254,66 @@ def test_a_jumped_trace_is_bifurcated():
     check = bifurcated_by_derivative(a_step(a=JUMPED))
 
     assert check.bifurcated
-    assert check.metric > check.threshold
+    assert check.metric["positive_spike_prominence"] > check.threshold
+    assert check.metric["negative_spike_prominence"] > check.threshold
+    assert check.metric["adjacency"]
+
+
+def test_the_reported_numbers_are_the_three_conditions_the_verdict_is_made_of():
+    """The verdict is the conjunction of exactly what ``metric`` reports, so a
+    caller can see which condition decided it rather than guessing from one
+    number that stood in for all three."""
+    check = bifurcated_by_derivative(a_step(a=JUMPED))
+
+    assert set(check.metric) == {
+        "positive_spike_prominence",
+        "negative_spike_prominence",
+        "adjacency",
+    }
+    assert check.bifurcated == (
+        check.metric["positive_spike_prominence"] >= check.threshold
+        and check.metric["negative_spike_prominence"] >= check.threshold
+        and check.metric["adjacency"]
+    )
+
+
+def test_a_spike_that_missed_the_bar_still_reports_its_prominence():
+    """The near-miss is the case a factor gets turned by, so the number has to
+    survive the verdict going against it — asking find_peaks for only the
+    spikes that cleared would report nothing exactly when it matters."""
+    step = a_step(a=JUMPED)
+    demanding = bifurcated_by_derivative(step, spike_prominence_factor=1.5)
+
+    assert not demanding.bifurcated
+    assert demanding.metric["positive_spike_prominence"] > 0.0
+    assert demanding.metric["negative_spike_prominence"] > 0.0
+
+
+def test_a_trace_with_no_spike_at_all_reports_zero_rather_than_failing():
+    """A spike needs a point on either side of it, so a sweep short enough that
+    the differenced trace has no interior point has nowhere for one to be. That
+    is a number — nothing stood out — rather than a missing answer, and it must
+    not come back as ``.max()`` of an empty array."""
+    check = bifurcated_by_derivative({"upward": a_sweep(npoints=4)})
+
+    assert not check.bifurcated
+    assert check.metric["positive_spike_prominence"] == 0.0
+    assert check.metric["negative_spike_prominence"] == 0.0
+
+
+def test_the_direction_reported_is_one_that_fired():
+    """Every direction is tested, but only one direction's numbers come back.
+    A metric describing the quiet sweep beside ``bifurcated=True`` would be
+    explaining the wrong thing."""
+    mixed = {
+        "upward": a_sweep(a=0.0, direction="upward"),
+        "downward": a_sweep(a=JUMPED, direction="downward"),
+    }
+
+    check = bifurcated_by_derivative(mixed)
+
+    assert check.bifurcated
+    assert check.metric["adjacency"]
 
 
 def test_a_bigger_prominence_factor_is_what_makes_the_test_less_sensitive():
@@ -303,11 +363,14 @@ def test_a_downward_sweep_is_read_the_same_way_as_an_upward_one():
 # ─── bifurcation by hysteresis ────────────────────────────────────────────────
 
 
-def test_two_directions_that_agree_are_not_bifurcated():
-    check = bifurcated_by_hysteresis(a_step(a=0.0, directions=("upward", "downward")))
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_two_directions_that_agree_are_not_bifurcated(compare):
+    check = bifurcated_by_hysteresis(
+        a_step(a=0.0, directions=("upward", "downward")), compare=compare
+    )
 
     assert not check.bifurcated
-    assert check.metric == pytest.approx(0.0, abs=1e-9)
+    assert check.metric["max_separation"] == pytest.approx(0.0, abs=1e-9)
     assert check.method == "hysteresis"
 
 
@@ -323,23 +386,83 @@ def test_the_discrepancy_is_measured_in_loop_radii():
     apart[100:110] = 0.4 * radius
     step["downward"]["iq_counts"] = step["downward"]["iq_counts"] + apart[::-1]
 
-    check = bifurcated_by_hysteresis(step)
+    check = bifurcated_by_hysteresis(step, compare="iq")
 
-    assert check.metric == pytest.approx(0.4, rel=1e-6)
+    assert check.metric["max_separation"] == pytest.approx(0.4, rel=1e-6)
     assert check.bifurcated
-    assert not bifurcated_by_hysteresis(step, max_discrepancy=0.5).bifurcated
+    assert not bifurcated_by_hysteresis(
+        step, compare="iq", max_discrepancy=0.5
+    ).bifurcated
 
 
-def test_the_discrepancy_does_not_care_how_large_the_loop_is():
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_the_discrepancy_does_not_care_how_large_the_trace_is(compare):
+    """Whichever plane it is measured in, the separation is normalized by the
+    scale of that plane — so turning up the readout gain does not move it."""
     step = a_step(a=0.0, directions=("upward", "downward"))
     step["downward"]["iq_counts"] = a_trace(a=0.5, direction="downward")[1]
     louder = {
         d: {**e, "iq_counts": e["iq_counts"] * 10} for d, e in step.items()
     }
 
-    assert bifurcated_by_hysteresis(louder).metric == pytest.approx(
-        bifurcated_by_hysteresis(step).metric
+    assert bifurcated_by_hysteresis(louder, compare=compare).metric == pytest.approx(
+        bifurcated_by_hysteresis(step, compare=compare).metric
     )
+
+
+def test_the_magnitude_comparison_is_measured_in_dip_depths():
+    """The same imposed-separation check as above, one plane over: a known
+    difference in |S21| comes back in units of the upward sweep's own depth."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    depth = np.ptp(np.abs(step["upward"]["iq_counts"]))
+    down = step["downward"]["iq_counts"]
+    apart = np.zeros(len(down))
+    apart[100:110] = 0.4 * depth
+    # Straight along the trace's own direction, so |S21| moves by exactly this
+    # much and the phase does not move at all.
+    step["downward"]["iq_counts"] = down * (1 + apart[::-1] / np.abs(down))
+
+    check = bifurcated_by_hysteresis(step, compare="magnitude")
+
+    assert check.metric["max_separation"] == pytest.approx(0.4, rel=1e-6)
+    assert check.bifurcated
+    assert not bifurcated_by_hysteresis(
+        step, compare="magnitude", max_discrepancy=0.5
+    ).bifurcated
+
+
+def test_the_magnitude_comparison_is_blind_to_a_phase_difference():
+    """Which is the point of it: a delay or rotation drift between the two
+    passes moves the traces a long way apart on the IQ plane and leaves their
+    |S21| curves exactly on top of each other."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = step["downward"]["iq_counts"] * np.exp(0.3j)
+
+    in_iq = bifurcated_by_hysteresis(step, compare="iq")
+    in_magnitude = bifurcated_by_hysteresis(step, compare="magnitude")
+
+    assert in_iq.metric["max_separation"] > 0.25
+    assert in_magnitude.metric["max_separation"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_hysteresis_default_is_the_magnitude_comparison():
+    """Which of the two is the default is a decision rather than an accident,
+    so it is pinned here. The phase-rotated step above is the one case where
+    the two comparisons disagree loudly, which makes it the one that can tell
+    which was run."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = step["downward"]["iq_counts"] * np.exp(0.3j)
+
+    assert bifurcated_by_hysteresis(step).metric == pytest.approx(
+        bifurcated_by_hysteresis(step, compare="magnitude").metric
+    )
+
+
+def test_an_unknown_hysteresis_comparison_is_refused():
+    with pytest.raises(ValueError, match="Unknown compare"):
+        bifurcated_by_hysteresis(
+            a_step(directions=("upward", "downward")), compare="phase"
+        )
 
 
 def test_hysteresis_needs_both_directions_and_says_which_is_missing():
@@ -423,8 +546,15 @@ def test_the_normalized_speed_reader_is_what_the_detector_differentiates():
 
     assert len(speed) == len(entry["frequencies"]) - 1
     assert len(frequencies) == len(speed)
-    assert np.diff(speed).max() == pytest.approx(
-        bifurcated_by_derivative({"upward": entry}).metric
+
+    # The detector differences this and reads the prominence of the tallest
+    # spike, so reproducing that from the exported reader has to land on the
+    # number it reported — otherwise this is not what it looked at.
+    _, prominences = find_peaks(np.diff(speed), prominence=0)
+    assert prominences["prominences"].max() == pytest.approx(
+        bifurcated_by_derivative({"upward": entry}).metric[
+            "positive_spike_prominence"
+        ]
     )
 
 

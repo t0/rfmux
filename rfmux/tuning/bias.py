@@ -127,6 +127,7 @@ from .sweep_results import _iterations, collect_amplitude_iterations_for
 __all__ = [
     "BIFURCATION_METHODS",
     "FREQUENCY_METHODS",
+    "HYSTERESIS_COMPARISONS",
     "BifurcationCheck",
     "AmplitudeChoice",
     "BiasFinding",
@@ -147,6 +148,12 @@ __all__ = [
 #: works on one.
 BIFURCATION_METHODS = ("derivative", "hysteresis")
 
+#: What :func:`bifurcated_by_hysteresis` compares the two sweep directions in,
+#: and the default. ``"magnitude"`` compares their ``|S21|`` against frequency;
+#: ``"iq"`` measures how far apart the two traces are on the IQ plane. Same
+#: test, two projections of it — see the detector for what each is blind to.
+HYSTERESIS_COMPARISONS = ("magnitude", "iq")
+
 #: How :func:`find_bias_frequency` places the tone inside the chosen sweep, and
 #: the default.
 FREQUENCY_METHODS = ("iq_derivative", "minimum")
@@ -166,16 +173,22 @@ class BifurcationCheck(NamedTuple):
     produce them are knobs a user has to turn against their own array: a
     detector that only ever says yes or no gives them nothing to turn them by.
 
-    ``metric`` and ``threshold`` are in whatever units the method works in —
-    see the detector for what they mean, and for how closely the verdict tracks
-    the comparison. Above the threshold is not on its own a positive verdict:
-    ``"derivative"`` also requires the spikes it found to be adjacent, and in
-    the right order.
+    ``metric`` is a dict with one entry per quantity the method examined, each
+    named for what it is. A method that tests more than one thing has more than
+    one entry, so the verdict can be read off the numbers behind it rather than
+    inferred from a single figure standing in for all of them — which is what
+    ``"derivative"``, testing three things, used to do. Which keys appear
+    depends on the method; see the detector for what each means and what units
+    it is in.
+
+    ``threshold`` is the single bar those quantities were held to, in their own
+    units. Clearing it is not on its own a positive verdict: ``"derivative"``
+    reports two prominences and an ``"adjacency"`` flag, and needs all three.
     """
 
     method: str
     bifurcated: bool
-    metric: float
+    metric: dict
     threshold: float
 
     def to_dict(self) -> dict:
@@ -183,7 +196,7 @@ class BifurcationCheck(NamedTuple):
         return {
             "method": self.method,
             "bifurcated": bool(self.bifurcated),
-            "metric": float(self.metric),
+            "metric": dict(self.metric),
             "threshold": float(self.threshold),
         }
 
@@ -192,7 +205,7 @@ class BifurcationCheck(NamedTuple):
         return cls(
             method=d["method"],
             bifurcated=bool(d["bifurcated"]),
-            metric=float(d["metric"]),
+            metric=dict(d["metric"]),
             threshold=float(d["threshold"]),
         )
 
@@ -342,8 +355,11 @@ class BiasReport:
     # Stamped into to_dict output and required exactly by from_dict, so a file
     # from another version of this module fails loudly rather than being half
     # understood. Bump whenever the dict shape changes in a way from_dict
-    # cannot absorb.
-    SCHEMA_VERSION = 1
+    # cannot absorb. Version 2 made BifurcationCheck.metric a dict of named
+    # quantities where version 1 had a single float, which from_dict cannot
+    # tell apart from a legitimate value — so a version 1 report is refused
+    # rather than read as though one number meant the same thing.
+    SCHEMA_VERSION = 2
 
     catalog: ResonatorCatalog
     findings: list[BiasFinding]
@@ -426,7 +442,8 @@ def find_bias_points(
     frequency_method: str = "iq_derivative",
     direction: str | None = None,
     spike_prominence_factor: float = 0.5,
-    max_discrepancy: float = 0.25,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
     max_distance_hz: float | None = None,
     save=None,
     label=None,
@@ -460,6 +477,9 @@ def find_bias_points(
             unaffected — a detector sees every direction of its own step.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis` — what the two
+            sweep directions are compared in, from
+            :data:`HYSTERESIS_COMPARISONS`.
         max_distance_hz: how far from the sweep centre a resonance may come
             out before the answer is disbelieved. Past this, the tone is left
             where the sweep was centred — the frequency it already had — and
@@ -494,6 +514,7 @@ def find_bias_points(
     # copies of the same complaint is worse than one.
     _check_method("amplitude_method", amplitude_method, BIFURCATION_METHODS)
     _check_method("frequency_method", frequency_method, FREQUENCY_METHODS)
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
 
     directions = _directions_swept(sweeps)
     if amplitude_method == "hysteresis" and not {"upward", "downward"} <= directions:
@@ -522,6 +543,7 @@ def find_bias_points(
         method=amplitude_method,
         spike_prominence_factor=spike_prominence_factor,
         max_discrepancy=max_discrepancy,
+        compare=compare,
     )
 
     # One finding per resonator, in bias-frequency order, because that is what
@@ -548,6 +570,7 @@ def find_bias_points(
             "direction": direction,
             "spike_prominence_factor": spike_prominence_factor,
             "max_discrepancy": max_discrepancy,
+            "compare": compare,
             "max_distance_hz": max_distance_hz,
         },
     )
@@ -703,7 +726,8 @@ def find_bias_amplitude(
     *,
     method: str = "derivative",
     spike_prominence_factor: float = 0.5,
-    max_discrepancy: float = 0.25,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
 ) -> AmplitudeChoice:
     """Search one resonator's amplitude steps for the one to bias at.
 
@@ -732,15 +756,18 @@ def find_bias_amplitude(
         method: which test, from :data:`BIFURCATION_METHODS`.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
 
     Returns:
         AmplitudeChoice: the iteration and amplitude to bias at, where
         bifurcation was first seen, and each examined step's verdict.
 
     Raises:
-        ValueError: for an unknown *method*, or for no sweeps at all.
+        ValueError: for an unknown *method* or *compare*, or for no sweeps at
+            all.
     """
     _check_method("method", method, BIFURCATION_METHODS)
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
     if not iterations:
         raise ValueError("No sweeps here, so there is no amplitude to choose.")
 
@@ -750,7 +777,7 @@ def find_bias_amplitude(
     settings = (
         {"spike_prominence_factor": spike_prominence_factor}
         if method == "derivative"
-        else {"max_discrepancy": max_discrepancy}
+        else {"max_discrepancy": max_discrepancy, "compare": compare}
     )
 
     # What each step probed at, and the steps in ascending order of it. Every
@@ -841,21 +868,35 @@ def bifurcated_by_derivative(
             of the span of the arc-length speed. Larger is less sensitive.
 
     Returns:
-        BifurcationCheck: with ``metric`` the largest positive jump seen in any
-        direction and ``threshold`` the bar that direction's spikes had to
-        clear. The two are not quite the same quantity — a jump is measured
-        from zero and a prominence from whatever the spike's own neighbourhood
-        sits at — so read their ratio as the margin this sweep has, not as the
-        verdict. The verdict needs more than a big spike anyway: the up-spike
-        has to be followed by a down-spike, so a metric well over threshold
-        with a negative verdict means the jump was there and the pattern was
-        not.
+        BifurcationCheck: with ``threshold`` the bar the spikes had to clear,
+        and ``metric`` the three things this test asks about, from one
+        direction — the same three the verdict is the conjunction of:
+
+        ``"positive_spike_prominence"``
+            how far the tallest up-spike stands out of its own neighbourhood.
+            ``0.0`` if the trace has no up-spike at all.
+        ``"negative_spike_prominence"``
+            the same for the tallest down-spike.
+        ``"adjacency"``
+            whether the spikes that cleared the bar sat next to each other, up
+            first. Its own condition, with no threshold to compare against.
+
+        The verdict is ``True`` when both prominences clear ``threshold`` *and*
+        ``"adjacency"``, so the three entries say which of those failed. That
+        is what they are for: a prominence just under the bar is a factor to
+        lower, and two prominences well over it with ``"adjacency"`` false is a
+        jump the pattern-matching missed, which is a different problem.
+
+        The direction reported is the one that came closest to bifurcating —
+        one that fired if any did, and otherwise the one that spiked hardest —
+        so the numbers sit beside a verdict they belong to. Every direction is
+        still tested.
 
     Raises:
         ValueError: if none of the directions holds a usable sweep.
     """
     verdict = False
-    biggest = None  # the (metric, threshold) of the direction that jumped most
+    reported = None  # (rank, metric, threshold) of the closest direction so far
     for entry in _directions(entries):
         frequencies, iq = _sorted_trace(entry, "iq_counts")
         speed = _point_to_point_speed(frequencies, iq)
@@ -867,34 +908,62 @@ def bifurcated_by_derivative(
             spike_prominence_factor * (speed.max() - speed.min())
         )
 
-        up, _ = find_peaks(jumps, prominence=prominence_threshold)
-        down, _ = find_peaks(-jumps, prominence=prominence_threshold)
+        # Every spike with its prominence, then the bar applied as a filter,
+        # rather than asking find_peaks for only the spikes that clear it. The
+        # two select identically, and this way a spike that just missed still
+        # has a prominence to report — which is the number the factor gets
+        # turned by, so it is the one worth having when the answer was no.
+        up, up_prominence = _spikes(jumps)
+        down, down_prominence = _spikes(-jumps)
+        cleared_up = up[up_prominence >= prominence_threshold]
+        cleared_down = down[down_prominence >= prominence_threshold]
 
         # look for adjacent spikes, with one up before one down:
         # TODO we are assuming there will only be one spike here - is that okay?
         # maybe filtering for multiple spikes could cut down on getting tripped up
         ## by noisy data
-        if len(up) and len(down) and down[0] == up[0] + 1:
-            verdict = True
+        adjacency = bool(
+            len(cleared_up)
+            and len(cleared_down)
+            and cleared_down[0] == cleared_up[0] + 1
+        )
+        verdict = verdict or adjacency
 
-        # Reported as a pair from one direction, so the metric and the
-        # threshold beside it come from the same sweep.
-        if biggest is None or float(jumps.max()) > biggest[0]:
-            biggest = (float(jumps.max()), prominence_threshold)
+        metric = {
+            "positive_spike_prominence": _tallest(up_prominence),
+            "negative_spike_prominence": _tallest(down_prominence),
+            "adjacency": adjacency,
+        }
+        # One direction's numbers are reported, and it is the one that came
+        # closest: a direction that fired outranks one that did not, and among
+        # equals the harder spike wins. So the metric explains the verdict
+        # rather than describing whichever sweep happened to be quieter.
+        rank = (
+            adjacency,
+            max(
+                metric["positive_spike_prominence"],
+                metric["negative_spike_prominence"],
+            ),
+        )
+        if reported is None or rank > reported[0]:
+            reported = (rank, metric, prominence_threshold)
 
-    if biggest is None:
+    if reported is None:
         raise ValueError(
             "No usable sweep at this amplitude: every direction is too short "
             "have a shape, or has a degenerate frequency or IQ axis."
         )
-    metric, threshold = biggest
+    _, metric, threshold = reported
     return BifurcationCheck(
         method="derivative", bifurcated=verdict, metric=metric, threshold=threshold
     )
 
 
 def bifurcated_by_hysteresis(
-    entries: Mapping[str, dict], *, max_discrepancy: float = 0.25
+    entries: Mapping[str, dict],
+    *,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
 ) -> BifurcationCheck:
     """Is this sweep bifurcated? Ask whether up and down agree.
 
@@ -907,27 +976,71 @@ def bifurcated_by_hysteresis(
     passes agree.
 
     The measure is the largest separation between the two traces anywhere in
-    the sweep, in units of the IQ loop's own radius, so it means the same thing
+    the sweep, in units of the trace's own scale, so it means the same thing
     for a deep resonator and a shallow one. Below bifurcation it is a noise
-    figure. Above it, the traces are a good fraction of the loop apart.
+    figure. Above it, the traces are a good fraction of a resonance apart.
+
+    *compare* is what "apart" is measured in, and the two answer slightly
+    different questions:
+
+    ``"magnitude"`` (the default)
+        The difference between the two ``|S21|`` curves against frequency, in
+        units of the upward sweep's own dip depth. Deliberately blind to phase:
+        a rotation or a delay drift between the passes moves both curves
+        nowhere, so what is left is whether the *depth and position of the dip*
+        depended on which way the sweep ran. That is the thing bifurcation
+        actually does — the two branches carry different transmission — and it
+        is a narrower question than the IQ distance asks. On a real array it is
+        the better-behaved of the two: the branch switch shows up as a narrow
+        spike two to three orders of magnitude above an otherwise flat trace,
+        so the quiet steps sit further below the bar than they do in IQ.
+    ``"iq"``
+        The distance between the two traces on the IQ plane, at matched
+        frequency, in units of the loop's own radius. It sees every way the two
+        passes can differ — which is its strength and its weakness, because
+        phase is the fastest-varying thing across a resonance. A small
+        frequency mis-registration between the passes, or a bit of cable-delay
+        drift between them, slides one trace along the loop and reads as a
+        large separation with no bifurcation anywhere in sight. This was the
+        original comparison.
 
     Args:
         entries: one amplitude step, ``{direction: entry}``. Both directions
             are required — this test *is* the comparison.
-        max_discrepancy: how far apart the traces may be, in loop radii, before
-            the step is called bifurcated. The default is a starting point
-            rather than a measured number: pick it against your own array by
-            reading ``metric`` across the amplitude steps of a resonator that
-            is known to bifurcate, which is what it is reported for.
+        max_discrepancy: how far apart the traces may be, in the units
+            *compare* measures in, before the step is called bifurcated. The
+            default is a starting point rather than a measured number: on a
+            real array it sits several times above what two agreeing passes
+            leave behind, and an order of magnitude below a resonator that has
+            plainly jumped, which is room enough to be wrong in
+            without changing any confident answer. A *marginal* resonator can
+            still fall under it. Pick it against your own array by reading
+            ``"max_separation"`` across the amplitude steps of a resonator that
+            is known to bifurcate, which is what it is reported for — and note
+            that the two comparisons are not on the same scale, so a value
+            tuned for one does not carry to the other.
+        compare: what to measure the separation in, from
+            :data:`HYSTERESIS_COMPARISONS`.
 
     Returns:
-        BifurcationCheck: with ``metric`` the largest separation, in loop
-        radii, and ``threshold`` the *max_discrepancy* it was compared against.
+        BifurcationCheck: with ``threshold`` the *max_discrepancy* and
+        ``metric`` the one quantity this test asks about:
+
+        ``"max_separation"``
+            the largest separation between the two traces — in dip depths for
+            ``compare="magnitude"``, in loop radii for ``compare="iq"``.
+
+        A dict for one number, so that a caller reading a check does not have
+        to know which method produced it to know what shape it is in. The
+        verdict here really is the comparison — unlike ``"derivative"``, this
+        test has only the one condition.
 
     Raises:
-        ValueError: if either direction is missing or unusable, or if the two
-            sweeps do not cover the same frequencies.
+        ValueError: for an unknown *compare*, if either direction is missing or
+            unusable, or if the two sweeps do not cover the same frequencies.
     """
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
+
     missing = {"upward", "downward"} - set(entries)
     if missing:
         raise ValueError(
@@ -948,6 +1061,19 @@ def bifurcated_by_hysteresis(
             f"there is nothing to compare them at."
         )
 
+    separation = _HYSTERESIS_COMPARISON[compare](f_up, z_up, f_down, z_down)
+    return BifurcationCheck(
+        method="hysteresis",
+        bifurcated=separation > max_discrepancy,
+        metric={"max_separation": separation},
+        threshold=max_discrepancy,
+    )
+
+
+def _separation_in_iq(
+    f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
+) -> float:
+    """How far apart the two directions are on the IQ plane, in loop radii."""
     # Onto one grid. Exact where the grids agree, which for two directions of
     # one sweep is everywhere — the interpolation is for the case where a
     # re-centring or a dropped point has moved one of them.
@@ -962,13 +1088,51 @@ def bifurcated_by_hysteresis(
             "to measure a discrepancy against."
         )
 
-    metric = float(np.max(np.abs(z_up - on_up)) / radius)
-    return BifurcationCheck(
-        method="hysteresis",
-        bifurcated=metric > max_discrepancy,
-        metric=metric,
-        threshold=max_discrepancy,
-    )
+    return float(np.max(np.abs(z_up - on_up)) / radius)
+
+
+def _separation_in_magnitude(
+    f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
+) -> float:
+    """How far apart the two directions' ``|S21|`` curves are, in dip depths.
+
+    The magnitudes are interpolated, not the complex traces — the curve being
+    compared is the one you would plot, so a phase difference between the
+    passes cannot leak into the answer through the interpolation either.
+
+    The scale is the upward sweep's own depth, peak to trough: the deepest the
+    resonance got minus the baseline it sat on. That is the magnitude plane's
+    equivalent of the loop radius, and it is what makes one threshold portable
+    between a deep resonator and a shallow one.
+    """
+    up, down = np.abs(z_up), np.abs(z_down)
+    on_up = np.interp(f_up, f_down, down)
+
+    depth = float(np.ptp(up))
+    if depth == 0:
+        raise ValueError(
+            "The upward sweep's |S21| is flat — no dip, so no scale to measure "
+            "a discrepancy against."
+        )
+
+    return float(np.max(np.abs(up - on_up)) / depth)
+
+
+def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Every local maximum in *values*, and how far each stands out of its own
+    neighbourhood. ``prominence=0`` keeps them all; the bar is applied after."""
+    peaks, properties = find_peaks(values, prominence=0)
+    return peaks, properties["prominences"]
+
+
+def _tallest(prominences: np.ndarray) -> float:
+    """The most prominent spike, or ``0.0`` where the trace has no spike at all.
+
+    Zero rather than ``None`` because it is the honest answer — nothing stood
+    out — and because it keeps the entry a number that can be compared against
+    the threshold and plotted across amplitude steps like any other.
+    """
+    return float(prominences.max()) if len(prominences) else 0.0
 
 
 # ─── Which frequency ──────────────────────────────────────────────────────────
@@ -1326,6 +1490,14 @@ def _arc_length_speed(frequencies: np.ndarray, iq: np.ndarray) -> np.ndarray | N
 _BIFURCATION = {
     "derivative": bifurcated_by_derivative,
     "hysteresis": bifurcated_by_hysteresis,
+}
+
+#: Name → what the hysteresis test measures the two directions apart in. Each
+#: takes both traces already sorted and returns one number, normalized by the
+#: scale of its own plane so that one threshold travels between resonators.
+_HYSTERESIS_COMPARISON = {
+    "magnitude": _separation_in_magnitude,
+    "iq": _separation_in_iq,
 }
 
 #: Name → placer, each taking a whole sweep entry. The fitted ``fr`` joins here

@@ -92,7 +92,7 @@ import copy
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
@@ -277,9 +277,15 @@ from rfmux.tuning import (
     get_amplitudes_at_iteration,
 )
 
-# gnuplot runs black → purple → red → orange → yellow, so it stays saturated
-# from end to end and every trace reads against a white background.
-AMPLITUDE_CMAP = plt.cm.gnuplot
+# gnuplot runs black → purple → red → orange → yellow, so it stays saturated for
+# most of its length and every trace reads against a white background. The top
+# tenth is the exception: it fades to a pale yellow that vanishes on white, and
+# that is where the loudest drive would land. So the map is truncated before it
+# gets there — truncating it rather than clamping at the call site keeps the
+# colourbar showing the colours the traces were actually drawn in.
+AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
+    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
+)
 
 
 def amplitude_colours(amplitudes):

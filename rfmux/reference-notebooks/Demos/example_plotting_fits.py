@@ -50,7 +50,7 @@ import textwrap
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LogNorm, Normalize
+from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 
 from rfmux.tuning import (
@@ -101,8 +101,15 @@ PLOT_STYLE = {
 BATCH_SIZE = 50
 
 # gnuplot runs black -> purple -> red -> orange -> yellow, so it stays
-# saturated from end to end and every trace reads against a white background.
-AMPLITUDE_CMAP = plt.cm.gnuplot
+# saturated for most of its length and every trace reads against a white
+# background. The top tenth is the exception: it fades to a pale yellow that
+# vanishes on white, and that is where the loudest drive would land. So the map
+# is truncated before it gets there. Truncating the colormap rather than
+# clamping at the call site keeps the colourbar showing the colours the traces
+# were actually drawn in.
+AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
+    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
+)
 
 # When only one amplitude step is drawn there is no drive for colour to encode,
 # so it is spent on telling the data from the model instead. With several steps

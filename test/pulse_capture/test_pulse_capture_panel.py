@@ -1774,3 +1774,27 @@ def test_the_file_label_shows_the_name_with_the_path_on_hover(qt_app):
                      "session_20260902_180701/pulse_module2_180833.h5")
     assert panel.path_label.text() == "HDF5: pulse_module2_180833.h5"
     assert panel.path_label.toolTip().endswith("pulse_module2_180833.h5")
+
+
+def test_both_mode_accepts_more_channels_than_the_pfb_streamer(
+        qt_app, tmp_path, monkeypatch):
+    """Five channels in both mode pass the panel's pre-check (the task's
+    streamer check picks the fast subset); in fast mode they do not."""
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warnings.append(a[2])))
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    panel.channels_edit.setText("1-5")
+
+    panel.mode_combo.setCurrentText("fast")
+    panel._on_start()
+    assert warnings and "at most 4" in warnings[-1]
+
+    panel.mode_combo.setCurrentText("both")
+    panel._on_start()
+    assert "at most 4" not in warnings[-1], warnings[-1]
+    assert "CRS connection" in warnings[-1]
+    panel.close()
+    spin(qt_app)

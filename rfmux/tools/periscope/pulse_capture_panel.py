@@ -1266,11 +1266,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         crs = getattr(runtime, "crs", None)
         host = None
         if mode in ("fast", "both"):
-            if len(channels) > 4:
+            # A both-mode capture takes fast data for the streamed subset
+            # (the task's streamer check names it); only a fast capture
+            # needs every channel on the four-channel PFB streamer.
+            if mode == "fast" and len(channels) > 4:
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
-                    "The PFB (fast) streamer supports at most 4 channels "
-                    f"— {len(channels)} requested.")
+                    "The PFB (fast) streamer supports at most 4 channels; "
+                    f"{len(channels)} requested.")
                 return
             host = getattr(crs, "tuber_hostname", None) \
                 or getattr(runtime, "host", None)

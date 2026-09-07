@@ -79,6 +79,11 @@ def _register_global_cleanup():
 # ── Constants ─────────────────────────────────────────────────────
 
 PFB_BATCH = 64              # PFB samples per dec-0 slow sample (fundamental quantum)
+#: The PFB stream's noise sigma over the white-noise extrapolation from
+#: the slow stream's.  Board 0156 (firmware v1.7.0rc4), stage 6, no
+#: tone: PFB sigma 605 counts against a slow sigma of 10.9, a ratio of
+#: 55 where white noise decimated by 4096 gives 64.
+PFB_NOISE_OVER_WHITE = 0.86
 
 #: Wire mode for each channel count the PFB packet can express.
 PFB_MODE_FOR_CHANNELS = {1: 0, 2: 1, 4: 2}
@@ -493,8 +498,9 @@ class MockCRSStreamer(threading.Thread):
         full_scale, noise_level = self._scale_and_noise()
         # The slow stream is this one decimated by CIC1_DECIMATION *
         # 2**dec, so for white readout noise the PFB sigma is root that
-        # many times the slow floor udp_noise_level names.
-        pfb_noise = noise_level * np.sqrt(CIC1_DECIMATION * n_sub)
+        # many times the slow floor udp_noise_level names; a board's PFB
+        # stream sits a little under that.
+        pfb_noise = noise_level * np.sqrt(CIC1_DECIMATION * n_sub) * PFB_NOISE_OVER_WHITE
         model = self.mock_crs._resonator_model
         model.advance_pulses_to(t_frame + (n_sub - 1) * PFB_BATCH / PFB_SAMPLING_FREQ,
                                 n_sub, PFB_BATCH / PFB_SAMPLING_FREQ)

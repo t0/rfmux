@@ -635,7 +635,9 @@ class ServerMockCRS:
     async def get_timestamp(self):
         return dict(self._last_timestamp)
 
-    async def get_pfb_samples(self, num_samples, units=Units.NORMALIZED, channel=None, module=1):
+    async def get_pfb_samples(self, num_samples, units=Units.RAW, channel=None, module=1):
+        # The board's RPC takes no units and returns counts, the scale
+        # get_samples reports.
         assert isinstance(num_samples, int) and num_samples > 0
         assert channel is not None and isinstance(channel, int)
         assert 0 <= channel < 1024

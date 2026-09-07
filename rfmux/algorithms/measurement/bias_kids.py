@@ -55,8 +55,8 @@ async def find_optimal_phases_parallel(
 
     Signal and noise move mostly along the resonance's frequency
     direction, so the principal component of (I, Q) is that direction
-    and one PCA gives the angle.  The board rotates samples by +phase,
-    so a principal axis at theta lands on Q at 90 - theta.
+    and one PCA gives the angle.  The board rotates samples by -phase,
+    so a principal axis at theta lands on Q at theta - 90.
 
     Args:
         crs: CRS object
@@ -101,7 +101,7 @@ async def find_optimal_phases_parallel(
         pc = v[:, np.argmax(w)]
         # An axis, not a direction: fold the eigenvector's sign away.
         theta = (np.degrees(np.arctan2(pc[1], pc[0])) + 90.0) % 180.0 - 90.0
-        phase = (90.0 - theta) % 360.0
+        phase = (theta - 90.0) % 360.0
         optimal_phases[det_idx] = (float(phase), float(np.sqrt(w.max())))
         print(f"Detector {det_idx}: principal axis at {theta:.1f} deg, ADC phase {phase:.1f} deg")
     return optimal_phases
@@ -555,10 +555,10 @@ async def bias_kids(
                               f"measured one, if any, still applies")
 
             if 'df_calibration' in biased_data and biased_data['df_calibration'] is not None and optimal_phase != 0.0:
-                # The board rotates the samples by +phase; the calibration
+                # The board rotates the samples by -phase; the calibration
                 # multiplies them, so it turns the other way to keep
                 # samples * calibration the same frequency shift.
-                biased_data['df_calibration'] *= np.exp(-1j * np.radians(optimal_phase))
+                biased_data["df_calibration"] *= np.exp(1j * np.radians(optimal_phase))
 
             fit_cal = biased_data.get('df_calibration')
             meas_cal = measured.get(det_idx)

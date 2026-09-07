@@ -222,8 +222,9 @@ def test_three_pfb_channels_are_rejected():
 @pytest.mark.parametrize("dec", [0, 6])
 def test_pfb_noise_is_the_slow_floor_scaled_by_the_decimation_ratio(dec):
     """udp_noise_level is the slow stream's sigma at every stage; the
-    PFB stream, decimated by 64 * 2**dec into it, carries white noise
-    root-that-many times larger."""
+    PFB stream, decimated by 64 * 2**dec into it, carries noise
+    root-that-many times larger, scaled by the board's measured excess."""
+    from rfmux.mock.udp_streamer import PFB_NOISE_OVER_WHITE
     crs = _crs()
     crs._fir_stage = dec
     st = _streamer(crs)
@@ -236,4 +237,4 @@ def test_pfb_noise_is_the_slow_floor_scaled_by_the_decimation_ratio(dec):
     x = np.concatenate(samples)
     sigma = crs._physics_config["udp_noise_level"]
     assert np.std(x.real) == pytest.approx(
-        sigma * np.sqrt(CIC1_DECIMATION * 2 ** dec), rel=0.1)
+        sigma * np.sqrt(CIC1_DECIMATION * 2 ** dec) * PFB_NOISE_OVER_WHITE, rel=0.05)

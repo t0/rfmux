@@ -128,6 +128,13 @@ Old values are main at the merge base (e46fc41).
   `bias_amplitude` 0.01 (about -40 dBm) to `bias_amplitude_from_dbm(-55)`,
   about 0.0016. `DAC_SCALE_DBM` (1 dBm) and `BIAS_DBM` (-55 dBm) live in
   `rfmux.mock.config`.
+- Simulator readout floor: `udp_noise_level` 0.04 counts, a placeholder, to
+  11 counts, the slow-stream sigma of board 0156 (firmware v1.7.0rc4) at
+  stage 6 with no tone through a detector chain. The PFB stream's sigma is
+  `PFB_NOISE_OVER_WHITE` (0.86) times the white-noise extrapolation, the
+  board's ratio of 55 against 64.
+- Simulator `get_pfb_samples` stub: normalized values by default, to counts,
+  what the board's RPC returns (it takes no units argument).
 - Simulator transport: unicast to 127.0.0.1 with multicast TTL 1, to
   multicast on the hardware group with TTL 0, falling back to loopback unicast
   and printing the failing step when the host cannot multicast.
@@ -391,8 +398,11 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   because intermodulation products land on the grid; the calibration step is
   rounded to it too.
 - The ADC phase: with `optimize_phase=True` the principal axis of (I, Q) goes
-  to Q from one sample set, and the calibration turns by minus the phase; the
-  multisweep zeroes the ADC phase on the channels it sweeps.
+  to Q from one sample set.  The board turns samples by minus the phase it
+  is given (measured on board 0156, firmware v1.7.0rc4), so the phase is
+  the axis angle minus 90 degrees and the calibration turns by plus the
+  phase; the simulator turns samples the same way.  The multisweep zeroes
+  the ADC phase on the channels it sweeps.
 - Bifurcation is a warning, not a refusal: `identify_bifurcation` sets
   `is_bifurcated` on the multisweep entry; `bias_kids` still biases, at the
   lowest amplitude swept when it has a choice.

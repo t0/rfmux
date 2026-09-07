@@ -1611,12 +1611,13 @@ class MockResonatorModel:
                 s21_complex = self.s21_lc_response(total_freq, amp, pulse_time=pulse_time)
                 s21_call_count += 1
                 
-                # Combine amplitude, S21, and phase
-                complex_amplitude = amp * s21_complex * np.exp(1j * np.deg2rad(phase_deg))
+                # Combine amplitude, S21 and the ADC phase; the board turns
+                # samples by minus the phase it is given
+                complex_amplitude = amp * s21_complex * np.exp(-1j * np.deg2rad(phase_deg))
             else:
                 # For multi-sample, just store base amplitude with phase
                 # S21 will be evaluated fresh for each sample
-                complex_amplitude = amp * np.exp(1j * np.deg2rad(phase_deg))
+                complex_amplitude = amp * np.exp(-1j * np.deg2rad(phase_deg))
             
             active_tone_freqs.append(total_freq)
             active_tone_amps.append(complex_amplitude)
@@ -2101,7 +2102,7 @@ class MockResonatorModel:
         # Single channel case - use original efficient calculation
         s21_val = self.s21_lc_response(frequency, amplitude)
         phase_rad = np.deg2rad(phase_degrees)
-        s21_with_phase = s21_val * np.exp(1j * phase_rad)
+        s21_with_phase = s21_val * np.exp(-1j * phase_rad)
         
         # Return S21 * commanded_amplitude (preserves amplitude scaling)
         return s21_with_phase * amplitude

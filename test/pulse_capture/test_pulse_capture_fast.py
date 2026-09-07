@@ -28,6 +28,7 @@ from rfmux.pulse_capture.capture_session import (  # noqa: E402
 )
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ  # noqa: E402
+from rfmux.mock.config import bias_amplitude_from_dbm  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
     PulseCaptureSignals,
     PulseCaptureTask,
@@ -48,7 +49,11 @@ def mock_crs():
             "num_resonances": 2,
             "resonator_random_seed": 11,
             "auto_bias_kids": True,
-            "bias_amplitude": 0.001,
+            # The PFB stream's floor is 605 counts (a board's), and a pulse
+            # can swing the tone no further than its off-resonance level,
+            # so the fast stream's per-sample reach is set by the bias:
+            # about 7 sigma at -55 dBm, 21 at -45.
+            "bias_amplitude": bias_amplitude_from_dbm(-45.0),
             "pulse_mode": "periodic",
             "pulse_period": 0.02,
             "pulse_tau_rise": 1e-6,
@@ -144,7 +149,7 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     capture_session = PulseCaptureSession(
         channels=channels, module=1, streamer_mode="fast",
-        threshold_sigma=50.0, end_sigma=3.0,
+        threshold_sigma=5.0, end_sigma=3.0,
         sample_rate=PFB_SAMPLING_FREQ, buf_size=200_000,
         noise_samples=50_000, hdf5_path=path,
         histogram_flush_every=2)

@@ -1552,7 +1552,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_histograms()
         self._render_templates()
         self._enter_review_state(
-            path, f"{sum(self._counts.values())} pairs")
+            path, f"{sum(self._counts.values())} pulses")
         if self._pulse_order:
             self._show_pair(*self._pulse_order[-1])
 
@@ -1855,7 +1855,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     item.setBackground(col, QtGui.QColor(
                         "#33251c" if self.dark_mode else "#ffe8d9"))
             parent.insertChild(0, item)
-            parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pairs)")
+            parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pulses)")
             self._autosize_tree()
 
         if self.follow_check.isChecked() \
@@ -1901,7 +1901,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             fast_n = s.get("fast", {}).get("total_pulses", 0)
             text = (f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
                     f"{s['pairs_matched']} matched / "
-                    f"{s['pairs_unmatched']} single-trigger pairs")
+                    f"{s['pairs_unmatched']} single-stream pulses")
             text += self._dropped_text(
                 {name: s.get(name, {}).get("dropped_invalid_ts", 0)
                  for name in ("slow", "fast")})
@@ -1923,8 +1923,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 tooltip += (("\n\n" if tooltip else "")
                             + f"Stream clock skew: slow − fast trigger time "
                               f"= {skew*1e3:+.2f} ms (median of {n} matched "
-                              "pairs). This is how far the two streams' "
-                              "timestamps disagree on one event; in the pair "
+                              "pulses). This is how far the two streams' "
+                              "timestamps disagree on one event; in the pulse "
                               "view it shows as one stream's marks sitting "
                               "off the other stream's trace by this much.")
             self.status_label.setToolTip(tooltip)

@@ -450,7 +450,7 @@ def test_dual_review_mode(qt_app, tmp_path):
 
     ch_item = panel._channel_items[1]
     assert ch_item.childCount() >= 1
-    assert "pairs" in ch_item.text(0)
+    assert "pulses" in ch_item.text(0)
 
     # The matched pair renders: fast line + slow line+markers per plot
     key = panel._pulse_order[-1]

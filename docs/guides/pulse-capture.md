@@ -122,12 +122,15 @@ toolbar follows.
   use it: a sample must leave the baseline by this many σ, and the signal
   must have risen by this many jump-σ within the edge lookback. The second
   test is a difference of raw samples, so baseline drift cannot fake it.
-- **Max pulse (ms)** (250) is the longest pulse you expect. It sizes
-  everything else: the ring buffer at 1.5 times it, the hard stop at 1.2,
-  the edge lookback and the noise training. Estimate it generously. A pulse
-  that outlasts the buffer loses its rising edge.
-- **Noise training** is derived: 20 times the max pulse, the record the
-  noise σ and the rolling baseline are estimated from.
+- **Max pulse (ms)** (250) is the longest pulse you expect. It sizes the
+  pulse-scale quantities: the ring buffer at 1.5 times it, the hard stop at
+  1.2, and the edge lookback. Estimate it generously. A pulse that outlasts
+  the buffer loses its rising edge.
+- **1/f window (ms)** (5000) is the record the noise σ is fitted from and
+  the span of the rolling baseline. It has to be long compared with any
+  pulse and with the 1/f knee, so it is seconds whatever the pulse length.
+  Below 2 s the banner warns: the baseline is then refreshed so often that
+  a capture of many channels falls behind the stream.
 
 **Advanced** opens the rest. The defaults suit most captures.
 

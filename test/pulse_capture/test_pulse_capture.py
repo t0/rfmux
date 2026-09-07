@@ -1079,9 +1079,23 @@ class TestPulseCaptureConfig:
         assert not any(s == "error" for s, _ in issues)
 
     def test_validate_default_end_sigma_is_clean(self):
-        """The default (1.0) is measured to close captures on both
+        """The default (1.5) is measured to close captures on both
         streams; the config must not warn about itself."""
         assert not any("End σ" in m for _, m in PulseCaptureConfig().validate())
+
+    def test_the_window_is_seconds_whatever_the_pulse_length(self):
+        """The 1/f window has its own default; a short max pulse does not
+        shorten it, and 0 still derives it from the pulse."""
+        assert PulseCaptureConfig().noise_train_span_ms() == pytest.approx(5000.0)
+        assert PulseCaptureConfig(max_pulse_ms=20.0).noise_train_span_ms() \
+            == pytest.approx(5000.0)
+        assert PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=0.0) \
+            .noise_train_span_ms() == pytest.approx(400.0)
+
+    def test_a_short_window_warns_and_the_default_does_not(self):
+        short = PulseCaptureConfig(noise_train_ms=500.0).validate()
+        assert any(s == "warning" and "1/f window" in m for s, m in short)
+        assert not any("1/f window" in m for _, m in PulseCaptureConfig().validate())
 
     def test_validate_min_above_max_is_error(self):
         cfg = PulseCaptureConfig(min_pulse_ms=300.0, max_pulse_ms=100.0)
@@ -1694,9 +1708,9 @@ class TestBaselineConfig:
         """One window, one requirement: long compared with a pulse.
         The ring holds one max-length pulse, so the window is floored
         against it in case training was overridden short."""
-        # Once the ring is above its own minimum size, training (20x the
-        # pulse) beats the ring floor (8 x 1.5x the pulse) and wins.
-        cfg = PulseCaptureConfig(max_pulse_ms=1000.0)
+        # A window long compared with the pulse beats the ring floor
+        # (8 x 1.5x the pulse) and wins.
+        cfg = PulseCaptureConfig(max_pulse_ms=1000.0, noise_train_ms=20_000.0)
         kw = cfg.session_kwargs(1000.0)
         assert kw["baseline_window"] == cfg.noise_samples(1000.0) == 20000
         assert kw["baseline_window"] > cfg.buf_size(1000.0)

@@ -90,18 +90,33 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         # from the config's constants and the live margin fraction.
         form.addRow("Max pulse (ms):", self.max_pulse_spin)
 
-        # Training is derived, not chosen: what matters is that the
-        # window is long compared with a pulse, and that ratio follows
-        # the pulse length automatically.
+        # The 1/f window is its own time scale, seconds whatever the
+        # pulse length: the record fitted for sigma and the span of the
+        # rolling baseline median.
+        self.window_spin = QtWidgets.QDoubleSpinBox()
+        self.window_spin.setRange(0.0, 600_000.0)
+        self.window_spin.setDecimals(0)
+        self.window_spin.setSingleStep(500.0)
+        self.window_spin.setSpecialValueText(
+            f"derived ({PulseCaptureConfig.NOISE_TRAIN_PULSES}× max pulse)")
+        self.window_spin.setValue(config.noise_train_ms)
+        self.window_spin.setToolTip(
+            "The record the noise level (sigma) is fitted from, and the "
+            "span the rolling baseline median covers.  It must be long "
+            "compared with any pulse and with the 1/f knee, so it is "
+            "seconds whatever the pulse length.  Below "
+            f"{PulseCaptureConfig.MIN_WINDOW_MS / 1e3:g} s the baseline is "
+            "refreshed often enough to fall behind the stream at many "
+            "channels.\n"
+            "Robust estimators tolerate pulses in the window.  0 derives "
+            f"it as {PulseCaptureConfig.NOISE_TRAIN_PULSES}× the max pulse.")
+        form.addRow("1/f window (ms):", self.window_spin)
         self.noise_label = QtWidgets.QLabel()
         self.noise_label.setToolTip(
-            f"{PulseCaptureConfig.NOISE_TRAIN_PULSES}x the max pulse "
-            "length.  The record is fitted for the noise level (sigma), "
-            "and the same span is what the rolling baseline median "
-            "covers — sigma is stationary and wants a long record, the "
-            "mean drifts and wants recency.\n"
-            "Robust estimators tolerate pulses in the window.")
-        form.addRow("Noise training:", self.noise_label)
+            "The window as the capture will use it at this rate: the "
+            "record is memory-bounded on the PFB stream and floored "
+            "against the ring buffer.")
+        form.addRow("Window at this rate:", self.noise_label)
 
         adv_box = QtWidgets.QGroupBox("Advanced")
         adv_box.setCheckable(True)
@@ -255,7 +270,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         form.addRow(self.buttons)
 
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
-                  self.min_pulse_spin, self.max_pulse_spin,
+                  self.min_pulse_spin, self.max_pulse_spin, self.window_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
@@ -271,6 +286,7 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
+            noise_train_ms=float(self.window_spin.value()),
             enable_pileup=self.pileup_check.isChecked(),
             min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
@@ -293,21 +309,17 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
                 f"({cfg.NOISE_TRAIN_PULSES}×), the rolling-baseline "
                 "median span, and the edge-detector lookback (margin "
                 f"fraction × max pulse: {cfg.margin_fraction:.0%}).")
-            # The training span is a ratio of the pulse length, but the
-            # record is memory-bounded at fast rates and floored at slow
-            # ones; the label says which length is actually used.
+            # The record is memory-bounded at fast rates and floored at
+            # slow ones; the label says which length is actually used.
             span = d["noise_train_span_ms"]
             n_noise = d["noise_samples"]
             wanted = round(span * 1e-3 * self.sample_rate)
-            ratio = f"{cfg.NOISE_TRAIN_PULSES}× the max pulse length"
             if abs(n_noise - wanted) <= 1:
-                note = ratio
+                note = f"{n_noise:,} samples"
             elif n_noise < wanted:
-                note = (f"capped at {n_noise:,} samples; {ratio} would "
-                        f"be {_ms(span)}")
+                note = f"capped at {n_noise:,} samples from {_ms(span)}"
             else:
-                note = (f"floor of {n_noise:,} samples; {ratio} is only "
-                        f"{_ms(span)}")
+                note = f"floor of {n_noise:,} samples over {_ms(span)}"
             self.noise_label.setText(
                 f"{_ms(d['noise_train_actual_ms'])} ({note})")
             acc = d["accidental_per_min"]

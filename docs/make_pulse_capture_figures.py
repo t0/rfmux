@@ -43,7 +43,7 @@ ANATOMY_PATHS = (
 #: Decimation stage 3, 4.77 kHz: a 12 ms decay spans tens of samples.
 FS = decimation_to_sampling(3)
 #: Every field but the pulse length at its default.
-CONFIG = PulseCaptureConfig(max_pulse_ms=50.0)
+CONFIG = PulseCaptureConfig(max_pulse_ms=50.0, noise_train_ms=1000.0)
 AMP_SIGMA, TAU_MS, RISE_MS = 14.0, 12.0, 1.0
 SEED = 13
 

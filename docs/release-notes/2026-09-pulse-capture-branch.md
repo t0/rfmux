@@ -42,8 +42,8 @@ simulator files are unchanged in meaning.
 - Noise training before every capture: the threshold is `threshold_sigma`
   times a sigma measured as the samples' scatter about a block-median
   baseline, so it holds for the correlated samples the decimators produce.
-  Training lasts twenty times `max_pulse_ms` and is not charged against
-  `time_run`.
+  Training lasts the 1/f window, `noise_train_ms` (5 s), and is not
+  charged against `time_run`.
 - Triggering in the frequency basis (`trigger_basis="df"`): with a df
   calibration a channel is rotated so the pulse lies along one axis before
   thresholding, and stored in hertz; without one it stays on the quadratures
@@ -191,6 +191,13 @@ Old values are main at the merge base (e46fc41).
   `PulseCaptureSession`, `PulseCapture` and the Settings dialog. A file
   written with it still opens; its stored value is ignored, and its pulses
   keep the duration they had, trigger to the threshold drop.
+- The 1/f window (`noise_train_ms`): derived as twenty times the max pulse,
+  to its own default of 5 s. The noise fit and the rolling baseline want
+  seconds whatever the pulse length, and deriving them from a short max
+  pulse refreshed the baseline often enough to fall behind the stream at
+  128 channels (measured: 109% of real time at 20 ms against 45% at 250
+  ms, stage 1). The dialog's Noise training row is now the editable 1/f
+  window, with a warning below 2 s; 0 still derives it.
 - Peak-amplitude histogram: the larger of the two axis excursions, to one
   histogram per stored axis (`amplitude_i`, `amplitude_q`, shared bins),
   overlaid on the Histograms tab and named by the stored basis. The

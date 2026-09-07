@@ -349,10 +349,13 @@ How pulse detection works:
   ignores pulses as long as they are a minority of the window. The noise σ is
   the samples' scatter about a block-median baseline, three hard-stop lengths
   per block, so a slow drift is not counted as noise.
-- **`max_pulse_ms` sizes everything.** The ring buffer is 1.5× it, the hard
-  stop 1.2×, and it sets the floor under the baseline window and the training
-  length. Estimate it generously: a pulse that outlasts the buffer loses its
-  rising edge.
+- **`max_pulse_ms` sizes the pulse scale.** The ring buffer is 1.5× it, the
+  hard stop 1.2×, the edge lookback a tenth. Estimate it generously: a pulse
+  that outlasts the buffer loses its rising edge.
+- **`noise_train_ms` is the 1/f window** (5 s): the record the noise σ is
+  fitted from and the span of the rolling baseline, long compared with any
+  pulse and with the 1/f knee. Below 2 s the baseline refresh costs real time
+  at many channels.
 - **A capture that never ends is cut off** at the hard stop and flagged
   `truncated`.
 - **Piled-up pulses are split.** A fresh rise on the tail of a pulse, after
@@ -385,6 +388,7 @@ capture_config = PulseCaptureConfig(
     end_sigma=1.5,          # close when BOTH are back inside ±1.5σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
     max_pulse_ms=50.0,      # longest recordable pulse; sizes the buffer
+    noise_train_ms=5000.0,  # the 1/f window: noise fit and rolling baseline
     enable_pileup=True,     # split piled-up events on a sharp re-rise
 )
 

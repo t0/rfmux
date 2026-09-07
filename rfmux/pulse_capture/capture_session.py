@@ -201,9 +201,14 @@ class PulseCaptureConfig:
     #: under the baseline tracking window.  Estimate it generously — a
     #: capture that outlasts the ring loses its rising edge.
     max_pulse_ms: float = 250.0
-    #: Training length override, in SAMPLE time.  0 (the default)
-    #: derives it from the pulse length — see noise_train_span_ms().
-    noise_train_ms: float = 0.0
+    #: The 1/f window, in stream time: the record the noise sigma is
+    #: fitted from and the span of the rolling-baseline median.  It has
+    #: to be long compared with any pulse and with the 1/f knee, which
+    #: is a matter of seconds whatever the pulse length; below about
+    #: two seconds the baseline refreshes often enough to cost real time
+    #: at many channels.  0 derives it from the pulse length instead —
+    #: see noise_train_span_ms().
+    noise_train_ms: float = 5000.0
     enable_pileup: bool = True
     #: Floor under the end-confirmation count, in samples.  A capture
     #: ends once the confirmation bucket exceeds
@@ -239,6 +244,8 @@ class PulseCaptureConfig:
     #: pulse (so the fit sees baseline, not signal), and that ratio —
     #: not any absolute duration — is the thing that matters.
     NOISE_TRAIN_PULSES = 20
+    #: A 1/f window shorter than this draws a warning.
+    MIN_WINDOW_MS = 2000.0
     #: Hard stop on a capture, as a multiple of the max pulse length —
     #: the ring fraction expressed against the pulse rather than the
     #: ring, so it is the same stop the engine's own default computes.
@@ -269,14 +276,8 @@ class PulseCaptureConfig:
         return max(self._MIN_NOISE, min(want, self._MAX_NOISE))
 
     def noise_train_span_ms(self) -> float:
-        """Effective training length.
-
-        Derived from the pulse length by default: the window must be
-        long compared with a pulse for the fit to see baseline rather
-        than signal, and expressing that as a ratio means it follows
-        whatever pulse scale the user sets instead of needing its own
-        answer.  A positive noise_train_ms overrides it.
-        """
+        """Effective training length: the 1/f window, or, when that is
+        0, NOISE_TRAIN_PULSES times the pulse length."""
         if self.noise_train_ms > 0:
             return self.noise_train_ms
         return self.NOISE_TRAIN_PULSES * self.max_pulse_ms
@@ -454,8 +455,14 @@ class PulseCaptureConfig:
                            "Min pulse length must be below max pulse "
                            "length."))
         if self.noise_train_ms < 0:
-            issues.append(("error",
-                           "Noise training override cannot be negative."))
+            issues.append(("error", "The 1/f window cannot be negative."))
+        elif self.noise_train_span_ms() < self.MIN_WINDOW_MS:
+            issues.append((
+                "warning",
+                f"A 1/f window of {self.noise_train_span_ms():g} ms is short: "
+                f"below {self.MIN_WINDOW_MS / 1e3:g} s the baseline is "
+                "refreshed often enough to fall behind the stream at many "
+                "channels, and it tracks 1/f drift poorly."))
         if sample_rate:
             acc = 60.0 * self.accidental_rate_hz(sample_rate)
             if acc > 1.0:

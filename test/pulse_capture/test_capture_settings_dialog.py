@@ -64,10 +64,10 @@ def test_roundtrip(qt_app):
     assert cfg.threshold_sigma == 8.0
     assert cfg.min_pulse_ms == 0.5
     assert cfg.max_pulse_ms == 100.0
-    # Training is derived from the pulse length, not entered.
-    assert cfg.noise_train_ms == 0.0
-    assert cfg.noise_train_span_ms() == 100.0 * cfg.NOISE_TRAIN_PULSES
-    assert "20×" in dlg.noise_label.text()
+    # The 1/f window is its own control, untouched by the pulse length.
+    assert cfg.noise_train_ms == 5000.0
+    assert cfg.noise_train_span_ms() == 5000.0
+    assert "samples" in dlg.noise_label.text()
     assert cfg.margin_fraction == 0.2
     assert cfg.enable_pileup is False
     dlg.close()
@@ -111,20 +111,23 @@ def test_derived_readouts_split_by_driving_knob(qt_app):
     assert "50 ms" in _plain(dlg.pulse_derived_label)
     dlg.close()
 
-def test_max_pulse_is_a_primary_control_and_drives_training(qt_app):
-    """Max pulse sits in the main form, and the derived training length
-    tracks it — the ratio is what matters, not any absolute duration."""
+def test_max_pulse_and_the_window_are_separate_primary_controls(qt_app):
+    """Max pulse and the 1/f window both sit in the main form; the
+    window keeps its seconds whatever the pulse length, and the readout
+    follows the window."""
     dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
     # Not hidden behind Advanced.
     assert not dlg.adv_box.isChecked()
     assert dlg.max_pulse_spin.isVisible() or not dlg.isVisible()
 
     dlg.max_pulse_spin.setValue(10.0)
-    assert dlg.get_config().noise_train_span_ms() == 200.0
+    assert dlg.get_config().noise_train_span_ms() == 5000.0
     first = dlg.noise_label.text()
-    dlg.max_pulse_spin.setValue(40.0)
-    assert dlg.get_config().noise_train_span_ms() == 800.0
+    dlg.window_spin.setValue(8000.0)
+    assert dlg.get_config().noise_train_span_ms() == 8000.0
     assert dlg.noise_label.text() != first, "readout did not follow"
+    dlg.window_spin.setValue(0.0)            # derived from the pulse again
+    assert dlg.get_config().noise_train_span_ms() == 200.0
     dlg.close()
 
 

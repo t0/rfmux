@@ -49,11 +49,14 @@ def mock_crs():
             "num_resonances": 2,
             "resonator_random_seed": 11,
             "auto_bias_kids": True,
-            # The PFB stream's floor is 605 counts (a board's), and a pulse
-            # can swing the tone no further than its off-resonance level,
-            # so the fast stream's per-sample reach is set by the bias:
-            # about 7 sigma at -55 dBm, 21 at -45.
-            "bias_amplitude": bias_amplitude_from_dbm(-45.0),
+            # At the default -55 dBm bias and the board's readout floor
+            # the fast stream cannot trigger on single samples: a pulse
+            # swings the tone no further than its off-resonance level,
+            # about 7 sigma over a 605-count PFB floor.  A quarter of the
+            # board's floor gives these tests 21 sigma without driving the
+            # resonator into bifurcation, which more bias would.
+            "bias_amplitude": bias_amplitude_from_dbm(-55.0),
+            "udp_noise_level": 4.0,
             "pulse_mode": "periodic",
             "pulse_period": 0.02,
             "pulse_tau_rise": 1e-6,

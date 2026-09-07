@@ -175,7 +175,9 @@ warning.
 
 The **Histograms** tab accumulates signal-to-noise, peak amplitude, duration
 and decay constant over every pulse, live, with ranges that expand as pulses
-arrive. The **Template** tab stacks the pulses trigger-aligned and shows the
+arrive. Peak amplitude is one histogram per stored axis, overlaid: frequency
+filled and dissipation outlined once a channel is calibrated, I and Q
+otherwise. The units selector rescales them; it does not re-project them. The **Template** tab stacks the pulses trigger-aligned and shows the
 mean with its residual scatter. In both mode each tab has its own stream
 selector, slow or fast.
 

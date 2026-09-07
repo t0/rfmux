@@ -327,7 +327,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         ----------
         histogram_data : dict[str, ndarray]
             Flat dict of histogram arrays keyed by descriptive names
-            (e.g. ``"amplitude_bins"``, ``"amplitude_counts_ch1"``).
+            (e.g. ``"amplitude_i_bins"``, ``"amplitude_i_counts_ch1"``).
         """
         self._replace_datasets("histograms", histogram_data)
 

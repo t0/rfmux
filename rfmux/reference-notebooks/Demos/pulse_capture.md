@@ -550,10 +550,11 @@ scale in advance. Keys are `<metric>_edges`, `<metric>_bins` (centers) and
 
 ```python
 hist = reader.get_histograms()
-fig, axes = plt.subplots(1, 3, figsize=(13, 3))
+fig, axes = plt.subplots(1, 4, figsize=(17, 3))
 for ax, metric, xlabel in zip(
-        axes, ["snr", "amplitude", "tau_ms"],
-        ["peak deviation (σ)", "amplitude (V)", "derived τ (ms)"]):
+        axes, ["snr", "amplitude_i", "amplitude_q", "tau_ms"],
+        ["peak deviation (σ)", "peak along df (V)", "peak along dissipation (V)",
+         "derived τ (ms)"]):
     edges = hist.get(f"{metric}_edges")
     for ch in reader.channels:
         counts = hist.get(f"{metric}_counts_ch{ch}")

@@ -117,12 +117,18 @@ class HistogramAccumulator:
 
 # ───────────────────────── Pulse Histogram Set ──────────────────────
 
+#: The two peak-amplitude histograms, one per stored axis, on shared bins.
+_AMPLITUDE_METRICS = ("amplitude_i", "amplitude_q")
+
+
 class PulseHistogramSet:
     """Collection of running histograms for pulse capture statistics.
 
     Maintains per-channel histograms for:
 
-    - **amplitude**: Peak excursion from baseline (max of I and Q)
+    - **amplitude_i**, **amplitude_q**: Peak excursion from baseline
+      along each stored axis (frequency and dissipation once rotated,
+      I and Q otherwise), on shared bins
     - **duration_ms**: Trigger to settled (back inside the end band)
       in milliseconds, not the length of the saved window
     - **snr**: Peak signal-to-noise ratio in σ units
@@ -188,13 +194,15 @@ class PulseHistogramSet:
             return
         self.amp_edges = np.linspace(0.0, sigmas * sigma, len(self.amp_edges))
         for h in self.histograms.values():
-            h["amplitude"] = HistogramAccumulator(self.amp_edges.copy())
+            for metric in _AMPLITUDE_METRICS:
+                h[metric] = HistogramAccumulator(self.amp_edges.copy())
 
     def _ensure_channel(self, channel: int) -> None:
         """Create histogram accumulators for a channel if not yet present."""
         if channel not in self.histograms:
             self.histograms[channel] = {
-                "amplitude": HistogramAccumulator(self.amp_edges.copy()),
+                "amplitude_i": HistogramAccumulator(self.amp_edges.copy()),
+                "amplitude_q": HistogramAccumulator(self.amp_edges.copy()),
                 "duration_ms": HistogramAccumulator(self.dur_edges.copy()),
                 "snr": HistogramAccumulator(self.snr_edges.copy()),
                 "tau_ms": HistogramAccumulator(self.tau_edges.copy()),
@@ -228,7 +236,8 @@ class PulseHistogramSet:
 
         summary = pulse_summary(pulse_data, noise_stats, self.threshold_sigma)
 
-        for metric, value in (("amplitude", summary["peak_amp"]),
+        for metric, value in (("amplitude_i", summary["peak_I"]),
+                              ("amplitude_q", summary["peak_Q"]),
                               ("snr", summary["snr"]),
                               ("duration_ms", summary["duration_ms"]),
                               ("tau_ms", summary["tau_ms"])):
@@ -241,7 +250,8 @@ class PulseHistogramSet:
 
     # Template-edge attribute per metric (used when new channels appear)
     _EDGE_ATTRS = {
-        "amplitude": "amp_edges",
+        "amplitude_i": "amp_edges",
+        "amplitude_q": "amp_edges",
         "duration_ms": "dur_edges",
         "snr": "snr_edges",
         "tau_ms": "tau_edges",
@@ -256,13 +266,16 @@ class PulseHistogramSet:
         if not np.isfinite(value) or value < 0:
             return
         attr = self._EDGE_ATTRS[metric]
+        # Every metric on these edges expands together, so the two
+        # amplitude axes keep sharing one binning.
+        sharing = [m for m, a in self._EDGE_ATTRS.items() if a == attr]
         for _ in range(64):  # 2**64 dynamic range — effectively unbounded
             edges = getattr(self, attr)
             if value < edges[-1]:
                 return
-            expanded = [acc.expand_double()
-                        for acc in (ch[metric]
-                                    for ch in self.histograms.values())]
+            expanded = [ch[m].expand_double()
+                        for ch in self.histograms.values()
+                        for m in sharing]
             if expanded and not all(expanded):
                 return  # not expandable (odd bins / nonzero base)
             setattr(self, attr, edges * 2.0)
@@ -282,7 +295,7 @@ class PulseHistogramSet:
         Returns
         -------
         dict[str, ndarray]
-            Keys like ``"amplitude_bins"``, ``"amplitude_counts_ch1"``,
+            Keys like ``"amplitude_i_bins"``, ``"amplitude_i_counts_ch1"``,
             ``"duration_ms_edges"``, etc.
         """
         result: Dict[str, np.ndarray] = {}
@@ -299,9 +312,9 @@ class PulseHistogramSet:
             h = self.histograms.get(channel)
             if h is None:
                 return 0
-            return h["amplitude"].total
+            return h["amplitude_i"].total
         return sum(
-            h["amplitude"].total for h in self.histograms.values())
+            h["amplitude_i"].total for h in self.histograms.values())
 
 # ═══════════════════════════ Templates ══════════════════════════
 

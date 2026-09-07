@@ -318,10 +318,24 @@ class TestPulseHistogramSet:
         hs.add_pulse(1, pulse, ns)
 
         data = hs.get_histogram_data()
-        assert "amplitude_bins" in data
-        assert "amplitude_counts_ch1" in data
+        assert "amplitude_i_bins" in data
+        assert "amplitude_q_counts_ch1" in data
         assert "snr_bins" in data
         assert "duration_ms_bins" in data
+
+    def test_each_axis_has_its_own_amplitude_histogram_on_shared_bins(self):
+        hs = PulseHistogramSet(amp_range=(0, 200), amp_bins=10)
+        ns = _make_noise_stats(std_I=10.0, std_Q=10.0)
+        hs.add_pulse(1, _make_pulse_data(peak_I=100.0, peak_Q=40.0), ns)
+        h = hs.get_channel_histograms(1)
+        assert np.argmax(h["amplitude_i"].counts) == 5     # 100 of 200 in 10 bins
+        assert np.argmax(h["amplitude_q"].counts) == 2     # 40
+        # A pulse beyond the range widens both axes' bins together
+        hs.add_pulse(1, _make_pulse_data(peak_I=1000.0, peak_Q=40.0), ns)
+        np.testing.assert_array_equal(h["amplitude_i"].bin_edges,
+                                      h["amplitude_q"].bin_edges)
+        assert h["amplitude_i"].bin_edges[-1] > 1000.0
+        assert h["amplitude_q"].total == 2
 
 # ═══════════════════════════════════════════════════════════════════
 #  HDF5 Writer/Reader Tests
@@ -547,8 +561,8 @@ class TestPulseHDF5:
         writer = self._make_writer(path, channels=[1])
 
         hist_data = {
-            "amplitude_bins": np.array([5.0, 15.0, 25.0]),
-            "amplitude_counts_ch1": np.array([10, 20, 5], dtype=np.int64),
+            "amplitude_i_bins": np.array([5.0, 15.0, 25.0]),
+            "amplitude_i_counts_ch1": np.array([10, 20, 5], dtype=np.int64),
         }
         writer.update_histograms(hist_data)
         writer.finalize()
@@ -556,10 +570,10 @@ class TestPulseHDF5:
         with PulseHDF5Reader(path) as reader:
             loaded = reader.get_histograms()
             np.testing.assert_array_equal(
-                loaded["amplitude_bins"], hist_data["amplitude_bins"])
+                loaded["amplitude_i_bins"], hist_data["amplitude_i_bins"])
             np.testing.assert_array_equal(
-                loaded["amplitude_counts_ch1"],
-                hist_data["amplitude_counts_ch1"])
+                loaded["amplitude_i_counts_ch1"],
+                hist_data["amplitude_i_counts_ch1"])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -630,8 +644,8 @@ class TestIntegration:
 
             # Histograms present
             hists = reader.get_histograms()
-            assert "amplitude_counts_ch1" in hists
-            assert np.sum(hists["amplitude_counts_ch1"]) == n_detected
+            assert "amplitude_i_counts_ch1" in hists
+            assert np.sum(hists["amplitude_i_counts_ch1"]) == n_detected
 
         # Verify histogram set agrees
         assert histograms.total_pulses() == n_detected
@@ -753,7 +767,7 @@ class TestTauHistogram:
         hist = PulseHistogramSet(threshold_sigma=5.0)
         hist.add_pulse(1, _make_pulse_data(), _make_noise_stats())
         assert set(hist.get_channel_histograms(1)) == {
-            "amplitude", "duration_ms", "snr", "tau_ms"}
+            "amplitude_i", "amplitude_q", "duration_ms", "snr", "tau_ms"}
 
 
 # ───────────────────────── Phase A: HDF5 derived attrs ──────────────
@@ -2196,7 +2210,7 @@ class TestAmplitudeBinsFollowStoredUnits:
                 session.feed_sample(1, 100.0 + rng.normal(), rng.normal(), k / fs); k += 1
         session.stop()
 
-        acc = session.histograms.get_channel_histograms(1)["amplitude"]
+        acc = session.histograms.get_channel_histograms(1)["amplitude_i"]
         assert acc.total == 2
         assert acc.counts[0] == 0, "no pulse in the first bin: the range is in stored units"
         assert np.count_nonzero(acc.counts) == 2, "different heights, different bins"

@@ -170,13 +170,31 @@ def test_amplitude_bins_follow_the_view_in_counts_too(qt_app,
                                                        calibrated_panel):
     panel = calibrated_panel
     panel._counts = {1: 3}
-    panel._hist_data = {"amplitude_edges": np.array([0.0, 1e-5, 2e-5]),
-                        "amplitude_counts_ch1": np.array([1.0, 2.0])}
+    panel._hist_data = {"amplitude_i_edges": np.array([0.0, 1e-5, 2e-5]),
+                        "amplitude_i_counts_ch1": np.array([1.0, 2.0])}
     panel.units_combo.setCurrentText(m.UNITS_COUNTS)
     curve = panel.hist_plots["amplitude"].getPlotItem().listDataItems()[0]
     assert np.max(curve.xData) == pytest.approx(2e-5 / VOLTS_PER_ROC)
     label = panel.hist_plots["amplitude"].getPlotItem().getAxis("bottom")
     assert label.labelText == "amplitude (counts)"
+
+
+def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
+                                                         calibrated_panel):
+    panel = calibrated_panel
+    panel._counts = {1: 3}
+    panel._hist_data = {"amplitude_i_edges": np.array([0.0, 1e-5, 2e-5]),
+                        "amplitude_i_counts_ch1": np.array([1.0, 2.0]),
+                        "amplitude_q_edges": np.array([0.0, 1e-5, 2e-5]),
+                        "amplitude_q_counts_ch1": np.array([3.0, 0.0])}
+    panel._render_histograms()
+    curves = panel.hist_plots["amplitude"].getPlotItem().listDataItems()
+    names = [c.name() for c in curves]
+    assert len(curves) == 2
+    # Quadratures stored, so the axes are I and Q; the second is an outline
+    assert any(" I (" in n for n in names) and any(" Q (" in n for n in names)
+    q = curves[[i for i, n in enumerate(names) if " Q (" in n][0]]
+    assert q.opts.get("fillLevel") is None
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):

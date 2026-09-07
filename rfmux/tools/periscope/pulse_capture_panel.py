@@ -163,9 +163,12 @@ def _channel_color(channel: int) -> str:
     return TABLEAU10_COLORS[(channel - 3) % len(TABLEAU10_COLORS)]
 
 
+#: Legend names for the two stored axes, by basis.
+_AXIS_NAMES = {"df": ("df", "diss"), "iq": ("I", "Q")}
+
 _HIST_METRICS = [
     ("snr", "Signal-to-noise (σ)", "peak deviation (σ)"),
-    ("amplitude", "Peak amplitude", "amplitude"),
+    ("amplitude", "Peak amplitude per axis", "amplitude"),
     ("duration_ms", "Duration", "duration (ms)"),
     ("tau_ms", "Derived τ", "derived τ (ms)"),
 ]
@@ -2681,48 +2684,60 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 item.setLabel(
                     "bottom",
                     f"amplitude ({self._units_label(self._label_channel())})")
+            # The amplitude plot overlays the two stored axes: the first
+            # (frequency, or I) filled, the second (dissipation, or Q)
+            # as an outline in the same colour.
+            sources = (("amplitude_i", 0), ("amplitude_q", 1)) if scalable \
+                else ((metric, 0),)
+            n_named = len(series) * len(sources)
 
-            edges = self._hist_data.get(f"{metric}_edges")
-            if edges is None:
-                continue
-            base_edges = np.asarray(edges, dtype=np.float64)
             occupied_lo = occupied_hi = None
-            for label, chans in series:
-                edges_list, counts_list = [], []
-                for ch in chans:
-                    counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
-                    if counts is None:
-                        continue
-                    edges = base_edges
-                    if scalable:
-                        scale = self._amp_scale(ch)
-                        if scale is not None:
-                            edges = base_edges * scale
-                    edges_list.append(edges)
-                    counts_list.append(np.asarray(counts, dtype=np.float64))
-                if not counts_list:
+            for source, axis in sources:
+                edges = self._hist_data.get(f"{source}_edges")
+                if edges is None:
                     continue
-                edges, counts = combine_histograms(edges_list, counts_list)
-                nz = np.nonzero(counts > 0)[0]
-                if len(nz):
-                    lo, hi = edges[nz[0]], edges[nz[-1] + 1]
-                    occupied_lo = lo if occupied_lo is None \
-                        else min(occupied_lo, lo)
-                    occupied_hi = hi if occupied_hi is None \
-                        else max(occupied_hi, hi)
-                color = _channel_color(chans[0])
-                brush = QtGui.QColor(color)
-                brush.setAlpha(110)
-                plot.plot(
-                    edges, counts,
-                    stepMode="center",
-                    fillLevel=0,
-                    brush=brush,
-                    pen=pg.mkPen(color, width=1.2),
-                    name=_series_name(label, int(np.nansum(counts)),
-                                      len(series)),
-                    connect="finite",
-                )
+                base_edges = np.asarray(edges, dtype=np.float64)
+                for label, chans in series:
+                    edges_list, counts_list = [], []
+                    for ch in chans:
+                        counts = self._hist_data.get(f"{source}_counts_ch{ch}")
+                        if counts is None:
+                            continue
+                        edges = base_edges
+                        if scalable:
+                            scale = self._amp_scale(ch)
+                            if scale is not None:
+                                edges = base_edges * scale
+                        edges_list.append(edges)
+                        counts_list.append(np.asarray(counts, dtype=np.float64))
+                    if not counts_list:
+                        continue
+                    edges, counts = combine_histograms(edges_list, counts_list)
+                    nz = np.nonzero(counts > 0)[0]
+                    if len(nz):
+                        lo, hi = edges[nz[0]], edges[nz[-1] + 1]
+                        occupied_lo = lo if occupied_lo is None \
+                            else min(occupied_lo, lo)
+                        occupied_hi = hi if occupied_hi is None \
+                            else max(occupied_hi, hi)
+                    color = _channel_color(chans[0])
+                    brush = QtGui.QColor(color)
+                    brush.setAlpha(110)
+                    name = label
+                    if scalable:
+                        basis, _units = self._stored_state(chans[0])
+                        name = f"{label} {_AXIS_NAMES[basis][axis]}"
+                    plot.plot(
+                        edges, counts,
+                        stepMode="center",
+                        fillLevel=0 if axis == 0 else None,
+                        brush=brush if axis == 0 else None,
+                        pen=pg.mkPen(color, width=1.2,
+                                     style=QtCore.Qt.PenStyle.SolidLine if axis == 0
+                                     else QtCore.Qt.PenStyle.DashLine),
+                        name=_series_name(name, int(np.nansum(counts)), n_named),
+                        connect="finite",
+                    )
             # Fit x to the populated bins — auto-expanded ranges
             # otherwise leave the data huddled at one edge
             if occupied_lo is not None and occupied_hi > occupied_lo:

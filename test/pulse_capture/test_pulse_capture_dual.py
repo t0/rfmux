@@ -202,7 +202,7 @@ def test_dual_session_end_to_end(tmp_path):
                    if p["slow_idx"] and p["fast_idx"]) == 1
         assert any("fast_tod" in p for p in pairs)
         assert np.sum(reader.get_histograms("slow")
-                      ["amplitude_counts_ch1"]) == 3
+                      ["amplitude_i_counts_ch1"]) == 3
         ns = reader.noise_stats(1, "slow")
         assert ns.std_I > 0
         # A dual file describes its own samples the way a single-stream

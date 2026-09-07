@@ -168,17 +168,28 @@ async def apply_streamer_config(crs, cfg: StreamerConfig) -> Dict[str, Any]:
         raise ValueError("Invalid streamer configuration:\n- "
                          + "\n- ".join(errors))
 
+    # TEMPORARY firmware workaround: the PFB streamer command checks
+    # the link budget with a miscalculated slow-stream rate and refuses
+    # configurations that fit (stage 1, short packets, one module and
+    # four PFB channels among them).  Enabling the fast stream while the
+    # slow stream sits at stage 6, its lowest rate, passes that check;
+    # the wanted stage is applied afterwards.  Back to two calls once
+    # the firmware that fixes the check is the minimum.
     # 'module' takes None, an int, or a list (firmware r1.6.0+).
-    await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
-                             module=cfg.modules)
+    enabling = bool(cfg.pfb_channels)
+    await crs.set_decimation(6 if enabling else cfg.dec_stage,
+                             short=cfg.short_packets, module=cfg.modules)
 
     if cfg.pfb_channels is not None:
-        if cfg.pfb_channels:
+        if enabling:
             await crs.set_pfb_streamer(channel=list(cfg.pfb_channels),
                                        module=cfg.pfb_module)
             await asyncio.sleep(0.3)  # let the fast stream settle
         else:
             await crs.set_pfb_streamer(channel=None, module=cfg.pfb_module)
+    if enabling:
+        await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
+                                 module=cfg.modules)
 
     return describe(cfg)
 

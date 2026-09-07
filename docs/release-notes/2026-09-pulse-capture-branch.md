@@ -184,6 +184,11 @@ Old values are main at the merge base (e46fc41).
   `PulseCaptureSession`, `PulseCapture` and the Settings dialog. A file
   written with it still opens; its stored value is ignored, and its pulses
   keep the duration they had, trigger to the threshold drop.
+- Streamer configuration, temporary firmware workaround: the PFB streamer
+  command checks the link budget with a miscalculated slow-stream rate, so
+  `apply_streamer_config` enables the fast stream with the slow stream at
+  stage 6 and applies the wanted stage afterwards. Two calls again once the
+  firmware that fixes the check is the minimum.
 - Both mode with a partial PFB streamer: the capture takes every channel on
   the slow stream and fast data for the captured channels the PFB streamer
   carries (`pfb_streamed_channels` in `pulse_capture.sources`), warns which

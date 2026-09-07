@@ -221,3 +221,40 @@ class TestSources:
         finally:
             loop.run_until_complete(crs.set_pfb_streamer(channel=None,
                                                          module=1))
+
+
+class _RecordingCRS:
+    """Records the streamer calls in the order the board would see them."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def set_decimation(self, dec, short=None, module=None):
+        self.calls.append(("dec", dec, short, module))
+
+    async def set_pfb_streamer(self, channel=None, module=1):
+        self.calls.append(("pfb", channel, module))
+
+
+def test_enabling_the_fast_stream_parks_the_slow_stream_at_stage_6_first():
+    """TEMPORARY firmware workaround: the PFB command's link-budget check
+    uses a miscalculated slow rate, so the fast stream is enabled with
+    the slow stream at stage 6 and the wanted stage is applied after."""
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=1, short_packets=True, modules=[1],
+        pfb_channels=[1, 2, 3, 4], pfb_module=1)))
+    assert crs.calls == [("dec", 6, True, [1]),
+                         ("pfb", [1, 2, 3, 4], 1),
+                         ("dec", 1, True, [1])]
+
+
+def test_disabling_or_leaving_the_fast_stream_keeps_the_plain_order():
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=1, short_packets=True, modules=[1], pfb_channels=[])))
+    assert crs.calls == [("dec", 1, True, [1]), ("pfb", None, 1)]
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=3, short_packets=False, modules=[1, 2])))
+    assert crs.calls == [("dec", 3, False, [1, 2])]

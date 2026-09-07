@@ -1766,8 +1766,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         pileup = bool(summary.get("pileup", False))
         truncated = bool(summary.get("truncated", False))
-        label = ("\u2298" if truncated else "\u26a0" if pileup else "\u25c6") \
-            + f" #{pulse_idx:06d}"
+        label = "\u2298" if truncated else "\u26a0" if pileup else "\u25c6"
         item = QtWidgets.QTreeWidgetItem(
             [label, self._clock(summary), str(summary.get("n_samples", "")),
              f"{summary.get('snr', 0):.1f}\u03c3"])
@@ -1819,15 +1818,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             and pair["fast_idx"] is not None
         complement_missing = False
         if matched:
-            label = (f"◆ Pair #{pair_idx:04d}  "
-                     f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
+            label = "◆ slow + fast"
             dt = pair.get("time_offset") or 0.0
             detail = f"Δt(trig)={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
             other = "fast" if side == "slow" else "slow"
-            idx = pair["slow_idx"] or pair["fast_idx"]
-            label = f"◆ Pair #{pair_idx:04d}  {side}-trig #{idx}"
+            label = f"◆ {side} only"
             if pair.get(f"has_{other}_tod"):
                 detail = f"+{other} data"
             else:
@@ -2551,7 +2548,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
         tau_ms = summ.get("tau_ms", float("nan"))
         self.pulse_info.setText(
-            f"Pair #{pair_idx:04d} — Channel {channel}   "
+            f"Pulse #{pair_idx:04d} — Channel {channel}   "
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
             + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast; paired "

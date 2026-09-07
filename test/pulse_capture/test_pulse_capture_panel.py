@@ -127,7 +127,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     ch_item = panel._channel_items[1]
     assert "(3)" in ch_item.text(0)
     assert ch_item.childCount() == 3
-    assert "#000003" in ch_item.child(0).text(0)
+    assert ch_item.child(0).text(0) == "\u25c6", "marker only, no index"
 
     # Status line went green/capturing
     assert "Capturing" in panel.status_label.text()
@@ -239,7 +239,7 @@ def test_review_mode(qt_app, tmp_path):
     ch_item = panel._channel_items[1]
     assert ch_item.childCount() == 3
     assert "(3)" in ch_item.text(0)
-    assert "#000003" in ch_item.child(0).text(0)
+    assert ch_item.child(0).text(0) == "\u25c6", "marker only, no index"
 
     # Waveforms come from the reader (no task)
     assert panel.task is None
@@ -455,7 +455,7 @@ def test_dual_review_mode(qt_app, tmp_path):
     # The matched pair renders: fast line + slow line+markers per plot
     key = panel._pulse_order[-1]
     panel._show_pair(*key)
-    assert "Pair #" in panel.pulse_info.text()
+    assert "Pulse #" in panel.pulse_info.text()
     assert len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 2
     assert len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 2
     # Legend distinguishes the fast line from the slow markers

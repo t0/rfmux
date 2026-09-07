@@ -1481,6 +1481,13 @@ class DualPulseCaptureSession(_CallbackHost):
             "margin_fraction": self.config.margin_fraction,
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
+            "min_pulse_ms": self.config.min_pulse_ms,
+            "max_pulse_ms": self.config.max_pulse_ms,
+            "noise_train_ms": self.config.noise_train_span_ms(),
+            "trigger_samples_slow":
+                self.config.trigger_samples_for(self.slow.sample_rate),
+            "trigger_samples_fast":
+                self.config.trigger_samples_for(self.fast.sample_rate),
             "module": self.module,
             "fast_channels": list(self.fast_channels),
             "sample_rate_slow": self.slow.sample_rate,

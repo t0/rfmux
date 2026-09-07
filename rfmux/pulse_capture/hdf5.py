@@ -98,9 +98,11 @@ class _PulseFileWriter:
     _META = (
         (str, ("streamer_mode", "trigger_basis", "stored_units")),
         (float, ("threshold_sigma", "end_sigma", "margin_fraction",
+                 "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count", "slow_time_offset_s")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
+               "trigger_samples_slow", "trigger_samples_fast",
                "baseline_window", "edge_lookback", "max_capture_samples",
                "min_end_samples")),
         (bool, ("enable_pileup",)),

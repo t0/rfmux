@@ -616,3 +616,27 @@ def test_template_tab_picks_its_own_stream(qt_app):
     assert panel._template_data is fast, "the other stream's update is kept, not shown"
     panel.close()
     spin(qt_app)
+
+
+def test_the_dual_file_records_the_pulse_settings(tmp_path):
+    """Min pulse, max pulse, training and the confirmation length per
+    stream reach the dual file, so a fragment's absence can be read
+    against the setting that dropped it."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+    cfg = PulseCaptureConfig(min_pulse_ms=1.5, max_pulse_ms=40.0,
+                             noise_train_ms=50.0)
+    path = tmp_path / "dual.h5"
+    d = DualPulseCaptureSession(channels=[1], module=1, slow_rate=1000.0,
+                                fast_rate=100000.0, config=cfg, hdf5_path=path,
+                                on_error=lambda m: None)
+    d.start()
+    d.stop()
+    with PulseHDF5Reader(path) as r:
+        m = r.metadata
+        assert m["min_pulse_ms"] == pytest.approx(1.5)
+        assert m["max_pulse_ms"] == pytest.approx(40.0)
+        assert m["noise_train_ms"] == pytest.approx(50.0)
+        assert int(m["trigger_samples_slow"]) == 1
+        assert int(m["trigger_samples_fast"]) == 2

@@ -204,6 +204,12 @@ class _ChState:
     prev_mag: float = 0.0
     prev2_mag: float = 0.0
     scatter: float = 0.0
+    # Consecutive samples on which the magnitude rose above its own
+    # recent level.  A split needs trigger_samples of them, the same
+    # confirmation a trigger gets: on a tail the amplitude test is
+    # always satisfied, so without it one noise sample against one
+    # sample ten back is the whole decision, tried on every tail sample.
+    rise_run: int = 0
     # Run of consecutive above-threshold samples — the trigger is dated
     # to the start of the run, not to the sample that confirmed it.
     above_run: int = 0
@@ -663,6 +669,7 @@ class PulseCapture:
                                 else st.active_duration)
         si[_walk.SETTLED] = (-1 if st.settled_abs is None
                              else st.settled_abs)
+        si[_walk.RISE_RUN] = st.rise_run
         si[_walk.ABOVE_RUN] = st.above_run
         si[_walk.RUN_START] = st.run_start_abs
         si[_walk.EPOCH] = st.epoch_start
@@ -695,6 +702,7 @@ class PulseCapture:
                               else int(si[_walk.ACTIVE_DUR]))
         st.settled_abs = (None if si[_walk.SETTLED] < 0
                           else int(si[_walk.SETTLED]))
+        st.rise_run = int(si[_walk.RISE_RUN])
         st.above_run = int(si[_walk.ABOVE_RUN])
         st.run_start_abs = int(si[_walk.RUN_START])
         st.epoch_start = int(si[_walk.EPOCH])
@@ -788,6 +796,7 @@ class PulseCapture:
         st.end_ptr_count = 0
         st.settled_abs = None
         st.prev_mag = st.prev2_mag = st.scatter = 0.0
+        st.rise_run = 0
         st.fire_abs = st.ch_sample_n
         st.trig_mean_I, st.trig_mean_Q = ns.mean_I, ns.mean_Q
         st.trig_std_I, st.trig_std_Q = ns.std_I, ns.std_Q
@@ -941,14 +950,17 @@ class PulseCapture:
         if not st.capturing and not self.freeze_triggers and trigger_ok:
             self._begin_capture(st, ns)
             # Pre-pulse anchor: the level the pulse rose from, as the
-            # median of the edge taps.  Baseline-free — the end tests
-            # compare against where the signal actually WAS, so a mean
-            # estimate lagging the 1/f wander cannot hold the capture
-            # open after the pulse has visibly returned.
+            # edge tap nearest the tracked mean.  Baseline-free — the
+            # end tests compare against where the signal actually WAS,
+            # so a mean estimate lagging the 1/f wander cannot hold the
+            # capture open after the pulse has visibly returned.  The
+            # nearest tap rather than the median: at a high rate two of
+            # the three taps can land on earlier pulses, and the median
+            # is then a pulse level.
             if edge_taps is not None:
                 vi, vq = edge_taps
-                st.anchor_I = sorted(vi)[len(vi) // 2]
-                st.anchor_Q = sorted(vq)[len(vq) // 2]
+                st.anchor_I = min(vi, key=lambda v: abs(v - ns.mean_I))
+                st.anchor_Q = min(vq, key=lambda v: abs(v - ns.mean_Q))
             else:
                 st.anchor_I = ns.mean_I
                 st.anchor_Q = ns.mean_Q
@@ -1065,6 +1077,7 @@ class PulseCapture:
                         (near_vals[1] - ns.mean_Q) / sQ)
                     rising_above_self = (
                         (mag - near_mag) / jn > self.threshold_sigma)
+            st.rise_run = st.rise_run + 1 if rising_above_self else 0
 
             # ── Baseline-free return test ─────────────────────────
             # Back at the pre-pulse anchor on BOTH quadratures.  The
@@ -1097,10 +1110,11 @@ class PulseCapture:
 
             # ── Pileup split ──────────────────────────────────────
             # A confirmed run that rose above the current pulse's own
-            # recent level, after the current pulse was seen decaying.
+            # recent level for trigger_samples consecutive samples,
+            # after the current pulse was seen decaying.
             if (self.enable_pileup and self.edge_lookback > 0
                     and st.re_trigger_ready and eligible
-                    and rising_above_self):
+                    and st.rise_run >= self.trigger_samples):
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
                     self._rearm_after_split(st, ns, near_vals)
@@ -1329,6 +1343,7 @@ class PulseCapture:
         st.re_trigger_ready = False
         st.active_duration = None
         st.settled_abs = None
+        st.rise_run = 0
         st.pileup_child = False
 
 

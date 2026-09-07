@@ -150,9 +150,10 @@ toolbar follows.
   glitches. 0 turns the filter off.
 - **Split piled-up events** (on): a fresh rise on the tail of a pulse
   starts a new one. The rise is judged against the larger of the trained
-  noise and the scatter inside the capture, so noise that grows with the
-  pulse does not split it. Both fragments are flagged `pileup`. Templates
-  skip them, histograms keep them.
+  noise and the scatter inside the capture, and must hold for as many
+  samples as a trigger needs at this rate, so neither noise that grows
+  with the pulse nor one stray sample splits it. Both fragments are
+  flagged `pileup`. Templates skip them, histograms keep them.
 - **Trigger basis**: `df/dissipation (rotated)` triggers in the frequency
   basis on every channel with a df calibration; a channel without one
   triggers on I and Q. `I/Q (quadratures)` triggers on the raw quadratures

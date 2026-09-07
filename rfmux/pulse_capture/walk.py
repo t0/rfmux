@@ -33,8 +33,8 @@ SPLIT = 3           # pileup split on that sample: save, then re-arm
 # two quadrature markers use 0 for "", 1 for "I", 2 for "Q".
 (CAPTURING, END_PTR, TRIG_ABS, FIRE_ABS, RUN_QUAD, TRIG_QUAD, PILEUP_CHILD,
  CH_N, RETRIG, ACTIVE_DUR, ABOVE_RUN, RUN_START, EPOCH, DECIM_N,
- SINCE_REFRESH, SETTLED) = range(16)
-N_INT = SETTLED + 1
+ SINCE_REFRESH, SETTLED, RISE_RUN) = range(17)
+N_INT = RISE_RUN + 1
 # Floats.
 (ANCHOR_I, ANCHOR_Q, TMEAN_I, TMEAN_Q, TSTD_I, TSTD_Q, NEAR_I,
  NEAR_Q, PREV_MAG, PREV2_MAG, SCATTER) = range(11)
@@ -53,6 +53,17 @@ def _median3(a: float, b: float, c: float) -> float:
         if a > b:
             a, b = b, a
     return b
+
+
+@njit(nogil=True, cache=True)
+def _nearest3(a: float, b: float, c: float, m: float) -> float:
+    """Of three values, the one nearest *m*."""
+    best, d = a, abs(a - m)
+    if abs(b - m) < d:
+        best, d = b, abs(b - m)
+    if abs(c - m) < d:
+        best = c
+    return best
 
 
 @njit(nogil=True, cache=True)
@@ -172,6 +183,7 @@ def walk(I, Q, T, start, stop,
             sf[PREV_MAG] = 0.0
             sf[PREV2_MAG] = 0.0
             sf[SCATTER] = 0.0
+            si[RISE_RUN] = 0
             si[FIRE_ABS] = ch_n
             sf[TMEAN_I] = mean_I
             sf[TMEAN_Q] = mean_Q
@@ -180,11 +192,11 @@ def walk(I, Q, T, start, stop,
             si[TRIG_QUAD] = si[RUN_QUAD]
             if have_taps:
                 if n_taps == 3:
-                    sf[ANCHOR_I] = _median3(t0_I, t1_I, t2_I)
-                    sf[ANCHOR_Q] = _median3(t0_Q, t1_Q, t2_Q)
+                    sf[ANCHOR_I] = _nearest3(t0_I, t1_I, t2_I, mean_I)
+                    sf[ANCHOR_Q] = _nearest3(t0_Q, t1_Q, t2_Q, mean_Q)
                 elif n_taps == 2:
-                    sf[ANCHOR_I] = t0_I if t0_I > t1_I else t1_I
-                    sf[ANCHOR_Q] = t0_Q if t0_Q > t1_Q else t1_Q
+                    sf[ANCHOR_I] = _nearest3(t0_I, t1_I, t1_I, mean_I)
+                    sf[ANCHOR_Q] = _nearest3(t0_Q, t1_Q, t1_Q, mean_Q)
                 else:
                     sf[ANCHOR_I] = t0_I
                     sf[ANCHOR_Q] = t0_Q
@@ -255,6 +267,10 @@ def walk(I, Q, T, start, stop,
                     near_mag = math.hypot((sf[NEAR_I] - mean_I) / sI,
                                           (sf[NEAR_Q] - mean_Q) / sQ)
                     rising_above_self = (mag - near_mag) / jn > thr
+            if rising_above_self:
+                si[RISE_RUN] += 1
+            else:
+                si[RISE_RUN] = 0
             returned = (abs(i_val - sf[ANCHOR_I]) < end_sigma * sI
                         and abs(q_val - sf[ANCHOR_Q]) < end_sigma * sQ)
             if max_dev < thr or returned:
@@ -264,7 +280,7 @@ def walk(I, Q, T, start, stop,
             elif decaying_now and si[RETRIG] == 0 and since_fire > min_end:
                 si[RETRIG] = 1
             if (enable_pileup and edge_lookback > 0 and si[RETRIG] != 0
-                    and eligible and rising_above_self):
+                    and eligible and si[RISE_RUN] >= trigger_samples):
                 # The split: Python saves this capture, then re-arms the
                 # next one with these values.
                 reason = SPLIT

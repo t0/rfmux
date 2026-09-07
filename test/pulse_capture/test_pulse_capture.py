@@ -2318,3 +2318,67 @@ class TestInPulseNoise:
                                 float(rng.normal(0, sig)), k * 2.6e-5)
         assert pcap.pulse_count[1] == 2
         assert all(pcap.pulses["Channel 1"][i]["pileup"] for i in (1, 2))
+
+
+class TestSplitConfirmation:
+    """A split needs the same confirmation a trigger gets."""
+
+    @staticmethod
+    def _tail_with_spike(trigger_samples, seed=2):
+        """A slow-decaying pulse with one noise sample on its tail that
+        clears the rise test on its own."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=trigger_samples,
+                                   edge_lookback=400)
+        rng = np.random.default_rng(seed)
+        for k in range(6000):
+            s = 40.0 * np.exp(-(k - 1000) / 400.0) if k >= 1000 else 0.0
+            if k == 1400:
+                s += 9.0                       # one sample, gone the next
+            pcap.process_sample(1, float(s + rng.normal(0, 1.0)),
+                                float(rng.normal(0, 1.0)), k * 4e-7)
+        return pcap
+
+    def test_one_sample_cannot_split_where_a_trigger_needs_two(self):
+        """At a rate where accidentals take two confirming samples, a
+        single-sample excursion on a tail is not a second pulse."""
+        pcap = self._tail_with_spike(trigger_samples=2)
+        assert pcap.pulse_count[1] == 1
+        assert not pcap.pulses["Channel 1"][1]["pileup"]
+
+    def test_the_same_excursion_splits_at_one_sample_confirmation(self):
+        """The contract is the confirmation length, not a softer bar."""
+        pcap = self._tail_with_spike(trigger_samples=1)
+        assert pcap.pulse_count[1] == 2
+
+
+class TestAnchorTap:
+    """The pre-pulse anchor is the edge tap nearest the tracked mean."""
+
+    def test_taps_on_earlier_pulses_do_not_set_the_anchor(self):
+        """Three pulses inside one edge lookback: the median tap sits on
+        a pulse, the nearest-to-mean tap on baseline."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5,
+                                   trigger_samples=2, edge_lookback=240)
+        rng = np.random.default_rng(4)
+        for k in range(3000):
+            v = rng.normal(0, 1.0)
+            for k0 in (700, 850, 1000):
+                if k >= k0:
+                    v += 60.0 * np.exp(-(k - k0) / 40.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        records = pcap.pulses["Channel 1"]
+        last = records[max(records)]
+        assert last["trigger_time"] == pytest.approx(1.000, abs=3e-3)
+        # Taps 240, 120 and 60 samples before the third trigger land at
+        # 760, 880 and 940: on the first pulse's tail (13σ), on the
+        # second's (28σ) and on its tail (6σ).  The nearest is the 6σ
+        # one; the median would be 13σ.
+        assert abs(last["end_baseline_I"]) < 8.0

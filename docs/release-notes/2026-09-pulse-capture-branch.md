@@ -195,6 +195,24 @@ Old values are main at the merge base (e46fc41).
   every channel streamed.
 - Periscope Template tab: its own stream selector in both mode; the
   histogram tab's selector no longer drives the templates.
+- Pileup split confirmation: the rise above the pulse's own recent level
+  must hold for `trigger_samples` consecutive samples, the confirmation
+  length the trigger derives from the sample rate. On a tail the amplitude
+  test is always satisfied, so the split had no confirmation and one noise
+  sample against one sample ten back decided it, tried on every tail
+  sample: about 3% of pulses split falsely on the PFB stream (on the mock at
+  ten pulses per second, one-sided pairs fell from 42 to 7, the rest genuine
+  doubles the slow stream cannot resolve). One sample
+  at 596 Hz, so nothing changes there.
+- Pre-pulse anchor: the edge tap nearest the tracked mean rather than the
+  median of the three. At tens of pulses per second two taps can land on
+  earlier pulses, and the median was then a pulse level, so the end band
+  sat far from the baseline and the return test judged against it.
+- Dual capture file: `min_pulse_ms`, `max_pulse_ms`, `noise_train_ms`,
+  `trigger_samples_slow` and `trigger_samples_fast` are recorded.
+- Periscope pulse list: rows carry the marker alone (the index is in the
+  info line), and a both-mode row reads "slow + fast", "slow only" or
+  "fast only" instead of "Pair #n".
 - Pileup split test: the rise above the pulse's own recent level, and the
   decay evidence that arms it, are judged against the larger of the trained
   jump σ and the scatter measured inside the capture (a clipped average of

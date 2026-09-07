@@ -264,7 +264,7 @@ class PulseCapture:
         Number of standard deviations above noise mean to trigger.
     end_sigma : float
         Number of standard deviations — signal must return within this
-        to declare pulse end (default 1.0σ).
+        to declare pulse end (default 1.5σ).
     margin_fraction : float
         Fraction of the saved length kept as pre-trigger margin, and
         fraction of the time above threshold that the end-of-pulse

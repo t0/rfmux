@@ -223,8 +223,9 @@ async def trigger_capture(
     Parameters
     ----------
     channel : int | list[int]
-        Channel(s) to monitor.  Max 4 for ``"fast"``/``"both"`` — the PFB
-        streamer's hard limit.
+        Channel(s) to monitor.  Max 4 for ``"fast"``, the PFB streamer's
+        limit; ``"both"`` takes any number and streams the fast side for
+        the channels the PFB streamer carries.
     module : int
         Module index (1-based).
     streamer_mode : str
@@ -281,7 +282,7 @@ async def trigger_capture(
         raise ValueError(
             f"streamer_mode must be 'slow', 'fast' or 'both', "
             f"not {streamer_mode!r}")
-    if streamer_mode in ("fast", "both") and len(channels) > 4:
+    if streamer_mode == "fast" and len(channels) > 4:
         raise ValueError(
             f"the PFB streamer carries at most 4 channels, got "
             f"{len(channels)}")

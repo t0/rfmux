@@ -62,3 +62,12 @@ def test_fast_capture_refuses_channels_the_streamer_does_not_carry():
         asyncio.run(tc.trigger_capture.__wrapped__(
             board, channel=[1], module=1, streamer_mode="fast", time_run=0.01))
     assert board.configured == []
+
+
+def test_both_mode_takes_more_channels_than_the_streamer_carries():
+    """Both mode is refused only when no channel is on the PFB streamer,
+    never for the count: the slow stream carries them all."""
+    board = _StreamerBoard([])
+    with pytest.raises(ValueError, match="configure_streamer"):
+        asyncio.run(tc.trigger_capture.__wrapped__(
+            board, channel=[1, 2, 3, 4, 5], module=1, streamer_mode="both", time_run=0.01))

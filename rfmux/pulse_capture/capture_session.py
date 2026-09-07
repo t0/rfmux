@@ -1338,8 +1338,8 @@ class DualPulseCaptureSession(_CallbackHost):
         # writer records them, the sessions rotate with them.  One
         # calibration serves both streams because the PFB source scales
         # its samples to the slow stream's ADC counts (sources.py); that
-        # scale is checked in mock and on loopback, not yet on a board
-        # (tag checkpoint-validate-pfb-receiver).
+        # scale is checked in mock, on loopback and on a board (0156: the
+        # two streams agree to 0.2%).
         self.df_calibrations = df_calibrations
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None

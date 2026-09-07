@@ -3,7 +3,7 @@
 rfmux can trigger on transient events in a detector timestream as the board
 streams, record each pulse to HDF5 with its summary statistics, and show
 them as they arrive. It runs in Periscope, from a script, and against the
-simulated board.
+simulated board in mock-mode.
 
 This guide shows what the feature does and how to drive it from Periscope.
 For the headless version, with every step as a runnable cell, open the
@@ -14,18 +14,18 @@ For the headless version, with every step as a runnable cell, open the
 ![Anatomy of one capture window](images/capture-window-anatomy.png)
 
 A capture estimates the noise on each channel first, then triggers when a
-sample leaves `threshold_sigma` and rose that far within the edge lookback,
-faster than the baseline drifts. It closes when both axes are back inside
-`end_sigma` of the baseline or of the level the pulse rose from. The saved
-window starts before the trigger, so the rising edge is kept, and ends
+sample leaves `threshold_sigma` faster than the baseline 1/f drift.
+It closes when both axes are back inside `end_sigma` of the baseline.
+The saved window starts before the trigger, so the rising edge is kept, and ends
 where the pulse settled; the confirmation that follows only verifies that
 it stayed there. A capture still open at 1.2 times `max_pulse_ms` is
 closed there and flagged `truncated`. Two pulses that
 overlap are split when the signal rises sharply again on the tail of the
-first, and both fragments are flagged `pileup`. The figure is the engine's
-own output on a synthetic pulse and a piled-up pair.
+first, and both fragments are flagged `pileup`. The figure above is pulled
+from the output from a mock-mode run. All of the annotated metadata for the pulse
+also exist within the HDF5.
 
-Each pulse carries its signal-to-noise, peak amplitude, duration, derived
+Each pulse also carries its signal-to-noise, peak amplitude, duration, derived
 decay constant and trigger time in UTC, decoded from the packet timestamps.
 The file is written as the capture runs, so an interrupted run keeps what it
 saw.

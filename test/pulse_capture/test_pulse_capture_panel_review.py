@@ -10,6 +10,7 @@ from test.qt_helpers import spin  # noqa: E402
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+from PyQt6 import QtCore  # noqa: E402
 from rfmux.core.transferfunctions import VOLTS_PER_ROC  # noqa: E402
 from rfmux.pulse_capture.capture_session import (  # noqa: E402
     PulseCaptureConfig, PulseCaptureSession,
@@ -191,10 +192,12 @@ def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
     curves = panel.hist_plots["amplitude"].getPlotItem().listDataItems()
     names = [c.name() for c in curves]
     assert len(curves) == 2
-    # Quadratures stored, so the axes are I and Q; the second is an outline
+    # Quadratures stored, so the axes are I and Q; the second is hatched
     assert any(" I (" in n for n in names) and any(" Q (" in n for n in names)
     q = curves[[i for i, n in enumerate(names) if " Q (" in n][0]]
-    assert q.opts.get("fillLevel") is None
+    assert m.pg.mkBrush(q.opts["fillBrush"]).style() == QtCore.Qt.BrushStyle.BDiagPattern
+    i = curves[[i for i, n in enumerate(names) if " I (" in n][0]]
+    assert m.pg.mkBrush(i.opts["fillBrush"]).style() == QtCore.Qt.BrushStyle.SolidPattern
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):

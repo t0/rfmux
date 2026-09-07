@@ -2686,7 +2686,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"amplitude ({self._units_label(self._label_channel())})")
             # The amplitude plot overlays the two stored axes: the first
             # (frequency, or I) filled, the second (dissipation, or Q)
-            # as an outline in the same colour.
+            # hatched in the same colour.
             sources = (("amplitude_i", 0), ("amplitude_q", 1)) if scalable \
                 else ((metric, 0),)
             n_named = len(series) * len(sources)
@@ -2721,8 +2721,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                         occupied_hi = hi if occupied_hi is None \
                             else max(occupied_hi, hi)
                     color = _channel_color(chans[0])
-                    brush = QtGui.QColor(color)
-                    brush.setAlpha(110)
+                    fill = QtGui.QColor(color)
+                    fill.setAlpha(110)
+                    # Second axis: the same colour hatched, in the fill
+                    # and in the legend swatch alike.
+                    brush = QtGui.QBrush(fill) if axis == 0 else QtGui.QBrush(
+                        QtGui.QColor(color), QtCore.Qt.BrushStyle.BDiagPattern)
                     name = label
                     if scalable:
                         basis, _units = self._stored_state(chans[0])
@@ -2730,11 +2734,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     plot.plot(
                         edges, counts,
                         stepMode="center",
-                        fillLevel=0 if axis == 0 else None,
-                        brush=brush if axis == 0 else None,
-                        pen=pg.mkPen(color, width=1.2,
-                                     style=QtCore.Qt.PenStyle.SolidLine if axis == 0
-                                     else QtCore.Qt.PenStyle.DashLine),
+                        fillLevel=0,
+                        brush=brush,
+                        pen=pg.mkPen(color, width=1.2),
                         name=_series_name(name, int(np.nansum(counts)), n_named),
                         connect="finite",
                     )

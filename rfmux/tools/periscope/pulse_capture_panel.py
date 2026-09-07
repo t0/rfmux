@@ -1404,7 +1404,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._unregister_tap()
         if self.task is not None:
             self.task.request_stop()
-        self.btn_start.setEnabled(False)  # until finished arrives
+        # The worker still drains its queue and closes the file before
+        # `finished` arrives; say so, or the click looks lost.
+        self.btn_start.setText("… Stopping")
+        self.btn_start.setEnabled(False)
+        self.btn_start.setStyleSheet(
+            "background-color: #FFCC33; color: #10241B; font-weight: bold;")
+        self._set_status("● Stopping — finishing queued packets and closing the file",
+                         "#FFCC33")
 
     def _on_task_finished(self) -> None:
         self._unregister_tap()   # however the worker ended

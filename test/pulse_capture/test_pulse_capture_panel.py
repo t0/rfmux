@@ -1798,3 +1798,36 @@ def test_both_mode_accepts_more_channels_than_the_pfb_streamer(
     assert "CRS connection" in warnings[-1]
     panel.close()
     spin(qt_app)
+
+
+class _StoppingTask:
+    """A worker between the stop request and its finished signal."""
+    def __init__(self):
+        self.stop_requests = 0
+        self.session = type("S", (), {"hdf5_path": None})()
+
+    def request_stop(self):
+        self.stop_requests += 1
+
+    def wait(self, ms):
+        return True
+
+
+def test_stop_shows_stopping_until_the_worker_finishes(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.task = _StoppingTask()
+    panel._set_run_state(True)
+
+    panel._on_stop()
+    assert panel.task.stop_requests == 1
+    assert "Stopping" in panel.btn_start.text()
+    assert not panel.btn_start.isEnabled()
+    assert "Stopping" in panel.status_label.text()
+
+    panel._on_task_finished()
+    assert panel.task is None
+    assert "Start" in panel.btn_start.text()
+    assert panel.btn_start.isEnabled()
+    assert "Stopped" in panel.status_label.text()
+    panel.close()
+    spin(qt_app)

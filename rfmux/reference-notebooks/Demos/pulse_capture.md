@@ -382,7 +382,7 @@ inconsistent settings before you spend a capture on them.
 ```python
 capture_config = PulseCaptureConfig(
     threshold_sigma=5.0,    # trigger when I or Q leaves ±5σ
-    end_sigma=1.0,          # close when BOTH are back inside ±1σ
+    end_sigma=1.5,          # close when BOTH are back inside ±1.5σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
     max_pulse_ms=50.0,      # longest recordable pulse; sizes the buffer
     enable_pileup=True,     # split piled-up events on a sharp re-rise
@@ -436,7 +436,7 @@ res = await crs.trigger_capture(
     streamer_mode="slow",
     time_run=2.0,               # seconds of SAMPLE time, not wall clock
     threshold_sigma=5.0,
-    end_sigma=1.0,
+    end_sigma=1.5,
 )
 
 for ch in res.channels:
@@ -644,7 +644,7 @@ reader.close()
 
 res = await crs.trigger_capture(
     channel=CHANNELS, module=MODULE, streamer_mode="slow", time_run=2.0,
-    threshold_sigma=5.0, end_sigma=1.0,
+    threshold_sigma=5.0, end_sigma=1.5,
     df_calibrations=df_cals,
     hdf5_path=str(OUTPUT_DIR / "pulse_capture_calibrated.h5"),
 )

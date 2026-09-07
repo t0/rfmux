@@ -111,7 +111,7 @@ the capture stops.
 
 ![Pulse Capture Settings dialog with the Advanced group open](images/pulse-capture-settings-dialog.png)
 
-**Thresh σ** (5.0), **End σ** (1.0) and **Pileup** (on) sit on the panel's
+**Thresh σ** (5.0), **End σ** (1.5) and **Pileup** (on) sit on the panel's
 toolbar. **Settings…** opens the Pulse Capture Settings dialog with the
 rest. Both edit one configuration: **OK** applies the dialog and the
 toolbar follows.
@@ -233,7 +233,7 @@ result = await crs.trigger_capture(
     module=1,
     streamer_mode="slow",
     time_run=15.0,
-    config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.0),
+    config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5),
     hdf5_path="capture.h5",
 )
 ```

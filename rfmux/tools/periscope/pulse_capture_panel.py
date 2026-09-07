@@ -361,7 +361,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.end_spin = QtWidgets.QDoubleSpinBox()
         self.end_spin.setRange(0.1, 100.0)
-        self.end_spin.setValue(1.0)
+        self.end_spin.setValue(self.capture_config.end_sigma)
         self.end_spin.setSingleStep(0.1)
         self.end_spin.setToolTip(
             "Pulse end requires BOTH axes back within this band of the "

@@ -184,6 +184,8 @@ Old values are main at the merge base (e46fc41).
   `PulseCaptureSession`, `PulseCapture` and the Settings dialog. A file
   written with it still opens; its stored value is ignored, and its pulses
   keep the duration they had, trigger to the threshold drop.
+- `end_sigma` default: 1.5, the value the panel shipped with; 1.0 was tried
+  on the mock and kept the record about a fifth longer for the same pulses.
 - Streamer configuration, temporary firmware workaround: the PFB streamer
   command checks the link budget with a miscalculated slow-stream rate, so
   `apply_streamer_config` enables the fast stream with the slow stream at

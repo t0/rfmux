@@ -59,7 +59,7 @@ _SQRT2 = math.sqrt(2.0)
 
 #: End-of-pulse threshold, in sigma: the one definition the engine, the
 #: session and the config share.
-DEFAULT_END_SIGMA = 1.0
+DEFAULT_END_SIGMA = 1.5
 
 #: Ring headroom over the longest expected pulse.  The pre-trigger
 #: margin and the end-confirmation tail share the ring with the pulse.
@@ -238,7 +238,7 @@ class PulseCapture:
     slow 1/f wander that crosses the threshold band cannot fake it.
 
     End-of-pulse is declared when **both** I and Q return to within
-    ``end_sigma`` (default 1.0) standard deviations — of the tracked
+    ``end_sigma`` (default 1.5) standard deviations — of the tracked
     mean, or of the pre-pulse *anchor* (the level this pulse rose from,
     snapshotted at the trigger; baseline-free like the edge test) — for
     a configurable time duration, or unconditionally at

@@ -330,7 +330,11 @@ To try to identify the best amplitude to use, we look at the sweeps to find the 
 is bifurcated, and then select one amplitude step below that (the highest amplitude sweep
 which is **not** bifurcated).
 
-We will try two different methods to identify whether a sweep is bifurcated: `derivative` and `hysteresis`.
+We will try two different methods to identify whether a sweep is bifurcated:
+`derivative` and `hysteresis`. They look for different evidence of the same
+thing, and they do not miss the same resonators, so the default is a third
+option — `both` — which runs the two of them and calls a sweep bifurcated if
+either one says so.
 
 <!-- #endregion -->
 
@@ -340,14 +344,15 @@ resonator at a time. Its arguments:
 | Argument | Default | Does |
 |---|---|---|
 | `iterations` | required | multiamplitude multisweep measurements of a resonator in the usual form: `{iteration: {direction: entry}}`. This can be extracted using the convenience wrapper `rfmux.tuning.collect_amplitude_iterations_for` |
-| `method` | `"derivative"` | which bifurcation detection method to apply. Options are: `"derivative"` (reads the shape of a single trace and looks for jumps) and `"hysteresis"` (compares the two sweep directions against each other to see when they diverge) |
-| `spike_prominence_factor` | `0.5` | `"derivative"` method only: how far a spike has to stand out from its surroundings to count as a jump, as a multiple of the arc speed's range. Larger is less sensitive |
-| `max_discrepancy` | `0.1` | `"hysteresis"` method only: how far the upward and downward traces may part company, in the units `compare` measures in, before the step is called bifurcated |
-| `compare` | `"magnitude"` | `"hysteresis"` method only: which plane the two directions are compared in — `"magnitude"` for their `\|S21\|` against frequency, `"iq"` for their distance on the IQ plane |
+| `method` | `"both"` | which bifurcation detection method to apply. Options are: `"derivative"` (reads the shape of a single trace and looks for jumps), `"hysteresis"` (compares the two sweep directions against each other to see when they diverge), and `"both"` (runs the two and takes a step as bifurcated if either says so) |
+| `spike_prominence_factor` | `0.5` | `"derivative"` and `"both"`: how far a spike has to stand out from its surroundings to count as a jump, as a multiple of the arc speed's range. Larger is less sensitive |
+| `max_discrepancy` | `0.1` | `"hysteresis"` and `"both"`: how far the upward and downward traces may part company, in the units `compare` measures in, before the step is called bifurcated |
+| `compare` | `"magnitude"` | `"hysteresis"` and `"both"`: which plane the two directions are compared in — `"magnitude"` for their `\|S21\|` against frequency, `"iq"` for their distance on the IQ plane |
 
 `spike_prominence_factor`, `max_discrepancy` and `compare` are handed straight
 down to whichever `method` was selected, so passing them all is harmless — the
-test that has no use for a knob never sees it.
+test that has no use for a knob never sees it. `"both"` is the one method that
+reads all three, since it runs both tests.
 
 It needs to be called on measurements of one resonator at a time, so below we
 demonstrate calling it on the first resonator in the array:
@@ -602,10 +607,11 @@ as its verdict based on them, to facilitate troubleshooting. These include:
 
 | Field | Is |
 |---|---|
-| `method` | which test produced this, `"derivative"` or `"hysteresis"` |
+| `method` | which test produced this: `"derivative"`, `"hysteresis"` or `"both"` |
 | `bifurcated` | the verdict |
 | `metric` | a dict, one entry per quantity the method examined — see below |
 | `threshold` | the single bar those quantities were held to. For `"derivative"`: `spike_prominence_factor` times the arc speed's range |
+| `parts` | empty, unless this check combined several tests — `"both"` keeps each test's own check in here, raw numbers and own threshold |
 
 `metric` is a dict rather than one number because the verdict is not one
 comparison. `"derivative"` asks three things, and reports all three:
@@ -721,6 +727,28 @@ method of bifurcation detection.
 This emphasizes the importance of using multiple methods to attempt to identify bifurcation
 and a good bias amplitude. Combining the hysteresis method with the derivative method,
 and later on by fitting to the chosen bias points, we should be able to get a decent result.
+
+<!-- #region -->
+
+
+### Bifurcation detection method #3: `"both"`
+
+To increase our odds of detecting resonance bifurcation, the default method is
+`rfmux.tuning.bifurcated_by_either`. It runs the two tests
+on every amplitude step and calls the step bifurcated if **either** of them
+says so. 
+
+It compares the two directions, so like `"hysteresis"` you need to provide both.
+
+| Argument | Default | Does |
+|---|---|---|
+| `entries` | required | one amplitude step, `{direction: entry}`, with both `"upward"` and `"downward"` present |
+| `spike_prominence_factor` | `0.5` | handed to `rfmux.tuning.bifurcated_by_derivative` |
+| `max_discrepancy` | `0.1` | handed to `rfmux.tuning.bifurcated_by_hysteresis` |
+| `compare` | `"magnitude"` | handed to `rfmux.tuning.bifurcated_by_hysteresis` |
+
+
+<!-- #endregion -->
 
 <!-- #region -->
 
@@ -1093,7 +1121,7 @@ result.
 |---|---|---|
 | `sweeps` | required | **one module's** `multiamp_multisweep` outputs, i.e. `multiamp_ms[crs.module[MODULE].index()]` |
 | `catalog` | `None` | the resonators to bias, which must match the catalog used to make the above multisweeps. `None` uses the one recorded in the sweep's `call_params`, which is the usual case. |
-| `amplitude_method` | `"derivative"` | which bifurcation test the amplitude search uses — section 2. `"hysteresis"` requires the sweeps to have been taken in both directions. |
+| `amplitude_method` | `"both"` | which bifurcation test the amplitude search uses — section 2. The default and `"hysteresis"` require the sweeps to have been taken in both directions; `"derivative"` is the one that reads a single trace. |
 | `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
 | `direction` | `None` | which sweep direction to measure the bias frequency and the calibration on. `None` prefers `"upward"`. |
 | `spike_prominence_factor` | `0.5` | passed to `rfmux.tuning.bifurcated_by_derivative` — section 2 |
@@ -1102,6 +1130,9 @@ result.
 | `max_distance_hz` | `None` | how far from the sweep centre a resonance may come out before the bias frequency is rejected. Past this, the tone is left where the sweep was centred and the finding is flagged. Useful for handling densely packed arrays or collisions. |
 | `save` | `None` | write the sweeps — which now carry the report — back to the file they came from. `None` does whatever `rfmux.tuning.store.autosave_enabled()` says, which is on unless you turned it off. Sweeps that have never been in a file get a new one |
 | `label` | `None` | your name for that file, used only when these sweeps are being written for the first time. A re-save keeps the name the file already has |
+
+The last three go to whichever test `amplitude_method` selected, and
+`"both"` — running both tests — is the one that reads all three.
 
 We pass `save=False` below for one reason that has nothing to do with bias
 finding: this notebook's ladder is the demo file that ships inside the rfmux
@@ -1225,13 +1256,17 @@ That is a bias point you can use, incidentally. It is just one you should decide
 to use, having read that it is a floor rather than a finding — the right response
 being another ladder that goes louder.
 
-Swapping in the hysteresis detector flags `LALM` as well, since that test saw
-nothing on it at any drive either:
+Running the hysteresis detector on its own flags `LALM` as well, since that test
+saw nothing on it at any drive either — and it is the default's derivative half
+that caught it above:
 
 ```python
 print(find_bias_points(multiamp_module_results,
                        amplitude_method="hysteresis", save=False))
 ```
+
+`MELL` is flagged whichever way it is run, which is the honest answer: no
+combination of tests can find a limit in a ladder that never reached one.
 
 Each flagged finding carries the sentence in `flagged_because`, so what you read
 here is per resonator and specific — not a bit that says something went wrong

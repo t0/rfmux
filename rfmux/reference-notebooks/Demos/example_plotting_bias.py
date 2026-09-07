@@ -554,6 +554,13 @@ def plot_bifurcation_checks(
     the verdict was still no are marked with a dotted line, because that is the
     one case where reading the crossings alone would mislead.
 
+    ``both`` draws three — the two prominences and the separation — and its
+    threshold line is flat at 1.0, because a combined check reports each
+    quantity in multiples of the bar its own test held it to. That is what puts
+    two tests measured in different units on one set of axes, and the first
+    curve to cross 1.0 is the test that ended the search. The raw numbers, each
+    beside its own threshold, are in ``check.parts``.
+
     Every series is in the detector's own units, so they belong on one axes.
 
     Note that a detector stops examining steps once it fires, so a resonator
@@ -667,7 +674,10 @@ def plot_bifurcation_checks(
                         color=FLAGGED_COLOUR,
                     )
 
-            _outer_labels(axes, "drive amp. [norm.]", f"{method} metric")
+            # A combined check's quantities are already in multiples of their
+            # own bars, so the axis says so rather than implying units.
+            units = " / own threshold" if method == "both" else ""
+            _outer_labels(axes, "drive amp. [norm.]", f"{method} metric{units}")
 
             # Built from the keys these checks actually carry, so the legend
             # names the curves rather than calling all of them "metric".

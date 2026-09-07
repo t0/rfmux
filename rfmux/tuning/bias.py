@@ -137,16 +137,23 @@ __all__ = [
     "find_bias_frequency",
     "bifurcated_by_derivative",
     "bifurcated_by_hysteresis",
+    "bifurcated_by_either",
     "iq_arc_speed",
     "normalized_arc_speed",
     "iq_derivative_splines",
     "iq_derivatives_at",
 ]
 
-#: How :func:`find_bias_amplitude` decides an amplitude step is bifurcated,
-#: and the default. ``"hysteresis"`` needs both sweep directions; ``"derivative"``
-#: works on one.
-BIFURCATION_METHODS = ("derivative", "hysteresis")
+#: How :func:`find_bias_amplitude` decides an amplitude step is bifurcated, and
+#: the default. ``"both"`` runs the other two and takes a step as bifurcated if
+#: either says so, which is the most sensitive of the three and the one to
+#: reach for unless you have a reason not to. It needs both sweep directions,
+#: as ``"hysteresis"`` does; ``"derivative"`` works on one.
+BIFURCATION_METHODS = ("both", "derivative", "hysteresis")
+
+#: The bifurcation methods that need both sweep directions, because comparing
+#: them is what they do. Checked once per call rather than once per resonator.
+_NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
 
 #: What :func:`bifurcated_by_hysteresis` compares the two sweep directions in,
 #: and the default. ``"magnitude"`` compares their ``|S21|`` against frequency;
@@ -184,12 +191,20 @@ class BifurcationCheck(NamedTuple):
     ``threshold`` is the single bar those quantities were held to, in their own
     units. Clearing it is not on its own a positive verdict: ``"derivative"``
     reports two prominences and an ``"adjacency"`` flag, and needs all three.
+
+    ``parts`` is empty for a check that came from one test, and holds the
+    constituent checks for one that combined several — ``"both"``, whose
+    ``metric`` is in multiples of each test's own bar so that the two fit on
+    one set of axes. The raw numbers are then in here, each beside the
+    threshold it was actually compared against, which is where to read them
+    from when a threshold is what you are picking.
     """
 
     method: str
     bifurcated: bool
     metric: dict
     threshold: float
+    parts: dict = {}  # by method name, for a combined check; else empty
 
     def to_dict(self) -> dict:
         """Plain builtins only — files never contain these classes."""
@@ -198,6 +213,7 @@ class BifurcationCheck(NamedTuple):
             "bifurcated": bool(self.bifurcated),
             "metric": dict(self.metric),
             "threshold": float(self.threshold),
+            "parts": {k: v.to_dict() for k, v in self.parts.items()},
         }
 
     @classmethod
@@ -207,6 +223,11 @@ class BifurcationCheck(NamedTuple):
             bifurcated=bool(d["bifurcated"]),
             metric=dict(d["metric"]),
             threshold=float(d["threshold"]),
+            # .get, because a report written before combined checks existed
+            # has no parts, and a check from a single test never does.
+            parts={
+                k: cls.from_dict(v) for k, v in (d.get("parts") or {}).items()
+            },
         )
 
 
@@ -438,7 +459,7 @@ def find_bias_points(
     sweeps,
     catalog: ResonatorCatalog | None = None,
     *,
-    amplitude_method: str = "derivative",
+    amplitude_method: str = "both",
     frequency_method: str = "iq_derivative",
     direction: str | None = None,
     spike_prominence_factor: float = 0.5,
@@ -467,8 +488,10 @@ def find_bias_points(
             the array you swept. A catalog holding a resonator these sweeps do
             not cover raises, because the two were then not measured together.
         amplitude_method: which bifurcation test the amplitude search uses,
-            from :data:`BIFURCATION_METHODS`. ``"hysteresis"`` requires the
-            sweeps to have been taken in both directions.
+            from :data:`BIFURCATION_METHODS`. The default, ``"both"``, requires
+            the sweeps to have been taken in both directions, and so does
+            ``"hysteresis"`` — a one-direction sweep wants ``"derivative"``,
+            which reads a single trace.
         frequency_method: where in the chosen sweep the tone goes, from
             :data:`FREQUENCY_METHODS`.
         direction: which direction's sweep to measure the bias frequency and
@@ -517,10 +540,13 @@ def find_bias_points(
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
 
     directions = _directions_swept(sweeps)
-    if amplitude_method == "hysteresis" and not {"upward", "downward"} <= directions:
+    if (
+        amplitude_method in _NEEDS_BOTH_DIRECTIONS
+        and not {"upward", "downward"} <= directions
+    ):
         raise ValueError(
-            f"The 'hysteresis' method compares an upward sweep against a "
-            f"downward one, and this result holds only {sorted(directions)}. "
+            f"The {amplitude_method!r} method compares an upward sweep against "
+            f"a downward one, and this result holds only {sorted(directions)}. "
             f"Sweep both directions, or use amplitude_method='derivative', "
             f"which reads one sweep at a time."
         )
@@ -724,7 +750,7 @@ def _check_method(argument: str, value: str, allowed: tuple[str, ...]) -> None:
 def find_bias_amplitude(
     iterations: Mapping[int, Mapping[str, dict]],
     *,
-    method: str = "derivative",
+    method: str = "both",
     spike_prominence_factor: float = 0.5,
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
@@ -753,7 +779,10 @@ def find_bias_amplitude(
             :func:`~rfmux.tuning.sweep_results.collect_amplitude_iterations_for`
             returns. A single ``multisweep`` gives one amplitude step, which is
             a legitimate thing to hand over.
-        method: which test, from :data:`BIFURCATION_METHODS`.
+        method: which test, from :data:`BIFURCATION_METHODS`. The default,
+            ``"both"``, runs the other two and takes either verdict, so it is
+            the one method that reads all three of the settings below — and
+            the one that needs both sweep directions.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         compare: passed to :func:`bifurcated_by_hysteresis`.
@@ -772,13 +801,16 @@ def find_bias_amplitude(
         raise ValueError("No sweeps here, so there is no amplitude to choose.")
 
     detector = _BIFURCATION[method]
-    # Each detector takes only its own setting, so a caller passing both does
-    # not hand the hysteresis test a spike threshold it has no use for.
-    settings = (
-        {"spike_prominence_factor": spike_prominence_factor}
-        if method == "derivative"
-        else {"max_discrepancy": max_discrepancy, "compare": compare}
-    )
+    # Each detector takes only its own settings, so a caller passing all of
+    # them does not hand the hysteresis test a spike threshold it has no use
+    # for. "both" runs the two tests, so it is the one that takes both sets.
+    spikes = {"spike_prominence_factor": spike_prominence_factor}
+    separation = {"max_discrepancy": max_discrepancy, "compare": compare}
+    settings = {
+        "derivative": spikes,
+        "hysteresis": separation,
+        "both": {**spikes, **separation},
+    }[method]
 
     # What each step probed at, and the steps in ascending order of it. Every
     # direction of a step shares one amplitude, so this is one number per step.
@@ -1068,6 +1100,118 @@ def bifurcated_by_hysteresis(
         metric={"max_separation": separation},
         threshold=max_discrepancy,
     )
+
+
+def bifurcated_by_either(
+    entries: Mapping[str, dict],
+    *,
+    spike_prominence_factor: float = 0.5,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
+) -> BifurcationCheck:
+    """Is this sweep bifurcated? Ask both tests, and believe whichever says yes.
+
+    The two detectors look for different evidence of the same thing —
+    :func:`bifurcated_by_derivative` for the jump inside one trace,
+    :func:`bifurcated_by_hysteresis` for the disagreement between the two
+    directions — and on a real array they do not fail on the same resonators.
+    A resonator that jumps at nearly the same frequency going up as coming down
+    is invisible to the hysteresis test and obvious to the derivative one; a
+    resonator whose branch switch is spread over enough sweep points to look
+    smooth is the other way around. So this asks both and takes a step as
+    bifurcated if *either* fires, which is a more sensitive test than either
+    alone — deliberately. The cost is the same asymmetry run the other way: a
+    false positive from either test is now a false positive here, and it lands
+    as a bias amplitude one step quieter than the resonator needed.
+
+    That is usually the trade you want — biasing one step too quiet costs
+    responsivity, while biasing one step too loud puts the tone on a resonance
+    that is not there any more — and it is why this is the default.
+
+    Both tests run on every step, and both have to be *able* to run: this needs
+    the two sweep directions, as the hysteresis test does.
+
+    Args:
+        entries: one amplitude step, ``{direction: entry}``, with both
+            ``"upward"`` and ``"downward"`` present.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
+
+    Returns:
+        BifurcationCheck: with ``bifurcated`` the disjunction of the two
+        verdicts, and ``parts`` the two checks that produced them, keyed
+        ``"derivative"`` and ``"hysteresis"`` — each exactly what its own
+        detector returned, raw numbers and own threshold.
+
+        Its own ``metric`` is those numbers **in multiples of the bar each was
+        held to**, one entry per quantity, named for the test it came from:
+
+        ``"derivative_positive_spike_prominence"``
+            the up-spike's prominence over the prominence it needed.
+        ``"derivative_negative_spike_prominence"``
+            the same for the down-spike.
+        ``"derivative_adjacency"``
+            the flag, carried through as it stands — a condition rather than a
+            measurement, so there is nothing to divide.
+        ``"hysteresis_max_separation"``
+            the separation between the directions over *max_discrepancy*.
+
+        With ``threshold`` then ``1.0`` for all of them. Two tests in units of
+        their own thresholds are the one form in which they are comparable —
+        it is what makes a single number tell you how close each came, and it
+        puts prominences, dip depths and loop radii on one set of axes. A
+        quantity over 1.0 met its condition; the verdict is still each test's
+        own combination of its own conditions, which is why the checks that
+        made it are kept.
+
+        The exception is a test whose bar was zero — a completely flat
+        arc-length speed, or a *spike_prominence_factor* of zero. Nothing can
+        be a multiple of nothing, so a quantity that cleared such a bar is
+        reported as ``inf`` and one that did not as ``0.0``.
+
+    Raises:
+        ValueError: for an unknown *compare*, or for anything either test
+            refuses — a missing direction, two directions that do not overlap
+            in frequency, a degenerate trace.
+    """
+    parts = {
+        "derivative": bifurcated_by_derivative(
+            entries, spike_prominence_factor=spike_prominence_factor
+        ),
+        "hysteresis": bifurcated_by_hysteresis(
+            entries, max_discrepancy=max_discrepancy, compare=compare
+        ),
+    }
+
+    metric = {
+        f"{name}_{key}": _in_thresholds(value, part.threshold)
+        for name, part in parts.items()
+        for key, value in part.metric.items()
+    }
+    return BifurcationCheck(
+        method="both",
+        bifurcated=any(part.bifurcated for part in parts.values()),
+        metric=metric,
+        threshold=1.0,
+        parts=parts,
+    )
+
+
+def _in_thresholds(value, threshold: float):
+    """*value* as a multiple of the bar it was held to — the unit a combined
+    check reports in. A flag passes through: it has no bar to be a multiple of.
+
+    A bar of zero has no multiples either, so clearing it is reported as
+    ``inf`` rather than as a division that raises or returns a nan. That is the
+    honest reading — anything at all stands out further than nothing — and it
+    keeps the entry a number that plots and compares against 1.0.
+    """
+    if isinstance(value, bool):
+        return value
+    if threshold == 0:
+        return float("inf") if value > 0 else 0.0
+    return float(value) / threshold
 
 
 def _separation_in_iq(
@@ -1490,6 +1634,7 @@ def _arc_length_speed(frequencies: np.ndarray, iq: np.ndarray) -> np.ndarray | N
 _BIFURCATION = {
     "derivative": bifurcated_by_derivative,
     "hysteresis": bifurcated_by_hysteresis,
+    "both": bifurcated_by_either,
 }
 
 #: Name → what the hysteresis test measures the two directions apart in. Each

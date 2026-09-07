@@ -238,8 +238,10 @@ What is left:
 
 ## Calibrate the bifurcation thresholds against a real array
 
-`rfmux/tuning/bias.py` ships two ways to spot a bifurcated amplitude step, and
-neither default has been checked against a cryostat.
+`rfmux/tuning/bias.py` ships two tests for spotting a bifurcated amplitude step
+— plus `both`, which runs them and takes either verdict, so it has no threshold
+of its own and inherits whatever these two are calibrated to. Neither default
+has been checked against a cryostat.
 
 * **`derivative`** carries the GUI's long-standing prominence bar, restated as
   `spike_prominence_factor=0.5` multiplying the span of the arc speed. The GUI

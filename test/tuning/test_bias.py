@@ -23,6 +23,7 @@ from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.tuning.bias import (
     BiasReport,
     bifurcated_by_derivative,
+    bifurcated_by_either,
     bifurcated_by_hysteresis,
     find_bias_amplitude,
     find_bias_frequency,
@@ -97,12 +98,24 @@ def a_step(a=0.0, amplitude=1e-3, directions=("upward",), **kwargs):
     }
 
 
-def amplitude_iterations(nonlinearities=(0.0, 0.0, JUMPED), amplitudes=None, **kwargs):
-    """One resonator's ``{iteration: {direction: entry}}``, a step per ``a``."""
+def amplitude_iterations(
+    nonlinearities=(0.0, 0.0, JUMPED),
+    amplitudes=None,
+    directions=("upward", "downward"),
+    **kwargs,
+):
+    """One resonator's ``{iteration: {direction: entry}}``, a step per ``a``.
+
+    Both directions by default, which is what the default bifurcation method
+    needs — so a test of the *search* gets the search a caller actually gets.
+    The two passes are drawn from the same model and so are identical, which
+    leaves the hysteresis half of that method with nothing to find: what fires
+    on these ladders is the jump, exactly as under ``"derivative"`` alone.
+    """
     if amplitudes is None:
         amplitudes = [1e-3 * 2**i for i in range(len(nonlinearities))]
     return {
-        i: a_step(a=a, amplitude=amp, **kwargs)
+        i: a_step(a=a, amplitude=amp, directions=directions, **kwargs)
         for i, (a, amp) in enumerate(zip(nonlinearities, amplitudes))
     }
 
@@ -196,11 +209,9 @@ def test_a_single_multisweep_is_one_amplitude_step():
 def test_steps_are_examined_in_amplitude_order_not_the_order_measured():
     """An explicit schedule is free to run high, low, middle. 'One step below'
     is a statement about drive, not about when the sweep happened."""
-    iterations = {
-        0: a_step(a=JUMPED, amplitude=4e-3),
-        1: a_step(a=0.0, amplitude=1e-3),
-        2: a_step(a=0.0, amplitude=2e-3),
-    }
+    iterations = amplitude_iterations(
+        (JUMPED, 0.0, 0.0), amplitudes=[4e-3, 1e-3, 2e-3]
+    )
 
     choice = find_bias_amplitude(iterations)
 
@@ -486,6 +497,140 @@ def test_a_hysteresis_search_stops_where_the_directions_part():
     assert choice.bifurcated_at == pytest.approx(4e-3)
 
 
+# ─── bifurcation by both ──────────────────────────────────────────────────────
+
+
+def a_step_the_directions_part_on():
+    """A step with no discontinuity in either direction and the two of them a
+    long way apart: the downward pass leans further over than the upward one.
+
+    Only the hysteresis test sees this. Its mirror image — a jump both
+    directions agree on, which only the derivative test sees — is any step at
+    :data:`JUMPED`, since both passes are drawn from the same model.
+    """
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = a_trace(a=0.5, direction="downward")[1]
+    return step
+
+
+@pytest.mark.parametrize(
+    "step, seen_by",
+    [
+        (a_step(a=JUMPED, directions=("upward", "downward")), "derivative"),
+        (a_step_the_directions_part_on(), "hysteresis"),
+    ],
+)
+def test_a_step_either_test_flags_is_flagged_by_both(step, seen_by):
+    """Which is the whole point: the two tests miss different resonators, and
+    the combination misses only what neither of them caught."""
+    verdicts = {
+        "derivative": bifurcated_by_derivative(step).bifurcated,
+        "hysteresis": bifurcated_by_hysteresis(step).bifurcated,
+    }
+
+    assert verdicts[seen_by]
+    assert not any(v for method, v in verdicts.items() if method != seen_by)
+    assert bifurcated_by_either(step).bifurcated
+
+
+def test_a_step_neither_test_flags_is_not_bifurcated():
+    step = a_step(a=0.0, directions=("upward", "downward"))
+
+    check = bifurcated_by_either(step)
+
+    assert not check.bifurcated
+    assert not any(part.bifurcated for part in check.parts.values())
+    assert check.method == "both"
+
+
+def test_a_combined_check_reports_each_test_in_multiples_of_its_own_bar():
+    """Prominences, dip depths and one flag do not belong on one axis; how far
+    each of them got towards its own threshold does."""
+    step = a_step(a=JUMPED, directions=("upward", "downward"))
+
+    check = bifurcated_by_either(step, spike_prominence_factor=0.4,
+                                 max_discrepancy=0.2)
+
+    assert check.threshold == 1.0
+    assert set(check.parts) == {"derivative", "hysteresis"}
+    assert check.metric == pytest.approx({
+        "derivative_positive_spike_prominence": (
+            check.parts["derivative"].metric["positive_spike_prominence"]
+            / check.parts["derivative"].threshold
+        ),
+        "derivative_negative_spike_prominence": (
+            check.parts["derivative"].metric["negative_spike_prominence"]
+            / check.parts["derivative"].threshold
+        ),
+        # A condition rather than a measurement, so it is carried across as it
+        # stands — there is no bar to be a multiple of.
+        "derivative_adjacency": True,
+        "hysteresis_max_separation": (
+            check.parts["hysteresis"].metric["max_separation"] / 0.2
+        ),
+    })
+    # And the raw numbers are still there, each beside the bar it was actually
+    # held to, which is where a threshold gets picked from.
+    assert check.parts["hysteresis"].threshold == 0.2
+    assert check.parts["derivative"].threshold == pytest.approx(
+        bifurcated_by_derivative(step, spike_prominence_factor=0.4).threshold
+    )
+
+
+def test_a_bar_of_zero_has_no_multiples():
+    """Asking for a prominence of zero makes the arithmetic degenerate rather
+    than the answer wrong: anything at all stands further out than nothing."""
+    step = a_step(a=JUMPED, directions=("upward", "downward"))
+
+    check = bifurcated_by_either(step, spike_prominence_factor=0.0)
+
+    assert check.metric["derivative_positive_spike_prominence"] == float("inf")
+    assert check.bifurcated
+
+
+@pytest.mark.parametrize(
+    "nonlinearities, parted_at, fires_first",
+    [
+        ((0.0, 0.0, JUMPED), 1, "hysteresis"),  # the directions part first
+        ((0.0, JUMPED, 0.0), 2, "derivative"),  # the jump comes first
+    ],
+)
+def test_a_combined_search_stops_wherever_the_first_test_fires(
+    nonlinearities, parted_at, fires_first
+):
+    """One step is caught only by hysteresis and another only by the
+    derivative test, so the combination stops at whichever comes first — one
+    step below where the more sensitive of the two would have stopped."""
+    iterations = amplitude_iterations(nonlinearities, directions=("upward", "downward"))
+    iterations[parted_at]["downward"]["iq_counts"] = a_trace(
+        a=0.5, direction="downward"
+    )[1]
+    later = "derivative" if fires_first == "hysteresis" else "hysteresis"
+
+    combined = find_bias_amplitude(iterations, method="both")
+
+    assert combined.iteration == 0
+    assert combined.bifurcated_at == pytest.approx(
+        find_bias_amplitude(iterations, method=fires_first).bifurcated_at
+    )
+    # The other test, on its own, would have let this resonator go a step
+    # louder — which is the step the combination just refused.
+    assert find_bias_amplitude(iterations, method=later).iteration == 1
+
+
+def test_both_needs_both_directions_and_says_which_is_missing():
+    """It runs the hysteresis test, so it asks for what that test asks for."""
+    with pytest.raises(ValueError, match="no downward sweep"):
+        bifurcated_by_either(a_step(directions=("upward",)))
+
+
+def test_an_unknown_comparison_is_refused_by_the_combination_too():
+    with pytest.raises(ValueError, match="Unknown compare"):
+        bifurcated_by_either(
+            a_step(directions=("upward", "downward")), compare="phase"
+        )
+
+
 # ─── where in the sweep the tone goes ─────────────────────────────────────────
 
 
@@ -701,7 +846,7 @@ def test_a_sweep_of_bare_frequencies_has_no_catalog_to_bias():
     )[MODULE_ID]
 
     with pytest.raises(ValueError, match="Pass catalog"):
-        find_bias_points(sweeps)
+        find_bias_points(sweeps, amplitude_method="derivative")
 
 
 def test_a_catalog_resonator_these_sweeps_do_not_cover_is_the_callers_mistake():
@@ -867,14 +1012,21 @@ def test_only_the_first_concern_is_reported():
     assert "loudest amplitude measured" in report["R0001"].flagged_because
 
 
-def test_hysteresis_on_a_one_direction_sweep_is_refused_once_not_per_resonator():
-    with pytest.raises(ValueError, match="Sweep both directions"):
-        find_bias_points(a_multiamp_multisweep(directions=("upward",)), amplitude_method="hysteresis")
+@pytest.mark.parametrize("amplitude_method", ["hysteresis", "both"])
+def test_comparing_directions_on_a_one_direction_sweep_is_refused_once_not_per_resonator(
+    amplitude_method,
+):
+    with pytest.raises(ValueError, match=f"The {amplitude_method!r} method"):
+        find_bias_points(
+            a_multiamp_multisweep(directions=("upward",)),
+            amplitude_method=amplitude_method,
+        )
 
 
 def test_a_direction_that_was_not_swept_is_refused():
     with pytest.raises(ValueError, match="was not swept"):
-        find_bias_points(a_multiamp_multisweep(directions=("upward",)), direction="downward")
+        find_bias_points(a_multiamp_multisweep(directions=("upward",)),
+                         amplitude_method="derivative", direction="downward")
 
 
 def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
@@ -887,7 +1039,7 @@ def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
 def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
     report = find_bias_points(a_multiamp_multisweep(), max_discrepancy=0.4)
 
-    assert report.settings["amplitude_method"] == "derivative"
+    assert report.settings["amplitude_method"] == "both"
     assert report.settings["frequency_method"] == "iq_derivative"
     assert report.settings["max_discrepancy"] == 0.4
     assert report.settings["max_distance_hz"] is None
@@ -930,6 +1082,34 @@ def test_a_reports_dict_holds_no_rfmux_classes():
         type(c).__name__ == "dict"
         for f in d["findings"]
         for c in f["checks"].values()
+    )
+
+
+def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
+    """A combined check nests one level deeper than any other, so it is the
+    one that would take a NamedTuple into a file if to_dict stopped early."""
+    report = find_bias_points(
+        a_multiamp_multisweep(), amplitude_method="both", save=False
+    )
+    d = report.to_dict()
+
+    parts = [
+        c["parts"] for f in d["findings"] for c in f["checks"].values()
+    ]
+    assert parts and all(set(p) == {"derivative", "hysteresis"} for p in parts)
+    assert all(type(v).__name__ == "dict" for p in parts for v in p.values())
+    assert BiasReport.from_dict(d).findings == report.findings
+
+
+def test_a_single_test_check_carries_no_parts():
+    report = find_bias_points(
+        a_multiamp_multisweep(), amplitude_method="derivative", save=False
+    )
+
+    assert all(
+        check.parts == {}
+        for finding in report.findings
+        for check in finding.checks.values()
     )
 
 

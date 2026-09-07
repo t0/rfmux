@@ -766,21 +766,41 @@ class PulseCapture:
             elif reason == _walk.SPLIT:
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    self._rearm_after_split(st, ns)
+                    self._rearm_after_split(channel, st, ns)
             si, sf = self._pack_state(st)
             pos = k + 1
         return stop
 
-    def _rearm_after_split(self, st: "_ChState",
+    def _rearm_after_split(self, channel: int, st: "_ChState",
                            ns: ChannelNoiseStats) -> None:
         """Open a capture for the pulse that rose on the tail of the
-        one just saved: dated at the first sample of the confirmed
-        rise, as a trigger is dated to the first sample of its run;
-        anchored where the parent was, since both pulses return to the
-        same pre-pulse level; and marked a fragment of a chain."""
-        first_rise = st.ch_sample_n - max(0, st.rise_run - 1)
+        one just saved: dated at the onset of its rise, the sample of
+        least deviation in the near window before the confirmed rise
+        (the dip between the tail and the new pulse), as a trigger is
+        dated to the start of its run rather than the sample that
+        confirmed it; anchored where the parent was, since both pulses
+        return to the same pre-pulse level; and marked a fragment of a
+        chain.  The rise test compares against the level a near window
+        back, so on a decimated stream the confirming sample can lag
+        the onset by several samples; the fast stream sees the onset
+        itself, and the two streams' children have to agree on a date
+        to pair.
+        """
+        bufs = self.buf[channel]
+        bI, bQ = bufs["I"], bufs["Q"]
+        sI, sQ = max(ns.std_I, 1e-30), max(ns.std_Q, 1e-30)
+        first = max(1, st.rise_run)
+        near = min(self.min_end_samples, st.ch_sample_n - st.fire_abs,
+                   bI.count - 1)
+        onset_lag, least = first - 1, math.inf
+        for lag in range(first, near + 1):
+            mag = math.hypot((bI.recent(lag) - ns.mean_I) / sI,
+                             (bQ.recent(lag) - ns.mean_Q) / sQ)
+            if mag < least:
+                least, onset_lag = mag, lag
+        onset = st.ch_sample_n - onset_lag
         self._begin_capture(st, ns)
-        st.trig_abs = max(st.run_start_abs, first_rise)
+        st.trig_abs = max(st.run_start_abs, onset)
         st.pileup_child = True
 
     @staticmethod
@@ -1109,7 +1129,7 @@ class PulseCapture:
                     and st.rise_run >= self.trigger_samples):
                 self._save_pulse(channel, pileup=True)
                 if not self.freeze_triggers:
-                    self._rearm_after_split(st, ns)
+                    self._rearm_after_split(channel, st, ns)
                 return
 
             # ── Normal end: baseline confirmation ─────────────────

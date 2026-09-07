@@ -214,13 +214,17 @@ Old values are main at the merge base (e46fc41).
   info line), and a both-mode row reads "slow + fast", "slow only" or
   "fast only" instead of "Pair #n", with the pileup or truncated marker
   taken from its summaries.
-- Split child: dated at the first sample of its confirmed rise, as a
-  trigger is dated to the first sample of its run. It was dated
-  `min_end_samples` before the split, ten samples, which at 19 kHz put the
-  slow child half a millisecond before its fast twin and outside the match
-  window. It keeps the parent's pre-pulse anchor instead of the tail level
-  at the split, since both pulses return to the same level; the end band
-  in the Pulse View sits there.
+- Split child: dated at the onset of its rise, the sample of least
+  deviation in the near window before the confirmed rise, as a trigger is
+  dated to the start of its run rather than the sample that confirmed it.
+  It was dated `min_end_samples` before the split, ten samples, which at
+  19 kHz put the slow child half a millisecond before its fast twin and
+  outside the match window; dating at the confirming sample instead left
+  the slow child 0.1 to 0.2 ms after it, since the slow rise test only
+  clears the level half a millisecond back a few samples in. It keeps the
+  parent's pre-pulse anchor instead of the tail level at the split, since
+  both pulses return to the same level; the end band in the Pulse View
+  sits there.
 - Pileup split test: the rise above the pulse's own recent level, and the
   decay evidence that arms it, are judged against the larger of the trained
   jump σ and the scatter measured inside the capture (a clipped average of

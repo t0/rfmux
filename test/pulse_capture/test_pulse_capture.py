@@ -2418,3 +2418,25 @@ class TestSplitChild:
         records = self._double(second_at=930)
         assert records[2]["end_baseline_I"] == records[1]["end_baseline_I"]
         assert abs(records[2]["end_baseline_I"]) < 3.0
+
+
+    def test_a_smeared_child_is_dated_at_its_onset(self):
+        """A decimated stream smears the second rise over samples and
+        the rise test only clears the near level a few samples in; the
+        child is dated at the dip before the rise, within a sample of
+        the true onset, so it pairs with the fast stream's child."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(9)
+        k = np.arange(3000)
+        clean = np.where(k >= 800, 60.0 * np.exp(-(k - 800) / 40.0), 0.0)
+        clean += np.where(k >= 930, 60.0 * np.exp(-(k - 930) / 40.0), 0.0)
+        smeared = np.convolve(clean, np.ones(3) / 3.0, mode="full")[:3000]
+        for i in range(3000):
+            pcap.process_sample(1, float(smeared[i] + rng.normal(0, 1.0)),
+                                float(rng.normal(0, 1.0)), i * 1e-3)
+        records = pcap.pulses["Channel 1"]
+        assert len(records) == 2
+        assert abs(records[2]["trigger_time"] - 0.930) <= 1.5e-3

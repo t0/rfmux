@@ -8,9 +8,9 @@ developer laptop.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 42 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 852 | ~1 min | Default while editing. |
+| `pytest --tier=quick` | 853 | ~1 min | Default while editing. |
 | `pytest --tier=acquisition` | 20 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 872 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 873 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
 | `pytest --tier=all --serial 0024` | 930 | needs a board | Before a release. |
 

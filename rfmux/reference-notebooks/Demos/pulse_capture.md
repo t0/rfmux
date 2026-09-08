@@ -388,7 +388,8 @@ capture_config = PulseCaptureConfig(
     end_sigma=1.5,          # close when BOTH are back inside ±1.5σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
     max_pulse_ms=50.0,      # longest recordable pulse; sizes the buffer
-    noise_train_ms=5000.0,  # the 1/f window: noise fit and rolling baseline
+    noise_train_ms=1000.0,  # the 1/f window: noise fit and rolling baseline
+                            # (5 s by default; 1 s keeps this demo short)
     enable_pileup=True,     # split piled-up events on a sharp re-rise
 )
 

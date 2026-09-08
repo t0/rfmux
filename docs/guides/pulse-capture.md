@@ -162,9 +162,12 @@ parameters.
 
 The **Histograms** tab accumulates signal-to-noise, peak amplitude, duration
 and decay constant over every pulse, live, with ranges that expand as pulses
-arrive. Peak amplitude is one histogram per stored axis on shared bins,
-overlaid in the channel colour: frequency filled and dissipation hatched
-once a channel is calibrated, I and Q otherwise, with a key naming the two.
+arrive. Peak amplitude is one histogram per axis on shared bins, overlaid
+in the channel colour, the first filled and the second hatched, with a key
+naming the two. A calibrated channel keeps two pairs, frequency and
+dissipation in hertz and I and Q in volts, and the units selector picks
+the pair that matches the view, so the toggle changes frame here as it
+does on the other tabs.
 
 The **Template** tab stacks the pulses trigger-aligned and shows the
 mean with its residual scatter. In both mode each tab has its own stream

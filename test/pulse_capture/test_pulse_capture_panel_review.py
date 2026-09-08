@@ -215,6 +215,36 @@ def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
     assert labels == ["I: filled", "Q: hatched"]
 
 
+def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
+    """A channel stored in the frequency basis keeps its raw-quadrature
+    peaks beside the stored ones; the volts and counts views draw those,
+    named I and Q, and the df view the stored pair."""
+    cal = 2.0e6 + 0j
+    panel = PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel.capture_config = PulseCaptureConfig(trigger_basis="df")
+    panel._counts = {1: 3}
+    hz = np.array([0.0, 1000.0, 2000.0])
+    volts = np.array([0.0, 1e-4, 2e-4])
+    panel._hist_data = {
+        "amplitude_i_edges": hz, "amplitude_i_counts_ch1": np.array([1.0, 2.0]),
+        "amplitude_q_edges": hz, "amplitude_q_counts_ch1": np.array([3.0, 0.0]),
+        "amplitude_raw_i_edges": volts, "amplitude_raw_i_counts_ch1": np.array([2.0, 1.0]),
+        "amplitude_raw_q_edges": volts, "amplitude_raw_q_counts_ch1": np.array([0.0, 3.0])}
+    item = panel.hist_plots["amplitude"].getPlotItem()
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    names = [c.name() for c in item.listDataItems()]
+    assert all(" I (" in n or " Q (" in n for n in names) and len(names) == 2
+    assert np.max(item.listDataItems()[0].xData) == pytest.approx(2e-4)
+    panel.units_combo.setCurrentText(m.UNITS_COUNTS)
+    assert np.max(item.listDataItems()[0].xData) == pytest.approx(2e-4 / VOLTS_PER_ROC)
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    names = [c.name() for c in item.listDataItems()]
+    assert all(" df (" in n or " diss (" in n for n in names)
+    assert np.max(item.listDataItems()[0].xData) == pytest.approx(2000.0)
+    panel.close()
+    spin(qt_app)
+
+
 def test_idle_axes_name_the_default_view(qt_app, panel):
     """Before any data, every tab names the units the selector shows."""
     assert panel.units_combo.currentText() == m.UNITS_VOLTS

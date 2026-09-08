@@ -2060,24 +2060,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return _VIEW_STATES.get(self.units_combo.currentText(),
                                 ("iq", "V"))
 
-    def _view_coeffs(self, channel: int):
+    def _view_coeffs(self, channel: int, stored=None):
         """(factor, units) taking stored samples to the current view.
 
         None when the view cannot be produced -- hertz or a rotation with
         no calibration.  Callers show what is stored rather than putting
-        an unscaled number under a label it does not have.
+        an unscaled number under a label it does not have.  *stored*
+        overrides the (basis, units) the samples are taken to be in.
         """
-        sb, su = self._stored_state(channel)
+        sb, su = stored or self._stored_state(channel)
         vb, vu = self._view_state()
         return display_transform(self._channel_cal(channel), sb, su, vb, vu)
 
-    def _amp_scale(self, channel: int) -> Optional[float]:
+    def _amp_scale(self, channel: int, stored=None) -> Optional[float]:
         """Factor for amplitude-like scalars, or None if unavailable.
 
         Amplitudes are magnitudes, so the rotation contributes only its
         length -- which is 1 -- and this reduces to the units ratio.
         """
-        t = self._view_coeffs(channel)
+        t = self._view_coeffs(channel, stored)
         if t is None:
             return None
         return abs(t[0])
@@ -2684,10 +2685,20 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 item.setLabel(
                     "bottom",
                     f"amplitude ({self._units_label(self._label_channel())})")
-            # The amplitude plot overlays the two stored axes: the first
-            # (frequency, or I) filled, the second (dissipation, or Q)
-            # hatched in the same colour.
-            sources = (("amplitude_i", 0), ("amplitude_q", 1)) if scalable \
+            # The amplitude plot overlays two axes: the first (frequency,
+            # or I) filled, the second (dissipation, or Q) hatched in the
+            # same colour.  A quadrature view of a channel stored in the
+            # frequency basis draws the raw-quadrature pair the capture
+            # kept beside the stored one, so the toggle changes frame
+            # here as it does on the other tabs.
+            raw_pair = None
+            if scalable:
+                basis, _units = self._stored_state(self._label_channel())
+                if (basis == "df" and self._view_state()[0] == "iq"
+                        and "amplitude_raw_i_edges" in self._hist_data):
+                    raw_pair, basis = ("iq", "V"), "iq"
+            sources = ((("amplitude_raw_i", 0), ("amplitude_raw_q", 1)) if raw_pair
+                       else (("amplitude_i", 0), ("amplitude_q", 1))) if scalable \
                 else ((metric, 0),)
             n_named = len(series) * len(sources)
             if scalable and item.legend is not None:
@@ -2695,7 +2706,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 # count: the per-channel names drop out past
                 # MAX_LISTED_CHANNELS, the key does not.
                 item.legend.clear()
-                basis, _units = self._stored_state(self._label_channel())
                 grey = "#8A8A8A"
                 for axis, style, word in (
                         (0, QtCore.Qt.BrushStyle.SolidPattern, "filled"),
@@ -2721,7 +2731,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                             continue
                         edges = base_edges
                         if scalable:
-                            scale = self._amp_scale(ch)
+                            scale = self._amp_scale(ch, raw_pair)
                             if scale is not None:
                                 edges = base_edges * scale
                         edges_list.append(edges)
@@ -2745,8 +2755,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                         QtGui.QColor(color), QtCore.Qt.BrushStyle.BDiagPattern)
                     name = label
                     if scalable:
-                        basis, _units = self._stored_state(chans[0])
-                        name = f"{label} {_AXIS_NAMES[basis][axis]}"
+                        series_basis = "iq" if raw_pair else self._stored_state(chans[0])[0]
+                        name = f"{label} {_AXIS_NAMES[series_basis][axis]}"
                     plot.plot(
                         edges, counts,
                         stepMode="center",

@@ -736,6 +736,15 @@ class PulseCaptureSession(_CallbackHost):
             self._store_coeff[channel] = co
         return co
 
+    def _to_raw_volts(self, channel: int) -> Optional[complex]:
+        """The factor stored samples are divided by to get the raw
+        quadratures in volts, for a channel rotated into the frequency
+        basis; None for one stored in the quadratures already."""
+        co = self._storage_coeffs(channel)
+        if self.stored_units.get(channel) != "Hz":
+            return None
+        return co / VOLTS_PER_ROC
+
     def storage_description(self) -> Dict[str, Any]:
         """capture_params saying what the stored samples are: the basis
         requested, their units, and the counts-to-volts constant they
@@ -1023,8 +1032,12 @@ class PulseCaptureSession(_CallbackHost):
             samples, self.channels, jump_lag=self.edge_lookback,
             baseline_block=block)
 
-        self.histograms.size_amplitude_to_noise(max(
-            (max(s.std_I, s.std_Q) for s in self.noise_stats.values()), default=0.0))
+        raw = {ch: self._to_raw_volts(ch) for ch in self.noise_stats}
+        self.histograms.size_amplitude_to_noise(
+            max((max(s.std_I, s.std_Q) for s in self.noise_stats.values()), default=0.0),
+            raw_sigma=max((max(s.std_I, s.std_Q) / abs(raw[ch])
+                           for ch, s in self.noise_stats.items() if raw[ch]),
+                          default=None))
         if self.pcap is None:
             self._build_engine_and_writer()
         else:
@@ -1101,7 +1114,8 @@ class PulseCaptureSession(_CallbackHost):
         self._to_writer("append_pulse", channel, pulse_idx, pulse_data,
                         what=f"write for pulse ch{channel}#{pulse_idx}")
 
-        self.histograms.add_pulse(channel, pulse_data, ns)
+        self.histograms.add_pulse(channel, pulse_data, ns,
+                                  to_raw=self._to_raw_volts(channel))
         self.templates.add_pulse(channel, pulse_data, ns)
 
         self._callback(self.on_pulse, channel, pulse_idx, summary, pulse_data)

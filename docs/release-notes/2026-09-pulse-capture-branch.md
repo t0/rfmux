@@ -200,8 +200,12 @@ Old values are main at the merge base (e46fc41).
   window, with a warning below 2 s; 0 still derives it.
 - Peak-amplitude histogram: the larger of the two axis excursions, to one
   histogram per stored axis (`amplitude_i`, `amplitude_q`, shared bins),
-  overlaid on the Histograms tab and named by the stored basis. The
-  per-pulse `peak_I`, `peak_Q` and `peak_amp` attributes are unchanged.
+  overlaid on the Histograms tab and named by the stored basis. A channel
+  stored in the frequency basis also keeps the raw-quadrature pair
+  (`amplitude_raw_i`, `amplitude_raw_q`, volts), binned from each pulse's
+  waveform turned back with its calibration, and the quadrature views draw
+  that pair. The per-pulse `peak_I`, `peak_Q` and `peak_amp` attributes are
+  unchanged.
 - `end_sigma` default: 1.5, the value the panel shipped with; 1.0 was tried
   on the mock and kept the record about a fifth longer for the same pulses.
 - Streamer configuration, temporary firmware workaround: the PFB streamer

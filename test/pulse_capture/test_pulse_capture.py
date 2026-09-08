@@ -337,6 +337,29 @@ class TestPulseHistogramSet:
         assert h["amplitude_i"].bin_edges[-1] > 1000.0
         assert h["amplitude_q"].total == 2
 
+    def test_a_rotated_channel_also_bins_the_raw_quadrature_peaks(self):
+        """Given the factor that took raw volts into storage, the raw
+        pair is binned from the waveform turned back; without it (a
+        channel stored in the quadratures) the raw pair stays empty and
+        out of the exported data."""
+        hs = PulseHistogramSet(amp_range=(0, 200), amp_bins=10)
+        hs.size_amplitude_to_noise(2.0, raw_sigma=0.02)
+        ns = _make_noise_stats(std_I=10.0, std_Q=10.0)
+        # Storage = raw volts * 100 * exp(j pi/2): a quarter turn and a scale
+        to_raw = 100.0 * np.exp(1j * np.pi / 2)
+        hs.add_pulse(1, _make_pulse_data(peak_I=100.0, peak_Q=0.0), ns, to_raw=to_raw)
+        h = hs.get_channel_histograms(1)
+        # A stored peak along I of 100 turned back a quarter turn lies along
+        # raw Q, at 100 / 100 = 1 V; raw I sees the stored Q, which is 0.
+        assert h["amplitude_raw_q"].total == 1
+        assert np.argmax(h["amplitude_raw_q"].counts) == \
+            np.searchsorted(h["amplitude_raw_q"].bin_edges, 1.0, side="right") - 1
+        assert np.argmax(h["amplitude_raw_i"].counts) == 0
+        hs.add_pulse(2, _make_pulse_data(peak_I=100.0), ns)
+        data = hs.get_histogram_data()
+        assert "amplitude_raw_i_counts_ch1" in data
+        assert "amplitude_raw_i_counts_ch2" not in data
+
 # ═══════════════════════════════════════════════════════════════════
 #  HDF5 Writer/Reader Tests
 # ═══════════════════════════════════════════════════════════════════
@@ -767,7 +790,8 @@ class TestTauHistogram:
         hist = PulseHistogramSet(threshold_sigma=5.0)
         hist.add_pulse(1, _make_pulse_data(), _make_noise_stats())
         assert set(hist.get_channel_histograms(1)) == {
-            "amplitude_i", "amplitude_q", "duration_ms", "snr", "tau_ms"}
+            "amplitude_i", "amplitude_q", "amplitude_raw_i", "amplitude_raw_q",
+            "duration_ms", "snr", "tau_ms"}
 
 
 # ───────────────────────── Phase A: HDF5 derived attrs ──────────────

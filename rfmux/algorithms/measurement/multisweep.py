@@ -35,6 +35,12 @@ There are two ways to say what to sweep, identical once the measurement starts:
   or on a system that has none.  Results come back keyed by section name,
   ``S0001…`` unless ``names`` says otherwise.
 
+The second form is resolved into the first before anything is measured, the way
+a bare ``amp`` is resolved into an ``AmplitudeSchedule``: the catalog recorded
+in ``call_params`` is the one that was swept whichever way the call was
+spelled, so a reader downstream — bias finding, above all — has one thing to
+look at and never a sweep with no resonators in it.
+
 Either way multisweep reads its input and never modifies it. Updating a catalog
 from what a sweep reveals belongs to the analysis that learns it — fitting,
 bias finding — not here.
@@ -49,7 +55,7 @@ from dataclasses import dataclass
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.resonators import ResonatorCatalog
+from ...core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from ...core.transferfunctions import ALLOWED_NCO_BANDWIDTH_HZ, convert_roc_to_volts
 from ...tuning import store
 from ...tuning.multisweep_amplitudes import AmplitudeSchedule, resolve_amplitudes
@@ -169,6 +175,49 @@ def _resolve_sweep_targets(
             start=1,
         )
     ]
+
+
+def _resolve_catalog(
+    catalog: ResonatorCatalog | None,
+    targets: list[_SweepTarget],
+    amplitudes: Mapping[str, float],
+    module: int,
+) -> ResonatorCatalog:
+    """The catalog this sweep is of, whichever way it was asked for.
+
+    A bare ``center_frequencies`` list becomes one here, and what
+    ``call_params`` records is this rather than the ``None`` it used to: a
+    sweep then always carries the array it measured, and the analysis that
+    reads it back — ``find_bias_points`` in particular — needs nothing from the
+    caller that the measurement did not already hold.
+
+    Everything but the amplitude is already decided, because it is the target:
+    the name each section comes back under, the channel it was measured on, and
+    the frequency it was centred on. Centres are kept exactly as passed rather
+    than quantized — a centre is a number the caller may be doing arithmetic
+    with, and it agrees with each entry's ``original_center_frequency`` this
+    way. *amplitudes* is step 0's, which is the amplitude the first pass
+    actually used; a ladder has no one amplitude, and the rung each later step
+    ran at is on its own sweeps.
+    """
+    if catalog is not None:
+        return catalog
+
+    return ResonatorCatalog(
+        [
+            Resonator(
+                name=t.name,
+                channel=t.channel,
+                bias=BiasPoint(
+                    frequency_hz=t.center_frequency_hz,
+                    amplitude=amplitudes[t.name],
+                    bias_frequency_quantized=False,
+                ),
+            )
+            for t in targets
+        ],
+        module=module,
+    )
 
 
 def _resolve_directions(sweep_direction) -> tuple[str, ...]:
@@ -591,7 +640,11 @@ async def multisweep(
             centres, for sweeping frequencies that are not a tuned array — no
             resonances found yet, or a system that has none. Hardware channels
             are 1-based positions in this list. Pass this or *catalog*, not
-            both.
+            both. A catalog is generated from the list and recorded in
+            ``call_params["catalog"]``, the same way one amplitude is recorded
+            as a one-rung schedule, so what comes back is the same result a
+            catalog would have produced and every analysis downstream works on
+            it unchanged. Each section's bias amplitude there is step 0's.
         names (list[str], optional): Names for the *center_frequencies*, one
             each, in the same order — these are the keys the sweeps come back
             under. Defaults to ``S0001…`` (S for section), which is visibly not
@@ -648,10 +701,11 @@ async def multisweep(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 5,
+                    "schema_version": 6,
                     "measurement": "multisweep",
                     "module": 2,           # resolved, never None
-                    "call_params": {...},  # verbatim, as this macro was called
+                    "call_params": {...},  # verbatim, as this macro was called,
+                                           # plus the resolved catalog and ladder
                     "results": {
                         0: {"upward": {"BOTA": {...}, "KOZR": {...}}},
                         1: {"upward": {...}},
@@ -678,6 +732,13 @@ async def multisweep(
         without asking. They take *one module's* value, not the whole dict —
         ``fit_sweeps(sweeps["crs0042_rmod2"])`` — and say so if handed the
         container.
+
+        ``call_params`` records the arguments as they were passed, ``None``s
+        and all, beside the two things they were resolved into: ``catalog``,
+        which is there whichever form was asked for, and ``amp_schedule``.
+        Between them a result says what was measured without reference to the
+        call that made it, which is what lets the analysis downstream take a
+        result and nothing else.
 
         Nothing is duplicated into the step level. What a resonator was probed
         at is already ``sweep_amplitude`` in its own entry, and the rung that
@@ -709,9 +770,10 @@ async def multisweep(
 
     Raises:
         ValueError: for an empty or unknown *sweep_direction*, a module list
-            alongside a catalog, a module that disagrees with the catalog, or
-            an amplitude the schedule cannot resolve — all before the first
-            sweep runs.
+            alongside a catalog, a module that disagrees with the catalog, an
+            amplitude the schedule cannot resolve, or a *center_frequencies*
+            entry that is not a positive frequency — all before the first sweep
+            runs.
     """
 
     # What call_params records: the argument as passed, before the catalog or
@@ -795,6 +857,23 @@ async def multisweep(
         else None,
     )
 
+    # Resolves the whole ladder up front, so an amplitude that overshoots full
+    # scale on step 5 is a ValueError now rather than after four steps of data.
+    # A call with nothing to sweep has nothing to resolve it against; the ladder
+    # it asked for is still reported below.
+    steps = (
+        schedule.steps(catalog if catalog is not None else [t.name for t in targets])
+        if targets
+        else []
+    )
+
+    # Both ways of saying what to sweep, as one catalog — see _resolve_catalog.
+    # After the ladder because it takes the first step's amplitudes, and before
+    # the packing because that is where it is going.
+    swept = _resolve_catalog(
+        catalog, targets, steps[0].amplitudes if steps else {}, module
+    )
+
     # Every sweep this call makes comes back under this one key.
     module_id = crs.module[module].index()
 
@@ -809,7 +888,7 @@ async def multisweep(
             span_hz=span_hz,
             npoints_per_sweep=npoints_per_sweep,
             nsamps=nsamps,
-            catalog=catalog,
+            catalog=swept,
             center_frequencies=center_frequencies,
             names=names,
             requested_module=requested_module,
@@ -828,10 +907,6 @@ async def multisweep(
         })
         store.maybe_save(empty, "multisweep", save=save, label=label)
         return empty
-
-    # Resolves the whole ladder up front, so an amplitude that overshoots full
-    # scale on step 5 is a ValueError now rather than after four steps of data.
-    steps = schedule.steps(catalog if catalog is not None else [t.name for t in targets])
 
     # --- Validate inputs for single module execution ---
     # Check if number of resonances exceeds maximum channels

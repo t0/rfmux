@@ -440,6 +440,7 @@ def test_the_whole_container_is_refused_with_the_subscript_to_use():
         span_hz=600e3,
         npoints_per_sweep=201,
         nsamps=10,
+        catalog=a_catalog(),
     )
 
     with pytest.raises(TypeError, match="keyed by module"):

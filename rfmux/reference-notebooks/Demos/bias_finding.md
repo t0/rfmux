@@ -193,9 +193,12 @@ what `find_bias_points` does in section 5.
 
 A sweep records the catalog it was given, under `call_params`, as a plain dict.
 That is worth knowing about for two reasons: it is how you get the array
-bookkeeping back out of a file weeks later, and it is what
-`rfmux.tuning.find_bias_points` falls back on when you do not hand it a catalog
-yourself.
+bookkeeping back out of a file weeks later, and it is the array
+`rfmux.tuning.find_bias_points` biases — the function takes no catalog of its
+own, because the sweep already carries the one it was taken from. A sweep of
+bare `center_frequencies` records one too: `multisweep` generates a catalog
+from the list, names the sections in it, and puts it here, so bias finding
+works the same way on an array you have not tuned yet.
 
 ```python
 swept_catalog = ResonatorCatalog.from_dict(
@@ -1087,8 +1090,7 @@ result.
 
 | Argument | Default | Does |
 |---|---|---|
-| `sweeps` | required | **one module's** `multisweep` outputs, i.e. `multi_amplitude_ms[crs.module[MODULE].index()]` |
-| `catalog` | `None` | the resonators to bias, which must match the catalog used to make the above multisweeps. `None` uses the one recorded in the sweep's `call_params`, which is the usual case. |
+| `sweeps` | required | **one module's** `multisweep` outputs, i.e. `multi_amplitude_ms[crs.module[MODULE].index()]`. This is the whole input — the resonators to bias are the catalog recorded in its `call_params` |
 | `amplitude_method` | `"both"` | which bifurcation test the amplitude search uses — section 2. The default and `"hysteresis"` require the sweeps to have been taken in both directions; `"derivative"` is the one that reads a single trace. |
 | `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
 | `direction` | `None` | which sweep direction to measure the bias frequency and the calibration on. `None` prefers `"upward"`. |
@@ -1119,9 +1121,12 @@ print(bias_report.catalog)
 
 ```
 
-No catalog was passed, so it used the one recorded in the sweep's `call_params`
-— the array that was swept, which is nearly always the array you want to bias.
-Pass `catalog=` to override that.
+There was no array to pass: the resonators are the ones recorded in the sweep's
+`call_params`, which are the ones the sweeps were taken from. That is the whole
+reason there is no `catalog=` argument — a catalog handed in beside the sweeps
+could only agree with them or disagree, and a bias point measured against
+sweeps of a different array is the one thing it cannot survive. To bias part of
+an array, take the subset out of the catalog and sweep it.
 
 **note that `bias_report.catalog`** is a new `ResonatorCatalog`, not the one the function started with from `call_params`:
 

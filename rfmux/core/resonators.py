@@ -196,9 +196,9 @@ class ResonatorCatalog:
     The object algorithms accept and return::
 
         catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
-        await crs.multisweep(catalog)
-        find_bias_points(catalog, sweeps)
-        await crs.apply_bias(catalog)
+        sweeps = await crs.multisweep(catalog)
+        report = find_bias_points(sweeps[crs.module[2].index()])
+        await crs.apply_bias(report.catalog)
 
     Lookup is by name. Iteration is in bias-frequency order — the members
     themselves are an unordered collection, so ``resonators()`` and ``names()``
@@ -211,7 +211,8 @@ class ResonatorCatalog:
     separation cut there is the first place to make it — pass a threshold here
     when you want the catalog to hold the line as well. Every constructor takes
     it, so ``from_frequencies``, ``from_dict`` and ``from_csv`` can each be
-    given one.
+    given one. ``from_dict`` defaults to the rule recorded in the file rather
+    than to ``None``: a catalog read back is the catalog that was written.
 
     Retuning through ``Resonator.set_bias`` is not re-checked — two tones can be
     walked onto one frequency after the fact. Worth a ``validate()`` pass once
@@ -524,8 +525,8 @@ class ResonatorCatalog:
         but nothing needs to lean on that — ``from_dict`` takes the order back
         off the frequencies, the same as everywhere else.
 
-        ``min_separation_hz`` is recorded for the reader's information and is
-        not applied on the way back in; see :meth:`from_dict`.
+        ``min_separation_hz`` is part of the record like every other field,
+        and :meth:`from_dict` reads it back and applies it.
         """
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -545,13 +546,20 @@ class ResonatorCatalog:
     def from_dict(cls, d: dict, **kwargs) -> ResonatorCatalog:
         """Rebuild a catalog from ``to_dict`` output.
 
-        The separation rule is not taken from the file. It is a rule you are
-        applying now rather than a property the resonators carry, so it arrives
-        the way it does everywhere else — ``from_dict(d, min_separation_hz=1e3)``
-        reads a catalog under it, and raises if the file does not meet it. A
-        file that recorded a rule is a record of how it was built, not an
-        instruction to whoever opens it; without the keyword the catalog comes
-        back under the default of ``None`` and no frequency is policed.
+        The dict carries everything the object does, the separation rule
+        included, so reading one back restores the catalog that was written
+        instead of deciding what to make of it. The rule arrives the way it
+        does in every other constructor, which means it is checked against the
+        frequencies in the file — and that is a check worth having here, since
+        retuning through ``Resonator.set_bias`` is not policed: a catalog whose
+        tones were walked together after it was built fails on the way back in
+        rather than coming back claiming a spacing it does not have.
+
+        ``from_dict(d, min_separation_hz=...)`` reads the file under a rule of
+        your own instead — a tighter one to audit it with, or ``None`` to open a
+        file whose rule you no longer want to be held to. A file written before
+        the rule was persisted has no key at all and comes back under ``None``,
+        the same as any other catalog with no rule.
         """
         version = d.get("schema_version")
         if version not in cls.READABLE_SCHEMA_VERSIONS:
@@ -576,12 +584,13 @@ class ResonatorCatalog:
             )
             for name, rd in entries
         ]
-        # `min_separation_hz` in the file goes unread, as above. Anything else
-        # the file carries and __init__ does not take is ignored the same way
-        # — including a file written while the catalog
-        # still carried an NCO frequency, which is why removing that field did
-        # not need a schema bump: neither direction of the round trip loses a
-        # resonator over it.
+        # The file's rule unless the caller named one of their own, so that a
+        # round trip is a round trip. Anything else the file carries and
+        # __init__ does not take is ignored — including a file written while the
+        # catalog still carried an NCO frequency, which is why removing that
+        # field did not need a schema bump: neither direction of the round trip
+        # loses a resonator over it.
+        kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
         return cls(resonators, module=d["module"], **kwargs)
 
     # -- CSV ------------------------------------------------------------------

@@ -195,7 +195,7 @@ beyond specifying the sweep bandwidth and resolution:
 The catalog even knows its own module.
 
 
-**Multisweep does not modify the catalog.** The catalog that you used to call it is stored under `call_params`.
+**Multisweep does not modify the catalog.** The catalog that you used to call it is stored under `call_params`. A sweep of a bare frequency list gets one too — see below.
 
 Everything a multisweep produces comes back in the returned dict.
 <!-- #endregion -->
@@ -394,6 +394,27 @@ for section_name, s in no_catalog_sections.items():
 ```python
 plot_ms(no_catalog_sections, list(no_catalog_sections),
         "multisweep done using a plain frequency list")
+```
+
+#### No-catalog operation: there is a catalog in the result anyway
+
+`multisweep` builds one out of the list and records it under
+`call_params["catalog"]`, the same way a single `amp` is recorded as the
+one-rung `AmplitudeSchedule` it is. Each section becomes a resonator: the name
+it comes back under, the channel it was measured on, the frequency it was
+centred on, and step 0's amplitude.
+
+That is what makes a frequency-list sweep a result like any other. Analysis
+downstream — `find_bias_points` above all, which has no catalog argument and
+takes the array out of the sweep — works on it without your having to write a
+catalog to hand back in.
+
+```python
+generated_catalog = ResonatorCatalog.from_dict(
+    no_catalog_ms[crs.module[MODULE].index()]["call_params"]["catalog"]
+)
+
+print(generated_catalog)
 ```
 
 #### No-catalog operation: passing a list of amplitudes

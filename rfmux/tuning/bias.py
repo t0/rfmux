@@ -23,9 +23,16 @@ so a saved sweep is biased the same way a live one is.
 What goes in, what comes out
 ----------------------------
 In: **one module's** sweep result, as everything in this package takes it —
-``sweeps[crs.module[m].index()]``. A ``multisweep`` that was given no schedule
-is one amplitude step, which is a legitimate thing to bias off if you already
-know the amplitude; the search then has nothing to go back to and says so.
+``sweeps[crs.module[m].index()]``, and nothing else. The array being biased is
+the catalog the sweep recorded, because that is the array these sweeps are of;
+there is no argument for a different one, and no way to bias part of what was
+measured. Both would let a report be about a catalog and a set of sweeps that
+were never measured together, which is the one thing a bias point cannot
+survive. To bias a subset, take the subset out of the catalog and sweep it.
+
+A ``multisweep`` that was given no schedule is one amplitude step, which is a
+legitimate thing to bias off if you already know the amplitude; the search then
+has nothing to go back to and says so.
 
 Out: a :class:`BiasReport`, whose ``catalog`` is a **new**
 :class:`~rfmux.core.resonators.ResonatorCatalog` carrying the operating points
@@ -45,18 +52,18 @@ a fit replaces that model's fit.
 Nothing else is modified on the way past: not the catalog that was swept, not
 the sweep entries. A bias point is a claim about one analysis of one set of
 sweeps, and two of them side by side — one from the derivative method, one from
-hysteresis — is a comparison worth being able to make. The catalog you swept is
-still the catalog you swept, and merging is
+hysteresis — is a comparison worth being able to make. The catalog in the file
+is still the catalog that was swept, and merging is
 the caller's decision.
 
 Every resonator gets a bias point
 ---------------------------------
 There is no such thing here as a resonator that came back unbiased. The catalog
-and the sweeps go together — the sweeps were taken *from* that catalog — so
-every resonator has the data it needs, and the questions above always have an
-answer. A missing sweep or a missing ``iq_volts`` is a mismatched pair of
-arguments rather than a property of one detector, and it raises rather than
-being absorbed into a per-resonator result.
+and the sweeps go together — they came out of the same file, and the sweeps were
+taken *from* that catalog — so every resonator has the data it needs, and the
+questions above always have an answer. A missing sweep or a missing ``iq_volts``
+means a result that disagrees with itself rather than a property of one
+detector, and it raises rather than being absorbed into a per-resonator result.
 
 What does happen is that an answer turns out to be a **default rather than a
 measurement**. The quietest amplitude measured was already bifurcated, so there
@@ -468,7 +475,6 @@ class BiasReport:
 
 def find_bias_points(
     sweeps,
-    catalog: ResonatorCatalog | None = None,
     *,
     amplitude_method: str = "both",
     frequency_method: str = "iq_derivative",
@@ -481,24 +487,26 @@ def find_bias_points(
     save=None,
     label=None,
 ) -> BiasReport:
-    """Find an operating point for every resonator in a catalog.
+    """Find an operating point for every resonator a sweep measured.
 
     For each one: search the amplitude steps for the one below bifurcation,
     place the tone inside that step's sweep, and measure the IQ derivatives
     there. Every resonator gets a bias point; see the module docstring for what
     ``flagged_because`` means and why there is no unbiased outcome.
 
+    The array being biased is the one the sweep recorded — there is no catalog
+    argument. Everything a bias point needs is already in the sweep, the
+    resonators included, and a catalog passed in beside them could only agree
+    with them or disagree.
+
     Args:
         sweeps: **one module's** value out of what ``multisweep`` returned —
-            ``sweeps[crs.module[m].index()]``.
+            ``sweeps[crs.module[m].index()]``. This is the whole input: the
+            resonators to bias are the catalog in its ``call_params``, and
+            everything the new catalog keeps unchanged — names, channels, the
+            module, the separation rule — comes from there.
             The whole container, keyed by module, is refused: a report is about
             one module, and which one is your choice to make.
-        catalog: the resonators to bias, and the source of everything the new
-            catalog keeps unchanged — names, channels, the module, the
-            separation rule. Defaults to the catalog snapshot recorded in the
-            sweep's ``call_params``, which is the usual case: you are biasing
-            the array you swept. A catalog holding a resonator these sweeps do
-            not cover raises, because the two were then not measured together.
         amplitude_method: which bifurcation test the amplitude search uses,
             from :data:`BIFURCATION_METHODS`. The default, ``"both"``, requires
             the sweeps to have been taken in both directions, and so does
@@ -545,9 +553,10 @@ def find_bias_points(
     Raises:
         TypeError: for the whole container rather than one module's result.
         ValueError: for an unknown method, for ``"hysteresis"`` on a sweep with
-            only one direction, for a *direction* that was not swept, or for no
-            catalog to bias — none passed and none recorded in the sweep.
-        KeyError: for a catalog resonator these sweeps do not cover.
+            only one direction, for a *direction* that was not swept, or for a
+            sweep with no catalog recorded in it.
+        KeyError: for a resonator in that catalog the sweeps do not cover,
+            which means a result that disagrees with itself.
     """
     # Everything the caller could have got wrong about the *whole* call is
     # checked here, once, before a single resonator is analysed. A thousand
@@ -573,14 +582,11 @@ def find_bias_points(
             f"{sorted(directions)}."
         )
 
-    # The array being biased. Falling back to the snapshot the sweep recorded
-    # is the common case, and it guarantees the catalog and the data match.
-    if catalog is None:
-        catalog = _catalog_swept(sweeps)
-
-    # We work on a copy and hand that back, so the catalog that was swept is
-    # still the catalog that was swept. Cheap — a catalog holds only scalars.
-    biased = catalog.copy()
+    # The array being biased: the one these sweeps were taken from, which is
+    # the only one they can speak for. Built fresh out of the snapshot, and it
+    # is what we hand back, so the record in the file still reads as the
+    # catalog that was swept.
+    biased = _catalog_swept(sweeps)
 
     amplitude_settings = dict(
         method=amplitude_method,
@@ -1584,13 +1590,20 @@ def _directions_swept(sweeps) -> set[str]:
 
 
 def _catalog_swept(sweeps) -> ResonatorCatalog:
-    """The catalog this sweep recorded, rebuilt from its snapshot."""
+    """The catalog this sweep recorded, rebuilt from its snapshot.
+
+    A fresh object every call, which is what lets the caller be handed it: the
+    snapshot in the file is a dict and stays one, so the report's catalog is
+    never the record of what was swept.
+    """
     snapshot = (sweeps.get("call_params") or {}).get("catalog")
     if snapshot is None:
         raise ValueError(
-            "No catalog to bias: none was passed, and this result came from a "
-            "bare center_frequencies sweep, which has no resonators to put an "
-            "operating point on. Pass catalog=."
+            "No catalog in these sweeps to bias. Every multisweep records one "
+            "— a bare center_frequencies call generates one from the list — so "
+            "this is a result from before that was so (schema_version 5 or "
+            "earlier). Re-sweep, or build the catalog yourself and put it in "
+            "call_params['catalog'] as ResonatorCatalog.to_dict() output."
         )
     return ResonatorCatalog.from_dict(snapshot)
 

@@ -11,6 +11,7 @@ The narrow call — one amplitude, one direction — goes through this same loop
 it is tested here too rather than being a separate path to trust.
 """
 
+import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
@@ -310,6 +311,107 @@ async def test_a_frequency_list_is_swept_at_a_ladder_of_absolute_amplitudes(swee
 
 
 @pytest.mark.asyncio
+async def test_a_frequency_list_is_recorded_as_the_catalog_it_became(sweeps):
+    """The resolved form goes into call_params beside the request, the way a
+    bare amp is recorded as the one-rung schedule it became. That is what lets
+    the analysis downstream take a result and nothing else."""
+    result = await drive(
+        FakeCRS(),
+        center_frequencies=[1.0e9, 1.1e9],
+        module=2,
+        amp=AmplitudeSchedule.ramp(1e-4, 1e-2, 3),
+    )
+
+    generated = ResonatorCatalog.from_dict(result["call_params"]["catalog"])
+
+    assert generated.module == 2
+    assert generated.names(order="frequency") == ["S0001", "S0002"]
+    assert [r.channel for r in generated] == [1, 2]
+    # The centres exactly as passed — unquantized, so they agree with each
+    # sweep's own original_center_frequency — and step 0's amplitude, which is
+    # the one the first pass used.
+    assert [r.bias.frequency_hz for r in generated] == [1.0e9, 1.1e9]
+    assert [r.bias.amplitude for r in generated] == pytest.approx([1e-4, 1e-4])
+    # The request is still recorded beside it.
+    assert result["call_params"]["center_frequencies"] == [1.0e9, 1.1e9]
+
+
+@pytest.mark.asyncio
+async def test_the_generated_catalog_takes_the_names_that_were_supplied(sweeps):
+    result = await drive(
+        FakeCRS(),
+        center_frequencies=[1.0e9, 1.1e9],
+        names=["low", "high"],
+        module=2,
+        amp=AmplitudeSchedule.explicit([1e-3]),
+    )
+
+    generated = ResonatorCatalog.from_dict(result["call_params"]["catalog"])
+    assert generated.names(order="frequency") == ["low", "high"]
+
+
+def a_measured_resonance(targets, amplitudes, kwargs):
+    """A stand-in for ``_measure_sweep`` that returns traces with data in them.
+
+    The rest of this file substitutes a stub, because the loop does not care
+    what a sweep contains. The one test that hands its result to an analysis
+    does, and this is the least resonance that analysis can work on: one circle
+    per target, centred where the sweep was.
+    """
+    entries = {}
+    for t in targets:
+        frequencies = np.linspace(
+            t.center_frequency_hz - 1e5, t.center_frequency_hz + 1e5, 101
+        )
+        if kwargs["sweep_direction"] == "downward":
+            frequencies = frequencies[::-1]
+        s21 = 1 - 1 / (1 + 2j * (frequencies - t.center_frequency_hz) / 2e4)
+        entries[t.name] = {
+            "channel": t.channel,
+            "frequencies": frequencies,
+            "iq_counts": s21 * 1e3,
+            "iq_volts": s21 * 1e-6,
+            "original_center_frequency": t.center_frequency_hz,
+            "sweep_direction": kwargs["sweep_direction"],
+            "sweep_amplitude": amplitudes[t.name],
+        }
+    return entries
+
+
+@pytest.mark.asyncio
+async def test_a_frequency_list_sweep_can_be_biased(monkeypatch):
+    """The point of generating one: find_bias_points reads the array out of the
+    sweep, so a bare frequency list is biased like anything else without the
+    caller having to build a catalog by hand to hand back to it."""
+    from rfmux.tuning import find_bias_points
+
+    measuring(monkeypatch, a_measured_resonance)
+    result = await drive(
+        FakeCRS(),
+        center_frequencies=[1.0e9],
+        module=2,
+        amp=AmplitudeSchedule.ramp(1e-4, 1e-2, 3),
+    )
+
+    report = find_bias_points(result, amplitude_method="derivative", save=False)
+
+    assert [f.name for f in report.findings] == ["S0001"]
+    assert report.catalog["S0001"].bias.dI_df is not None
+
+
+@pytest.mark.asyncio
+async def test_nothing_to_sweep_still_records_a_catalog_of_nothing(sweeps):
+    with pytest.warns(UserWarning, match="Nothing to sweep"):
+        result = await drive(
+            FakeCRS(), center_frequencies=[], module=2, amp=1e-3
+        )
+
+    generated = ResonatorCatalog.from_dict(result["call_params"]["catalog"])
+    assert len(generated) == 0
+    assert generated.module == 2
+
+
+@pytest.mark.asyncio
 async def test_section_names_are_resolved_once_for_the_whole_call(sweeps):
     """So the schedule's keys and the results' keys are the same strings by
     construction, not by both happening to generate S0001…"""
@@ -580,7 +682,7 @@ async def test_the_result_carries_a_schema_version(sweeps):
     result = await drive(FakeCRS(), a_catalog())
     # A literal, not the constant: bumping the version should mean editing a
     # test, because it is a claim that readers of older files need to know.
-    assert result["schema_version"] == 5
+    assert result["schema_version"] == 6
 
 
 @pytest.mark.asyncio
@@ -840,9 +942,10 @@ async def test_the_readers_work_on_a_frequency_list_result_too(sweeps):
     assert list(collect_amplitude_iterations_for(result, "S0002")) == [0, 1, 2]
     assert find_iteration_matching_amplitude(result, "S0002", 1e-2)[1] == 2
 
-    # No catalog, so no bias amplitude to fall back on.
-    with pytest.raises(ValueError, match="no catalog to take one from"):
-        find_iteration_matching_amplitude(result, "S0002")
+    # The catalog multisweep generated from the list is what the fallback
+    # reads, so a frequency-list result has a bias amplitude like any other:
+    # step 0's, which for an absolute ramp is its first rung.
+    assert find_iteration_matching_amplitude(result, "S0002")[1] == 0
 
 
 @pytest.mark.asyncio

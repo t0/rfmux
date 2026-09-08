@@ -17,6 +17,7 @@ import asyncio
 import numpy as np
 import pytest
 
+from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, fit_sweeps, netanal_trace
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
@@ -68,7 +69,7 @@ class TestPacking:
 
         # A literal, not the constant: bumping the version should mean editing
         # a test, because it is a claim about what readers of older files need.
-        assert module_netanal["schema_version"] == 5
+        assert module_netanal["schema_version"] == 6
         assert module_netanal["schema_version"] == RESULTS_SCHEMA_VERSION
         assert module_netanal["measurement"] == "netanal"
         assert module_netanal["module"] == 1
@@ -137,6 +138,9 @@ def a_sweep_output():
         span_hz=1e5,
         npoints_per_sweep=8,
         nsamps=10,
+        catalog=ResonatorCatalog.from_frequencies(
+            [1.0e9], module=MODULE, amplitude=1e-3
+        ),
     )["crs0000_rmod1"]
 
 

@@ -772,33 +772,51 @@ def test_a_file_carrying_the_retired_nco_field_still_loads():
     assert not hasattr(back, "nco_frequency_hz")
 
 
-def test_a_dict_round_trip_does_not_bring_the_separation_rule_back():
-    """The rule is one the reader applies, not one the file imposes on it. The
-    resonators come back either way — it is only the policing that has to be
-    asked for again."""
+def test_a_dict_round_trip_brings_the_separation_rule_back():
+    """The dict holds everything the object does, so reading one back is a
+    restoration and not a decision about what to make of the file."""
     m = ResonatorCatalog.from_frequencies(
         [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
     )
     d = m.to_dict()
-    assert d["min_separation_hz"] == 1e3  # still recorded, for the reader
+    assert d["min_separation_hz"] == 1e3
 
     back = ResonatorCatalog.from_dict(d)
-    assert back.min_separation_hz is None
+    assert back.min_separation_hz == 1e3
     assert [r.bias.frequency_hz for r in back] == [r.bias.frequency_hz for r in m]
 
 
-def test_a_file_with_no_separation_rule_in_it_reads_the_same_way():
-    """Files written before the rule was persisted have no key at all, which is
-    not a case worth distinguishing now that neither is read."""
+def test_a_dict_round_trip_re_checks_the_rule_it_brings_back():
+    """Which is the one thing the round trip can discover: set_bias is not
+    policed, so a catalog whose tones were walked together after it was built
+    fails on the way back in rather than claiming a spacing it does not have."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
+    )
+    walked = m.names(order="frequency")[1]
+    m[walked].set_bias(frequency_hz=1e9 + 500.0)
+
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_dict(m.to_dict())
+
+
+def test_a_file_with_no_separation_rule_in_it_reads_under_none():
+    """Files written before the rule was persisted have no key at all, and come
+    back the same as any other catalog with no rule."""
     d = a_catalog().to_dict()
     del d["min_separation_hz"]
     assert ResonatorCatalog.from_dict(d).min_separation_hz is None
 
 
-def test_from_dict_takes_a_separation_rule():
-    """Reading a catalog under a rule, like every other constructor."""
+def test_from_dict_takes_a_separation_rule_of_its_own():
+    """A rule passed in wins over the file's, like every other constructor."""
     d = ResonatorCatalog.from_frequencies([1e9, 2e9], module=1, amplitude=0.01).to_dict()
     assert ResonatorCatalog.from_dict(d, min_separation_hz=1e3).min_separation_hz == 1e3
+
+    stricter = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
+    ).to_dict()
+    assert ResonatorCatalog.from_dict(stricter, min_separation_hz=None).min_separation_hz is None
 
 
 def test_from_dict_applies_the_separation_rule_it_is_given():

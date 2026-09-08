@@ -53,19 +53,13 @@ def a_sweep_entry(amplitude, direction):
     }
 
 
-# So `catalog=None` can mean "a frequency-list sweep, which has none" rather
-# than "you didn't say".
-_UNSET = object()
-
-
 def container(
-    schedule=None, catalog=_UNSET, names=None, directions=("upward",), **overrides
+    schedule=None, catalog=None, names=None, directions=("upward",), **overrides
 ):
     """A ladder's whole return, keyed by module, as the driver builds it."""
-    if catalog is _UNSET:
-        catalog = a_catalog()
+    catalog = catalog if catalog is not None else a_catalog()
     schedule = schedule if schedule is not None else AmplitudeSchedule()
-    target = catalog if catalog is not None else list(names)
+    target = catalog
 
     sweeps = {
         step.step: {
@@ -451,17 +445,16 @@ def test_a_relative_ladder_gives_each_resonator_its_own_answer():
     assert matched_iteration(result, "R0002", 0.004) == 0
 
 
-def test_a_frequency_list_result_has_no_bias_amplitude_to_fall_back_on():
-    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
-    result = packed(
-        schedule=schedule,
-        catalog=None,
-        center_frequencies=[1.0e9, 1.1e9],
-        names=["low", "high"],
-    )
+def test_a_result_with_no_catalog_recorded_has_no_bias_amplitude_to_fall_back_on():
+    """Every multisweep records a catalog since schema_version 6 — a bare
+    center_frequencies call generates one from the list — so nothing writes this
+    any more. Files that predate it are still readable, and this is what one of
+    them costs: the fallback has nowhere to read an amplitude from."""
+    result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
+    result["call_params"]["catalog"] = None
 
     with pytest.raises(ValueError, match="no catalog to take one from"):
-        find_iteration_matching_amplitude(result, "low")
+        find_iteration_matching_amplitude(result, "R0001")
 
     # but an explicit amplitude still works
-    assert matched_iteration(result, "low", 1e-2) == 1
+    assert matched_iteration(result, "R0001", 1e-2) == 1

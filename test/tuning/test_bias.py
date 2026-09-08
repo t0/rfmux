@@ -83,7 +83,7 @@ def a_sweep(amplitude=1e-3, a=0.0, fr=FR, direction="upward", **kwargs):
     }
 
 
-def a_catalog(amplitude=1e-3):
+def a_catalog(amplitude=1e-3, min_separation_hz=None):
     """Two resonators a megahertz apart."""
     return ResonatorCatalog(
         [
@@ -93,6 +93,7 @@ def a_catalog(amplitude=1e-3):
                       bias=BiasPoint(frequency_hz=FR + 1e6, amplitude=amplitude)),
         ],
         module=2,
+        min_separation_hz=min_separation_hz,
     )
 
 
@@ -831,13 +832,17 @@ def test_a_sweep_with_no_volts_cannot_be_calibrated():
 
 def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
     catalog = a_catalog()
+    sweeps = a_ladder(catalog=catalog)
     before = catalog.to_dict()
 
-    report = find_bias_points(a_ladder(), catalog)
+    report = find_bias_points(sweeps, save=False)
 
     assert isinstance(report, BiasReport)
     assert report.catalog is not catalog
+    # Neither the object the sweep was taken from nor the snapshot recorded in
+    # it: the report's catalog is a third thing, built from that snapshot.
     assert catalog.to_dict() == before
+    assert sweeps["call_params"]["catalog"] == before
     assert report.catalog.to_dict() != before
 
 
@@ -897,11 +902,21 @@ def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
 def test_identity_and_channels_survive_the_new_catalog():
     catalog = a_catalog()
 
-    report = find_bias_points(a_ladder(catalog=catalog), catalog)
+    report = find_bias_points(a_ladder(catalog=catalog))
 
     assert [r.name for r in report.catalog] == [r.name for r in catalog]
     assert [r.channel for r in report.catalog] == [r.channel for r in catalog]
     assert report.catalog.module == catalog.module
+
+
+def test_the_separation_rule_survives_the_new_catalog_too():
+    """It rides in the snapshot like everything else, so the array comes back
+    under the rule it was built under rather than under no rule at all."""
+    catalog = a_catalog(min_separation_hz=1e3)
+
+    report = find_bias_points(a_ladder(catalog=catalog))
+
+    assert report.catalog.min_separation_hz == 1e3
 
 
 def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
@@ -913,43 +928,38 @@ def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
         )
 
 
-def test_the_catalog_defaults_to_the_one_the_sweep_recorded():
+def test_the_catalog_biased_is_the_one_the_sweep_recorded():
     report = find_bias_points(a_ladder())
 
     assert len(report.catalog) == 2
     assert all(f.good for f in report.findings)
 
 
-def test_a_sweep_of_bare_frequencies_has_no_catalog_to_bias():
-    sweeps = pack_multisweep(
-        {0: {"upward": {"section_0": a_sweep()}}},
-        module_id=MODULE_ID,
-        module=2,
-        amp_schedule=AmplitudeSchedule(1e-3),
-        directions=("upward",),
-        span_hz=SPAN,
-        npoints_per_sweep=201,
-        nsamps=10,
-        center_frequencies=[FR],
-    )[MODULE_ID]
+def test_a_sweep_with_no_catalog_recorded_in_it_has_nothing_to_bias():
+    """Every multisweep records a catalog since schema_version 6, a bare
+    center_frequencies call included, so nothing writes this any more. An older
+    file still can, and it is the one input this function cannot work from."""
+    sweeps = a_ladder()
+    sweeps["call_params"]["catalog"] = None
 
-    with pytest.raises(ValueError, match="Pass catalog"):
-        find_bias_points(sweeps, amplitude_method="derivative")
+    with pytest.raises(ValueError, match="No catalog in these sweeps"):
+        find_bias_points(sweeps, save=False)
 
 
-def test_a_catalog_resonator_these_sweeps_do_not_cover_is_the_callers_mistake():
-    """The catalog and the sweeps come from one measurement, so a resonator with
-    no data means a mismatched pair of arguments — not a detector that could not
-    be biased."""
-    catalog = ResonatorCatalog(
+def test_a_catalog_resonator_these_sweeps_do_not_cover_says_so():
+    """The catalog and the sweeps come out of one file, so a resonator with no
+    data means a result that disagrees with itself — not a detector that could
+    not be biased."""
+    sweeps = a_ladder()
+    sweeps["call_params"]["catalog"] = ResonatorCatalog(
         [*a_catalog(),
          Resonator(name="R0003", channel=3,
                    bias=BiasPoint(frequency_hz=FR + 2e6, amplitude=1e-3))],
         module=2,
-    )
+    ).to_dict()
 
     with pytest.raises(KeyError, match="R0003"):
-        find_bias_points(a_ladder(), catalog)
+        find_bias_points(sweeps, save=False)
 
 
 def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
@@ -962,10 +972,15 @@ def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
         find_bias_points(sweeps)
 
 
-def test_there_is_one_finding_per_catalog_resonator_in_channel_order():
-    """Sections in the sweep that are not in the catalog are not detectors we
-    were asked to bias, so they are not reported on."""
-    report = find_bias_points(a_ladder(), a_catalog_of_one())
+def test_the_recorded_catalog_is_what_the_findings_are_counted_from():
+    """Which side drives the iteration, pinned. multisweep cannot produce a
+    sweep holding a section its catalog does not name — the sections come from
+    the catalog — so this is a doctored file, and the point of it is that the
+    catalog is what is walked and the sections are what get looked up."""
+    sweeps = a_ladder()
+    sweeps["call_params"]["catalog"] = a_catalog_of_one().to_dict()
+
+    report = find_bias_points(sweeps, save=False)
 
     assert [f.name for f in report.findings] == ["R0001"]
     with pytest.raises(KeyError):
@@ -986,7 +1001,7 @@ def a_catalog_of_one():
 def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
     catalog = a_catalog()
 
-    report = find_bias_points(a_ladder(catalog=catalog), catalog)
+    report = find_bias_points(a_ladder(catalog=catalog))
 
     assert len(report.findings) == len(catalog)
     for resonator in report.catalog:

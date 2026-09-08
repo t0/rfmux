@@ -66,7 +66,14 @@ __all__ = [
 #    to record. A one-rung schedule is the faithful record of amp=0.005; what
 #    each resonator was actually probed at is, as before, 'sweep_amplitude' on
 #    its own entry.
-RESULTS_SCHEMA_VERSION = 5
+#
+# 6: call_params always carries a catalog. A bare center_frequencies sweep used
+#    to record None there, and multisweep now generates one from the list, so a
+#    result says what array it is of whichever way it was asked for — which is
+#    what lets find_bias_points work off the sweep alone, and why this is a bump
+#    rather than a field quietly filling in: a reader that needs the catalog
+#    cannot absorb a 5 that has none.
+RESULTS_SCHEMA_VERSION = 6
 
 
 # The iteration a netanal's one trace sits at. Not a placeholder: a netanal is
@@ -89,10 +96,13 @@ def _call_params(
 
     Verbatim throughout — what was asked for, not what was worked out from it —
     including the ``None``s, which is why *requested_module* is separate from
-    the module that was actually swept.
+    the module that was actually swept. The catalog is the exception, and for
+    the same reason ``amp_schedule`` is: it is the resolved form of either way
+    of asking, so a bare ``center_frequencies`` sweep records both the list
+    that was passed *and* the catalog it became.
     """
     return {
-        "catalog": catalog.to_dict() if catalog is not None else None,
+        "catalog": catalog.to_dict(),
         "center_frequencies": (
             [float(f) for f in center_frequencies]
             if center_frequencies is not None
@@ -149,7 +159,7 @@ def pack_multisweep(
     span_hz: float,
     npoints_per_sweep: int,
     nsamps: int,
-    catalog=None,
+    catalog,
     center_frequencies: Sequence[float] | None = None,
     names: Sequence[str] | None = None,
     requested_module: int | None = None,
@@ -177,8 +187,11 @@ def pack_multisweep(
             itself for a call that fanned out over several. Recorded as-is,
             because *call_params* says what was asked for and not what was
             worked out from it.
-        catalog: the ``ResonatorCatalog`` swept, or None in frequency-list mode.
-            Snapshotted with ``to_dict`` for provenance.
+        catalog: the ``ResonatorCatalog`` swept — required, and for a
+            frequency-list sweep the one ``multisweep`` generated from the list
+            rather than None. Snapshotted with ``to_dict``, which is the whole
+            catalog and not a summary of it, so the array a sweep was taken
+            from comes back off a file intact.
 
     Returns:
         dict: ``{module_id: output}``, one module's output holding
@@ -476,8 +489,9 @@ def find_iteration_matching_amplitude(
 
     Raises:
         KeyError: if *name* was not swept.
-        ValueError: if *amplitude* is None and there is no catalog to take a
-            bias amplitude from, or if nothing was measured.
+        ValueError: if nothing was measured, or if *amplitude* is None and the
+            result records no catalog to take a bias amplitude from — which
+            only a file older than schema_version 6 does.
     """
     collected = collect_amplitude_iterations_for(results, name)
     iteration = _iteration_matching_amplitude(results, name, amplitude, collected)
@@ -523,9 +537,10 @@ def _bias_amplitude_of(results: Mapping, name: str) -> float:
     catalog = results.get("call_params", {}).get("catalog")
     if catalog is None:
         raise ValueError(
-            "No amplitude given and no catalog to take one from — this result "
-            "came from a bare center_frequencies sweep, which has no bias "
-            "amplitude. Pass amplitude= explicitly."
+            "No amplitude given and no catalog to take one from. Every "
+            "multisweep records one since schema_version 6, so this is an "
+            "older result — a bare center_frequencies sweep from back when "
+            "those had no catalog at all. Pass amplitude= explicitly."
         )
 
     # Keyed by name since catalog schema_version 2, and a list of entries each

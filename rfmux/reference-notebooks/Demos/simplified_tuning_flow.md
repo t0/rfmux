@@ -12,7 +12,7 @@ This is an end-to-end detector tuning guide using the Python API rather than
 the Periscope GUI. The first steps are for a new chip on its first cooldown.
 Once the nominal detector frequencies are known, start at section 6.
 
-Everything here is the same code path Periscope's tuning panels drive. The GUI
+Everything here is the same code path used by the Periscope GUI. Periscope
 runs these functions from `QThread` workers and draws the results; this notebook
 calls them directly and plots instead.
 
@@ -32,12 +32,11 @@ Run the cells in order; later ones use variables the earlier ones defined.
 Sections 1 and 2 are the exception: run only the one option (1A, 1B or 2)
 that fits.
 
-This format saves no outputs, so every number you see comes from your own run.
-The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
+This notebook format doesn't embed outputs like ipython noteboooks, and is shipped read-only.
+It is executable and will fill with outputs like an ipython notebook.
+To save it with those outputs, use *File → Save Notebook As*.
 
-**This notebook changes the board's state.** It sets the cable length,
-programs channels, and in section 8 steps the biased tones while measuring
-the calibration. On a shared board other users see these changes.
+**This notebook changes the board's state.** 
 
 ```python
 %matplotlib inline
@@ -88,14 +87,12 @@ Everything below needs a CRS. **Run exactly one** of the three options:
 
 ### A. Attach to the CRS Periscope is driving
 
-Use this when Periscope is driving a board, real or simulated, and you want
-that one rather than your own.
-
+Use this if you are viewing this notebook from within Periscope's embedded jupyter environment.
 Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
 the cell finds the board with no configuration from you.
 
-Attaching matters most if you have already configured Periscope in mock mode.
-A second `create_mock_crs()` gives you a *second, unrelated* simulation,
+This is most important if you are currently running Periscope in mock mode, to avoid
+generating a second `create_mock_crs()`, which would produce a *second, unrelated* simulation,
 whose detectors are not the ones Periscope is showing you.
 
 ```python
@@ -211,15 +208,14 @@ record the transmitted amplitude and phase at each frequency. Resonators appear
 as narrow dips in |S21|, each absorbing power at its resonant frequency.
 
 `take_netanal` drives up to `max_chans` tones at once and re-tunes the NCO for
-each `max_span`-wide chunk, stitching the chunks with a phase rotation computed
-from the one frequency they share. The cell below sweeps 50,000 points.
+each `max_span`-wide chunk. The cell below sweeps 50,000 points.
 
 Parameters:
 
 - **`amp`**: drive amplitude in normalized DAC units. Too high drives the
   resonators nonlinear (they bifurcate and the dip is distorted); too low
   measures the amplifier's noise. 0.001 is a starting point for a first look.
-- **`nsamps`**: samples averaged per point. Trades time for noise.
+- **`nsamps`**: samples averaged per point.
 - **`npoints`**: sweep resolution. A resonator with too few points across it
   cannot be fitted, and at high Q the linewidth is a few kHz.
 - **`max_span`**: defaults to 500 MHz, the droop-free bandwidth of one NCO
@@ -474,7 +470,7 @@ plt.tight_layout(); plt.show()
 
 ## 7. Fit the resonances
 
-Two fits, doing different jobs.
+Two fits:
 
 **The skewed Lorentzian** (`fit_skewed_multisweep`) is the standard resonator
 model with a complex coupling quality factor, which makes the dip asymmetric:
@@ -547,7 +543,8 @@ plt.tight_layout(); plt.show()
 ## 8. Bias the KIDs
 
 `bias_kids` biases each resonator: it picks an operating point and programs the
-channel frequency and amplitude (and an ADC phase, with `optimize_phase=True`).
+channel frequency and amplitude. It can also rotate the IQ basis to maximize
+the signal in Q (a proxy for the df basis), with `optimize_phase=True`.
 
 `fit_method` names the resonance fit it works from, `"nonlinear"` (default) or
 `"skewed"`, and runs it on any sweep that does not already carry it. Given
@@ -561,10 +558,10 @@ the raw sweep grid, and the tone is programmed at the nearest multiple of the
 It also returns **`df_calibration`**, a complex number in hertz per volt:
 multiply the IQ motion in volts by it to get frequency shift plus j times
 dissipation. Pulse capture uses the same number to report pulse heights in Hz.
-By default (`measure_calibration=True`) it is measured where each detector
-ends up. Every biased tone steps down, then up, together, by
-`calibration_step` (0.05) of its fitted linewidth rounded to the tone grid,
-with one read of the module at each step; this cell briefly moves the tones. The fit's own value is kept as `df_calibration_fit`, and
+By default (`measure_calibration=True`) then verifies this through direct measurement:
+every biased tone steps down, then up, together, by
+`calibration_step` (0.05) of its fitted linewidth rounded to the tone grid.
+This cell briefly moves the tones. The fit's own value is kept as `df_calibration_fit`, and
 `df_calibration_source` says which one `df_calibration` is. Pass
 `measure_calibration=False` to use the fit's.
 

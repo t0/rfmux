@@ -893,6 +893,79 @@ def report_entry(sweeps, finding, direction="upward"):
     return sweeps["results"][finding.iteration][direction][finding.name]
 
 
+# ─── the sweep the calibration was read off ───────────────────────────────────
+
+
+def test_the_bias_point_carries_the_sweep_its_calibration_came_off():
+    sweeps = a_ladder()
+    report = find_bias_points(sweeps, save=False)
+    bias = report.catalog["R0001"].bias
+    entry = report_entry(sweeps, report["R0001"])
+
+    assert bias.bias_sweep["frequencies"] is entry["frequencies"]
+    assert bias.bias_sweep["iq_volts"] is entry["iq_volts"]
+    assert bias.bias_sweep["sweep_direction"] == entry["sweep_direction"]
+    assert bias.bias_sweep["original_center_frequency"] == pytest.approx(
+        entry["original_center_frequency"]
+    )
+
+
+def test_the_calibration_can_be_re_derived_from_the_catalog_alone():
+    """The point of storing it: the same call as on the sweeps, on a catalog
+    that has been carried away from the file they live in."""
+    report = find_bias_points(a_ladder(), save=False)
+    bias = report.catalog["R0001"].bias
+
+    assert (bias.dI_df, bias.dQ_df) == pytest.approx(
+        iq_derivatives_at(bias.bias_sweep, bias.frequency_hz)
+    )
+
+
+def test_the_stored_sweep_is_the_step_that_was_chosen():
+    """One trace at one amplitude, not the ladder it was picked out of."""
+    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)), save=False)
+
+    for finding in report.findings:
+        stored = report.catalog[finding.name].bias.bias_sweep
+        assert stored["sweep_amplitude"] == pytest.approx(finding.amplitude)
+
+
+def test_the_stored_sweep_leaves_behind_what_is_recoverable_or_known():
+    """``iq_counts`` is iq_volts over a constant, and ``channel`` is the
+    resonator's own — a second copy is a second thing to keep in agreement."""
+    report = find_bias_points(a_ladder(), save=False)
+    stored = report.catalog["R0001"].bias.bias_sweep
+
+    assert set(stored) == set(BiasPoint.BIAS_SWEEP_KEYS)
+    assert "iq_counts" not in stored
+    assert "channel" not in stored
+
+
+def test_the_stored_sweep_survives_the_report_round_trip():
+    report = find_bias_points(a_ladder(), save=False)
+
+    back = BiasReport.from_dict(report.to_dict())
+    stored = back.catalog["R0001"].bias.bias_sweep
+
+    assert stored["frequencies"] == pytest.approx(
+        report.catalog["R0001"].bias.bias_sweep["frequencies"]
+    )
+    assert (back.catalog["R0001"].bias.dI_df, back.catalog["R0001"].bias.dQ_df) == (
+        pytest.approx(iq_derivatives_at(stored, back.catalog["R0001"].bias.frequency_hz))
+    )
+
+
+def test_retuning_a_biased_resonator_drops_the_sweep_with_the_calibration():
+    report = find_bias_points(a_ladder(), save=False)
+    resonator = report.catalog["R0001"]
+    assert resonator.bias.bias_sweep is not None
+
+    resonator.set_bias(amplitude=resonator.bias.amplitude * 2)
+
+    assert resonator.bias.bias_sweep is None
+    assert resonator.bias.df_calibration is None
+
+
 def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
     report = find_bias_points(a_ladder())
 

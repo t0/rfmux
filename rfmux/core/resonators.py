@@ -18,11 +18,16 @@ from outliving the tone it belongs to. A catalog checks its members as they
 join and does
 not re-check them afterwards.
 
-The catalog holds only what is small and canonical: identity, the operating
-point, and the calibrations downstream measurements need. Sweep data is *not*
-stored here. Analysis reduces a sweep to the handful of scalars that belong on
-a ``BiasPoint`` and the traces themselves stay with the caller, so the catalog
-is cheap to copy, cheap to save, and cannot disagree with itself.
+The catalog holds identity, the operating point, the calibrations downstream
+measurements need, and — for a bias point that has one — the single sweep its
+calibration was read off. The sweeps themselves are *not* stored here: analysis
+reduces a ladder of amplitudes and directions to the handful of scalars that
+belong on a ``BiasPoint``, plus the one trace behind them, and everything else
+stays with the caller. That trace is a few kB per resonator, so a catalog for a
+large array is a few MB rather than the handful of bytes it used to be. It is
+carried because a calibration you cannot re-derive or plot is a number you have
+to take on faith, and the catalog is what travels to the places the sweeps file
+does not.
 
 ``reference-notebooks/Demos/resonator_catalogs.md`` works through all of this
 against a catalog seeded from a recorded network analysis, including what the
@@ -37,8 +42,9 @@ import copy as _copy
 import csv
 import io
 import math
-from dataclasses import dataclass, field, replace, asdict
+from dataclasses import dataclass, field, fields, replace
 
+from collections.abc import Mapping
 from typing import Callable, Iterable, Iterator, Literal, Sequence
 
 from ..resonator_names import syllabic_names
@@ -75,6 +81,32 @@ class BiasPoint:
     opts out for the caller who needs the exact number they asked for — a sweep
     centre they are doing arithmetic on, say — and nothing downstream
     re-quantizes for them.
+
+    ``bias_sweep`` is the one trace ``dI_df`` and ``dQ_df`` were read off, and
+    it is a calibration field like they are: moving the tone drops it, because
+    a trace taken at another amplitude is not the trace behind this
+    calibration. It is a plain dict rather than a type of its own, holding a
+    subset of the keys ``multisweep`` puts on a sweep entry, so every reader
+    that takes an entry takes this too —
+    :func:`~rfmux.tuning.bias.iq_derivatives_at` recomputes the calibration off
+    a bias point exactly as it did off the sweeps::
+
+        {
+            "frequencies": ndarray,             # Hz
+            "iq_volts": ndarray,                # complex, at the board input
+            "original_center_frequency": float, # where the sweep was centred
+            "sweep_amplitude": float,           # what this trace was probed at
+            "sweep_direction": str,             # which direction it came from
+        }
+
+    The entry's ``iq_counts`` is deliberately not kept: nothing in the
+    calibration path reads it, and it is ``iq_volts`` divided by
+    ``transferfunctions.VOLTS_PER_ROC``, a module constant, so it is
+    recoverable. That reasoning holds only while the conversion *is* one
+    constant — if ``VOLTS_PER_ROC`` becomes per-board, per-module or
+    per-frequency, a trace stored in volts can no longer be turned back into
+    the counts that were measured, and this decision has to be made again. See
+    the note beside it in ``core/transferfunctions.py``.
     """
 
     frequency_hz: float
@@ -86,10 +118,34 @@ class BiasPoint:
     dQ_df: float | None = None
     iq_rotation_deg: float | None = None
     bifurcated_at: float | None = None  # amplitude where bifurcation first seen
+    bias_sweep: dict | None = None  # the trace dI_df/dQ_df were read off
 
     # Fields that describe *this* tone and are therefore invalidated by moving
     # it. Consumed by Resonator.set_bias.
-    _CAL_FIELDS = ("dI_df", "dQ_df", "iq_rotation_deg", "bifurcated_at")
+    _CAL_FIELDS = (
+        "dI_df",
+        "dQ_df",
+        "iq_rotation_deg",
+        "bifurcated_at",
+        "bias_sweep",
+    )
+
+    # Which keys of a multisweep entry a bias_sweep keeps, in one place, so
+    # that the writer (rfmux.tuning.bias) and the shape documented above are
+    # the same fact. Everything else on an entry is either recoverable or
+    # already known to the resonator holding this point.
+    BIAS_SWEEP_KEYS = (
+        "frequencies",
+        "iq_volts",
+        "original_center_frequency",
+        "sweep_amplitude",
+        "sweep_direction",
+    )
+
+    # The head of that tuple: the two arrays a calibration is computed from,
+    # and the only part a stored sweep has to have. The scalars after them are
+    # provenance — a missing one costs a reader context rather than an answer.
+    _SWEEP_TRACES = BIAS_SWEEP_KEYS[:2]
 
     def __post_init__(self):
         if self.amplitude <= 0:
@@ -113,6 +169,38 @@ class BiasPoint:
                     f"so the hardware has nowhere to put it."
                 )
             object.__setattr__(self, "frequency_hz", snapped)
+        if self.bias_sweep is not None:
+            self._check_sweep(self.bias_sweep)
+
+    @classmethod
+    def _check_sweep(cls, sweep):
+        """Reject a ``bias_sweep`` that cannot be read as a trace.
+
+        Shallow on purpose. It is checked at all because a bias point
+        validated at construction is meant to stay valid, and a sweep that
+        arrives with mismatched arrays would otherwise surface much later, in
+        whichever reader interpolated it.
+        """
+        if not isinstance(sweep, Mapping):
+            raise ValueError(
+                f"bias_sweep is a {type(sweep).__name__}: expected a dict of "
+                f"the keys multisweep puts on a sweep entry."
+            )
+        missing = [k for k in cls._SWEEP_TRACES if sweep.get(k) is None]
+        if missing:
+            raise ValueError(
+                f"bias_sweep is missing {', '.join(missing)}. A stored sweep "
+                f"exists to have a calibration read off it, which needs "
+                f"{' and '.join(cls._SWEEP_TRACES)}; its keys are "
+                f"{sorted(sweep)}."
+            )
+        lengths = {k: len(sweep[k]) for k in cls._SWEEP_TRACES}
+        if len(set(lengths.values())) > 1:
+            described = ", ".join(f"{n} {k}" for k, n in lengths.items())
+            raise ValueError(
+                f"bias_sweep has {described} — they describe different "
+                f"measurements."
+            )
 
     @property
     def df_calibration(self) -> complex | None:
@@ -136,6 +224,22 @@ class BiasPoint:
         alone, so an opted-out point stays opted out for its next move.
         """
         return replace(self, frequency_hz=on_grid(self.frequency_hz))
+
+
+def _bias_dict(bias: BiasPoint) -> dict:
+    """One bias point as a dict, for :meth:`ResonatorCatalog.to_dict`.
+
+    Field by field rather than ``dataclasses.asdict``, which deep-copies as it
+    recurses. Over floats that cost nothing and nobody noticed; over a
+    ``bias_sweep`` it would duplicate both arrays on every call, including the
+    ``to_dict`` every multisweep does to snapshot its catalog. The sweep is
+    copied one level, so the record is its own dict but shares the traces —
+    they are measurement data and nothing mutates them.
+    """
+    d = {f.name: getattr(bias, f.name) for f in fields(bias)}
+    if d.get("bias_sweep") is not None:
+        d["bias_sweep"] = dict(d["bias_sweep"])
+    return d
 
 
 # ─── Resonator ────────────────────────────────────────────────────────────────
@@ -233,14 +337,20 @@ class ResonatorCatalog:
     # Stamped into to_dict output and checked by from_dict, so a file written by
     # a version of this module that shaped things differently fails loudly
     # instead of being half-understood. Bump it whenever the dict shape changes.
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     # Older shapes from_dict can still read. Version 1 stored `resonators` as a
     # list of entries each carrying its own `name`; 2 keys them by name, so a
     # reader can look one up instead of scanning. That is a shape change and so
     # a version bump, but the old shape is unambiguous — no reason to strand
     # files already on disk over it.
-    READABLE_SCHEMA_VERSIONS = (1, 2)
+    #
+    # 3 added `bias_sweep` to a bias point: the trace its calibration was read
+    # off. Reading an older file back needs nothing — the field defaults to
+    # None, which is what a bias point that never had one says. The bump is for
+    # the other direction, so that a file written now fails on an older reader
+    # rather than arriving there as an unexpected keyword.
+    READABLE_SCHEMA_VERSIONS = (1, 2, 3)
 
     def __init__(
         self,
@@ -496,8 +606,9 @@ class ResonatorCatalog:
         """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;
         the GUI swaps its reference when the worker's completed signal fires.
 
-        Cheap because the catalog holds no sweep data — only scalars per
-        resonator.
+        A resonator is scalars plus, once it has been biased, the one trace its
+        calibration came off, so the copy costs a few kB per resonator rather
+        than the sweeps it was measured in.
         """
         return _copy.deepcopy(self)
 
@@ -516,7 +627,12 @@ class ResonatorCatalog:
     # -- persistence ----------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Plain builtins only — files never contain these classes.
+        """Builtins and arrays only — files never contain these classes.
+
+        Everything here is a builtin except the two arrays inside a
+        ``bias_sweep``, which stay arrays: ``store`` writes pickles of builtins
+        and ndarrays, and a trace turned into a list of Python floats on the
+        way out would be slower to read and no more portable.
 
         ``resonators`` is keyed by name, the same way the catalog itself is, so
         a reader that wants one resonator says ``d["resonators"]["BOTA"]``
@@ -535,7 +651,7 @@ class ResonatorCatalog:
             "resonators": {
                 r.name: {
                     "channel": r.channel,
-                    "bias": asdict(r.bias),
+                    "bias": _bias_dict(r.bias),
                     "notes": dict(r.notes),
                 }
                 for r in self
@@ -597,8 +713,9 @@ class ResonatorCatalog:
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
     # operating point and nothing else. `notes`,
-    # `bias_frequency_quantized` and every calibration field (and so
-    # df_calibration) are dropped — pass the separation rule to
+    # `bias_frequency_quantized` and every calibration field — `df_calibration`
+    # and `bias_sweep` with them — are dropped; a trace does not go in a cell
+    # anyway. Pass the separation rule to
     # `from_csv` if the table needs it, and note that a row read back comes in
     # quantized whether or not it was written that way. Use to_dict for a
     # faithful round-trip.

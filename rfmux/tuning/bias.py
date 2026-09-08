@@ -90,6 +90,13 @@ frequency does, and the derivatives are evaluated *there* rather than at the
 un-quantized peak — the calibration then belongs to the tone that will actually
 be played.
 
+The sweep they were read off goes onto the bias point with them, as
+``bias_sweep`` — the one trace at the chosen amplitude and direction, not the
+ladder around it. It is there so a calibration can be re-derived, checked or
+plotted from the catalog alone, which is what gets carried to the places these
+sweeps do not reach. It is a calibration field like the derivatives are, so
+moving the tone drops it too.
+
 ``iq_rotation_deg`` is deliberately left unset. It comes off a timestream
 rather than a sweep, so it is not this module's to measure, and a rotation
 angle measured at the previous tone would not survive the move anyway.
@@ -688,9 +695,15 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
     dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
 
     # Frequency and calibration go on together — BiasPoint is frozen so that a
-    # tone can never carry a calibration measured somewhere else.
+    # tone can never carry a calibration measured somewhere else. The trace the
+    # derivatives came off goes on with them, so a catalog carried away from
+    # this file can still show its own calibration's working.
     resonator.bias = replace(
-        bias, dI_df=dI_df, dQ_df=dQ_df, bifurcated_at=choice.bifurcated_at
+        bias,
+        dI_df=dI_df,
+        dQ_df=dQ_df,
+        bifurcated_at=choice.bifurcated_at,
+        bias_sweep=_stored_sweep(entry),
     )
 
     # 7. Finally, is this an operating point we actually established, or a
@@ -1570,6 +1583,32 @@ def iq_derivatives_at(entry: Mapping, frequency_hz: float) -> tuple[float, float
     frequencies, iq = _sorted_trace(entry, "iq_volts")
     dI_df, dQ_df = iq_derivative_splines(frequencies, iq)
     return float(dI_df(frequency_hz)), float(dQ_df(frequency_hz))
+
+
+def _stored_sweep(entry: Mapping) -> dict:
+    """What of one sweep entry goes onto the bias point it calibrated.
+
+    The pair to :func:`iq_derivatives_at`: that one reads a calibration off an
+    entry, this one keeps the part of the entry the calibration was read from,
+    so a catalog can show its own working somewhere the sweeps file is not.
+
+    A subset of the entry's own keys, under their own names, so what comes back
+    is still a sweep entry as far as every reader here is concerned —
+    ``iq_derivatives_at(resonator.bias.bias_sweep, f)`` is the same call as on
+    the sweeps. What it leaves behind is the ladder this trace was one rung of,
+    ``iq_counts`` (see :class:`~rfmux.core.resonators.BiasPoint`), and
+    ``channel``, which the resonator already carries and should not be able to
+    disagree with.
+
+    The arrays are referenced, not copied. They are measurement data that
+    nothing mutates, and the sweeps dict outlives this call in the caller's
+    hands anyway. It also keeps the report cheap where it is written: pickle
+    memoizes a shared array, so the ``bias_report`` that goes back into the
+    sweeps file costs its scalars and not a second copy of every trace. The
+    duplication only appears once the catalog is saved *away* from these
+    sweeps, which is the case the stored sweep exists for.
+    """
+    return {k: entry[k] for k in BiasPoint.BIAS_SWEEP_KEYS if k in entry}
 
 
 # ─── Reading the sweeps ───────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ The point of these types is that certain states are unrepresentable, so this
 asserts the invariants rather than the arithmetic.
 """
 
+from array import array
 from functools import partial
 
 import pytest
@@ -36,6 +37,24 @@ def a_catalog(freqs=(1.01e9, 1.03e9, 1.05e9), amplitude=0.01, **kwargs) -> Reson
 
 def a_resonator(name="R0001", channel=1, frequency_hz=1.01e9, amplitude=0.01) -> Resonator:
     return Resonator(name, channel=channel, bias=BiasPoint(frequency_hz, amplitude))
+
+
+def a_sweep(npoints=4, **kwargs):
+    """A stored bias sweep, as ``find_bias_points`` puts one on a bias point.
+
+    Lists rather than arrays, deliberately: the model stores whatever the
+    measurement handed it and asserts nothing about the type, so a test of the
+    model needs no numpy either. The real ones arrive as ndarrays — see
+    ``test/tuning/test_bias.py``.
+    """
+    return {
+        "frequencies": [1.01e9 + i for i in range(npoints)],
+        "iq_volts": [complex(i, -i) for i in range(npoints)],
+        "original_center_frequency": 1.01e9,
+        "sweep_amplitude": 0.01,
+        "sweep_direction": "upward",
+        **kwargs,
+    }
 
 
 # ─── the data model imports clean ─────────────────────────────────────────────
@@ -243,6 +262,51 @@ def test_amending_only_calibration_leaves_the_tone_alone():
     assert r.bias.frequency_hz == parked_at
     assert r.bias.amplitude == 0.01
     assert r.bias.df_calibration is not None
+
+
+def test_moving_the_tone_drops_the_stored_sweep_with_the_rest():
+    """A trace taken at the old amplitude is not the working behind a
+    calibration measured at the new one, so it goes when they go."""
+    r = a_resonator()
+    r.set_bias(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
+    r.set_bias(amplitude=0.02)
+    assert r.bias.bias_sweep is None
+
+
+# ─── a stored bias sweep ──────────────────────────────────────────────────────
+
+
+def test_a_bias_point_carries_no_sweep_until_one_is_measured():
+    assert a_resonator().bias.bias_sweep is None
+
+
+def test_a_sweep_without_the_traces_a_calibration_needs_is_refused():
+    sweep = a_sweep()
+    del sweep["iq_volts"]
+    with pytest.raises(ValueError, match="missing iq_volts"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=sweep)
+
+
+def test_a_sweep_whose_traces_disagree_in_length_is_refused():
+    """Caught here rather than in whichever reader interpolated it later."""
+    sweep = a_sweep()
+    sweep["frequencies"] = sweep["frequencies"][:-1]
+    with pytest.raises(ValueError, match="describe different measurements"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=sweep)
+
+
+def test_a_sweep_that_is_not_a_mapping_at_all_is_refused():
+    with pytest.raises(ValueError, match="expected a dict"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=[1, 2, 3])
+
+
+def test_the_stored_sweep_is_whatever_the_measurement_put_there():
+    """The model does not curate it — the keys it keeps are chosen by
+    ``rfmux.tuning.bias``, and extra ones ride along rather than being
+    stripped by a second opinion here."""
+    bias = BiasPoint(1.01e9, 0.01, bias_sweep=a_sweep(fitted="anything"))
+    assert bias.bias_sweep["fitted"] == "anything"
+    assert bias.bias_sweep["sweep_direction"] == "upward"
 
 
 # ─── ResonatorCatalog invariants ──────────────────────────────────────────────
@@ -706,20 +770,65 @@ def test_from_dict_quantizes_files_written_before_the_flag_existed():
     assert ResonatorCatalog.from_dict(d)["R0001"].bias.bias_frequency_quantized is True
 
 
-def test_to_dict_holds_only_builtins():
+def test_dict_round_trip_carries_the_stored_sweep():
     m = a_catalog()
-    m["R0001"].set_bias(dI_df=1e-9)
-    allowed = (str, int, float, bool, type(None), dict, list)
+    sweep = a_sweep()
+    m["R0001"].set_bias(dI_df=1e-9, dQ_df=-2e-9, bias_sweep=sweep)
+
+    back = ResonatorCatalog.from_dict(m.to_dict())
+
+    assert back["R0001"].bias.bias_sweep == sweep
+    assert back["R0002"].bias.bias_sweep is None
+
+
+def test_to_dict_copies_the_sweep_dict_but_not_the_traces():
+    """One level, and for two different reasons. The record must be its own
+    dict, or writing into it would reach back into the catalog; the traces are
+    measurement data nothing mutates, and copying them on every to_dict — a
+    multisweep does one to snapshot its catalog — would be paid for nothing."""
+    m = a_catalog()
+    sweep = a_sweep()
+    m["R0001"].set_bias(bias_sweep=sweep)
+
+    d = m.to_dict()
+    d["resonators"]["R0001"]["bias"]["bias_sweep"]["injected"] = True
+
+    assert "injected" not in m["R0001"].bias.bias_sweep
+    assert (
+        d["resonators"]["R0001"]["bias"]["bias_sweep"]["frequencies"]
+        is sweep["frequencies"]
+    )
+
+
+def test_to_dict_holds_only_builtins_and_the_stored_traces():
+    """Traces are the one exception, and only inside a ``bias_sweep``.
+
+    They come off a measurement as arrays and stay arrays — ``store`` pickles
+    builtins and ndarrays both. Everywhere else a non-builtin would mean a file
+    that needs this module back to be read, which is what the rule is for.
+    ``array.array`` stands in for the ndarray a real sweep carries, since
+    nothing in the model cares which it is.
+    """
+    m = a_catalog()
+    m["R0001"].set_bias(
+        dI_df=1e-9,
+        bias_sweep=a_sweep(
+            npoints=2, frequencies=array("d", [1.01e9, 1.01e9 + 1])
+        ),
+    )
+    allowed = (str, int, float, bool, complex, type(None), dict, list)
     d = m.to_dict()
 
-    def walk(o, path="root"):
+    def walk(o, path="root", in_sweep=False):
+        if in_sweep and isinstance(o, array):
+            return
         assert isinstance(o, allowed), f"{path}: {type(o).__name__} is not a builtin"
         if isinstance(o, dict):
             for k, v in o.items():
-                walk(v, f"{path}.{k}")
+                walk(v, f"{path}.{k}", in_sweep or k == "bias_sweep")
         elif isinstance(o, list):
             for i, v in enumerate(o):
-                walk(v, f"{path}[{i}]")
+                walk(v, f"{path}[{i}]", in_sweep)
 
     walk(d)
 
@@ -729,6 +838,21 @@ def test_to_dict_notes_are_copied_not_aliased():
     d = m.to_dict()
     d["resonators"]["R0001"]["notes"]["injected"] = True
     assert m["R0001"].notes == {}
+
+
+def test_from_dict_reads_a_file_written_before_sweeps_were_stored():
+    """Schema 2 and 3 differ by one field with a default, so a file from before
+    it existed reads back as the bias points it holds: calibrated, with no
+    trace behind them, which is exactly what it was."""
+    d = a_catalog().to_dict()
+    d["schema_version"] = 2
+    for rd in d["resonators"].values():
+        del rd["bias"]["bias_sweep"]
+
+    back = ResonatorCatalog.from_dict(d)
+
+    assert back["R0001"].bias.bias_sweep is None
+    assert back.names() == a_catalog().names()
 
 
 def test_from_dict_rejects_unknown_schema_version():
@@ -874,10 +998,11 @@ def test_csv_bad_number_reports_the_line():
 def test_csv_is_lossy_by_design():
     """Calibration and notes do not survive; to_dict is the faithful path."""
     m = a_catalog()
-    m["R0001"].set_bias(dI_df=1e-9, dQ_df=2e-9)
+    m["R0001"].set_bias(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
     m["R0001"].notes["x"] = 1
     back = ResonatorCatalog.from_csv(m.to_csv(), module=2)
     assert back["R0001"].bias.df_calibration is None
+    assert back["R0001"].bias.bias_sweep is None
     assert back["R0001"].notes == {}
 
 

@@ -13,6 +13,13 @@ from scipy import interpolate
 
 
 # TODO: Empirical value (should probably be a hybrid)
+#
+# Being one constant is load-bearing for more than arithmetic.
+# `resonators.BiasPoint.bias_sweep` stores a sweep in volts and drops the counts
+# it was measured in, on the grounds that counts are recoverable by dividing by
+# this. The day this stops being a single number — per board, per module, per
+# frequency, or anything fitted — that stops being true for a catalog already
+# written, and what a bias sweep stores has to be reconsidered.
 VOLTS_PER_ROC = (
     (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
 )

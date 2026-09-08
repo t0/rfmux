@@ -5,7 +5,7 @@ streams, record each pulse to HDF5 with its summary statistics, and show
 them as they arrive. It runs in Periscope, from a script, and against the
 simulated board in mock-mode.
 
-This guide shows what the feature does and how to drive it from Periscope.
+This guide shows what the feature does and how to use it from the Periscope GUI.
 For the headless version, with every step as a runnable cell, open the
 [Pulse Capture notebook](../../rfmux/reference-notebooks/Demos/pulse_capture.md).
 
@@ -23,12 +23,12 @@ closed there and flagged `truncated`. Two pulses that
 overlap are split when the signal rises sharply again on the tail of the
 first, and both fragments are flagged `pileup`. The figure above is pulled
 from the output from a mock-mode run. All of the annotated metadata for the pulse
-also exist within the HDF5.
+also exist within the saved HDF5 output.
 
-Each pulse also carries its signal-to-noise, peak amplitude, duration, derived
+Each pulse also carries its signal-to-noise, peak amplitudes, duration, derived
 decay constant and trigger time in UTC, decoded from the packet timestamps.
-The file is written as the capture runs, so an interrupted run keeps what it
-saw.
+The file is written as the capture runs, so it can be run indefinitely without
+RAM constraints, and will be preserved if the capture is interrupted.
 
 ## Capture in Periscope
 
@@ -43,44 +43,44 @@ saw.
 
 2. Press **Pulse Capture** in the main toolbar. The panel docks in the
    window.
-3. Set **Mode** (slow, fast or both), **Channels** (`1,2`, `2-19`, or `all`
+3. Set **Mode** (slow, fast, or both), **Channels** (`1,2`, `2-19`, or `all`
    for every biased channel) and **Module**.
-4. Set **Thresh σ** and **End σ**. **Settings…** holds the rest; see
+4. Set **Thresh σ** and **End σ**.
+5. **Settings** holds the rest of the individual settings; see
    [Configuring the pulse capture engine](#configuring-the-pulse-capture-engine).
-5. For fast or both mode, press **Streamer…** and put the PFB streamer on
-   the channels you will capture; see
+6. To configure the data-stream used for the capture, press **Streamer**,
+   which provides access to the PFB and decimated streamer settings; see
    [Selecting the stream](#selecting-the-stream).
-6. Choose the output file with **…**, then press **▶ Start**.
+7. Choose the output file with **…**, then press **▶ Start** to run.
 
 The left pane lists every pulse with its length, signal-to-noise and trigger
-time. **Pulse View** stacks the two axes against a common time axis with
-marks for the trigger, the drop below threshold and the settled point that
-ends the record. Left and Right move through the pulses, Home and End jump
-to the first and
+time. **Pulse View** shows whatever displayed unit, (I,Q) or (df,diss), against
+a common time axis with vertical annotations for each of the pulse detection
+parameters (trigger; drop below threshold; settled point). 
+Left and Right move through the pulses, Home and End jump to the first and
 last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
 **Units** switches the pulse view, histograms and templates between counts,
-volts and df in hertz. Hertz needs a calibrated channel (below). In both
-mode the pair view shows each stream in the units it was stored in.
+volts and df in hertz. df units require a df calibration (below).
 
 ## Selecting the stream
 
 ![Streamer Configuration dialog](images/streamer-configuration-dialog.png)
 
-The capture reads whatever the board streams. **Mode** on the panel picks
-the stream: `slow` for the readout stream, `fast` for the PFB stream, `both`
-for a dual-stream capture (see
+**Mode** on the panel picks which data-stream the pulse detection uses:
+`slow` for the ordinary decimated readout stream, `fast` for the raw PFB stream,
+and `both` for a dual-stream capture (see
 [Fast and dual-stream captures](#fast-and-dual-stream-captures)).
-**Streamer…** opens the Streamer Configuration dialog, the same one the
-main window uses. **OK** applies it to the board at once.
+**Streamer** opens the Streamer Configuration dialog, the same one that is
+accessible via the main window. **OK** applies it to the board at once.
 
 - **Current stream** is what the board streams now, read when the dialog
   opens.
 - **Decimation stage** sets the slow sample rate (table below). Aim for ten
   or more samples across one decay constant of your pulses.
 - **Packet format**: short packets carry 128 channels per module, long
-  packets 1024. Below stage 3 only short packets fit the link, and the box
+  packets 1024. Below stage 3 only short packets fit the 1GbE link, and the box
   is locked on.
 - **Modules** lists the modules the slow stream carries, as `1,2` or `1-4`.
 - **Enable fast (PFB) streamer** turns the 2.44 MHz stream on for up to
@@ -94,17 +94,11 @@ main window uses. **OK** applies it to the board at once.
 The rows below the settings report what they give: the slow sample rate and
 its Nyquist frequency, the channels per module, and the link budget in Mbps
 against the 1 GbE port. The banner lists anything wrong. An error disables
-**OK**: long packets below stage 3, more than four PFB channels, or a
-budget over 1000 Mbps. A warning, such as a budget over 800 Mbps, leaves it
-enabled.
+**OK**. Examples of invalid configurations are: long packets below stage 3, 
+more than four PFB channels, or a total bandwidth over 1000 Mbps.
 
-The capture never changes the streamer. A fast capture needs every
-channel it captures among the PFB channels, on the module it captures; if
-they do not match, the panel says so and stops. A both capture takes every
-channel on the slow stream and fast data for the ones the PFB streamer
-carries, so `all` over a hundred channels with four streamed works: the
-status line names the four, the rest capture slow only, and their pulses
-come out as slow-only pairs. If none of the captured channels is streamed,
+In dual capture mode it is permitted for only a subset of channels to have 
+the fast PFB data, but if none of the captured channels are being streamed,
 the capture stops.
 
 ## Configuring the pulse capture engine
@@ -112,16 +106,13 @@ the capture stops.
 ![Pulse Capture Settings dialog with the Advanced group open](images/pulse-capture-settings-dialog.png)
 
 **Thresh σ** (5.0), **End σ** (1.5) and **Pileup** (on) sit on the panel's
-toolbar. **Settings…** opens the Pulse Capture Settings dialog with the
-rest. Both edit one configuration: **OK** applies the dialog and the
-toolbar follows.
+toolbar. The **Settings** dialog includes:
 
 - **Stream** is the stream and sample rate the capture will read. The
   derived values below are computed for it.
 - **Threshold σ** is how significant an event must be. Both trigger tests
-  use it: a sample must leave the baseline by this many σ, and the signal
-  must have risen by this many jump-σ within the edge lookback. The second
-  test is a difference of raw samples, so baseline drift cannot fake it.
+  use it: a sample must leave the baseline by this many σ within a narrow window.
+  The second test is a difference of raw samples, so baseline drift cannot fake it.
 - **Max pulse (ms)** (250) is the longest pulse you expect. It sizes the
   pulse-scale quantities: the ring buffer at 1.5 times it, the hard stop at
   1.2, and the edge lookback. Estimate it generously. A pulse that outlasts
@@ -137,10 +128,9 @@ toolbar follows.
 - **Trigger confirmation (samples)**: consecutive samples that must clear
   the threshold. `auto` picks the fewest that keep accidental triggers
   under one per minute per channel at this rate: 1 at 596 Hz, 2 on the PFB
-  stream.
-- **End σ**: a capture ends once both axes are back inside this band, of
-  the baseline or of the level the pulse rose from. It must sit below
-  **Threshold σ**.
+  stream (based on an assumption of white noise).
+- **End σ**: a capture ends once both axes are back inside this band.
+  It must sit below **Threshold σ**.
 - **End confirmation floor (samples)** (10): the fewest in-band samples
   that confirm the end. For long pulses the count grows to **Margin
   fraction** of the time above threshold. It counts down while the signal
@@ -160,18 +150,11 @@ toolbar follows.
 - **Trigger basis**: `df/dissipation (rotated)` triggers in the frequency
   basis on every channel with a df calibration; a channel without one
   triggers on I and Q. `I/Q (quadratures)` triggers on the raw quadratures
-  everywhere.
+  everywhere. A trigger in the df basis is likely to be more sensitive than
+  a trigger in an arbitrary (un-rotated) (I,Q) basis.
 
-**Time scales** and **Threshold σ sets** show what the settings give at
-this rate. The first lists the ring buffer in samples and megabytes, the
-hard stop and the edge lookback from the max pulse; the noise training and
-baseline spans from the 1/f window, floored against the ring; the end
-floor in samples; and the min pulse when one is set. The second lists the confirmation
-length with its accidental rate and the edge test's amplitude floor. The
-banner below lists anything wrong.
-An **End σ** at or above **Threshold σ** is an error and disables **OK**. A
-threshold under 3σ, or a min pulse under two samples at this rate, is a
-warning.
+A text box below dervies the relevant timescales and expectations for the selected
+parameters.
 
 ## Histograms and templates
 
@@ -182,7 +165,8 @@ and decay constant over every pulse, live, with ranges that expand as pulses
 arrive. Peak amplitude is one histogram per stored axis on shared bins,
 overlaid in the channel colour: frequency filled and dissipation hatched
 once a channel is calibrated, I and Q otherwise, with a key naming the two.
-The units selector rescales them; it does not re-project them. The **Template** tab stacks the pulses trigger-aligned and shows the
+
+The **Template** tab stacks the pulses trigger-aligned and shows the
 mean with its residual scatter. In both mode each tab has its own stream
 selector, slow or fast.
 
@@ -197,7 +181,8 @@ Captures written into the session folder appear in the **Session Browser**
 under the Pulse Capture filter. Double-click one to open it in review mode:
 the capture parameters load into locked controls, and the pulse list,
 histograms and templates come from the file. A capture still running opens
-its live panel instead.
+its live panel instead. Note -- it can take some time to load a large .hdf5
+record and re-generate the template and histograms.
 
 ## Fast and dual-stream captures
 
@@ -209,11 +194,11 @@ pulses between them into pairs: the slow stream gives a long clean baseline,
 the fast stream resolves the rise. The pair view draws the fast trace over
 the slow one with the pair's trigger offset.
 
-A fast capture is a lot of data, so the status line turns amber and then
-red as the fast stream falls behind, with the cause and the remedy in its
-tooltip.
-Raise `net.core.rmem_max` before a long fast capture; the
-[Networking Guide](networking.md) has the numbers.
+A fast capture is a lot of data does require a performant system to keep up
+with the full 1 GbE link. The status line turns amber and then
+red if the processing falls behind, with the cause and the remedy in its
+tooltip. Raise `net.core.rmem_max` before a long fast capture (see
+[Networking Guide](networking.md)).
 
 ## Trigger in the frequency basis
 
@@ -249,7 +234,7 @@ Everything else, from configuring the streamers and choosing thresholds to
 live sessions, fast and dual captures, reading a file back and calibrated
 amplitudes, is in the
 [Pulse Capture notebook](../../rfmux/reference-notebooks/Demos/pulse_capture.md),
-section by section, against a board or the simulator. Open it from the
+section by section, against a board or the mock mode simulator. Open it from the
 Jupyter panel Periscope launches, or in JupyterLab with Open With → Notebook.
 [`pulse_capture_flow.py`](../../rfmux/reference-notebooks/Demos/pulse_capture_flow.py)
 beside it runs the same sequence unattended.

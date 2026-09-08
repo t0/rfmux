@@ -245,9 +245,11 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.pulse_derived_label = QtWidgets.QLabel()
         self.pulse_derived_label.setWordWrap(True)
         self.pulse_derived_label.setToolTip(
-            "Everything with units of time derives from the max pulse "
-            "length, so one setting works at any stream rate.")
-        form.addRow("Max pulse sets:", self.pulse_derived_label)
+            "The ring buffer, hard stop and edge lookback follow the max "
+            "pulse; the training record and the baseline median follow "
+            "the 1/f window, floored against the ring so the median never "
+            "runs in a span a pulse could dominate.")
+        form.addRow("Time scales:", self.pulse_derived_label)
 
         self.sigma_derived_label = QtWidgets.QLabel()
         self.sigma_derived_label.setWordWrap(True)

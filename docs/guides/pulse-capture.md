@@ -162,10 +162,11 @@ toolbar follows.
   triggers on I and Q. `I/Q (quadratures)` triggers on the raw quadratures
   everywhere.
 
-**Max pulse sets** and **Threshold σ sets** show what the settings give at
+**Time scales** and **Threshold σ sets** show what the settings give at
 this rate. The first lists the ring buffer in samples and megabytes, the
-hard stop, the noise training and baseline spans, the edge lookback, the
-end floor in samples, and the min pulse when one is set. The second lists the confirmation
+hard stop and the edge lookback from the max pulse; the noise training and
+baseline spans from the 1/f window, floored against the ring; the end
+floor in samples; and the min pulse when one is set. The second lists the confirmation
 length with its accidental rate and the edge test's amplitude floor. The
 banner below lists anything wrong.
 An **End σ** at or above **Threshold σ** is an error and disables **OK**. A
@@ -178,9 +179,10 @@ warning.
 
 The **Histograms** tab accumulates signal-to-noise, peak amplitude, duration
 and decay constant over every pulse, live, with ranges that expand as pulses
-arrive. Peak amplitude is one histogram per stored axis, overlaid: frequency
-filled and dissipation outlined once a channel is calibrated, I and Q
-otherwise. The units selector rescales them; it does not re-project them. The **Template** tab stacks the pulses trigger-aligned and shows the
+arrive. Peak amplitude is one histogram per stored axis on shared bins,
+overlaid in the channel colour: frequency filled and dissipation hatched
+once a channel is calibrated, I and Q otherwise, with a key naming the two.
+The units selector rescales them; it does not re-project them. The **Template** tab stacks the pulses trigger-aligned and shows the
 mean with its residual scatter. In both mode each tab has its own stream
 selector, slow or fast.
 

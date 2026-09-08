@@ -2690,6 +2690,22 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             sources = (("amplitude_i", 0), ("amplitude_q", 1)) if scalable \
                 else ((metric, 0),)
             n_named = len(series) * len(sources)
+            if scalable and item.legend is not None:
+                # A fixed key for the two axes, kept whatever the channel
+                # count: the per-channel names drop out past
+                # MAX_LISTED_CHANNELS, the key does not.
+                item.legend.clear()
+                basis, _units = self._stored_state(self._label_channel())
+                grey = "#8A8A8A"
+                for axis, style, word in (
+                        (0, QtCore.Qt.BrushStyle.SolidPattern, "filled"),
+                        (1, QtCore.Qt.BrushStyle.BDiagPattern, "hatched")):
+                    key = pg.PlotDataItem(
+                        [], [], fillLevel=0,
+                        brush=QtGui.QBrush(QtGui.QColor(grey), style),
+                        pen=pg.mkPen(grey, width=1.2))
+                    item.legend.addItem(
+                        key, f"{_AXIS_NAMES[basis][axis]}: {word}")
 
             occupied_lo = occupied_hi = None
             for source, axis in sources:

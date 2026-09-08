@@ -198,6 +198,21 @@ def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
     assert m.pg.mkBrush(q.opts["fillBrush"]).style() == QtCore.Qt.BrushStyle.BDiagPattern
     i = curves[[i for i, n in enumerate(names) if " I (" in n][0]]
     assert m.pg.mkBrush(i.opts["fillBrush"]).style() == QtCore.Qt.BrushStyle.SolidPattern
+    # The key naming the two axes leads the legend, and stays when the
+    # per-channel names drop out past the listed-channel limit.
+    legend = panel.hist_plots["amplitude"].getPlotItem().legend
+    labels = [lbl.text for _s, lbl in legend.items]
+    assert labels[:2] == ["I: filled", "Q: hatched"]
+    many = {}
+    for ch in range(1, m.MAX_LISTED_CHANNELS + 3):
+        many[f"amplitude_i_counts_ch{ch}"] = np.array([1.0, 2.0])
+        many[f"amplitude_q_counts_ch{ch}"] = np.array([3.0, 0.0])
+    panel._counts = {ch: 3 for ch in range(1, m.MAX_LISTED_CHANNELS + 3)}
+    panel._hist_data = {"amplitude_i_edges": np.array([0.0, 1e-5, 2e-5]),
+                        "amplitude_q_edges": np.array([0.0, 1e-5, 2e-5]), **many}
+    panel._render_histograms()
+    labels = [lbl.text for _s, lbl in legend.items]
+    assert labels == ["I: filled", "Q: hatched"]
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):

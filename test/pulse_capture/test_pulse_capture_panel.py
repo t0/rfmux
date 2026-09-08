@@ -1282,7 +1282,9 @@ def test_histogram_legend_does_not_grow_without_bound(qt_app):
     panel._render_histograms()
 
     for metric in ("snr", "amplitude", "duration_ms", "tau_ms"):
-        assert _legend_rows(panel.hist_plots[metric]) == 0, \
+        # The amplitude plot keeps only its two-row axis key.
+        rows = 2 if metric == "amplitude" else 0
+        assert _legend_rows(panel.hist_plots[metric]) == rows, \
             f"{metric} legend has a row per channel"
         title = panel.hist_plots[metric].getPlotItem().titleLabel.text
         assert "128 ch" in title, f"{metric} title should say how many"

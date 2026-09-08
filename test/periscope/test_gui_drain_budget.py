@@ -7,11 +7,11 @@ unbounded loop then never returned to the Qt event loop -- a frozen
 window rather than dropped packets.
 """
 
-import os
 import threading
 import time
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -27,6 +27,13 @@ REFRESH_MS = 33
 DEADLINE_S = 0.25
 
 
+def _batch(n):
+    """What pop_readout_batch hands back for n packets: (samples,
+    seconds, recent, fir_stage, seq, year, yday)."""
+    return (np.zeros((n, 1), dtype=complex), np.zeros(n),
+            np.zeros(n, dtype=bool), np.zeros(n, dtype=int),
+            np.arange(n), 0, 0)
+
 
 class _NeverEmptyQueue:
     """A stream arriving faster than the GUI can process it."""
@@ -34,37 +41,29 @@ class _NeverEmptyQueue:
     def __init__(self):
         self.pops = 0
 
-    def empty(self):
-        return False
-
-    def try_pop(self):
+    def pop_readout_batch(self, max_packets):
         self.pops += 1
-        return SimpleNamespace(to_python=lambda: SimpleNamespace())
+        return _batch(max_packets)
 
 
 class _FiniteQueue:
     def __init__(self, n):
         self.remaining = n
 
-    def empty(self):
-        return self.remaining <= 0
-
-    def try_pop(self):
+    def pop_readout_batch(self, max_packets):
         if self.remaining <= 0:
             return None
-        self.remaining -= 1
-        return SimpleNamespace(to_python=lambda: SimpleNamespace())
+        n = min(self.remaining, max_packets)
+        self.remaining -= n
+        return _batch(n)
 
 
-def _runtime(qt_app, queue, per_packet_s=0.0):
+def _runtime(qt_app, queue, per_batch_s=0.0):
     p = Periscope.__new__(Periscope)
     QtWidgets.QMainWindow.__init__(p)
     p.refresh_ms = REFRESH_MS
     p.drain_overruns = 0
-    p.pkt_cnt = 0
-    p.is_mock_mode = False
     p.receiver = SimpleNamespace(queue=queue)
-    p._calculate_relative_timestamp = lambda pkt: 0.0
     p.processed = 0
     # The drain flushes the display batch on its way out.
     p._display_values = []
@@ -75,12 +74,12 @@ def _runtime(qt_app, queue, per_packet_s=0.0):
     p.buf = {}
     p.tbuf = {}
 
-    def _update_buffers(pkt, t_rel):
-        p.processed += 1
-        if per_packet_s:
-            time.sleep(per_packet_s)
+    def _ingest_batch(samples, *rest):
+        p.processed += samples.shape[0]
+        if per_batch_s:
+            time.sleep(per_batch_s)
 
-    p._update_buffers = _update_buffers
+    p._ingest_batch = _ingest_batch
     return p
 
 
@@ -100,11 +99,11 @@ def _drain(p, timeout=5.0):
 
 
 def test_drain_returns_under_sustained_overload(qt_app):
-    # 1 ms/packet against a queue that never empties: the unbounded loop
+    # 1 ms/batch against a queue that never empties: the unbounded loop
     # ran forever here.  Driven from a worker thread with a join
     # timeout so a regression fails the test instead of hanging the
     # whole suite.
-    p = _runtime(qt_app, _NeverEmptyQueue(), per_packet_s=0.001)
+    p = _runtime(qt_app, _NeverEmptyQueue(), per_batch_s=0.001)
 
     elapsed = _drain(p)
 
@@ -119,7 +118,7 @@ def test_backstop_is_not_a_throughput_budget(qt_app):
     # A frame's worth of packets must never be cut short.  At stage 0
     # that is ~1270 packets per 33 ms frame; the drain has to swallow
     # them without tripping the backstop.
-    p = _runtime(qt_app, _FiniteQueue(1270), per_packet_s=0.0)
+    p = _runtime(qt_app, _FiniteQueue(1270))
     _drain(p)
     assert p.processed == 1270
     assert p.drain_overruns == 0, \
@@ -128,11 +127,11 @@ def test_backstop_is_not_a_throughput_budget(qt_app):
 
 def test_drain_makes_progress_across_frames(qt_app):
     q = _NeverEmptyQueue()
-    p = _runtime(qt_app, q, per_packet_s=0.001)
+    p = _runtime(qt_app, q, per_batch_s=0.001)
     for _ in range(3):
         _drain(p)
     assert p.drain_overruns == 3
-    assert p.processed >= 3
+    assert q.pops >= 3, "each frame should ingest at least one batch"
 
 
 def test_normal_load_drains_fully_without_overrun(qt_app):

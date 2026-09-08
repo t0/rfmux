@@ -15,7 +15,7 @@ import asyncio
 import numpy as np
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import convert_roc_to_volts
+from ...core.transferfunctions import CREST_FACTOR, convert_roc_to_volts
 from ...tuning import store
 from ...tuning.sweep_results import merge_modules, pack_netanal
 
@@ -190,13 +190,15 @@ async def take_netanal(
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
 
-    # Warn if total amplitude might exceed rule-of-thumb DAC headroom.
-    if max_chans * amp > 3.5:
-        warn_msg = (
-            f"Total amplitude sum {max_chans * amp:.3f} exceeds crest-factor limit (3.5). "
-            "Results may be noisy due to possible DAC clipping."
-        )
-        warnings.warn(warn_msg)
+    # The comb's peak against DAC full scale (1.0): with random phases
+    # the rms is amp * sqrt(N / 2) and the peak about CREST_FACTOR times
+    # that; the coherent sum N * amp bounds it for a few tones.
+    peak = min(max_chans * amp, CREST_FACTOR * amp * np.sqrt(max_chans / 2))
+    if peak > 1.0:
+        warnings.warn(
+            f"{max_chans} tones at {amp:g} reach an estimated {peak:.2f} of DAC "
+            f"full scale (crest factor {CREST_FACTOR}); results may be noisy "
+            "from clipping.")
     
     # Check actual available channels by doing a simple get_samples
     test_samples = await crs.get_samples(1, average=True, channel=None, module=module)

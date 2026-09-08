@@ -10,7 +10,11 @@ from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
 import numpy as np
-from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+from typing import Optional
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    apply_iq_conversion,
+)
 from ... import streamer as _streamer
 from ...pulse_capture.sources import (
     columns_for_width,
@@ -44,10 +48,12 @@ class PeriscopeRuntime:
         if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
             df_cal = self.df_calibrations[self.module].get(ch_val)
             if df_cal is not None:
-                # Apply df calibration
-                iq_volts = convert_roc_to_volts(rawI) + 1j * convert_roc_to_volts(rawQ)
-                df_complex = iq_volts * df_cal
-                return df_complex.real, df_complex.imag  # Frequency shift (Hz), Dissipation (unitless)
+                # (I + jQ) * calibration, the rotation convert_iq_to_df
+                # defines; apply_iq_conversion is the one implementation
+                # the display and pulse capture share.
+                return apply_iq_conversion(
+                    convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ),
+                    df_cal)
             else:
                 # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
@@ -78,11 +84,14 @@ class PeriscopeRuntime:
         # ring buffers in one go.  See _flush_display_batch.
         self._display_values: list = []
         self._display_times: list = []
+        self._display_rows = 0
         self._display_width: int = -1
 
         # Pulse capture tap callback (registered by PulseCapturePanel)
         if not hasattr(self, '_pulse_tap'):
             self._pulse_tap = None
+            self._pulse_tap_day_key = None
+            self._pulse_tap_day = None
         if not hasattr(self, '_pulse_tap_channels'):
             self._pulse_tap_channels = None
         if not hasattr(self, '_pulse_tap_cache'):
@@ -100,17 +109,15 @@ class PeriscopeRuntime:
                            on_frame_end=None):
         """Register a callback to receive slow stream samples for pulse capture.
 
-        Invoked from the GUI timer thread once per PACKET, not once per
-        sample, so it must be fast (e.g. put into a queue).
+        Invoked from the GUI timer thread once per batch, so it must be
+        fast (e.g. put into a queue).
 
-        Signature: ``callback(channels: tuple[int, ...], values: np.ndarray,
-        timestamp: float | None)`` -- ``values`` holds one complex sample
-        per entry of ``channels``, in that order.
+        Signature: ``callback(channels, values, seconds, day_epoch)``:
+        ``values`` is (packets, len(channels)) complex, one column per
+        entry of ``channels``; ``seconds`` is (packets,) seconds of day
+        with NaN for an undisciplined stamp; ``day_epoch`` the UTC
+        midnight those count from, or None.
 
-        Handing over whole packets keeps the per-packet cost flat in the
-        channel count.  The per-sample callback this replaced cost one
-        Python call and one queue put per channel per packet, which is
-        what made a 200-channel capture outrun the frame budget.
 
         Parameters
         ----------
@@ -124,6 +131,9 @@ class PeriscopeRuntime:
             needs this: without it the tail of a batch waits for a
             packet that may not come until the stream resumes.
         """
+        # Packets already queued predate this capture.  Delivered at the
+        # display's pace they would put its clock behind from the start.
+        self._discard_packets()
         self._pulse_tap_channels = (
             sorted(set(int(c) for c in channels)) if channels else None)
         self._pulse_tap_cache = None
@@ -173,6 +183,9 @@ class PeriscopeRuntime:
         modes_active = self._get_active_modes() # Renamed modes
         self.plots = []
         self.curves = []
+        # Histogram ranges are smoothed across frames; a rebuild changes
+        # units or channels, so they start over rather than decaying.
+        self._hist_ranges = {}
         font = QFont() # QFont from .utils
         font.setPointSize(UI_FONT_SIZE) # UI_FONT_SIZE from .utils
         single_colors = self._get_single_channel_colors()
@@ -316,7 +329,10 @@ class PeriscopeRuntime:
             else:
                 pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "H":
-            pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
+            if self.unit_mode == "df" and all_have_calibration:
+                pw.setLabel("bottom", "Amplitude", units="Hz or unitless")
+            else:
+                pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
             pw.setLabel("left", "Bin Count (log)")
         elif mode_key == "S":
             pw.setLogMode(x=True, y=not self.real_units)
@@ -585,11 +601,10 @@ class PeriscopeRuntime:
     def _update_dark_mode_in_child_windows(self):
         """Propagate dark mode setting to all open child windows and panels."""
         # Update NetworkAnalysis panels (in docks)
-        if hasattr(self, 'netanal_windows'):
-            for window_data in self.netanal_windows.values():
-                panel = window_data.get('window')  # 'window' key contains panel instance
-                if panel and hasattr(panel, 'apply_theme'):
-                    panel.apply_theme(self.dark_mode)
+        for window_data in self._live_netanal_windows().values():
+            panel = window_data.get('window')  # 'window' key contains panel instance
+            if panel and hasattr(panel, 'apply_theme'):
+                panel.apply_theme(self.dark_mode)
         
         # Update Multisweep panels (in docks)
         if hasattr(self, 'multisweep_windows'):
@@ -598,17 +613,11 @@ class PeriscopeRuntime:
                 if panel and hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
-        # Update Pulse Capture panels (in docks).  Entries survive dock
-        # closure, so skip (and drop) panels whose C++ object is gone.
-        if hasattr(self, 'pulse_capture_windows'):
-            for key in list(self.pulse_capture_windows.keys()):
-                window_data = self.pulse_capture_windows.get(key) or {}
-                panel = window_data.get('window')
-                if panel is None or sip.isdeleted(panel):
-                    self.pulse_capture_windows.pop(key, None)
-                    continue
-                if hasattr(panel, 'apply_theme'):
-                    panel.apply_theme(self.dark_mode)
+        # Update Pulse Capture panels (in docks)
+        for window_data in self._live_pulse_capture_windows():
+            panel = window_data.get('window')
+            if hasattr(panel, 'apply_theme'):
+                panel.apply_theme(self.dark_mode)
 
     def _toggle_real_units(self, checked: bool):
         """
@@ -667,155 +676,126 @@ class PeriscopeRuntime:
         self._update_plot_data()
         self._update_performance_stats(now)
 
-    def _discard_packets(self):
-        """Discard all packets currently in the receiver queue (when paused)."""
-        if self.receiver.queue is None:
-            return
-        self.receiver.queue.clear()
+    def _discard_packets(self) -> None:
+        """Discard what the receiver has queued and nothing has read:
+        on pause, and when a capture registers its tap."""
+        q = getattr(getattr(self, "receiver", None), "queue", None)
+        if q is not None:
+            q.clear()
 
-    #: Hard ceiling on one drain pass.  This is a backstop against the
-    #: unbounded loop that used to freeze the window, NOT a throughput
-    #: budget: it must sit far above the time an honest frame's worth of
-    #: packets takes, or it invents packet loss at rates the GUI could
-    #: otherwise sustain.  An earlier version capped the drain at half
-    #: the refresh interval and did exactly that -- 32% loss at stage 0
-    #: with 8 channels displayed, on a stream the receiver handles with
-    #: zero loss.  A quarter second still bounds the freeze to something
-    #: a user reads as a stutter.
+    #: Ceiling on one drain pass, far above a frame's worth of packets:
+    #: it bounds a stall without inventing loss the receiver could
+    #: otherwise absorb.
     _DRAIN_DEADLINE_S = 0.25
 
-    def _process_incoming_packets(self):
-        """Process queued packets, stopping only if the drain runs long.
-
-        Draining until the queue is empty looks right and is a trap: it
-        is only bounded if processing outruns arrival.  Widen a pulse
-        capture to a few hundred channels and the per-channel work in
-        _update_buffers costs more than the packet interval, so the
-        queue never empties, this call never returns, and the GUI
-        freezes -- Qt cannot repaint or handle input while it is stuck
-        here.
-
-        Stopping at a deadline leaves the backlog in the C++ queue,
-        which is bounded (queue_max_size) and drops from the far end, so
-        a genuine sustained overrun surfaces as packet loss in the
-        status bar rather than a hang.
-
-        KNOWN LIMIT (measured on a board, 2026-08-19): a 128-channel
-        pulse capture at decimation stage 0 with the viewer also drawing
-        still loses roughly 0.5-10%, and clicking around the GUI adds a
-        little.  Everything cheap has been done -- batched display
-        writes, a batched tap, a 2048-packet receive ceiling -- so what
-        is left is the GIL: three Python threads (drain, capture worker,
-        receive loop) taking turns on one interpreter.  Getting to zero
-        means moving per-packet work out of Python, not tuning these
-        constants.
+    def _process_incoming_packets(self) -> None:
+        """Drain the queue a batch at a time until it is empty or the
+        deadline passes.  A backlog left behind is bounded by the C++
+        queue and surfaces as packet loss in the status bar, never as
+        a frozen window.  A queue without the batched getter has no
+        stream to drain.
         """
         if self.receiver.queue is None:
             return
 
-        deadline = time.monotonic() + self._DRAIN_DEADLINE_S
-
-        while not self.receiver.queue.empty():
-            # Get packet from C++ queue (returns type-erased Packet)
-            packet = self.receiver.queue.try_pop()
-            if packet is None:
-                break
-
-            # Convert to ReadoutPacket
-            pkt = packet.to_python()
-
-            self.pkt_cnt += 1
-            if hasattr(pkt, 'fir_stage'):
-                # The fir_stage field is a 4-bit packed value:
-                #   Bit 3 (MSB): short/long packet flag (1=short/128ch, 0=long/1024ch)
-                #   Bits 2-0:    decimation stage (0-6)
-                self.actual_dec_stage = pkt.fir_stage & 0x7
-                self.is_short_packet = bool(pkt.fir_stage & 0x8)
-            t_rel = self._calculate_relative_timestamp(pkt)
-            self._update_buffers(pkt, t_rel)
-
-            # Track simulation time for speed calculation (mock mode only)
-            if self.is_mock_mode and t_rel is not None:
-                self._update_sim_time_tracking(t_rel)
-
-            if time.monotonic() >= deadline:
-                self.drain_overruns += 1
-                break
+        pop_batch = getattr(self.receiver.queue, "pop_readout_batch", None)
+        if pop_batch is not None:
+            deadline = time.monotonic() + self._DRAIN_DEADLINE_S
+            while True:
+                batch = pop_batch(self._DRAIN_BATCH_MAX)
+                if batch is None:
+                    break
+                self._ingest_batch(*batch)
+                if time.monotonic() >= deadline:
+                    self.drain_overruns += 1
+                    break
 
         # Before _update_plot_data reads them, and before all_chs can
         # change under a half-written batch.
         self._flush_display_batch()
-        frame_end = getattr(self, "_pulse_tap_frame_end", None)
-        if frame_end is not None:
-            frame_end()
+        if self._pulse_tap_frame_end is not None:
+            self._pulse_tap_frame_end()
 
-    def _calculate_relative_timestamp(self, pkt) -> float | None:
-        """
-        Calculate a relative timestamp for a packet.
+    #: Packets per batched pop: 100 ms of stage 0.
+    _DRAIN_BATCH_MAX = 4096
 
-        If the packet's timestamp is recent, it's adjusted slightly and
-        converted to seconds relative to the first packet's timestamp.
-
-        Args:
-            pkt: The incoming packet object.
-
-        Returns:
-            float | None: Relative timestamp in seconds, or None if not recent.
-        """
-        # streamer from .utils
-        ts = pkt.ts
-        if ts.recent:
-            # Apply a small offset to ensure timestamps are strictly increasing for plotting
-            ts.ss += int(0.02 * streamer.SS_PER_SECOND); ts.renormalize()
-            t_now = ts.h * 3600 + ts.m * 60 + ts.s + ts.ss / streamer.SS_PER_SECOND
-            if self.start_time is None: self.start_time = t_now
-            return t_now - self.start_time
-        return None
+    def _ingest_batch(self, samples: np.ndarray, seconds: np.ndarray,
+                      recent: np.ndarray, fir_stage: np.ndarray,
+                      _seq: np.ndarray, year: int, yday: int) -> None:
+        """One popped batch: packet count, decimation stage, relative
+        time, rings and pulse tap, once for the batch."""
+        n = samples.shape[0]
+        self.pkt_cnt += n
+        stage = int(fir_stage[-1])
+        self.actual_dec_stage = stage & 0x7
+        self.is_short_packet = bool(stage & 0x8)
+        # The display's small forward shift, applied per packet before
+        # the offset from the first stamp; undisciplined stamps stay NaN.
+        t_now = seconds + 0.02
+        if self.start_time is None and recent.any():
+            self.start_time = float(t_now[np.flatnonzero(recent)[0]])
+        t_rel = (t_now - self.start_time if self.start_time is not None
+                 else np.full(n, np.nan))
+        self._update_buffers_batch(samples, t_rel, seconds, recent,
+                                   (int(year), int(yday)) if recent.any()
+                                   else None)
+        if self.is_mock_mode and recent.any():
+            self._update_sim_time_tracking(
+                float(t_rel[np.flatnonzero(recent)[-1]]))
 
     def _update_buffers(self, pkt, t_rel: float | None):
-        """
-        Update data buffers with I, Q, and Magnitude values from a packet.
+        """One packet into the display batch and the pulse tap: the
+        batch form with one row.  The reference the batched writer is
+        held equal to."""
+        samples = np.array(pkt)                 # packetizer gain out
+        ts = pkt.ts
+        recent = bool(ts.recent)
+        seconds = _streamer.ts_to_seconds(ts)
+        if seconds is None:
+            seconds = np.nan
+        self._update_buffers_batch(
+            samples[None, :],
+            np.array([np.nan if t_rel is None else t_rel]),
+            np.array([seconds]), np.array([recent]),
+            (ts.y, ts.d) if recent else None)
 
-        Args:
-            pkt: The incoming packet object.
-            t_rel (float | None): The relative timestamp for this packet.
-        """
-        # Convert 24-bit datapath to 16-bit ADC scale
-        # np.array(pkt) applies the first /256 (packetizer gain);
-        # the second /256 brings 24-bit values down to 16-bit ADC scale.
-        samples = np.array(pkt) / 256
+    def _update_buffers_batch(self, samples: np.ndarray, t_rel: np.ndarray,
+                              seconds: np.ndarray, recent: np.ndarray,
+                              day_key: Optional[tuple]) -> None:
+        """A batch (packets, channels) into the display batch and the
+        pulse tap.
 
-        # Buffer for the frame rather than writing per channel now.
-        # Four Circular.add calls per displayed channel per packet was
-        # the dominant per-packet cost at stage 0, and it scaled with
-        # the number of channels on screen; a frame at a time it is a
-        # couple of numpy copies per channel.  The packet width is part
-        # of the batch, so a decimation or packet-mode change flushes
-        # rather than trying to stack ragged rows.
-        width = len(pkt)
+        The receiver hands back ADC counts, the scale get_samples
+        reports; nothing is rescaled here.  The packet width is part of
+        the display batch, so a decimation or packet-mode change flushes
+        rather than trying to stack ragged rows.
+        """
+        width = samples.shape[1]
         if width != self._display_width:
             self._flush_display_batch()
             self._display_width = width
         self._display_values.append(samples)
         self._display_times.append(t_rel)
-        if len(self._display_values) >= self._DISPLAY_BATCH_MAX:
+        self._display_rows += samples.shape[0]
+        if self._display_rows >= self._DISPLAY_BATCH_MAX:
             self._flush_display_batch()
 
         # Pulse capture tap: forward the requested channels' raw I/Q.
         # The packet carries every streamed channel, so capture is
-        # independent of which channels are displayed.
-        # Timestamps are ABSOLUTE packet time (seconds of day) — the
-        # same clock the PFB stream uses — so both-mode cross-stream
-        # matching sees one time base (display t_rel is display-only).
+        # independent of which channels are displayed.  Timestamps are
+        # ABSOLUTE packet time (seconds of day), the same clock the PFB
+        # stream uses, so both-mode cross-stream matching sees one time
+        # base (display t_rel is display-only).
         if self._pulse_tap is not None:
-            ts = pkt.ts
-            ts_abs = (ts.h * 3600 + ts.m * 60 + ts.s
-                      + ts.ss / _streamer.SS_PER_SECOND) \
-                if ts.recent else None
-            channels, idx = self._pulse_tap_columns(len(pkt))
+            channels, idx = self._pulse_tap_columns(width)
             if channels:
-                self._pulse_tap(channels, samples[idx], ts_abs)
-
+                day = None
+                if day_key is not None:
+                    if day_key != self._pulse_tap_day_key:
+                        self._pulse_tap_day_key = day_key
+                        self._pulse_tap_day = _streamer.day_epoch(*day_key)
+                    day = self._pulse_tap_day
+                self._pulse_tap(channels, samples[:, idx], seconds, day)
 
     #: Cap on packets held before writing them into the rings.  Bounds
     #: the transient memory (packets x channels complex128) without
@@ -827,12 +807,11 @@ class PeriscopeRuntime:
         """Write the buffered packets into the per-channel rings."""
         if not self._display_values:
             return
-        values = np.stack(self._display_values)       # (packets, width)
-        # None means "no recent timestamp"; float64 turns that into NaN,
-        # exactly as Circular.add did with it one at a time.
-        times = np.asarray(self._display_times, dtype=float)
+        values = np.concatenate(self._display_values)  # (packets, width)
+        times = np.concatenate(self._display_times)
         self._display_values = []
         self._display_times = []
+        self._display_rows = 0
 
         width = values.shape[1]
         for ch_val in self.all_chs:
@@ -914,18 +893,10 @@ class PeriscopeRuntime:
         if "H" in rowCurves and ch_val in rowCurves["H"]:
             cset = rowCurves["H"][ch_val]
             try:
-                nbins = getattr(self, "hist_nbins", 128)
-        
                 if "I" in cset and not sip.isdeleted(cset["I"]) and cset["I"].isVisible():
-                    self._set_hist_bargraph_dynamic(
-                        ch_val, "I", cset["I"], I_data, nbins=nbins
-                    )
-        
+                    self._set_hist_bargraph_dynamic(ch_val, "I", cset["I"], I_data)
                 if "Q" in cset and not sip.isdeleted(cset["Q"]) and cset["Q"].isVisible():
-                    self._set_hist_bargraph_dynamic(
-                        ch_val, "Q", cset["Q"], Q_data, nbins=nbins
-                    )
-        
+                    self._set_hist_bargraph_dynamic(ch_val, "Q", cset["Q"], Q_data)
             except RuntimeError:
                 pass
 
@@ -991,27 +962,29 @@ class PeriscopeRuntime:
         self._hist_ranges[key] = (slo, shi)
         return slo, shi
 
-    def _set_hist_bargraph_dynamic(self, ch_val, which, item, data, nbins=128):
+    #: Bins in the amplitude histogram.
+    HIST_NBINS = 128
+
+    def _set_hist_bargraph_dynamic(self, ch_val, which, item, data):
         """
         Update a 1D histogram plot with dynamically computed amplitude ranges.
-    
+
         Computes the true data range, applies temporal smoothing, and updates
         the associated BarGraphItem for real-time visualization.
-    
+
         Args:
             ch_val (int): Channel ID associated with the histogram.
             which (str): Data selector (e.g., "I" or "Q").
             item (pg.BarGraphItem): Histogram plot item to update.
             data (np.ndarray): Input data used to build the histogram.
-            nbins (int): Number of histogram bins.
         """
         lo, hi = self._true_minmax(data)
         if lo is None:
             return
-    
+
         lo, hi = self._smooth_range((ch_val, which), lo, hi, alpha=0.2, pad_frac=0.05)
-    
-        counts, edges = np.histogram(data, bins=nbins, range=(lo, hi))
+
+        counts, edges = np.histogram(data, bins=self.HIST_NBINS, range=(lo, hi))
         counts_display = np.log10(counts + 1.0)
         centers = 0.5 * (edges[:-1] + edges[1:])
         width = edges[1] - edges[0]
@@ -1202,7 +1175,6 @@ class PeriscopeRuntime:
             self.frame_cnt = 0; self.pkt_cnt = 0; self.t_last = now
             self.prev_missing = missing
             self.prev_qdrops = qdrops
-            self.prev_drop = missing + qdrops
             self.prev_receive = received
             
 
@@ -1270,11 +1242,9 @@ class PeriscopeRuntime:
             item (pg.ImageItem): The ImageItem to update.
             payload: Tuple containing (histogram, (Imin, Imax, Qmin, Qmax)).
         """
-        # convert_roc_to_volts from .utils
+        # The task received display units from _convert_iq_data, so its
+        # bounds are already in them.
         hist, (Imin, Imax, Qmin, Qmax) = payload
-        if self.real_units: # Convert bounds if real units are active
-            Imin, Imax = convert_roc_to_volts(np.array([Imin, Imax], dtype=float))
-            Qmin, Qmax = convert_roc_to_volts(np.array([Qmin, Qmax], dtype=float))
         item.setImage(hist, levels=(0, 255), autoLevels=False) # Update image data
         item.setRect(QtCore.QRectF(float(Imin), float(Qmin), float(Imax - Imin), float(Qmax - Qmin))) # Set image bounds
 
@@ -1286,9 +1256,8 @@ class PeriscopeRuntime:
             item (pg.ScatterPlotItem): The ScatterPlotItem to update.
             payload: Tuple containing (xs, ys, colors) for scatter points.
         """
-        # convert_roc_to_volts, SCATTER_SIZE from .utils
+        # SCATTER_SIZE from .utils; the points are already in display units.
         xs, ys, colors = payload
-        if self.real_units: xs = convert_roc_to_volts(xs); ys = convert_roc_to_volts(ys) # Convert points if real units
         item.setData(xs, ys, brush=colors, pen=None, size=SCATTER_SIZE) # Update scatter plot data
 
     @QtCore.pyqtSlot(int, str, int, object)
@@ -1366,6 +1335,12 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
+        # The startup df-calibration worker, if still sweeping: ask it
+        # to stop, then wait.
+        task = getattr(self, "_df_cal_task", None)
+        if task is not None and task.isRunning():
+            task.requestInterruption()
+            task.wait(2000)
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
             if not sip.isdeleted(self.notebook_dock):
@@ -1661,7 +1636,7 @@ class PeriscopeRuntime:
                 bias_output = load_params['bias_kids_output']
                 df_calibrations = {}
                 for det_idx, det_data in bias_output.items():
-                    if 'df_calibration' in det_data:
+                    if det_data.get('df_calibration') is not None:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
                 # Load calibrations into main window
@@ -2348,6 +2323,7 @@ class PeriscopeRuntime:
             "min_Q": DEFAULT_MIN_Q,
             "max_Q": DEFAULT_MAX_Q,
             "min_resonance_separation_hz": DEFAULT_MIN_RESONANCE_SEPARATION_HZ,
+            "require_isolation": DEFAULT_REQUIRE_ISOLATION,
             "data_exponent": DEFAULT_DATA_EXPONENT,
         }
         _assert_param_keys(
@@ -2362,7 +2338,7 @@ class PeriscopeRuntime:
             "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
             "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
             "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
-            "bias_frequency_method": None,
+            "bias_frequency_method": "max-diq",
             "rotate_saved_data": False,
             "sweep_direction": "upward",
             "resonance_frequencies": {self.module: [90e6, 91e6]},
@@ -2377,11 +2353,11 @@ class PeriscopeRuntime:
         )
     
         self.bias_params = {
+            "fit_method": "nonlinear",
             "nonlinear_threshold": 0.77,
             "fallback_to_lowest": True,
             "optimize_phase": True,
             "num_phase_samples": 300,
-            "phase_step": 5,
             "bandpass_params": {
                 "apply_bandpass": True,
                 "lowcut": 5.0,
@@ -2392,6 +2368,8 @@ class PeriscopeRuntime:
             "lowcut": 5.0,
             "highcut": 20.0,
             "fs": 597.0,
+            "measure_calibration": True,
+            "calibration_step": 0.05,
         }
         _assert_param_keys(
             self.bias_params,
@@ -2804,8 +2782,6 @@ class PeriscopeRuntime:
     
                 fake_event = FakeClickEvent(90e6)
 
-                self.test_noise_samples = [0]
-                self.phase_shifts = [0]
     
                 multisweep_window._handle_multisweep_plot_double_click(fake_event)
 

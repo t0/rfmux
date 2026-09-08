@@ -102,6 +102,7 @@ from .sweep_results import (
 
 __all__ = [
     "MODELS",
+    "BIFURCATION_A",
     "FitFailed",
     "SweepFit",
     "FitReport",
@@ -129,6 +130,13 @@ MODELS = ("skewed", "nonlinear", "circle")
 
 #: Parameters of the nonlinear model, in the order its fitter works in.
 NONLINEAR_PARAMS = ("fr", "Qr", "amp", "phi", "a", "i0", "q0")
+
+#: The nonlinearity at which the resonator model becomes multivalued (Swenson
+#: et al. 2013): ``4*sqrt(3)/9 ≈ 0.7698``. A fit at or past it describes no
+#: single curve, so ``fr`` and the model trace are not to be trusted there; the
+#: fit is still recorded, because *how far past* is the reading that says the
+#: probe tone was too loud.
+BIFURCATION_A = 4 * np.sqrt(3) / 9
 
 #: Parameters of the skewed Lorentzian. ``Qc`` and ``Qi`` are derived from the
 #: other three Qs rather than fitted, which is why they have no error below.
@@ -1116,8 +1124,16 @@ def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
                         |     --------------  X  ------------   |
                          \     Qc * cos(phi)       (1+ 2jy)    /
 
-    where the nonlinearity enters through ``yg = y + a/(1+y^2)``, with
-    ``yg = Qr * (f - fr) / fr``.
+    where ``y`` is the detuning from the power-shifted resonance and ``yg`` the
+    generator's detuning from the low-power resonance ``fr``, related by
+    Swenson et al. 2013 (J. Appl. Phys. 113, 104501), eq. 13::
+
+        y = yg + a / (1 + 4 y^2)      where yg = Qr * (f - fr) / fr
+
+    The stored energy pulls the resonance to lower frequency, so the dip sits
+    below ``fr`` and a sweep leans that way; for ``a > 4*sqrt(3)/9`` the relation
+    is multivalued (bifurcation) and the curve has a step where
+    :func:`get_y_nonlinear` changes branch.
 
     Cable delay is not in here: rfmux takes it out upstream.
 
@@ -1128,8 +1144,8 @@ def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
         amp (float): ``Qr / Qc``, so ``0 < amp < 1``.
         phi (float): Impedance-mismatch rotation between resonator and readout
             (radians).
-        a (float): Nonlinearity. Bifurcation is at ``a = 4*sqrt(3)/9 ≈ 0.77``;
-            a linear resonator sits near 0.
+        a (float): Nonlinearity. Bifurcation is at :data:`BIFURCATION_A`,
+            ``4*sqrt(3)/9 ≈ 0.7698``; a linear resonator sits near 0.
         i0 (float): Real part of the overall gain and phase offset.
         q0 (float): Imaginary part of the same.
 
@@ -1143,59 +1159,46 @@ def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
 
 
 def get_y_nonlinear(yg, a):
-    """The largest real root of ``yg = y + a / (1 + y^2)``.
+    """The detuning ``y`` that solves Swenson et al. 2013 eq. 13,
+    ``y = yg + a / (1 + 4 y^2)``.
 
-    The frequency-pulling that makes a driven resonator's dip lean over. Solved
-    by vectorized Newton iteration; ``a == 0`` is the linear case and returns
-    *yg* untouched.
+    The pull ``a / (1 + 4 y^2)`` lies in ``(0, a]``, so ``y`` is in
+    ``[yg, yg + a]``. Below bifurcation (``a < 4*sqrt(3)/9``) the equation is
+    monotone in ``y`` with one root on that bracket, so bisection always
+    converges, and a few Newton steps from the narrowed bracket finish it.
+    Above bifurcation the bracket holds up to three roots and the one found is
+    whichever the bisection lands on: the model curve jumps where the branch
+    changes, and a derivative across the jump is meaningless. ``a == 0`` is the
+    linear case and returns *yg* untouched.
 
     Args:
-        yg (float | np.ndarray): The unpulled shift, ``Qr * (f - fr) / fr``.
+        yg (float | np.ndarray): Generator detuning from the low-power
+            resonance, ``Qr * (f - fr) / fr``.
         a (float): Nonlinearity parameter.
 
     Returns:
-        float | np.ndarray: the pulled shift, matching *yg*'s shape.
+        float | np.ndarray: detuning from the power-shifted resonance, in units
+        of ``fr / Qr``, matching *yg*'s shape.
     """
     if a == 0:
         return yg
-
-    if np.isscalar(yg):
-        return _solve_single_y(yg, a)
-
-    yg = np.asarray(yg)
-    y = yg.copy()
-
-    for _ in range(50):
-        y_squared = y * y
-        value = y + a / (1 + y_squared) - yg
-        derivative = 1 - 2 * a * y / (1 + y_squared) ** 2
-
-        movable = np.abs(derivative) > 1e-10
-        if not np.any(movable):
-            break
-        y[movable] -= value[movable] / derivative[movable]
-
-        if np.all(np.abs(value) < 1e-10):
-            break
-
-    return y
-
-
-def _solve_single_y(yg: float, a: float) -> float:
-    """:func:`get_y_nonlinear` for one value, by scalar Newton iteration."""
-    y = yg
-    for _ in range(50):
-        value = y + a / (1 + y**2) - yg
-        derivative = 1 - 2 * a * y / (1 + y**2) ** 2
-
-        if abs(derivative) < 1e-10:
-            break
-        stepped = y - value / derivative
-        if abs(stepped - y) < 1e-10:
-            break
-        y = stepped
-
-    return y
+    scalar = np.isscalar(yg)
+    yg = np.atleast_1d(np.asarray(yg, dtype=np.float64))
+    lo = yg.copy()
+    hi = yg + a
+    for _ in range(12):
+        mid = 0.5 * (lo + hi)
+        above = mid - a / (1 + 4 * mid * mid) > yg
+        hi = np.where(above, mid, hi)
+        lo = np.where(above, lo, mid)
+    y = 0.5 * (lo + hi)
+    for _ in range(4):
+        denominator = 1 + 4 * y * y
+        residual = y - a / denominator - yg
+        slope = 1 + 8 * a * y / (denominator * denominator)
+        step = residual / np.where(np.abs(slope) > 1e-12, slope, 1e-12)
+        y = np.clip(y - step, lo, hi)
+    return float(y[0]) if scalar else y
 
 
 def remove_gain(frequencies, iq, *, n_extrema_points: int = 5):
@@ -1305,7 +1308,14 @@ def fit_nonlinear_iq(
             linear resonator with the same machine.
         bounds (tuple[list, list] | None): Lower and upper bounds on
             ``[fr, Qr, amp, phi, a, i0, q0]``. None uses the sweep's own
-            frequency range and physically sensible limits on the rest.
+            frequency range for ``fr``, ``Qr`` in ``[1e3, 1e7]``, ``amp`` in
+            ``[0.01, 0.99]``, ``phi`` in ``[-pi/2, pi/2]``, ``a`` in
+            ``[0, 0.9]`` and ``i0``, ``q0`` in ``[-100, 100]``. The upper bound
+            on ``a`` sits above :data:`BIFURCATION_A` on purpose, so an
+            over-driven sweep records how far past bifurcation it fitted
+            instead of pinning at the threshold; a fit landing between the two
+            is returned as-is, and it is the reader's job to compare ``a`` to
+            the threshold before trusting ``fr`` or the model curve.
         p0 (list | None): Initial guesses. None reads them off the trace with
             :func:`guess_p0_nonlinear`.
         max_iterations (int): How many times to re-seed the optimizer from its

@@ -9,7 +9,7 @@ every pulse.
 
 import numpy as np
 
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     CaptureState, PulseCaptureSession)
 
 FS = 1000.0

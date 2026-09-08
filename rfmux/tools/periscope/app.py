@@ -67,13 +67,16 @@ from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
+from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
+import asyncio
 import datetime
 import time
 
 
 
 class DummyReceiver:
-    """A dummy receiver for Offline mode that provides the expected interface."""
+    """The receiver in Offline mode: every counter UDPReceiver exposes,
+    reading as a healthy stream carrying nothing."""
     def __init__(self):
         self.queue = queue.Queue()
     def start(self): pass
@@ -81,6 +84,32 @@ class DummyReceiver:
     def wait(self): pass
     def get_dropped_packets(self): return 0
     def get_received_packets(self): return 0
+    def get_missing_packets(self): return 0
+    def get_queue_drops(self): return 0
+    def get_loss_bursts(self): return 0
+    def get_module_mismatch(self): return None
+    def get_port_conflict(self): return None
+
+
+def _live_entries(registry: Dict[str, Dict]) -> Dict[str, Dict]:
+    """The entries of a panel registry whose panel AND dock are still
+    alive, pruning the rest from *registry*.
+
+    Closing a dock destroys the C++ objects while the dict entry
+    survives, and _build_layout walks these registries on every
+    rebuild; a dead entry raises 'wrapped C/C++ object has been
+    deleted' from deep inside pyqtgraph.
+    """
+    live: Dict[str, Dict] = {}
+    for key in list(registry.keys()):
+        entry = registry.get(key) or {}
+        panel, dock = entry.get('window'), entry.get('dock')
+        if (panel is None or dock is None
+                or sip.isdeleted(panel) or sip.isdeleted(dock)):
+            registry.pop(key, None)
+            continue
+        live[key] = entry
+    return live
 
 class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     """
@@ -129,6 +158,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         dot_px: int = DENSITY_DOT_SIZE,       # Constant from .utils
         crs=None, # CRS object, type hint likely from .utils or a core module
         skip_startup_dialog: bool = False,  # Skip dialog if already handled by launcher
+        df_calibrations: Optional[Dict[int, complex]] = None,
     ):
         """
         Initializes the Periscope main window.
@@ -183,9 +213,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.zoom_box_mode: bool = True         # Default mouse mode for plots (zoom vs pan)
 
 
-        self.test_noise_samples = {}           ##### debugging purposes 
-        self.noise_count = 0                   ##### debugging purposes 
-        self.phase_shifts = []                 ##### debugging purposes 
 
         self.channel_noise_data = {}
         self.channel_noise_panel_count = 0
@@ -205,6 +232,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Start the UDP packet receiver thread (UDPReceiver from .tasks).
         self._init_receiver()
+
+        # Measure df calibrations from startup, off the GUI thread, so
+        # the window is up and streaming while the sweep runs.  Mock
+        # mode only -- see _measure_df_calibrations.  The launcher
+        # measures them behind its build window for large arrays and
+        # hands them in instead.
+        self._df_cal_task = None
+        if df_calibrations is None:
+            self._start_df_calibration(self.module)
+        elif df_calibrations:
+            self._handle_df_calibration_ready(self.module,
+                                              dict(df_calibrations))
 
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.
@@ -410,7 +449,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         self.btn_pulse_capture = QtWidgets.QPushButton("Pulse Capture")
         self.btn_pulse_capture.setToolTip(
-            "Open a live pulse capture panel (taps the slow readout stream)")
+            "Open a live pulse capture panel: slow stream, PFB stream, or "
+            "both with pair matching")
         self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
 
         self.btn_streamer_cfg = QtWidgets.QPushButton("Streamer Config")
@@ -933,13 +973,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 # Check if viewbox is valid before accessing (may be deleted during layout rebuild)
                 if isinstance(viewbox, ClickableViewBox) and not sip.isdeleted(viewbox): # ClickableViewBox from .utils, sip from PyQt6
                     viewbox.enableZoomBoxMode(enable)
-        for window_id, window_data in self.netanal_windows.items():
+        for window_data in self._live_netanal_windows().values():
             window = window_data.get('window')
             if window: # window is NetworkAnalysisWindow from .ui
                 for module_idx in window.plots: # module_idx is int key
                     for plot_type in ['amp_plot', 'phase_plot']:
                         viewbox = window.plots[module_idx][plot_type].getViewBox()
-                        if isinstance(viewbox, ClickableViewBox):
+                        # Same check as the main plots above: a live panel
+                        # can still be mid-rebuild.
+                        if (isinstance(viewbox, ClickableViewBox)
+                                and not sip.isdeleted(viewbox)):
                             viewbox.enableZoomBoxMode(enable)
                 if hasattr(window, 'zoom_box_cb'):
                     window.zoom_box_cb.setChecked(enable)
@@ -1188,15 +1231,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
             # Load data into panel
-            amplitudes = params['parameters'].get('amps')
             for mod in modules_to_run:
-                for i in range(len(amplitudes)):
-                    freqs = np.array(params['modules'][mod][i]['frequency']['values'])
-                    amps = np.array(params['modules'][mod][i]['magnitude']['counts']['raw'])
-                    phases = np.array(params['modules'][mod][i]['phase']['values'])
-                    
+                # Each sweep carries its own probe amplitude; pairing by
+                # position would trust the file's ordering instead.
+                sweeps = [v for k, v in params['modules'][mod].items()
+                          if isinstance(k, int)]
+                for sweep in sweeps:
+                    freqs = np.array(sweep['frequency']['values'])
+                    amps = np.array(sweep['magnitude']['counts']['raw'])
+                    phases = np.array(sweep['phase']['values'])
+
                     panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases, amplitudes[i])
+                    panel.update_data_with_amp(mod, freqs, amps, phases,
+                                               sweep['sweep_amplitude'])
                 
                 r_freq = params['modules'][mod]['resonances_hz']
                 panel._use_loaded_resonances(mod, r_freq)
@@ -1341,14 +1388,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # Find the panel that's calling this
             if source_panel is None:
                 # Try to find it from params (fallback)
-                for w_id, w_data in self.netanal_windows.items():
+                for w_id, w_data in self._live_netanal_windows().items():
                     if w_data['window'].current_params == params:
                         source_panel = w_data['window']
                         break
             
             # Find window_id for this panel
             window_id = None
-            for w_id, w_data in self.netanal_windows.items():
+            for w_id, w_data in self._live_netanal_windows().items():
                 if w_data['window'] == source_panel: 
                     window_id = w_id
                     break
@@ -1475,9 +1522,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             return
         cfg = dialog.get_config()
         if self.crs is None:
-            QtWidgets.QMessageBox.warning(
-                self, "Streamer Configuration",
-                "No CRS connection to apply the configuration to.")
+            self.statusBar().showMessage(
+                "No CRS connection to apply the streamer configuration to",
+                5000)
             return
         task = ApplyStreamerConfigTask(self.crs, cfg, parent=self)
         task.success.connect(
@@ -1493,7 +1540,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         task.start()
 
     def _open_pulse_capture_panel(self) -> None:
-        """Create a Pulse Capture dock (live detection via the slow tap)."""
+        """Create a Pulse Capture dock for live detection."""
         self.pulse_capture_window_count += 1
         n = self.pulse_capture_window_count
         panel = PulseCapturePanel(
@@ -1504,15 +1551,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             df_calibrations=getattr(self, "df_calibrations", None),
             module=getattr(self, "module", 1),
         )
+        self._dock_pulse_capture_panel(panel, f"Pulse Capture #{n}",
+                                       f"pulse_{n}")
+
+    def _dock_pulse_capture_panel(self, panel, title: str, key: str) -> None:
+        """Dock *panel* beside the main plots, raised, and register it
+        under *key* so theme changes and file loads can find it."""
         dock = self.dock_manager.create_dock(
-            panel, f"Pulse Capture #{n}", f"pulse_{n}_{int(time.time())}")
+            panel, title, f"{key}_{int(time.time())}")
         main_dock = self.dock_manager.get_dock("main_plots")
         if main_dock:
             self.tabifyDockWidget(main_dock, dock)
         dock.show()
         dock.raise_()
-        self.pulse_capture_windows[f"pulse_{n}"] = {
-            "window": panel, "dock": dock}
+        self.pulse_capture_windows[key] = {"window": panel, "dock": dock}
 
     def _get_channel_noise(self) -> None:
         ''' Open Dialog to get noise spectrum dialog '''
@@ -1642,7 +1694,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             amplitudes = []
             phases = []
             channels = []
-            data_rod = {}
             
             for det_idx, det_data in bias_output.items():
                 channel = int(det_data.get("bias_channel", det_idx))
@@ -1653,8 +1704,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 amplitudes.append(amplitude)
                 phase = det_data.get("optimal_phase_degrees", 0)
                 phases.append(phase)
-                if "rotation_tod" in det_data:
-                    data_rod[channel] = det_data["rotation_tod"]
 
             # Apply bias to hardware if CRS is available
             if self.crs is not None:
@@ -1664,12 +1713,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
                 
                 asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
-                    
-                if data_rod:
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod))
-                    #print(f"[Bias] Refining the rotation")
-                    self.noise_count = self.noise_count + 1
-                    asyncio.run(self.adjust_phase(target_module, channels, data_rod, True))
             else:
                 print("[Offline] Skipping hardware bias application and phase adjustment")
 
@@ -1696,71 +1739,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
 
 
-    async def adjust_phase(self, module, channels, data_rod, refine=False):
-        if self.crs is None: 
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for Bias.") 
-            return
-        else:
-            crs = self.crs
-
-        for channel in channels:
-            samples = await self.collecting_samples_chan(crs, module, channel)
-            
-            phase_shift = self.calculate_shift(data_rod[channel], samples.i, samples.q, refine)
-            
-            self.phase_shifts.append(phase_shift)
-            
-            init_phase = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            mod_phase = phase_shift + init_phase 
-            
-            await crs.set_phase(mod_phase, crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            phase_after_change = await crs.get_phase(crs.UNITS.DEGREES, crs.TARGET.ADC, channel = channel, module = module)
-            
-            print(f"[Bias] Phase shift implemented of {phase_after_change} degrees for channel {channel}")            
-            
-    def calculate_shift(self, file_samples, noise_i, noise_q, refine):
-        i_val_file = convert_roc_to_volts(file_samples.real)
-        q_val_file = convert_roc_to_volts(file_samples.imag)
-        phase_file = np.degrees(np.median(np.arctan(q_val_file/i_val_file)))
-
-        
-        i_val_noise = convert_roc_to_volts(np.array(noise_i))
-        q_val_noise = convert_roc_to_volts(np.array(noise_q))
-        phase_noise = np.degrees(np.median(np.arctan(q_val_noise/i_val_noise)))
-
-        phase_shift =  phase_noise - phase_file
-
-        q_noise_m = np.median(q_val_noise)
-        i_noise_m = np.median(i_val_noise)
-
-        q_file_m = np.median(q_val_file)
-        i_file_m = np.median(i_val_file)
-
-
-        if ((q_noise_m/q_file_m) < 0) and ((i_noise_m/i_file_m) < 0): ### incase there are in opposite quadrants
-            print(f"[Bias] Opposite quadrant shifting by 180")
-            phase_shift = phase_shift + 180
-
-        return phase_shift
-        
-    async def collecting_samples_chan(self, crs, module, channel, total=100):
-        samples = await crs.get_samples(total, average=False, channel=channel, module=module)
-
-        if channel not in self.test_noise_samples:
-            self.test_noise_samples[channel] = {}
-
-        self.test_noise_samples[channel][self.noise_count] = np.array(samples.i) + np.array(samples.q) * 1j
-        return samples
-
-    def get_test_noise(self):
-        return self.test_noise_samples
-
-    def get_phase_shift(self):
-        return self.phase_shifts
-            
-    
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
@@ -1867,6 +1845,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.real_units = False  # df units are different from standard real units
             
             # Check if calibration data is available
+            if (not self.df_calibrations.get(self.module)
+                    and self._df_calibration_running()):
+                # The startup measurement is still sweeping; a second
+                # sweep would fight it for the same tones.
+                self.statusBar().showMessage(
+                    "df calibration is still being measured; try again in "
+                    "a moment", 5000)
+                self.rb_counts.setChecked(True)
+                self.unit_mode = "counts"
+                self.real_units = False
+                return
+            if not self.df_calibrations.get(self.module):
+                # Normally done at startup; this catches a module tuned
+                # afterwards, and blocks the window for the sweep
+                # (seconds at many tones) when it fires.
+                self._measure_df_calibrations(self.module)
             if not self.df_calibrations.get(self.module):
                 QtWidgets.QMessageBox.warning(
                     self,
@@ -1875,7 +1869,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     "To use df units:\n"
                     "1. Run a multisweep analysis\n"
                     "2. Click 'Bias KIDs' in the multisweep window\n"
-                    "3. The calibration data will be loaded automatically"
+                    "3. The calibration data will be loaded automatically\n\n"
+                    "In mock mode, enabling auto_bias_kids measures one for "
+                    "each channel it tunes."
                 )
                 # Reset to counts mode
                 self.rb_counts.setChecked(True)
@@ -1886,16 +1882,75 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Rebuild layout to update axis labels
         self._build_layout()
     
+    def _measure_df_calibrations(self, module: int) -> None:
+        """Measure a calibration for every biased channel, in mock mode:
+        ``crs.measure_df_calibrations``, a narrow sweep around each bias
+        point, so a simulated session can use df units without a
+        multisweep first.
+
+        Only in mock mode.  Sweeping moves each channel's frequency and
+        puts it back, which is free against a simulator and not something
+        to do to a tuned array because someone picked a units option; on
+        hardware the calibration comes from bias_kids.
+        """
+        measure = self._df_calibration_measurement(module)
+        if measure is None:
+            return
+        try:
+            cals = asyncio.run(measure())
+        except Exception as exc:
+            print(f"[Periscope] df calibration failed: {exc}")
+            return
+        if cals:
+            self._handle_df_calibration_ready(module, dict(cals))
+
+    def _df_calibration_measurement(self, module: int):
+        """The coroutine factory both the startup worker and the
+        synchronous fallback run, or None when there is nothing to
+        measure (a board, or no CRS)."""
+        crs = getattr(self, "crs", None)
+        if crs is None or not getattr(self, "is_mock_mode", False):
+            return None
+
+        async def _measure():
+            # Every channel the module reports as biased, not just the
+            # ones on screen: the macro resolves that itself.
+            return await crs.measure_df_calibrations(module=module)
+        return _measure
+
+    def _start_df_calibration(self, module: int) -> None:
+        """Measure in a worker; the result lands through the same
+        handler a multisweep's calibration does."""
+        measure = self._df_calibration_measurement(module)
+        if measure is None:
+            return
+        signals = DfCalibrationSignals()
+        signals.completed.connect(self._on_df_calibration_measured)
+        signals.error.connect(
+            lambda msg: print(f"[Periscope] df calibration failed: {msg}"))
+        self._df_cal_task = DfCalibrationTask(measure, module, signals,
+                                              parent=self)
+        self._df_cal_task.start()
+        self.statusBar().showMessage(
+            f"Measuring df calibrations for module {module} in the "
+            "background; df units are available when it finishes")
+
+    def _df_calibration_running(self) -> bool:
+        task = getattr(self, "_df_cal_task", None)
+        return task is not None and task.isRunning()
+
+    def _on_df_calibration_measured(self, module: int, cals: dict) -> None:
+        if cals:
+            self._handle_df_calibration_ready(module, cals)
+        self.statusBar().showMessage(
+            f"df calibrations measured for {len(cals)} channels on module "
+            f"{module}", 8000)
+        self._df_cal_task = None
+
     def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
-        """
-        Handle the df_calibration_ready signal from MultisweepWindow.
-        
-        Stores the calibration data for the specified module.
-        
-        Args:
-            module: Module number
-            df_calibrations: Dictionary mapping detector indices (1-based) to complex calibration factors
-        """
+        """Store a module's df calibrations, from bias_kids, the mock
+        startup measurement, or a loaded session: {detector index
+        (1-based): complex calibration factor}."""
         # Store calibration data for this module
         self.df_calibrations[module] = df_calibrations
         
@@ -1946,15 +2001,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Get current configuration if available
         current_config = self.mock_config or self._get_current_mock_config()
         
-        # Show dialog
         dialog = MockConfigurationDialog(self, current_config)
         if dialog.exec():
-            # Get new configuration
-            new_config = dialog.get_configuration()
-            self.mock_config = new_config
-            
-            # Apply configuration to the mock CRS
-            self._apply_mock_configuration(new_config)
+            self._apply_mock_configuration(dialog.get_configuration(),
+                                           self.mock_config)
             
     def _get_current_mock_config(self) -> dict:
         """
@@ -1969,20 +2019,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error getting current mock config: {e}")
             return mc.defaults()
             
-    def _apply_mock_configuration(self, config: dict):
+    def _apply_mock_configuration(self, config: dict, previous=None):
         """
         Apply the user's configuration to the mock CRS system.
-        
-        This sends the configuration to the server-side MockCRS to regenerate
-        resonators with the new parameters.
-        
+
+        Pulse settings are taken live by the running model; anything
+        else is sent to the server-side MockCRS to regenerate the
+        resonators, which at many tones is seconds of blocked GUI and a
+        stalled stream.  *previous* is the configuration in force
+        before, so only what changed decides which.  What is kept as
+        mock_config is *previous* with *config* on top: the dialog's
+        configuration carries no pulse mode (the QP Pulses toggle
+        records it), and the apply pins a random seed into *config*.
+
         Args:
             config: Dictionary of configuration values
+            previous: the configuration it replaces, if known
         """
         try:
             if self.crs is not None and hasattr(self.crs, 'generate_resonators'):
-                import asyncio
-                
                 # Use the existing event loop or create new one
                 try:
                     loop = asyncio.get_event_loop()
@@ -1992,69 +2047,43 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 except RuntimeError:
                     loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(loop)
-                
+
                 try:
-                    # Ensure a concrete random seed exists before sending to server.
-                    # generate_resonators() is a tuber RPC — mutations on the server
-                    # side don't propagate back to the client's config dict.
-                    if config.get('resonator_random_seed') is None:
-                        config['resonator_random_seed'] = random.randint(0, 2**31 - 1)
-
-                    # Apply configuration to server
-                    future = asyncio.ensure_future(self.crs.generate_resonators(config))
-                    resonator_count = loop.run_until_complete(future)
-
-                    # If QP pulses are currently active, re-apply the same mode with updated parameters
-                    try:
-                        if self.crs is not None and hasattr(self.crs, "set_pulse_mode") and getattr(self, "qp_pulse_mode", "none") in ("periodic", "random"):
-                            try:
-                                cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
-                            except Exception:
-                                cfg = mc.defaults()
-                            if self.qp_pulse_mode == "periodic":
-                                loop.run_until_complete(self.crs.set_pulse_mode(
-                                    "periodic",
-                                    period=cfg.get("pulse_period", 10.0),
-                                    tau_rise=cfg.get("pulse_tau_rise", 1e-6),
-                                    tau_decay=cfg.get("pulse_tau_decay", 1e-1),
-                                    amplitude=cfg.get("pulse_amplitude", 2.0),
-                                    resonators=cfg.get("pulse_resonators", "all"),
-                                ))
-                                print("[Periscope] Re-applied periodic QP pulses with updated parameters")
-                            elif self.qp_pulse_mode == "random":
-                                loop.run_until_complete(self.crs.set_pulse_mode(
-                                    "random",
-                                    probability=cfg.get("pulse_probability", 0.001),
-                                    tau_rise=cfg.get("pulse_tau_rise", 1e-6),
-                                    tau_decay=cfg.get("pulse_tau_decay", 1e-1),
-                                    amplitude=cfg.get("pulse_amplitude", 2.0),
-                                    resonators=cfg.get("pulse_resonators", "all"),
-                                    # Random amplitude distribution
-                                    random_amp_mode=cfg.get("pulse_random_amp_mode", "fixed"),
-                                    random_amp_min=cfg.get("pulse_random_amp_min", 1.5),
-                                    random_amp_max=cfg.get("pulse_random_amp_max", 3.0),
-                                    random_amp_logmean=cfg.get("pulse_random_amp_logmean", 0.7),
-                                    random_amp_logsigma=cfg.get("pulse_random_amp_logsigma", 0.3),
-                                ))
-                                print("[Periscope] Re-applied random QP pulses with updated parameters")
-                    except Exception as e2:
-                        print(f"[Periscope] Warning: failed to re-apply QP pulse mode after reconfigure: {e2}")
-
-                    # Save mock config to session if one is active
-                    if self.session_manager.is_active:
-                        self.session_manager.save_mock_config(config)
-
-                    print(f"Regenerated {resonator_count} resonators with new parameters")
-                    QtWidgets.QMessageBox.information(self, "Configuration Applied", 
-                                                   f"Mock KID parameters have been updated.\n"
-                                                   f"Generated {resonator_count} resonators.")
+                    outcome, resonator_count = loop.run_until_complete(
+                        apply_mock_config(self.crs, config, previous))
                 except Exception as e:
                     import traceback
                     print(f"Error regenerating resonators: {e}")
                     traceback.print_exc()
-                    QtWidgets.QMessageBox.critical(self, "Configuration Error", 
+                    QtWidgets.QMessageBox.critical(self, "Configuration Error",
                                                  f"Failed to regenerate resonators:\n{str(e)}\n\n"
                                                  f"Details:\n{traceback.format_exc()}")
+                    return
+
+                self.mock_config = merged(previous or {}, config)
+                cfg = mc.apply_overrides(self.mock_config)
+                if outcome == "unchanged":
+                    print("[Periscope] Mock configuration unchanged")
+                    return
+                # The mode in force: a pulse-only change was applied
+                # with it, and a rebuild sets the model's mode from the
+                # same merged configuration.
+                self.qp_pulse_mode = cfg.get("pulse_mode", "none")
+                self._update_pulse_button_ui()
+                if outcome == "pulses":
+                    print("[Periscope] Pulse settings applied live")
+                else:
+                    print(f"Regenerated {resonator_count} resonators with new parameters")
+                    self.statusBar().showMessage(
+                        f"Mock array regenerated: {resonator_count} resonators",
+                        5000)
+                    # The calibrations belong to the array that is gone.
+                    self.df_calibrations.pop(self.module, None)
+                    if cfg.get("auto_bias_kids"):
+                        self._start_df_calibration(self.module)
+
+                if self.session_manager.is_active:
+                    self.session_manager.save_mock_config(self.mock_config)
             else:
                 QtWidgets.QMessageBox.warning(self, "Configuration Warning", 
                                             "CRS object not available or doesn't support mock configuration.")
@@ -2090,7 +2119,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         crs = self.crs
         
         # Run the async pulse mode setting in a separate thread
-        import asyncio
         import threading
         
         def run_async_pulse_mode():
@@ -2099,77 +2127,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-                # Use current mock configuration (dialog) or defaults
-                try:
-                    cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
-                except Exception:
-                    cfg = mc.defaults()
-                
-                # Cycle through pulse modes
-                if self.qp_pulse_mode == 'none':
-                    # Switch to periodic mode
-                    self.qp_pulse_mode = 'periodic'
-                    
-                    # Configure periodic pulses using unified config
-                    loop.run_until_complete(crs.set_pulse_mode(
-                        'periodic',
-                        period=cfg.get('pulse_period', 10.0),
-                        tau_rise=cfg.get('pulse_tau_rise', 1e-6),
-                        tau_decay=cfg.get('pulse_tau_decay', 1e-1),
-                        amplitude=cfg.get('pulse_amplitude', 2.0),
-                        resonators=cfg.get('pulse_resonators', 'all')
-                    ))
-                    # Sync SoT
-                    try:
-                        if self.mock_config is None:
-                            self.mock_config = mc.defaults()
-                        self.mock_config['pulse_mode'] = 'periodic'
-                    except Exception:
-                        pass
-                    print(f"[Periscope] Enabled periodic QP pulses (period={cfg.get('pulse_period', 10.0)}s)")
-                    
-                elif self.qp_pulse_mode == 'periodic':
-                    # Switch to random mode
-                    self.qp_pulse_mode = 'random'
-                    
-                    # Configure random pulses using unified config
-                    loop.run_until_complete(crs.set_pulse_mode(
-                        'random',
-                        probability=cfg.get('pulse_probability', 0.001),
-                        tau_rise=cfg.get('pulse_tau_rise', 1e-6),
-                        tau_decay=cfg.get('pulse_tau_decay', 1e-1),
-                        amplitude=cfg.get('pulse_amplitude', 2.0),
-                        resonators=cfg.get('pulse_resonators', 'all'),
-                        # Random amplitude distribution (random mode)
-                        random_amp_mode=cfg.get('pulse_random_amp_mode', 'fixed'),
-                        random_amp_min=cfg.get('pulse_random_amp_min', 1.5),
-                        random_amp_max=cfg.get('pulse_random_amp_max', 3.0),
-                        random_amp_logmean=cfg.get('pulse_random_amp_logmean', 0.7),
-                        random_amp_logsigma=cfg.get('pulse_random_amp_logsigma', 0.3),
-                    ))
-                    # Sync SoT
-                    try:
-                        if self.mock_config is None:
-                            self.mock_config = mc.defaults()
-                        self.mock_config['pulse_mode'] = 'random'
-                    except Exception:
-                        pass
-                    print(f"[Periscope] Enabled random QP pulses (prob={cfg.get('pulse_probability', 0.001)}/s)")
-                    
-                elif self.qp_pulse_mode == 'random':
-                    # Switch back to off
-                    self.qp_pulse_mode = 'none'
-                    
-                    # Disable pulses
-                    loop.run_until_complete(crs.set_pulse_mode('none'))
-                    try:
-                        if self.mock_config is None:
-                            self.mock_config = mc.defaults()
-                        self.mock_config['pulse_mode'] = 'none'
-                    except Exception:
-                        pass
-                    print("[Periscope] Disabled QP pulses")
-                
+                # Off -> Periodic -> Random -> Off, with the parameters
+                # the mock configuration holds.
+                cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
+                mode = {"none": "periodic", "periodic": "random"}.get(
+                    self.qp_pulse_mode, "none")
+                loop.run_until_complete(crs.set_pulse_mode(
+                    mode, **pulse_mode_kwargs(cfg)))
+                self.qp_pulse_mode = mode
+                if self.mock_config is None:
+                    self.mock_config = mc.defaults()
+                self.mock_config["pulse_mode"] = mode
+                print(f"[Periscope] QP pulses: {mode}")
                 # Update UI on main thread
                 QtCore.QMetaObject.invokeMethod(
                     self, "_update_pulse_button_ui", 
@@ -2210,36 +2179,36 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             cfg = mc.defaults()
         extra = ""
         if self.qp_pulse_mode == 'periodic':
-            extra = f"\nPeriod={cfg.get('pulse_period', 10.0)} s, tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, amp={cfg.get('pulse_amplitude', 2.0)}, res={cfg.get('pulse_resonators', 'all')}"
+            extra = f"\nPeriod={cfg['pulse_period']} s, tau_rise={cfg['pulse_tau_rise']} s, tau_decay={cfg['pulse_tau_decay']} s, amp={cfg['pulse_amplitude']}, res={cfg['pulse_resonators']}"
         elif self.qp_pulse_mode == 'random':
-            ram = cfg.get('pulse_random_amp_mode', 'fixed')
+            ram = cfg['pulse_random_amp_mode']
             if ram == 'uniform':
-                amin = cfg.get('pulse_random_amp_min', 1.5)
-                amax = cfg.get('pulse_random_amp_max', 3.0)
+                amin = cfg['pulse_random_amp_min']
+                amax = cfg['pulse_random_amp_max']
                 extra = (
-                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
-                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"\nProb={cfg['pulse_probability']}/s, "
+                    f"tau_rise={cfg['pulse_tau_rise']} s, "
+                    f"tau_decay={cfg['pulse_tau_decay']} s, "
                     f"ampMode=uniform[{amin},{amax}], "
-                    f"res={cfg.get('pulse_resonators', 'all')}"
+                    f"res={cfg['pulse_resonators']}"
                 )
             elif ram == 'lognormal':
-                mu = cfg.get('pulse_random_amp_logmean', 0.7)
-                sigma = cfg.get('pulse_random_amp_logsigma', 0.3)
+                mu = cfg['pulse_random_amp_logmean']
+                sigma = cfg['pulse_random_amp_logsigma']
                 extra = (
-                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
-                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
+                    f"\nProb={cfg['pulse_probability']}/s, "
+                    f"tau_rise={cfg['pulse_tau_rise']} s, "
+                    f"tau_decay={cfg['pulse_tau_decay']} s, "
                     f"ampMode=lognormal[μ={mu},σ={sigma}], "
-                    f"res={cfg.get('pulse_resonators', 'all')}"
+                    f"res={cfg['pulse_resonators']}"
                 )
             else:
                 extra = (
-                    f"\nProb={cfg.get('pulse_probability', 0.001)}/s, "
-                    f"tau_rise={cfg.get('pulse_tau_rise', 1e-6)} s, "
-                    f"tau_decay={cfg.get('pulse_tau_decay', 1e-1)} s, "
-                    f"amp=fixed({cfg.get('pulse_amplitude', 2.0)}), "
-                    f"res={cfg.get('pulse_resonators', 'all')}"
+                    f"\nProb={cfg['pulse_probability']}/s, "
+                    f"tau_rise={cfg['pulse_tau_rise']} s, "
+                    f"tau_decay={cfg['pulse_tau_decay']} s, "
+                    f"amp=fixed({cfg['pulse_amplitude']}), "
+                    f"res={cfg['pulse_resonators']}"
                 )
         tooltip_text = (
             f"Toggle quasiparticle pulses in mock mode\n"
@@ -2944,24 +2913,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             traceback.print_exc()
     
-    def _live_pulse_capture_windows(self):
-        """Registry entries whose panel AND dock are still alive.
+    def _live_netanal_windows(self) -> Dict[str, Dict]:
+        return _live_entries(getattr(self, 'netanal_windows', {}))
 
-        Closing a dock destroys the C++ object while the Python dict
-        entry survives — using such an entry raises 'wrapped C/C++
-        object has been deleted'.  Prune as we go.
-        """
-        registry = getattr(self, 'pulse_capture_windows', {})
-        live = []
-        for key in list(registry.keys()):
-            entry = registry.get(key) or {}
-            panel, dock = entry.get('window'), entry.get('dock')
-            if (panel is None or dock is None
-                    or sip.isdeleted(panel) or sip.isdeleted(dock)):
-                registry.pop(key, None)
-                continue
-            live.append(entry)
-        return live
+    def _live_pulse_capture_windows(self) -> list:
+        return list(_live_entries(
+            getattr(self, 'pulse_capture_windows', {})).values())
 
     def _load_pulse_capture_from_session(self, file_path: str):
         """Open a pulse-capture HDF5 file in a review-mode panel."""
@@ -2982,16 +2939,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 self, "Load Error",
                 f"Could not open pulse capture file:\n{file_path}\n\n{e}")
             return
-        stem = Path(file_path).stem
-        dock = self.dock_manager.create_dock(
-            panel, f"Pulses: {stem}", f"pulse_review_{n}_{int(time.time())}")
-        main_dock = self.dock_manager.get_dock("main_plots")
-        if main_dock:
-            self.tabifyDockWidget(main_dock, dock)
-        dock.show()
-        dock.raise_()
-        self.pulse_capture_windows[f"pulse_review_{n}"] = {
-            "window": panel, "dock": dock}
+        self._dock_pulse_capture_panel(
+            panel, f"Pulses: {Path(file_path).stem}", f"pulse_review_{n}")
 
     def _load_netanal_from_session(self, data: dict, file_path: str):
         """Load network analysis data from session file into a new panel."""

@@ -3,7 +3,7 @@ Fast (PFB) pulse-capture integration test.
 
 Drives PulseCaptureTask in fast mode against a MockCRS with periodic
 QP pulses: the task must configure the PFB streamer for the capture
-channels, feed the session from the 1.22 MHz stream via the shared
+channels, feed the session from the 2.44 MHz stream via the shared
 run_pfb_source, detect pulses, write the HDF5, and tear the PFB
 streamer down on stop.
 """
@@ -22,14 +22,13 @@ pytest.importorskip("h5py")
 pytestmark = pytest.mark.slow_acquisition
 
 
-from rfmux.pulse_capture.session import (  # noqa: E402
+from rfmux.pulse_capture.capture_session import (  # noqa: E402
     CaptureState,
     PulseCaptureSession,
 )
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
-from rfmux.algorithms.measurement.streamer_config import (  # noqa: E402
-    PFB_SAMPLE_RATE,
-)
+from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ  # noqa: E402
+from rfmux.mock.config import bias_amplitude_from_dbm  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
     PulseCaptureSignals,
     PulseCaptureTask,
@@ -41,7 +40,7 @@ from rfmux.tools.periscope.pulse_capture_task import (  # noqa: E402
 def mock_crs():
     from rfmux.mock.helpers import create_mock_crs
     loop = asyncio.new_event_loop()
-    # auto_bias_kids parks carriers on the resonators — without it the
+    # auto_bias_kids biases the detectors — without it the
     # QP pulses modulate resonators no channel is tuned to, and the
     # streams carry pure noise (mirrors e2e setup_mock).
     crs = loop.run_until_complete(create_mock_crs(
@@ -50,7 +49,14 @@ def mock_crs():
             "num_resonances": 2,
             "resonator_random_seed": 11,
             "auto_bias_kids": True,
-            "bias_amplitude": 0.001,
+            # At the default -55 dBm bias and the board's readout floor
+            # the fast stream cannot trigger on single samples: a pulse
+            # swings the tone no further than its off-resonance level,
+            # about 7 sigma over a 605-count PFB floor.  A quarter of the
+            # board's floor gives these tests 21 sigma without driving the
+            # resonator into bifurcation, which more bias would.
+            "bias_amplitude": bias_amplitude_from_dbm(-55.0),
+            "udp_noise_level": 4.0,
             "pulse_mode": "periodic",
             "pulse_period": 0.02,
             "pulse_tau_rise": 1e-6,
@@ -144,10 +150,10 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     channels = [1, 2]
     path = tmp_path / "fast_capture.h5"
 
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=channels, module=1, streamer_mode="fast",
-        threshold_sigma=50.0, end_sigma=3.0,
-        sample_rate=PFB_SAMPLE_RATE, buf_size=200_000,
+        threshold_sigma=5.0, end_sigma=3.0,
+        sample_rate=PFB_SAMPLING_FREQ, buf_size=200_000,
         noise_samples=50_000, hdf5_path=path,
         histogram_flush_every=2)
     signals = PulseCaptureSignals()
@@ -159,21 +165,22 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     # Registered so the task stops (and releases port 9877) even if an
     # assertion below fails; see stream_guard.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=channels, module=1))
     task = stream_guard.task(
-        PulseCaptureTask(session, signals, mode="fast", crs=crs,
+        PulseCaptureTask(capture_session, signals, mode="fast", crs=crs,
                          host="127.0.0.1", module=1))
     task.start()
 
     assert spin_until(
-        qt_app, lambda: session.state is CaptureState.CAPTURING, 30), \
-        f"never reached CAPTURING (state={session.state}, " \
+        qt_app, lambda: capture_session.state is CaptureState.CAPTURING, 30), \
+        f"never reached CAPTURING (state={capture_session.state}, " \
         f"errors={events['errors']})"
 
-    # PFB streamer was configured for our channels by the task
+    # The streamer this test configured is what the task reads.
     assert loop.run_until_complete(
         crs.get_pfb_streamer(module=1)) == channels
 
-    assert spin_until(qt_app, lambda: session.total_pulses >= 2, 60), \
+    assert spin_until(qt_app, lambda: capture_session.total_pulses >= 2, 60), \
         f"no pulses detected (errors={events['errors']})"
 
     task.request_stop()
@@ -181,9 +188,9 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         "task never finished"
     task.wait(5000)
 
-    # Teardown contract: PFB streamer disabled again
+    # The task uses the streamer as it finds it, and leaves it so.
     assert loop.run_until_complete(
-        crs.get_pfb_streamer(module=1)) is None
+        crs.get_pfb_streamer(module=1)) == channels
     assert not events["errors"], events["errors"]
 
     with PulseHDF5Reader(path) as reader:
@@ -191,20 +198,18 @@ def test_fast_capture_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         assert total >= 2
         assert reader.metadata.get("streamer_mode") == "fast"
         assert reader.metadata.get("sample_rate_fast") == pytest.approx(
-            PFB_SAMPLE_RATE)
+            PFB_SAMPLING_FREQ)
 
 
 def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     """Both-mode task: dual sockets, live matching, dual file, teardown."""
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         PulseCaptureConfig,
     )
-    from rfmux.algorithms.measurement.streamer_config import (
-        slow_sample_rate,
-    )
+    from rfmux.core.transferfunctions import decimation_to_sampling
 
     loop, crs = mock_crs
     channels = [1, 2]
@@ -220,7 +225,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         dec = 6
     dual = DualPulseCaptureSession(
         channels=channels, module=1,
-        slow_rate=slow_sample_rate(dec),
+        slow_rate=decimation_to_sampling(dec),
         config=cfg, hdf5_path=path)
 
     signals = PulseCaptureSignals()
@@ -231,6 +236,7 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
 
     # Registered so the task stops (releasing port 9877) even if an assertion
     # below fails; see stream_guard.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=channels, module=1))
     task = stream_guard.task(
         PulseCaptureTask(dual, signals, mode="both", crs=crs,
                          host="127.0.0.1", module=1))
@@ -277,16 +283,22 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     # and tap thread however this test exits. The version that guarded only
     # this first assertion is what leaked the sockets when the second one
     # failed.
+    # Budgets are generous because the mock generates both streams in one
+    # process, and two PFB channels at PFB_SAMPLING_FREQ is 4.9 M complex
+    # samples a second.  It does not keep up with real time on a loaded CI
+    # runner, so the slow stream reaches CAPTURING late.  These are liveness
+    # bounds, not performance assertions -- a healthy run gets here in
+    # seconds and does not spend the budget.
     assert spin_until(
         qt_app,
         lambda: dual.slow.state is CaptureState.CAPTURING
-        and dual.fast.state is CaptureState.CAPTURING, 60), \
+        and dual.fast.state is CaptureState.CAPTURING, 180), \
         f"states={dual.state}, errors={events['errors']}"
 
     assert spin_until(
         qt_app,
         lambda: any(p["slow_idx"] and p["fast_idx"]
-                    for p in events["pairs"]), 90), \
+                    for p in events["pairs"]), 180), \
         f"no matched pairs (pairs={len(events['pairs'])}, " \
         f"stats={dual.stats()}, errors={events['errors']})"
 
@@ -296,8 +308,9 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
     task.wait(5000)
     tap_thread.join(timeout=10)
 
+    # The task uses the streamer as it finds it, and leaves it so.
     assert loop.run_until_complete(
-        crs.get_pfb_streamer(module=1)) is None
+        crs.get_pfb_streamer(module=1)) == channels
     matched = [p for p in events["pairs"]
                if p["slow_idx"] and p["fast_idx"]]
     assert matched, "expected at least one matched pair"
@@ -315,10 +328,116 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
                     found = True
         assert found
 
-        # NOTE on cross-stream scales: run_pfb_source applies the
-        # 24-bit -> 16-bit /256 so both streams use the same digital
-        # convention, but the MOCK's slow-path gain varies with the
-        # decimation stage while its PFB rendering is fixed (measured
-        # fast/slow baseline ratios pre-/256: ~255x at dec 1, ~51x at
-        # dec 6) — so no amplitude-ratio assertion is possible here.
-        # See the plan doc follow-up on mock stream-gain modeling.
+        # No fast-to-slow amplitude ratio is asserted: the board's gain
+        # between the two streams is a hardware measurement.
+
+
+def test_macro_stores_df_calibrations(mock_crs, tmp_path):
+    """crs.trigger_capture(df_calibrations=...) reaches the capture file.
+
+    Lives in this module to reuse its MockCRS rather than paying for a
+    second server; it captures the slow stream, which is the cheapest
+    path through the macro.
+
+    The macro had no df_calibrations argument at all, so the only way to
+    label a headless capture in Hz was to bypass it and drive
+    PulseCaptureSession directly.  A signature check would not be enough:
+    the first attempt forwarded the value from the helper that builds the
+    session without giving that helper the parameter, which is a
+    NameError only a real call reaches.
+    """
+    loop, crs = mock_crs
+    path = tmp_path / "headless_cal.h5"
+
+    result = loop.run_until_complete(crs.trigger_capture(
+        channel=[1, 2], module=1, streamer_mode="slow", time_run=3.0,
+        hdf5_path=path,
+        df_calibrations={1: 2.5e6},        # channel 2 left uncalibrated
+        verbose=False,
+    ))
+    assert result.streamer_mode == "slow"
+    assert path.exists()
+
+    with PulseHDF5Reader(path) as reader:
+        assert reader.df_calibration(1) == pytest.approx(2.5e6)
+        # Uncalibrated channels stay in counts rather than getting a 1.0.
+        assert reader.df_calibration(2) is None
+
+    # Uncalibrated channels stay in volts rather than being given a
+    # scale of 1; storage_transform is what decides.
+    from rfmux.pulse_capture.analysis import storage_transform
+    assert storage_transform(2.5e6, "df")[1] == "Hz"
+    assert storage_transform(None, "df")[1] == "V"
+
+
+def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
+    """A calibration can be measured against the simulator, so mock
+    captures can be in Hz.
+
+    measure_df_calibrations is host-side and uses only set_frequency and
+    get_samples, so the same code runs against a board.  A simulated
+    board has none of its own to hand out: the number is a measurement,
+    not a property of the hardware.
+    """
+    import numpy as np
+
+    loop, crs = mock_crs
+    cals = loop.run_until_complete(
+        crs.measure_df_calibrations(channels=[1, 2], module=1))
+    assert cals, "no calibration measured against the simulator"
+    for ch, cal in cals.items():
+        assert isinstance(cal, complex) and np.isfinite(cal)
+        assert abs(cal) > 0
+
+    path = tmp_path / "mock_cal.h5"
+    result = loop.run_until_complete(crs.trigger_capture(
+        channel=sorted(cals)[:1], module=1, streamer_mode="slow",
+        time_run=3.0, hdf5_path=path, df_calibrations=cals,
+        trigger_basis="df", verbose=False))
+    ch = result.channels[0]
+
+    with PulseHDF5Reader(path) as reader:
+        assert reader.trigger_basis() == "df"
+        # Rotated and calibrated, so the samples are hertz, not volts.
+        assert reader.stored_units(ch) == "Hz"
+        assert reader.df_calibration(ch) is not None
+
+
+def test_periscope_takes_the_mocks_df_calibration(mock_crs):
+    """Selecting df units in mock mode measures a calibration.
+
+    Periscope only learned about calibrations through the multisweep
+    panel's bias_kids run, so a simulated session was told none existed.
+    """
+    from rfmux.tools.periscope.app import Periscope
+
+    loop, crs = mock_crs
+
+    class Fake:
+        """Only the parts _measure_df_calibrations touches."""
+        module = 1
+        channel_list = [[1, 2]]
+
+        def __init__(self, board, is_mock=True):
+            self.crs = board
+            self.is_mock_mode = is_mock
+            self.df_calibrations = {}
+
+        _measure_df_calibrations = Periscope._measure_df_calibrations
+        _df_calibration_measurement = Periscope._df_calibration_measurement
+
+        def _handle_df_calibration_ready(self, module, cals):
+            self.df_calibrations[module] = cals
+
+    f = Fake(crs)
+    assert not f.df_calibrations.get(1), "should start with none"
+    f._measure_df_calibrations(1)
+    cals = f.df_calibrations.get(1) or {}
+    assert cals, "the measurement did not reach Periscope"
+    assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
+
+    # Not on hardware: sweeping moves a tuned array, so the calibration
+    # there comes from bias_kids, not from picking a units option.
+    g = Fake(crs, is_mock=False)
+    g._measure_df_calibrations(1)
+    assert g.df_calibrations == {}

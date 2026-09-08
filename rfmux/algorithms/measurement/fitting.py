@@ -141,6 +141,7 @@ def find_resonances(
     min_resonance_separation_hz: float = 100e3,
     data_exponent: float = 2.0,
     module_identifier: str | int | None = None,
+    require_isolation: bool = False,
 ):
     """
     Deprecated. Use :func:`rfmux.tuning.find_resonances` instead.
@@ -153,15 +154,16 @@ def find_resonances(
 
     Two things to know if you are reading old output:
 
-    * ``min_resonance_separation_hz`` means something stricter than it used to.
-      It was ``find_peaks(distance=...)``, which counted samples and kept the
-      tallest member of a close group. It is now a collision cut in Hz: any
-      candidate with a neighbour inside the separation is removed *along with
-      that neighbour*, because a tone on either member of a collided pair reads
-      the other one too. Well-separated arrays are unaffected; a collided pair
-      that used to yield one resonance now yields none. Callers that want the
-      old permissiveness should pass a much smaller value — the new default in
-      ``rfmux.tuning`` is 0 Hz, which cuts exact duplicates only.
+    * ``min_resonance_separation_hz`` is a separation in Hz, and what it does
+      depends on ``require_isolation``. The default, ``False``, thins the way
+      ``find_peaks(distance=...)`` always did here: of a group closer than the
+      separation, the deepest dip is kept and the rest are discarded, so the
+      returned list obeys the separation but a survivor can still have a real
+      resonance beside it. ``True`` drops every member of such a group instead,
+      with a warning saying how many went, because a tone on either member of a
+      collided pair reads the other one too; a collided pair then yields none.
+      ``rfmux.tuning.find_resonances`` defaults the other way (isolation
+      required, separation 0 Hz) and reports what it cut in ``.rejected``.
     * ``data_exponent`` is accepted and ignored. Raising ``|S21|`` to a power is
       a multiplier in dB, so it scaled dips and noise together and could not
       change what was found; its only real effect here was that the prominence
@@ -207,9 +209,23 @@ def find_resonances(
         min_Q=min_Q,
         max_Q=max_Q,
         min_separation_hz=min_resonance_separation_hz,
+        require_isolation=require_isolation,
         expected_resonances=expected_resonances,
         label=str(module_identifier) if module_identifier is not None else None,
     )
+    if require_isolation:
+        n_dropped = sum(
+            1 for c in found.rejected if (c.rejected_because or "").startswith("collided")
+        )
+        if n_dropped:
+            n_peaks = len(found.candidates) + len(found.rejected)
+            warnings.warn(
+                f"Dropped {n_dropped} of {n_peaks} peaks for "
+                f"{module_identifier or 'data'}: closer than "
+                f"{min_resonance_separation_hz:.4g} Hz to another peak. Both "
+                "members of each such pair are dropped, since neither can be "
+                "read without the other."
+            )
 
     return {
         'resonance_frequencies': found.resonance_frequencies_hz.tolist(),

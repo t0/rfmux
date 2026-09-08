@@ -1,11 +1,5 @@
 ---
 jupyter:
-  jupytext:
-    text_representation:
-      extension: .md
-      format_name: markdown
-      format_version: '1.3'
-      jupytext_version: 1.16.4
   kernelspec:
     display_name: Python 3 (ipykernel)
     language: python
@@ -21,9 +15,7 @@ import sys
 sys.path.append('../../')
 import rfmux
 
-# We're going to need the spectrum helper py_get_samples uses.  It used to
-# live in py_get_samples as _compute_spectrum; it now sits in
-# rfmux.core.transferfunctions and takes dec_stage instead of (fsamp, stage).
+# The spectrum helper py_get_samples uses; it takes dec_stage.
 from rfmux.core.transferfunctions import spectrum_from_slow_tod
 
 import matplotlib.pyplot as plt
@@ -66,10 +58,8 @@ plt.tight_layout()
 # Q had better be negligible
 assert all(psd_q < -300)
 
-# I and DSB spectra are only allowed energy at DC.  The single-sideband
-# channels get floored to ~-3000 dB, but the dual-sideband spectrum carries
-# genuine float64 FFT roundoff at ~-300 dB, so it is held to -200 dB — still
-# 20 orders of magnitude below the 0 dB carrier at DC.
+# I and DSB spectra are only allowed energy at DC.  The DSB spectrum
+# carries float64 FFT roundoff near -300 dB, so its floor is -200 dB.
 assert all((psd_i < -300) | (np.abs(freq_iq) < 1))
 assert all((psd_dsb < -200) | (np.abs(freq_dsb) < 1))
 

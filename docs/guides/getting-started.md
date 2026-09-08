@@ -34,9 +34,8 @@ crs = s.query(rfmux.CRS).one()
 await crs.resolve()
 ```
 
-For an interactive session it is usually easier to use the helper, which builds
-the session, resolves it, configures simulated resonators and starts streaming
-in one call:
+For an interactive session, use the helper instead. It builds the session,
+resolves it, configures simulated resonators and starts streaming in one call:
 
 ```python
 from rfmux.mock.helpers import create_mock_crs
@@ -44,11 +43,9 @@ from rfmux.mock.helpers import create_mock_crs
 crs = await create_mock_crs(module=1, config={"num_resonances": 10})
 ```
 
-Note that a simulated CRS is *created*, not discovered: its RPC port is assigned
-at startup, so a second `create_mock_crs()` gives you a second, unrelated
-simulation — and both stream to the same UDP port, where one reader sees the two
-interleaved with nothing raised. Start one per machine, and attach to it by
-hostname if another process needs it.
+Start one simulation per machine: a second `create_mock_crs()` is a second,
+unrelated simulation streaming to the same UDP port. Attach to a running one
+by hostname.
 
 Mock mode emulates:
 - KID non-linear inductance
@@ -95,8 +92,8 @@ channels = s.query(rfmux.ReadoutChannel).filter(
 
 ### Network Analysis
 
-Most measurement algorithms are registered on the CRS object itself, so you call
-them as methods rather than importing them — `module` is keyword-only:
+Most measurement algorithms are registered on the CRS object, so you call them
+as methods rather than importing them. `module` is keyword-only:
 
 ```python
 # Sweep 600 MHz - 1.1 GHz
@@ -122,13 +119,8 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 ### Biasing KIDs
 
-`bias_kids` picks an operating point per detector and programs the hardware. It
-works from multisweep results — it needs each resonator characterised before it
-can choose where to park a carrier — so it is the last step of the tuning
-sequence, not a standalone call.
-
-It is one of the algorithms that is *not* registered on `CRS`, so unlike the
-calls above it is imported and takes `crs` as an argument:
+`bias_kids` takes multisweep results and biases each detector. It is not
+registered on `CRS`: import it and pass `crs`.
 
 ```python
 from rfmux.algorithms.measurement.bias_kids import bias_kids
@@ -142,15 +134,15 @@ bias_results = await bias_kids(crs=crs, multisweep_results=sweeps, module=1)
 # {detector_index: {"bias_frequency": ..., "df_calibration": ..., ...}}
 ```
 
-The full sequence — sweep, unwrap cable delay, find resonances, multisweep, fit,
-bias, measure noise — is documented and runnable in
+The full sequence (sweep, unwrap cable delay, find resonances, multisweep, fit,
+bias, measure noise) is documented and runnable in
 `rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`.
 
 ## IPython Integration
 
 rfmux depends on the `awaitless` package, which lets you call coroutines in
 IPython and Jupyter without writing `await`. `import rfmux` loads it for you
-whenever it detects an IPython session — there is nothing to enable:
+whenever it detects an IPython session. There is nothing to enable:
 
 ```python
 # In IPython/Jupyter, these are equivalent:
@@ -193,15 +185,12 @@ For reliable data streaming, you may need to increase UDP receive buffer sizes a
 
 ## Next Steps
 
-- Launch Periscope for real-time visualization: `python -m rfmux.tools.periscope`
-  (add `--mock` for a simulated board)
+- Launch Periscope for real-time visualization: `uv run periscope` (or
+  `periscope`; `periscope MOCK` runs it on a simulated board)
 - [Configure networking](networking.md) for optimal data streaming
 - [Flash firmware](firmware.md) to update CRS boards
+- [Capture detector pulses](pulse-capture.md) in Periscope or from a script
 - Work through the runnable reference notebooks in
-  `rfmux/reference-notebooks/Demos/`:
-  - `simplified_tuning_flow.md` — sweep, find, fit, bias and measure noise
-  - `pulse_capture.md` — detect and record detector pulses
-
-  These are jupytext markdown, not `.ipynb`. Periscope's Jupyter panel opens
-  them as notebooks on double-click; in your own JupyterLab use right-click →
-  *Open With* → *Notebook*.
+  `rfmux/reference-notebooks/Demos/` (`simplified_tuning_flow.md`,
+  `pulse_capture.md`); `rfmux/reference-notebooks/README.md` says how to
+  open them.

@@ -17,6 +17,7 @@ from test.qt_helpers import spin, spin_until  # noqa: E402
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+import pyqtgraph as pg  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader  # noqa: E402
@@ -126,7 +127,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     ch_item = panel._channel_items[1]
     assert "(3)" in ch_item.text(0)
     assert ch_item.childCount() == 3
-    assert "#000003" in ch_item.child(0).text(0)
+    assert ch_item.child(0).text(0) == "\u25c6", "marker only, no index"
 
     # Status line went green/capturing
     assert "Capturing" in panel.status_label.text()
@@ -190,7 +191,7 @@ def test_tap_exclusivity(qt_app, tmp_path, monkeypatch):
 
 # ───────────────────────── Phase C: review mode + session ───────────
 
-from rfmux.pulse_capture.session import (  # noqa: E402
+from rfmux.pulse_capture.capture_session import (  # noqa: E402
     PulseCaptureSession,
 )
 
@@ -198,14 +199,14 @@ from rfmux.pulse_capture.session import (  # noqa: E402
 def _build_capture_file(tmp_path, n_pulses=3):
     """Produce a real capture HDF5 headlessly via PulseCaptureSession."""
     path = tmp_path / "review_source.h5"
-    session = PulseCaptureSession(
+    capture_session = PulseCaptureSession(
         channels=[1], threshold_sigma=5.0, end_sigma=1.5,
         margin_fraction=0.2, noise_samples=200, hdf5_path=path,
         histogram_flush_every=2)
     rng = np.random.default_rng(42)
-    session.start()
+    capture_session.start()
     for _ in range(200):
-        session.feed_sample(1, float(rng.normal(0, 1.0)),
+        capture_session.feed_sample(1, float(rng.normal(0, 1.0)),
                             float(rng.normal(0, 1.0)), None)
     n = 3000
     starts = [100 + 800 * i for i in range(n_pulses)]
@@ -215,10 +216,10 @@ def _build_capture_file(tmp_path, n_pulses=3):
         m = k >= k0
         signal[m] += 60.0 * np.exp(-(k[m] - k0) / 40.0)
     for i in range(n):
-        session.feed_sample(1, float(signal[i]),
+        capture_session.feed_sample(1, float(signal[i]),
                             float(rng.normal(0, 1.0)), i * DT)
-    assert session.total_pulses == n_pulses
-    session.stop()
+    assert capture_session.total_pulses == n_pulses
+    capture_session.stop()
     return path
 
 
@@ -238,7 +239,7 @@ def test_review_mode(qt_app, tmp_path):
     ch_item = panel._channel_items[1]
     assert ch_item.childCount() == 3
     assert "(3)" in ch_item.text(0)
-    assert "#000003" in ch_item.child(0).text(0)
+    assert ch_item.child(0).text(0) == "\u25c6", "marker only, no index"
 
     # Waveforms come from the reader (no task)
     assert panel.task is None
@@ -407,10 +408,10 @@ def test_channel_default_follows_stream(qt_app, tmp_path):
 
 
 def _build_dual_file(tmp_path):
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         PulseCaptureConfig,
     )
     path = tmp_path / "dual_review.h5"
@@ -449,12 +450,12 @@ def test_dual_review_mode(qt_app, tmp_path):
 
     ch_item = panel._channel_items[1]
     assert ch_item.childCount() >= 1
-    assert "pairs" in ch_item.text(0)
+    assert "pulses" in ch_item.text(0)
 
     # The matched pair renders: fast line + slow line+markers per plot
     key = panel._pulse_order[-1]
     panel._show_pair(*key)
-    assert "Pair #" in panel.pulse_info.text()
+    assert "Pulse #" in panel.pulse_info.text()
     assert len(panel.pulse_plot_i.getPlotItem().listDataItems()) >= 2
     assert len(panel.pulse_plot_q.getPlotItem().listDataItems()) >= 2
     # Legend distinguishes the fast line from the slow markers
@@ -470,7 +471,7 @@ def test_dual_review_mode(qt_app, tmp_path):
 def test_dual_session_hdf5_path_parity(tmp_path):
     """Panel/task read session.hdf5_path on finish — the dual session
     must expose it like the single session (stop-crash regression)."""
-    from rfmux.pulse_capture.session import (
+    from rfmux.pulse_capture.capture_session import (
         DualPulseCaptureSession,
     )
     path = tmp_path / "parity.h5"
@@ -596,24 +597,135 @@ def test_template_tab_renders(qt_app, tmp_path):
     spin(qt_app)
 
 
-def test_units_toggle_scales_amplitude(qt_app, tmp_path):
-    """counts → Hz uses counts × VOLTS_PER_ROC × df_calibration."""
+def test_the_three_views(qt_app):
+    """counts, volts and df, as the main window offers them.
+
+    Basis and scale are not offered separately: rotating without
+    converting to hertz, or asking for hertz on the quadratures, are
+    combinations with no meaning.
+    """
     from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.tools.periscope.pulse_capture_panel import (
+        UNITS_COUNTS, UNITS_DF, UNITS_VOLTS)
+    cal = 2.0e6 + 0.0j
 
     panel = PulseCapturePanel(dark_mode=False,
-                              df_calibrations={1: {1: 2.0e6}})
+                              df_calibrations={1: {1: cal}})
     panel.module_spin.setValue(1)
-    assert panel._df_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
-    assert panel._df_scale(7) is None          # uncalibrated channel
-    assert not panel._units_are_hz()
-    panel.units_combo.setCurrentText("Hz")
-    assert panel._units_are_hz()
+    # The views are exercised from a capture stored on the quadratures.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
 
-    # No calibration at all → no scaling offered
-    plain = PulseCapturePanel(dark_mode=False)
-    assert plain._df_scale(1) is None
+    # Exactly three, and no basis control to pair them with.
+    items = [panel.units_combo.itemText(i)
+             for i in range(panel.units_combo.count())]
+    assert items == [UNITS_COUNTS, UNITS_VOLTS, UNITS_DF]
+    assert not hasattr(panel, "basis_combo")
+
+    # Live captures store volts, so that view is a no-op.
+    panel.units_combo.setCurrentText(UNITS_VOLTS)
+    assert panel._amp_scale(1) == pytest.approx(1.0)
+    assert panel._axis_names(1) == ("I (V)", "Q (V)")
+
+    # Counts divide out the constant the file records.
+    panel.units_combo.setCurrentText(UNITS_COUNTS)
+    assert panel._amp_scale(1) == pytest.approx(1.0 / VOLTS_PER_ROC)
+
+    # df rotates and scales together.
+    panel.units_combo.setCurrentText(UNITS_DF)
+    assert panel._amp_scale(1) == pytest.approx(abs(cal))
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # An uncalibrated channel cannot be rotated, so it is refused.
+    assert panel._view_coeffs(7) is None
     panel.close()
-    plain.close()
+    spin(qt_app)
+
+
+def test_df_view_is_refused_without_a_calibration(qt_app, monkeypatch):
+    """Selecting df uncalibrated says so instead of drawing volts.
+
+    Falling back silently meant the plot showed volts under a hertz
+    label, which is worse than not offering the view.
+    """
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    warned = []
+    monkeypatch.setattr(m.QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: warned.append(a[2] if len(a) > 2 else ""))
+
+    panel = PulseCapturePanel(dark_mode=False)      # no calibration at all
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    spin(qt_app)
+
+    assert warned, "selecting df with no calibration should say so"
+    assert panel.units_combo.currentText() == m.UNITS_VOLTS, \
+        "should fall back to a view it can actually draw"
+    panel.close()
+    spin(qt_app)
+
+
+def test_df_calibrations_reach_the_session_flat(qt_app):
+    """What the panel hands a session is {channel: cal}, not {module: ...}.
+
+    Periscope stores one mapping per module.  The session and the HDF5
+    writer take the flat per-channel mapping the tuning flow builds, and
+    passing the nested one through is what made the writer refuse the
+    file, losing the capture rather than the units.
+    """
+    panel = PulseCapturePanel(dark_mode=False,
+                              df_calibrations={1: {1: 2.0e6, 2: 3.0e6},
+                                               2: {1: 9.9e9}})
+    panel.module_spin.setValue(1)
+    flat = panel._flat_df_calibrations()
+    assert flat == {1: 2.0e6, 2: 3.0e6}
+    assert all(not isinstance(v, dict) for v in flat.values())
+
+    # Module 2 is a different set, and must not leak into module 1.
+    panel.module_spin.setValue(2)
+    assert panel._flat_df_calibrations() == {1: 9.9e9}
+
+    # A headless caller's already-flat mapping survives unchanged.
+    flat_panel = PulseCapturePanel(dark_mode=False,
+                                   df_calibrations={1: 5.0e6})
+    assert flat_panel._flat_df_calibrations() == {1: 5.0e6}
+
+    panel.close()
+    flat_panel.close()
+    spin(qt_app)
+
+
+def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
+    """Hz units work on a loaded capture, where no session holds the cal."""
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+
+    path = tmp_path / "reviewed.h5"
+    writer = PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                             {"streamer_mode": "slow", "sample_rate": 596.0},
+                             df_calibrations={1: 2.0e6})
+    writer.finalize()
+
+    panel = PulseCapturePanel(dark_mode=False)      # no calibration passed in
+    from rfmux.tools.periscope.pulse_capture_panel import UNITS_DF
+    # Nothing known about the channel yet, so df is not on offer;
+    # volts still is, being only a scale.
+    assert panel._channel_cal(1) is None
+
+    panel.load_from_hdf5(path)
+    panel.units_combo.setCurrentText(UNITS_DF)   # now the file supplies one
+    spin(qt_app)
+    # The file carries the calibration, so the rotated view is available
+    # even though no Periscope session ever held one.  This file has no
+    # stored_units attribute, which is what a capture written before
+    # samples were stored in physical units looks like: the reader says
+    # counts, and counts -> Hz is the calibration times volts-per-count.
+    assert panel.reader.stored_units(1) == "counts"
+    assert panel._amp_scale(1) == pytest.approx(2.0e6 * VOLTS_PER_ROC)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+    panel.close()
+    spin(qt_app)
     spin(qt_app)
 
 
@@ -683,7 +795,6 @@ def test_template_view_fits_data_and_uses_zoombox(qt_app, tmp_path):
     """Template axes track the STACKED region (not the whole pre/post
     grid), and plots default to zoombox (RectMode) like the rest of
     Periscope."""
-    import pyqtgraph as pg
 
     from rfmux.pulse_capture.accumulators import (
         PulseTemplateSet,
@@ -819,9 +930,8 @@ def test_both_mode_annotates_bands_per_stream(qt_app, tmp_path):
 
 
 def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
-    """Trigger and leaky-bucket points, so a wrong-looking capture can
+    """Trigger and end-confirmation points, so a wrong-looking capture can
     be read against the decisions that produced it."""
-    import pyqtgraph as pg
 
     runtime = _FakeRuntime()
     panel = _make_panel(qt_app, tmp_path, runtime)
@@ -837,6 +947,7 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
 
     info = panel.pulse_info.text()
     assert "trigger @ sample" in info, info
+    assert "settled @" in info, info
     assert "end confirmed @" in info, info
     assert "bucket" in info, info
 
@@ -850,8 +961,7 @@ def test_decision_marks_are_drawn_and_described(qt_app, tmp_path):
         labels = [getattr(it, "label", None) for it in verticals]
         if name == "I":
             texts = [lb.textItem.toPlainText() for lb in labels if lb]
-            assert set(texts) == {"trigger", "below threshold",
-                                  "end confirmed"}, texts
+            assert set(texts) == {"trigger", "below threshold", "settled"}, texts
         else:
             # x-linked, so repeating the labels underneath is noise
             assert all(lb is None for lb in labels)
@@ -866,7 +976,6 @@ def test_pair_view_marks_come_from_the_triggered_record(qt_app, tmp_path):
     """In 'both' mode the plots show the UNION ring window, which
     carries no decisions — the marks live on the stream's own triggered
     record and are absolute times, so they still land correctly."""
-    import pyqtgraph as pg
 
     path = _build_dual_file(tmp_path)
     panel = PulseCapturePanel(dark_mode=False)
@@ -989,6 +1098,9 @@ def test_all_without_a_crs_declines(qt_app):
     # buffer estimate.
     assert panel._parse_channels(quiet=True) is None
 
+    panel.close()
+    spin(qt_app)
+
 
 def test_all_with_nothing_biased_declines(qt_app):
     crs = _BiasedCRS([])
@@ -1095,6 +1207,9 @@ def test_many_channels_are_summarised(qt_app, _id, drive, many, must_contain):
     # Nothing is lost — the full listing moves to the tooltip.
     assert label.toolTip().count("\n") == many - 1
 
+    panel.close()
+    spin(qt_app)
+
 
 @pytest.mark.parametrize("_id,drive,many,must_contain", STATUS_SURFACES,
                          ids=[s[0] for s in STATUS_SURFACES])
@@ -1103,6 +1218,9 @@ def test_a_few_channels_are_named(qt_app, _id, drive, many, must_contain):
     label = drive(panel, [1, 2])
     text = label.text()
     assert "Ch1" in text and "Ch2" in text, text
+
+    panel.close()
+    spin(qt_app)
 
 
 def test_capturing_status_before_any_pulse(qt_app):
@@ -1114,6 +1232,9 @@ def test_capturing_status_before_any_pulse(qt_app):
     panel._refresh_status_line()
     assert "none firing yet" in panel.status_label.text()
 
+    panel.close()
+    spin(qt_app)
+
 
 def test_status_labels_do_not_drive_panel_width(qt_app):
     # Even if some future message is long, the label's size hint must
@@ -1122,6 +1243,9 @@ def test_status_labels_do_not_drive_panel_width(qt_app):
     for label in (panel.status_label, panel.noise_label):
         assert (label.sizePolicy().horizontalPolicy()
                 is QtWidgets.QSizePolicy.Policy.Ignored)
+
+    panel.close()
+    spin(qt_app)
 
 
 # ── plot legends and summaries stay bounded ───────────────────────
@@ -1139,8 +1263,8 @@ def _template_data(channels, n=16):
     data = {}
     for c in channels:
         data[f"time_s_ch{c}"] = np.arange(n) * 1e-3
-        data[f"mean_I_ch{c}"] = np.linspace(1.0, 0.0, n)
-        data[f"mean_Q_ch{c}"] = np.zeros(n)
+        data[f"template_I_ch{c}"] = np.linspace(1.0, 0.0, n)
+        data[f"template_Q_ch{c}"] = np.zeros(n)
         data[f"counts_ch{c}"] = np.full(n, 5)
     return data
 
@@ -1158,10 +1282,15 @@ def test_histogram_legend_does_not_grow_without_bound(qt_app):
     panel._render_histograms()
 
     for metric in ("snr", "amplitude", "duration_ms", "tau_ms"):
-        assert _legend_rows(panel.hist_plots[metric]) == 0, \
+        # The amplitude plot keeps only its two-row axis key.
+        rows = 2 if metric == "amplitude" else 0
+        assert _legend_rows(panel.hist_plots[metric]) == rows, \
             f"{metric} legend has a row per channel"
         title = panel.hist_plots[metric].getPlotItem().titleLabel.text
         assert "128 ch" in title, f"{metric} title should say how many"
+
+    panel.close()
+    spin(qt_app)
 
 
 def test_histogram_legend_kept_for_a_few_channels(qt_app):
@@ -1171,6 +1300,65 @@ def test_histogram_legend_kept_for_a_few_channels(qt_app):
     panel._hist_data = _hist_data(channels)
     panel._render_histograms()
     assert _legend_rows(panel.hist_plots["snr"]) == 2
+
+    panel.close()
+    spin(qt_app)
+
+
+def _curves(plot):
+    return [it for it in plot.getPlotItem().listDataItems()]
+
+
+def test_plot_field_selects_and_combines(qt_app):
+    """"1-5" is one series holding five channels' counts; "2,4" two;
+    "*" everything; and both views follow the one field."""
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 21))
+    panel._counts = {c: 3 for c in channels}
+    panel._hist_data = _hist_data(channels)
+    panel._template_data = _template_data(channels)
+
+    panel.plot_spec_edit.setText("1-5")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    assert panel.template_spec_edit.text() == "1-5"
+    curves = _curves(panel.hist_plots["snr"])
+    assert len(curves) == 1
+    assert curves[0].yData.sum() == pytest.approx(5 * 8 * 3)
+    assert _legend_rows(panel.hist_plots["snr"]) == 1
+    assert len(_curves(panel.template_plot_i)) == 1
+    assert "Ch1-5: 25" in panel.template_info.text()
+
+    panel.template_spec_edit.setText("2,4")
+    panel._on_plot_spec_edited(panel.template_spec_edit)
+    assert panel.plot_spec_edit.text() == "2,4"
+    assert len(_curves(panel.hist_plots["snr"])) == 2
+
+    panel.plot_spec_edit.setText("*")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    curves = _curves(panel.hist_plots["snr"])
+    assert len(curves) == 1
+    assert curves[0].yData.sum() == pytest.approx(20 * 8 * 3)
+
+    # A bad spec is shown on the field and changes nothing.
+    panel.plot_spec_edit.setText("5-1")
+    panel._on_plot_spec_edited(panel.plot_spec_edit)
+    assert panel._plot_spec == "*"
+    assert "border" in panel.plot_spec_edit.styleSheet()
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_template_info_stays_one_line(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    channels = list(range(1, 129))
+    panel._counts = {c: 5 for c in channels}
+    panel._template_data = _template_data(channels)
+    panel._render_templates()
+    h = panel.template_info.sizeHint().height()
+    assert h <= 2 * panel.template_info.fontMetrics().height()
+    panel.close()
+    spin(qt_app)
 
 
 def test_template_legend_does_not_grow_without_bound(qt_app):
@@ -1182,3 +1370,466 @@ def test_template_legend_does_not_grow_without_bound(qt_app):
     panel._template_data = _template_data(channels)
     panel._render_templates()
     assert _legend_rows(panel.template_plot_i) == 0
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_main_display_and_pulse_capture_rotate_the_same_way(qt_app):
+    """Periscope's df display and pulse capture must agree on the rotation.
+
+    Both take IQ in volts to frequency shift plus dissipation, and both
+    now go through apply_iq_conversion.  They were separate before,
+    and the copy written second used the conjugate -- which sends a pure
+    frequency excursion into both axes with the wrong sign.  Comparing
+    against the surviving correct one would have caught it immediately,
+    so this pins them together.
+    """
+    import numpy as np
+    from rfmux.core.transferfunctions import (
+        apply_iq_conversion, convert_roc_to_volts)
+
+    rng = np.random.default_rng(3)
+    raw_i = rng.normal(200.0, 20.0, 512)
+    raw_q = rng.normal(-90.0, 20.0, 512)
+    cal = 3.0e6 * np.exp(1j * np.radians(37.0))
+
+    # The definition, spelled out: (I + jQ) * calibration, in volts.
+    volts = convert_roc_to_volts(raw_i) + 1j * convert_roc_to_volts(raw_q)
+    want = volts * cal
+
+    got_df, got_diss = apply_iq_conversion(
+        convert_roc_to_volts(raw_i), convert_roc_to_volts(raw_q), cal)
+
+    # Not bitwise: numpy's complex multiply and the explicit real form
+    # round differently where the imaginary part passes through zero.
+    assert np.allclose(got_df, want.real, rtol=1e-12, atol=0)
+    assert np.allclose(got_diss, want.imag, rtol=1e-9,
+                       atol=1e-12 * np.abs(want).max())
+
+    # The sign is the part that was wrong: conjugating flips it.
+    wrong_df, _ = apply_iq_conversion(
+        convert_roc_to_volts(raw_i), convert_roc_to_volts(raw_q),
+        cal.conjugate())
+    assert not np.allclose(wrong_df, want.real, rtol=1e-6)
+
+
+def test_axis_labels_name_what_is_plotted(qt_app, tmp_path, monkeypatch):
+    """Labels come from the data on the axes, not from the request.
+
+    Taking the basis from what was asked for and the units from the
+    fallback produced "I (Hz)": quadrature names over samples stored as
+    frequency and dissipation, which are not the quadratures.
+    """
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    monkeypatch.setattr(m.QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: None)
+
+    path = tmp_path / "df_basis.h5"
+    PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                    {"streamer_mode": "slow", "sample_rate": 596.0,
+                     "trigger_basis": "df", "stored_units": "Hz"},
+                    df_calibrations={1: 2.0e6 + 0j},
+                    stored_units={1: "Hz"}).finalize()
+
+    panel = m.PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+
+    expected = {
+        m.UNITS_DF: ("df (Hz)", "dissipation (Hz)"),
+        m.UNITS_VOLTS: ("I (V)", "Q (V)"),
+        m.UNITS_COUNTS: ("I (counts)", "Q (counts)"),
+    }
+    for units, names in expected.items():
+        panel.units_combo.setCurrentText(units)
+        assert panel._axis_names(1) == names, f"wrong labels for {units}"
+
+    # The case that produced "I (Hz)": stored in the frequency basis, but
+    # the view cannot be rebuilt, so the stored samples are drawn as they
+    # are -- and those are df and dissipation, not I and Q.
+    panel._channel_cal = lambda ch: None
+    panel.units_combo.blockSignals(True)
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel.units_combo.blockSignals(False)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_live_capture_knows_what_it_stored(qt_app):
+    """A live df capture is not displayed as though it were quadratures.
+
+    The panel used to read two attributes for this that nothing ever
+    assigned, so every live capture looked like I/Q in volts.  Viewing a
+    frequency-basis capture in df then multiplied samples already in
+    hertz by the calibration a second time.
+    """
+    from rfmux.pulse_capture import PulseCaptureConfig
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 + 0j
+    panel = m.PulseCapturePanel(dark_mode=False,
+                                df_calibrations={1: {1: cal}})
+    panel.module_spin.setValue(1)
+
+    # Default basis: frequency, so a calibrated channel is stored in
+    # hertz and the default df view is a no-op rather than a second
+    # application of the calibration.
+    assert panel._stored_state(1) == ("df", "Hz")
+    assert panel.units_combo.currentText() == m.UNITS_DF
+    assert panel._amp_scale(1) == pytest.approx(1.0)
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # Capturing on the quadratures stores volts; the df view then
+    # applies the calibration, once.
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    assert panel._stored_state(1) == ("iq", "V")
+    assert panel._amp_scale(1) == pytest.approx(abs(cal))
+
+    # And volts is reachable from a hertz capture, by undoing it.
+    panel.capture_config = PulseCaptureConfig(trigger_basis="df")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    assert panel._amp_scale(1) == pytest.approx(1.0 / abs(cal))
+    assert panel._axis_names(1) == ("I (V)", "Q (V)")
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_templates_are_rotated_not_just_scaled(qt_app):
+    """A stacked template under df labels must be the rotated template.
+
+    Scaling I and Q one at a time by |calibration| leaves the pair
+    unrotated: the plots keep their quadrature shapes while the axes
+    claim frequency and dissipation, so the two look swapped against
+    the pulse view, which does rotate.  Averaging and the rotation are
+    both linear, so the rotated template is the template of rotated
+    pulses -- but only when the pair is converted together.
+    """
+
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    # A pure frequency excursion moves (I, Q) along the direction of
+    # 1/calibration, not of the calibration itself.
+    ang = np.angle(1.0 / cal)
+    t = np.linspace(0.0, 0.1, 64)
+    env = 100.0 * np.exp(-t / 0.02)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel.module_spin.setValue(1)
+    panel._counts = {1: 10}
+    panel._template_data = {
+        "time_s_ch1": t,
+        "counts_ch1": np.full(t.size, 10),
+        "template_I_ch1": env * np.cos(ang),
+        "template_Q_ch1": env * np.sin(ang),
+        "residual_I_ch1": np.full(t.size, 10.0),
+        "residual_Q_ch1": np.full(t.size, 10.0),
+    }
+    panel.template_residual_check.setChecked(True)
+
+    def peaks():
+        out = []
+        for plot in (panel.template_plot_i, panel.template_plot_q):
+            curves = [c for c in plot.getPlotItem().listDataItems()
+                      if c.yData is not None]
+            assert curves, "template plotted nothing"
+            out.append(max(np.nanmax(np.abs(c.yData)) for c in curves))
+        return out
+
+    # Volts: stored as volts already, so the trace is untouched and both
+    # quadratures carry the excursion.
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel._render_templates()
+    v_i, v_q = peaks()
+    assert v_i == pytest.approx(100.0 * abs(np.cos(ang)), rel=1e-6)
+    assert v_q == pytest.approx(100.0 * abs(np.sin(ang)), rel=1e-6)
+
+    # df: the whole excursion is frequency, so dissipation is empty.
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel._render_templates()
+    df, diss = peaks()
+    assert df == pytest.approx(100.0 * abs(cal), rel=1e-9)
+    assert diss < 1e-9 * df, f"dissipation kept {diss} of {df}"
+    assert panel._axis_names(1) == ("df (Hz)", "dissipation (Hz)")
+
+    # Scaling without rotating splits it across both, which is the bug.
+    assert not np.isclose(100.0 * abs(cal) * abs(np.sin(ang)), 0.0)
+
+    # The residual band travels with the mean.  It is a spread rather
+    # than a signed pair, so it takes the rotation's length only -- but
+    # it does have to take it, or the band is drawn in volts under a
+    # hertz axis and collapses onto the mean.  Read the band itself:
+    # the plot's y-range is set by the mean and padded, so it cannot
+    # tell a scaled band from an unscaled one.
+    fills = [it for it in panel.template_plot_i.getPlotItem().items
+             if isinstance(it, pg.FillBetweenItem)]
+    assert len(fills) == 1, fills
+    upper = max(np.nanmax(c.yData) for c in fills[0].curves)
+    assert upper == pytest.approx((100.0 + 10.0) * abs(cal), rel=1e-9)
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_noise_bands_follow_the_rotation(qt_app):
+    """The baseline and threshold lines rotate with the samples.
+
+    The waveform went through the calibration but the noise statistics
+    were only scaled by its magnitude, so in the df view the baseline
+    and the +/-sigma lines were drawn from the volts-basis position
+    while the trace above them was in hertz -- horizontal lines that
+    belonged to a different basis.
+
+    A baseline is a signed position in the plane, so it rotates.  The
+    spreads are magnitudes and take the rotation's length only.
+    """
+
+    from rfmux.core.transferfunctions import apply_iq_conversion
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel.module_spin.setValue(1)
+    panel.noise_stats = {1: ns}
+    panel._pulse_summaries[(1, 1)] = {
+        "n_samples": 8, "duration_ms": 1.0, "peak_amp": 0.0, "snr": 0.0,
+        "tau_ms": float("nan"),
+    }
+    # A flat stretch sitting exactly on the baseline: wherever the trace
+    # is drawn, the baseline line has to be drawn on top of it.
+    flat = np.full(8, 1.0)
+    panel._get_waveform = lambda ch, idx, stream="slow": {
+        "Time": np.arange(8) * 1e-3,
+        "Amp_I": flat * ns.mean_I,
+        "Amp_Q": flat * ns.mean_Q,
+    }
+
+    def drawn(plot):
+        out = {}
+        for item in plot.getPlotItem().listDataItems():
+            if item.yData is None:
+                continue
+            out.setdefault(item.name() or "", []).append(
+                float(np.nanmean(item.yData)))
+        return out
+
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    panel._show_pulse(1, 1)
+
+    want_I, want_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, cal)
+    for plot, want in ((panel.pulse_plot_i, want_I),
+                       (panel.pulse_plot_q, want_Q)):
+        got = drawn(plot)
+        base = [v for k, v in got.items() if "baseline" in k]
+        trace = [v for k, v in got.items() if "pulse" in k]
+        assert base and trace, got.keys()
+        assert base[0][0] == pytest.approx(want, rel=1e-9)
+        assert trace[0][0] == pytest.approx(want, rel=1e-9)
+        # The thing that was wrong: scaling alone puts it elsewhere.
+        assert base[0][0] == pytest.approx(trace[0][0], rel=1e-9)
+
+    # The spreads take the length only -- a rotation does not stretch them.
+    view_ns = panel._view_noise(1, ns)
+    assert view_ns.std_I == pytest.approx(ns.std_I * abs(cal), rel=1e-12)
+    assert view_ns.std_Q == pytest.approx(ns.std_Q * abs(cal), rel=1e-12)
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_noise_strip_follows_the_view(qt_app):
+    """The noise strip names the basis on the axes and carries its unit.
+
+    It was written once, when the statistics arrived, as "I=... Q=..."
+    with no unit at all -- so it went on describing what the capture
+    stored while the plots underneath had been switched to another
+    basis, and never said which.
+    """
+    from rfmux.core.transferfunctions import apply_iq_conversion
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope import pulse_capture_panel as m
+
+    cal = 2.0e6 * np.exp(1j * np.radians(40.0))
+    ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
+
+    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    # Stored on the quadratures and viewed in volts, the state this
+    # test exercises.
+    from rfmux.pulse_capture import PulseCaptureConfig
+    panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel.module_spin.setValue(1)
+    panel.noise_stats = {1: ns}
+    panel._refresh_noise_label()        # what the arrival path does
+
+    text = panel.noise_label.text()
+    assert "I=" in text and "Q=" in text, text
+    assert "V" in text, text
+
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    text = panel.noise_label.text()
+    assert "df=" in text and "dissipation=" in text, text
+    assert "Hz" in text, text
+    assert "I=" not in text and "Q=" not in text, text
+
+    # And the numbers are the rotated ones, not the stored ones scaled.
+    want_I, _ = apply_iq_conversion(ns.mean_I, ns.mean_Q, cal)
+    assert f"{want_I:.4g}" in text, (text, f"{want_I:.4g}")
+
+    panel.close()
+    spin(qt_app)
+
+
+def test_the_tap_is_released_however_the_worker_ends(qt_app):
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    released = []
+    runtime = SimpleNamespace(unregister_pulse_tap=lambda: released.append(True))
+    panel = PulseCapturePanel(periscope=runtime, dark_mode=False)
+    try:
+        panel._tap_registered = True
+        panel.task = None
+        panel._on_task_finished()
+        assert released == [True]
+        assert panel._tap_registered is False
+    finally:
+        panel.close()
+
+
+def test_a_new_capture_starts_from_the_newest_packets():
+    """Registering the tap discards the receiver's backlog, so the slow
+    stream's clock starts current instead of behind."""
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.app_runtime import PeriscopeRuntime
+
+    class _Q:
+        def __init__(self, n):
+            self.n = n
+
+        def clear(self):
+            self.n = 0
+
+    rt = PeriscopeRuntime.__new__(PeriscopeRuntime)
+    rt.receiver = SimpleNamespace(queue=_Q(37))
+    rt.register_pulse_tap(lambda *a: None)
+    assert rt.receiver.queue.n == 0
+    PeriscopeRuntime.__new__(PeriscopeRuntime)._discard_packets()  # no receiver yet
+
+
+def test_a_new_capture_does_not_show_the_last_runs_counts(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    try:
+        panel._last_stats = {"total_pulses": 57, "rate_per_min": 12.0,
+                             "elapsed_s": 300, "per_channel": {1: 57}}
+        panel._reset_results([1])
+        panel._refresh_status_line()
+        assert "57" not in panel.status_label.text()
+    finally:
+        panel.close()
+
+
+def test_pulse_tree_shows_the_clock_and_stays_resizable(qt_app):
+    """Columns size to their contents as rows arrive, until the user
+    drags a divider; the decoded packet clock has its own column."""
+    from PyQt6 import QtWidgets
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    tree = panel.pulse_tree
+    header = tree.header()
+    assert tree.columnCount() == 4
+    assert header.sectionResizeMode(0) == \
+        QtWidgets.QHeaderView.ResizeMode.Interactive
+    panel._reset_results([1], "now")
+    panel._add_pulse_row(1, 1, {"n_samples": 120, "snr": 7.0,
+                                "trigger_utc": "2026-09-02T16:14:05.123456Z"})
+    row = panel._channel_items[1].child(0)
+    assert row.text(1) == "16:14:05.123456"
+    header.resizeSection(1, 333)          # the user drags a divider
+    panel._add_pulse_row(1, 2, {"n_samples": 5, "snr": 3.0})
+    assert header.sectionSize(1) == 333   # and keeps the width
+
+
+def test_the_file_label_shows_the_name_with_the_path_on_hover(qt_app):
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._show_path("/very/long/session/directory/that/goes/on/and/on/"
+                     "session_20260902_180701/pulse_module2_180833.h5")
+    assert panel.path_label.text() == "HDF5: pulse_module2_180833.h5"
+    assert panel.path_label.toolTip().endswith("pulse_module2_180833.h5")
+
+
+def test_both_mode_accepts_more_channels_than_the_pfb_streamer(
+        qt_app, tmp_path, monkeypatch):
+    """Five channels in both mode pass the panel's pre-check (the task's
+    streamer check picks the fast subset); in fast mode they do not."""
+    warnings = []
+    monkeypatch.setattr(
+        QtWidgets.QMessageBox, "warning",
+        staticmethod(lambda *a, **k: warnings.append(a[2])))
+    runtime = _FakeRuntime()
+    panel = _make_panel(qt_app, tmp_path, runtime)
+    panel.channels_edit.setText("1-5")
+
+    panel.mode_combo.setCurrentText("fast")
+    panel._on_start()
+    assert warnings and "at most 4" in warnings[-1]
+
+    panel.mode_combo.setCurrentText("both")
+    panel._on_start()
+    assert "at most 4" not in warnings[-1], warnings[-1]
+    assert "CRS connection" in warnings[-1]
+    panel.close()
+    spin(qt_app)
+
+
+class _StoppingTask:
+    """A worker between the stop request and its finished signal."""
+    def __init__(self):
+        self.stop_requests = 0
+        self.session = type("S", (), {"hdf5_path": None})()
+
+    def request_stop(self):
+        self.stop_requests += 1
+
+    def wait(self, ms):
+        return True
+
+
+def test_stop_shows_stopping_until_the_worker_finishes(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.task = _StoppingTask()
+    panel._set_run_state(True)
+
+    panel._on_stop()
+    assert panel.task.stop_requests == 1
+    assert "Stopping" in panel.btn_start.text()
+    assert not panel.btn_start.isEnabled()
+    assert "Stopping" in panel.status_label.text()
+
+    panel._on_task_finished()
+    assert panel.task is None
+    assert "Start" in panel.btn_start.text()
+    assert panel.btn_start.isEnabled()
+    assert "Stopped" in panel.status_label.text()
+    panel.close()
+    spin(qt_app)

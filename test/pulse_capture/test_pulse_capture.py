@@ -318,10 +318,47 @@ class TestPulseHistogramSet:
         hs.add_pulse(1, pulse, ns)
 
         data = hs.get_histogram_data()
-        assert "amplitude_bins" in data
-        assert "amplitude_counts_ch1" in data
+        assert "amplitude_i_bins" in data
+        assert "amplitude_q_counts_ch1" in data
         assert "snr_bins" in data
         assert "duration_ms_bins" in data
+
+    def test_each_axis_has_its_own_amplitude_histogram_on_shared_bins(self):
+        hs = PulseHistogramSet(amp_range=(0, 200), amp_bins=10)
+        ns = _make_noise_stats(std_I=10.0, std_Q=10.0)
+        hs.add_pulse(1, _make_pulse_data(peak_I=100.0, peak_Q=40.0), ns)
+        h = hs.get_channel_histograms(1)
+        assert np.argmax(h["amplitude_i"].counts) == 5     # 100 of 200 in 10 bins
+        assert np.argmax(h["amplitude_q"].counts) == 2     # 40
+        # A pulse beyond the range widens both axes' bins together
+        hs.add_pulse(1, _make_pulse_data(peak_I=1000.0, peak_Q=40.0), ns)
+        np.testing.assert_array_equal(h["amplitude_i"].bin_edges,
+                                      h["amplitude_q"].bin_edges)
+        assert h["amplitude_i"].bin_edges[-1] > 1000.0
+        assert h["amplitude_q"].total == 2
+
+    def test_a_rotated_channel_also_bins_the_raw_quadrature_peaks(self):
+        """Given the factor that took raw volts into storage, the raw
+        pair is binned from the waveform turned back; without it (a
+        channel stored in the quadratures) the raw pair stays empty and
+        out of the exported data."""
+        hs = PulseHistogramSet(amp_range=(0, 200), amp_bins=10)
+        hs.size_amplitude_to_noise(2.0, raw_sigma=0.02)
+        ns = _make_noise_stats(std_I=10.0, std_Q=10.0)
+        # Storage = raw volts * 100 * exp(j pi/2): a quarter turn and a scale
+        to_raw = 100.0 * np.exp(1j * np.pi / 2)
+        hs.add_pulse(1, _make_pulse_data(peak_I=100.0, peak_Q=0.0), ns, to_raw=to_raw)
+        h = hs.get_channel_histograms(1)
+        # A stored peak along I of 100 turned back a quarter turn lies along
+        # raw Q, at 100 / 100 = 1 V; raw I sees the stored Q, which is 0.
+        assert h["amplitude_raw_q"].total == 1
+        assert np.argmax(h["amplitude_raw_q"].counts) == \
+            np.searchsorted(h["amplitude_raw_q"].bin_edges, 1.0, side="right") - 1
+        assert np.argmax(h["amplitude_raw_i"].counts) == 0
+        hs.add_pulse(2, _make_pulse_data(peak_I=100.0), ns)
+        data = hs.get_histogram_data()
+        assert "amplitude_raw_i_counts_ch1" in data
+        assert "amplitude_raw_i_counts_ch2" not in data
 
 # ═══════════════════════════════════════════════════════════════════
 #  HDF5 Writer/Reader Tests
@@ -467,6 +504,71 @@ class TestPulseHDF5:
             assert reader.df_calibration(1) == pytest.approx(42.5)
             assert reader.df_calibration(99) is None
 
+    def test_rotation_matches_convert_iq_to_df(self):
+        """The rotation is the one convert_iq_to_df defines, not its conjugate.
+
+        df_calibration is the reciprocal of dIQ/df, so a frequency shift
+        is recovered by *multiplying* IQ by it.  Conjugating instead
+        sends a pure frequency excursion into both axes with the wrong
+        sign -- which is what this did, undetected, because nothing
+        compared the two directly.
+        """
+        import numpy as np
+        from rfmux.core.transferfunctions import (
+            VOLTS_PER_ROC, apply_iq_conversion, convert_iq_to_df)
+        from rfmux.pulse_capture.analysis import (
+            display_transform, storage_transform)
+
+        # A sweep with a known complex slope; the calibration is 1/slope.
+        freqs = np.linspace(-1e5, 1e5, 401)
+        slope = (2.0 + 5.0j) * 1e-9              # volts per Hz
+        cal = convert_iq_to_df(np.array([1.0 + 0j]), 0.0,
+                               freqs, slope * freqs)[0]
+
+        shift_hz = 1000.0
+        d_iq = slope * shift_hz                   # what that shift does to IQ
+        counts = (d_iq.real / VOLTS_PER_ROC, d_iq.imag / VOLTS_PER_ROC)
+
+        # Counts in, hertz out, through the transform a capture applies.
+        factor, units = storage_transform(cal, "df")
+        assert units == "Hz"
+        df, diss = apply_iq_conversion(counts[0], counts[1], factor)
+        assert df == pytest.approx(shift_hz, rel=1e-9)
+        assert df == pytest.approx((d_iq * cal).real, rel=1e-9)
+        # A pure frequency shift has no dissipation component.
+        assert abs(diss) < 1e-6 * abs(df)
+
+        # And the view can put it back: stored hertz to the quadratures
+        # in volts is the same map inverted, which is what makes either
+        # view of a capture exact.
+        back = display_transform(cal, "df", "Hz", "iq", "V")
+        assert back is not None
+        vi, vq = apply_iq_conversion(df, diss, back[0])
+        assert vi == pytest.approx(d_iq.real, rel=1e-9)
+        assert vq == pytest.approx(d_iq.imag, rel=1e-9)
+
+    def test_unusable_df_calibration_costs_the_units_not_the_file(
+            self, tmp_path):
+        """A wrong-shaped mapping must not take the capture with it.
+
+        Periscope keys its calibrations by module, so passing them
+        straight through handed h5py a dict.  It refused, the writer's
+        constructor raised, and PulseCaptureSession turned that into
+        ``writer = None`` -- a capture that ran and saved nothing.
+        """
+        path = tmp_path / "nested.h5"
+        with pytest.warns(UserWarning, match="df_calibration"):
+            writer = PulseHDF5Writer(
+                path, [1], {1: _make_noise_stats()},
+                {"streamer_mode": "slow"},
+                df_calibrations={1: {1: 42.5}},   # {module: {channel: cal}}
+            )
+            writer.finalize()
+
+        assert path.exists(), "the file is worth more than the units"
+        with PulseHDF5Reader(path) as reader:
+            assert reader.df_calibration(1) is None
+
     def test_nonexistent_pulse_returns_none(self, tmp_path):
         path = tmp_path / "test.h5"
         writer = self._make_writer(path, channels=[1])
@@ -482,8 +584,8 @@ class TestPulseHDF5:
         writer = self._make_writer(path, channels=[1])
 
         hist_data = {
-            "amplitude_bins": np.array([5.0, 15.0, 25.0]),
-            "amplitude_counts_ch1": np.array([10, 20, 5], dtype=np.int64),
+            "amplitude_i_bins": np.array([5.0, 15.0, 25.0]),
+            "amplitude_i_counts_ch1": np.array([10, 20, 5], dtype=np.int64),
         }
         writer.update_histograms(hist_data)
         writer.finalize()
@@ -491,10 +593,10 @@ class TestPulseHDF5:
         with PulseHDF5Reader(path) as reader:
             loaded = reader.get_histograms()
             np.testing.assert_array_equal(
-                loaded["amplitude_bins"], hist_data["amplitude_bins"])
+                loaded["amplitude_i_bins"], hist_data["amplitude_i_bins"])
             np.testing.assert_array_equal(
-                loaded["amplitude_counts_ch1"],
-                hist_data["amplitude_counts_ch1"])
+                loaded["amplitude_i_counts_ch1"],
+                hist_data["amplitude_i_counts_ch1"])
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -565,8 +667,8 @@ class TestIntegration:
 
             # Histograms present
             hists = reader.get_histograms()
-            assert "amplitude_counts_ch1" in hists
-            assert np.sum(hists["amplitude_counts_ch1"]) == n_detected
+            assert "amplitude_i_counts_ch1" in hists
+            assert np.sum(hists["amplitude_i_counts_ch1"]) == n_detected
 
         # Verify histogram set agrees
         assert histograms.total_pulses() == n_detected
@@ -579,7 +681,7 @@ from rfmux.pulse_capture.analysis import (
     pulse_peaks,
     pulse_summary,
 )
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
@@ -688,7 +790,8 @@ class TestTauHistogram:
         hist = PulseHistogramSet(threshold_sigma=5.0)
         hist.add_pulse(1, _make_pulse_data(), _make_noise_stats())
         assert set(hist.get_channel_histograms(1)) == {
-            "amplitude", "duration_ms", "snr", "tau_ms"}
+            "amplitude_i", "amplitude_q", "amplitude_raw_i", "amplitude_raw_q",
+            "duration_ms", "snr", "tau_ms"}
 
 
 # ───────────────────────── Phase A: HDF5 derived attrs ──────────────
@@ -728,11 +831,12 @@ class TestHDF5DerivedAttrs:
         ns = {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)}
         pulse = _make_decay_pulse(tau_s=1.5e-3, amp_sigma=40.0)
 
-        # Crossings well inside the window, as save_to_end_confirmed
-        # leaves them: the tail runs on past the pulse.
+        # Crossings well inside the window: the confirmation tail runs
+        # on past the pulse.
         t = pulse["Time"]
         pulse["trigger_time"] = float(t[10])
         pulse["below_threshold_time"] = float(t[150])
+        pulse["settled_time"] = float(t[200])
 
         expected = pulse_summary(pulse, ns[1], 5.0)
         assert expected["duration_s"] < float(t[-1] - t[0]), \
@@ -785,10 +889,10 @@ class TestPulseCaptureSession:
         kwargs = dict(
             channels=[1],
             threshold_sigma=5.0,
-            # 1.5σ: the leaky-bucket end condition increments when BOTH
-            # I and Q are within end_sigma.  At 1.0σ that probability is
-            # ~0.47 on Gaussian noise (negative drift — termination only
-            # by lucky random walk); at 1.5σ it is ~0.75 (prompt).
+            # 1.5σ: the end-confirmation count increments when BOTH
+            # I and Q are within end_sigma, ~0.75 per sample here on
+            # white noise, so termination is prompt and these tests
+            # stay about what they assert rather than about the end.
             end_sigma=1.5,
             margin_fraction=0.2,
             buf_size=4000,
@@ -866,7 +970,12 @@ class TestPulseCaptureSession:
         _feed_noise(session, 200, rng, mean=5.0)  # shifted baseline
         assert session.state is CaptureState.CAPTURING
         assert len(events["noise"]) == 2
-        assert session.noise_stats[1].mean_I == pytest.approx(5.0, abs=1.0)
+        # Samples are converted to physical units on the way in, so the
+        # statistics are in volts: 5 counts of shift, times the readout's
+        # counts-to-volts constant.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert session.noise_stats[1].mean_I / VOLTS_PER_ROC == \
+            pytest.approx(5.0, abs=1.0)
 
         _feed_capture_stream(session, 1000, [100], rng, mean=5.0,
                              t_offset=t_end)
@@ -874,7 +983,9 @@ class TestPulseCaptureSession:
         session.stop()
 
         with PulseHDF5Reader(tmp_path / "session.h5") as reader:
-            assert reader.noise_stats(1).mean_I == pytest.approx(5.0, abs=1.0)
+            assert reader.stored_units(1) == "V"
+            assert reader.noise_stats(1).mean_I / VOLTS_PER_ROC == \
+                pytest.approx(5.0, abs=1.0)
             assert reader.pulse_count(1) == 2
 
     def test_stop_idempotent(self, tmp_path):
@@ -952,7 +1063,7 @@ class TestHistogramAutoExpand:
 
 # ───────────────────────── PulseCaptureConfig ───────────────────────
 
-from rfmux.pulse_capture.session import (
+from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
 
@@ -973,23 +1084,42 @@ class TestPulseCaptureConfig:
     def test_session_kwargs_match_session_signature(self):
         cfg = PulseCaptureConfig(min_pulse_ms=0.5, max_pulse_ms=100.0)
         kwargs = cfg.session_kwargs(19073.486328125)
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
-        session = PulseCaptureSession(channels=[1], **kwargs)
-        assert session.threshold_sigma == cfg.threshold_sigma
-        assert session.buf_size == cfg.buf_size(19073.486328125)
+        capture_session = PulseCaptureSession(channels=[1], **kwargs)
+        assert capture_session.threshold_sigma == cfg.threshold_sigma
+        assert capture_session.buf_size == cfg.buf_size(19073.486328125)
 
     def test_validate_end_at_or_above_threshold_is_error(self):
         cfg = PulseCaptureConfig(threshold_sigma=3.0, end_sigma=3.0)
         assert any(s == "error" for s, _ in cfg.validate())
 
     def test_validate_low_end_sigma_warns(self):
-        cfg = PulseCaptureConfig(end_sigma=1.0)
+        cfg = PulseCaptureConfig(end_sigma=0.8)
         issues = cfg.validate()
-        assert any(s == "warning" and "random walk" in m
+        assert any(s == "warning" and "hard stop" in m
                    for s, m in issues)
         assert not any(s == "error" for s, _ in issues)
+
+    def test_validate_default_end_sigma_is_clean(self):
+        """The default (1.5) is measured to close captures on both
+        streams; the config must not warn about itself."""
+        assert not any("End σ" in m for _, m in PulseCaptureConfig().validate())
+
+    def test_the_window_is_seconds_whatever_the_pulse_length(self):
+        """The 1/f window has its own default; a short max pulse does not
+        shorten it, and 0 still derives it from the pulse."""
+        assert PulseCaptureConfig().noise_train_span_ms() == pytest.approx(5000.0)
+        assert PulseCaptureConfig(max_pulse_ms=20.0).noise_train_span_ms() \
+            == pytest.approx(5000.0)
+        assert PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=0.0) \
+            .noise_train_span_ms() == pytest.approx(400.0)
+
+    def test_a_short_window_warns_and_the_default_does_not(self):
+        short = PulseCaptureConfig(noise_train_ms=500.0).validate()
+        assert any(s == "warning" and "1/f window" in m for s, m in short)
+        assert not any("1/f window" in m for _, m in PulseCaptureConfig().validate())
 
     def test_validate_min_above_max_is_error(self):
         cfg = PulseCaptureConfig(min_pulse_ms=300.0, max_pulse_ms=100.0)
@@ -1011,6 +1141,10 @@ class TestPulseCaptureConfig:
             assert key in d
         assert d["buf_mb_total"] == pytest.approx(
             2 * d["buf_mb_per_channel"])
+        # What the session actually allocates: three doubled rings.
+        from rfmux.pulse_capture.detection import Circular
+        ring = Circular(d["buf_samples"]).buf.nbytes
+        assert d["buf_mb_per_channel"] == pytest.approx(3 * ring / 1e6)
 
     def test_edge_and_hard_stop_follow_max_pulse(self):
         """Both new time scales derive from max_pulse_ms — no knobs."""
@@ -1111,7 +1245,7 @@ class TestSessionFeedBlock:
 
     @staticmethod
     def _feed(mode, n=9000, noise_train=2000, block=700):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
         rng = np.random.default_rng(3)
@@ -1123,22 +1257,22 @@ class TestSessionFeedBlock:
         T = np.arange(n) / 1e4
 
         got = []
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=1e4, noise_samples=noise_train,
             buf_size=3000, threshold_sigma=5.0, end_sigma=1.5,
             baseline_window=20000,
             on_pulse=lambda ch, i, s_, d: got.append((ch, i, d)))
-        session.start()
+        capture_session.start()
         if mode == "sample":
             for k in range(n):
-                session.feed_sample(1, float(I[k]), float(Q[k]),
+                capture_session.feed_sample(1, float(I[k]), float(Q[k]),
                                     float(T[k]))
         else:
             for s in range(0, n, block):
-                session.feed_block(1, I[s:s + block], Q[s:s + block],
+                capture_session.feed_block(1, I[s:s + block], Q[s:s + block],
                                    T[s:s + block])
-        session.stop()
-        return session, got
+        capture_session.stop()
+        return capture_session, got
 
     def test_feed_block_matches_feed_sample_across_the_transition(self):
         ref_s, ref = self._feed("sample")
@@ -1158,23 +1292,23 @@ class TestSessionFeedBlock:
     def test_feed_block_drops_unusable_timestamps(self):
         """Same rule as feed_sample: no timestamp, no sample — every
         duration and tau is measured from these."""
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             PulseCaptureSession,
         )
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=1e4, noise_samples=200,
             buf_size=1000)
-        session.start()
+        capture_session.start()
         rng = np.random.default_rng(0)
-        session.feed_block(1, rng.normal(size=200), rng.normal(size=200),
+        capture_session.feed_block(1, rng.normal(size=200), rng.normal(size=200),
                            np.arange(200) / 1e4)
-        assert session.state.name == "CAPTURING"
+        assert capture_session.state.name == "CAPTURING"
 
         t = np.arange(10) / 1e4
         t[3] = np.nan
         t[7] = np.inf
-        session.feed_block(1, rng.normal(size=10), rng.normal(size=10), t)
-        assert session.dropped_invalid_ts == 2
+        capture_session.feed_block(1, rng.normal(size=10), rng.normal(size=10), t)
+        assert capture_session.dropped_invalid_ts == 2
 
 
 # Circular.extend is covered by test_circular_extend.py in this directory,
@@ -1182,7 +1316,7 @@ class TestSessionFeedBlock:
 
 
 class TestHotLoopCost:
-    """process_sample runs once per sample per channel — 1.22 MHz on the
+    """process_sample runs once per sample per channel — 2.44 MHz on the
     PFB stream — so work done on samples that cannot trigger is work the
     detector cannot afford.  Measured as a rate rather than asserted
     here: skipping the edge block on non-eligible samples took a single
@@ -1254,18 +1388,23 @@ class TestDetectionParamsPlumbing:
     """
 
     def test_session_kwargs_covers_exactly_the_detection_params(self):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
         # session_kwargs also carries the two sizing quantities, which
-        # are not detection knobs but are needed to build the session.
+        # are not detection knobs but are needed to build the session,
+        # and trigger_basis, which the session applies on the way in
+        # rather than handing to PulseCapture.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
-                                                   "noise_samples"}
+                                                   "noise_samples",
+                                                   "trigger_basis"}
+        # The join that matters: every detection knob still gets there.
+        assert set(DETECTION_PARAMS) <= set(kw)
 
     def test_every_detection_param_is_a_pulse_capture_argument(self):
         import inspect
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
         )
         accepted = set(inspect.signature(PulseCapture).parameters)
@@ -1277,7 +1416,7 @@ class TestDetectionParamsPlumbing:
         handed to the writer and silently dropped, so a capture file
         recorded neither what confirmed a trigger nor over what lag."""
         import h5py
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
             PulseCaptureSession,
         )
@@ -1285,16 +1424,16 @@ class TestDetectionParamsPlumbing:
         fs = 19073.486328125
         cfg = PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=50.0)
         path = tmp_path / "capture.h5"
-        session = PulseCaptureSession(
+        capture_session = PulseCaptureSession(
             channels=[1], sample_rate=fs, hdf5_path=path,
             **cfg.session_kwargs(fs))
-        session.start()
+        capture_session.start()
 
         rng = np.random.default_rng(0)
         for k in range(cfg.noise_samples(fs) + 10):
-            session.feed_sample(1, float(rng.normal()),
+            capture_session.feed_sample(1, float(rng.normal()),
                                 float(rng.normal()), k / fs)
-        session.stop()
+        capture_session.stop()
 
         with h5py.File(path, "r") as f:
             attrs = dict(f["metadata"].attrs)
@@ -1302,7 +1441,12 @@ class TestDetectionParamsPlumbing:
         missing = [p for p in DETECTION_PARAMS if p not in attrs]
         assert not missing, f"dropped on the way to the file: {missing}"
         for name in DETECTION_PARAMS:
-            assert attrs[name] == pytest.approx(getattr(session, name))
+            assert attrs[name] == pytest.approx(getattr(capture_session, name))
+        # The samples are stored converted, so the constant they were
+        # converted with travels with them.
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        assert attrs["volts_per_count"] == VOLTS_PER_ROC
+        assert attrs["stored_units"] == "V"
 
 
 # ───────────────────────── Template stacking ────────────────────────
@@ -1466,9 +1610,9 @@ class TestRollingBaseline:
 
     def test_slow_drift_cannot_trigger_even_a_frozen_baseline(self):
         """Monotonic drift used to park the signal past threshold and
-        deadlock the engine mid-capture.  The edge gate now vetoes the
-        trigger outright — over one lookback the drift moves a fraction
-        of a σ — so nothing fires at all, stale baseline or not."""
+        deadlock the engine mid-capture.  The edge test now vetoes the
+        trigger: over one lookback the drift moves a fraction of a σ, so
+        nothing fires at all, stale baseline or not."""
         pcap, ns = _run(baseline_window=0, amp=15.0, monotonic=True)
         assert not pcap.state[1].capturing, \
             "the engine must never wedge mid-capture"
@@ -1488,7 +1632,7 @@ class TestRollingBaseline:
         stop truncates the capture at the ring's capacity and the edge
         gate keeps the parked signal from re-firing — exactly one
         flagged event.  Rolling baseline: the median walks to the new
-        level and the leaky bucket ends the capture normally, sooner."""
+        level and the end confirmation ends the capture normally, sooner."""
         def step(window):
             ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                        mean_Q=0.0, std_Q=1.0)}
@@ -1521,9 +1665,9 @@ class TestRollingBaseline:
             len(d["Amp_I"]), "baseline recovery should beat the hard stop"
         assert ns.mean_I == pytest.approx(15.0, abs=0.2)
 
-    def test_wander_never_triggers_with_the_edge_gate(self):
+    def test_wander_never_triggers_with_the_edge_test(self):
         """4σ wander crosses the threshold band repeatedly, but over one
-        edge lookback it moves ~0.2σ — the edge gate vetoes it at ANY
+        edge lookback it moves ~0.2σ, so the edge test vetoes it at ANY
         baseline window, including the frozen and too-slow ones that
         used to storm.  Suppression no longer depends on the median
         keeping up with the drift."""
@@ -1532,7 +1676,7 @@ class TestRollingBaseline:
             assert pcap.pulse_count[1] == 0, \
                 f"wander triggered at baseline_window={window}"
 
-    def test_edge_gate_off_restores_the_wander_storm(self):
+    def test_edge_test_off_restores_the_wander_storm(self):
         """Ties the suppression to the gate: amplitude-only triggering
         (edge_lookback=0, debug) still storms on a frozen baseline."""
         legacy, _ = _run(baseline_window=0, amp=4.0, edge_lookback=0)
@@ -1541,7 +1685,7 @@ class TestRollingBaseline:
     def test_a_pulse_riding_on_wander_still_triggers(self):
         pcap, _ = _run(baseline_window=1000, amp=4.0, pulse_at=8000)
         assert pcap.pulse_count[1] >= 1, \
-            "the edge gate must not eat real pulses"
+            "the edge test must not eat real pulses"
 
     def test_a_pulse_does_not_move_the_baseline(self):
         """The median ignores pulses outright rather than bounding their
@@ -1588,9 +1732,9 @@ class TestBaselineConfig:
         """One window, one requirement: long compared with a pulse.
         The ring holds one max-length pulse, so the window is floored
         against it in case training was overridden short."""
-        # Once the ring is above its own minimum size, training (20x the
-        # pulse) beats the ring floor (8 x 1.5x the pulse) and wins.
-        cfg = PulseCaptureConfig(max_pulse_ms=1000.0)
+        # A window long compared with the pulse beats the ring floor
+        # (8 x 1.5x the pulse) and wins.
+        cfg = PulseCaptureConfig(max_pulse_ms=1000.0, noise_train_ms=20_000.0)
         kw = cfg.session_kwargs(1000.0)
         assert kw["baseline_window"] == cfg.noise_samples(1000.0) == 20000
         assert kw["baseline_window"] > cfg.buf_size(1000.0)
@@ -1792,46 +1936,17 @@ class TestHardStop:
         # within the same neighborhood — not at the hard stop.
         assert d["end_index"] < 1000
 
-    def test_stalled_confirmation_is_not_flagged_truncated(self):
-        """A hard stop reached because the end confirmation stalled —
-        the pulse itself long over — saved a COMPLETE pulse: with
-        save_to_end_confirmed off the window ends at below-threshold +
-        tail and the truncated flag stays off.  Truncated is reserved
-        for pulses still above threshold when the stop fired."""
-        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
-                                   mean_Q=0.0, std_Q=1.0)}
-        pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
-                            threshold_sigma=5.0, end_sigma=1.5,
-                            save_to_end_confirmed=False)
-        rng = np.random.default_rng(5)
-        # Pulse decays to a 3σ plateau: below threshold (so the pulse
-        # "ends"), but never inside the 1.5σ end band — the bucket can
-        # only stall until the hard stop.
-        for k in range(3000):
-            v = rng.normal(0, 1.0)
-            if k >= 200:
-                v += max(3.0, 60.0 * np.exp(-(k - 200) / 40.0))
-            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
-                                k * 1e-3)
-        assert pcap.pulse_count[1] == 1
-        d = pcap.pulses["Channel 1"][1]
-        assert d["truncated"] is False, \
-            "a complete pulse with a stalled bucket is not truncated"
-        below = d["below_threshold_index"]
-        assert (len(d["Amp_I"]) - 1) - below <= \
-            max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
-            "the stalled confirmation stretch must not be saved"
-
-    def test_stalled_confirmation_is_kept_when_saving_to_confirmed(self):
-        """Same stall, default save policy: the stretch IS saved, and
-        the pulse is still not truncated.  This is the case the option
-        exists for — the samples are in the ring either way, and which
-        of them reach disk is a policy choice, not a detection one."""
+    def test_stalled_confirmation_runs_to_the_hard_stop(self):
+        """A pulse that drops below threshold but never settles inside
+        the end band is saved to the hard stop and flagged truncated:
+        the window ran out before the pulse demonstrably ended."""
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(buf_size=2000, channels=[1], noise_stats=ns,
                                    threshold_sigma=5.0, end_sigma=1.5)
         rng = np.random.default_rng(5)
+        # Pulse decays to a 3σ plateau: below threshold, but never inside
+        # the 1.5σ end band, so the bucket can only stall.
         for k in range(3000):
             v = rng.normal(0, 1.0)
             if k >= 200:
@@ -1840,14 +1955,10 @@ class TestHardStop:
                                 k * 1e-3)
         assert pcap.pulse_count[1] == 1
         d = pcap.pulses["Channel 1"][1]
-        assert d["truncated"] is False, \
-            "the save policy must not change what counts as truncated"
-        below = d["below_threshold_index"]
-        tail = (len(d["Amp_I"]) - 1) - below
-        assert tail > max(10, int(0.1 * (below - d["trigger_index"]))) + 2, \
-            "the confirmation stretch should be saved under this policy"
-        # The window now runs to where the state machine stopped.
-        assert d["end_index"] == len(d["Amp_I"]) - 1
+        assert d["truncated"] is True
+        assert "settled_index" not in d, "a hard stop never saw it settle"
+        assert d["below_threshold_index"] < d["end_index"] \
+            == len(d["Amp_I"]) - 1
 
     def test_truncated_flag_survives_hdf5(self, tmp_path):
         d = _make_pulse_data()
@@ -1934,7 +2045,7 @@ class TestTriggerConfirmation:
         assert cfg.accidental_rate_hz(1.0) == pytest.approx(1.147e-6,
                                                             rel=1e-2)
         # PFB rate: the number that makes single-sample triggering
-        # unusable at 1.22 MHz.
+        # unusable at 2.44 MHz.
         assert cfg.accidental_rate_hz(1220703.125) == pytest.approx(
             1.4, rel=0.05)
         confirmed = PulseCaptureConfig(threshold_sigma=5.0,
@@ -1943,7 +2054,7 @@ class TestTriggerConfirmation:
 
     def test_confirmation_length_follows_the_stream_rate(self):
         """One sample is ample evidence at 596 Hz and nowhere near
-        enough at 1.22 MHz, so a fixed length cannot serve both: at the
+        enough at 2.44 MHz, so a fixed length cannot serve both: at the
         slow end it would reject real pulses that span less than one
         sample."""
         cfg = PulseCaptureConfig(threshold_sigma=5.0)
@@ -1984,7 +2095,7 @@ def _run_len(trigger_samples, spike_len):
 class TestTrainingWindow:
     def test_training_length_is_memory_bounded(self):
         """Raising the window by hand must stay safe: the record is held
-        whole, and 30 s at 1.22 MHz is 36.6M samples per channel."""
+        whole, and 30 s at 2.44 MHz is 73.2M samples per channel."""
         cfg = PulseCaptureConfig(noise_train_ms=30_000.0)
         assert cfg.noise_samples(19073.486328125) == 572_205
         assert cfg.noise_samples(1220703.125) == cfg._MAX_NOISE
@@ -1997,14 +2108,13 @@ class TestDecisionMarks:
     produced it, not just its samples."""
 
     def _run(self, trigger_samples=2, start=800, tau=40.0, amp=60.0,
-             n=3000, seed=3, save_to_end_confirmed=True):
+             n=3000, seed=3):
         ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(
             buf_size=4000, channels=[1], noise_stats=ns,
             threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
-            trigger_samples=trigger_samples,
-            save_to_end_confirmed=save_to_end_confirmed)
+            trigger_samples=trigger_samples)
         rng = np.random.default_rng(seed)
         for k in range(n):
             v = rng.normal(0, 1.0)
@@ -2024,56 +2134,41 @@ class TestDecisionMarks:
         # …and it is where the signal is largest, not somewhere in noise.
         assert abs(d["Amp_I"][d["trigger_index"]]) > 20
 
-    def test_window_ends_at_below_threshold_plus_tail(self):
-        """With save_to_end_confirmed off, the saved window ends where
-        the eye puts the end of the pulse — the below-threshold instant
-        plus a margin_fraction tail.  The leaky bucket only bounds the
-        state machine, so the end-confirmed mark sits well past the
-        last saved sample."""
-        d = self._run(save_to_end_confirmed=False)
+    def test_window_ends_where_the_pulse_settled(self):
+        """The settled sample is the last one saved, with the threshold
+        drop inside the window; the end confirmation that verified it
+        lies past the data."""
+        d = self._run()
         n = len(d["Amp_I"])
-        below = d["below_threshold_index"]
-        core = below - d["trigger_index"]
-        tail = (n - 1) - below
-        expected = max(10, int(0.1 * core))
-        assert abs(tail - expected) <= 2, \
-            f"tail {tail} vs margin-derived {expected}"
+        assert d["settled_index"] == n - 1
+        assert d["settled_time"] == pytest.approx(d["Time"][-1])
+        assert d["trigger_index"] < d["below_threshold_index"] \
+            < d["settled_index"]
         assert d["end_index"] > n - 1
         assert d["end_time"] > d["Time"][-1]
 
-    def test_window_runs_to_confirmation_by_default(self):
-        """Default policy: the window ends exactly where the state
-        machine did, so the end mark is the last sample rather than a
-        pointer past the data."""
-        d = self._run()
-        n = len(d["Amp_I"])
-        assert d["end_index"] == n - 1
-        assert d["end_time"] == pytest.approx(d["Time"][-1])
-        assert d["below_threshold_index"] < n - 1, \
-            "below-threshold must sit inside the window, not at its edge"
-
-    def test_saved_tail_is_longer_when_saving_to_confirmation(self):
-        """The two policies differ only in how much tail reaches disk —
-        same trigger, same below-threshold instant."""
-        on = self._run()
-        off = self._run(save_to_end_confirmed=False)
-        assert on["trigger_time"] == pytest.approx(off["trigger_time"])
-        assert on["below_threshold_time"] == pytest.approx(
-            off["below_threshold_time"])
-        assert len(on["Amp_I"]) > len(off["Amp_I"])
-
-    def test_duration_does_not_move_with_the_save_policy(self):
-        """The reason the policy can default to on: duration measures
-        the threshold crossings, so it describes the pulse and not how
-        long the leaky bucket took to be satisfied."""
+    def test_duration_is_trigger_to_settled(self):
+        """Duration measures to where the pulse settled inside the end
+        band, past the threshold drop and before the confirmation, so it
+        describes the pulse and not how long the bucket took."""
         ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0,
                                mean_Q=0.0, std_Q=1.0)
-        on = pulse_summary(self._run(), ns, threshold_sigma=5.0)
-        off = pulse_summary(self._run(save_to_end_confirmed=False), ns,
-                            threshold_sigma=5.0)
-        assert on["n_samples"] > off["n_samples"], \
-            "the windows must actually differ, or this proves nothing"
-        assert on["duration_ms"] == pytest.approx(off["duration_ms"])
+        d = self._run()
+        summ = pulse_summary(d, ns, threshold_sigma=5.0)
+        assert summ["duration_s"] == pytest.approx(
+            d["settled_time"] - d["trigger_time"])
+        assert d["below_threshold_time"] < d["settled_time"] < d["end_time"]
+
+    def test_a_file_without_a_settled_instant_measures_to_the_threshold(self):
+        """Records written before the settled instant existed keep the
+        duration they had: trigger to the threshold drop."""
+        ns = ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                               mean_Q=0.0, std_Q=1.0)
+        d = dict(self._run())
+        d.pop("settled_index"), d.pop("settled_time")
+        summ = pulse_summary(d, ns, threshold_sigma=5.0)
+        assert summ["duration_s"] == pytest.approx(
+            d["below_threshold_time"] - d["trigger_time"])
 
     def test_bucket_count_reaches_its_target(self):
         d = self._run()
@@ -2102,6 +2197,298 @@ class TestDecisionMarks:
             with PulseHDF5Reader(path) as r:
                 got = r.get_pulse(1, 1)
         for key in ("trigger_index", "end_index", "below_threshold_index",
-                    "end_confirm_samples", "end_confirm_target"):
+                    "settled_index", "end_confirm_samples",
+                    "end_confirm_target"):
             assert got[key] == d[key], key
         assert got["end_time"] == pytest.approx(d["end_time"])
+        assert got["settled_time"] == pytest.approx(d["settled_time"])
+
+
+def test_window_by_time_skips_samples_without_a_timestamp():
+    """A sample fed without a timestamp holds NaN in the ring; it is
+    outside every window, and the mask that says so is vectorised."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    pc = PulseCapture(channels=[1], buf_size=64,
+                      noise_stats={1: ChannelNoiseStats()}, baseline_window=0)
+    for k in range(20):
+        pc.process_sample(1, 0.0, 0.0, None if k == 5 else k * 1e-3)
+    w = pc.get_window_by_time(1, 3e-3, 8e-3)
+    assert list(w["Time"]) == [3e-3, 4e-3, 6e-3, 7e-3, 8e-3]
+    assert pc.get_window_by_time(1, 1.0, 2.0) is None
+
+
+# ───────────────────── Amplitude bins in stored units ───────────────
+
+
+class TestAmplitudeBinsFollowStoredUnits:
+    def test_volts_pulses_spread_over_the_amplitude_bins(self, tmp_path):
+        """Samples reach the histograms in volts (or hertz), not counts;
+        the amplitude bins are sized from the noise sigma in those
+        units once it is known, so pulses of different heights land in
+        different bins instead of all in the first."""
+        from rfmux.pulse_capture.capture_session import PulseCaptureSession
+
+        fs = 19073.486328125
+        cfg = PulseCaptureConfig(max_pulse_ms=20.0, noise_train_ms=50.0)
+        session = PulseCaptureSession(channels=[1], sample_rate=fs,
+                                      hdf5_path=tmp_path / "c.h5",
+                                      **cfg.session_kwargs(fs))
+        session.start()
+        rng = np.random.default_rng(1)
+        n_train = cfg.noise_samples(fs)
+        k = 0
+        for _ in range(n_train + 50):
+            session.feed_sample(1, 100.0 + rng.normal(), rng.normal(), k / fs); k += 1
+        # Two pulses of clearly different height, in counts.
+        for height in (200.0, 800.0):
+            for i in range(60):
+                session.feed_sample(1, 100.0 + height * np.exp(-i / 15) + rng.normal(),
+                                    rng.normal(), k / fs); k += 1
+            for _ in range(400):
+                session.feed_sample(1, 100.0 + rng.normal(), rng.normal(), k / fs); k += 1
+        session.stop()
+
+        acc = session.histograms.get_channel_histograms(1)["amplitude_i"]
+        assert acc.total == 2
+        assert acc.counts[0] == 0, "no pulse in the first bin: the range is in stored units"
+        assert np.count_nonzero(acc.counts) == 2, "different heights, different bins"
+
+    def test_sizing_leaves_a_histogram_in_use_alone(self):
+        hist = PulseHistogramSet(amp_range=(0, 200), amp_bins=10, threshold_sigma=5.0)
+        ns = ChannelNoiseStats(std_I=1.0, std_Q=1.0)
+        hist.add_pulse(1, _make_decay_pulse(amp_sigma=20.0), ns)
+        edges = hist.amp_edges.copy()
+        hist.size_amplitude_to_noise(1e-6)
+        assert np.array_equal(hist.amp_edges, edges)
+
+
+class TestTriggerCaptureTooShort:
+    def test_a_run_that_never_trains_says_so(self, monkeypatch, capsys):
+        """A time_run shorter than the noise training returns nothing;
+        the caller is told, rather than handed an empty result."""
+        import asyncio
+        from rfmux.algorithms.measurement import trigger_capture as tc
+
+        async def ends_at_once(session, *a, **k):
+            return 0.01
+        monkeypatch.setattr(tc, "run_slow_source", ends_at_once)
+        result = tc.PulseCaptureResult(streamer_mode="slow", config=PulseCaptureConfig(),
+                                       channels=[1], module=1)
+        asyncio.run(tc._run_single(result, "127.0.0.1", [1], 1, "slow", 596.0,
+                                   0.01, None, None, True))
+        assert "noise training never completed" in capsys.readouterr().out
+        assert result.slow.noise == {}
+
+
+class TestMalformedDfCalibration:
+    """A calibration that is not a number (the module-keyed mapping
+    where the flat {channel: calibration} one is expected) is treated as
+    absent: the channel stays in the quadratures and in volts, and the
+    display transform declines, so the first fed sample cannot take the
+    session down."""
+
+    def test_storage_transform_falls_back_to_volts(self):
+        from rfmux.core.transferfunctions import VOLTS_PER_ROC
+        from rfmux.pulse_capture.analysis import storage_transform
+        with pytest.warns(UserWarning, match="df_calibration"):
+            factor, units = storage_transform({1: 42.5}, "df")
+        assert units == "V"
+        assert factor == complex(VOLTS_PER_ROC)
+
+    def test_display_transform_declines_instead_of_raising(self):
+        from rfmux.pulse_capture.analysis import display_transform
+        assert display_transform({1: 42.5}, "iq", "V", "df", "Hz") is None
+
+
+class TestPostNoiseHoldIsBounded:
+    def test_hold_keeps_at_most_one_training_span(self):
+        """A channel the stream never delivers keeps the session in
+        ESTIMATING; the other channels' post-quota samples are held for
+        the transition, but only the newest training span of them."""
+        from rfmux.pulse_capture.capture_session import PulseCaptureSession
+
+        s = PulseCaptureSession(channels=[1, 2], sample_rate=1e4,
+                                noise_samples=500, buf_size=1000)
+        s.start()
+        rng = np.random.default_rng(0)
+        k = 0
+        for _ in range(20):
+            t = np.arange(k, k + 300) / 1e4
+            s.feed_block(1, rng.normal(size=300), rng.normal(size=300), t)
+            k += 300
+        assert s.state.name == "ESTIMATING"
+        held_I, _held_Q, held_T = s._pending_post_noise[1]
+        assert held_I.shape[0] == s.noise_samples
+        assert held_T[-1] == pytest.approx((k - 1) / 1e4), "the newest are kept"
+
+
+class TestInPulseNoise:
+    """Noise that grows with the pulse must not read as pileup."""
+
+    @staticmethod
+    def _noisy_pulse(scale, seed=3, n=6000, tau=190.0, amp=40.0):
+        """One pulse whose noise sigma is 1 + scale * signal, sampled
+        fast enough that the tail hardly decays across the ten-sample
+        near tap: the mock at decimation 0."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=2, edge_lookback=400)
+        rng = np.random.default_rng(seed)
+        for k in range(n):
+            s = amp * np.exp(-(k - 1000) / tau) if k >= 1000 else 0.0
+            sig = 1.0 + scale * s
+            pcap.process_sample(1, float(s + rng.normal(0, sig)),
+                                float(rng.normal(0, sig)), k * 2.6e-5)
+        return pcap
+
+    def test_signal_proportional_noise_does_not_split(self):
+        """The mock at 38 kHz: quasiparticle noise ten times the trained
+        sigma at the peak.  Judged against the baseline sigma the tail
+        splits again and again; against the scatter inside the capture
+        it is one pulse."""
+        for seed in range(4):
+            pcap = self._noisy_pulse(scale=0.25, seed=seed)
+            assert pcap.pulse_count[1] == 1, f"seed {seed}"
+            assert not pcap.pulses["Channel 1"][1]["pileup"], f"seed {seed}"
+
+    def test_a_real_pileup_still_splits_under_that_noise(self):
+        """A second pulse that clears the local scatter is still split."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=2, edge_lookback=400)
+        rng = np.random.default_rng(5)
+        for k in range(6000):
+            s = 40.0 * np.exp(-(k - 1000) / 190.0) if k >= 1000 else 0.0
+            if k >= 1600:
+                s += 60.0 * np.exp(-(k - 1600) / 190.0)
+            sig = 1.0 + 0.25 * s
+            pcap.process_sample(1, float(s + rng.normal(0, sig)),
+                                float(rng.normal(0, sig)), k * 2.6e-5)
+        assert pcap.pulse_count[1] == 2
+        assert all(pcap.pulses["Channel 1"][i]["pileup"] for i in (1, 2))
+
+
+class TestSplitConfirmation:
+    """A split needs the same confirmation a trigger gets."""
+
+    @staticmethod
+    def _tail_with_spike(trigger_samples, seed=2):
+        """A slow-decaying pulse with one noise sample on its tail that
+        clears the rise test on its own."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=8000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.0,
+                                   trigger_samples=trigger_samples,
+                                   edge_lookback=400)
+        rng = np.random.default_rng(seed)
+        for k in range(6000):
+            s = 40.0 * np.exp(-(k - 1000) / 400.0) if k >= 1000 else 0.0
+            if k == 1400:
+                s += 9.0                       # one sample, gone the next
+            pcap.process_sample(1, float(s + rng.normal(0, 1.0)),
+                                float(rng.normal(0, 1.0)), k * 4e-7)
+        return pcap
+
+    def test_one_sample_cannot_split_where_a_trigger_needs_two(self):
+        """At a rate where accidentals take two confirming samples, a
+        single-sample excursion on a tail is not a second pulse."""
+        pcap = self._tail_with_spike(trigger_samples=2)
+        assert pcap.pulse_count[1] == 1
+        assert not pcap.pulses["Channel 1"][1]["pileup"]
+
+    def test_the_same_excursion_splits_at_one_sample_confirmation(self):
+        """The contract is the confirmation length, not a softer bar."""
+        pcap = self._tail_with_spike(trigger_samples=1)
+        assert pcap.pulse_count[1] == 2
+
+
+class TestAnchorTap:
+    """The pre-pulse anchor is the edge tap nearest the tracked mean."""
+
+    def test_taps_on_earlier_pulses_do_not_set_the_anchor(self):
+        """Three pulses inside one edge lookback: the median tap sits on
+        a pulse, the nearest-to-mean tap on baseline."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5,
+                                   trigger_samples=2, edge_lookback=240)
+        rng = np.random.default_rng(4)
+        for k in range(3000):
+            v = rng.normal(0, 1.0)
+            for k0 in (700, 850, 1000):
+                if k >= k0:
+                    v += 60.0 * np.exp(-(k - k0) / 40.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        records = pcap.pulses["Channel 1"]
+        last = records[max(records)]
+        assert last["trigger_time"] == pytest.approx(1.000, abs=3e-3)
+        # Taps 240, 120 and 60 samples before the third trigger land at
+        # 760, 880 and 940: on the first pulse's tail (13σ), on the
+        # second's (28σ) and on its tail (6σ).  The nearest is the 6σ
+        # one; the median would be 13σ.
+        assert abs(last["end_baseline_I"]) < 8.0
+
+
+class TestSplitChild:
+    """What a split child is dated and anchored on."""
+
+    @staticmethod
+    def _double(second_at=930):
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(9)
+        for k in range(3000):
+            v = rng.normal(0, 1.0)
+            if k >= 800:
+                v += 60.0 * np.exp(-(k - 800) / 40.0)
+            if k >= second_at:
+                v += 60.0 * np.exp(-(k - second_at) / 40.0)
+            pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),
+                                k * 1e-3)
+        return pcap.pulses["Channel 1"]
+
+    def test_the_child_is_dated_at_its_own_rise(self):
+        """Not min_end_samples before the split: at 19 kHz that was half
+        a millisecond early, and the slow child missed its fast twin."""
+        records = self._double(second_at=930)
+        assert len(records) == 2
+        assert records[2]["trigger_time"] == pytest.approx(0.930, abs=2e-3)
+
+    def test_the_child_keeps_the_parent_anchor(self):
+        """Both pulses return to the same pre-pulse level, so the end
+        band and the return test are judged against it, not against the
+        tail level at the split."""
+        records = self._double(second_at=930)
+        assert records[2]["end_baseline_I"] == records[1]["end_baseline_I"]
+        assert abs(records[2]["end_baseline_I"]) < 3.0
+
+
+    def test_a_smeared_child_is_dated_at_its_onset(self):
+        """A decimated stream smears the second rise over samples and
+        the rise test only clears the near level a few samples in; the
+        child is dated at the dip before the rise, within a sample of
+        the true onset, so it pairs with the fast stream's child."""
+        ns = {1: ChannelNoiseStats(mean_I=0.0, std_I=1.0,
+                                   mean_Q=0.0, std_Q=1.0)}
+        pcap = _collecting_capture(buf_size=4000, channels=[1], noise_stats=ns,
+                                   threshold_sigma=5.0, end_sigma=1.5)
+        rng = np.random.default_rng(9)
+        k = np.arange(3000)
+        clean = np.where(k >= 800, 60.0 * np.exp(-(k - 800) / 40.0), 0.0)
+        clean += np.where(k >= 930, 60.0 * np.exp(-(k - 930) / 40.0), 0.0)
+        smeared = np.convolve(clean, np.ones(3) / 3.0, mode="full")[:3000]
+        for i in range(3000):
+            pcap.process_sample(1, float(smeared[i] + rng.normal(0, 1.0)),
+                                float(rng.normal(0, 1.0)), i * 1e-3)
+        records = pcap.pulses["Channel 1"]
+        assert len(records) == 2
+        assert abs(records[2]["trigger_time"] - 0.930) <= 1.5e-3

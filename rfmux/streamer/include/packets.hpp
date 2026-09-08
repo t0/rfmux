@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 #include <deque>
+#include <functional>
+#include <limits>
 #include <map>
 #include <queue>
 #include <tuple>
@@ -65,6 +67,8 @@ namespace packets {
 		}
 
 		Timestamp normalized() const;
+		// Seconds of day; NaN when the stamp is not disciplined.
+		double seconds_of_day() const;
 		void renormalize() { *this = normalized(); }
 	};
 
@@ -176,6 +180,10 @@ namespace packets {
 
 		std::optional<Packet> pop(std::optional<int> timeout_ms = std::nullopt);
 		std::optional<Packet> try_pop();
+		// Pop up to max_packets into *out* under one lock, stopping
+		// at the first packet *accept* refuses (it is left queued).
+		size_t pop_while(std::vector<Packet>& out, size_t max_packets,
+		                 const std::function<bool(const Packet&)>& accept);
 		void push(Packet&& packet);
 		void clear();
 
@@ -217,6 +225,9 @@ namespace packets {
 		PacketReceiver& operator=(const PacketReceiver&) = delete;
 
 		size_t receive_batch(size_t batch_size = 256, std::optional<int> timeout_ms = std::nullopt);
+		// Every held packet to its queue, ordered.  Packets received
+		// afterwards are held again, so call once receive_batch has stopped.
+		void flush_all();
 
 		std::shared_ptr<PacketQueue> get_queue(uint16_t serial, uint8_t module);
 
@@ -238,7 +249,8 @@ namespace packets {
 
 	private:
 		void process_packet(std::vector<char>&& data);
-		void flush_reorder_buffer(uint16_t serial, uint8_t module);
+		// Release all but *keep* of the packets held for (serial, module).
+		void flush_reorder_buffer(uint16_t serial, uint8_t module, size_t keep);
 
 		std::shared_ptr<PacketType> type_;
 		int sockfd_;
@@ -246,12 +258,8 @@ namespace packets {
 		size_t queue_max_size_;
 		size_t flush_threshold_;
 
-		// recvmmsg scratch, allocated once and reused. Built per call
-		// it cost batch_size * max_packet_size of allocation EVERY
-		// call -- 17 MB at batch_size 2048 -- which is what kept the
-		// batch small, which in turn made the receive thread reacquire
-		// the GIL every few packets and lose half the stream under
-		// load. Only ever touched by the single thread that calls
+		// recvmmsg scratch, reused across calls (why: see
+		// receive_batch). Touched only by the thread that calls
 		// receive_batch.
 #ifdef __linux__
 		std::vector<struct mmsghdr> rx_msgs_;

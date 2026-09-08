@@ -750,8 +750,10 @@ def test_both_methods_answer_with_a_frequency_that_was_measured():
 def test_the_frequency_method_does_not_judge_its_own_answer():
     """Plausibility needs the sweep centre and a tolerance, so it belongs to
     find_bias_points — which flags rather than refuses, because the answer is
-    still the best point on the trace."""
-    assert find_bias_frequency(a_sweep(a=JUMPED)) > FR
+    still the best point on the trace. The stored energy pulls the resonance
+    down (Swenson et al. 2013 eq. 13), so a jumped sweep's answer is well below
+    the centre it was swept about."""
+    assert find_bias_frequency(a_sweep(a=JUMPED)) < FR
 
 
 def test_an_unknown_frequency_method_is_refused_by_name():

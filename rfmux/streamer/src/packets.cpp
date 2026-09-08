@@ -33,6 +33,12 @@ namespace packets {
 		return type_->to_python(data(), size());
 	}
 
+	double Timestamp::seconds_of_day() const {
+		if (!is_recent())
+			return std::numeric_limits<double>::quiet_NaN();
+		return h * 3600.0 + m * 60.0 + s + ss / static_cast<double>(SS_PER_SECOND);
+	}
+
 	Timestamp Timestamp::normalized() const {
 		Timestamp result = *this;
 		if (!result.is_recent())
@@ -261,27 +267,38 @@ namespace packets {
 		return packet;
 	}
 
+	size_t PacketQueue::pop_while(std::vector<Packet>& out, size_t max_packets,
+	                              const std::function<bool(const Packet&)>& accept) {
+		std::lock_guard<std::mutex> lock(mutex_);
+		size_t n = 0;
+		while (n < max_packets && !queue_.empty() && accept(queue_.front())) {
+			out.push_back(std::move(queue_.front()));
+			queue_.pop_front();
+			n++;
+		}
+		return n;
+	}
+
 	void PacketQueue::push(Packet&& packet) {
 		std::lock_guard<std::mutex> lock(mutex_);
 
-		// Check for sequence gaps
-		uint32_t seq = packet.seq();
-		if (stats_.packets_received > 0 && stats_.last_seq != 0) {
-			uint32_t expected_seq = stats_.last_seq + 1;
-			if (seq != expected_seq) {
-				stats_.sequence_gaps++;
-				// Unsigned subtraction wraps, so a counter rollover
-				// still yields the true distance. A reordered or
-				// duplicated packet looks like a gap of nearly 2^32
-				// instead; the reorder window already handles ordering,
-				// so treat anything in the top half as "not a loss"
-				// rather than adding billions to the tally.
-				uint32_t missing = seq - expected_seq;
-				if (missing < (1u << 31))
-					stats_.packets_missing += missing;
-			}
+		// Sequence accounting.  last_seq is a high-water mark, so a
+		// packet that arrives past the reorder window fills a hole
+		// already counted: it takes one back from packets_missing and
+		// moves nothing else.  Unsigned subtraction wraps, so a counter
+		// rollover still yields the true distance ahead, and a late or
+		// duplicated packet lands in the top half.
+		const uint32_t seq = packet.seq();
+		const uint32_t ahead = seq - (stats_.last_seq + 1);   // 0 in order
+		if (stats_.packets_received == 0 || stats_.last_seq == 0 || ahead == 0) {
+			stats_.last_seq = seq;
+		} else if (ahead < (1u << 31)) {
+			stats_.sequence_gaps++;
+			stats_.packets_missing += ahead;
+			stats_.last_seq = seq;
+		} else if (stats_.packets_missing > 0) {
+			stats_.packets_missing--;
 		}
-		stats_.last_seq = seq;
 		stats_.packets_received++;
 
 		// Check if queue is full
@@ -465,7 +482,7 @@ namespace packets {
 			for (auto& [key, reorder_buf] : reorder_buffers_) {
 				if (reorder_buf.size() >= reorder_window_ + flush_threshold_) {
 					auto [serial, module] = key;
-					flush_reorder_buffer(serial, module);
+					flush_reorder_buffer(serial, module, reorder_window_);
 				}
 			}
 		}
@@ -518,7 +535,7 @@ namespace packets {
 		reorder_buffers_[key].push(std::move(packet));
 	}
 
-	void PacketReceiver::flush_reorder_buffer(uint16_t serial, uint8_t module) {
+	void PacketReceiver::flush_reorder_buffer(uint16_t serial, uint8_t module, size_t keep) {
 		auto key = std::make_tuple(serial, module);
 
 		if (queues_.find(key) == queues_.end())
@@ -527,9 +544,8 @@ namespace packets {
 		auto& reorder_buf = reorder_buffers_[key];
 		auto& out_queue = *queues_[key];
 
-		// Flush excess packets while maintaining reorder_window_ for reordering
 		size_t current_size = reorder_buf.size();
-		size_t to_pop = (current_size > reorder_window_) ? (current_size - reorder_window_) : 0;
+		size_t to_pop = (current_size > keep) ? (current_size - keep) : 0;
 
 		while (to_pop && !reorder_buf.empty()) {
 			// Can't move from priority_queue::top() because it's const
@@ -538,6 +554,14 @@ namespace packets {
 			reorder_buf.pop();
 			out_queue.push(std::move(pkt));
 			to_pop--;
+		}
+	}
+
+	void PacketReceiver::flush_all() {
+		std::lock_guard<std::mutex> lock(queues_mutex_);
+		for (auto& [key, reorder_buf] : reorder_buffers_) {
+			auto [serial, module] = key;
+			flush_reorder_buffer(serial, module, 0);
 		}
 	}
 

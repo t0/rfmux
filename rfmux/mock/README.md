@@ -1,17 +1,18 @@
 # MockCRS Hardware Emulation System
 
-This package provides a complete software emulation of the CRS and KIDs for testing and development without physical hardware.
+This package emulates the CRS and its KIDs for testing and development without hardware.
 
 ## File Structure
 
 ```
 rfmux/mock/
 ├── __init__.py          # Public API and flavour hook (yaml_hook)
-├── config.py            # Single Source of Truth for all configuration
+├── config.py            # Every default, in one place
 ├── crs.py               # MockCRS class - core device emulation
 ├── server.py            # Tuber HTTP server and process management
 ├── resonator_model.py   # Physics-based KID resonator simulation
 ├── udp_streamer.py      # UDP packet streaming for real-time data
+├── tls_noise.py         # TLS 1/f frequency wander
 ├── helpers.py           # Helper functions for resonator generation
 └── README.md            # This file
 ```
@@ -22,12 +23,12 @@ rfmux/mock/
 Entry point for the mock flavour system. Provides `yaml_hook()` which is called when `!flavour "rfmux.mock"` is specified in a hardware map YAML file.
 
 ### `config.py`
-**Single Source of Truth (SoT)** for all MockCRS configuration parameters. Contains:
+Every MockCRS default, in one place. Contains:
 - `MOCK_DEFAULTS`: Dictionary of all default parameter values
 - `defaults()`: Returns a deep copy of defaults
 - `apply_overrides()`: Merges user configuration with defaults
 
-All other modules import configuration from here - no other module should define mock defaults.
+No other module defines a mock default.
 
 ### `crs.py`
 The main `MockCRS` class that emulates CRS hardware. Provides:
@@ -64,7 +65,7 @@ Utility functions for resonator generation and configuration.
 ```yaml
 !HardwareMap
 - !flavour "rfmux.mock"
-- !CRS { serial: "0000", hostname: "127.0.0.1" }
+- !CRS { serial: "MOCK0001" }
 ```
 
 ### Python Usage
@@ -78,8 +79,8 @@ await crs.resolve()
 
 # Use CRS methods as normal
 await crs.set_nco_frequency(1.2e9, module=1)
-crs.set_frequency(10e6, channel=1, module=1)
-crs.set_amplitude(0.01, channel=1, module=1)
+await crs.set_frequency(10e6, channel=1, module=1)
+await crs.set_amplitude(0.01, channel=1, module=1)
 samples = await crs.get_samples(100, channel=1, module=1)
 ```
 
@@ -99,10 +100,10 @@ await crs.generate_resonators(config={
 ### UDP Streaming
 ```python
 # Start streaming
-await crs.start_udp_streaming(host='127.0.0.1', port=9876)
+await crs.start_udp_streaming()   # multicast, or loopback unicast if the host cannot
 
 # Check status
-status = crs.get_udp_streaming_status()
+status = await crs.get_udp_streaming_status()
 
 # Stop streaming
 await crs.stop_udp_streaming()
@@ -111,10 +112,12 @@ await crs.stop_udp_streaming()
 ### Quasiparticle Pulses
 ```python
 # Enable periodic pulses
-await crs.set_pulse_mode('periodic', 
-    pulse_period=2.0,
-    pulse_amplitude=2.0,
-    pulse_tau_decay=0.1)
+await crs.set_pulse_mode('periodic',
+    period=2.0,
+    amplitude=2.0,
+    tau_decay=5e-3)
+# From a config dict, with rfmux.mock.helpers.pulse_mode_kwargs:
+await crs.set_pulse_mode(cfg['pulse_mode'], **pulse_mode_kwargs(cfg))
 
 # Add manual pulse event
 await crs.add_pulse_event(resonator_index=0, start_time=time.time(), amplitude=3.0)
@@ -129,10 +132,11 @@ See `config.py` for the complete list of parameters. Key categories:
 - **Readout**: Vin, input_atten_dB, system_termination
 - **Convergence**: convergence_tolerance, cache settings
 - **UDP streaming**: udp_noise_level, scale_factor
-- **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay
+- **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay,
+  and the per-pulse draws pulse_random_amp_* and pulse_random_tau_*
+  (mode, min, max, logmean, logsigma; periodic and random modes)
 
 ## Integration with Periscope
 
-The mock system integrates with Periscope GUI for visualization. When using mock mode, Periscope will:
-1. Detect mock hardware automatically
-2. Enable mock configuration dialog
+`periscope MOCK` starts the simulator behind the GUI and enables the Mock
+Configuration dialog.

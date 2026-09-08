@@ -23,25 +23,17 @@ from ..core.schema import CRS as BaseCRS
 
 mp_ctx = multiprocessing.get_context()
 
-# Every mock session started in this interpreter, so they can be shut down
-# together at exit rather than one handler at a time.
-#
-# The per-session version of this registered its own atexit hook doing
-# terminate() + join(2.0) and possibly kill() + join(2.0). That is bounded per
-# server but not in aggregate: atexit runs handlers sequentially, so a pytest
-# session with ~20 mock sessions could spend well over a minute exiting, all of
-# it after the last test reported. The process holds its streamer sockets for
-# that whole stretch, and because get_multicast_socket() sets SO_REUSEPORT the
-# next run joins the same multicast group instead of failing to bind — so a slow
-# exit silently corrupts whatever starts next.
-#
-# Terminating every server first and only then waiting turns N x timeout into
-# one timeout, because the waits overlap.
+# Every mock session started in this interpreter, shut down together by one
+# atexit handler.  atexit runs handlers sequentially, so one join per server
+# would stack up to N x timeout while the interpreter still holds its streamer
+# sockets, and with SO_REUSEPORT on those sockets the next run would join the
+# same multicast group instead of failing to bind.  Terminating every server
+# first and then waiting against one deadline keeps the exit to one timeout.
 _server_processes: "list" = []
 _shutdown_done = False
 
-# Per-server grace period for a clean exit before SIGKILL. Applied to the whole
-# fleet as one deadline, not per process.
+# Grace period for the whole fleet to exit before SIGKILL; one deadline, not
+# one per process.
 _SHUTDOWN_GRACE_S = 2.0
 
 
@@ -137,10 +129,7 @@ def yaml_hook(hwm):
     p.start()
     l.acquire()
 
-    # Shutdown is handled by the single _shutdown_all_servers() hook registered
-    # at import, not by a per-session atexit handler: see the note there for why
-    # N sequential handlers made the interpreter linger with its streamer
-    # sockets open.
+    # Shut down by _shutdown_all_servers(), registered at import.
     _server_processes.append(p)
 
     # In the client process, we do not need the sockets -- in fact, we don't

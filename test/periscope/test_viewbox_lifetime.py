@@ -6,6 +6,10 @@ double-click handler in utils.py can reach the window. Held strongly, that
 closes a cycle — ViewBox -> panel -> PlotWidget -> ViewBox — and tearing the
 panel down then goes through Python's *cyclic* collector, which finalizes PyQt
 objects in arbitrary order and frees C++ objects out from under live wrappers.
+A hover handler that closes over the panel and is connected through a
+SignalProxy the panel owns is the same cycle by another route, and so is a
+lambda slot on one of the panel's own widgets: PyQt exposes the slot to the
+collector, so widget -> lambda -> panel -> widget closes.
 
 The mild symptom is pyqtgraph writing "wrapped C/C++ object of type QComboBox
 has been deleted" to stderr. The real one is a segfault: building and dropping a
@@ -92,12 +96,14 @@ def test_unset_parent_window_reads_as_none(qt_app):
 # instance has none to tear down — the weakref contract above covers it.
 _TEARDOWN_SCRIPT = textwrap.dedent(
     '''
-    import gc, os
+    import gc, os, sys, weakref
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    sys.path.insert(0, "__ROOT__")
     from PyQt6 import QtWidgets
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
     from rfmux.tools.periscope.detector_digest_panel import DetectorDigestPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
+    from test.periscope.test_noise_panel_fast_tod_units import _spectrum_data
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     detectors = {1: {"conceptual_freq_hz": 4.0e9},
@@ -106,6 +112,12 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
         (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
                                   all_detectors_data=detectors,
                                   initial_detector_idx=1)),
+        # With data the panel draws its plots and installs the hover
+        # handler; that handler must not own the panel either.
+        (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
+                                  all_detectors_data=detectors,
+                                  initial_detector_idx=1,
+                                  spectrum_data=_spectrum_data("absolute"))),
         (DetectorDigestPanel, dict(detector_id=1)),
         (MultisweepPanel, dict(target_module=1)),
     ]
@@ -113,7 +125,14 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
         for _ in range(3):
             panel = cls(**kwargs)
             panel.close()
+            ref = weakref.ref(panel)
             del panel
+            # A dropped panel must die by refcount; one that is still
+            # alive here is waiting for the cyclic collector, and only
+            # the platform decides whether that collection crashes.
+            if ref() is not None:
+                print("CYCLE " + cls.__name__, flush=True)
+                raise SystemExit(3)
             # gc.collect() is the point: it forces the cyclic collection that
             # the strong back-pointer made lethal.
             gc.collect()
@@ -130,15 +149,16 @@ def test_panels_survive_being_built_and_dropped(qt_app):
     With a strong parent_window this segfaults (exit -11 / 139); the subprocess
     turns that into a readable failure instead of killing the test session.
     """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     proc = subprocess.run(
-        [sys.executable, "-u", "-c", _TEARDOWN_SCRIPT],
+        [sys.executable, "-u", "-c", _TEARDOWN_SCRIPT.replace("__ROOT__", root)],
         capture_output=True, text=True, timeout=300,
         env={**os.environ, "QT_QPA_PLATFORM": "offscreen"},
     )
 
     assert proc.returncode == 0, (
         f"panel teardown crashed (returncode {proc.returncode}; "
-        f"-11/139 is SIGSEGV). This is the parent_window reference cycle.\n"
+        f"-11/139 is SIGSEGV, 3 is a panel kept alive by a reference cycle).\n"
         f"stdout:\n{proc.stdout}\nstderr tail:\n{proc.stderr[-2000:]}"
     )
     assert "ALL PANELS SURVIVED" in proc.stdout, \

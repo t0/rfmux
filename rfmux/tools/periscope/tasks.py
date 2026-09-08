@@ -14,6 +14,7 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
 from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alias to avoid conflict if utils also exports 'fitting'
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
+from rfmux.pulse_capture.sources import _set_receive_timeout
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -37,7 +38,8 @@ class UDPReceiver(QtCore.QThread):
         # Ask BEFORE binding: the probe is a plain bind, which our own
         # socket would then fail. Loopback only -- see
         # find_competing_receiver for why a second reader is fatal for
-        # the mock's unicast stream and harmless for a board's multicast.
+        # the mock's unicast fallback and harmless for multicast, which
+        # a board always sends and the mock sends when it can.
         self._port_conflict = streamer.find_competing_receiver(host)
         if self._port_conflict:
             print(f"[UDP] {self._port_conflict}")
@@ -52,9 +54,13 @@ class UDPReceiver(QtCore.QThread):
         # call blocks forever. The thread then never reaches the
         # queue-discovery loop below, so Periscope draws nothing and
         # reports "0 packets received" with no error to explain it.
-        # With SO_RCVTIMEO the call returns EAGAIN, which receive_batch
-        # already treats as "no packets this time".
-        self.sock.settimeout(0.5)
+        # SO_RCVTIMEO on a socket left blocking: the call waits up to
+        # 0.5 s, then returns EAGAIN, which receive_batch already treats
+        # as "no packets this time". settimeout() would not do: it makes
+        # the fd non-blocking, so an empty socket returns EAGAIN at once
+        # and run() spins, retaking the GIL on every call. The 0.5 s
+        # also bounds how long stop() waits for the thread.
+        _set_receive_timeout(self.sock, 0.5)
         self.receiver = streamer.ReadoutPacketReceiver(self.sock,
                                                        reorder_window=256,
                                                        queue_max_size=50000,
@@ -94,8 +100,9 @@ class UDPReceiver(QtCore.QThread):
         loss, no error -- while the receiver is in fact working
         perfectly.  That is indistinguishable from a dead stream unless
         something says otherwise, and it is not a rare mistake: the
-        startup dialog restores the last-used module, and the mock only
-        ever streams module 1, so going from hardware to mock lands here.
+        startup dialog restores the last-used module, and the mock streams
+        only the modules that carry a tone -- at startup, module 1 -- so
+        going from hardware to mock lands here.
         """
         if not streaming_modules:
             self._module_mismatch = None   # nothing streaming yet
@@ -144,12 +151,6 @@ class UDPReceiver(QtCore.QThread):
         if self.queue is not None:
             return self.queue.get_stats().packets_dropped
         return self.packets_dropped
-
-    def get_loss_bursts(self):
-        """Discontinuity events — how bursty the missing packets were."""
-        if self.queue is not None:
-            return self.queue.get_stats().sequence_gaps
-        return 0
 
     def get_dropped_packets(self):
         """Everything lost, however it was lost.
@@ -203,6 +204,37 @@ class UDPReceiver(QtCore.QThread):
             self.sock.close()
         except OSError:
             pass
+
+class DfCalibrationSignals(QObject):
+    completed = pyqtSignal(int, dict)
+    error = pyqtSignal(str)
+
+
+class DfCalibrationTask(QtCore.QThread):
+    """Runs one df-calibration measurement off the GUI thread.
+
+    *measure* is a callable returning the coroutine to run; the app
+    hands in crs.measure_df_calibrations for the module, tests hand in
+    whatever they like.  Mock mode measures at startup
+    and the sweep is seconds at many tones: it must not hold the window.
+    """
+
+    def __init__(self, measure, module: int,
+                 signals: DfCalibrationSignals, parent=None):
+        super().__init__(parent)
+        self.measure, self.module, self.signals = measure, module, signals
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            cals = loop.run_until_complete(self.measure())
+            self.signals.completed.emit(self.module, dict(cals or {}))
+        except Exception as exc:
+            self.signals.error.emit(str(exc))
+        finally:
+            loop.close()
+
 
 class IQSignals(QObject):
     done = pyqtSignal(int, str, object)
@@ -684,20 +716,7 @@ class MultisweepTask(QtCore.QThread):
                         self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
                         return
                     
-                    # Process bifurcation detection first
-                    if raw_results_from_crs:
-                        for res_key, data_dict_val in raw_results_from_crs.items():
-                            if not isinstance(res_key, (int, np.integer)): continue
-                            iq_data = data_dict_val.get('iq_complex')
-                            if iq_data is not None:
-                                try:
-                                    data_dict_val['is_bifurcated'] = fitting_module_direct.identify_bifurcation(iq_data, threshold_factor=7)
-                                except Exception as e:
-                                    print(f"Warning: Bifurcation detection failed for index {res_key}: {e}", file=sys.stderr)
-                                    data_dict_val['is_bifurcated'] = False
-                            else:
-                                data_dict_val['is_bifurcated'] = False
-                    
+                    # is_bifurcated comes with the multisweep's results.
                     # Now apply fitting analysis using the (potentially) bifurcation-annotated data
                     # Use async version with ThreadPoolExecutor for better responsiveness
                     enhanced_results = loop.run_until_complete(
@@ -1024,7 +1043,7 @@ class BiasKidsTask(QtCore.QThread):
                 # Extract df_calibration values (result is now guaranteed to be a dict)
                 df_calibrations = {}
                 for det_idx, det_data in result.items():
-                    if 'df_calibration' in det_data:
+                    if det_data.get('df_calibration') is not None:
                         df_calibrations[det_idx] = det_data['df_calibration']
                 
                 # Read the NCO frequency that was used during biasing
@@ -1061,6 +1080,8 @@ class BiasKidsTask(QtCore.QThread):
         }
         
         # Add optional parameters from dialog
+        if 'fit_method' in self.bias_params:
+            kwargs['fit_method'] = self.bias_params['fit_method']
         if 'nonlinear_threshold' in self.bias_params:
             kwargs['nonlinear_threshold'] = self.bias_params['nonlinear_threshold']
         if 'fallback_to_lowest' in self.bias_params:
@@ -1071,8 +1092,9 @@ class BiasKidsTask(QtCore.QThread):
             kwargs['bandpass_params'] = self.bias_params['bandpass_params']
         if 'num_phase_samples' in self.bias_params:
             kwargs['num_phase_samples'] = self.bias_params['num_phase_samples']
-        if 'phase_step' in self.bias_params:
-            kwargs['phase_step'] = self.bias_params['phase_step']
+        for key in ('measure_calibration', 'calibration_step'):
+            if key in self.bias_params:
+                kwargs[key] = self.bias_params[key]
         
         # Call bias_kids with all parameters
         result = await bias_kids(**kwargs)

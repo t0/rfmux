@@ -25,6 +25,8 @@ Usage (read)::
 from __future__ import annotations
 
 import time
+import warnings
+
 import numpy as np
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
@@ -32,7 +34,47 @@ from typing import Any, Dict, Iterator, List, Optional
 import h5py
 
 from .detection import ChannelNoiseStats
+from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
+
+
+
+def _store_units(grp, stored_units, channel) -> None:
+    """Record what a channel's stored samples actually are.
+
+    Per channel rather than per file: a capture in the frequency basis
+    still holds uncalibrated channels in volts, because there is nothing
+    to rotate them with.  A reader that assumed one answer for the whole
+    file would mislabel those.
+    """
+    if not isinstance(stored_units, dict):
+        return
+    units = stored_units.get(channel)
+    if units:
+        grp.attrs["stored_units"] = str(units)
+
+
+def _store_df_calibration(grp, df_calibrations, channel) -> None:
+    """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
+
+    Expects the flat ``{channel: calibration}`` mapping.  Anything h5py
+    cannot store as an attribute is skipped with a warning rather than
+    raised: the pulses are worth more than the units they are labelled
+    in, and a writer that refuses to open costs the whole capture.
+    """
+    if not isinstance(df_calibrations, dict) or not df_calibrations:
+        return
+    value = df_calibrations.get(channel)
+    if value is None:
+        return
+    if not isinstance(value, (int, float, complex, np.number)):
+        warnings.warn(
+            f"ignoring df_calibration for channel {channel}: expected a "
+            f"number, got {type(value).__name__}.  df_calibrations is the "
+            f"flat {{channel: calibration}} mapping, not one keyed by module.",
+            stacklevel=3)
+        return
+    grp.attrs["df_calibration"] = value
 
 
 # ───────────────────────── Shared writer plumbing ───────────────────
@@ -51,22 +93,24 @@ class _PulseFileWriter:
     #: capture_params written to ``metadata``, grouped by attribute type.
     #: Must cover everything in
     #: :data:`~.session.DETECTION_PARAMS` — a parameter
-    #: missing here is silently dropped, which is how capture files came
-    #: to record neither the trigger confirmation length nor the edge
-    #: lookback.  test_every_detection_param_reaches_the_file pins it.
+    #: missing here is dropped without complaint.
+    #: test_every_detection_param_reaches_the_file pins it.
     _META = (
-        (str, ("streamer_mode",)),
+        (str, ("streamer_mode", "trigger_basis", "stored_units")),
         (float, ("threshold_sigma", "end_sigma", "margin_fraction",
-                 "sample_rate_slow", "sample_rate_fast")),
+                 "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
+                 "sample_rate_slow", "sample_rate_fast",
+                 "volts_per_count", "slow_time_offset_s")),
         (int, ("min_pulse_samples", "module", "trigger_samples",
-               "baseline_window", "edge_lookback", "max_capture_samples")),
-        (bool, ("enable_pileup", "save_to_end_confirmed")),
+               "trigger_samples_slow", "trigger_samples_fast",
+               "baseline_window", "edge_lookback", "max_capture_samples",
+               "min_end_samples")),
+        (bool, ("enable_pileup",)),
     )
 
     def __init__(self, path: str | Path, channels: List[int],
                  capture_params: Dict[str, Any]):
         self.path = Path(path)
-        self._channels = list(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
 
@@ -78,6 +122,9 @@ class _PulseFileWriter:
                 if k in capture_params:
                     meta.attrs[k] = cast(capture_params[k])
         meta.attrs["channels"] = channels
+        if "fast_channels" in capture_params:
+            meta.attrs["fast_channels"] = [
+                int(c) for c in capture_params["fast_channels"]]
 
     # ── Shared helpers ────────────────────────────────────────────
 
@@ -143,6 +190,18 @@ class _PulseFileWriter:
             self.f.close()
         self.f = None
 
+    def set_time_origin(self, day_epoch: float) -> None:
+        """Record the calendar day the stream's seconds-of-day count
+        from, once; the packet clock is the source, not this host."""
+        if not self.is_open:
+            return
+        meta = self.f["metadata"]
+        if "time_origin_epoch" in meta.attrs:
+            return
+        meta.attrs["time_origin_epoch"] = float(day_epoch)
+        meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+        self.f.flush()
+
     @property
     def is_open(self) -> bool:
         return self.f is not None and self.f.id.valid
@@ -176,8 +235,12 @@ class PulseHDF5Writer(_PulseFileWriter):
         Per-channel noise statistics from the estimation phase.
     capture_params : dict
         Capture configuration (streamer_mode, threshold_sigma, etc.).
-    df_calibrations : dict[int, float], optional
-        Per-channel df calibration values (Hz per ADC count).
+    df_calibrations : dict[int, complex], optional
+        Per-channel complex df calibration as ``measure_df_calibrations``
+        returns it: magnitude in hertz per volt, phase minus the angle of
+        the frequency direction in the (I, Q) plane.
+    stored_units : dict[int, str], optional
+        Per-channel units of the stored samples (``"Hz"`` or ``"V"``).
     """
 
     def __init__(
@@ -186,7 +249,8 @@ class PulseHDF5Writer(_PulseFileWriter):
         channels: List[int],
         noise_stats: Dict[int, ChannelNoiseStats],
         capture_params: Dict[str, Any],
-        df_calibrations: Optional[Dict[int, float]] = None,
+        df_calibrations: Optional[Dict[int, complex]] = None,
+        stored_units: Optional[Dict[int, str]] = None,
     ):
         super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
@@ -197,8 +261,8 @@ class PulseHDF5Writer(_PulseFileWriter):
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
-            if df_calibrations and ch in df_calibrations:
-                grp.attrs["df_calibration"] = df_calibrations[ch]
+            _store_df_calibration(grp, df_calibrations, ch)
+            _store_units(grp, stored_units, ch)
 
         # ── Histogram / template groups (updated periodically) ────
         self.f.create_group("histograms")
@@ -263,7 +327,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         ----------
         histogram_data : dict[str, ndarray]
             Flat dict of histogram arrays keyed by descriptive names
-            (e.g. ``"amplitude_bins"``, ``"amplitude_counts_ch1"``).
+            (e.g. ``"amplitude_i_bins"``, ``"amplitude_i_counts_ch1"``).
         """
         self._replace_datasets("histograms", histogram_data)
 
@@ -284,13 +348,15 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         matched/channel_<n>/pair_*    (slow_idx/fast_idx, -1 = one-sided;
                                        optional cross-stream TOD datasets)
         histograms/slow/  histograms/fast/
+        templates/slow/   templates/fast/
     """
 
     STREAMS = ("slow", "fast")
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
-                 df_calibrations: Optional[Dict[int, float]] = None):
+                 df_calibrations: Optional[Dict[int, complex]] = None,
+                 stored_units: Optional[Dict[int, str]] = None):
         super().__init__(path, channels, capture_params)
         self._noise: Dict[str, Dict[int, ChannelNoiseStats]] = {
             s: {} for s in self.STREAMS}
@@ -304,8 +370,8 @@ class DualPulseHDF5Writer(_PulseFileWriter):
             for ch in channels:
                 grp = sgrp.create_group(f"channel_{ch}")
                 grp.attrs["pulse_count"] = 0
-                if df_calibrations and ch in df_calibrations:
-                    grp.attrs["df_calibration"] = df_calibrations[ch]
+                _store_df_calibration(grp, df_calibrations, ch)
+                _store_units(grp, stored_units, ch)
             self.f.create_group(f"histograms/{stream}")
 
         matched = self.f.create_group("matched")
@@ -341,6 +407,12 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         pg.attrs["time_offset"] = (
             float(pair["time_offset"])
             if pair.get("time_offset") is not None else float("nan"))
+        # The union window each side was asked for, so a reader can
+        # tell a complete window from one the ring or the socket lost
+        # part of.
+        if pair.get("window") is not None:
+            pg.attrs["window_t0"] = float(pair["window"][0])
+            pg.attrs["window_t1"] = float(pair["window"][1])
         for side in ("slow_tod", "fast_tod"):
             tod = pair.get(side)
             if tod:
@@ -358,6 +430,17 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         """Live read-back through the open write handle (writer thread)."""
         return self._read_pulse_at(
             f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}")
+
+    def read_match(self, channel: int,
+                   pair_idx: int) -> Optional[Dict[str, Any]]:
+        """A pair back out of the live file, with its windows, for a
+        viewer whose cache has let it go."""
+        if not self.is_open:
+            return None
+        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        if key not in self.f:
+            return None
+        return _pair_from_group(self.f[key], channel, pair_idx)
 
     def update_histograms(self, stream: str,
                           histogram_data: Dict[str, np.ndarray]) -> None:
@@ -427,8 +510,47 @@ class PulseHDF5Reader:
             jump_std_Q=float(grp.attrs.get("noise_jump_std_Q", 0.0)),
         )
 
+    def volts_per_count(self) -> Optional[float]:
+        """The counts-to-volts constant *this file* was written with.
+
+        Read from the file's metadata, not from the library: it is what
+        the capture was converted with, which is what makes the samples
+        interpretable without knowing which version wrote them.
+        """
+        if self.f is None:
+            return None
+        meta = self.f.get("metadata")
+        return None if meta is None else meta.attrs.get("volts_per_count")
+
+    def stored_units(self, channel: int,
+                     stream: Optional[str] = None) -> str:
+        """Units of *channel*'s stored samples: ``"Hz"`` or ``"V"``.
+
+        ``"counts"`` for files written before samples were stored in
+        physical units, which is what those actually hold.
+        """
+        if self.f is None:
+            return "counts"
+        grp = self.f.get(self._ch_key(channel, stream))
+        if grp is None:
+            return "counts"
+        return str(grp.attrs.get("stored_units", "counts"))
+
+    def trigger_basis(self) -> str:
+        """Basis the samples were triggered on, and are stored in.
+
+        ``"iq"`` or ``"df"``.  Files written before this was recorded
+        predate the rotation and are therefore I/Q.
+        """
+        if self.f is None:
+            return "iq"
+        meta = self.f.get("metadata")
+        if meta is None:
+            return "iq"
+        return str(meta.attrs.get("trigger_basis", "iq"))
+
     def df_calibration(self, channel: int,
-                       stream: Optional[str] = None) -> Optional[float]:
+                       stream: Optional[str] = None) -> Optional[complex]:
         """Return the df calibration for *channel*, or None."""
         if self.f is None:
             return None
@@ -443,13 +565,16 @@ class PulseHDF5Reader:
                   stream: Optional[str] = None) -> Optional[dict]:
         """Load a single pulse's waveform data and metadata.
 
-        Returns a dict with keys: ``Amp_I``, ``Amp_Q``, ``Time``,
-        ``pileup``, ``peak_I``, ``peak_Q``, ``peak_snr_I``,
-        ``peak_snr_Q``, ``n_samples``, ``duration_s``, ``timestamp``.
-        Scalars are as :func:`pulse_summary` computed them at capture
-        time, so ``duration_s`` is the time above threshold rather than
-        the span of the saved window.  Returns ``None`` if the pulse
-        doesn't exist.
+        Returns the dict :func:`_pulse_dict_from_group` builds: the
+        ``Amp_I``, ``Amp_Q``, ``Time`` waveforms, ``pileup``,
+        ``truncated``, ``n_samples``, the :func:`pulse_summary` scalars
+        (``peak_I``, ``peak_Q``, ``peak_amp``, ``snr``, ``duration_s``,
+        ``timestamp``, ``tau_s``), ``peak_snr_I``/``peak_snr_Q`` and
+        whichever decision marks were recorded.  Scalars are as
+        :func:`pulse_summary` computed them at capture time, so
+        ``duration_s`` is trigger to settled rather than the span
+        of the saved window.  Returns ``None`` if the pulse doesn't
+        exist.
         """
         if self.f is None:
             return None
@@ -506,25 +631,7 @@ class PulseHDF5Reader:
         key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
-        pg = self.f[key]
-        slow_idx = int(pg.attrs.get("slow_idx", -1))
-        fast_idx = int(pg.attrs.get("fast_idx", -1))
-        pair: Dict[str, Any] = {
-            "pair_idx": pair_idx,
-            "channel": channel,
-            "slow_idx": slow_idx if slow_idx >= 0 else None,
-            "fast_idx": fast_idx if fast_idx >= 0 else None,
-            "time_offset": float(pg.attrs.get("time_offset",
-                                              float("nan"))),
-        }
-        for side in ("slow_tod", "fast_tod"):
-            if f"{side}_Amp_I" in pg:
-                pair[side] = {
-                    "Amp_I": np.array(pg[f"{side}_Amp_I"]),
-                    "Amp_Q": np.array(pg[f"{side}_Amp_Q"]),
-                    "Time": np.array(pg[f"{side}_Time"]),
-                }
-        return pair
+        return _pair_from_group(self.f[key], channel, pair_idx)
 
     def iter_matches(self, channel: int) -> Iterator[Dict[str, Any]]:
         for idx in range(1, self.pair_count(channel) + 1):
@@ -534,31 +641,28 @@ class PulseHDF5Reader:
 
     # ── Histograms ────────────────────────────────────────────────
 
-    def get_histograms(
-            self, stream: Optional[str] = None) -> Dict[str, np.ndarray]:
-        """Read all histogram datasets (per stream for dual files)."""
+    def _read_group(self, name: str,
+                    stream: Optional[str]) -> Dict[str, np.ndarray]:
+        """All datasets of an accumulator group (per stream for dual
+        files)."""
         if self.f is None:
             return {}
-        key = (f"histograms/{stream or 'slow'}" if self.dual
-               else "histograms")
-        hist_grp = self.f.get(key)
-        if hist_grp is None:
-            return {}
-        return {k: np.array(hist_grp[k]) for k in hist_grp
-                if not isinstance(hist_grp[k], h5py.Group)}
-
-    def get_templates(
-            self, stream: Optional[str] = None) -> Dict[str, np.ndarray]:
-        """Read the trigger-aligned template datasets."""
-        if self.f is None:
-            return {}
-        key = (f"templates/{stream or 'slow'}" if self.dual
-               else "templates")
-        grp = self.f.get(key)
+        grp = self.f.get(f"{name}/{stream or 'slow'}" if self.dual
+                         else name)
         if grp is None:
             return {}
         return {k: np.array(grp[k]) for k in grp
                 if not isinstance(grp[k], h5py.Group)}
+
+    def get_histograms(
+            self, stream: Optional[str] = None) -> Dict[str, np.ndarray]:
+        """Read all histogram datasets."""
+        return self._read_group("histograms", stream)
+
+    def get_templates(
+            self, stream: Optional[str] = None) -> Dict[str, np.ndarray]:
+        """Read the trigger-aligned template datasets."""
+        return self._read_group("templates", stream)
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
@@ -582,6 +686,21 @@ class PulseHDF5Reader:
 
 # ── Helpers ───────────────────────────────────────────────────────
 
+#: Per-pulse decision attributes, by type: where the engine triggered
+#: and ended, and the bands it decided against.
+_PULSE_INT_MARKS = ("trigger_index", "end_index", "below_threshold_index",
+                    "settled_index",
+                    "end_confirm_samples", "end_confirm_target")
+_PULSE_FLOAT_MARKS = ("trigger_time", "end_time", "below_threshold_time",
+                      "settled_time",
+                      "trigger_epoch",
+                      "trigger_baseline_I", "trigger_baseline_Q",
+                      "trigger_sigma_I", "trigger_sigma_Q",
+                      "end_baseline_I", "end_baseline_Q",
+                      "threshold_sigma", "end_sigma")
+_PULSE_STR_MARKS = ("trigger_quad", "trigger_utc")
+
+
 def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
                  noise_stats: Optional[ChannelNoiseStats],
                  threshold_sigma: Optional[float]) -> None:
@@ -602,26 +721,19 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
     pulse_grp.attrs["truncated"] = bool(pulse_data.get("truncated", False))
     pulse_grp.attrs["n_samples"] = len(amp_I)
 
-    # Where the detector triggered and where the leaky bucket confirmed
+    # Where the engine triggered and where the end condition confirmed
     # the end — kept so a saved capture can be reviewed against the
     # decisions that produced it, not just its samples.
-    for key in ("trigger_index", "end_index", "below_threshold_index",
-                "end_confirm_samples", "end_confirm_target"):
-        if key in pulse_data:
-            pulse_grp.attrs[key] = int(pulse_data[key])
-    for key in ("trigger_time", "end_time", "below_threshold_time"):
-        if key in pulse_data:
-            pulse_grp.attrs[key] = float(pulse_data[key])
+    for cast, keys in ((int, _PULSE_INT_MARKS), (float, _PULSE_FLOAT_MARKS),
+                       (str, _PULSE_STR_MARKS)):
+        for key in keys:
+            if key in pulse_data:
+                pulse_grp.attrs[key] = cast(pulse_data[key])
 
     # Every scalar below comes from pulse_summary(), the same call the
     # histograms, the live on_pulse callback and the GUI derive from.
     # Computing any of them a second time here is how a capture file
-    # ends up disagreeing with itself: duration_s was the span of the
-    # saved window while the duration_ms histogram beside it measured
-    # trigger -> below-threshold, so one pulse read back as 4.72 ms or
-    # 3.09 ms depending on which you asked.  Under save_to_end_confirmed
-    # the window also carries however long the leaky bucket took to be
-    # satisfied, which is a property of the baseline, not the event.
+    # ends up disagreeing with itself.
     summary = pulse_summary(pulse_data, noise_stats, threshold_sigma)
     for key in ("peak_I", "peak_Q", "peak_amp", "snr", "duration_s",
                 "timestamp", "tau_s"):
@@ -639,12 +751,37 @@ def _write_pulse(channel_grp, pulse_idx: int, pulse_data: dict,
         pulse_grp.attrs["peak_snr_Q"] = 0.0
 
 
+def _pair_from_group(pg, channel: int, pair_idx: int) -> Dict[str, Any]:
+    """One matched pair as the session emitted it: indices (None =
+    one-sided), time offset, the union window, and the stored
+    cross-stream windows (reader/writer shared)."""
+    slow_idx = int(pg.attrs.get("slow_idx", -1))
+    fast_idx = int(pg.attrs.get("fast_idx", -1))
+    offset = float(pg.attrs.get("time_offset", float("nan")))
+    pair: Dict[str, Any] = {
+        "pair_idx": pair_idx,
+        "channel": channel,
+        "slow_idx": slow_idx if slow_idx >= 0 else None,
+        "fast_idx": fast_idx if fast_idx >= 0 else None,
+        "time_offset": offset if np.isfinite(offset) else None,
+    }
+    if "window_t0" in pg.attrs:
+        pair["window"] = (float(pg.attrs["window_t0"]),
+                          float(pg.attrs["window_t1"]))
+    for side in ("slow_tod", "fast_tod"):
+        if f"{side}_Amp_I" in pg:
+            pair[side] = {
+                "Amp_I": np.array(pg[f"{side}_Amp_I"]),
+                "Amp_Q": np.array(pg[f"{side}_Amp_Q"]),
+                "Time": np.array(pg[f"{side}_Time"]),
+            }
+    return pair
+
+
 def _pulse_dict_from_group(grp) -> dict:
     """Waveforms + scalar attrs for one pulse group (reader/writer shared)."""
     marks = {k: _convert_attr(grp.attrs[k])
-             for k in ("trigger_index", "end_index", "below_threshold_index",
-                       "end_confirm_samples", "end_confirm_target",
-                       "trigger_time", "end_time", "below_threshold_time")
+             for k in _PULSE_INT_MARKS + _PULSE_FLOAT_MARKS + _PULSE_STR_MARKS
              if k in grp.attrs}
     return {
         **marks,

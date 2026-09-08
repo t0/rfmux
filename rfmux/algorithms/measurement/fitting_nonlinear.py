@@ -35,11 +35,13 @@ from ...tuning.fits import (
     guess_p0_nonlinear,
     nonlinear_iq,
     remove_gain,
+    BIFURCATION_A,
 )
 
 # Listed so a linter reports the imports above as re-exports rather than as
 # seven unused names, and so this module's surface is stated in one place.
 __all__ = [
+    "BIFURCATION_A",
     # Re-exported from rfmux.tuning.fits.
     "FitFailed",
     "calculate_residuals",

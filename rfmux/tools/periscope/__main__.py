@@ -28,6 +28,110 @@ import warnings
 import asyncio
 
 import click
+from PyQt6 import QtCore
+
+from rfmux.mock.helpers import apply_mock_config
+
+
+#: Arrays this size and under build in about a second; the progress
+#: window is for the ones that take long enough to wonder about.
+PROGRESS_MIN_RESONATORS = 25
+
+
+_STAGE_TEXT = {
+    "generating": "Generating resonators",
+    "biasing": "Biasing detectors",
+    "warming": "Warming pulse caches",
+    "calibrating": "Measuring df calibrations",
+}
+_STAGE_UNIT = {"warming": "blocks", "calibrating": "points"}
+
+
+def _build_with_progress(crs_obj, config, loop, module):
+    """The mock build in a worker thread, with a progress window on the
+    main thread showing where it is.
+
+    The build is seconds at many tones: apply_mock_config (one RPC the
+    server reports on through get_build_progress) and then, when the
+    array was biased, the df calibration sweep, which the client drives
+    point by point.  The worker keeps the event loop alive, and the main
+    thread polls on *loop* (idle while the worker runs) to fill one bar
+    with the stages: generating alone, or generating, biasing, warming
+    and calibrating when the array is biased.
+
+    Returns ``(resonator_count, df_calibrations)``.
+    """
+    import threading
+    import time
+
+    n = config.get("num_resonances", 0)
+    biasing = bool(config.get("auto_bias_kids"))
+    stages = (["generating", "biasing", "warming", "calibrating"] if biasing
+              else ["generating"])
+    offsets = {stage: k * n for k, stage in enumerate(stages)}
+    total = len(stages) * n
+    dialog = QtWidgets.QProgressDialog(
+        f"Building the mock array: {n} resonators", None, 0, total)
+    dialog.setWindowTitle("Periscope")
+    dialog.setMinimumDuration(0)
+    dialog.setMinimumWidth(420)
+    dialog.show()
+
+    result = {}
+    local = {}          # the calibration stage's progress, client-side
+
+    def work():
+        worker_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(worker_loop)
+        try:
+            _, result["count"] = worker_loop.run_until_complete(
+                apply_mock_config(crs_obj, config))
+            if biasing:
+                local.update(stage="calibrating", done=0, total=1)
+                result["cals"] = worker_loop.run_until_complete(
+                    crs_obj.measure_df_calibrations(
+                        module=module,
+                        progress=lambda d, t: local.update(done=d, total=t)))
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            worker_loop.close()
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    last_poll = 0.0
+    while worker.is_alive():
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+            | QtCore.QEventLoop.ProcessEventsFlag.WaitForMoreEvents, 50)
+        if time.monotonic() - last_poll < 0.2:
+            continue
+        last_poll = time.monotonic()
+        if local:
+            stage, done, stage_total = (local["stage"], local["done"],
+                                        local["total"])
+        else:
+            try:
+                p = loop.run_until_complete(crs_obj.get_build_progress())
+            except Exception:
+                continue
+            # Over tuber the dict comes back as an attribute-access
+            # result; in-process it is the dict itself.
+            field = (p.get if isinstance(p, dict)
+                     else lambda k, d=None: getattr(p, k, d))
+            stage, done, stage_total = (field("stage", ""), field("done", 0),
+                                        field("total", 0))
+        if stage in offsets:
+            unit = _STAGE_UNIT.get(stage, "")
+            dialog.setLabelText(
+                f"{_STAGE_TEXT[stage]}: {done} / {stage_total} {unit}".rstrip())
+            share = done * n // stage_total if stage_total else 0
+            dialog.setValue(min(total, offsets[stage] + share))
+    worker.join()
+    dialog.close()
+    if "error" in result:
+        raise result["error"]
+    return result["count"], result.get("cals")
 
 from .app import Periscope  # Core application class
 from .mock_configuration_dialog import MockConfigurationDialog
@@ -127,6 +231,7 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
+    initial_df_calibrations = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
     
@@ -293,18 +398,18 @@ def main():
             
             # Apply the mock configuration (either from dialog or loaded from session)
             if initial_mock_config:
-                # Ensure a concrete random seed exists before sending to server.
-                # generate_resonators() is a tuber RPC — mutations on the server
-                # side don't propagate back.  By fixing the seed here, the client's
-                # config dict (which gets saved to the session) already contains the
-                # concrete seed, so restoring the session reproduces the same resonators.
-                if initial_mock_config.get('resonator_random_seed') is None:
-                    import random as _rng
-                    initial_mock_config['resonator_random_seed'] = _rng.randint(0, 2**31 - 1)
-
                 try:
-                    # Apply configuration to the server
-                    resonator_count = loop.run_until_complete(crs_obj.generate_resonators(initial_mock_config))
+                    # Apply configuration to the server.  Seconds at many
+                    # tones, before there is a window: show one.  A small
+                    # array is done before it would be read.  Either way
+                    # apply_mock_config pins the seed into the config the
+                    # session saves, so a restore rebuilds the same array.
+                    if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
+                        resonator_count, initial_df_calibrations = _build_with_progress(
+                            crs_obj, initial_mock_config, loop, args.module)
+                    else:
+                        _, resonator_count = loop.run_until_complete(
+                            apply_mock_config(crs_obj, initial_mock_config))
                     if load_mock_config_from_session:
                         print(f"[Session] Mock configuration restored: {resonator_count} resonators generated")
                     #else:
@@ -374,6 +479,7 @@ def main():
         dot_px=args.density_dot,
         crs=crs_obj,  # Pass the CRS object
         skip_startup_dialog=(session_config is not None),  # Skip dialog if already shown
+        df_calibrations=initial_df_calibrations,
     )
     
     # Store the initial mock configuration if in mock mode
@@ -581,11 +687,9 @@ def periscope_excepthook(exctype, value, tb):
     """Report unhandled exceptions without taking the window down.
 
     KeyboardInterrupt is the exception: it is a request to quit, not a
-    fault to log and continue past.  Swallowing it left the window up
-    with the receive thread still holding UDP 9876, and because
-    get_multicast_socket sets SO_REUSEPORT the next launch bound the
-    same port happily and then lost the whole stream to the process the
-    user thought they had killed.
+    fault to log and continue past.  A window left up keeps the receive
+    thread on UDP 9876; with SO_REUSEPORT the next launch binds the
+    same port and shares the stream with it.
     """
     if issubclass(exctype, KeyboardInterrupt):
         print("\n[Periscope] Interrupted - shutting down", file=sys.stderr)

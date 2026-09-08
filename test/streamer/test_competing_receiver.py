@@ -1,4 +1,4 @@
-"""A second receiver starves the mock's stream, but not a board's.
+"""A second receiver starves the mock's unicast stream, never a multicast one.
 
 The two transports differ, and the difference decides whether warning
 about a competing receiver is a service or a false alarm:
@@ -9,9 +9,9 @@ about a competing receiver is a service or a false alarm:
   multicast to a group -- every joined socket gets its own copy, so
                           multiple readers are fine and expected
 
-The mock sends unicast (rfmux/mock/udp_streamer.py does
-``sendto((self.host, port))`` with host 127.0.0.1) whatever its
-"(multicast)" log line says. A real board multicasts.
+A real board multicasts. The mock multicasts when
+``check_multicast_loopback`` passes and sends unicast to 127.0.0.1 when
+it does not, so the warning is gated on that same check.
 """
 
 import socket
@@ -19,25 +19,25 @@ import struct
 
 import pytest
 
-from rfmux.streamer import (MULTICAST_GROUP, find_competing_receiver,
-                            find_streamer_conflict)
-
-
-#: The starvation these tests describe is a property of SO_REUSEPORT,
-#: which Windows does not have.  Skipping is the honest outcome there:
-#: the option is absent, so the behaviour it produces cannot arise.
-requires_reuseport = pytest.mark.skipif(
-    not hasattr(socket, "SO_REUSEPORT"),
-    reason="SO_REUSEPORT is POSIX-only; Windows has no equivalent")
+from rfmux.streamer import (MULTICAST_GROUP, MulticastCheck,
+                            find_competing_receiver)
+from test.streamer.reuseport_helpers import requires_reuseport
 
 
 @pytest.fixture
-def free_port():
-    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    probe.bind(("", 0))
-    port = probe.getsockname()[1]
-    probe.close()
-    return port
+def multicast_broken(monkeypatch):
+    """The machine on which the mock falls back to unicast."""
+    monkeypatch.setattr(
+        "rfmux.streamer.check_multicast_loopback",
+        lambda **kw: MulticastCheck(False, [("receive", False, "nothing")], "fix"))
+
+
+@pytest.fixture
+def multicast_works(monkeypatch):
+    """The machine on which the mock multicasts."""
+    monkeypatch.setattr(
+        "rfmux.streamer.check_multicast_loopback",
+        lambda **kw: MulticastCheck(True, [("receive", True, "ok")], ""))
 
 
 def _reuse_socket(port, join_group=False):
@@ -64,7 +64,8 @@ def test_quiet_when_the_port_is_free(free_port):
 
 @pytest.mark.portable
 @requires_reuseport
-def test_reports_a_receiver_that_would_take_our_packets(free_port):
+def test_reports_a_receiver_that_would_take_our_packets(free_port,
+                                                        multicast_broken):
     holder = _reuse_socket(free_port)
     try:
         message = find_competing_receiver(port=free_port)
@@ -72,6 +73,28 @@ def test_reports_a_receiver_that_would_take_our_packets(free_port):
         assert str(free_port) in message
     finally:
         holder.close()
+
+
+@pytest.mark.portable
+@requires_reuseport
+def test_silent_when_the_mock_multicasts(free_port, multicast_works):
+    """Where multicast works the mock uses it, and every reader gets a copy."""
+    holder = _reuse_socket(free_port)
+    try:
+        assert find_competing_receiver(port=free_port) is None, \
+            "warned about a second reader of a multicast stream"
+    finally:
+        holder.close()
+
+
+@pytest.mark.portable
+def test_a_free_port_does_not_run_the_multicast_check(free_port, monkeypatch):
+    """The check can take its whole timeout; a routine launch must not pay it."""
+    def explode(**kw):
+        raise AssertionError("checked multicast with nobody on the port")
+
+    monkeypatch.setattr("rfmux.streamer.check_multicast_loopback", explode)
+    assert find_competing_receiver(port=free_port) is None
 
 
 @pytest.mark.portable
@@ -90,7 +113,7 @@ def test_silent_for_a_real_board(free_port):
 
 @pytest.mark.portable
 @requires_reuseport
-def test_the_probe_sees_past_so_reuseport(free_port):
+def test_the_probe_sees_past_so_reuseport(free_port, multicast_broken):
     """The holder sets SO_REUSEPORT; a probe that did too would miss it."""
     holder = _reuse_socket(free_port)
     try:
@@ -98,18 +121,6 @@ def test_the_probe_sees_past_so_reuseport(free_port):
     finally:
         holder.close()
     assert find_competing_receiver(port=free_port) is None
-
-
-@pytest.mark.portable
-@requires_reuseport
-def test_conflict_check_still_sees_a_receiver(free_port):
-    """find_streamer_conflict shares the probe; keep its half working."""
-    holder = _reuse_socket(free_port)
-    try:
-        conflict = find_streamer_conflict(port=free_port)
-        assert conflict and "receiving" in conflict
-    finally:
-        holder.close()
 
 
 def _drain(s):
@@ -125,7 +136,7 @@ def _drain(s):
 @pytest.mark.portable
 @requires_reuseport
 def test_unicast_starves_the_second_listener(free_port):
-    """Why the warning exists at all -- this is the mock's transport."""
+    """Why the warning exists at all -- this is the mock's fallback transport."""
     a, b = _reuse_socket(free_port), _reuse_socket(free_port)
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     tx.bind(("127.0.0.1", 0))
@@ -145,7 +156,8 @@ def test_unicast_starves_the_second_listener(free_port):
 @pytest.mark.portable
 @requires_reuseport
 def test_multicast_feeds_every_listener(free_port):
-    """Why the warning is scoped to loopback -- this is a board."""
+    """Why the warning is gated on the check -- a board, or a mock where
+    multicast works."""
     a = _reuse_socket(free_port, join_group=True)
     b = _reuse_socket(free_port, join_group=True)
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

@@ -566,21 +566,15 @@ class SessionManager(QtCore.QObject):
             Data type string (netanal, multisweep, bias, noise, pulse)
             or None if unknown
         """
-        # HDF5 files are never pickles — sniff by structure before any
-        # unpickle attempt.  Pulse capture files have a 'metadata' group
-        # and one 'channel_<n>' group per captured channel.
+        # HDF5 files are never pickles.  The pulse capture reader owns
+        # the file layout: a file it opens with captured channels is one.
         if str(file_path).lower().endswith(('.h5', '.hdf5')):
+            from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
             try:
-                import h5py
-                with h5py.File(file_path, 'r') as f:
-                    if 'metadata' in f and (
-                            'slow' in f  # dual-layout ("both" mode)
-                            or any(k.startswith('channel_')
-                                   for k in f.keys())):
-                        return 'pulse'
+                with PulseHDF5Reader(file_path) as reader:
+                    return 'pulse' if reader.channels else None
             except Exception:
-                pass
-            return None
+                return None
 
         # Try to load the file
         data = self.load_file(file_path)
@@ -638,7 +632,6 @@ class SessionManager(QtCore.QObject):
 
         path = Path(filepath)
         self._export_count += 1
-        self._session_metadata['export_count'] = self._export_count
         self._session_metadata.setdefault('exports', []).append({
             'filename': path.name,
             'data_type': data_type,

@@ -4,7 +4,8 @@ from typing import Optional # Import Optional
 from .utils import (
     QtWidgets, QRegularExpression, QRegularExpressionValidator,
     QDoubleValidator, DEFAULT_EXPECTED_RESONANCES, DEFAULT_MIN_DIP_DEPTH_DB, DEFAULT_MIN_Q,
-    DEFAULT_MAX_Q, DEFAULT_MIN_RESONANCE_SEPARATION_HZ, DEFAULT_DATA_EXPONENT
+    DEFAULT_MAX_Q, DEFAULT_MIN_RESONANCE_SEPARATION_HZ, DEFAULT_DATA_EXPONENT,
+    DEFAULT_REQUIRE_ISOLATION
 )
 
 class FindResonancesDialog(QtWidgets.QDialog):
@@ -62,6 +63,22 @@ class FindResonancesDialog(QtWidgets.QDialog):
         self.min_resonance_separation_khz_edit.setValidator(QDoubleValidator(0.00001, 100000.0, 3, self))
         layout.addRow("Min Separation (KHz):", self.min_resonance_separation_khz_edit)
 
+        # What the separation above means.  Unchecked it thins: of any group
+        # closer than it, the most prominent is kept -- so a kept resonance
+        # can still have a real one beside it, the one that was discarded.
+        # Checked it drops every member of such a group, so what comes back
+        # has nothing within the separation.
+        self.require_isolation_check = QtWidgets.QCheckBox(
+            "Drop both when two are closer than the separation")
+        self.require_isolation_check.setChecked(DEFAULT_REQUIRE_ISOLATION)
+        self.require_isolation_check.setToolTip(
+            "Off: of a crowded group, keep the most prominent. The list obeys "
+            "the separation, but a kept resonance may still have a neighbour "
+            "just under it -- the one that was dropped.\n\n"
+            "On: drop the whole group. Every resonance returned is one "
+            "nothing else is close to, so none of them collide.")
+        layout.addRow("Isolation:", self.require_isolation_check)
+
         # Data exponent for fitting (float)
         self.data_exponent_edit = QtWidgets.QLineEdit(str(DEFAULT_DATA_EXPONENT))
         self.data_exponent_edit.setValidator(QDoubleValidator(0.1, 10.0, 2, self))
@@ -92,6 +109,7 @@ class FindResonancesDialog(QtWidgets.QDialog):
             params_dict['min_Q'] = float(self.min_Q_edit.text())
             params_dict['max_Q'] = float(self.max_Q_edit.text())
             params_dict['min_resonance_separation_hz'] = float(self.min_resonance_separation_khz_edit.text()) * 1e3 # Convert KHz to Hz
+            params_dict['require_isolation'] = self.require_isolation_check.isChecked()
             params_dict['data_exponent'] = float(self.data_exponent_edit.text())
 
             # Perform basic validation

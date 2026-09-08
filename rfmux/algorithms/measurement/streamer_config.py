@@ -4,7 +4,7 @@ Streamer configuration: rates, link-budget math, validation, and apply.
 One headless home for everything about configuring the CRS streamers —
 the slow readout stream (decimation stage, short/long packets, which
 modules are streamed) and the fast PFB stream (up to 4 channels of one
-module at ~1.22 MHz).  The Periscope "Streamer Configuration" dialog is
+module at ~2.44 MHz).  The Periscope "Streamer Configuration" dialog is
 a thin view over :func:`describe` and :func:`validate`; scripts and
 notebooks use :func:`apply_streamer_config` or the registered
 ``crs.configure_streamer(...)`` macro directly.
@@ -29,11 +29,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import decimation_to_sampling
+from ...core.transferfunctions import (
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
+)
 from ... import streamer
-
-#: Re-exported from rfmux.streamer, which owns the stream constants.
-PFB_SAMPLE_RATE = streamer.PFB_SAMPLE_RATE
 
 # Link budget (1 GbE), with the firmware's ~0.8 bandwidth derating
 LINK_MBPS = 1000.0
@@ -50,22 +50,17 @@ class StreamerConfig:
     """
     dec_stage: int = 6
     short_packets: bool = False
-    modules: Optional[List[int]] = None      # None = all active modules
+    modules: Optional[List[int]] = None      # None = all active; [] = none
     pfb_channels: Optional[List[int]] = None
     pfb_module: int = 1
 
     def n_modules(self, default: int = 4) -> int:
-        return len(self.modules) if self.modules else default
-
-
-def slow_sample_rate(dec_stage: int) -> float:
-    """Slow-stream sample rate (Hz) for a decimation stage."""
-    return decimation_to_sampling(dec_stage)
+        return len(self.modules) if self.modules is not None else default
 
 
 def describe(cfg: StreamerConfig) -> Dict[str, Any]:
     """Derived quantities for a configuration (rates, widths, bandwidth)."""
-    fs = slow_sample_rate(cfg.dec_stage)
+    fs = decimation_to_sampling(cfg.dec_stage)
     packet_bytes = (streamer.SHORT_PACKET_SIZE if cfg.short_packets
                     else streamer.LONG_PACKET_SIZE)
     channels = (streamer.SHORT_PACKET_CHANNELS if cfg.short_packets
@@ -74,9 +69,8 @@ def describe(cfg: StreamerConfig) -> Dict[str, Any]:
     slow_mbps = packet_bytes * 8 * fs * n_mod / 1e6
 
     n_pfb = len(cfg.pfb_channels) if cfg.pfb_channels else 0
-    # PFB packets carry 1000 interleaved samples in PFB_PACKET_SIZE bytes
-    pfb_mbps = (streamer.PFB_PACKET_SIZE * 8 * PFB_SAMPLE_RATE * n_pfb
-                / 1000.0 / 1e6)
+    pfb_mbps = (streamer.PFB_PACKET_SIZE * 8 * PFB_SAMPLING_FREQ * n_pfb
+                / streamer.PFBPACKET_NSAMP_MAX / 1e6)
 
     return {
         "sample_rate_hz": fs,
@@ -85,7 +79,7 @@ def describe(cfg: StreamerConfig) -> Dict[str, Any]:
         "packet_bytes": packet_bytes,
         "n_modules": n_mod,
         "slow_mbps": slow_mbps,
-        "pfb_sample_rate_hz": PFB_SAMPLE_RATE,
+        "pfb_sample_rate_hz": PFB_SAMPLING_FREQ,
         "n_pfb_channels": n_pfb,
         "pfb_mbps": pfb_mbps,
         "total_mbps": slow_mbps + pfb_mbps,
@@ -174,19 +168,28 @@ async def apply_streamer_config(crs, cfg: StreamerConfig) -> Dict[str, Any]:
         raise ValueError("Invalid streamer configuration:\n- "
                          + "\n- ".join(errors))
 
-    # 'module' (singular) is the firmware spelling as of r1.6.0; it takes
-    # None, an int, or a list.  r1.5.6 spelled it 'modules' -- see the
-    # firmware/CHANGES entry for r1.6.0.
-    await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
-                             module=cfg.modules)
+    # TEMPORARY firmware workaround: the PFB streamer command checks
+    # the link budget with a miscalculated slow-stream rate and refuses
+    # configurations that fit (stage 1, short packets, one module and
+    # four PFB channels among them).  Enabling the fast stream while the
+    # slow stream sits at stage 6, its lowest rate, passes that check;
+    # the wanted stage is applied afterwards.  Back to two calls once
+    # the firmware that fixes the check is the minimum.
+    # 'module' takes None, an int, or a list (firmware r1.6.0+).
+    enabling = bool(cfg.pfb_channels)
+    await crs.set_decimation(6 if enabling else cfg.dec_stage,
+                             short=cfg.short_packets, module=cfg.modules)
 
     if cfg.pfb_channels is not None:
-        if cfg.pfb_channels:
+        if enabling:
             await crs.set_pfb_streamer(channel=list(cfg.pfb_channels),
                                        module=cfg.pfb_module)
             await asyncio.sleep(0.3)  # let the fast stream settle
         else:
             await crs.set_pfb_streamer(channel=None, module=cfg.pfb_module)
+    if enabling:
+        await crs.set_decimation(cfg.dec_stage, short=cfg.short_packets,
+                                 module=cfg.modules)
 
     return describe(cfg)
 
@@ -218,19 +221,26 @@ async def configure_streamer(
     *,
     short: bool = False,
     modules: Optional[List[int]] = None,
-    pfb_channels: Optional[List[int]] = None,
+    pfb_channels: Optional[List[int]] = (),
     pfb_module: int = 1,
 ) -> Dict[str, Any]:
-    """Configure the slow (and optionally fast/PFB) streamers.
+    """Configure the slow and fast (PFB) streamers.
+
+    The call states the whole streamer configuration, as the Streamer
+    Configuration dialog does: ``pfb_channels`` left at its default (or
+    ``[]``) disables the PFB streamer, a list enables it on those
+    channels, and ``None`` leaves it untouched for a caller that manages
+    it separately.
 
     Usage::
 
         info = await crs.configure_streamer(1, short=True, modules=[1])
         info = await crs.configure_streamer(6, pfb_channels=[1, 2])
-        await crs.configure_streamer(6, pfb_channels=[])   # disable PFB
 
     Returns the derived-quantities dict (sample rate, bandwidth, ...).
     """
+    if pfb_channels is not None:
+        pfb_channels = list(pfb_channels)
     cfg = StreamerConfig(dec_stage=dec_stage, short_packets=short,
                          modules=modules, pfb_channels=pfb_channels,
                          pfb_module=pfb_module)

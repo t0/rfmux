@@ -1,14 +1,15 @@
 """
 Dockable live pulse-capture panel.
 
-Layout mirrors the SPIE2026 HUD mockup: a toolbar of capture controls,
-a status strip (state / counts / rate + per-channel noise), a pulse
-tree on the left (newest first, pileup flagged), and a tabbed viewer on
-the right (single-pulse I/Q waveform with threshold bands, and a 2×2
-grid of running histograms — SNR, peak amplitude, duration, derived τ).
+The layout: a toolbar of capture controls, a status strip (state /
+counts / rate + per-channel noise), a pulse tree on the left (newest
+first, pileup flagged), and three tabs on the right — a single-pulse
+I/Q waveform with threshold bands, a 2×2 grid of running histograms
+(SNR, peak amplitude, duration, derived τ), and the trigger-aligned
+template stack.
 
 All capture logic lives in
-:class:`~rfmux.pulse_capture.session.PulseCaptureSession`;
+:class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`;
 this panel only configures a session, bridges it through
 :class:`~rfmux.tools.periscope.pulse_capture_task.PulseCaptureTask`,
 and draws.
@@ -19,14 +20,16 @@ from __future__ import annotations
 import asyncio
 import csv
 import datetime
-import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from dataclasses import replace
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from ... import streamer
+from .layouts import ElidedLabel, FlowLayout, labelled
 from .utils import (
     ClickableViewBox,
     ScreenshotMixin,
@@ -41,22 +44,31 @@ from .pulse_capture_settings_dialog import PulseCaptureSettingsDialog
 from ...algorithms.measurement.channel_selection import (
     parse_channel_spec,
 )
-from ...pulse_capture.session import (
+from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
     PulseCaptureSession,
 )
 from ...pulse_capture.hdf5 import PulseHDF5Reader
-from ...algorithms.measurement.streamer_config import (
-    PFB_SAMPLE_RATE,
-    slow_sample_rate,
+from ...core.transferfunctions import (
+    apply_iq_conversion,
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
 )
-from ...pulse_capture.analysis import counts_to_hz_scale
+from ...pulse_capture.detection import ChannelNoiseStats
+from ...pulse_capture.analysis import (
+    combine_histograms,
+    combine_templates,
+    display_transform,
+    plot_groups,
+    storage_transform,
+    summary_from_attrs,
+    window_shortfall,
+)
 
-# Fast/PFB stream overlay colors (darker variants, HUD convention)
-FAST_IQ_COLORS = {"I": "#24478F", "Q": "#8F4724"}
+# The fast stream keeps the quadrature hue family but sits apart from
+# the slow one on the same plot: blue/purple, orange/red.
+FAST_IQ_COLORS = {"I": "#7A3FBF", "Q": "#CC3333"}
 
-# Channel plot colors: ch1 = I-blue, ch2 = Q-orange (HUD convention),
-# further channels from Tableau10.
 #: Above this many channels the status strip summarises instead of
 #: naming every channel.  200 channels of "Ch12 I=1.0±2.34, Q=…" is
 #: several thousand characters on one line, and a QLabel that wide
@@ -85,46 +97,65 @@ def _spread(values) -> str:
             f"(median {ordered[len(ordered) // 2]:.2f})")
 
 
-def _noise_line(stats: dict) -> str:
-    """Noise strip text for one stream."""
+def _noise_line(stats: dict, names=("I", "Q"), unit: str = "") -> str:
+    """Noise strip text for one stream, in the units on the axes.
+
+    The names and the unit come from the caller because the strip sits
+    above plots whose basis the user can change: printing I and Q with
+    no unit described whatever happened to be on disk.  ``g`` rather
+    than a fixed decimal count, because hertz and volts are many orders
+    of magnitude apart and neither should overflow the strip.
+    """
+    a, b = names
+    tail = f" {unit}" if unit else ""
     return _summarize(
         stats,
-        lambda c, ns: (f"Ch{c} I={ns.mean_I:.1f}±{ns.std_I:.2f}, "
-                       f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"),
-        lambda st: (f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}"
-                    f", σQ {_spread(n.std_Q for n in st.values())}"))
+        lambda c, ns: (f"Ch{c} {a}={ns.mean_I:.4g}±{ns.std_I:.3g}, "
+                       f"{b}={ns.mean_Q:.4g}±{ns.std_Q:.3g}{tail}"),
+        lambda st: (f"{len(st)} ch — σ{a} {_spread(n.std_I for n in st.values())}"
+                    f", σ{b} {_spread(n.std_Q for n in st.values())}{tail}"))
 
 
 def _noise_line_sigma(stats: dict) -> str:
     """Compact per-stream variant used in both-mode."""
     return _summarize(
         stats,
-        lambda c, ns: f"Ch{c} σI={ns.std_I:.2f}",
+        lambda c, ns: f"Ch{c} σI={ns.std_I:.3g}",
         lambda st: f"{len(st)} ch — σI {_spread(n.std_I for n in st.values())}")
 
 
-def _legend_name(channel: int, count, n_channels: int):
+def _series_name(label: str, count, n_series: int):
     """Curve name, or None to keep it out of the legend.
 
     pyqtgraph draws one legend row per named curve, so a 128-channel
     capture buries the plot under its own key.  Past
-    MAX_LISTED_CHANNELS the curves stay unnamed and the channel count
-    goes in the title instead.
+    MAX_LISTED_CHANNELS the curves stay unnamed and the series count
+    goes in the title instead; the Plot field is how to get fewer.
     """
-    if n_channels > MAX_LISTED_CHANNELS:
+    if n_series > MAX_LISTED_CHANNELS:
         return None
-    return f"Ch {channel} (n={count})"
+    return f"{label} (n={count})"
 
 
-def _noise_detail(stats: dict) -> str:
+_PLOT_SPEC_TIP = (
+    "Which channels to draw.  Empty: every channel.  \"1,2,4\": those "
+    "channels, one line each.  \"1-5\": channels 1 to 5 combined into "
+    "one.  \"*\": all channels combined.  Items can be mixed: \"1,3-8,*\".")
+
+
+def _noise_detail(stats: dict, names=("I", "Q"), unit: str = "") -> str:
     """Full per-channel listing, for the tooltip."""
+    a, b = names
+    tail = f" {unit}" if unit else ""
     return "\n".join(
-        f"Ch{c}  I={ns.mean_I:.1f}±{ns.std_I:.2f}   "
-        f"Q={ns.mean_Q:.1f}±{ns.std_Q:.2f}"
+        f"Ch{c}  {a}={ns.mean_I:.4g}±{ns.std_I:.3g}   "
+        f"{b}={ns.mean_Q:.4g}±{ns.std_Q:.3g}{tail}"
         for c, ns in sorted(stats.items()))
 
 
 def _channel_color(channel: int) -> str:
+    """Channels 1 and 2 reuse IQ_COLORS so the two default channels
+    match the I/Q hues; further channels come from Tableau10."""
     if channel == 1:
         return IQ_COLORS["I"]
     if channel == 2:
@@ -132,12 +163,36 @@ def _channel_color(channel: int) -> str:
     return TABLEAU10_COLORS[(channel - 3) % len(TABLEAU10_COLORS)]
 
 
+#: Legend names for the two stored axes, by basis.
+_AXIS_NAMES = {"df": ("df", "diss"), "iq": ("I", "Q")}
+
 _HIST_METRICS = [
     ("snr", "Signal-to-noise (σ)", "peak deviation (σ)"),
-    ("amplitude", "Peak amplitude", "amplitude (counts)"),
+    ("amplitude", "Peak amplitude per axis", "amplitude"),
     ("duration_ms", "Duration", "duration (ms)"),
     ("tau_ms", "Derived τ", "derived τ (ms)"),
 ]
+
+
+#: The three views the panel offers, and the (basis, units) each means.
+#: Kept in step with the main window's counts / real / df selector.
+UNITS_COUNTS = "counts"
+UNITS_VOLTS = "volts"
+UNITS_DF = "df (Hz)"
+_VIEW_STATES = {
+    UNITS_COUNTS: ("iq", "counts"),
+    UNITS_VOLTS: ("iq", "V"),
+    UNITS_DF: ("df", "Hz"),
+}
+
+
+def _end_label(wf) -> str:
+    """How the capture ended, for its end mark."""
+    if wf.get("truncated"):
+        return "hard stop"
+    if wf.get("pileup") and wf.get("settled_index") is None:
+        return "split"
+    return "end confirmed"
 
 
 class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
@@ -174,11 +229,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order: List[Tuple[int, int]] = []
         self._pulse_summaries: Dict[Tuple[int, int], dict] = {}
         self._current_view: Optional[Tuple[int, int]] = None
-        self._pending_fetch: Optional[Tuple] = None
+        #: Items asked of the worker for the view being drawn; cleared
+        #: when the view changes, so a missing item is asked for once.
+        self._pending_fetch: set = set()
         self._both_mode = False
         self._current_pair: Optional[Tuple[int, int]] = None
         self._pair_meta: Dict[Tuple[int, int], dict] = {}
-        self._stream_counts: Dict[str, int] = {}
         self._noise_by_stream: Dict[str, dict] = {}
         self._hist_data_by_stream: Dict[str, dict] = {}
         self._template_data: dict = {}
@@ -195,9 +251,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._counts: Dict[int, int] = {}
         self._last_stats: dict = {}
         self._hist_data: dict = {}
-        self._capture_start_wall: Optional[float] = None
+        #: The Plot field: what the histograms and templates draw.
+        self._plot_spec: str = ""
 
+        #: Set once the user picks a view; the frequency-view default
+        #: below is applied only until then.
+        self._view_chosen = False
         self._setup_ui()
+        self._apply_default_view()
         self._setup_shortcuts()
         self._set_run_state(False)
         self.apply_theme(dark_mode)
@@ -238,7 +299,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if not self._pulse_order:
             return
         self.follow_check.setChecked(False)
-        key = self._pulse_order[0 if first else -1]
+        self._show_key(self._pulse_order[0 if first else -1])
+
+    def _show_key(self, key: Tuple[int, int]) -> None:
+        """Draw one tree entry: a pair in both mode, else a pulse."""
         if self._both_mode:
             self._show_pair(*key)
         else:
@@ -255,8 +319,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _setup_toolbar(self, layout: QtWidgets.QVBoxLayout) -> None:
         bar = QtWidgets.QWidget()
-        h = QtWidgets.QHBoxLayout(bar)
-        h.setContentsMargins(5, 5, 5, 5)
+        # Wraps into rows as the width requires: this many controls in
+        # one row is wider than a laptop screen.
+        h = FlowLayout(bar)
 
         self.btn_start = QtWidgets.QPushButton("▶ Start")
         self.btn_start.clicked.connect(self._on_start_stop)
@@ -268,54 +333,66 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.clicked.connect(self._on_reestimate)
         h.addWidget(self.btn_reestimate)
 
-        h.addWidget(QtWidgets.QLabel("Mode:"))
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["slow", "fast", "both"])
         self.mode_combo.setToolTip(
             "slow: ~kHz readout stream (taps the Periscope display "
-            "stream)\nfast: ~1.22 MHz PFB stream (max 4 channels; "
-            "configures the fast streamer automatically)\n"
+            "stream)\nfast: ~2.44 MHz PFB stream (max 4 channels; the "
+            "PFB streamer must already be streaming them — set it "
+            "under Streamer…)\n"
             "both: concurrent slow+fast with live pulse matching — the "
             "tree lists matched pairs")
-        h.addWidget(self.mode_combo)
+        h.addWidget(labelled("Mode:", self.mode_combo))
 
-        h.addWidget(QtWidgets.QLabel("Channels:"))
         self.channels_edit = QtWidgets.QLineEdit("1,2")
         self.channels_edit.setFixedWidth(90)
         self.channels_edit.setToolTip(
             "1-indexed channels: \"1,2\", ranges \"2-19\", or a mix\n"
             "\"1,5-8,20\".  \"all\" takes every channel on this module\n"
             "that has a bias set.")
-        h.addWidget(self.channels_edit)
+        h.addWidget(labelled("Channels:", self.channels_edit))
 
-        h.addWidget(QtWidgets.QLabel("Module:"))
         self.module_spin = QtWidgets.QSpinBox()
         self.module_spin.setRange(1, 8)
-        h.addWidget(self.module_spin)
+        h.addWidget(labelled("Module:", self.module_spin))
 
-        h.addWidget(QtWidgets.QLabel("Thresh σ:"))
         self.threshold_spin = QtWidgets.QDoubleSpinBox()
         self.threshold_spin.setRange(0.5, 1000.0)
         self.threshold_spin.setValue(5.0)
         self.threshold_spin.setSingleStep(0.5)
-        h.addWidget(self.threshold_spin)
+        h.addWidget(labelled("Thresh σ:", self.threshold_spin))
 
-        h.addWidget(QtWidgets.QLabel("End σ:"))
         self.end_spin = QtWidgets.QDoubleSpinBox()
         self.end_spin.setRange(0.1, 100.0)
-        self.end_spin.setValue(1.5)
+        self.end_spin.setValue(self.capture_config.end_sigma)
         self.end_spin.setSingleStep(0.1)
         self.end_spin.setToolTip(
-            "Pulse end requires BOTH I and Q within this band.  Below "
-            "~1.2σ the end condition confirms only by chance on Gaussian "
-            "noise — 1.5σ recommended.")
-        h.addWidget(self.end_spin)
+            "Pulse end requires BOTH axes back within this band of the "
+            "baseline for the confirmation count.  A tighter band keeps "
+            "more of the tail and lengthens the capture: 1.0σ runs about "
+            "a fifth longer than 1.5σ.")
+        h.addWidget(labelled("End σ:", self.end_spin))
 
         self.pileup_check = QtWidgets.QCheckBox("Pileup")
         self.pileup_check.setChecked(True)
         self.pileup_check.setToolTip("Split piled-up events on sharp "
                                      "re-triggers during the decay")
         h.addWidget(self.pileup_check)
+
+        self.units_combo = QtWidgets.QComboBox()
+        # The same three the main window offers, and for the same reason:
+        # basis and scale are not independent in any useful way.  Hertz is
+        # a property of the frequency axis, so "df" means rotated *and*
+        # scaled, and there is no such thing as volts on that axis.
+        self.units_combo.addItems([UNITS_COUNTS, UNITS_VOLTS, UNITS_DF])
+        self.units_combo.setCurrentText(UNITS_VOLTS)
+        self.units_combo.setToolTip(
+            "Units for waveforms, histograms and templates.\n\n"
+            "counts: raw ADC.  volts: the readout scale.  df: rotated "
+            "into frequency and dissipation, in hertz — needs a df "
+            "calibration for the channel.")
+        self.units_combo.currentTextChanged.connect(self._on_user_view_changed)
+        h.addWidget(labelled("Units:", self.units_combo))
 
         self.btn_settings = QtWidgets.QPushButton("Settings…")
         self.btn_settings.setToolTip(
@@ -330,17 +407,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_streamer.clicked.connect(self._on_streamer_config)
         h.addWidget(self.btn_streamer)
 
-        self.path_label = QtWidgets.QLabel("HDF5: (session)")
-        self.path_label.setTextInteractionFlags(
-            QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        # The file name only, elided if even that is long; the whole
+        # path is the tooltip, so the row never widens the panel.
+        self.path_label = ElidedLabel("HDF5: (session)")
         h.addWidget(self.path_label)
         self.btn_browse = QtWidgets.QPushButton("…")
         self.btn_browse.setFixedWidth(28)
         self.btn_browse.setToolTip("Choose the output HDF5 file")
         self.btn_browse.clicked.connect(self._on_browse)
         h.addWidget(self.btn_browse)
-
-        h.addStretch(1)
 
         self.btn_export = QtWidgets.QPushButton("Export…")
         self.btn_export.setToolTip(
@@ -354,6 +429,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         h.addWidget(screenshot_btn)
 
         layout.addWidget(bar)
+
+    def _show_path(self, path) -> None:
+        """The file's name in the toolbar, its whole path on hover."""
+        self.path_label.setText(f"HDF5: {Path(str(path)).name}")
+        self.path_label.setToolTip(str(path))
 
     def _setup_status(self, layout: QtWidgets.QVBoxLayout) -> None:
         strip = QtWidgets.QWidget()
@@ -379,9 +459,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
         self.pulse_tree = QtWidgets.QTreeWidget()
-        self.pulse_tree.setHeaderLabels(["Pulse", "Samples", "SNR"])
-        self.pulse_tree.setColumnWidth(0, 110)
-        self.pulse_tree.setColumnWidth(1, 60)
+        self.pulse_tree.setHeaderLabels(
+            ["Pulse", "Time (UTC)", "Samples", "SNR"])
+        header = self.pulse_tree.header()
+        header.setStretchLastSection(False)
+        # Sized to their contents as rows arrive, until the user drags
+        # a divider; from then on the widths are theirs.
+        header.setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Interactive)
+        self._tree_user_sized = False
+        self._tree_autosizing = False
+        header.sectionResized.connect(self._on_tree_section_resized)
+        self.pulse_tree.viewport().installEventFilter(self)
         self.pulse_tree.itemDoubleClicked.connect(self._on_tree_double_click)
         splitter.addWidget(self.pulse_tree)
 
@@ -412,6 +501,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addLayout(nav)
 
         self.pulse_info = QtWidgets.QLabel("No pulse selected")
+        self.pulse_info.setWordWrap(True)
+        self.pulse_info.setSizePolicy(QtWidgets.QSizePolicy.Policy.Ignored,
+                                      QtWidgets.QSizePolicy.Policy.Preferred)
         self.pulse_info.setTextInteractionFlags(
             QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         v.addWidget(self.pulse_info)
@@ -420,8 +512,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # baseline/threshold bands in its own quadrature's sigma.
         self.pulse_plot_i = pg.PlotWidget(viewBox=ClickableViewBox())
         self.pulse_plot_q = pg.PlotWidget(viewBox=ClickableViewBox())
-        for plot, ylabel in ((self.pulse_plot_i, "I (counts)"),
-                             (self.pulse_plot_q, "Q (counts)")):
+        for plot, ylabel in ((self.pulse_plot_i, "I (V)"),
+                             (self.pulse_plot_q, "Q (V)")):
             item = plot.getPlotItem()
             item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
@@ -432,13 +524,46 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addWidget(self.pulse_plot_q, stretch=1)
         return w
 
+    def _decision_noise(self, wf, ns):
+        """The bands a record was decided against: (trigger, end).
+
+        The live stats object is re-centred after every pulse, so a band
+        drawn from it is not the band the engine tested.  Records carry
+        their bands; older records fall back to the stats, and the end
+        band to the trigger band.
+        """
+        if not isinstance(wf, dict) or "trigger_baseline_I" not in wf:
+            return ns, ns
+        try:
+            v = {k: float(wf[k]) for k in (
+                "trigger_baseline_I", "trigger_baseline_Q",
+                "trigger_sigma_I", "trigger_sigma_Q")}
+        except (KeyError, TypeError, ValueError):
+            return ns, ns
+        if not all(np.isfinite(x) for x in v.values()) \
+                or v["trigger_sigma_I"] <= 0 or v["trigger_sigma_Q"] <= 0:
+            return ns, ns
+        base = ns if ns is not None else ChannelNoiseStats()
+        trig = replace(base, mean_I=v["trigger_baseline_I"],
+                       mean_Q=v["trigger_baseline_Q"],
+                       std_I=v["trigger_sigma_I"], std_Q=v["trigger_sigma_Q"])
+        end = trig
+        try:
+            e_I, e_Q = float(wf["end_baseline_I"]), float(wf["end_baseline_Q"])
+            if np.isfinite(e_I) and np.isfinite(e_Q):
+                end = replace(trig, mean_I=e_I, mean_Q=e_Q)
+        except (KeyError, TypeError, ValueError):
+            pass
+        return trig, end
+
     def _annotate_noise_bands(self, plot, quad, ns, x0, x1, color,
-                              prefix="") -> None:
+                              prefix="", thr=None, end=None,
+                              end_ns=None) -> None:
         """Draw the baseline and the ±σ bands on *plot*.
 
-        Drawn as two-point curves rather than addLine(): an InfiniteLine
-        is not a PlotDataItem and never shows up in the legend, so the
-        bands were unlabelled wherever they did appear.
+        Drawn as two-point curves rather than addLine(), so the bands
+        get legend entries: an InfiniteLine is not a PlotDataItem and
+        has none.
         """
         if ns is None:
             return
@@ -446,22 +571,36 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         std = getattr(ns, f"std_{quad}", None)
         if mean is None or std is None or not np.isfinite(std) or std <= 0:
             return
-        thr = float(self.threshold_spin.value())
-        end = float(self.end_spin.value())
+        # The record's own levels when it carries them (the spins can
+        # have moved since the capture, and say nothing about a file).
+        thr = float(self.threshold_spin.value()) if thr is None else float(thr)
+        end = float(self.end_spin.value()) if end is None else float(end)
+        end_mean = mean
+        if end_ns is not None:
+            end_mean = getattr(end_ns, f"mean_{quad}", mean)
+            if end_mean is None or not np.isfinite(end_mean):
+                end_mean = mean
         x = np.array([x0, x1], dtype=float)
         plot.plot(x, np.full(2, mean),
                   pen=pg.mkPen(color, width=1.0,
                                style=QtCore.Qt.PenStyle.DotLine),
                   name=f"{prefix}baseline")
-        for level, style, tag in (
-                (thr, QtCore.Qt.PenStyle.DashLine, f"±{thr:g}σ trigger"),
-                (end, QtCore.Qt.PenStyle.DotLine, f"±{end:g}σ end")):
-            for i, sign in enumerate((+1, -1)):
-                plot.plot(
-                    x, np.full(2, mean + sign * level * std),
-                    pen=pg.mkPen(color, width=1.0, style=style),
-                    # Name once per pair, or the legend doubles up.
-                    name=f"{prefix}{tag}" if i == 0 else None)
+        for centre, level, style, tag in (
+                (mean, thr, QtCore.Qt.PenStyle.DashLine,
+                 f"±{thr:g}σ trigger"),
+                (end_mean, end, QtCore.Qt.PenStyle.DotLine,
+                 f"±{end:g}σ end")):
+            # One item per +/- pair, joined by a NaN gap, so one legend
+            # entry hides and shows both lines.
+            band = centre + level * std
+            plot.plot(
+                np.array([x0, x1, np.nan, x0, x1], dtype=float),
+                np.array([band, band, np.nan,
+                          2 * centre - band, 2 * centre - band],
+                         dtype=float),
+                connect="finite",
+                pen=pg.mkPen(color, width=1.0, style=style),
+                name=f"{prefix}{tag}")
 
     @staticmethod
     def _decision_text(wf) -> str:
@@ -474,24 +613,30 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         got = wf.get("end_confirm_samples")
         want = wf.get("end_confirm_target")
         parts = [f"trigger @ sample {trig}"]
+        if wf.get("trigger_quad"):
+            # Which quadrature started the above-threshold run: the
+            # mark sits on both plots, and on the other one it can
+            # precede any visible crossing.
+            parts[0] += f" (on {wf['trigger_quad']})"
         if below is not None:
             parts.append(f"below threshold @ {below}")
+        settled = wf.get("settled_index")
+        if settled is not None:
+            parts.append(f"settled @ {settled}")
         if end is not None:
-            parts.append(f"end confirmed @ {end}")
+            parts.append(f"{_end_label(wf)} @ {end}")
         if got is not None and want is not None:
             parts.append(f"bucket {got}/{want}")
         return "\n" + "   ".join(parts)
 
     def _annotate_decisions(self, plot, wf, t0, quad,
                             prefix="") -> None:
-        """Mark where the detector triggered and where the leaky bucket
-        confirmed the end.
+        """Mark where the engine triggered, where the pulse dropped below
+        threshold and settled, and where the capture ended.
 
-        Vertical lines rather than markers on the trace: the end point
-        normally sits PAST the last saved sample, because the window is
-        trimmed back to where the signal returned to baseline rather
-        than where the bucket finished confirming it.  A line still
-        shows that, a data marker could not.
+        A mark past the last saved sample is not drawn: the confirmation
+        of a settled end lies past the settled sample that ends the
+        record, and a split's end is the split sample, one past its data.
         """
         t = np.asarray(wf.get("Time"), dtype=np.float64)
         if not len(t):
@@ -509,17 +654,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 return None
             return float(t[int(idx)]) - t0
 
-        marks = (
+        marks = [
             ("trigger_index", "trigger_time", "#33CC66", "trigger"),
             ("below_threshold_index", "below_threshold_time", "#CCAA33",
              "below threshold"),
-            ("end_index", "end_time", "#CC3366", "end confirmed"),
-        )
+            ("settled_index", "settled_time", "#33AACC", "settled"),
+            ("end_index", "end_time", "#CC3366", _end_label(wf)),
+        ]
+        t_last = float(t[-1]) - t0
+        # Each label sits one step below the last mark's, across both
+        # streams, so marks that land close together stay readable.
+        n_marks = sum(isinstance(it, pg.InfiniteLine)
+                      for it in plot.getPlotItem().items)
         for idx_key, time_key, color, label in marks:
             label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
-            if x is None:
+            if x is None or x > t_last:
                 continue
+            position = 0.95 - 0.06 * (n_marks % 10)
+            n_marks += 1
             plot.addItem(pg.InfiniteLine(
                 pos=x, angle=90,
                 pen=pg.mkPen(color, width=1.4,
@@ -527,7 +680,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 # Label only on the top plot; the two are x-linked, so
                 # repeating it underneath is noise.
                 label=label if quad == "I" else None,
-                labelOpts={"position": 0.95, "color": color,
+                labelOpts={"position": position, "color": color,
                            "fill": (0, 0, 0, 120), "movable": False}))
 
     def _set_pulse_x_axis(self, label: str, units: str | None = None) -> None:
@@ -547,9 +700,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.setContentsMargins(4, 4, 4, 4)
 
         controls = QtWidgets.QHBoxLayout()
-        self.log_check = QtWidgets.QCheckBox("Log y")
-        self.log_check.toggled.connect(self._render_histograms)
-        controls.addWidget(self.log_check)
+        self.plot_spec_edit = self._make_plot_spec_edit()
+        controls.addWidget(labelled("Plot:", self.plot_spec_edit))
         self.hist_stream_combo = QtWidgets.QComboBox()
         self.hist_stream_combo.addItems(["slow", "fast"])
         self.hist_stream_combo.setToolTip(
@@ -559,14 +711,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.hist_stream_combo.setVisible(False)  # both-mode only
         controls.addWidget(self.hist_stream_combo)
 
-        controls.addWidget(QtWidgets.QLabel("Units:"))
-        self.units_combo = QtWidgets.QComboBox()
-        self.units_combo.addItems(["counts", "Hz"])
-        self.units_combo.setToolTip(
-            "Amplitudes in raw ADC counts, or calibrated Δf (Hz) when a "
-            "df calibration is available for the channel")
-        self.units_combo.currentTextChanged.connect(self._on_units_changed)
-        controls.addWidget(self.units_combo)
         controls.addStretch(1)
         v.addLayout(controls)
 
@@ -586,6 +730,43 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addWidget(grid_holder, stretch=1)
         return w
 
+    def _make_plot_spec_edit(self) -> QtWidgets.QLineEdit:
+        edit = QtWidgets.QLineEdit()
+        edit.setPlaceholderText("all  (1,2,4  |  1-5  |  *)")
+        edit.setToolTip(_PLOT_SPEC_TIP)
+        edit.setMaximumWidth(220)
+        edit.editingFinished.connect(
+            lambda e=edit: self._on_plot_spec_edited(e))
+        return edit
+
+    def _on_plot_spec_edited(self, edit: QtWidgets.QLineEdit) -> None:
+        """One spec drives the histograms and the templates; the two
+        fields mirror each other."""
+        text = edit.text()
+        try:
+            plot_groups(text, [1])
+        except ValueError as e:
+            edit.setStyleSheet("border: 1px solid #CC3333")
+            edit.setToolTip(f"{e}\n\n{_PLOT_SPEC_TIP}")
+            return
+        for other in (self.plot_spec_edit, self.template_spec_edit):
+            other.setStyleSheet("")
+            other.setToolTip(_PLOT_SPEC_TIP)
+            if other.text() != text:
+                other.setText(text)
+        if text != self._plot_spec:
+            self._plot_spec = text
+            self._render_histograms()
+            self._render_templates()
+
+    def _plot_series(self) -> list:
+        """``[(label, [channels]), ...]`` the histograms and templates
+        draw: one per channel, or what the Plot field asks for."""
+        try:
+            return plot_groups(self._plot_spec, sorted(self._counts))
+        except ValueError:
+            return plot_groups("", sorted(self._counts))
+
     def _build_template_view(self) -> QtWidgets.QWidget:
         """Trigger-aligned pulse stack: mean template ± residual RMS."""
         w = QtWidgets.QWidget()
@@ -593,9 +774,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.setContentsMargins(4, 4, 4, 4)
 
         controls = QtWidgets.QHBoxLayout()
-        self.template_info = QtWidgets.QLabel("No pulses stacked yet")
+        # One elided line; the full text is the tooltip.  A wrapped
+        # label sharing the row with the controls would grow tall on a
+        # narrow panel.
+        self.template_info = ElidedLabel("No pulses stacked yet",
+                                         max_width=900)
         controls.addWidget(self.template_info)
         controls.addStretch(1)
+        self.template_spec_edit = self._make_plot_spec_edit()
+        controls.addWidget(labelled("Plot:", self.template_spec_edit))
+        self.template_stream_combo = QtWidgets.QComboBox()
+        self.template_stream_combo.addItems(["slow", "fast"])
+        self.template_stream_combo.setToolTip(
+            "Which stream's pulses to stack (both mode)")
+        self.template_stream_combo.currentTextChanged.connect(
+            self._on_template_stream_changed)
+        self.template_stream_combo.setVisible(False)  # both-mode only
+        controls.addWidget(self.template_stream_combo)
         self.template_residual_check = QtWidgets.QCheckBox(
             "Show residual RMS")
         self.template_residual_check.setChecked(True)
@@ -609,15 +804,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.template_plot_i = pg.PlotWidget(viewBox=ClickableViewBox())
         self.template_plot_q = pg.PlotWidget(viewBox=ClickableViewBox())
-        for plot, ylabel in ((self.template_plot_i, "I (counts)"),
-                             (self.template_plot_q, "Q (counts)")):
+        # The left labels follow the view; _render_templates sets them.
+        for plot in (self.template_plot_i, self.template_plot_q):
             item = plot.getPlotItem()
-            item.setLabel("left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
             item.addLegend(offset=(-10, 10))
-        for plot in (self.template_plot_i, self.template_plot_q):
-            plot.getPlotItem().setLabel("bottom", "time from trigger",
-                                        units="s")
+            item.setLabel("bottom", "time from trigger", units="s")
         self.template_plot_q.setXLink(self.template_plot_i)
         v.addWidget(self.template_plot_i, stretch=1)
         v.addWidget(self.template_plot_q, stretch=1)
@@ -626,7 +818,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_templates(self, data: dict) -> None:
         if "stream" in data and "data" in data:
             self._template_data_by_stream[data["stream"]] = data["data"]
-            if data["stream"] != self.hist_stream_combo.currentText():
+            if data["stream"] != self.template_stream_combo.currentText():
                 return
             self._template_data = data["data"]
         else:
@@ -636,77 +828,122 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _render_templates(self) -> None:
         for plot in (self.template_plot_i, self.template_plot_q):
             plot.clear()
+        # Same names the pulse view uses, set even with nothing stacked
+        # so an empty tab does not advertise units the view is not in.
+        first, second = self._axis_names(self._label_channel())
+        self.template_plot_i.getPlotItem().setLabel("left", first)
+        self.template_plot_q.getPlotItem().setLabel("left", second)
         data = self._template_data
         if not data:
             self.template_info.setText("No pulses stacked yet")
             return
 
         show_band = self.template_residual_check.isChecked()
+        series = self._plot_series()
         totals = []
-        scaled_any = False
         # Track the data extent so the view fits the STACKED region:
         # bins outside it are NaN/empty and would otherwise stretch the
         # axes over the full pre/post grid.
         x_lo = x_hi = None
         y_lim = {"I": [None, None], "Q": [None, None]}
-        for ch in sorted(self._counts):
-            t = data.get(f"time_s_ch{ch}")
-            counts = data.get(f"counts_ch{ch}")
-            if t is None or counts is None:
+        for label, chans in series:
+            # Each channel converted to the view first, then the group
+            # stacked as if its pulses had been stacked together.
+            t_ref = None
+            means_by = {"I": [], "Q": []}
+            resids_by = {"I": [], "Q": []}
+            counts_list = []
+            n_pulses = 0
+            for ch in chans:
+                t = data.get(f"time_s_ch{ch}")
+                counts = data.get(f"counts_ch{ch}")
+                if t is None or counts is None:
+                    continue
+                t_arr = np.asarray(t, dtype=np.float64)
+                if t_ref is None:
+                    t_ref = t_arr
+                elif len(t_arr) != len(t_ref):
+                    continue  # a different grid cannot be stacked
+                counts = np.asarray(counts, dtype=np.float64)
+                n_pulses += int(np.max(counts)) if len(counts) else 0
+                scale = self._amp_scale(ch)
+                # Convert the pair together.  Averaging and the
+                # conversion are both linear, so a rotated template
+                # equals the template of rotated pulses -- but only if
+                # the two axes are transformed as a pair.
+                view = self._view_coeffs(ch)
+                means = {q: data.get(f"template_{q}_ch{ch}")
+                         for q in ("I", "Q")}
+                rotated = (view is not None and means["I"] is not None
+                           and means["Q"] is not None)
+                if rotated:
+                    a, b = apply_iq_conversion(
+                        np.asarray(means["I"], dtype=np.float64),
+                        np.asarray(means["Q"], dtype=np.float64), view[0])
+                    means = {"I": a, "Q": b}
+                blank = np.full(len(t_ref), np.nan)
+                for quad in ("I", "Q"):
+                    mean = means.get(quad)
+                    if mean is None:
+                        means_by[quad].append(blank)
+                        resids_by[quad].append(blank)
+                        continue
+                    mean = np.asarray(mean, dtype=np.float64)
+                    if scale is not None and not rotated:
+                        mean = mean * scale
+                    # The residual is a spread, not a signed pair: the
+                    # rotation mixes the quadratures, so only its length
+                    # carries over -- which is what `scale` already is.
+                    resid = data.get(f"residual_{quad}_ch{ch}")
+                    if resid is None:
+                        resid = blank
+                    else:
+                        resid = np.asarray(resid, dtype=np.float64)
+                        if scale is not None:
+                            resid = resid * scale
+                    means_by[quad].append(mean)
+                    resids_by[quad].append(resid)
+                counts_list.append(counts)
+            if t_ref is None:
                 continue
-            counts = np.asarray(counts)
-            n_pulses = int(np.max(counts)) if len(counts) else 0
-            totals.append((ch, n_pulses))
-            t_arr = np.asarray(t, dtype=np.float64)
-            populated = np.nonzero(counts > 0)[0]
+            totals.append((label, n_pulses))
+            populated = np.nonzero(np.sum(counts_list, axis=0) > 0)[0]
             if len(populated):
-                lo, hi = t_arr[populated[0]], t_arr[populated[-1]]
+                lo, hi = t_ref[populated[0]], t_ref[populated[-1]]
                 x_lo = lo if x_lo is None else min(x_lo, lo)
                 x_hi = hi if x_hi is None else max(x_hi, hi)
-            color = _channel_color(ch)
-            scale = self._df_scale(ch) if self._units_are_hz() else None
-            if scale is not None:
-                scaled_any = True
+            color = _channel_color(chans[0])
             for quad, plot in (("I", self.template_plot_i),
                                ("Q", self.template_plot_q)):
-                mean = data.get(f"template_{quad}_ch{ch}")
-                if mean is None:
+                if len(counts_list) == 1:
+                    mean, resid = means_by[quad][0], resids_by[quad][0]
+                else:
+                    mean, resid, _ = combine_templates(
+                        means_by[quad], resids_by[quad], counts_list)
+                finite = np.isfinite(mean)
+                if not np.any(finite):
                     continue
-                mean = np.asarray(mean, dtype=np.float64)
-                if scale is not None:
-                    mean = mean * scale
-                plot.plot(np.asarray(t, float), mean,
+                plot.plot(t_ref, mean,
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
-                          name=_legend_name(ch, n_pulses,
-                                            len(self._counts)))
-                finite = np.isfinite(mean)
-                if np.any(finite):
-                    lo, hi = float(np.min(mean[finite])), \
-                        float(np.max(mean[finite]))
-                    cur = y_lim[quad]
-                    cur[0] = lo if cur[0] is None else min(cur[0], lo)
-                    cur[1] = hi if cur[1] is None else max(cur[1], hi)
+                          name=_series_name(label, n_pulses, len(series)))
+                lo, hi = float(np.min(mean[finite])), \
+                    float(np.max(mean[finite]))
+                cur = y_lim[quad]
+                cur[0] = lo if cur[0] is None else min(cur[0], lo)
+                cur[1] = hi if cur[1] is None else max(cur[1], hi)
 
-                resid = data.get(f"residual_{quad}_ch{ch}")
-                if show_band and resid is not None:
-                    resid = np.asarray(resid, dtype=np.float64)
-                    if scale is not None:
-                        resid = resid * scale
-                    both = np.isfinite(mean) & np.isfinite(resid)
-                    if np.any(both):
-                        cur = y_lim[quad]
-                        cur[0] = min(cur[0], float(np.min(
-                            (mean - resid)[both])))
-                        cur[1] = max(cur[1], float(np.max(
-                            (mean + resid)[both])))
+                both = finite & np.isfinite(resid)
+                if show_band and np.any(both):
+                    cur[0] = min(cur[0], float(np.min(
+                        (mean - resid)[both])))
+                    cur[1] = max(cur[1], float(np.max(
+                        (mean + resid)[both])))
                     band = QtGui.QColor(color)
                     band.setAlpha(60)
-                    upper = pg.PlotDataItem(np.asarray(t, float),
-                                            mean + resid,
+                    upper = pg.PlotDataItem(t_ref, mean + resid,
                                             connect="finite")
-                    lower = pg.PlotDataItem(np.asarray(t, float),
-                                            mean - resid,
+                    lower = pg.PlotDataItem(t_ref, mean - resid,
                                             connect="finite")
                     fill = pg.FillBetweenItem(upper, lower, brush=band)
                     plot.addItem(fill)
@@ -714,9 +951,6 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot, quad in ((self.template_plot_i, "I"),
                            (self.template_plot_q, "Q")):
             item = plot.getPlotItem()
-            item.setLabel(
-                "left", f"{quad} (Δf)" if scaled_any else f"{quad} (counts)",
-                units="Hz" if scaled_any else None)
             # Fit to the stacked data, not the whole pre/post grid
             if x_lo is not None and x_hi > x_lo:
                 item.vb.setXRange(x_lo, x_hi, padding=0.02)
@@ -731,16 +965,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         elif len(totals) <= MAX_LISTED_CHANNELS:
             self.template_info.setText(
                 "Trigger-aligned stack — "
-                + ", ".join(f"Ch{c}: {n}" for c, n in totals))
+                + ", ".join(f"{label}: {n}" for label, n in totals))
         else:
             stacked = sum(n for _, n in totals)
-            busiest = max(totals, key=lambda cn: (cn[1], -cn[0]))
+            busiest = max(totals, key=lambda ln: ln[1])
             self.template_info.setText(
                 f"Trigger-aligned stack — {len(totals)} ch, "
                 f"{stacked:,} pulses stacked, "
-                f"deepest Ch{busiest[0]}: {busiest[1]}")
+                f"deepest {busiest[0]}: {busiest[1]}")
         self.template_info.setToolTip(
-            "\n".join(f"Ch{c}  {n}" for c, n in totals))
+            "\n".join(f"{label}  {n}" for label, n in totals))
 
     # ── Capture lifecycle ─────────────────────────────────────────
 
@@ -785,7 +1019,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         module = int(self.module_spin.value())
         # A channel the slow packet cannot carry cannot be captured,
         # however it is biased — so don't offer them.
-        max_ch = 128 if getattr(runtime, "is_short_packet", False) else 1024
+        max_ch = self._packet_width(runtime)
 
         QtWidgets.QApplication.setOverrideCursor(
             QtGui.QCursor(QtCore.Qt.CursorShape.WaitCursor))
@@ -803,6 +1037,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  '"all" selects nothing. Bias some channels first.')
             return None
         return channels
+
+    @staticmethod
+    def _packet_width(runtime) -> int:
+        """Channels the slow packet carries in the runtime's current
+        packet format."""
+        return (streamer.SHORT_PACKET_CHANNELS
+                if getattr(runtime, "is_short_packet", False)
+                else streamer.LONG_PACKET_CHANNELS)
 
     def _resolve_runtime(self):
         """The object owning register_pulse_tap (Periscope main window)."""
@@ -830,10 +1072,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _current_sample_rate(self, mode: str) -> float:
         if mode == "fast":
-            return PFB_SAMPLE_RATE
+            return PFB_SAMPLING_FREQ
         runtime = self._resolve_runtime()
         dec = getattr(runtime, "actual_dec_stage", None)
-        return slow_sample_rate(dec if dec is not None else 6)
+        return decimation_to_sampling(dec if dec is not None else 6)
 
     # ── Export ────────────────────────────────────────────────────
 
@@ -862,8 +1104,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self, "Pulse Capture", f"Nothing to export:\n{e}")
             return
         if not rows:
-            QtWidgets.QMessageBox.information(
-                self, "Pulse Capture", "Nothing to export from this tab.")
+            self._set_status("● Nothing to export from this tab", "#9A9A9A")
             return
 
         path = self._export_dir() / name
@@ -970,6 +1211,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             sample_rate=self._current_sample_rate(mode),
             mode=mode,
             n_channels=len(channels),
+            df_available=any(self._channel_cal(ch) is not None
+                             for ch in channels),
         )
         if dlg.exec():
             self.capture_config = dlg.get_config()
@@ -999,7 +1242,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             if files:
                 self.hdf5_path = Path(files[0])
                 self._browse_dir = str(self.hdf5_path.parent)
-                self.path_label.setText(f"HDF5: {self.hdf5_path}")
+                self._show_path(self.hdf5_path)
 
         dlg.accepted.connect(_chosen)
         dlg.open()  # non-modal — modal exec() can hang on Linux
@@ -1026,20 +1269,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         crs = getattr(runtime, "crs", None)
         host = None
         if mode in ("fast", "both"):
-            if len(channels) > 4:
+            # A both-mode capture takes fast data for the streamed subset
+            # (the task's streamer check names it); only a fast capture
+            # needs every channel on the four-channel PFB streamer.
+            if mode == "fast" and len(channels) > 4:
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
-                    "The PFB (fast) streamer supports at most 4 channels "
-                    f"— {len(channels)} requested.")
+                    "The PFB (fast) streamer supports at most 4 channels; "
+                    f"{len(channels)} requested.")
                 return
             host = getattr(crs, "tuber_hostname", None) \
                 or getattr(runtime, "host", None)
             if crs is None or host in (None, "OFFLINE"):
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
-                    f"{mode} mode needs a CRS connection to configure "
-                    "the PFB streamer.")
+                    f"{mode} mode needs a CRS connection to check the "
+                    "PFB streamer.")
                 return
+        module = int(self.module_spin.value())
         if mode in ("slow", "both"):
             if getattr(runtime, "_pulse_tap", None) is not None:
                 QtWidgets.QMessageBox.warning(
@@ -1048,21 +1295,31 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     "Stop it first.")
                 return
 
+            # The tap carries the one module Periscope receives; the
+            # file, the PFB source and the streamer check all use the
+            # spinbox, so they must agree.
+            tapped = getattr(runtime, "module", None)
+            if tapped is not None and int(tapped) != module:
+                QtWidgets.QMessageBox.warning(
+                    self, "Pulse Capture",
+                    f"Periscope is receiving module {int(tapped)}, which "
+                    f"is the stream {mode} mode taps.  Set Module to "
+                    f"{int(tapped)}, or open Periscope on module {module}.")
+                return
+
             # Any channel the packet carries can be captured (display is
-            # irrelevant) — but the packet width is a hard limit:
-            # 128 channels in short-packet mode, 1024 in long mode.
-            max_ch = 128 if getattr(runtime, "is_short_packet", False) \
-                else 1024
+            # irrelevant) — but the packet width is a hard limit.
+            max_ch = self._packet_width(runtime)
             too_high = [c for c in channels if c > max_ch]
             if too_high:
+                short = getattr(runtime, "is_short_packet", False)
                 QtWidgets.QMessageBox.warning(
                     self, "Pulse Capture",
                     f"Channel(s) {too_high} exceed the current packet "
                     f"width ({max_ch} channels"
-                    f"{' — short-packet mode' if max_ch == 128 else ''}).")
+                    f"{' — short-packet mode' if short else ''}).")
                 return
 
-        module = int(self.module_spin.value())
         path = self._resolve_hdf5_path(module)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1083,30 +1340,30 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         if mode == "both":
-            from ...pulse_capture.session import (
+            from ...pulse_capture.capture_session import (
                 DualPulseCaptureSession,
             )
-            session = DualPulseCaptureSession(
+            capture_session = DualPulseCaptureSession(
                 channels=channels,
                 module=module,
                 slow_rate=self._current_sample_rate("slow"),
-                fast_rate=PFB_SAMPLE_RATE,
+                fast_rate=PFB_SAMPLING_FREQ,
                 config=self.capture_config,
                 hdf5_path=path,
-                df_calibrations=self.df_calibrations,
+                df_calibrations=self._flat_df_calibrations(),
             )
         else:
-            session = PulseCaptureSession(
+            capture_session = PulseCaptureSession(
                 channels=channels,
                 module=module,
                 streamer_mode=mode,
                 hdf5_path=path,
-                df_calibrations=self.df_calibrations,
+                df_calibrations=self._flat_df_calibrations(),
                 sample_rate=fs,
                 **self.capture_config.session_kwargs(fs),
             )
         self.signals = PulseCaptureSignals()
-        self.task = PulseCaptureTask(session, self.signals, mode=mode,
+        self.task = PulseCaptureTask(capture_session, self.signals, mode=mode,
                                      crs=crs, host=host, module=module)
         conn = QtCore.Qt.ConnectionType.QueuedConnection
         self.signals.noise_estimated.connect(self._on_noise_estimated, conn)
@@ -1118,6 +1375,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.signals.templates_updated.connect(self._on_templates, conn)
         self.signals.waveform_ready.connect(self._on_waveform_ready, conn)
         self.signals.error.connect(self._on_error, conn)
+        self.signals.warning.connect(self._on_warning, conn)
+        self.signals.failed.connect(self._on_failed, conn)
         self.signals.finished.connect(self._on_task_finished, conn)
 
         # A fresh capture replaces any file we were browsing
@@ -1127,9 +1386,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._both_mode = (mode == "both")
         self._reset_results(channels)
+        self._apply_default_view()
         self._registered_export = False
-        self.path_label.setText(f"HDF5: {path}")
-        self._capture_start_wall = time.time()
+        self._show_path(path)
 
         self.task.start()
         if mode in ("slow", "both"):
@@ -1148,9 +1407,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._unregister_tap()
         if self.task is not None:
             self.task.request_stop()
-        self.btn_start.setEnabled(False)  # until finished arrives
+        # The worker still drains its queue and closes the file before
+        # `finished` arrives; say so, or the click looks lost.
+        self.btn_start.setText("… Stopping")
+        self.btn_start.setEnabled(False)
+        self.btn_start.setStyleSheet(
+            "background-color: #FFCC33; color: #10241B; font-weight: bold;")
+        self._set_status("● Stopping — finishing queued packets and closing the file",
+                         "#FFCC33")
 
     def _on_task_finished(self) -> None:
+        self._unregister_tap()   # however the worker ended
         finalized_path = None
         if self.task is not None:
             finalized_path = self.task.session.hdf5_path
@@ -1218,34 +1485,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 float(meta["capture_start"])).strftime("%H:%M:%S")
         self._both_mode = self.reader.dual
         self._reset_results(channels, started=started)
+        self._apply_default_view()
 
         if self.reader.dual:
             self._load_dual_review(channels, path)
             return
 
         self.noise_stats = {c: self.reader.noise_stats(c) for c in channels}
-        self.noise_label.setText("Noise:  " + _noise_line(self.noise_stats))
-        self.noise_label.setToolTip(_noise_detail(self.noise_stats))
+        self._refresh_noise_label()
 
         # Tree from lazy per-pulse metadata (ascending insert at row 0
-        # → newest first), with fallbacks for files written before the
-        # unified snr/peak_amp/tau_s attrs existed.
+        # → newest first), in the shape the live summaries have.
         for c in channels:
             for m in self.reader.iter_pulse_metadata(c):
                 idx = int(m["pulse_idx"])
-                snr = float(m.get("snr") or max(
-                    m.get("peak_snr_I", 0.0), m.get("peak_snr_Q", 0.0)))
-                summary = {
-                    "n_samples": int(m.get("n_samples", 0)),
-                    "pileup": bool(m.get("pileup", False)),
-                    "truncated": bool(m.get("truncated", False)),
-                    "peak_amp": float(m.get("peak_amp") or max(
-                        m.get("peak_I", 0.0), m.get("peak_Q", 0.0))),
-                    "snr": snr,
-                    "duration_ms": float(m.get("duration_s", 0.0)) * 1e3,
-                    "tau_ms": float(m.get("tau_s", float("nan"))) * 1e3,
-                    "timestamp": float(m.get("timestamp", 0.0)),
-                }
+                summary = summary_from_attrs(m)
                 self._pulse_order.append((c, idx))
                 self._pulse_summaries[(c, idx)] = summary
                 self._counts[c] = self._counts.get(c, 0) + 1
@@ -1253,6 +1507,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._hist_data = self.reader.get_histograms()
         self._render_histograms()
+        self._template_data = self.reader.get_templates()
+        self._render_templates()
 
         self._enter_review_state(path, f"{sum(self._counts.values())} "
                                        f"pulses")
@@ -1263,16 +1519,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Populate the pair tree from a dual ('both' mode) file."""
         self.noise_stats = {
             c: self.reader.noise_stats(c, "slow") for c in channels}
-        parts = []
         for stream in ("slow", "fast"):
-            stats = {c: self.reader.noise_stats(c, stream)
-                     for c in channels}
-            self._noise_by_stream[stream] = stats
-            parts.append(f"{stream}: " + _noise_line_sigma(stats))
-        self.noise_label.setText("Noise:  " + "   —   ".join(parts))
-        self.noise_label.setToolTip("\n\n".join(
-            f"{stream}\n" + _noise_detail(st)
-            for stream, st in sorted(self._noise_by_stream.items())))
+            self._noise_by_stream[stream] = {
+                c: self.reader.noise_stats(c, stream) for c in channels}
+        self._refresh_dual_noise_label()
 
         self.follow_check.setChecked(False)
         for c in channels:
@@ -1286,14 +1536,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                         pair["time_offset"]
                         if pair.get("time_offset") is not None
                         and np.isfinite(pair["time_offset"]) else None),
-                    "slow_summary": (
-                        self.reader.get_pulse_metadata(
-                            c, pair["slow_idx"], "slow")
-                        if pair["slow_idx"] else None),
-                    "fast_summary": (
-                        self.reader.get_pulse_metadata(
-                            c, pair["fast_idx"], "fast")
-                        if pair["fast_idx"] else None),
+                    "slow_summary": self._review_summary(c, pair, "slow"),
+                    "fast_summary": self._review_summary(c, pair, "fast"),
                     "has_slow_tod": "slow_tod" in pair,
                     "has_fast_tod": "fast_tod" in pair,
                 }
@@ -1302,13 +1546,27 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for stream in ("slow", "fast"):
             self._hist_data_by_stream[stream] = \
                 self.reader.get_histograms(stream)
+            self._template_data_by_stream[stream] = \
+                self.reader.get_templates(stream)
         self._hist_data = self._hist_data_by_stream.get(
             self.hist_stream_combo.currentText(), {})
+        self._template_data = self._template_data_by_stream.get(
+            self.template_stream_combo.currentText(), {})
         self._render_histograms()
+        self._render_templates()
         self._enter_review_state(
-            path, f"{sum(self._counts.values())} pairs")
+            path, f"{sum(self._counts.values())} pulses")
         if self._pulse_order:
             self._show_pair(*self._pulse_order[-1])
+
+    def _review_summary(self, channel: int, pair: dict, stream: str):
+        """One side's pulse summary from the file, in the live shape;
+        None for the side that did not trigger."""
+        idx = pair.get(f"{stream}_idx")
+        if not idx:
+            return None
+        attrs = self.reader.get_pulse_metadata(channel, idx, stream)
+        return summary_from_attrs(attrs) if attrs else None
 
     def _enter_review_state(self, path, what: str) -> None:
         self._review_mode = True
@@ -1320,7 +1578,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                   self.threshold_spin, self.end_spin, self.pileup_check,
                   self.btn_browse):
             w.setEnabled(False)
-        self.path_label.setText(f"HDF5: {path}")
+        self._show_path(path)
         self._set_status(
             f"● Review Mode — {what} — {Path(path).name}", "#3366CC")
         self.follow_check.setChecked(False)
@@ -1344,12 +1602,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order.clear()
         self._pulse_summaries.clear()
         self._pair_meta.clear()
-        self._stream_counts = {"slow": 0, "fast": 0}
         self._noise_by_stream = {}
+        self._last_stats = {}      # the status line must not show the last run
         self._hist_data_by_stream = {}
         self._template_data = {}
         self._template_data_by_stream = {}
         self.hist_stream_combo.setVisible(self._both_mode)
+        self.template_stream_combo.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}
@@ -1358,7 +1617,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_tree.clear()
         self._channel_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
         for c in channels:
-            item = QtWidgets.QTreeWidgetItem([f"▤ Channel {c} (0)", "", ""])
+            item = QtWidgets.QTreeWidgetItem(
+                [f"▤ Channel {c} (0)", "", "", ""])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("channel", c))
             self.pulse_tree.addTopLevelItem(item)
             item.setExpanded(True)
@@ -1400,38 +1660,56 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                        for c in sorted(collected)))
 
     def _baseline_summary(self) -> str:
-        """The span the rolling baseline median covers."""
-        sess = getattr(self.task, "session", None)
-        if sess is None:
+        """The span the rolling baseline median covers, as the session
+        reports it (per stream in both mode)."""
+        stats_of = getattr(getattr(self.task, "session", None), "stats", None)
+        if stats_of is None:
             return ""
-        inners = ([("slow", sess.slow), ("fast", sess.fast)]
-                  if hasattr(sess, "slow") and hasattr(sess, "fast")
-                  else [("", sess)])
+        stats = stats_of()
+        inners = ([("slow", stats["slow"]), ("fast", stats["fast"])]
+                  if "slow" in stats and "fast" in stats else [("", stats)])
         parts = []
         for name, s in inners:
-            n = getattr(s, "baseline_window", 0)
-            if not n:
-                continue
-            rate = getattr(s, "sample_rate", None)
-            span = f"{n / rate:,.3g} s" if rate else f"{n:,} samples"
-            parts.append(f"{name + ' ' if name else ''}{span}")
+            ms = s.get("baseline_window_ms")
+            if ms:
+                parts.append(f"{name + ' ' if name else ''}{ms / 1e3:,.3g} s")
         return ("   —   baseline median over:  " + ",  ".join(parts)
                 if parts else "")
 
+    def _refresh_dual_noise_label(self, extra: str = "") -> None:
+        """Both-mode noise strip: one compact entry per stream."""
+        by_stream = sorted(self._noise_by_stream.items())
+        self.noise_label.setText(
+            "Noise:  " + "   —   ".join(
+                f"{s}: " + _noise_line_sigma(st) for s, st in by_stream)
+            + extra)
+        self.noise_label.setToolTip("\n\n".join(
+            f"{s}\n" + _noise_detail(st) for s, st in by_stream))
+
+    def _register_capture_file(self) -> None:
+        """Register the streamed HDF5 with the session, once per
+        capture, so it appears in the Session Browser."""
+        if (self._registered_export or self.task is None
+                or self.session_manager is None
+                or not getattr(self.session_manager, "is_active", False)):
+            return
+        path = self.task.session.hdf5_path
+        sp = self.session_manager.session_path
+        if path is not None and sp is not None \
+                and Path(sp) in Path(path).parents:
+            self.session_manager.register_external_file(
+                str(path), "pulse", f"module{self.task.session.module}")
+        self._registered_export = True
+
     def _on_noise_estimated(self, noise_stats: dict) -> None:
+        self._register_capture_file()
         if "stream" in noise_stats and "stats" in noise_stats:
             stream = noise_stats["stream"]
             stats = noise_stats["stats"]
             self._noise_by_stream[stream] = stats
             if stream == "slow":
                 self.noise_stats = stats
-            parts = [f"{s}: " + _noise_line_sigma(st)
-                     for s, st in sorted(self._noise_by_stream.items())]
-            self.noise_label.setText("Noise:  " + "   —   ".join(parts)
-                                     + self._baseline_summary())
-            self.noise_label.setToolTip("\n\n".join(
-                f"{s}\n" + _noise_detail(st)
-                for s, st in sorted(self._noise_by_stream.items())))
+            self._refresh_dual_noise_label(self._baseline_summary())
             print(f"[PulseCapture] Noise estimated ({stream})"
                   f"{self._baseline_summary()}")
             self._refresh_status_line()
@@ -1442,9 +1720,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
 
         self.noise_stats = noise_stats
-        self.noise_label.setText("Noise:  " + _noise_line(noise_stats)
-                                 + self._baseline_summary())
-        self.noise_label.setToolTip(_noise_detail(noise_stats))
+        self._refresh_noise_label(self._baseline_summary())
         print("[PulseCapture] Noise estimated: " + _noise_line(noise_stats)
               + self._baseline_summary())
         self._refresh_status_line()
@@ -1452,36 +1728,57 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.follow_check.isChecked() or self._current_view is None:
             self._show_noise_segment()
 
-        # Register the streamed HDF5 with the session (once per capture)
-        if (not self._registered_export and self.task is not None
-                and self.session_manager is not None
-                and getattr(self.session_manager, "is_active", False)):
-            path = self.task.session.hdf5_path
-            sp = self.session_manager.session_path
-            if path is not None and sp is not None \
-                    and Path(sp) in Path(path).parents:
-                self.session_manager.register_external_file(
-                    str(path), "pulse",
-                    f"module{self.task.session.module}")
-            self._registered_export = True
+    def _on_tree_section_resized(self, *_) -> None:
+        if not self._tree_autosizing:
+            self._tree_user_sized = True
+
+    def _autosize_tree(self) -> None:
+        """Size the value columns to their contents and give the name
+        column the rest of the width, until the user sizes them."""
+        if self._tree_user_sized:
+            return
+        self._tree_autosizing = True
+        try:
+            tree = self.pulse_tree
+            header = tree.header()
+            used = 0
+            for col in range(1, tree.columnCount()):
+                tree.resizeColumnToContents(col)
+                used += header.sectionSize(col)
+            tree.resizeColumnToContents(0)
+            rest = tree.viewport().width() - used
+            if rest > header.sectionSize(0):
+                header.resizeSection(0, rest)
+        finally:
+            self._tree_autosizing = False
+
+    def eventFilter(self, obj, event) -> bool:
+        if (obj is self.pulse_tree.viewport()
+                and event.type() == QtCore.QEvent.Type.Resize):
+            self._autosize_tree()
+        return super().eventFilter(obj, event)
+
+    @staticmethod
+    def _clock(summary: dict) -> str:
+        """HH:MM:SS.ffffff from the decoded packet clock, or ''."""
+        utc = summary.get("trigger_utc") if summary else None
+        return utc[11:-1] if utc else ""
 
     def _add_pulse_row(self, channel: int, pulse_idx: int,
                        summary: dict) -> None:
         """Insert one pulse into the tree, newest first.
 
-        Shared by the live handler and the review loader: the row looks
-        the same whether the pulse just arrived or came out of a file,
-        and it used to be built twice.
+        Shared by the live handler and the review loader, so a row looks
+        the same whether the pulse just arrived or came out of a file.
         """
         parent = self._channel_items.get(channel)
         if parent is None:
             return
         pileup = bool(summary.get("pileup", False))
         truncated = bool(summary.get("truncated", False))
-        label = ("\u2298" if truncated else "\u26a0" if pileup else "\u25c6") \
-            + f" #{pulse_idx:06d}"
+        label = "\u2298" if truncated else "\u26a0" if pileup else "\u25c6"
         item = QtWidgets.QTreeWidgetItem(
-            [label, str(summary.get("n_samples", "")),
+            [label, self._clock(summary), str(summary.get("n_samples", "")),
              f"{summary.get('snr', 0):.1f}\u03c3"])
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                      ("pulse", channel, pulse_idx))
@@ -1489,18 +1786,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             colour = QtGui.QColor(
                 ("#3a2222" if self.dark_mode else "#ffd9d2") if truncated
                 else ("#3a3320" if self.dark_mode else "#fff3c2"))
-            for col in range(3):
+            for col in range(4):
                 item.setBackground(col, colour)
         parent.insertChild(0, item)
+        self._autosize_tree()
         parent.setText(0, f"\u25a4 Channel {channel} "
                           f"({self._counts[channel]})")
 
     def _on_pulse_detected(self, channel: int, pulse_idx: int,
                            summary: dict) -> None:
         if self._both_mode:
-            stream = summary.get("stream", "slow")
-            self._stream_counts[stream] = \
-                self._stream_counts.get(stream, 0) + 1
             return  # both-mode tree shows matched pairs, not raw pulses
         key = (channel, pulse_idx)
         self._pulse_order.append(key)
@@ -1532,16 +1827,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         matched = pair["slow_idx"] is not None \
             and pair["fast_idx"] is not None
         complement_missing = False
+        summaries = [s for s in (pair.get("slow_summary"),
+                                 pair.get("fast_summary")) if s]
+        mark = ("\u2298" if any(s.get("truncated") for s in summaries)
+                else "\u26a0" if any(s.get("pileup") for s in summaries)
+                else "\u25c6")
         if matched:
+            label = f"{mark} slow + fast"
             dt = pair.get("time_offset") or 0.0
-            label = (f"◆ Pair #{pair_idx:04d}  "
-                     f"s#{pair['slow_idx']}/f#{pair['fast_idx']}")
-            detail = f"Δt={dt*1e6:+.0f}µs"
+            detail = f"Δt(trig)={dt*1e6:+.0f}µs"
         else:
             side = "slow" if pair["slow_idx"] is not None else "fast"
             other = "fast" if side == "slow" else "slow"
-            idx = pair["slow_idx"] or pair["fast_idx"]
-            label = f"◆ Pair #{pair_idx:04d}  {side}-trig #{idx}"
+            label = f"{mark} {side} only"
             if pair.get(f"has_{other}_tod"):
                 detail = f"+{other} data"
             else:
@@ -1551,29 +1849,88 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         parent = self._channel_items.get(ch)
         if parent is not None:
             item = QtWidgets.QTreeWidgetItem(
-                [label, detail, f"{summ.get('snr', 0):.1f}σ"])
+                [label, self._clock(summ), detail,
+                 f"{summ.get('snr', 0):.1f}σ"])
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pair", ch, pair_idx))
             if complement_missing:
-                for col in range(3):
+                for col in range(4):
                     item.setBackground(col, QtGui.QColor(
                         "#33251c" if self.dark_mode else "#ffe8d9"))
             parent.insertChild(0, item)
-            parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pairs)")
+            parent.setText(0, f"▤ Channel {ch} ({self._counts[ch]} pulses)")
+            self._autosize_tree()
 
         if self.follow_check.isChecked() \
                 and not self._follow_timer.isActive():
             self._follow_timer.start()
+
+    #: The fast engine shares the event loop with the slow one; when it
+    #: cannot keep real time its ring drifts behind the slow ring, and
+    #: past the ring overlap cross-stream windows go unavailable.  Amber
+    #: at half the overlap, red once the lag exceeds it.
+    _LAG_WARN_FRACTION = 0.5
+
+    def _stream_lag_signal(self, stats: dict):
+        """(status colour, (short, tooltip)) for the current stream lag.
+
+        Returns the healthy green and ``None`` when the lag is fine, so
+        the caller only appends a note when there is one.
+        """
+        lag = stats.get("stream_lag_s")
+        overlap = stats.get("ring_overlap_s")
+        if lag is None or overlap is None or overlap <= 0:
+            return "#4CC38A", None
+        lag = abs(lag)
+        if lag < self._LAG_WARN_FRACTION * overlap:
+            return "#4CC38A", None
+        who = "fast" if (stats.get("stream_lag_s") or 0) >= 0 else "slow"
+        short = f"⚠ {who} stream {lag:.1f}s behind"
+        tip = (
+            f"The {who} stream is {lag:.2f}s behind the other, and the "
+            f"rings overlap only {overlap:.2f}s. When the lag exceeds the "
+            "overlap the two streams no longer share a time span: "
+            "cross-stream windows read 'unavailable' and pulses stop "
+            "matching.\n\nThe engine is not keeping real time on the "
+            "shared event loop — raise the threshold σ (fewer crossings "
+            "to walk) or capture fewer channels.")
+        colour = "#E5484D" if lag >= overlap else "#E5A23B"
+        return colour, (short, tip)
 
     def _refresh_status_line(self) -> None:
         s = self._last_stats
         if self._both_mode and "pairs_matched" in s:
             slow_n = s.get("slow", {}).get("total_pulses", 0)
             fast_n = s.get("fast", {}).get("total_pulses", 0)
-            self._set_status(
-                f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
-                f"{s['pairs_matched']} matched / "
-                f"{s['pairs_unmatched']} single-trigger pairs", "#4CC38A")
+            text = (f"● Capturing — slow {slow_n} | fast {fast_n} pulses — "
+                    f"{s['pairs_matched']} matched / "
+                    f"{s['pairs_unmatched']} single-stream pulses")
+            text += self._dropped_text(
+                {name: s.get(name, {}).get("dropped_invalid_ts", 0)
+                 for name in ("slow", "fast")})
+            colour, tip = self._stream_lag_signal(s)
+            if tip:                       # append the drift note when it bites
+                text += f"  —  {tip[0]}"
+            text += self._source_text(s.get("fast", {}).get("source"))
+            self._set_status(text, colour)
+            tooltip = tip[1] if tip else ""
+            skew, n = s.get("stream_skew_s"), s.get("stream_skew_n", 0)
+            shift = s.get("slow_time_offset_s") or 0.0
+            if shift:
+                tooltip += (("\n\n" if tooltip else "")
+                            + f"Slow timestamps shifted by {shift*1e3:+.3f} "
+                              "ms to take out the decimated stream's CIC "
+                              "group delay (the PFB clock is the "
+                              "reference). The skew below is the residual.")
+            if skew is not None and n:
+                tooltip += (("\n\n" if tooltip else "")
+                            + f"Stream clock skew: slow − fast trigger time "
+                              f"= {skew*1e3:+.2f} ms (median of {n} matched "
+                              "pulses). This is how far the two streams' "
+                              "timestamps disagree on one event; in the pulse "
+                              "view it shows as one stream's marks sitting "
+                              "off the other stream's trace by this much.")
+            self.status_label.setToolTip(tooltip)
             return
         total = s.get("total_pulses", 0)
         rate = s.get("rate_per_min", 0.0)
@@ -1594,44 +1951,296 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         elapsed = int(s.get("elapsed_s", 0))
         hh, rem = divmod(elapsed, 3600)
         mm, ss = divmod(rem, 60)
-        dropped = s.get("dropped_invalid_ts", 0)
-        drop_str = f" — {dropped} dropped (no timestamp)" if dropped else ""
+        drop_str = self._dropped_text(
+            {"": s.get("dropped_invalid_ts", 0)}).replace(" —  ", " — ")
         self._set_status(
             f"● Capturing — {total} pulses ({rate:.1f}/min) — {ch_str} — "
-            f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}", "#4CC38A")
+            f"{hh:02d}:{mm:02d}:{ss:02d}{drop_str}"
+            + self._source_text(s.get("source")), "#4CC38A")
 
-    def _df_scale(self, channel: int) -> Optional[float]:
-        """counts → Hz factor for *channel*, or None if uncalibrated.
+    #: A fast-source backlog peak below this is not worth a note.
+    _SOURCE_NOTE_BACKLOG_S = 0.05
 
-        Only the lookup through the nested/flat calibration mapping is
-        GUI business; the conversion itself is shared with headless
-        callers as counts_to_hz_scale.
+    @classmethod
+    def _source_text(cls, source) -> str:
+        """The fast source's busy fraction, the kernel's queue now and
+        at its peak, and the packets lost, once a loss or a backlog
+        has shown."""
+        if not source:
+            return ""
+        lost = source.get("lost_packets", 0)
+        flushed = source.get("flushed_packets", 0)
+        peak = source.get("backlog_peak_s") or 0.0
+        if not lost and peak < cls._SOURCE_NOTE_BACKLOG_S:
+            return ""
+        busy = source.get("busy")
+        text = (f" — fast source {busy*100:.0f}% busy, " if busy is not None
+                else " — fast ")
+        text += (f"kernel queue {source.get('backlog_s', 0.0):.2f} s "
+                 f"(peak {peak:.2f} s)")
+        if lost:
+            text += f", {lost} packets lost"
+        if flushed:
+            text += f" ({flushed} flushed to stay current)"
+        return text
+
+    @staticmethod
+    def _trigger_clock_text(summary: dict) -> str:
+        utc = summary.get("trigger_utc") if summary else None
+        return f"\ntrigger at {utc} (packet clock)" if utc else ""
+
+    @staticmethod
+    def _dropped_text(counts: dict) -> str:
+        """" — slow 3 dropped (no timestamp) / fast 1 dropped ..." for
+        the nonzero counts, or ''."""
+        parts = [f"{name} {n} dropped (no timestamp)"
+                 for name, n in counts.items() if n]
+        return " — " + " / ".join(parts) if parts else ""
+
+    def _flat_df_calibrations(self) -> Dict[int, Any]:
+        """Calibrations for the selected module, as {channel: calibration}.
+
+        Periscope keeps one mapping per module, because its plots are
+        per-module; PulseCaptureSession and PulseHDF5Writer take the flat
+        per-channel mapping.  Flattening here keeps the storage layer
+        from having to know about modules.  Accepts either shape, so a
+        headless caller's flat mapping passes through unchanged.
         """
         cal = self.df_calibrations
-        if not cal:
-            return None
-        module = int(self.module_spin.value())
-        per_module = cal.get(module) if isinstance(cal, dict) else None
+        if not isinstance(cal, dict) or not cal:
+            return {}
+        per_module = cal.get(int(self.module_spin.value()))
         if isinstance(per_module, dict):
-            df_cal = per_module.get(channel)
-        else:  # flat {channel: cal} mapping
-            df_cal = cal.get(channel) if isinstance(cal, dict) else None
-        return counts_to_hz_scale(df_cal)
+            return dict(per_module)
+        # Already flat: a headless caller's {channel: calibration}.
+        return {ch: v for ch, v in cal.items() if not isinstance(v, dict)}
+
+    def _channel_cal(self, channel: int):
+        """This channel's df calibration, from the session or the file.
+
+        In review mode there is no Periscope session holding one, so the
+        file is the only place it survives a capture.
+        """
+        cal = self._flat_df_calibrations().get(channel)
+        if cal is None and self.reader is not None:
+            try:
+                cal = self.reader.df_calibration(channel)
+            except Exception:
+                cal = None
+        return cal
+
+    def _stored_state(self, channel: int) -> Tuple[str, str]:
+        """(basis, units) the samples for *channel* are held in.
+
+        A finished capture says so in the file; a live one follows the
+        same storage_transform the session applies.  The units decide
+        the basis: a channel is in hertz only once it has been rotated,
+        so a df capture of an uncalibrated channel is quadratures in
+        volts.
+        """
+        units = None
+        if self.reader is not None:
+            try:
+                units = self.reader.stored_units(channel)
+            except Exception:
+                pass
+        if units is None:
+            _factor, units = storage_transform(
+                self._flat_df_calibrations().get(channel),
+                self.capture_config.trigger_basis)
+        return ("df" if units == "Hz" else "iq"), units
+
+    def _view_state(self) -> Tuple[str, str]:
+        """(basis, units) for the selected view.
+
+        Three choices, not a basis crossed with a scale: rotating without
+        converting to hertz, or asking for hertz on the quadratures, are
+        combinations with no meaning.
+        """
+        return _VIEW_STATES.get(self.units_combo.currentText(),
+                                ("iq", "V"))
+
+    def _view_coeffs(self, channel: int, stored=None):
+        """(factor, units) taking stored samples to the current view.
+
+        None when the view cannot be produced -- hertz or a rotation with
+        no calibration.  Callers show what is stored rather than putting
+        an unscaled number under a label it does not have.  *stored*
+        overrides the (basis, units) the samples are taken to be in.
+        """
+        sb, su = stored or self._stored_state(channel)
+        vb, vu = self._view_state()
+        return display_transform(self._channel_cal(channel), sb, su, vb, vu)
+
+    def _amp_scale(self, channel: int, stored=None) -> Optional[float]:
+        """Factor for amplitude-like scalars, or None if unavailable.
+
+        Amplitudes are magnitudes, so the rotation contributes only its
+        length -- which is 1 -- and this reduces to the units ratio.
+        """
+        t = self._view_coeffs(channel, stored)
+        if t is None:
+            return None
+        return abs(t[0])
+
+    def _units_label(self, channel: int) -> str:
+        """Axis label for *channel* under the current view."""
+        t = self._view_coeffs(channel)
+        if t is not None:
+            return t[1]
+        return self._stored_state(channel)[1]
+
+    def _refresh_pulse_plot(self) -> None:
+        """Redraw for a changed view, labels included.
+
+        The labels are set even with nothing selected, so an empty panel
+        does not advertise units the next capture will not be in.
+        """
+        first, second = self._axis_names(self._label_channel())
+        self.pulse_plot_i.getPlotItem().setLabel("left", first)
+        self.pulse_plot_q.getPlotItem().setLabel("left", second)
+        cur = self._current_view
+        if cur is not None:
+            try:
+                self._show_pulse(*cur)
+            except Exception:
+                pass
+
+    def _label_channel(self) -> int:
+        """A channel to take axis labels from when none is selected."""
+        cur = self._current_view
+        if cur is not None:
+            return cur[0]
+        # The spec alone, never resolved: "all" would read the board
+        # (or warn) on every relabel.
+        try:
+            chans = parse_channel_spec(self.channels_edit.text())
+        except ValueError:
+            chans = None
+        return chans[0] if chans else 1
+
+    def _axis_names(self, channel: int) -> Tuple[str, str]:
+        """Axis labels for what is actually plotted.
+
+        Basis and unit come from the same source -- the view when it
+        can be produced, else the stored samples -- so the names never
+        describe one and the unit the other.
+        """
+        view = self._view_coeffs(channel)
+        if view is not None:
+            basis, _ = self._view_state()
+            unit = view[1]
+        else:
+            # Cannot produce what was asked for, so the stored samples
+            # are drawn as they are: name those.
+            basis, unit = self._stored_state(channel)
+        if basis == "df":
+            return f"df ({unit})", f"dissipation ({unit})"
+        return f"I ({unit})", f"Q ({unit})"
+
+    def _view_noise(self, channel: int, ns):
+        """Noise statistics taken into the current view.
+
+        The two halves do not transform alike.  The baseline is a
+        signed position in the plane, so it rotates with the samples.
+        The spreads are magnitudes, and the rotation mixes the
+        quadratures, so they scale by its length only.
+        """
+        if ns is None:
+            return ns
+        view = self._view_coeffs(channel)
+        if view is None or view[0] == 1.0:
+            return ns
+        factor = view[0]
+        k = abs(factor)
+        mean_I, mean_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, factor)
+        return replace(
+            ns, mean_I=mean_I, std_I=ns.std_I * k,
+            mean_Q=mean_Q, std_Q=ns.std_Q * k,
+            jump_std_I=ns.jump_std_I * k, jump_std_Q=ns.jump_std_Q * k)
+
+    def _refresh_noise_label(self, extra: str = "") -> None:
+        """Noise strip in the units on the axes, not the ones on disk.
+
+        Rebuilt on every view change, so it names the basis the plots
+        below it are drawn in.
+        """
+        if self._both_mode and self._noise_by_stream:
+            self._refresh_dual_noise_label(extra)
+            return
+        stats = {c: self._view_noise(c, ns)
+                 for c, ns in (self.noise_stats or {}).items()}
+        first, second = self._axis_names(self._label_channel())
+        names = tuple(n.split(" (")[0] for n in (first, second))
+        unit = first.rpartition(" (")[2].rstrip(")")
+        self.noise_label.setText(
+            "Noise:  " + _noise_line(stats, names, unit) + extra)
+        self.noise_label.setToolTip(_noise_detail(stats, names, unit))
 
     def _units_are_hz(self) -> bool:
-        return self.units_combo.currentText() == "Hz"
+        return self.units_combo.currentText() == UNITS_DF
 
-    def _on_units_changed(self, _text: str) -> None:
+    def _on_user_view_changed(self, _text: str = "") -> None:
+        self._view_chosen = True
+        self._on_view_changed()
+
+    def _apply_default_view(self) -> None:
+        """Default to the frequency view once a calibration makes it
+        possible.
+
+        Applied wherever a calibration can become known -- construction,
+        capture start, opening a file -- and only until the user picks a
+        view, which then stands.  Volts is the only default that can
+        always be drawn, so it stays the fallback.
+        """
+        if self._view_chosen or self._units_are_hz():
+            return
+        if not self._any_channel_calibrated():
+            return
+        self.units_combo.blockSignals(True)
+        self.units_combo.setCurrentText(UNITS_DF)
+        self.units_combo.blockSignals(False)
+        self._on_view_changed()
+
+    def _on_view_changed(self, _text: str = "") -> None:
+        if (self.units_combo.currentText() == UNITS_DF
+                and not self._any_channel_calibrated()):
+            # Say so rather than quietly drawing volts under a hertz
+            # label.
+            QtWidgets.QMessageBox.warning(
+                self, "df Calibration Not Available",
+                "No df calibration for these channels, so frequency and "
+                "dissipation cannot be separated.\n\n"
+                "It comes from bias_kids — run a multisweep and click "
+                "'Bias KIDs'. In mock mode, enabling auto_bias_kids "
+                "measures one for each channel it tunes.\n\n"
+                "A capture already holding one carries it in the file, "
+                "so opening that capture is enough.")
+            self.units_combo.blockSignals(True)
+            self.units_combo.setCurrentText(UNITS_VOLTS)
+            self.units_combo.blockSignals(False)
         self._render_histograms()
         self._render_templates()
+        self._refresh_pulse_plot()
+        self._refresh_noise_label()
+
+    def _any_channel_calibrated(self) -> bool:
+        """Whether any displayed channel has a df calibration.
+
+        Any rather than all: a mixed capture should still offer the view
+        for the channels that can show it.
+        """
+        channels = list(self._counts) or [self._label_channel()]
+        return any(self._channel_cal(ch) is not None for ch in channels)
 
     def _on_hist_stream_changed(self, stream: str) -> None:
         if stream in self._hist_data_by_stream:
             self._hist_data = self._hist_data_by_stream[stream]
             self._render_histograms()
-        if stream in self._template_data_by_stream:
-            self._template_data = self._template_data_by_stream[stream]
-            self._render_templates()
+
+    def _on_template_stream_changed(self, stream: str) -> None:
+        self._template_data = self._template_data_by_stream.get(stream, {})
+        self._render_templates()
 
     def _on_histograms(self, data: dict) -> None:
         if "stream" in data and "data" in data:
@@ -1648,6 +2257,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_label.setToolTip(message)
         self._set_status(f"● Error: {message}", "#E5484D")
         print(f"[PulseCapture] ERROR: {message}")
+
+    def _on_warning(self, message: str) -> None:
+        """The capture runs with a caveat: the status line and the
+        console carry it, no dialog."""
+        self.noise_label.setToolTip(message)
+        self._set_status(f"● {message}", "#FFCC33")
+        print(f"[PulseCapture] {message}")
+
+    def _on_failed(self, message: str) -> None:
+        """The capture cannot run or has died: say so in a dialog, not
+        only the status line.  finished follows and cleans up."""
+        self._on_error(message)
+        QtWidgets.QMessageBox.warning(self, "Pulse Capture", message)
 
     def _show_noise_segment(self, stream: str | None = None) -> None:
         """Plot the noise-training segment with the fitted baselines and
@@ -1676,13 +2298,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         ns = stats[channel]
         thr = float(self.threshold_spin.value())
         end = float(self.end_spin.value())
+        # The training record is drawn as stored, so the text and the
+        # axes name the stored basis and unit, not the view.
+        basis, unit = self._stored_state(channel)
+        names = ("df", "dissipation") if basis == "df" else ("I", "Q")
 
         self._current_view = None
         self.pulse_info.setText(
             f"Noise training segment{tag} — Channel {channel} "
             f"({len(arr)} samples)\n"
-            f"I = {ns.mean_I:.1f} ± {ns.std_I:.2f}   "
-            f"Q = {ns.mean_Q:.1f} ± {ns.std_Q:.2f}\n"
+            f"{names[0]} = {ns.mean_I:.4g} ± {ns.std_I:.3g} {unit}   "
+            f"{names[1]} = {ns.mean_Q:.4g} ± {ns.std_Q:.3g} {unit}\n"
             f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)")
 
         x = np.arange(len(arr))
@@ -1692,10 +2318,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_plot_q.setTitle(None)
         self._set_pulse_x_axis("sample")
         x1 = float(len(arr) - 1) if len(arr) else 1.0
-        for quad, plot, data in (("I", self.pulse_plot_i, arr.real),
-                                 ("Q", self.pulse_plot_q, arr.imag)):
+        for quad, name, plot, data in (
+                ("I", names[0], self.pulse_plot_i, arr.real),
+                ("Q", names[1], self.pulse_plot_q, arr.imag)):
+            plot.getPlotItem().setLabel("left", f"{name} ({unit})")
             plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
-                      name=f"{quad} (training)")
+                      name=f"{name} (training)")
             self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
 
     def _set_status(self, text: str, color: str) -> None:
@@ -1709,24 +2337,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Coalesced follow-latest redraw (newest pulse or pair)."""
         if not self.follow_check.isChecked() or not self._pulse_order:
             return
-        latest = self._pulse_order[-1]
-        if self._both_mode:
-            self._show_pair(*latest)
-        else:
-            self._show_pulse(*latest)
+        self._show_key(self._pulse_order[-1])
 
     def _on_tree_double_click(self, item, column) -> None:
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not data:
+        if not data or data[0] not in ("pulse", "pair"):
             return
-        if data[0] == "pulse":
-            self.follow_check.setChecked(False)
-            self.viewer_tabs.setCurrentIndex(0)
-            self._show_pulse(data[1], data[2])
-        elif data[0] == "pair":
-            self.follow_check.setChecked(False)
-            self.viewer_tabs.setCurrentIndex(0)
-            self._show_pair(data[1], data[2])
+        self.follow_check.setChecked(False)
+        self.viewer_tabs.setCurrentIndex(0)
+        self._show_key((data[1], data[2]))
 
     def _navigate(self, step: int) -> None:
         if not self._pulse_order:
@@ -1739,10 +2358,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             i = len(self._pulse_order) - 1
         i = max(0, min(len(self._pulse_order) - 1, i))
-        if self._both_mode:
-            self._show_pair(*self._pulse_order[i])
-        else:
-            self._show_pulse(*self._pulse_order[i])
+        self._show_key(self._pulse_order[i])
 
     def _on_waveform_ready(self, channel: int, pulse_idx: int) -> None:
         """Worker warmed the cache (or failed) — redraw if still viewing."""
@@ -1786,6 +2402,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _show_pulse(self, channel: int, pulse_idx: int) -> None:
         summary = self._pulse_summaries.get((channel, pulse_idx))
         wf = self._get_waveform(channel, pulse_idx)
+        if self._current_view != (channel, pulse_idx):
+            self._pending_fetch.clear()
         self._current_view = (channel, pulse_idx)
 
         if summary is None:
@@ -1795,13 +2413,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             pile += "  [truncated at max pulse — hard stop]"
         tau_ms = summary.get("tau_ms", float("nan"))
         tau_str = f"{tau_ms:.2f} ms" if np.isfinite(tau_ms) else "n/a"
+        # The peak is a stored-unit magnitude; _units_label names the
+        # view when _amp_scale can produce it and the stored unit when
+        # it cannot, so the two agree either way.
+        peak = float(summary.get("peak_amp", 0)) * (self._amp_scale(channel)
+                                                     or 1.0)
         self.pulse_info.setText(
             f"Pulse #{pulse_idx:06d} — Channel {channel}   {pile}\n"
             f"{summary.get('n_samples', 0)} samples   "
             f"{summary.get('duration_ms', 0):.2f} ms   "
-            f"peak {summary.get('peak_amp', 0):.0f} cts "
+            f"peak {peak:.4g} {self._units_label(channel)} "
             f"({summary.get('snr', 0):.1f}σ)\n"
             f"derived τ = {tau_str}"
+            + self._trigger_clock_text(summary)
             + self._decision_text(wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
@@ -1811,15 +2435,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if wf is None:
             # Evicted from the live cache — fetch it from the HDF5 file
             # via the worker thread (waveform_ready redraws on arrival).
-            key = (channel, pulse_idx)
-            if self.task is not None and self._pending_fetch != key:
-                self._pending_fetch = key
-                self.task.request_waveform(channel, pulse_idx)
+            if self.task is not None and self._request_once(
+                    (None, channel, pulse_idx),
+                    lambda: self.task.request_waveform(channel, pulse_idx)):
                 self.pulse_plot_i.setTitle("loading waveform from file…")
             else:
                 self.pulse_plot_i.setTitle("waveform not available")
             return
-        self._pending_fetch = None
 
         t = np.asarray(wf["Time"], dtype=np.float64)
         finite = np.isfinite(t)
@@ -1828,24 +2450,72 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
         amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
 
-        ns = self.noise_stats.get(channel)
+        # Stored samples into the requested view.  Both axes rotate
+        # together, so the noise bands drawn below have to come along.
+        ns, ns_end = self._decision_noise(wf, self.noise_stats.get(channel))
+        view = self._view_coeffs(channel)
+        if view is not None:
+            factor, _units = view
+            amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, factor)
+            ns = self._view_noise(channel, ns)
+            ns_end = self._view_noise(channel, ns_end)
+        first, second = self._axis_names(channel)
+        for plot, name in ((self.pulse_plot_i, first),
+                           (self.pulse_plot_q, second)):
+            plot.getPlotItem().setLabel("left", name)
         x0 = float(t_rel[0]) if len(t_rel) else 0.0
         x1 = float(t_rel[-1]) if len(t_rel) else 1.0
-        for quad, plot, data in (("I", self.pulse_plot_i, amp_I),
-                                 ("Q", self.pulse_plot_q, amp_Q)):
+        # Series names follow the axes: "I (pulse)" over a plot labelled
+        # df (Hz) names the wrong thing.  The colours stay keyed to the
+        # underlying quadrature so a trace does not change colour when
+        # the view does.
+        series = [n.split(" (")[0] for n in (first, second)]
+        for quad, label, plot, data in (
+                ("I", series[0], self.pulse_plot_i, amp_I),
+                ("Q", series[1], self.pulse_plot_q, amp_Q)):
             plot.plot(t_rel, data,
                       pen=pg.mkPen(IQ_COLORS[quad], width=LINE_WIDTH),
-                      name=f"{quad} (pulse)")
-            self._annotate_noise_bands(plot, quad, ns, x0, x1, "#888888")
+                      name=f"{label} (pulse)")
+            self._annotate_noise_bands(
+                plot, quad, ns, x0, x1, "#888888",
+                thr=wf.get("threshold_sigma"), end=wf.get("end_sigma"),
+                end_ns=ns_end)
             self._annotate_decisions(plot, wf, t0, quad)
+
+    def _request_once(self, key: tuple, request) -> bool:
+        """Ask the worker for *key* unless this view already has; True
+        when a request is newly in flight.  The worker answers every
+        request, hit or miss, so a second miss means not available."""
+        if key in self._pending_fetch:
+            return False
+        self._pending_fetch.add(key)
+        request()
+        return True
+
+    def _shortfall_text(self, window, fast_wf) -> str:
+        """The session's judgement of a fast window short of its union
+        *window* (t0, t1), as a note."""
+        if fast_wf is None or window is None:
+            return ""
+        head, tail = window_shortfall(
+            fast_wf.get("Time", ()), window,
+            1.0 / self._current_sample_rate("slow"))
+        parts = ([f"first {head*1e3:.2f} ms"] if head else []) \
+            + ([f"last {tail*1e3:.2f} ms"] if tail else [])
+        if not parts:
+            return ""
+        return ("\nfast window incomplete: " + " and ".join(parts)
+                + " missing (packets lost)")
 
     def _show_pair(self, channel: int, pair_idx: int) -> None:
         """Matched-pair overlay: dense fast trace under slow markers,
-        per quadrature (HUD 'both' view)."""
+        per quadrature."""
         pair = self._get_pair(channel, pair_idx)
         meta = self._pair_meta.get((channel, pair_idx)) or pair
         if meta is None:
             return
+        if self._current_pair != (channel, pair_idx):
+            self._pending_fetch.clear()
         self._current_pair = (channel, pair_idx)
         self._current_view = None
 
@@ -1857,26 +2527,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if pair is not None:
             slow_wf = pair.get("slow_tod")
             fast_wf = pair.get("fast_tod")
-        if slow_wf is None and meta.get("slow_idx") is not None:
-            slow_wf = self._get_waveform(channel, meta["slow_idx"],
-                                         "slow")
-            if slow_wf is None and self.task is not None:
-                key = ("slow", channel, meta["slow_idx"])
-                if self._pending_fetch != key:
-                    self._pending_fetch = key
-                    self.task.request_waveform(channel,
-                                               meta["slow_idx"], "slow")
-                loading = True
-        if fast_wf is None and meta.get("fast_idx") is not None:
-            fast_wf = self._get_waveform(channel, meta["fast_idx"],
-                                         "fast")
-            if fast_wf is None and self.task is not None:
-                key = ("fast", channel, meta["fast_idx"])
-                if self._pending_fetch != key:
-                    self._pending_fetch = key
-                    self.task.request_waveform(channel,
-                                               meta["fast_idx"], "fast")
-                loading = True
+        elif self.task is not None:
+            # Evicted from the task's cache: bring it back from the
+            # file with its windows, and show the records meanwhile.
+            loading = self._request_once(
+                ("pair", channel, pair_idx),
+                lambda: self.task.request_pair(channel, pair_idx))
+        for stream, have in (("slow", slow_wf), ("fast", fast_wf)):
+            idx = meta.get(f"{stream}_idx")
+            if have is not None or idx is None:
+                continue
+            wf = self._get_waveform(channel, idx, stream)
+            if wf is None and self.task is not None:
+                loading = self._request_once(
+                    (stream, channel, idx),
+                    lambda s=stream, i=idx: self.task.request_waveform(
+                        channel, i, s)) or loading
+            if stream == "slow":
+                slow_wf = wf
+            else:
+                fast_wf = wf
 
         matched = meta.get("slow_idx") is not None \
             and meta.get("fast_idx") is not None
@@ -1894,13 +2564,20 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
         tau_ms = summ.get("tau_ms", float("nan"))
         self.pulse_info.setText(
-            f"Pair #{pair_idx:04d} — Channel {channel}   "
+            f"Pulse #{pair_idx:04d} — Channel {channel}   "
             f"[{provenance}]\n"
             f"slow #{meta.get('slow_idx')} / fast #{meta.get('fast_idx')}"
-            + (f"   Δt = {dt*1e6:+.0f} µs" if dt is not None else "")
+            + (f"   Δt(trigger) = {dt*1e6:+.0f} µs  (slow − fast; paired "
+               f"as one event within "
+               f"{1e6 * self._last_stats.get('match_window_s', 0):.0f} µs)"
+               if dt is not None and np.isfinite(dt) else "")
             + (f"\nSNR {summ.get('snr', 0):.1f}σ, "
                f"τ = {tau_ms:.2f} ms"
-               if np.isfinite(tau_ms) else ""))
+               if np.isfinite(tau_ms) else "")
+            + self._trigger_clock_text(summ)
+            # The union window travels with the full pair (live cache or
+            # file), not the lean tree entry.
+            + self._shortfall_text((pair or {}).get("window"), fast_wf))
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
@@ -1945,10 +2622,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 plot.plot(t_rel,
                           np.asarray(fast_wf[f"Amp_{quad}"], float),
                           pen=pg.mkPen(FAST_IQ_COLORS[quad], width=2.2),
-                          name="fast (PFB, 1.22 MHz)")
+                          name="fast (PFB, 2.44 MHz)")
             if slow_wf is not None:
-                # Slow stream: dots only — sparse samples, no
-                # interpolating line (Joshua's spec)
+                # Slow stream: dots only.  The samples are sparse, and a
+                # line between them would invent an interpolation.
                 t_rel = np.asarray(slow_wf["Time"], float) - t0
                 data = np.asarray(slow_wf[f"Amp_{quad}"], float)
                 plot.plot(t_rel, data, pen=None,
@@ -1966,19 +2643,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     ("slow", slow_wf, IQ_COLORS[quad])):
                 if wf is None:
                     continue
-                stats = self._noise_by_stream.get(stream) or {}
-                self._annotate_noise_bands(
-                    plot, quad, stats.get(channel), x0, x1, tint,
-                    prefix=f"{stream} ")
                 # The displayed window is usually the UNION ring
                 # extract, which carries no decisions — those live on
                 # the stream's own triggered record.  The marks are
                 # absolute times, so they land correctly on the union
-                # axis once looked up.
+                # axis once looked up; the bands come from the same
+                # record, so they are the bands those marks were
+                # decided against.
                 idx = meta.get(f"{stream}_idx")
                 marks = wf if "trigger_index" in wf else None
                 if marks is None and idx is not None:
                     marks = self._get_waveform(channel, idx, stream)
+                stats = self._noise_by_stream.get(stream) or {}
+                ns, ns_end = self._decision_noise(marks, stats.get(channel))
+                levels = marks if isinstance(marks, dict) else {}
+                self._annotate_noise_bands(
+                    plot, quad, ns, x0, x1, tint, prefix=f"{stream} ",
+                    thr=levels.get("threshold_sigma"),
+                    end=levels.get("end_sigma"), end_ns=ns_end)
                 if marks is not None:
                     self._annotate_decisions(plot, marks, t0, quad,
                                              prefix=f"{stream} ")
@@ -1986,63 +2668,104 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     # ── Histograms ────────────────────────────────────────────────
 
     def _render_histograms(self) -> None:
-        log_y = self.log_check.isChecked()
+        series = self._plot_series()
         for metric, title, _xlabel in _HIST_METRICS:
             plot = self.hist_plots[metric]
             item = plot.getPlotItem()
             plot.clear()
             item.setTitle(
-                title if len(self._counts) <= MAX_LISTED_CHANNELS
-                else f"{title} — {len(self._counts)} ch")
-            item.setLogMode(y=log_y)
+                title if len(series) <= MAX_LISTED_CHANNELS
+                else f"{title} — {len(series)} ch")
+            # Amplitude is the only metric in the sample units, so its
+            # bins are taken into the view like the templates are; SNR,
+            # duration and tau are dimensionless or times.  One unit,
+            # in the label: units= would add a second bracket.
+            scalable = metric == "amplitude"
+            if scalable:
+                item.setLabel(
+                    "bottom",
+                    f"amplitude ({self._units_label(self._label_channel())})")
+            # The amplitude plot overlays two axes: the first (frequency,
+            # or I) filled, the second (dissipation, or Q) hatched in the
+            # same colour.  A quadrature view of a channel stored in the
+            # frequency basis draws the raw-quadrature pair the capture
+            # kept beside the stored one, so the toggle changes frame
+            # here as it does on the other tabs.
+            raw_pair = None
+            if scalable:
+                basis, _units = self._stored_state(self._label_channel())
+                if (basis == "df" and self._view_state()[0] == "iq"
+                        and "amplitude_raw_i_edges" in self._hist_data):
+                    raw_pair, basis = ("iq", "V"), "iq"
+            sources = ((("amplitude_raw_i", 0), ("amplitude_raw_q", 1)) if raw_pair
+                       else (("amplitude_i", 0), ("amplitude_q", 1))) if scalable \
+                else ((metric, 0),)
+            n_named = len(series) * len(sources)
+            if scalable and item.legend is not None:
+                # A fixed key for the two axes, kept whatever the channel
+                # count: the per-channel names drop out past
+                # MAX_LISTED_CHANNELS, the key does not.
+                item.legend.clear()
+                grey = "#8A8A8A"
+                for axis, style, word in (
+                        (0, QtCore.Qt.BrushStyle.SolidPattern, "filled"),
+                        (1, QtCore.Qt.BrushStyle.BDiagPattern, "hatched")):
+                    key = pg.PlotDataItem(
+                        [], [], fillLevel=0,
+                        brush=QtGui.QBrush(QtGui.QColor(grey), style),
+                        pen=pg.mkPen(grey, width=1.2))
+                    item.legend.addItem(
+                        key, f"{_AXIS_NAMES[basis][axis]}: {word}")
 
-            edges = self._hist_data.get(f"{metric}_edges")
-            if edges is None:
-                continue
-            base_edges = np.asarray(edges, dtype=np.float64)
-            # Amplitude is the only metric with ADC-count units; SNR,
-            # duration and tau are dimensionless or times.
-            scalable = (metric == "amplitude") and self._units_are_hz()
-            any_scaled = False
             occupied_lo = occupied_hi = None
-            for ch in sorted(self._counts):
-                counts = self._hist_data.get(f"{metric}_counts_ch{ch}")
-                if counts is None:
+            for source, axis in sources:
+                edges = self._hist_data.get(f"{source}_edges")
+                if edges is None:
                     continue
-                edges = base_edges
-                if scalable:
-                    scale = self._df_scale(ch)
-                    if scale is not None:
-                        edges = base_edges * scale
-                        any_scaled = True
-                counts = np.asarray(counts, dtype=np.float64)
-                nz = np.nonzero(counts > 0)[0]
-                if len(nz):
-                    lo, hi = edges[nz[0]], edges[nz[-1] + 1]
-                    occupied_lo = lo if occupied_lo is None \
-                        else min(occupied_lo, lo)
-                    occupied_hi = hi if occupied_hi is None \
-                        else max(occupied_hi, hi)
-                if log_y:
-                    counts = np.where(counts > 0, counts, np.nan)
-                color = _channel_color(ch)
-                brush = QtGui.QColor(color)
-                brush.setAlpha(110)
-                plot.plot(
-                    edges, counts,
-                    stepMode="center",
-                    fillLevel=0 if not log_y else None,
-                    brush=brush,
-                    pen=pg.mkPen(color, width=1.2),
-                    name=_legend_name(ch, int(np.nansum(counts)),
-                                      len(self._counts)),
-                    connect="finite",
-                )
-            if metric == "amplitude":
-                item.setLabel("bottom",
-                              "amplitude (Δf)" if any_scaled
-                              else "amplitude (counts)",
-                              units="Hz" if any_scaled else None)
+                base_edges = np.asarray(edges, dtype=np.float64)
+                for label, chans in series:
+                    edges_list, counts_list = [], []
+                    for ch in chans:
+                        counts = self._hist_data.get(f"{source}_counts_ch{ch}")
+                        if counts is None:
+                            continue
+                        edges = base_edges
+                        if scalable:
+                            scale = self._amp_scale(ch, raw_pair)
+                            if scale is not None:
+                                edges = base_edges * scale
+                        edges_list.append(edges)
+                        counts_list.append(np.asarray(counts, dtype=np.float64))
+                    if not counts_list:
+                        continue
+                    edges, counts = combine_histograms(edges_list, counts_list)
+                    nz = np.nonzero(counts > 0)[0]
+                    if len(nz):
+                        lo, hi = edges[nz[0]], edges[nz[-1] + 1]
+                        occupied_lo = lo if occupied_lo is None \
+                            else min(occupied_lo, lo)
+                        occupied_hi = hi if occupied_hi is None \
+                            else max(occupied_hi, hi)
+                    color = _channel_color(chans[0])
+                    fill = QtGui.QColor(color)
+                    fill.setAlpha(110)
+                    # Second axis: the same colour hatched, in the fill
+                    # and in the legend swatch alike.
+                    brush = QtGui.QBrush(fill) if axis == 0 else QtGui.QBrush(
+                        QtGui.QColor(color), QtCore.Qt.BrushStyle.BDiagPattern)
+                    name = label
+                    if scalable:
+                        series_basis = "iq" if raw_pair else self._stored_state(chans[0])[0]
+                        name = f"{label} {_AXIS_NAMES[series_basis][axis]}"
+                    plot.plot(
+                        edges, counts,
+                        stepMode="center",
+                        fillLevel=0,
+                        brush=brush,
+                        pen=pg.mkPen(color, width=1.2),
+                        name=_series_name(name, int(np.nansum(counts)), n_named),
+                        connect="finite",
+                    )
             # Fit x to the populated bins — auto-expanded ranges
             # otherwise leave the data huddled at one edge
             if occupied_lo is not None and occupied_hi > occupied_lo:

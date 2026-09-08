@@ -4,8 +4,19 @@
  * This header is included by both C and C++ code
  */
 
-#ifndef __KERNEL__
-# include <stdint.h>
+#if defined(__bpf__)
+/* A BPF program should use kernel-side types. Presumably stdint.h would be
+ * fine it if worked - but "clang -target bpf" declares no host architecture
+ * and it gets confused. */
+ #include <linux/types.h>
+ typedef __u8  uint8_t;
+ typedef __u16 uint16_t;
+ typedef __u32 uint32_t;
+ typedef __u64 uint64_t;
+ typedef __s16 int16_t;
+ typedef __s32 int32_t;
+#else
+ #include <stdint.h>
 #endif
 
 /* Packet magic numbers */
@@ -98,6 +109,56 @@ struct readout_packet_header {
 #define PFB_PACKET_SIZE(__nsamp) (sizeof(struct pfb_packet_header) + \
 		((__nsamp)*8) + \
 		sizeof(struct irigb_timestamp))
+
+/* Channel-stream wire format. Linux-only (see FASTRX_* constants below), but
+ * kept in this shared bucket rather than its own header: it is one more wire
+ * format alongside PFB and readout above, and the BPF filter (src/bpf.c)
+ * that needs it compiles as C, which this header already supports. */
+#define FASTRX_PACKET_MAGIC        0x4348414eu  /* "CHAN" */
+#define FASTRX_PACKET_VERSION      0
+#define FASTRX_MULTICAST_GROUP     "239.192.0.3"
+#define FASTRX_MULTICAST_GROUP_NUM 0xefc00003u
+#define FASTRX_PORT                9876
+
+#define NUM_PIPELINES              8
+#define SAMPLES_PER_PIPELINE       128
+#define MAX_SAMPLES_PER_PACKET     (NUM_PIPELINES * SAMPLES_PER_PIPELINE)
+
+/* Sample truncation window applied by firmware (16-of-24 bits of I/Q). */
+typedef enum {
+	TRUNC_LOW  = 0,  /* bits 15:0  (LSB-aligned) */
+	TRUNC_MID  = 1,  /* bits 19:4  (mid) */
+	TRUNC_HIGH = 2,  /* bits 23:8  (MSB-aligned, default) */
+} fastrx_trunc_t;
+
+struct fastrx_packet_header {
+	uint32_t magic;
+	uint32_t seq;
+
+	uint8_t  pipe_snapshot;   /* bitmask of enabled pipelines */
+	uint8_t  sample_trunc;    /* fastrx_trunc_t */
+	uint8_t  module;
+	uint8_t  version;
+
+	uint16_t tag;
+	uint16_t serial;
+	uint16_t samples_per_packet;  /* # I/Q pairs in payload */
+	uint8_t  _reserved[6];
+
+	struct irigb_timestamp ts;
+	uint8_t  _ts_pad[30];
+} PACKED;  /* sizeof == 86 */
+
+#define FASTRX_PACKET_SIZE(__spp) \
+	(sizeof(struct fastrx_packet_header) + (__spp) * 2 * (int)sizeof(int16_t))
+
+#ifdef __cplusplus
+static_assert(sizeof(struct fastrx_packet_header) == 86,
+              "packet header layout no longer matches the wire format");
+#else
+_Static_assert(sizeof(struct fastrx_packet_header) == 86,
+               "packet header layout no longer matches the wire format");
+#endif
 
 #ifdef _MSC_VER
 # pragma pack(pop)

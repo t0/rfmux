@@ -1,12 +1,13 @@
-"""Mock mode must not inherit a module the mock cannot stream.
+"""Mock mode must not inherit a module the mock has no tones on.
 
 The Module spinbox is hidden whenever the connection is not hardware, so
 in mock mode whatever it holds is a leftover from a board session that
-the user can neither see nor correct.  The mock only ever streams module
-1 (``_auto_bias_kids`` in rfmux/mock/crs.py hardcodes it), so restoring
-module 2 there produced a permanently blank viewer -- zero packets, zero
-loss, no error.  It must also not write that module back, or one mock run
-would overwrite the module chosen for the board.
+the user can neither see nor correct.  The mock streams only the modules
+carrying tones, and ``_auto_bias_kids`` in rfmux/mock/crs.py puts every
+startup tone on module 1, so restoring module 2 there gives a permanently
+blank viewer -- zero packets, zero loss, no error.  It must also not write
+that module back, or one mock run would overwrite the module chosen for
+the board.
 """
 
 import pytest
@@ -55,14 +56,14 @@ def test_saved_module_is_restored_into_the_spinbox(qt_app, saved):
         dlg.deleteLater()
 
 
-def test_mock_mode_uses_the_module_the_mock_streams(qt_app, saved):
+def test_mock_mode_uses_the_module_the_mock_tones(qt_app, saved):
     dlg = _mock_dialog(qt_app)
     try:
         dlg.module_input.setValue(2)     # as restored from board use
         dlg._validate_and_accept()
         assert dlg.connection_mode == UnifiedStartupDialog.CONN_MOCK
         assert dlg.module == UnifiedStartupDialog.MOCK_MODULE == 1, \
-            "mock mode used a module the mock never streams"
+            "mock mode used a module the mock puts no startup tones on"
         assert dlg.get_configuration()["module"] == 1
     finally:
         dlg.deleteLater()

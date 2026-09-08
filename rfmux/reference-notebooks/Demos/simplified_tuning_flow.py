@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Unattended tuning run: bias a set of KIDs and measure their noise.
+Detector tuning as a plain script: bias a set of KIDs and measure their noise.
 
 Executes the complete measurement sequence:
 1. Initialize
@@ -75,8 +75,8 @@ async def main(serial="MOCK"):
     
     # Multisweep parameters
     MULTISWEEP_PARAMS = {
-        'span_hz': 500e3,             # 5 MHz span around each resonance
-        'npoints_per_sweep': 50,
+        'span_hz': 200e3,             # the multisweep defaults: 200 kHz span,
+        'npoints_per_sweep': 101,     # 2 kHz per point across a 10 kHz linewidth
         'amp': 0.001,
         'nsamps': 10,
         'module': MODULE,
@@ -372,7 +372,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         if 'bias_frequency' in det_data:
             print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
             if 'df_calibration' in det_data:
-                print(f"                      df_cal={det_data['df_calibration']:.3e} Hz/rad")
+                print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V")
     
     
     ### Step 8. Slow Noise spectrum 

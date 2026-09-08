@@ -108,7 +108,7 @@ _CHILD = textwrap.dedent(
 
 
 # Deliberately NOT marked portable: the child builds a QApplication, and
-# the portable tier is the subset tox runs on a bare Python 3.9-3.12
+# the portable tier is the subset tox runs on a bare Python 3.10-3.12
 # install.  Marked, it would have skipped there on the importorskip and
 # reported green while testing nothing.
 @pytest.mark.skipif(

@@ -273,6 +273,7 @@ def find_resonances(
     min_Q: float | None = 1e4,
     max_Q: float | None = 1e7,
     min_separation_hz: float | None = 0.0,
+    require_isolation: bool = True,
     expected_resonances: int | None = None,
     label: str | None = None,
 ) -> ResonanceSearch:
@@ -296,12 +297,21 @@ def find_resonances(
         what rejects single-sample noise spikes. ``None`` disables the floor,
         which is rarely what you want. Default 1e7.
     min_separation_hz : float or None, optional
-        Separation below which resonances are treated as collided and **all**
-        members of the group are cut — not thinned to the deepest, because a
-        tone on either member of a collided pair still reads the other. Default
-        0.0, which removes only candidates at identical frequencies and so
-        touches nothing real. ``None`` skips the pass. See
-        :func:`_separation_pass`.
+        Separation below which resonances are too close to each other. What
+        happens to them depends on ``require_isolation``. Default 0.0, which
+        acts only on candidates at identical frequencies and so touches nothing
+        real. ``None`` skips the pass.
+    require_isolation : bool, optional
+        What ``min_separation_hz`` promises. ``True`` (the default) cuts **all**
+        members of a close group — not thinned to the deepest, because a tone on
+        either member of a collided pair still reads the other — so every
+        resonance returned is one nothing else is near; see
+        :func:`_separation_pass`. ``False`` keeps the deepest member of each
+        group and rejects the rest, the way ``find_peaks(distance=...)`` used
+        to: the returned list obeys the separation, but a survivor can still
+        have a real resonance beside it, namely the one that was rejected; see
+        :func:`_thinning_pass`. Either way what was cut is in ``.rejected``
+        with its reason.
     expected_resonances : int or None, optional
         If given and more candidates survive, keep the ``expected_resonances``
         deepest and reject the rest; if fewer survive, warn. For arrays whose
@@ -370,6 +380,7 @@ def find_resonances(
         "min_Q": min_Q,
         "max_Q": max_Q,
         "min_separation_hz": min_separation_hz,
+        "require_isolation": require_isolation,
         "expected_resonances": expected_resonances,
     }
 
@@ -412,7 +423,10 @@ def find_resonances(
     rejected: list[ResonanceCandidate] = []
 
     if min_separation_hz is not None:
-        candidates, dropped = _separation_pass(candidates, min_separation_hz)
+        if require_isolation:
+            candidates, dropped = _separation_pass(candidates, min_separation_hz)
+        else:
+            candidates, dropped = _thinning_pass(candidates, min_separation_hz, trace_db)
         rejected += dropped
 
     if expected_resonances is not None:
@@ -505,6 +519,46 @@ def _separation_pass(candidates, min_separation_hz: float):
             )
         else:
             kept.append(c)
+    return kept, dropped
+
+
+def _thinning_pass(candidates, min_separation_hz: float, trace_db):
+    """Thin close resonances: of any group within ``min_separation_hz`` of each
+    other, keep the deepest dip and reject the rest.
+
+    The permissive alternative to :func:`_separation_pass`, chosen with
+    ``require_isolation=False``. It is what ``find_peaks(distance=...)`` did —
+    the deepest peak claims its neighbourhood, then the next deepest of those
+    left, and so on — expressed in Hz rather than samples, and with every
+    loser returned in ``rejected`` naming the survivor that displaced it
+    instead of vanishing. A survivor may therefore still have a real resonance
+    beside it; that is the trade this mode makes. Comparison is inclusive, as
+    in :func:`_separation_pass`.
+    """
+    by_depth = sorted(candidates, key=lambda c: float(trace_db[c.index]))  # deepest first
+    kept: list[ResonanceCandidate] = []
+    dropped: list[ResonanceCandidate] = []
+    for c in by_depth:
+        winner = next(
+            (k for k in kept if abs(k.frequency_hz - c.frequency_hz) <= min_separation_hz),
+            None,
+        )
+        if winner is None:
+            kept.append(c)
+        else:
+            gap = abs(winner.frequency_hz - c.frequency_hz)
+            dropped.append(
+                replace(
+                    c,
+                    rejected_because=(
+                        f"thinned: {_gap_text(gap)} from the deeper candidate at "
+                        f"{winner.frequency_hz / 1e6:.6f} MHz, within the "
+                        f"{_gap_text(min_separation_hz)} separation, which was "
+                        f"kept instead"
+                    ),
+                )
+            )
+    kept.sort(key=lambda c: c.frequency_hz)
     return kept, dropped
 
 

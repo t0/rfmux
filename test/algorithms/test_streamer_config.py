@@ -14,14 +14,17 @@ import pytest
 
 import rfmux
 
+from rfmux.core.transferfunctions import (
+    PFB_NYQUIST_FREQ,
+    PFB_SAMPLING_FREQ,
+    decimation_to_sampling,
+)
 from rfmux.algorithms.measurement.streamer_config import (
     DERATED_LINK_MBPS,
-    PFB_SAMPLE_RATE,
     StreamerConfig,
     apply_streamer_config,
     describe,
     read_streamer_config,
-    slow_sample_rate,
     validate,
 )
 
@@ -32,9 +35,13 @@ def _severities(issues):
 
 class TestDescribe:
     def test_rates(self):
-        assert slow_sample_rate(0) == pytest.approx(38146.97265625)
-        assert slow_sample_rate(6) == pytest.approx(596.0464477539062)
-        assert PFB_SAMPLE_RATE == pytest.approx(1220703.125)
+        assert decimation_to_sampling(0) == pytest.approx(38146.97265625)
+        assert decimation_to_sampling(6) == pytest.approx(596.0464477539062)
+        # 625 MHz / 256, complex samples.  The Nyquist -- 625 MHz / 512 --
+        # is the bin spacing, and is NOT the rate; conflating them halves
+        # every duration derived from the fast stream.
+        assert PFB_SAMPLING_FREQ == pytest.approx(2441406.25)
+        assert PFB_NYQUIST_FREQ == pytest.approx(1220703.125)
 
     def test_bandwidth_math(self):
         d = describe(StreamerConfig(dec_stage=6, short_packets=False,
@@ -48,12 +55,27 @@ class TestDescribe:
         assert d["channels_per_module"] == 128
         # 1072 B * 8 * 38147 Hz
         assert d["slow_mbps"] == pytest.approx(327.2, rel=0.01)
-        # 2 ch * 8056 B/1000 samp * 8 * 1.2207 MHz
-        assert d["pfb_mbps"] == pytest.approx(157.4, rel=0.01)
-        assert d["total_mbps"] == pytest.approx(484.5, rel=0.01)
+        # 2 ch * 8056 B/1000 samp * 8 * 2.4414 MHz
+        assert d["pfb_mbps"] == pytest.approx(314.7, rel=0.01)
+        # Two PFB channels alongside stage 0 short packets is 642 Mbps --
+        # past the derated budget, which is the point: at the Nyquist
+        # this configuration looked like it fitted.
+        assert d["total_mbps"] == pytest.approx(641.9, rel=0.01)
+
+    def test_empty_module_list_streams_nothing(self):
+        d = describe(StreamerConfig(dec_stage=3, short_packets=False,
+                                    modules=[]))
+        assert d["n_modules"] == 0
+        assert d["slow_mbps"] == 0
 
 
 class TestValidate:
+    def test_empty_module_list_is_not_over_budget(self):
+        # Four long-packet modules at stage 3 exceed the link; none do not.
+        issues = validate(StreamerConfig(dec_stage=3, short_packets=False,
+                                         modules=[]))
+        assert "error" not in _severities(issues)
+
     def test_long_below_stage3_is_error(self):
         issues = validate(StreamerConfig(dec_stage=0, short_packets=False))
         assert "error" in _severities(issues)
@@ -116,7 +138,7 @@ class TestApplyOnMock:
         info = loop.run_until_complete(apply_streamer_config(
             crs, StreamerConfig(dec_stage=1, short_packets=True,
                                 modules=[1])))
-        assert info["sample_rate_hz"] == pytest.approx(slow_sample_rate(1))
+        assert info["sample_rate_hz"] == pytest.approx(decimation_to_sampling(1))
         state = loop.run_until_complete(read_streamer_config(crs))
         assert state["dec_stage"] == 1
 
@@ -154,7 +176,7 @@ class TestApplyOnMock:
 class TestSources:
     pytestmark = pytest.mark.slow_acquisition
     def test_slow_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             CaptureState, PulseCaptureSession)
         from rfmux.pulse_capture.sources import (
             run_slow_source)
@@ -164,18 +186,18 @@ class TestSources:
                                                    module=[1]))
         # Let in-flight packets from earlier decimation settings drain
         loop.run_until_complete(asyncio.sleep(0.3))
-        session = PulseCaptureSession(channels=[1], noise_samples=50,
+        capture_session = PulseCaptureSession(channels=[1], noise_samples=50,
                                       hdf5_path=None)
-        session.start()
+        capture_session.start()
         elapsed = loop.run_until_complete(run_slow_source(
-            session, "127.0.0.1", module=1, duration_s=0.15))
-        assert session.state is CaptureState.CAPTURING, \
-            f"state={session.state}, elapsed={elapsed}"
-        assert session.noise_stats
-        session.stop()
+            capture_session, "127.0.0.1", module=1, duration_s=0.15))
+        assert capture_session.state is CaptureState.CAPTURING, \
+            f"state={capture_session.state}, elapsed={elapsed}"
+        assert capture_session.noise_stats
+        capture_session.stop()
 
     def test_pfb_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.session import (
+        from rfmux.pulse_capture.capture_session import (
             CaptureState, PulseCaptureSession)
         from rfmux.pulse_capture.sources import (
             run_pfb_source)
@@ -185,17 +207,54 @@ class TestSources:
             crs, StreamerConfig(dec_stage=6, short_packets=False,
                                 modules=[1], pfb_channels=[1, 2])))
         try:
-            session = PulseCaptureSession(
+            capture_session = PulseCaptureSession(
                 channels=[1, 2], streamer_mode="fast",
-                sample_rate=PFB_SAMPLE_RATE, noise_samples=400,
+                sample_rate=PFB_SAMPLING_FREQ, noise_samples=400,
                 hdf5_path=None)
-            session.start()
+            capture_session.start()
             elapsed = loop.run_until_complete(run_pfb_source(
-                session, "127.0.0.1", [1, 2], duration_s=0.01))
-            assert session.state is CaptureState.CAPTURING, \
-                f"state={session.state}, elapsed={elapsed}"
-            assert set(session.noise_stats) == {1, 2}
-            session.stop()
+                capture_session, "127.0.0.1", [1, 2], duration_s=0.01))
+            assert capture_session.state is CaptureState.CAPTURING, \
+                f"state={capture_session.state}, elapsed={elapsed}"
+            assert set(capture_session.noise_stats) == {1, 2}
+            capture_session.stop()
         finally:
             loop.run_until_complete(crs.set_pfb_streamer(channel=None,
                                                          module=1))
+
+
+class _RecordingCRS:
+    """Records the streamer calls in the order the board would see them."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def set_decimation(self, dec, short=None, module=None):
+        self.calls.append(("dec", dec, short, module))
+
+    async def set_pfb_streamer(self, channel=None, module=1):
+        self.calls.append(("pfb", channel, module))
+
+
+def test_enabling_the_fast_stream_parks_the_slow_stream_at_stage_6_first():
+    """TEMPORARY firmware workaround: the PFB command's link-budget check
+    uses a miscalculated slow rate, so the fast stream is enabled with
+    the slow stream at stage 6 and the wanted stage is applied after."""
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=1, short_packets=True, modules=[1],
+        pfb_channels=[1, 2, 3, 4], pfb_module=1)))
+    assert crs.calls == [("dec", 6, True, [1]),
+                         ("pfb", [1, 2, 3, 4], 1),
+                         ("dec", 1, True, [1])]
+
+
+def test_disabling_or_leaving_the_fast_stream_keeps_the_plain_order():
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=1, short_packets=True, modules=[1], pfb_channels=[])))
+    assert crs.calls == [("dec", 1, True, [1]), ("pfb", None, 1)]
+    crs = _RecordingCRS()
+    asyncio.run(apply_streamer_config(crs, StreamerConfig(
+        dec_stage=3, short_packets=False, modules=[1, 2])))
+    assert crs.calls == [("dec", 3, False, [1, 2])]

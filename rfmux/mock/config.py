@@ -10,19 +10,30 @@ This module centralizes all parameters used by:
 External code should import MOCK_DEFAULTS and optionally call apply_overrides()
 to merge user-provided overrides with validated defaults.
 
-No other module should define mock defaults or duplicate parameters.  This is
-worth enforcing rather than assuming: a copy of this file lived at
-rfmux/core/mock_config.py carrying the same claim, drifted 13 keys and 5 values
-behind without anyone noticing (it had no importers at all), and was deleted.
-A duplicate that nothing imports is worse than no duplicate, because editing it
-looks like it worked.
+No other module should define mock defaults or duplicate parameters.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict
 from copy import deepcopy
+import math
 import re
+
+#: The mock's DAC scale, what a tone power in dBm is normalized against
+#: (set_dac_scale's default on the mock board).
+DAC_SCALE_DBM = 1.0
+#: Tone power the automatic biasing sweeps and biases at.
+BIAS_DBM = -55.0
+
+
+def bias_amplitude_from_dbm(dbm: float) -> float:
+    """Normalized tone amplitude for a power in dBm at the mock's DAC scale."""
+    return 10 ** ((dbm - DAC_SCALE_DBM) / 20)
+
+
+def bias_dbm_from_amplitude(amplitude: float) -> float:
+    return 20 * math.log10(max(amplitude, 1e-12)) + DAC_SCALE_DBM
 
 # =============================================================================
 # Unified Default Configuration
@@ -113,12 +124,18 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Automatic KID biasing parameters
     # -------------------------------------------------------------------------
     "auto_bias_kids": False,   # Enable automatic channel configuration
-    "bias_amplitude": 0.01,    # Bias amplitude in normalized units (≈ -40 dBm)
+    # Normalized units; the dialog shows and edits it in dBm.
+    "bias_amplitude": bias_amplitude_from_dbm(BIAS_DBM),
 
     # -------------------------------------------------------------------------
     # UDP streamer (ADC simulation)
     # -------------------------------------------------------------------------
-    "udp_noise_level": 10.0,   # Additive ADC noise [counts]
+    # Additive white readout noise, sigma per slow sample [counts] at the
+    # scale get_samples reports; the PFB emitter derives its own sigma
+    # from this.  Measured on board 0156 (firmware v1.7.0rc4) at stage 6
+    # with no tone, through a detector chain: 10.9 to 11.6 counts on
+    # get_samples and the slow stream alike.
+    "udp_noise_level": 11.0,
     # scale_factor converts normalized S21 * amplitude to ADC readout counts.
     # Calibrated so that counts * VOLTS_PER_ROC gives the correct physical
     # voltage for 0 dB round-trip gain with default dac_scale = 1.0 dBm and
@@ -126,6 +143,11 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Formula: 1880796.46 * 10**((dac_scale_dbm - adc_ref_dbm) / 20)
     #        = 1880796.46 * 10**(2.75 / 20) ≈ 2_580_128
     "scale_factor": 1880796.4604246316 * 10**(2.75 / 20.0),
+    # How a block of samples is evaluated: "hoisted" (per-batch
+    # invariants computed once) or "reference", the sample-by-sample
+    # loop the hoisted path is checked against in
+    # test/mock/test_batch_physics_parity.py.  Not a user knob.
+    "physics_batch_mode": "hoisted",
 
     # -------------------------------------------------------------------------
     # Quasiparticle pulse parameters (time-dependent nqp)
@@ -134,18 +156,18 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "pulse_period": 2.0,          # seconds (periodic mode)
     "pulse_probability": 0.1,     # per-timestep probability (random mode)
     "pulse_tau_rise": 1e-6,       # seconds
-    "pulse_tau_decay": 0.1,       # seconds
+    "pulse_tau_decay": 5e-3,      # seconds
     "pulse_amplitude": 2.0,       # multiplicative factor relative to base nqp
     "pulse_resonators": "all",    # 'all' or list of resonator indices
 
-    # Random pulse amplitude distribution (random mode only)
-    "pulse_random_amp_mode": "uniform",  # "fixed" | "uniform" | "lognormal"
-    "pulse_random_amp_min": 1.5,        # for uniform mode (>= 1.0)
-    "pulse_random_amp_max": 3.0,        # for uniform mode (>= min)
+    # Pulse amplitude distribution (periodic and random modes)
+    "pulse_random_amp_mode": "fixed",  # "fixed" | "uniform" | "lognormal"
+    "pulse_random_amp_min": 1.1,        # for uniform mode (>= 1.0)
+    "pulse_random_amp_max": 1.5,        # for uniform mode (>= min)
     "pulse_random_amp_logmean": 0.7,    # for lognormal mode
     "pulse_random_amp_logsigma": 0.3,   # for lognormal mode (>= 0)
 
-    # Random pulse tau_decay distribution
+    # Pulse tau_decay distribution (periodic and random modes)
     # In MKID physics, tau_rise is quasi-instantaneous (~µs) and fixed,
     # while tau_decay (QP recombination) varies with QP density, temperature, etc.
     "pulse_random_tau_mode": "fixed",    # "fixed" | "uniform" | "lognormal"
@@ -260,13 +282,15 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
 
     # Enforce numeric constraints and sane defaults
     try:
-        minv = float(cfg.get("pulse_random_amp_min", 1.5))
+        minv = float(cfg.get("pulse_random_amp_min",
+                             MOCK_DEFAULTS["pulse_random_amp_min"]))
     except Exception:
-        minv = 1.5
+        minv = MOCK_DEFAULTS["pulse_random_amp_min"]
     try:
-        maxv = float(cfg.get("pulse_random_amp_max", 3.0))
+        maxv = float(cfg.get("pulse_random_amp_max",
+                             MOCK_DEFAULTS["pulse_random_amp_max"]))
     except Exception:
-        maxv = 3.0
+        maxv = MOCK_DEFAULTS["pulse_random_amp_max"]
     
     # Pulses should not reduce nqp unless explicitly desired; enforce >= 1.0
     if minv < 1.0:
@@ -337,7 +361,7 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
     cfg["pulse_random_tau_logsigma"] = tau_logsigma
 
     # ── TLS 1/f frequency noise ───────────────────────────────────
-    cfg["tls_noise_enabled"] = bool(cfg.get("tls_noise_enabled", False))
+    cfg["tls_noise_enabled"] = bool(cfg["tls_noise_enabled"])
     try:
         tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
     except Exception:

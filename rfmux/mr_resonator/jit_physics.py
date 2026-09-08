@@ -16,9 +16,12 @@ All functions are JIT-compiled for 10-25x speedup over pure Python.
 
 Numba is a required dependency for this module.
 """
-import numpy as np
-from numba import jit, prange
+import platform
 import types as _types
+
+import numpy as np
+import numba
+from numba import jit, prange
 
 
 # ============================================================================
@@ -46,8 +49,7 @@ def _serial_twin(dispatcher, name, **jit_kwargs):
                                py.__defaults__, py.__closure__)
     twin.__qualname__ = name
     return jit(nopython=True, parallel=False, cache=True, **jit_kwargs)(twin)
-import platform
-import numba
+
 
 # Physical constants
 H = 6.626e-34  # Planck constant
@@ -698,6 +700,21 @@ def compute_s21_parallel(
     S21 = 2.0 * S21_raw * att_factor * GLNA
     
     return S21
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def compute_s21_batch(fc, Vin, L2d, C2d, R2d, Cc_array,
+                      ZLNA, GLNA, input_atten_dB, system_termination):
+    """compute_s21_parallel for each row of (L2d, C2d, R2d): one
+    dispatch per batch of samples instead of one per sample.  The
+    per-row arithmetic is the same function."""
+    n = L2d.shape[0]
+    out = np.zeros(n, dtype=np.complex128)
+    for k in range(n):
+        out[k] = compute_s21_parallel(fc, Vin, L2d[k], C2d[k], R2d[k],
+                                      Cc_array, ZLNA, GLNA, input_atten_dB,
+                                      system_termination)
+    return out
 
 
 # ============================================================================

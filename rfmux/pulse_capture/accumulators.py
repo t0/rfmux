@@ -4,7 +4,7 @@ Running accumulations over detected pulses: histograms and templates.
 Both structures here follow the same pattern -- a per-channel
 ``*Accumulator`` holding running sums, and a ``*Set`` that owns one per
 channel -- and both are driven the same way: a
-:class:`~.session.PulseCaptureSession` calls ``add_pulse``
+:class:`~.capture_session.PulseCaptureSession` calls ``add_pulse``
 for every pulse it detects and flushes them together to HDF5 and to the
 live view.  They are two products of one stream, so they live in one
 module.
@@ -16,6 +16,7 @@ is what makes them usable on a live capture that runs for hours.
 duration, tau) into fixed bins::
 
     histograms = PulseHistogramSet()
+    histograms.size_amplitude_to_noise(sigma)   # once the noise is known
     for channel, pulse_data in pulse_stream:
         histograms.add_pulse(channel, pulse_data, noise_stats[channel])
     data = histograms.get_histogram_data()
@@ -116,13 +117,23 @@ class HistogramAccumulator:
 
 # ───────────────────────── Pulse Histogram Set ──────────────────────
 
+#: The two peak-amplitude histograms, one per stored axis, on shared bins.
+_AMPLITUDE_METRICS = ("amplitude_i", "amplitude_q")
+#: The same peaks in the raw quadratures, in volts, kept beside the
+#: stored pair for a channel that was rotated into the frequency basis,
+#: so the quadrature view shows quadrature peaks rather than a rescale.
+_RAW_METRICS = ("amplitude_raw_i", "amplitude_raw_q")
+
+
 class PulseHistogramSet:
     """Collection of running histograms for pulse capture statistics.
 
     Maintains per-channel histograms for:
 
-    - **amplitude**: Peak excursion from baseline (max of I and Q)
-    - **duration_ms**: Time above threshold (trigger → below-threshold)
+    - **amplitude_i**, **amplitude_q**: Peak excursion from baseline
+      along each stored axis (frequency and dissipation once rotated,
+      I and Q otherwise), on shared bins
+    - **duration_ms**: Trigger to settled (back inside the end band)
       in milliseconds, not the length of the saved window
     - **snr**: Peak signal-to-noise ratio in σ units
     - **tau_ms**: Fit-free decay constant in ms (only binned when
@@ -133,7 +144,10 @@ class PulseHistogramSet:
     Parameters
     ----------
     amp_range : tuple[float, float]
-        Min/max for amplitude histogram bins (in ADC counts or Hz).
+        Min/max for amplitude histogram bins, in the units the pulses
+        are stored in (V or Hz).  A placeholder until
+        :meth:`size_amplitude_to_noise` spans the bins from the measured
+        noise; the range grows on demand but never shrinks.
     amp_bins : int
         Number of amplitude histogram bins.
     duration_range_ms : tuple[float, float]
@@ -166,6 +180,7 @@ class PulseHistogramSet:
         threshold_sigma: Optional[float] = None,
     ):
         self.amp_edges = np.linspace(amp_range[0], amp_range[1], amp_bins + 1)
+        self.raw_amp_edges = self.amp_edges.copy()
         self.dur_edges = np.linspace(
             duration_range_ms[0], duration_range_ms[1], duration_bins + 1)
         self.snr_edges = np.linspace(snr_range[0], snr_range[1], snr_bins + 1)
@@ -176,11 +191,32 @@ class PulseHistogramSet:
         # Per-channel accumulators: {channel: {metric: HistogramAccumulator}}
         self.histograms: Dict[int, Dict[str, HistogramAccumulator]] = {}
 
+    def size_amplitude_to_noise(self, sigma: float, sigmas: float = 100.0,
+                                raw_sigma: Optional[float] = None) -> None:
+        """Span the amplitude bins from zero to *sigmas* times *sigma*, so
+        the range matches the stored units (V or Hz) whatever their
+        scale; *raw_sigma*, in volts, sizes the raw-quadrature pair the
+        same way.  Nothing changes once a pulse has been binned."""
+        if self.total_pulses():
+            return
+        for attr, metrics, s in (("amp_edges", _AMPLITUDE_METRICS, sigma),
+                                 ("raw_amp_edges", _RAW_METRICS, raw_sigma)):
+            if s is None or not (np.isfinite(s) and s > 0):
+                continue
+            edges = np.linspace(0.0, sigmas * s, len(getattr(self, attr)))
+            setattr(self, attr, edges)
+            for h in self.histograms.values():
+                for metric in metrics:
+                    h[metric] = HistogramAccumulator(edges.copy())
+
     def _ensure_channel(self, channel: int) -> None:
         """Create histogram accumulators for a channel if not yet present."""
         if channel not in self.histograms:
             self.histograms[channel] = {
-                "amplitude": HistogramAccumulator(self.amp_edges.copy()),
+                "amplitude_i": HistogramAccumulator(self.amp_edges.copy()),
+                "amplitude_q": HistogramAccumulator(self.amp_edges.copy()),
+                "amplitude_raw_i": HistogramAccumulator(self.raw_amp_edges.copy()),
+                "amplitude_raw_q": HistogramAccumulator(self.raw_amp_edges.copy()),
                 "duration_ms": HistogramAccumulator(self.dur_edges.copy()),
                 "snr": HistogramAccumulator(self.snr_edges.copy()),
                 "tau_ms": HistogramAccumulator(self.tau_edges.copy()),
@@ -191,8 +227,12 @@ class PulseHistogramSet:
         channel: int,
         pulse_data: dict,
         noise_stats: Optional[ChannelNoiseStats] = None,
+        to_raw: Optional[complex] = None,
     ) -> Dict[str, float]:
         """Update all histograms with a new pulse.
+
+        *to_raw* is the complex factor that took raw volts into storage
+        for this channel; given, the raw-quadrature pair is binned too.
 
         Parameters
         ----------
@@ -214,7 +254,8 @@ class PulseHistogramSet:
 
         summary = pulse_summary(pulse_data, noise_stats, self.threshold_sigma)
 
-        for metric, value in (("amplitude", summary["peak_amp"]),
+        for metric, value in (("amplitude_i", summary["peak_I"]),
+                              ("amplitude_q", summary["peak_Q"]),
                               ("snr", summary["snr"]),
                               ("duration_ms", summary["duration_ms"]),
                               ("tau_ms", summary["tau_ms"])):
@@ -223,11 +264,27 @@ class PulseHistogramSet:
             self._ensure_range(metric, value)
             h[metric].add(value)
 
+        if to_raw is not None and noise_stats is not None:
+            # The excursion turned back into the quadratures, in volts:
+            # the peak along each raw axis is taken on the turned
+            # waveform, not from the stored peaks, which fall on
+            # different samples.
+            z = ((np.asarray(pulse_data["Amp_I"], dtype=np.float64) - noise_stats.mean_I)
+                 + 1j * (np.asarray(pulse_data["Amp_Q"], dtype=np.float64)
+                         - noise_stats.mean_Q)) / to_raw
+            for metric, value in (("amplitude_raw_i", float(np.max(np.abs(z.real)))),
+                                  ("amplitude_raw_q", float(np.max(np.abs(z.imag))))):
+                self._ensure_range(metric, value)
+                h[metric].add(value)
+
         return summary
 
     # Template-edge attribute per metric (used when new channels appear)
     _EDGE_ATTRS = {
-        "amplitude": "amp_edges",
+        "amplitude_i": "amp_edges",
+        "amplitude_q": "amp_edges",
+        "amplitude_raw_i": "raw_amp_edges",
+        "amplitude_raw_q": "raw_amp_edges",
         "duration_ms": "dur_edges",
         "snr": "snr_edges",
         "tau_ms": "tau_edges",
@@ -242,13 +299,16 @@ class PulseHistogramSet:
         if not np.isfinite(value) or value < 0:
             return
         attr = self._EDGE_ATTRS[metric]
+        # Every metric on these edges expands together, so the two
+        # amplitude axes keep sharing one binning.
+        sharing = [m for m, a in self._EDGE_ATTRS.items() if a == attr]
         for _ in range(64):  # 2**64 dynamic range — effectively unbounded
             edges = getattr(self, attr)
             if value < edges[-1]:
                 return
-            expanded = [acc.expand_double()
-                        for acc in (ch[metric]
-                                    for ch in self.histograms.values())]
+            expanded = [ch[m].expand_double()
+                        for ch in self.histograms.values()
+                        for m in sharing]
             if expanded and not all(expanded):
                 return  # not expandable (odd bins / nonzero base)
             setattr(self, attr, edges * 2.0)
@@ -268,12 +328,14 @@ class PulseHistogramSet:
         Returns
         -------
         dict[str, ndarray]
-            Keys like ``"amplitude_bins"``, ``"amplitude_counts_ch1"``,
+            Keys like ``"amplitude_i_bins"``, ``"amplitude_i_counts_ch1"``,
             ``"duration_ms_edges"``, etc.
         """
         result: Dict[str, np.ndarray] = {}
         for ch, metrics in self.histograms.items():
             for name, acc in metrics.items():
+                if name in _RAW_METRICS and acc.total == 0:
+                    continue        # an unrotated channel has no raw pair
                 result[f"{name}_bins"] = acc.bin_centers
                 result[f"{name}_edges"] = acc.bin_edges
                 result[f"{name}_counts_ch{ch}"] = acc.counts.copy()
@@ -285,9 +347,9 @@ class PulseHistogramSet:
             h = self.histograms.get(channel)
             if h is None:
                 return 0
-            return h["amplitude"].total
+            return h["amplitude_i"].total
         return sum(
-            h["amplitude"].total for h in self.histograms.values())
+            h["amplitude_i"].total for h in self.histograms.values())
 
 # ═══════════════════════════ Templates ══════════════════════════
 

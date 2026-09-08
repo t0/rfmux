@@ -8,7 +8,7 @@ directly to MockCRS.generate_resonators().
 
 Groups:
 - Basic: number of resonances, frequency range (GHz), random seed
-- Bias: automatic bias enable and bias amplitude (normalized)
+- Bias: automatic bias enable and bias power (dBm, stored normalized)
 - Advanced (collapsible):
   - Physics: T (K), Popt (W)
   - Circuit: Lg (H), Cc (F), L_junk (H), C_variation, Cc_variation
@@ -17,15 +17,16 @@ Groups:
   - Convergence: convergence_tolerance
 """
 
-from .utils import QtWidgets, QtCore, QtGui
+from .utils import QtWidgets, QtGui
 import re
 import math
 import numpy as np
 from rfmux.mock import config as mc
+from rfmux.mock.helpers import merged
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
-from .custom_material_dialog import CustomMaterialDialog, ManageCustomMaterialsDialog
+from .custom_material_dialog import ManageCustomMaterialsDialog
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):
@@ -45,10 +46,13 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Mock Mode Configuration")
         self.setModal(True)
-        self.setMinimumWidth(1000)
+        self.setMinimumWidth(800)
 
         # Store current configuration or use defaults
         self.current_config = current_config or {}
+
+        # Constrain QLineEdit width to prevent excessive horizontal expansion
+        self.setStyleSheet("QLineEdit { max-width: 150px; }")
 
         # Create UI
         self._create_ui()
@@ -172,17 +176,55 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.auto_bias_check.setToolTip("Configure tones on generated resonator frequencies")
         layout.addWidget(self.auto_bias_check, row, 0, 1, 2)
 
-        layout.addWidget(QtWidgets.QLabel("Bias Amplitude (normalized):"), row, 2)
+        layout.addWidget(QtWidgets.QLabel("Bias Power (dBm):"), row, 2)
+        # Shown in dBm; the config holds the normalized amplitude, at the
+        # mock's DAC scale.
         self.bias_amplitude_spin = QtWidgets.QDoubleSpinBox()
-        self.bias_amplitude_spin.setRange(0.0001, 1.0)
-        self.bias_amplitude_spin.setSingleStep(0.001)
-        self.bias_amplitude_spin.setDecimals(4)
-        self.bias_amplitude_spin.setToolTip("Amplitude for automatic biasing (e.g., 0.01 ≈ -40 dBm)")
+        self.bias_amplitude_spin.setRange(-120.0, mc.DAC_SCALE_DBM)
+        self.bias_amplitude_spin.setSingleStep(1.0)
+        self.bias_amplitude_spin.setDecimals(1)
+        self.bias_amplitude_spin.setToolTip(
+            "Tone power the automatic biasing sweeps and biases at, "
+            f"relative to the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale")
         layout.addWidget(self.bias_amplitude_spin, row, 3)
 
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
         return group
 
+    # ── Collapsible section helper ──────────────────────────────────
+    def _make_collapsible_section(self, title: str, content: QtWidgets.QWidget,
+                                   default_open: bool = False) -> QtWidgets.QWidget:
+        """Wrap *content* in a toggle-button / container pair.
+
+        Returns a QWidget containing a flat toggle button and the content
+        widget.  When collapsed only the single-line button is visible.
+        """
+        wrapper = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(wrapper)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(0)
+
+        prefix = "▼ " if default_open else "▶ "
+        toggle = QtWidgets.QPushButton(prefix + title)
+        toggle.setCheckable(True)
+        toggle.setChecked(default_open)
+        toggle.setFlat(True)
+        toggle.setStyleSheet(
+            "QPushButton { text-align: left; padding: 4px 6px; font-weight: bold; font-size: 9pt; }"
+        )
+        content.setVisible(default_open)
+
+        def _on_toggle():
+            vis = not content.isVisible()
+            content.setVisible(vis)
+            toggle.setText(("▼ " if vis else "▶ ") + title)
+
+        toggle.clicked.connect(_on_toggle)
+        vbox.addWidget(toggle)
+        vbox.addWidget(content)
+        return wrapper
+
+    # ── Advanced widget (master toggle + two-column collapsible sections) ──
     def _create_advanced_widget(self) -> QtWidgets.QWidget:
         widget = QtWidgets.QWidget()
         vbox = QtWidgets.QVBoxLayout(widget)
@@ -200,17 +242,29 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.advanced_container.setVisible(False)
         grid = QtWidgets.QHBoxLayout(self.advanced_container)
 
-        # Left column
+        # Left column — MKIDs-related sections (each independently collapsible)
         left = QtWidgets.QVBoxLayout()
-        left.addWidget(self._create_mkids_group())
+        left.setSpacing(2)
+        left.addWidget(self._make_collapsible_section(
+            "Material & Operating Point", self._create_physics_driven_page()))
+        left.addWidget(self._make_collapsible_section(
+            "Geometry", self._create_geometry_section()))
+        left.addWidget(self._make_collapsible_section(
+            "Circuit Design", self._create_circuit_section()))
+        left.addWidget(self._create_derived_section())  # always visible
         left.addStretch()
 
-        # Right column
+        # Right column — operational sections (each independently collapsible)
         right = QtWidgets.QVBoxLayout()
-        right.addWidget(self._create_readout_group())
-        right.addWidget(self._create_pulse_injection_group())
-        right.addWidget(self._create_noise_group())
-        right.addWidget(self._create_simulation_realism_group())
+        right.setSpacing(2)
+        right.addWidget(self._make_collapsible_section(
+            "Readout", self._create_readout_group()))
+        right.addWidget(self._make_collapsible_section(
+            "Pulse Injection", self._create_pulse_injection_group()))
+        right.addWidget(self._make_collapsible_section(
+            "Noise", self._create_noise_group()))
+        right.addWidget(self._make_collapsible_section(
+            "Simulation Realism", self._create_simulation_realism_group()))
         right.addStretch()
 
         grid.addLayout(left)
@@ -223,124 +277,118 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.advanced_container.setVisible(not vis)
         self.advanced_toggle.setText("▼ Advanced Parameters" if not vis else "▶ Advanced Parameters")
 
-    def _create_mkids_group(self) -> QtWidgets.QGroupBox:
-        """Create unified MKIDs section with physics-driven parameters."""
-        group = QtWidgets.QGroupBox("MKIDs (Microwave Kinetic Inductance Detectors)")
-        layout = QtWidgets.QVBoxLayout(group)
-        
-        # Physics-driven content
-        physics_page = self._create_physics_driven_page()
-        layout.addWidget(physics_page)
-        
-        # Circuit Design Parameters (shared between both modes, always visible)
-        circuit_group = QtWidgets.QGroupBox("Circuit Design Parameters")
-        circuit_layout = QtWidgets.QGridLayout(circuit_group)
-        
-        circuit_layout.addWidget(QtWidgets.QLabel("Lg (geometric, nH):"), 0, 0)
+    # ── Section builders ──
+
+    def _create_geometry_section(self) -> QtWidgets.QWidget:
+        """Geometry inputs: width, thickness, length and derived volume."""
+        page = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(page)
+        layout.setContentsMargins(6, 2, 6, 2)
+
+        geom_grid = QtWidgets.QGridLayout()
+        geom_grid.addWidget(QtWidgets.QLabel("Width (µm):"), 0, 0)
+        self.width_edit = QtWidgets.QLineEdit("2.0")
+        self.width_edit.setValidator(ScientificDoubleValidator())
+        self.width_edit.setToolTip("Strip width in micrometers.")
+        geom_grid.addWidget(self.width_edit, 0, 1)
+
+        geom_grid.addWidget(QtWidgets.QLabel("Thickness (nm):"), 0, 2)
+        self.thickness_edit = QtWidgets.QLineEdit("30")
+        self.thickness_edit.setValidator(ScientificDoubleValidator())
+        self.thickness_edit.setToolTip("Film thickness in nanometers.")
+        geom_grid.addWidget(self.thickness_edit, 0, 3)
+
+        geom_grid.addWidget(QtWidgets.QLabel("Length (µm):"), 1, 0)
+        self.length_edit = QtWidgets.QLineEdit("9000")
+        self.length_edit.setValidator(ScientificDoubleValidator())
+        self.length_edit.setToolTip("Strip length in micrometers.")
+        geom_grid.addWidget(self.length_edit, 1, 1)
+
+        self.volume_label = QtWidgets.QLabel("Volume: 540 µm³")
+        self.volume_label.setStyleSheet("color: #1E90FF; font-weight: bold;")
+        geom_grid.addWidget(self.volume_label, 1, 2, 1, 2)
+
+        layout.addLayout(geom_grid)
+        return page
+
+    def _create_circuit_section(self) -> QtWidgets.QWidget:
+        """Circuit design parameters."""
+        page = QtWidgets.QWidget()
+        grid = QtWidgets.QGridLayout(page)
+        grid.setContentsMargins(6, 2, 6, 2)
+
+        grid.addWidget(QtWidgets.QLabel("Lg (geometric, nH):"), 0, 0)
         self.Lg_edit = QtWidgets.QLineEdit()
         self.Lg_edit.setValidator(ScientificDoubleValidator())
-        self.Lg_edit.setToolTip("Geometric inductance in nanohenries. Fixed by fabrication geometry.")
-        circuit_layout.addWidget(self.Lg_edit, 0, 1)
-        
-        circuit_layout.addWidget(QtWidgets.QLabel("L_junk (nH):"), 0, 2)
+        self.Lg_edit.setToolTip("Geometric inductance in nanohenries.")
+        grid.addWidget(self.Lg_edit, 0, 1)
+
+        grid.addWidget(QtWidgets.QLabel("L_junk (nH):"), 0, 2)
         self.L_junk_edit = QtWidgets.QLineEdit()
         self.L_junk_edit.setValidator(ScientificDoubleValidator())
-        self.L_junk_edit.setToolTip("Parasitic inductance in nH. Dilutes α_k = Lk/(Lk+Lg+L_junk).")
-        circuit_layout.addWidget(self.L_junk_edit, 0, 3)
-        
-        circuit_layout.addWidget(QtWidgets.QLabel("Cc (fF):"), 1, 0)
+        self.L_junk_edit.setToolTip("Parasitic inductance in nH.")
+        grid.addWidget(self.L_junk_edit, 0, 3)
+
+        grid.addWidget(QtWidgets.QLabel("Cc (fF):"), 1, 0)
         self.Cc_edit = QtWidgets.QLineEdit()
         self.Cc_edit.setValidator(ScientificDoubleValidator())
-        self.Cc_edit.setToolTip("Coupling capacitor in femtofarads. Controls coupling strength.")
-        circuit_layout.addWidget(self.Cc_edit, 1, 1)
-        
-        circuit_layout.addWidget(QtWidgets.QLabel("C variation:"), 1, 2)
+        self.Cc_edit.setToolTip("Coupling capacitor in femtofarads.")
+        grid.addWidget(self.Cc_edit, 1, 1)
+
+        grid.addWidget(QtWidgets.QLabel("C variation:"), 1, 2)
         self.C_variation_edit = QtWidgets.QLineEdit()
         self.C_variation_edit.setValidator(ScientificDoubleValidator())
         self.C_variation_edit.setToolTip("Fractional σ of capacitance variation (e.g., 0.01 = 1%).")
-        circuit_layout.addWidget(self.C_variation_edit, 1, 3)
-        
-        circuit_layout.addWidget(QtWidgets.QLabel("Cc variation:"), 2, 0)
+        grid.addWidget(self.C_variation_edit, 1, 3)
+
+        grid.addWidget(QtWidgets.QLabel("Cc variation:"), 2, 0)
         self.Cc_variation_edit = QtWidgets.QLineEdit()
         self.Cc_variation_edit.setValidator(ScientificDoubleValidator())
         self.Cc_variation_edit.setToolTip("Fractional σ of coupling capacitor variation.")
-        circuit_layout.addWidget(self.Cc_variation_edit, 2, 1)
-        
-        layout.addWidget(circuit_group)
-        
-        # Derived Properties - combined two-column layout
-        derived_group = QtWidgets.QGroupBox("Derived Properties (live-updated)")
-        derived_main_layout = QtWidgets.QHBoxLayout(derived_group)
-        
-        # Left column - physics derived values
+        grid.addWidget(self.Cc_variation_edit, 2, 1)
+
+        return page
+
+    def _create_derived_section(self) -> QtWidgets.QWidget:
+        """Derived Properties (always visible, live-updated)."""
+        group = QtWidgets.QGroupBox("Derived Properties (live-updated)")
+        main_layout = QtWidgets.QHBoxLayout(group)
+
+        # Left column
         left_form = QtWidgets.QFormLayout()
         left_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        
-        self.nqp_label = QtWidgets.QLabel("—")
-        self.nqp_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.nqp_label.setToolTip("Quasiparticle density. Increases with T and Popt.")
+        mono = "color: #1E90FF; font-family: monospace;"
+
+        self.nqp_label = QtWidgets.QLabel("—"); self.nqp_label.setStyleSheet(mono)
         left_form.addRow("nqp (µm⁻³):", self.nqp_label)
-        
-        self.sigma1_label = QtWidgets.QLabel("—")
-        self.sigma1_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.sigma1_label.setToolTip("Real part of complex conductivity (related to loss).")
+        self.sigma1_label = QtWidgets.QLabel("—"); self.sigma1_label.setStyleSheet(mono)
         left_form.addRow("σ₁ (S/m):", self.sigma1_label)
-        
-        self.sigma2_label = QtWidgets.QLabel("—")
-        self.sigma2_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.sigma2_label.setToolTip("Imaginary part of complex conductivity (related to kinetic inductance).")
+        self.sigma2_label = QtWidgets.QLabel("—"); self.sigma2_label.setStyleSheet(mono)
         left_form.addRow("σ₂ (S/m):", self.sigma2_label)
-        
-        self.lk_square_label = QtWidgets.QLabel("—")
-        self.lk_square_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.lk_square_label.setToolTip("Kinetic inductance per square. Material property at given T, Popt.")
+        self.lk_square_label = QtWidgets.QLabel("—"); self.lk_square_label.setStyleSheet(mono)
         left_form.addRow("Lk□ (pH/□):", self.lk_square_label)
-        
-        self.lk_label = QtWidgets.QLabel("—")
-        self.lk_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.lk_label.setToolTip("Total kinetic inductance = Lk□ × (length/width).")
+        self.lk_label = QtWidgets.QLabel("—"); self.lk_label.setStyleSheet(mono)
         left_form.addRow("Lk (nH):", self.lk_label)
-        
-        self.r_label = QtWidgets.QLabel("—")
-        self.r_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.r_label.setToolTip("Total series resistance scaled from surface resistance.")
+        self.r_label = QtWidgets.QLabel("—"); self.r_label.setStyleSheet(mono)
         left_form.addRow("R (mΩ):", self.r_label)
-        
-        # Right column - circuit derived values
+
+        # Right column
         right_form = QtWidgets.QFormLayout()
         right_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        
-        self.ltotal_label = QtWidgets.QLabel("—")
-        self.ltotal_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.ltotal_label.setToolTip("Total inductance = Lk + Lg + L_junk. Determines resonance frequency.")
+
+        self.ltotal_label = QtWidgets.QLabel("—"); self.ltotal_label.setStyleSheet(mono)
         right_form.addRow("L_total (nH):", self.ltotal_label)
-        
-        self.alpha_k_label = QtWidgets.QLabel("—")
-        self.alpha_k_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.alpha_k_label.setToolTip("Kinetic inductance fraction = Lk / L_total. Determines responsivity.")
+        self.alpha_k_label = QtWidgets.QLabel("—"); self.alpha_k_label.setStyleSheet(mono)
         right_form.addRow("α_k:", self.alpha_k_label)
-        
-        self.qr_label = QtWidgets.QLabel("—")
-        self.qr_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.qr_label.setToolTip("Loaded quality factor. Limited by both internal loss and coupling.")
+        self.qr_label = QtWidgets.QLabel("—"); self.qr_label.setStyleSheet(mono)
         right_form.addRow("Q_r (loaded):", self.qr_label)
-        
-        self.qi_label = QtWidgets.QLabel("—")
-        self.qi_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.qi_label.setToolTip("Internal quality factor. Limited by loss only.")
+        self.qi_label = QtWidgets.QLabel("—"); self.qi_label.setStyleSheet(mono)
         right_form.addRow("Q_i (internal):", self.qi_label)
-        
-        self.qc_label = QtWidgets.QLabel("—")
-        self.qc_label.setStyleSheet("color: #1E90FF; font-family: monospace;")
-        self.qc_label.setToolTip("Coupling quality factor. Higher Qc = weaker coupling.")
+        self.qc_label = QtWidgets.QLabel("—"); self.qc_label.setStyleSheet(mono)
         right_form.addRow("Q_c (coupling):", self.qc_label)
-        
-        # Add columns to main layout
-        derived_main_layout.addLayout(left_form)
-        derived_main_layout.addLayout(right_form)
-        
-        layout.addWidget(derived_group)
-        
+
+        main_layout.addLayout(left_form)
+        main_layout.addLayout(right_form)
         return group
     
     def _create_physics_driven_page(self) -> QtWidgets.QWidget:
@@ -398,37 +446,6 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         
         # Load materials into combo box
         self._refresh_material_list()
-        
-        # Geometry subsection
-        geom_group = QtWidgets.QGroupBox("Geometry")
-        geom_layout = QtWidgets.QGridLayout(geom_group)
-        
-        # Width, thickness, length inputs
-        geom_layout.addWidget(QtWidgets.QLabel("Width (µm):"), 0, 0)
-        self.width_edit = QtWidgets.QLineEdit("2.0")
-        self.width_edit.setValidator(ScientificDoubleValidator())
-        self.width_edit.setToolTip("Strip width in micrometers. Affects number of squares.")
-        geom_layout.addWidget(self.width_edit, 0, 1)
-        
-        geom_layout.addWidget(QtWidgets.QLabel("Thickness (nm):"), 0, 2)
-        self.thickness_edit = QtWidgets.QLineEdit("30")
-        self.thickness_edit.setValidator(ScientificDoubleValidator())
-        self.thickness_edit.setToolTip("Film thickness in nanometers. Thicker films reduce surface impedance.")
-        geom_layout.addWidget(self.thickness_edit, 0, 3)
-        
-        geom_layout.addWidget(QtWidgets.QLabel("Length (µm):"), 1, 0)
-        self.length_edit = QtWidgets.QLineEdit("9000")
-        self.length_edit.setValidator(ScientificDoubleValidator())
-        self.length_edit.setToolTip("Strip length in micrometers. Longer → higher Lk and R.")
-        geom_layout.addWidget(self.length_edit, 1, 1)
-        
-        # Volume display (calculated)
-        self.volume_label = QtWidgets.QLabel("Volume: 540 µm³")
-        self.volume_label.setStyleSheet("color: #1E90FF; font-weight: bold;")
-        geom_layout.addWidget(self.volume_label, 1, 2, 1, 2)
-        
-        layout.addWidget(geom_group)
-        
         return page
     
     def _refresh_material_list(self):
@@ -677,86 +694,181 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.udp_noise_edit.setToolTip("Additive ADC noise level in counts")
         layout.addWidget(self.udp_noise_edit, row, 1)
 
+        # ── TLS (1/f) frequency noise ─────────────────────────────
+        # Unlike the white noise above, this is CORRELATED in time: it
+        # drifts the baseline rather than adding scatter, which is what
+        # stresses trigger thresholds and baseline tracking.
+        row += 1
+        self.tls_noise_enabled_cb = QtWidgets.QCheckBox(
+            "Enable TLS 1/f frequency noise")
+        self.tls_noise_enabled_cb.setToolTip(
+            "Two-level-system frequency wander: a 1/f^alpha drift of the\n"
+            "resonance frequency, correlated in time. Common-mode across\n"
+            "the slow and PFB streams (it is one resonator moving).")
+        layout.addWidget(self.tls_noise_enabled_cb, row, 0, 1, 2)
+
+        layout.addWidget(QtWidgets.QLabel("TLS RMS (df/f):"), row, 2)
+        self.tls_rms_edit = QtWidgets.QLineEdit()
+        self.tls_rms_edit.setValidator(ScientificDoubleValidator())
+        self.tls_rms_edit.setToolTip(
+            "RMS fractional frequency wander integrated over the band\n"
+            "(e.g. 1e-7). Compare against your detector responsivity:\n"
+            "wander comparable to the pulse height will swamp triggering.")
+        layout.addWidget(self.tls_rms_edit, row, 3)
+
+        row += 1
+        layout.addWidget(QtWidgets.QLabel("TLS slope (alpha):"), row, 0)
+        self.tls_alpha_edit = QtWidgets.QLineEdit()
+        self.tls_alpha_edit.setValidator(ScientificDoubleValidator())
+        self.tls_alpha_edit.setToolTip(
+            "PSD ~ 1/f^alpha. 1.0 = pink; TLS is often quoted near 0.5.")
+        layout.addWidget(self.tls_alpha_edit, row, 1)
+
+        layout.addWidget(QtWidgets.QLabel("TLS corner (Hz):"), row, 2)
+        self.tls_corner_edit = QtWidgets.QLineEdit()
+        self.tls_corner_edit.setValidator(ScientificDoubleValidator())
+        self.tls_corner_edit.setToolTip(
+            "Upper corner of the power law; it spans three decades below.\n"
+            "Above the corner the wander rolls off and white noise wins.")
+        layout.addWidget(self.tls_corner_edit, row, 3)
+
         return group
 
     def _create_pulse_injection_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Pulse Injection")
-        layout = QtWidgets.QGridLayout(group)
+        main_layout = QtWidgets.QVBoxLayout(group)
+        main_layout.setSpacing(4)
+        main_layout.setContentsMargins(6, 6, 6, 6)
+
+        # ── Core pulse parameters (always visible) ──
+        core_grid = QtWidgets.QGridLayout()
+        core_grid.setSpacing(4)
         row = 0
 
-        layout.addWidget(QtWidgets.QLabel("Period (s):"), row, 0)
+        core_grid.addWidget(QtWidgets.QLabel("Period (s):"), row, 0)
         self.pulse_period_edit = QtWidgets.QLineEdit()
         self.pulse_period_edit.setValidator(ScientificDoubleValidator())
         self.pulse_period_edit.setToolTip("Pulse period in seconds (used in periodic mode).")
-        layout.addWidget(self.pulse_period_edit, row, 1)
+        core_grid.addWidget(self.pulse_period_edit, row, 1)
 
-        layout.addWidget(QtWidgets.QLabel("Probability (/s):"), row, 2)
+        core_grid.addWidget(QtWidgets.QLabel("Probability (/s):"), row, 2)
         self.pulse_probability_edit = QtWidgets.QLineEdit()
         self.pulse_probability_edit.setValidator(ScientificDoubleValidator())
         self.pulse_probability_edit.setToolTip("Per-resonator per-second probability (random mode).\nEffective per-update chance ≈ probability × dt.")
-        layout.addWidget(self.pulse_probability_edit, row, 3)
+        core_grid.addWidget(self.pulse_probability_edit, row, 3)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Tau rise (s):"), row, 0)
+        core_grid.addWidget(QtWidgets.QLabel("Tau rise (s):"), row, 0)
         self.pulse_tau_rise_edit = QtWidgets.QLineEdit()
         self.pulse_tau_rise_edit.setValidator(ScientificDoubleValidator())
         self.pulse_tau_rise_edit.setToolTip("Exponential rise time constant (seconds).")
-        layout.addWidget(self.pulse_tau_rise_edit, row, 1)
+        core_grid.addWidget(self.pulse_tau_rise_edit, row, 1)
 
-        layout.addWidget(QtWidgets.QLabel("Tau decay (s):"), row, 2)
+        core_grid.addWidget(QtWidgets.QLabel("Tau decay (s):"), row, 2)
         self.pulse_tau_decay_edit = QtWidgets.QLineEdit()
         self.pulse_tau_decay_edit.setValidator(ScientificDoubleValidator())
-        self.pulse_tau_decay_edit.setToolTip("Exponential decay time constant (seconds).")
-        layout.addWidget(self.pulse_tau_decay_edit, row, 3)
+        self.pulse_tau_decay_edit.setToolTip("Exponential decay time constant (seconds). Default when random tau mode is 'fixed'.")
+        core_grid.addWidget(self.pulse_tau_decay_edit, row, 3)
 
         row += 1
-        layout.addWidget(QtWidgets.QLabel("Amplitude (× base nqp):"), row, 0)
+        core_grid.addWidget(QtWidgets.QLabel("Amplitude (× nqp):"), row, 0)
         self.pulse_amplitude_edit = QtWidgets.QLineEdit()
         self.pulse_amplitude_edit.setValidator(ScientificDoubleValidator())
-        self.pulse_amplitude_edit.setToolTip("Multiplicative factor relative to base quasiparticle density.\nExample: 2.0 doubles base nqp.")
-        layout.addWidget(self.pulse_amplitude_edit, row, 1)
+        self.pulse_amplitude_edit.setToolTip("Multiplicative factor relative to base quasiparticle density.\nExample: 2.0 doubles base nqp. Default when random amp mode is 'fixed'.")
+        core_grid.addWidget(self.pulse_amplitude_edit, row, 1)
 
-        layout.addWidget(QtWidgets.QLabel("Resonators:"), row, 2)
+        core_grid.addWidget(QtWidgets.QLabel("Resonators:"), row, 2)
         self.pulse_resonators_edit = QtWidgets.QLineEdit()
         self.pulse_resonators_edit.setToolTip('Target resonators: "all" or CSV of 0-based indices (e.g., 0,1,7).')
-        layout.addWidget(self.pulse_resonators_edit, row, 3)
+        core_grid.addWidget(self.pulse_resonators_edit, row, 3)
 
-        # Random amplitude distribution (random mode)
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("Random amplitude mode:"), row, 0)
+        main_layout.addLayout(core_grid)
+
+        # ── Random Amplitude Distribution (inline) ──
+        amp_label = QtWidgets.QLabel("<b>Random Amplitude Distribution</b>")
+        amp_label.setStyleSheet("font-size: 9pt; padding-top: 4px;")
+        main_layout.addWidget(amp_label)
+
+        amp_grid = QtWidgets.QGridLayout()
+        amp_grid.setSpacing(4)
+
+        amp_grid.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
         self.random_amp_mode_combo = QtWidgets.QComboBox()
         self.random_amp_mode_combo.addItems(["fixed", "uniform", "lognormal"])
-        self.random_amp_mode_combo.setToolTip('Random pulse amplitude distribution in "random" mode.')
-        layout.addWidget(self.random_amp_mode_combo, row, 1)
+        self.random_amp_mode_combo.setToolTip('Per-pulse amplitude distribution. "fixed" uses the amplitude above.')
+        amp_grid.addWidget(self.random_amp_mode_combo, 0, 1)
 
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("Uniform min:"), row, 0)
+        amp_grid.addWidget(QtWidgets.QLabel("Uniform min:"), 0, 2)
         self.random_amp_min_edit = QtWidgets.QLineEdit()
         self.random_amp_min_edit.setValidator(ScientificDoubleValidator())
         self.random_amp_min_edit.setToolTip("Minimum amplitude (× base nqp) for uniform distribution (≥ 1.0).")
-        layout.addWidget(self.random_amp_min_edit, row, 1)
+        amp_grid.addWidget(self.random_amp_min_edit, 0, 3)
 
-        layout.addWidget(QtWidgets.QLabel("Uniform max:"), row, 2)
+        amp_grid.addWidget(QtWidgets.QLabel("Uniform max:"), 1, 0)
         self.random_amp_max_edit = QtWidgets.QLineEdit()
         self.random_amp_max_edit.setValidator(ScientificDoubleValidator())
         self.random_amp_max_edit.setToolTip("Maximum amplitude (× base nqp) for uniform distribution (≥ min).")
-        layout.addWidget(self.random_amp_max_edit, row, 3)
+        amp_grid.addWidget(self.random_amp_max_edit, 1, 1)
 
-        row += 1
-        layout.addWidget(QtWidgets.QLabel("Lognormal mean (μ):"), row, 0)
+        amp_grid.addWidget(QtWidgets.QLabel("Lognormal μ:"), 1, 2)
         self.random_amp_logmean_edit = QtWidgets.QLineEdit()
         self.random_amp_logmean_edit.setValidator(ScientificDoubleValidator())
         self.random_amp_logmean_edit.setToolTip("Mean parameter μ for lognormal amplitude distribution.")
-        layout.addWidget(self.random_amp_logmean_edit, row, 1)
+        amp_grid.addWidget(self.random_amp_logmean_edit, 1, 3)
 
-        layout.addWidget(QtWidgets.QLabel("Lognormal sigma (σ):"), row, 2)
+        amp_grid.addWidget(QtWidgets.QLabel("Lognormal σ:"), 2, 0)
         self.random_amp_logsigma_edit = QtWidgets.QLineEdit()
         self.random_amp_logsigma_edit.setValidator(ScientificDoubleValidator())
         self.random_amp_logsigma_edit.setToolTip("Sigma parameter σ (≥ 0) for lognormal amplitude distribution.")
-        layout.addWidget(self.random_amp_logsigma_edit, row, 3)
+        amp_grid.addWidget(self.random_amp_logsigma_edit, 2, 1)
+
+        main_layout.addLayout(amp_grid)
 
         # Connect mode change to toggling of fields
         self.random_amp_mode_combo.currentTextChanged.connect(self._on_random_amp_mode_changed)
+
+        # ── Random Tau Decay Distribution (inline) ──
+        tau_label = QtWidgets.QLabel("<b>Random Tau Decay Distribution</b>")
+        tau_label.setStyleSheet("font-size: 9pt; padding-top: 4px;")
+        main_layout.addWidget(tau_label)
+
+        tau_grid = QtWidgets.QGridLayout()
+        tau_grid.setSpacing(4)
+
+        tau_grid.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
+        self.random_tau_mode_combo = QtWidgets.QComboBox()
+        self.random_tau_mode_combo.addItems(["fixed", "uniform", "lognormal"])
+        self.random_tau_mode_combo.setToolTip('Per-pulse tau_decay distribution. "fixed" uses the tau decay above.')
+        tau_grid.addWidget(self.random_tau_mode_combo, 0, 1)
+
+        tau_grid.addWidget(QtWidgets.QLabel("Uniform min (s):"), 0, 2)
+        self.random_tau_min_edit = QtWidgets.QLineEdit()
+        self.random_tau_min_edit.setValidator(ScientificDoubleValidator())
+        self.random_tau_min_edit.setToolTip("Minimum tau_decay in seconds for uniform distribution (> 0).")
+        tau_grid.addWidget(self.random_tau_min_edit, 0, 3)
+
+        tau_grid.addWidget(QtWidgets.QLabel("Uniform max (s):"), 1, 0)
+        self.random_tau_max_edit = QtWidgets.QLineEdit()
+        self.random_tau_max_edit.setValidator(ScientificDoubleValidator())
+        self.random_tau_max_edit.setToolTip("Maximum tau_decay in seconds for uniform distribution (≥ min).")
+        tau_grid.addWidget(self.random_tau_max_edit, 1, 1)
+
+        tau_grid.addWidget(QtWidgets.QLabel("Lognormal μ:"), 1, 2)
+        self.random_tau_logmean_edit = QtWidgets.QLineEdit()
+        self.random_tau_logmean_edit.setValidator(ScientificDoubleValidator())
+        self.random_tau_logmean_edit.setToolTip("Mean parameter μ for lognormal tau distribution (e.g. -6.9 → median ~1ms).")
+        tau_grid.addWidget(self.random_tau_logmean_edit, 1, 3)
+
+        tau_grid.addWidget(QtWidgets.QLabel("Lognormal σ:"), 2, 0)
+        self.random_tau_logsigma_edit = QtWidgets.QLineEdit()
+        self.random_tau_logsigma_edit.setValidator(ScientificDoubleValidator())
+        self.random_tau_logsigma_edit.setToolTip("Sigma parameter σ (≥ 0) for lognormal tau distribution.")
+        tau_grid.addWidget(self.random_tau_logsigma_edit, 2, 1)
+
+        main_layout.addLayout(tau_grid)
+
+        # Connect tau mode change to toggling of fields
+        self.random_tau_mode_combo.currentTextChanged.connect(self._on_random_tau_mode_changed)
 
         return group
 
@@ -770,6 +882,16 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             w.setEnabled(is_uniform)
         # Lognormal fields
         for w in (self.random_amp_logmean_edit, self.random_amp_logsigma_edit):
+            w.setEnabled(is_lognormal)
+
+    def _on_random_tau_mode_changed(self, mode: str):
+        # Enable/disable tau distribution-specific fields
+        mode = (mode or "").lower()
+        is_uniform = mode == "uniform"
+        is_lognormal = mode == "lognormal"
+        for w in (self.random_tau_min_edit, self.random_tau_max_edit):
+            w.setEnabled(is_uniform)
+        for w in (self.random_tau_logmean_edit, self.random_tau_logsigma_edit):
             w.setEnabled(is_lognormal)
 
     def _create_simulation_realism_group(self) -> QtWidgets.QGroupBox:
@@ -793,27 +915,45 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         return group
 
     def _reset_to_defaults(self):
-        cfg = mc.defaults()
+        self._populate(mc.defaults())
+
+    def _load_current_values(self):
+        # None in the configuration means "not set": the default holds.
+        self._populate(merged(mc.defaults(), self.current_config))
+
+    def _populate(self, cfg):
+        """Every control from *cfg*, a fully defaulted configuration."""
         # Basic
         self.num_resonances_spin.setValue(int(cfg["num_resonances"]))
         self.freq_start_spin.setValue(float(cfg["freq_start"]) / 1e9)
         self.freq_end_spin.setValue(float(cfg["freq_end"]) / 1e9)
-        self.random_seed_edit.setText("" if cfg["resonator_random_seed"] is None else str(cfg["resonator_random_seed"]))
+        seed = cfg["resonator_random_seed"]
+        self.random_seed_edit.setText("" if seed in (None, "") else str(int(seed)))
+
         # Bias
         self.auto_bias_check.setChecked(bool(cfg["auto_bias_kids"]))
-        self.bias_amplitude_spin.setValue(float(cfg["bias_amplitude"]))
-        # Physics-driven mode
+        self.bias_amplitude_spin.setValue(
+            mc.bias_dbm_from_amplitude(float(cfg["bias_amplitude"])))
+
+        # Material and operating point
         self.T_edit.setText(str(cfg["T"]))
         self.Popt_edit.setText(str(cfg["Popt"]))
-        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
-        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
+        self.width_edit.setText(str(round(cfg["width"] * 1e6, 6)))  # m to µm
+        self.thickness_edit.setText(str(round(cfg["thickness"] * 1e9, 6)))  # m to nm
+        self.length_edit.setText(str(round(cfg["length"] * 1e6, 6)))  # m to µm
+        # Entries read "Al (Aluminum)", or a bare name for a custom material.
+        for i in range(self.material_combo.count()):
+            if self.material_combo.itemText(i).split()[0] == cfg["material"]:
+                self.material_combo.setCurrentIndex(i)
+                break
+
         # Circuit
         self.Lg_edit.setText(str(cfg["Lg"] * 1e9))  # H to nH
         self.Cc_edit.setText(str(cfg["Cc"] * 1e15))  # F to fF
         self.L_junk_edit.setText(str(cfg["L_junk"] * 1e9))  # H to nH
         self.C_variation_edit.setText(str(cfg["C_variation"]))
         self.Cc_variation_edit.setText(str(cfg["Cc_variation"]))
+
         # Readout
         self.Vin_edit.setText(str(cfg["Vin"]))
         self.input_atten_edit.setText(str(cfg["input_atten_dB"]))
@@ -825,126 +965,51 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         except Exception:
             glna_db = 0.0
         self.GLNA_db_spin.setValue(glna_db)
+
         # Noise
         self.nqp_noise_enabled_cb.setChecked(bool(cfg["nqp_noise_enabled"]))
         self.nqp_noise_std_edit.setText(str(cfg["nqp_noise_std_factor"]))
+        self.tls_noise_enabled_cb.setChecked(bool(cfg["tls_noise_enabled"]))
+        self.tls_rms_edit.setText(str(cfg["tls_fractional_rms"]))
+        self.tls_alpha_edit.setText(str(cfg["tls_alpha"]))
+        self.tls_corner_edit.setText(str(cfg["tls_corner_hz"]))
         self.udp_noise_edit.setText(str(cfg["udp_noise_level"]))
-        # Physics Realism & Cache
+
+        # Physics realism and cache
         self.conv_tol_edit.setText(str(cfg["convergence_tolerance"]))
         self.cache_qp_step_edit.setText(str(cfg["cache_qp_step"]))
 
-        # QP Pulses
+        # QP pulses
         self.pulse_period_edit.setText(str(cfg["pulse_period"]))
         self.pulse_probability_edit.setText(str(cfg["pulse_probability"]))
         self.pulse_tau_rise_edit.setText(str(cfg["pulse_tau_rise"]))
         self.pulse_tau_decay_edit.setText(str(cfg["pulse_tau_decay"]))
         self.pulse_amplitude_edit.setText(str(cfg["pulse_amplitude"]))
-        resonators = cfg.get("pulse_resonators", "all")
+        resonators = cfg["pulse_resonators"]
         if isinstance(resonators, list):
             self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
         else:
             self.pulse_resonators_edit.setText(str(resonators))
 
         # Random amplitude distribution
-        ram = str(cfg.get("pulse_random_amp_mode"))
-        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
-        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
-        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
-        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
-        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
-        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
+        self.random_amp_mode_combo.setCurrentIndex(max(
+            0, self.random_amp_mode_combo.findText(str(cfg["pulse_random_amp_mode"]))))
+        self.random_amp_min_edit.setText(str(cfg["pulse_random_amp_min"]))
+        self.random_amp_max_edit.setText(str(cfg["pulse_random_amp_max"]))
+        self.random_amp_logmean_edit.setText(str(cfg["pulse_random_amp_logmean"]))
+        self.random_amp_logsigma_edit.setText(str(cfg["pulse_random_amp_logsigma"]))
         self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
-        
-        # Trigger derived parameter update
+
+        # Random tau_decay distribution
+        self.random_tau_mode_combo.setCurrentIndex(max(
+            0, self.random_tau_mode_combo.findText(str(cfg["pulse_random_tau_mode"]))))
+        self.random_tau_min_edit.setText(str(cfg["pulse_random_tau_min"]))
+        self.random_tau_max_edit.setText(str(cfg["pulse_random_tau_max"]))
+        self.random_tau_logmean_edit.setText(str(cfg["pulse_random_tau_logmean"]))
+        self.random_tau_logsigma_edit.setText(str(cfg["pulse_random_tau_logsigma"]))
+        self._on_random_tau_mode_changed(self.random_tau_mode_combo.currentText())
+
         self._update_all_derived()
-
-    def _load_current_values(self):
-        if not self.current_config:
-            self._reset_to_defaults()
-            return
-        cfg = {**mc.defaults(), **self.current_config}  # fill missing with defaults
-
-        # Basic
-        self.num_resonances_spin.setValue(int(cfg.get("num_resonances")))
-        self.freq_start_spin.setValue(float(cfg.get("freq_start")) / 1e9)
-        self.freq_end_spin.setValue(float(cfg.get("freq_end")) / 1e9)
-        seed = cfg.get("resonator_random_seed", None)
-        self.random_seed_edit.setText("" if seed in (None, "") else str(int(seed)))
-
-        # Bias
-        self.auto_bias_check.setChecked(bool(cfg.get("auto_bias_kids")))
-        self.bias_amplitude_spin.setValue(float(cfg.get("bias_amplitude")))
-
-        # Physics-driven mode
-        self.T_edit.setText(str(cfg.get("T")))
-        self.Popt_edit.setText(str(cfg.get("Popt")))
-        self.width_edit.setText(str(round(cfg.get("width", 2e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        self.thickness_edit.setText(str(round(cfg.get("thickness", 30e-9) * 1e9, 6)))  # m to nm, round to 6 decimals
-        self.length_edit.setText(str(round(cfg.get("length", 9000e-6) * 1e6, 6)))  # m to µm, round to 6 decimals
-        
-        # Material selection (if present in config)
-        if 'material' in cfg:
-            mat_name = cfg['material']
-            # Find material in combo (might be "Al (Aluminum)" or just "Al" or custom "Nb")
-            idx = -1
-            for i in range(self.material_combo.count()):
-                combo_text = self.material_combo.itemText(i)
-                combo_mat = combo_text.split()[0]
-                if combo_mat == mat_name:
-                    idx = i
-                    break
-            if idx >= 0:
-                self.material_combo.setCurrentIndex(idx)
-
-        # Circuit
-        self.Lg_edit.setText(str(cfg.get("Lg") * 1e9))  # H to nH
-        self.Cc_edit.setText(str(cfg.get("Cc") * 1e15))  # F to fF
-        self.L_junk_edit.setText(str(cfg.get("L_junk") * 1e9))  # H to nH
-        self.C_variation_edit.setText(str(cfg.get("C_variation")))
-        self.Cc_variation_edit.setText(str(cfg.get("Cc_variation")))
-
-        # Readout
-        self.Vin_edit.setText(str(cfg.get("Vin")))
-        self.input_atten_edit.setText(str(cfg.get("input_atten_dB")))
-        self.system_termination_edit.setText(str(cfg.get("system_termination")))
-        self.ZLNA_edit.setText(str(cfg.get("ZLNA")))
-        try:
-            glna_val = float(cfg.get("GLNA"))
-            glna_db = 20.0 * math.log10(glna_val) if glna_val > 0 else 0.0
-        except Exception:
-            glna_db = 0.0
-        self.GLNA_db_spin.setValue(glna_db)
-
-        # Noise
-        self.nqp_noise_enabled_cb.setChecked(bool(cfg.get("nqp_noise_enabled")))
-        self.nqp_noise_std_edit.setText(str(cfg.get("nqp_noise_std_factor")))
-        self.udp_noise_edit.setText(str(cfg.get("udp_noise_level")))
-
-        # Physics Realism & Cache
-        self.conv_tol_edit.setText(str(cfg.get("convergence_tolerance")))
-        self.cache_qp_step_edit.setText(str(cfg.get("cache_qp_step")))
-
-        # QP Pulses
-        self.pulse_period_edit.setText(str(cfg.get("pulse_period")))
-        self.pulse_probability_edit.setText(str(cfg.get("pulse_probability")))
-        self.pulse_tau_rise_edit.setText(str(cfg.get("pulse_tau_rise")))
-        self.pulse_tau_decay_edit.setText(str(cfg.get("pulse_tau_decay")))
-        self.pulse_amplitude_edit.setText(str(cfg.get("pulse_amplitude")))
-        resonators = cfg.get("pulse_resonators", "all")
-        if isinstance(resonators, list):
-            self.pulse_resonators_edit.setText(",".join(str(int(r)) for r in resonators))
-        else:
-            self.pulse_resonators_edit.setText(str(resonators))
-
-        # Random amplitude distribution
-        ram = str(cfg.get("pulse_random_amp_mode"))
-        idx_ram = max(0, self.random_amp_mode_combo.findText(ram))
-        self.random_amp_mode_combo.setCurrentIndex(idx_ram)
-        self.random_amp_min_edit.setText(str(cfg.get("pulse_random_amp_min")))
-        self.random_amp_max_edit.setText(str(cfg.get("pulse_random_amp_max")))
-        self.random_amp_logmean_edit.setText(str(cfg.get("pulse_random_amp_logmean")))
-        self.random_amp_logsigma_edit.setText(str(cfg.get("pulse_random_amp_logsigma")))
-        self._on_random_amp_mode_changed(self.random_amp_mode_combo.currentText())
 
     def _validate_and_accept(self):
         # Frequency range
@@ -965,6 +1030,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             float(self.system_termination_edit.text()); float(self.ZLNA_edit.text()); float(self.GLNA_db_spin.value())
             # Noise and physics realism
             float(self.nqp_noise_std_edit.text()); float(self.udp_noise_edit.text()); float(self.conv_tol_edit.text())
+            float(self.tls_rms_edit.text()); float(self.tls_alpha_edit.text()); float(self.tls_corner_edit.text())
             float(self.cache_qp_step_edit.text())
             # QP Pulses
             float(self.pulse_period_edit.text())
@@ -975,6 +1041,9 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             # Random distribution fields (parse regardless; defaults present)
             float(self.random_amp_min_edit.text()); float(self.random_amp_max_edit.text())
             float(self.random_amp_logmean_edit.text()); float(self.random_amp_logsigma_edit.text())
+            # Random tau distribution fields
+            float(self.random_tau_min_edit.text()); float(self.random_tau_max_edit.text())
+            float(self.random_tau_logmean_edit.text()); float(self.random_tau_logsigma_edit.text())
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Invalid Input", "Please enter valid numeric values for all fields.")
             return
@@ -997,7 +1066,8 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
             # Bias
             "auto_bias_kids": bool(self.auto_bias_check.isChecked()),
-            "bias_amplitude": float(self.bias_amplitude_spin.value()),
+            "bias_amplitude": mc.bias_amplitude_from_dbm(
+                float(self.bias_amplitude_spin.value())),
 
             # Physics
             "T": float(self.T_edit.text()),
@@ -1020,6 +1090,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             # Noise
             "nqp_noise_enabled": bool(self.nqp_noise_enabled_cb.isChecked()),
             "nqp_noise_std_factor": float(self.nqp_noise_std_edit.text()),
+            "tls_noise_enabled": bool(self.tls_noise_enabled_cb.isChecked()),
+            "tls_fractional_rms": float(self.tls_rms_edit.text()),
+            "tls_alpha": float(self.tls_alpha_edit.text()),
+            "tls_corner_hz": float(self.tls_corner_edit.text()),
             "udp_noise_level": float(self.udp_noise_edit.text()),
 
             # Physics Realism & Cache
@@ -1042,6 +1116,13 @@ class MockConfigurationDialog(QtWidgets.QDialog):
             "pulse_random_amp_max": float(self.random_amp_max_edit.text()),
             "pulse_random_amp_logmean": float(self.random_amp_logmean_edit.text()),
             "pulse_random_amp_logsigma": float(self.random_amp_logsigma_edit.text()),
+
+            # Random tau_decay distribution
+            "pulse_random_tau_mode": str(self.random_tau_mode_combo.currentText()),
+            "pulse_random_tau_min": float(self.random_tau_min_edit.text()),
+            "pulse_random_tau_max": float(self.random_tau_max_edit.text()),
+            "pulse_random_tau_logmean": float(self.random_tau_logmean_edit.text()),
+            "pulse_random_tau_logsigma": float(self.random_tau_logsigma_edit.text()),
         }
         
         # Add geometry parameters

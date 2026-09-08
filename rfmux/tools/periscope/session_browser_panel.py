@@ -113,6 +113,7 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.filter_combo.addItem("Multisweep", "multisweep")
         self.filter_combo.addItem("Bias KIDs", "bias")
         self.filter_combo.addItem("Noise Spectrum", "noise")
+        self.filter_combo.addItem("Pulse Capture", "pulse")
         self.filter_combo.addItem("Screenshots", "screenshot")
         self.filter_combo.currentIndexChanged.connect(self._on_filter_changed)
         filter_layout.addWidget(self.filter_combo, 1)
@@ -132,7 +133,8 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         
         # Set up file system model (QFileSystemModel is in QtGui)
         self.file_model = QtGui.QFileSystemModel()
-        self.file_model.setNameFilters(["*.pkl", "*.ipynb", ".png"])
+        self.file_model.setNameFilters(
+            ["*.pkl", "*.ipynb", "*.png", "*.h5", "*.hdf5"])
         self.file_model.setNameFilterDisables(False)
         self.file_model.setFilter(
             QtCore.QDir.Filter.Files | QtCore.QDir.Filter.NoDotAndDotDot
@@ -380,11 +382,14 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         filter_type = self.filter_combo.currentData()
         
         if filter_type == "all":
-            self.file_model.setNameFilters(["*.pkl", "*.ipynb", "*.png"])
+            self.file_model.setNameFilters(
+                ["*.pkl", "*.ipynb", "*.png", "*.h5", "*.hdf5"])
         elif filter_type == "ipynb":
             self.file_model.setNameFilters(["*.ipynb"])
         elif filter_type == "screenshot":
             self.file_model.setNameFilters(["*.png"])
+        elif filter_type == "pulse":
+            self.file_model.setNameFilters(["*.h5", "*.hdf5"])
         else:
             # Filter by data type in filename (new format: type_identifier_HHMMSS.pkl)
             # Also support old format for backwards compatibility

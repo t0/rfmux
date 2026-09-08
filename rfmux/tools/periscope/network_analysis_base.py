@@ -1,14 +1,10 @@
 """Base dialog for network analysis parameter entry."""
 
 from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
-    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    DEFAULT_AMP_START, DEFAULT_AMP_STOP, DEFAULT_AMP_ITERATIONS,
-    UnitConverter, traceback
+    QtWidgets, QDoubleValidator, QIntValidator,
+    DEFAULT_AMPLITUDE, DEFAULT_AMP_START, DEFAULT_AMP_STOP, DEFAULT_AMP_ITERATIONS,
+    UnitConverter
 )
-from .tasks import DACScaleFetcher
 import numpy as np  # For linspace
 
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):

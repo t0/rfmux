@@ -34,6 +34,19 @@ crs = s.query(rfmux.CRS).one()
 await crs.resolve()
 ```
 
+For an interactive session, use the helper instead. It builds the session,
+resolves it, configures simulated resonators and starts streaming in one call:
+
+```python
+from rfmux.mock.helpers import create_mock_crs
+
+crs = await create_mock_crs(module=1, config={"num_resonances": 10})
+```
+
+Start one simulation per machine: a second `create_mock_crs()` is a second,
+unrelated simulation streaming to the same UDP port. Attach to a running one
+by hostname.
+
 Mock mode emulates:
 - KID non-linear inductance
 - Tuning algorithms
@@ -64,10 +77,14 @@ crs = s.query(rfmux.CRS).filter_by(serial="0033").one()
 # Get all modules on a CRS
 modules = s.query(rfmux.ReadoutModule).filter_by(crs=crs).all()
 
-# Get specific channels
-channels = s.query(rfmux.ReadoutChannel).filter_by(
-    module=modules[0],
-    channel_number=[1, 2, 3]
+# Get one channel, or a set of them
+channel = s.query(rfmux.ReadoutChannel).filter_by(
+    module=modules[0], channel=1
+).one()
+
+channels = s.query(rfmux.ReadoutChannel).filter(
+    rfmux.ReadoutChannel.module == modules[0],
+    rfmux.ReadoutChannel.channel.in_([1, 2, 3]),
 ).all()
 ```
 
@@ -75,11 +92,14 @@ channels = s.query(rfmux.ReadoutChannel).filter_by(
 
 ### Network Analysis
 
-```python
-from rfmux.algorithms.measurement import take_netanal
+Most measurement algorithms are registered on the CRS object, so you call them
+as methods rather than importing them. `module` is keyword-only:
 
-# Run network analysis sweep
-result = await take_netanal(crs, module=1, channel=1)
+```python
+# Sweep 600 MHz - 1.1 GHz and return frequencies, iq_complex, phase_degrees
+result = await crs.take_netanal(
+    amp=0.001, fmin=0.6e9, fmax=1.1e9, npoints=50000, module=1
+)
 ```
 
 ### Acquiring Samples
@@ -94,24 +114,37 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 ### Biasing KIDs
 
-```python
-from rfmux.algorithms.measurement import bias_kids
+`bias_kids` takes multisweep results and biases each detector. It is not
+registered on `CRS`: import it and pass `crs`.
 
-# Auto-bias resonators
-await bias_kids(crs, module=1, channels=[1, 2, 3])
+```python
+from rfmux.algorithms.measurement.bias_kids import bias_kids
+
+sweeps = await crs.multisweep(
+    center_frequencies=resonance_frequencies,
+    span_hz=500e3, npoints_per_sweep=500, amp=0.001, module=1,
+)
+bias_results = await bias_kids(crs=crs, multisweep_results=sweeps, module=1)
+
+# {detector_index: {"bias_frequency": ..., "df_calibration": ..., ...}}
 ```
+
+The full sequence (sweep, unwrap cable delay, find resonances, multisweep, fit,
+bias, measure noise) is documented and runnable in
+`rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`.
 
 ## IPython Integration
 
-rfmux integrates with IPython via the `awaitless` module, which automatically transforms `await` expressions:
+rfmux depends on the `awaitless` package, which lets you call coroutines in
+IPython and Jupyter without writing `await`. `import rfmux` loads it for you
+whenever it detects an IPython session. There is nothing to enable:
 
 ```python
 # In IPython/Jupyter, these are equivalent:
 await crs.resolve()
-crs.resolve()  # awaitless automatically adds await
+crs.resolve()  # awaitless supplies the await
 
-# To use awaitless, start IPython with:
-ipython --TerminalIPythonApp.exec_lines='import rfmux.awaitless'
+# In a plain .py script neither applies: use asyncio.run() around an async main().
 ```
 
 ## YAML Configuration Tags
@@ -140,7 +173,7 @@ Common tags:
 - `!Resonator` - Individual resonator
 - `!Resonators` - Bulk import from CSV
 - `!ChannelMappings` - Channel-to-resonator mappings from CSV
-- `!flavour "rfmux.core.mock"` - Enable mock mode
+- `!flavour "rfmux.mock"` - Enable mock mode
 
 ## Network Configuration
 
@@ -148,7 +181,12 @@ For reliable data streaming, you may need to increase UDP receive buffer sizes a
 
 ## Next Steps
 
-- [Launch Periscope](periscope.md) for real-time visualization
+- Launch Periscope for real-time visualization: `uv run periscope` (or
+  `periscope`; `periscope MOCK` runs it on a simulated board)
 - [Configure networking](networking.md) for optimal data streaming
 - [Flash firmware](firmware.md) to update CRS boards
-- Explore example notebooks in `home/Demos/`
+- [Capture detector pulses](pulse-capture.md) in Periscope or from a script
+- Work through the runnable reference notebooks in
+  `rfmux/reference-notebooks/Demos/` (`simplified_tuning_flow.md`,
+  `pulse_capture.md`); `rfmux/reference-notebooks/README.md` says how to
+  open them.

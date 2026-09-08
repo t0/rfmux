@@ -6,12 +6,63 @@
 #include <pybind11/complex.h>
 #include <pybind11/numpy.h>
 #include <fmt/format.h>
+#include <cmath>
 
 #include "packets.hpp"
 
 namespace py = pybind11;
 using namespace packets;
 using namespace py::literals;
+
+/* One interleaved I/Q pair as complex, the packetizer gain (256) taken out. */
+static inline std::complex<double> iq_at(const int32_t* raw, py::ssize_t k) {
+	return std::complex<double>(raw[2*k], raw[2*k+1]) / 256.;
+}
+static inline std::complex<double> iq_at(const std::vector<int32_t>& raw, py::ssize_t k) {
+	return iq_at(raw.data(), k);
+}
+
+/* Up to max_packets popped under one lock with the GIL released, all
+ * of one layout: *same* judges each against the first, and the first
+ * it refuses stays queued. */
+template <class Same>
+static std::vector<Packet> pop_batch(PacketQueue& self, size_t max_packets, Same same) {
+	std::vector<Packet> got;
+	got.reserve(std::min<size_t>(max_packets, 4096));
+	py::gil_scoped_release release;
+	self.pop_while(got, max_packets, [&](const Packet& p) {
+		return got.empty() || same(p, got.front());
+	});
+	return got;
+}
+
+/* The per-packet timestamp columns of a batch: seconds of day (NaN
+ * when the stamp is not disciplined), recent, seq, and the year/yday
+ * of the first disciplined stamp, 0 when none. */
+struct StampColumns {
+	py::array_t<double> seconds;
+	py::array_t<bool> recent;
+	py::array_t<uint32_t> seq;
+	int32_t year = 0, yday = 0;
+};
+
+static StampColumns stamp_columns(const std::vector<Packet>& got) {
+	const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+	StampColumns c{py::array_t<double>(n), py::array_t<bool>(n),
+	               py::array_t<uint32_t>(n)};
+	auto T = c.seconds.mutable_unchecked<1>();
+	auto R = c.recent.mutable_unchecked<1>();
+	auto Q = c.seq.mutable_unchecked<1>();
+	bool have_day = false;
+	for (py::ssize_t i = 0; i < n; i++) {
+		const Timestamp ts = got[i].timestamp();
+		R(i) = ts.is_recent();
+		T(i) = ts.seconds_of_day();
+		Q(i) = got[i].seq();
+		if (ts.is_recent() && !have_day) { c.year = ts.y; c.yday = ts.d; have_day = true; }
+	}
+	return c;
+}
 
 PYBIND11_MODULE(_receiver, m) {
 	py::class_<Timestamp>(m, "Timestamp")
@@ -116,7 +167,7 @@ PYBIND11_MODULE(_receiver, m) {
 		py::array_t<std::complex<double>> result(num_samples);
 		auto out = result.mutable_unchecked<1>();
 		for (py::ssize_t i = 0; i < num_samples; i++)
-			out(i) = std::complex<double>(raw[2*i], raw[2*i+1]) / 256.;
+			out(i) = iq_at(raw, i);
 		return result;
 	};
 
@@ -192,7 +243,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (idx < 0 || idx >= num_channels)
 					throw py::index_error("channel index out of range");
 				return py::cast(
-					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+					iq_at(raw, idx)
 				);
 			}
 
@@ -206,7 +257,7 @@ PYBIND11_MODULE(_receiver, m) {
 				auto out = result.mutable_unchecked<1>();
 				for (py::ssize_t i = 0; i < length; i++) {
 					py::ssize_t ch = start + i * step;
-					out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+					out(i) = iq_at(raw, ch);
 				}
 				return result;
 			}
@@ -226,7 +277,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (ch < 0) ch += num_channels;
 				if (ch < 0 || ch >= num_channels)
 					throw py::index_error("channel index out of range");
-				out(i) = std::complex<double>(raw[2*ch], raw[2*ch+1]) / 256.;
+				out(i) = iq_at(raw, ch);
 			}
 			return result;
 		})
@@ -342,7 +393,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (idx < 0 || idx >= num_samples)
 					throw py::index_error("sample index out of range");
 				return py::cast(
-					std::complex<double>(raw[2*idx], raw[2*idx+1]) / 256.
+					iq_at(raw, idx)
 				);
 			}
 
@@ -356,7 +407,7 @@ PYBIND11_MODULE(_receiver, m) {
 				auto out = result.mutable_unchecked<1>();
 				for (py::ssize_t i = 0; i < length; i++) {
 					py::ssize_t s = start + i * step;
-					out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+					out(i) = iq_at(raw, s);
 				}
 				return result;
 			}
@@ -375,7 +426,7 @@ PYBIND11_MODULE(_receiver, m) {
 				if (s < 0) s += num_samples;
 				if (s < 0 || s >= num_samples)
 					throw py::index_error("sample index out of range");
-				out(i) = std::complex<double>(raw[2*s], raw[2*s+1]) / 256.;
+				out(i) = iq_at(raw, s);
 			}
 			return result;
 		})
@@ -449,6 +500,7 @@ PYBIND11_MODULE(_receiver, m) {
 		.def_readonly("packets_received", &PacketQueue::Stats::packets_received)
 		.def_readonly("packets_dropped", &PacketQueue::Stats::packets_dropped)
 		.def_readonly("sequence_gaps", &PacketQueue::Stats::sequence_gaps)
+		.def_readonly("packets_missing", &PacketQueue::Stats::packets_missing)
 		.def_readonly("last_seq", &PacketQueue::Stats::last_seq);
 
 	py::class_<PacketQueue, std::shared_ptr<PacketQueue>>(m, "PacketQueue")
@@ -458,6 +510,109 @@ PYBIND11_MODULE(_receiver, m) {
 		}, "timeout_ms"_a = py::none(),
 		   "Pop packet from queue (blocks, releases GIL)")
 		.def("try_pop", &PacketQueue::try_pop, "Try to pop packet (non-blocking)")
+		.def("pop_readout_batch", [](PacketQueue& self, size_t max_packets) -> py::object {
+			/* A drain's worth of readout packets demuxed at once, so a
+			 * consumer touches one object per frame rather than one per
+			 * packet.  Returns (samples, seconds, recent, fir_stage, seq,
+			 * year, yday) or None when the queue is empty:
+			 *   samples   complex128 (packets, channels), the packetizer
+			 *             gain taken out (/256) exactly as np.array(pkt)
+			 *   seconds   float64 seconds of day per packet, NaN when the
+			 *             timestamp is not disciplined
+			 *   recent    bool per packet
+			 *   fir_stage uint8, seq uint32 per packet
+			 *   year/yday of the first disciplined stamp, 0 when none
+			 * A batch holds one packet width: it stops short at a size
+			 * change, which stays queued for the next call. */
+			const std::vector<Packet> got = pop_batch(self, max_packets,
+				[](const Packet& p, const Packet& first) {
+					return p.size() == first.size();
+				});
+			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+			if (n == 0)
+				return py::none();
+			const py::ssize_t width = (got.front().size() == LONG_PACKET_SIZE)
+				? LONG_PACKET_CHANNELS : SHORT_PACKET_CHANNELS;
+
+			py::array_t<std::complex<double>> samples({n, width});
+			py::array_t<uint8_t> fir(n);
+			auto S = samples.mutable_unchecked<2>();
+			auto F = fir.mutable_unchecked<1>();
+			for (py::ssize_t i = 0; i < n; i++) {
+				const char* data = static_cast<const char*>(got[i].data());
+				const auto* hdr = reinterpret_cast<const readout_packet_header*>(data);
+				const auto* raw = reinterpret_cast<const int32_t*>(
+					data + sizeof(readout_packet_header));
+				for (py::ssize_t ch = 0; ch < width; ch++)
+					S(i, ch) = iq_at(raw, ch);
+				F(i) = hdr->fir_stage;
+			}
+			const StampColumns st = stamp_columns(got);
+			return py::make_tuple(samples, st.seconds, st.recent, fir, st.seq,
+			                      st.year, st.yday);
+		}, "max_packets"_a = 4096,
+		   "Pop up to max_packets readout packets demuxed into arrays")
+		.def("pop_pfb_batch", [](PacketQueue& self, size_t max_packets) -> py::object {
+			/* A drain's worth of PFB packets demuxed at once.  Returns
+			 * (samples, seconds, recent, seq, mode, slots, num_samples,
+			 * year, yday) or None when the queue is empty:
+			 *   samples     complex128 (groups, packets * time_samples):
+			 *               row g is the g-th interleaved channel, the
+			 *               packetizer gain taken out (/256) as np.array
+			 *   seconds     float64 seconds of day per packet, NaN when
+			 *               the stamp is not disciplined; recent bool
+			 *   seq         uint32 per packet
+			 *   mode/slots/num_samples of the batch, shared by every
+			 *               packet in it; year/yday of the first
+			 *               disciplined stamp, 0 when none
+			 * A batch holds one layout: it stops short where the mode,
+			 * slots or sample count change, which stays queued. */
+			auto layout = [](const Packet& p) {
+				const auto* h = static_cast<const pfb_packet_header*>(p.data());
+				return std::make_tuple(h->mode, h->slot1, h->slot2, h->slot3,
+				                       h->slot4, h->num_samples);
+			};
+			const std::vector<Packet> got = pop_batch(self, max_packets,
+				[&layout](const Packet& p, const Packet& first) {
+					return layout(p) == layout(first);
+				});
+			const py::ssize_t n = static_cast<py::ssize_t>(got.size());
+			if (n == 0)
+				return py::none();
+			const auto* first = static_cast<const pfb_packet_header*>(got.front().data());
+			const int groups = first->mode == 0 ? 1 : first->mode == 1 ? 2 : 4;
+			const py::ssize_t num_samples = first->num_samples;
+			const py::ssize_t time_samples = num_samples / groups;
+
+			py::array_t<std::complex<double>> samples({static_cast<py::ssize_t>(groups),
+			                                           n * time_samples});
+			auto S = samples.mutable_unchecked<2>();
+			for (py::ssize_t i = 0; i < n; i++) {
+				const auto* raw = reinterpret_cast<const int32_t*>(
+					static_cast<const char*>(got[i].data()) + sizeof(pfb_packet_header));
+				for (py::ssize_t k = 0; k < time_samples * groups; k++)
+					S(k % groups, i * time_samples + k / groups) = iq_at(raw, k);
+			}
+			const StampColumns st = stamp_columns(got);
+			return py::make_tuple(samples, st.seconds, st.recent, st.seq,
+			                      static_cast<int>(first->mode),
+			                      py::make_tuple(first->slot1, first->slot2,
+			                                     first->slot3, first->slot4),
+			                      static_cast<int>(num_samples), st.year, st.yday);
+		}, "max_packets"_a = 256,
+		   "Pop up to max_packets PFB packets demuxed into arrays")
+		.def("drop_pfb_before", [](PacketQueue& self, double t_target, size_t limit) -> size_t {
+			/* Pop and discard PFB packets stamped before t_target seconds
+			 * of day (undisciplined stamps count as before), at most
+			 * limit of them; the first at or past it stays queued. */
+			std::vector<Packet> gone;
+			py::gil_scoped_release release;
+			return self.pop_while(gone, limit, [t_target](const Packet& p) {
+				const double t = p.timestamp().seconds_of_day();
+				return std::isnan(t) || t < t_target;
+			});
+		}, "t_target"_a, "limit"_a = 1 << 20,
+		   "Discard PFB packets stamped before t_target seconds of day")
 		.def("empty", &PacketQueue::empty)
 		.def("size", &PacketQueue::size)
 		.def("clear", &PacketQueue::clear, "Clear all packets from queue")
@@ -483,6 +638,8 @@ PYBIND11_MODULE(_receiver, m) {
 		.def("get_queue", &PacketReceiver::get_queue,
 			 "serial"_a, "module"_a,
 			 "Get queue for specific module")
+		.def("flush_all", &PacketReceiver::flush_all,
+			 "Every held packet to its queue, in order; call once receive_batch has stopped")
 		.def("get_all_queues", &PacketReceiver::get_all_queues,
 			 "Get all active queues as (serial, module, queue) tuples")
 		.def("get_stats", &PacketReceiver::get_stats)

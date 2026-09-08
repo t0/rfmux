@@ -21,7 +21,25 @@ CREST_FACTOR = 3.5
 
 TERMINATION = 50.0
 COMB_SAMPLING_FREQ = 625e6
+
+#: Per-channel sample rate of the PFB stream, in Hz.  Samples are
+#: complex, so this is the full complex bandwidth.
 PFB_SAMPLING_FREQ = COMB_SAMPLING_FREQ / 256
+
+# The decimated readout path: two cascaded CIC filters after the PFB.
+# CIC1 is fixed; CIC2's rate change is the decimation stage.  Both the
+# spectral droop correction and the group delay below are derived from
+# these, so they are stated once.
+CIC1_STAGES = 3
+CIC1_DECIMATION = 64
+CIC2_STAGES = 6
+CIC1_SAMPLING_FREQ = PFB_SAMPLING_FREQ / CIC1_DECIMATION   # CIC2's input rate
+
+#: Nyquist frequency of PFB_SAMPLING_FREQ -- the single-sided bandwidth,
+#: and numerically also the PFB bin spacing (512 bins across
+#: COMB_SAMPLING_FREQ).  NOT a sample rate: dividing a sample count by
+#: this gives twice the true elapsed time.
+PFB_NYQUIST_FREQ = PFB_SAMPLING_FREQ / 2
 
 DDS_PHASE_ACC_NBITS = 32  # bits
 FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
@@ -116,6 +134,17 @@ def convert_volts_to_watts(volts, termination=50.0):
     return watts
 
 
+def volts_squared_to_dbm(v2, termination=TERMINATION, floor=0.0):
+    """Mean-square volts (a power spectral density in V^2/Hz, or a power
+    spectrum in V^2) to dBm, or dBm/Hz.  Volts are peak amplitudes
+    throughout rfmux, so the power is v2 / 2 / termination, the same
+    convention as convert_volts_to_watts.  *floor* clamps the ratio
+    before the log so an empty bin does not give -inf."""
+    watts = np.asarray(v2, dtype=float) / 2.0 / termination
+    ratio = np.maximum(watts / 1e-3, floor)
+    return 10.0 * np.log10(ratio)
+
+
 def convert_volts_to_dbm(volts, termination=50.0):
     """
     Convenience function for converting a signal amplitude in
@@ -156,7 +185,47 @@ def decimation_to_sampling(dec_stage):
     float
         Sampling rate in Hz
     """
-    return 625e6 / 256 / 64 / 2**dec_stage
+    return CIC1_SAMPLING_FREQ / 2**dec_stage
+
+
+def sampling_to_decimation(sample_rate):
+    """The decimation stage nearest a slow-stream sample rate, 0-6.
+
+    The inverse of :func:`decimation_to_sampling`, for callers that were
+    handed a rate rather than the stage that produced it.  Rates that
+    match no stage round to the nearest one.
+    """
+    if not sample_rate or sample_rate <= 0:
+        raise ValueError(f"sample_rate must be positive, got {sample_rate!r}")
+    stage = int(round(np.log2(CIC1_SAMPLING_FREQ / sample_rate)))
+    return min(6, max(0, stage))
+
+
+def cic_group_delay(stages, rate_change):
+    """Group delay of an N-stage boxcar CIC, in its INPUT samples: N(R-1)/2."""
+    return stages * (rate_change - 1) / 2.0
+
+
+def decimated_stream_delay_s(dec_stage):
+    """Seconds the decimated (slow) stream lags the PFB stream.
+
+    The slow stream passes CIC1 and CIC2, the PFB stream neither, and the
+    firmware does not correct the slow packet timestamps for the filters'
+    group delay: a feature the PFB stream shows at time T appears in the
+    slow stream at T + this.  Output-referred, CIC2 contributes
+    3(R-1)/R slow samples — 2.81 at stage 4, 2.91 at stage 5, 2.95 at
+    stage 6 — and CIC1 a fixed 38.7 µs (1.5 samples at stage 0).
+
+    A property of the firmware, stated here beside the CIC droop
+    correction that uses the same filters.  Where it is acted on —
+    DualPulseCaptureSession pulling the slow clock back, and the mock
+    stamping its slow packets late — is marked TEMPORARY, to be removed
+    when the RTL timestamps the decimated stream at its filter centroid.
+    This function stays: it describes the filters either way.
+    """
+    r2 = 2 ** int(dec_stage)
+    return (cic_group_delay(CIC1_STAGES, CIC1_DECIMATION) / PFB_SAMPLING_FREQ
+            + cic_group_delay(CIC2_STAGES, r2) / CIC1_SAMPLING_FREQ)
 
 
 def _general_single_cic_correction(frequencies, f_in, R=64, N=6):
@@ -247,19 +316,20 @@ def compensate_psd_for_cics(frequencies, psd, dec_stage=6, spectrum_cutoff=0.9):
 
     Arrays (frequencies, corrected_psd)"""
 
-    # Define CIC decimation parameters
-    R1 = 64
+    R1 = CIC1_DECIMATION
     R2 = 2**dec_stage
-    f_in1 = 625e6 / 256.0  # Original samplerate before 1st CIC
-    f_in2 = f_in1 / R1     # Samplerate before 2nd CIC
-    fs = f_in2 / R2        # Final sample rate
+    f_in1 = PFB_SAMPLING_FREQ    # Original samplerate before 1st CIC
+    f_in2 = CIC1_SAMPLING_FREQ   # Samplerate before 2nd CIC
+    fs = f_in2 / R2              # Final sample rate
 
     # The CIC corrections are symmetric, take abs in case this is a dual-sideband PSD
     freq_abs = np.abs(frequencies)
 
     # Apply CIC correction for both CIC stages
-    cic1_corr_c = _general_single_cic_correction(freq_abs, f_in1, R=R1, N=3)
-    cic2_corr_c = _general_single_cic_correction(freq_abs, f_in2, R=R2, N=6)
+    cic1_corr_c = _general_single_cic_correction(freq_abs, f_in1, R=R1,
+                                                 N=CIC1_STAGES)
+    cic2_corr_c = _general_single_cic_correction(freq_abs, f_in2, R=R2,
+                                                 N=CIC2_STAGES)
     correction = cic1_corr_c * cic2_corr_c
     psd_corrected = psd / correction**2
 
@@ -454,12 +524,7 @@ def spectrum_from_slow_tod(
             psd_c_corrected / ((psd_c_corrected[0]))
         )
     elif reference=='absolute':
-        # absolute => convert V^2 -> W => dBm
-        p_c = psd_c_corrected / 50.0
-        # clamp the ratio p_c/1e-3 to avoid log10(0)
-        ratio = p_c / 1e-3
-        ratio_safe = np.maximum(ratio, eps)
-        psd_dual_sideband_db = 10.0 * np.log10(ratio_safe)        
+        psd_dual_sideband_db = volts_squared_to_dbm(psd_c_corrected, floor=eps)
 
     else: # Keep in counts
         psd_dual_sideband_db = psd_c_corrected
@@ -520,18 +585,8 @@ def spectrum_from_slow_tod(
         psd_i_db = 10.0 * np.log10(psd_i_corrected / carrier)
         psd_q_db = 10.0 * np.log10(psd_q_corrected / carrier)        
     elif reference == 'absolute':
-        # absolute => convert V^2 -> W -> dBm, with zero‑floor
-        p_i = psd_i_corrected / 50.0
-        p_q = psd_q_corrected / 50.0
-    
-        # avoid log10(0)
-        ratio_i = p_i / 1e-3
-        ratio_q = p_q / 1e-3
-        ratio_i = np.maximum(ratio_i, eps)
-        ratio_q = np.maximum(ratio_q, eps)
-
-        psd_i_db = 10.0 * np.log10(ratio_i)
-        psd_q_db = 10.0 * np.log10(ratio_q)
+        psd_i_db = volts_squared_to_dbm(psd_i_corrected, floor=eps)
+        psd_q_db = volts_squared_to_dbm(psd_q_corrected, floor=eps)
     else: # Keep in counts
         psd_i_db = psd_i_corrected
         psd_q_db = psd_q_corrected
@@ -677,6 +732,35 @@ def exp_bin_noise_data(f: np.ndarray, psd: np.ndarray, nbins: int = 1000) -> tup
             psd_binned.append(np.mean(psd[mask]))
     
     return np.array(fbinned), np.array(psd_binned)
+
+
+def apply_iq_conversion(i_vals, q_vals, factor):
+    """Convert an (I, Q) pair by a complex factor.
+
+    Computes ``(I + jQ) * factor`` and returns its real and imaginary
+    parts, in the convention :func:`convert_iq_to_df` defines: a
+    frequency shift moves IQ by ``df * (dI/df + j dQ/df)``, so
+    multiplying by the calibration -- its reciprocal -- recovers the
+    shift.  The factor carries whatever conversion is wanted: a rotation
+    into the frequency basis, a scale into volts or hertz, or both.
+
+    Parameters
+    ----------
+    i_vals, q_vals : array_like or float
+        The two quadratures, in matching units.
+    factor : complex
+        Conversion to apply.
+
+    Returns
+    -------
+    tuple
+        ``(first, second)`` -- the real and imaginary parts of the
+        product, shaped like the inputs.  With a df calibration these
+        are frequency shift and dissipation.
+    """
+    f = complex(factor)
+    c, s = f.real, f.imag
+    return i_vals * c - q_vals * s, i_vals * s + q_vals * c
 
 
 def convert_iq_to_df(iq, fbias, f_calsweep, iq_calsweep):

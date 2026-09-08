@@ -16,12 +16,40 @@ All functions are JIT-compiled for 10-25x speedup over pure Python.
 
 Numba is a required dependency for this module.
 """
-import numpy as np
-from numba import jit, prange
-import os
 import platform
-import subprocess
+import types as _types
+
+import numpy as np
 import numba
+from numba import jit, prange
+
+
+# ============================================================================
+# Small-n dispatch
+# ============================================================================
+# numba's parallel=True enters a thread-parallel region at every prange.
+# That entry costs a few microseconds, which dwarfs the actual work when
+# there are only a handful of resonators — and the convergence solver hits
+# three pranges per iteration for ~60 iterations, so it pays that cost
+# ~180 times per call.  Measured at n=5 the serial build is 27x faster;
+# parallel only pulls ahead above n ~ 1000.  Both builds are compiled and
+# selected per call on the array length.
+PARALLEL_MIN_N = 1024
+
+
+def _serial_twin(dispatcher, name, **jit_kwargs):
+    """Recompile a parallel dispatcher's source with parallel=False.
+
+    The twin gets its own __qualname__ so numba's on-disk cache keys it
+    separately — the two builds share a code object and would otherwise
+    collide.
+    """
+    py = dispatcher.py_func
+    twin = _types.FunctionType(py.__code__, py.__globals__, name,
+                               py.__defaults__, py.__closure__)
+    twin.__qualname__ = name
+    return jit(nopython=True, parallel=False, cache=True, **jit_kwargs)(twin)
+
 
 # Physical constants
 H = 6.626e-34  # Planck constant
@@ -219,7 +247,7 @@ def calc_R_L(f, Zs, length, width, R_spoiler):
 # ============================================================================
 
 @jit(nopython=True, parallel=True, cache=True)
-def vectorized_update_params_from_nqp(
+def _vectorized_update_params_from_nqp_par(
     nqp_array, readout_freqs, T_array, Delta0_array, 
     N0_array, sigmaN_array, thickness_array, 
     width_array, length_array, R_spoiler_array
@@ -291,12 +319,25 @@ def vectorized_update_params_from_nqp(
     return R_out, Lk_out
 
 
+_vectorized_update_params_from_nqp_ser = _serial_twin(
+    _vectorized_update_params_from_nqp_par,
+    "_vectorized_update_params_from_nqp_ser")
+
+
+def vectorized_update_params_from_nqp(nqp_array, *args):
+    """Update R and Lk for all resonators from quasiparticle density."""
+    fn = (_vectorized_update_params_from_nqp_par
+          if len(nqp_array) >= PARALLEL_MIN_N
+          else _vectorized_update_params_from_nqp_ser)
+    return fn(nqp_array, *args)
+
+
 # ============================================================================
 # Convergence Loop
 # ============================================================================
 
 @jit(nopython=True, parallel=True, cache=True, fastmath=True)
-def converged_lekid_parameters(
+def _converged_lekid_parameters_par(
     frequency, amplitude, 
     L_array, R_array, C_array, Cc_array,
     base_Lk, base_Lg, base_L_junk,
@@ -437,6 +478,19 @@ def converged_lekid_parameters(
     
     # Return converged values
     return L_work, R_array, currents_array, actual_iterations
+
+
+_converged_lekid_parameters_ser = _serial_twin(
+    _converged_lekid_parameters_par, "_converged_lekid_parameters_ser",
+    fastmath=True)
+
+
+def converged_lekid_parameters(frequency, amplitude, L_array, *args, **kwargs):
+    """Self-consistent convergence loop for current-dependent inductance."""
+    fn = (_converged_lekid_parameters_par
+          if len(L_array) >= PARALLEL_MIN_N
+          else _converged_lekid_parameters_ser)
+    return fn(frequency, amplitude, L_array, *args, **kwargs)
 
 
 # ============================================================================
@@ -646,6 +700,21 @@ def compute_s21_parallel(
     S21 = 2.0 * S21_raw * att_factor * GLNA
     
     return S21
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def compute_s21_batch(fc, Vin, L2d, C2d, R2d, Cc_array,
+                      ZLNA, GLNA, input_atten_dB, system_termination):
+    """compute_s21_parallel for each row of (L2d, C2d, R2d): one
+    dispatch per batch of samples instead of one per sample.  The
+    per-row arithmetic is the same function."""
+    n = L2d.shape[0]
+    out = np.zeros(n, dtype=np.complex128)
+    for k in range(n):
+        out[k] = compute_s21_parallel(fc, Vin, L2d[k], C2d[k], R2d[k],
+                                      Cc_array, ZLNA, GLNA, input_atten_dB,
+                                      system_termination)
+    return out
 
 
 # ============================================================================

@@ -1,0 +1,13 @@
+# Nothing that looks like Periscope session output may be committed from the
+# test tree, whatever it is called.
+#
+# The session base directory is chosen in the session dialog and remembered in
+# QSettings, so it follows wherever it was last pointed. It was once pointed at
+# test/session_testing/, which accumulated ~1.1 GB of capture .h5 inside the
+# test suite. That directory now lives at outputs/ (ignored in the root
+# .gitignore), and this pattern is the backstop: if anyone's settings still
+# resolve to somewhere under test/, the captures still cannot be committed.
+#
+# Session folders are named session_<YYYYmmdd>_<HHMMSS> by
+# session_manager.start_session().
+session_*/

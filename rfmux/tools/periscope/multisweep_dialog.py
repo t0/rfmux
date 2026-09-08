@@ -1,13 +1,9 @@
 """Dialog for multisweep settings."""
 
 from .utils import (
-    QtWidgets, QtCore, QtGui, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
-    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    MULTISWEEP_DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_SPAN_HZ, MULTISWEEP_DEFAULT_NPOINTS, 
-    MULTISWEEP_DEFAULT_NSAMPLES, DEFAULT_AMP_START, DEFAULT_AMP_STOP, DEFAULT_AMP_ITERATIONS,
-    UnitConverter, traceback
+    QtWidgets, QtCore, QtGui, QDoubleValidator, QIntValidator,
+    DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_SPAN_HZ, MULTISWEEP_DEFAULT_NPOINTS, 
+    MULTISWEEP_DEFAULT_NSAMPLES, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
 from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py

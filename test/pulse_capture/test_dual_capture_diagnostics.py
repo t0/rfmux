@@ -1,0 +1,666 @@
+"""Dual (both-mode) capture: what a capture that cannot work reports,
+how pair windows are taken as each ring catches up, and what a pair
+carries."""
+
+import asyncio
+
+import numpy as np
+import pytest
+
+from rfmux import streamer
+from rfmux.pulse_capture.sources import run_pfb_source
+from test.pulse_capture.test_source_drain import _loopback_pair, _patched_socket
+from test.qt_helpers import spin
+
+
+class _NeverFed:
+    channels = [1]
+
+    def feed_block(self, ch, i_vals, q_vals, timestamps):
+        raise AssertionError("a silent socket must feed nothing")
+
+
+def test_silent_pfb_socket_is_an_error(monkeypatch):
+    """Zero packets ever is a configuration problem, not an empty
+    capture: returning 0.0 would end a dual capture as though it had
+    been stopped."""
+    # A private loopback socket nothing sends to, so the real PFB
+    # multicast group cannot leak packets in.
+    with _loopback_pair() as (recv, send, port):
+        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+        with pytest.raises(TimeoutError, match="fast streamer is not sending"):
+            asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
+
+
+class _Signals:
+    def __init__(self, sink):
+        class _E:
+            def emit(_self, msg):
+                sink.append(msg)
+        self.error = _E()
+        self.warning = _E()
+
+
+def _watchdog_task(states):
+    """A PulseCaptureTask stripped to what the watchdog touches."""
+    from types import SimpleNamespace
+
+    from rfmux.tools.periscope.pulse_capture_task import PulseCaptureTask
+
+    t = PulseCaptureTask.__new__(PulseCaptureTask)
+    errors = []
+    t.signals = _Signals(errors)
+    t.session = SimpleNamespace(state=states)
+    return t, errors
+
+
+def test_watchdog_names_a_stream_still_training_and_nothing_else(monkeypatch):
+    async def fast_sleep(_s):
+        pass
+    monkeypatch.setattr(asyncio, "sleep", fast_sleep)
+
+    t, errors = _watchdog_task({"slow": "estimating", "fast": "capturing"})
+    ticks = {"n": 0}
+
+    def stop():
+        ticks["n"] += 1
+        return ticks["n"] > 2
+
+    asyncio.run(t._dual_watchdog(stop))
+    assert errors, "a stuck stream produced no warning"
+    assert "slow stream" in errors[0]
+    assert "no stream may trigger" in errors[0]
+
+    t, errors = _watchdog_task({"slow": "capturing", "fast": "capturing"})
+    asyncio.run(t._dual_watchdog(lambda: False))  # returns on its own
+    assert errors == []
+
+
+def test_dual_streams_receive_the_calibrations():
+    """trigger_basis="df" in a dual capture rotates both streams:
+    stored_units is "Hz" when the rotation happened, "V" when not."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+
+    cfg = PulseCaptureConfig(trigger_basis="df", noise_train_ms=50.0)
+    d = DualPulseCaptureSession(
+        channels=[1], module=1, slow_rate=1000.0, fast_rate=10000.0,
+        config=cfg, hdf5_path=None,
+        df_calibrations={1: 2.0e6 + 0j})
+    d.start()
+    t = np.arange(50) / 1000.0
+    z = np.zeros(50)
+    d.feed_slow_block(1, z, z, 1000.0 + t)
+    d.feed_fast_block(1, z, z, 1000.0 + t / 10.0)
+    d.stop()
+
+    assert d.slow.trigger_basis == "df"
+    assert d.slow.stored_units.get(1) == "Hz", d.slow.stored_units
+    assert d.fast.stored_units.get(1) == "Hz", d.fast.stored_units
+
+
+def _task_with_pfb(active):
+    """A PulseCaptureTask stripped to the streamer check."""
+    from rfmux.tools.periscope.pulse_capture_task import PulseCaptureTask
+
+    calls = []
+
+    class _CRS:
+        async def get_pfb_streamer(self, module=1):
+            return active
+
+        async def set_pfb_streamer(self, channel=None, module=1):
+            calls.append(channel)
+
+    t = PulseCaptureTask.__new__(PulseCaptureTask)
+    t.crs = _CRS()
+    t.module = 2
+    t.host = "127.0.0.1"
+    t._stop_requested = False
+    t.isInterruptionRequested = lambda: False
+    errors = []
+    t.signals = _Signals(errors)
+    t.signals.failed = t.signals.error
+    return t, errors, calls
+
+
+@pytest.mark.parametrize("active, wanted, ok", [
+    ([1, 2], [1, 2], True), ([2, 1], [1, 2], True), (None, [1, 2], False),
+    ([], [1, 2], False), ([1], [1, 2], False), ([1, 2, 3, 4], [1], True),
+    ([1, 2, 3], [1, 2], True), (1, [1], True), (2, [1], False)])
+def test_capture_uses_the_streamer_as_configured(active, wanted, ok):
+    """The capture reads what the board streams and never sets it: every
+    captured channel must be among the streamed ones.  The board
+    reports a single channel as a bare integer."""
+    t, errors, calls = _task_with_pfb(active)
+    problem = asyncio.run(t._pfb_mismatch(wanted))
+    assert (problem is None) is ok
+    if not ok:
+        assert "Streamer Configuration" in problem
+    assert calls == []
+
+
+def test_an_unreadable_streamer_report_is_named():
+    t, errors, calls = _task_with_pfb(object())
+    problem = asyncio.run(t._pfb_mismatch([1]))
+    assert problem and "get_pfb_streamer" in problem
+
+
+def test_a_mode_the_streamer_cannot_feed_fails_before_running(monkeypatch):
+    from types import SimpleNamespace
+    from rfmux.pulse_capture import sources
+    t, errors, calls = _task_with_pfb(None)
+    t.session = SimpleNamespace(channels=[1])
+    t.mode = "both"
+
+    async def never(*a, **k):
+        raise AssertionError("must not start a source")
+    monkeypatch.setattr(sources, "run_dual_source", never)
+    asyncio.run(t._run_both())
+    assert errors and "off" in errors[0]
+    assert calls == []
+
+
+def test_stream_lag_is_reported_in_stats():
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, noise_train_ms=50.0,
+                             max_pulse_ms=50.0)
+    d = DualPulseCaptureSession(channels=[1], module=1, slow_rate=1000.0,
+                                fast_rate=100000.0, config=cfg, hdf5_path=None)
+    d.start()
+    t = 43000.0
+    # Slow fed to t+2.0, fast only to t+0.5: fast trails by 1.5 s.
+    d.feed_slow_block(1, np.zeros(2000), np.zeros(2000), t + np.arange(2000) / 1000.0)
+    d.feed_fast_block(1, np.zeros(50000), np.zeros(50000), t + np.arange(50000) / 100000.0)
+    d.stop()
+
+    st = d.stats()
+    assert st["stream_lag_s"] == pytest.approx(1.5, abs=0.05)
+    assert st["ring_overlap_s"] is not None and st["ring_overlap_s"] > 0
+
+
+def test_status_line_warns_on_lag(qt_app):
+    """Green inside half the ring overlap, a warning colour past it, a
+    stronger one past the overlap, and the note reaches the status line."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    ok, tip = panel._stream_lag_signal({"stream_lag_s": 0.02, "ring_overlap_s": 0.4})
+    assert tip is None
+    amber, tip = panel._stream_lag_signal({"stream_lag_s": 0.25, "ring_overlap_s": 0.4})
+    assert amber != ok and "fast stream" in tip[0]
+    red, tip = panel._stream_lag_signal({"stream_lag_s": 3.5, "ring_overlap_s": 0.4})
+    assert red not in (ok, amber)
+
+    panel._last_stats = {"pairs_matched": 0, "pairs_unmatched": 8,
+                         "slow": {"total_pulses": 2}, "fast": {"total_pulses": 6},
+                         "stream_lag_s": 3.5, "ring_overlap_s": 0.4}
+    panel._refresh_status_line()
+    assert "behind" in panel.status_label.text()
+    assert panel.status_label.toolTip()
+    panel.close()
+    spin(qt_app)
+
+
+def _dual_for_deferral():
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=50.0, noise_train_ms=50.0)
+    pairs = []
+    d = DualPulseCaptureSession(
+        channels=[1], module=1, slow_rate=1000.0, fast_rate=100000.0,
+        config=cfg, hdf5_path=None, pair_window_wait_s=3.0,
+        on_pair=lambda p: pairs.append(p), on_error=lambda m: None)
+    d.start()
+    return d, pairs
+
+
+def _feed_to(d, stream, t_from, t_to, fs):
+    n = int(round((t_to - t_from) * fs))
+    t = t_from + np.arange(n) / fs
+    z = np.zeros(n)
+    (d.feed_slow_block if stream == "slow" else d.feed_fast_block)(1, z, z, t)
+
+
+def _pair(idx, t_trig, T0=43000.0, fast_core=0.05):
+    return {"channel": 1, "pair_idx": idx, "slow_idx": idx, "fast_idx": idx,
+            "slow_summary": {"timestamp": T0 + t_trig, "duration_s": 0.05},
+            "fast_summary": {"timestamp": T0 + t_trig, "duration_s": fast_core},
+            "time_offset": 0.0}
+
+
+def test_each_window_is_taken_when_its_own_ring_covers_it():
+    """The pair forms while the slow ring is behind the window's end:
+    the fast window is taken at once, the slow one when its ring reaches
+    the window's end, and the pair goes out then."""
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 1.00, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    # Union window ends at T0+0.80: past the slow ring, inside the fast.
+    pair = _pair(1, 0.70, fast_core=0.10)
+    d._on_matcher_pair(pair)
+
+    assert pairs == []
+    assert pair.get("fast_tod") is not None, "fast window should be taken now"
+    assert "slow_tod" not in pair, "slow window must wait for its ring"
+
+    _feed_to(d, "slow", T0 + 0.60, T0 + 0.90, 1000.0)
+    assert len(pairs) == 1
+    st = pairs[0]["slow_tod"]
+    assert st is not None
+    assert float(np.nanmax(st["Time"])) >= T0 + 0.80 - 0.002, \
+        "slow window stops short of the window end"
+    d.stop()
+
+
+def test_pairs_are_emitted_in_order_behind_a_waiting_one():
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 1.00, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    d._on_matcher_pair(_pair(1, 0.70))      # waits on the slow ring
+    d._on_matcher_pair(_pair(2, 0.30))      # both rings cover it
+    assert pairs == [], "the ready pair must not overtake the waiting one"
+    _feed_to(d, "slow", T0 + 0.60, T0 + 0.90, 1000.0)
+    assert [p["pair_idx"] for p in pairs] == [1, 2]
+    d.stop()
+
+
+def test_a_stream_that_never_catches_up_does_not_strand_the_pair():
+    """Past pair_window_wait_s of the other stream's time, the pair goes
+    out with what there is."""
+    d, pairs = _dual_for_deferral()
+    d._pair_window_wait_s = 0.2
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 0.85, 100000.0)    # 0.85 < 0.755 + 0.2
+    _feed_to(d, "slow", T0, T0 + 0.60, 1000.0)
+    d._on_matcher_pair(_pair(1, 0.70))
+    assert pairs == []
+    _feed_to(d, "fast", T0 + 1.00, T0 + 1.20, 100000.0)   # slow never comes
+    assert len(pairs) == 1, "pair stranded behind a stream that never came"
+    assert pairs[0].get("slow_tod") is None \
+        or float(np.nanmax(pairs[0]["slow_tod"]["Time"])) < T0 + 0.75
+    d.stop()
+
+
+def test_union_window_spans_the_saved_record():
+    """The pair's window covers the saved record, not the core, and a
+    summary without saved_end_time still gets the core."""
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession as D
+    T = 43000.0
+    pair = {"slow_summary": {"timestamp": T, "start_time": T,
+                             "trigger_time": T + 0.002, "duration_s": 0.004,
+                             "saved_end_time": T + 0.016},
+            "fast_summary": None}
+    t0, t1 = D._union_window(pair)
+    assert t1 >= T + 0.016 and t0 <= T
+
+    old = {"slow_summary": {"timestamp": T, "duration_s": 0.004},
+           "fast_summary": None}
+    t0, t1 = D._union_window(old)
+    assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
+
+
+def test_matcher_pairs_on_the_trigger_instant():
+    """Two records of one event start at different pre-margins and have
+    different core lengths; the matcher pairs on the trigger, and the
+    offset it reports is trigger to trigger."""
+    from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
+    pairs = []
+    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                on_pair=lambda p: pairs.append(p))
+    T = 43000.0
+    # Record starts 115 ms apart, outside the 50 ms window; one trigger.
+    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
+                         "duration_s": 0.010})
+    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T - 0.0016,
+                         "duration_s": 0.002})
+    assert m.matched == 1 and pairs and pairs[0]["slow_idx"] == 1 \
+        and pairs[0]["fast_idx"] == 1, "one event, two records, no match"
+    assert pairs[0]["time_offset"] == pytest.approx(0.0016, abs=1e-9)
+
+
+def test_band_pair_is_one_legend_entry_that_hides_both(qt_app):
+    """Each +/- band is a single item, so its legend entry hides both
+    lines and no unnamed twin is left behind."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    plot = panel.pulse_plot_i
+    ns = ChannelNoiseStats(mean_I=10.0, std_I=2.0, mean_Q=0.0, std_Q=1.0)
+    panel.threshold_spin.setValue(5.0)
+    panel.end_spin.setValue(1.5)
+    panel._annotate_noise_bands(plot, "I", ns, 0.0, 1.0, "#888888")
+
+    named = {}
+    for item in plot.getPlotItem().listDataItems():
+        if item.name():
+            named.setdefault(item.name(), []).append(item)
+    trig = named["±5σ trigger"]
+    assert len(trig) == 1
+    y = np.asarray(trig[0].yData, float)
+    levels = set(np.round(y[np.isfinite(y)], 6))
+    assert levels == {20.0, 0.0}, levels
+    for item in plot.getPlotItem().listDataItems():
+        if not item.name():
+            yy = np.asarray(item.yData, float)
+            assert not (set(np.round(yy[np.isfinite(yy)], 6)) & levels)
+    panel.close()
+    spin(qt_app)
+
+
+def _decision_labels(plot):
+    import pyqtgraph as pg
+    return [item.label.format for item in plot.getPlotItem().items
+            if isinstance(item, pg.InfiniteLine) and item.label is not None]
+
+
+def test_marks_are_drawn_only_inside_the_saved_data(qt_app):
+    """A file written before the window ran to the confirmation has its
+    end past the data: no end mark.  A current record has it on its
+    last sample, with the settled mark before it."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    T = 43000.0
+    old = {"Time": T + np.arange(20) / 1000.0,
+           "trigger_index": 2, "trigger_time": T + 0.002,
+           "below_threshold_index": 6, "below_threshold_time": T + 0.006,
+           "end_index": 40, "end_time": T + 0.040}   # past the data
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, old, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("trigger" in l for l in labels)
+    assert any("below threshold" in l for l in labels)
+    assert not any("end confirmed" in l for l in labels), labels
+
+    current = dict(old, settled_index=8, settled_time=T + 0.008,
+                   end_index=19, end_time=T + 0.019)
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, current, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("settled" in l for l in labels), labels
+    assert any("end confirmed" in l for l in labels), labels
+
+    stopped = dict(current, truncated=True)
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, stopped, T, "I")
+    labels = _decision_labels(panel.pulse_plot_i)
+    assert any("hard stop" in l for l in labels), labels
+    assert not any("end confirmed" in l for l in labels), labels
+    panel.close()
+    spin(qt_app)
+
+
+def test_review_mode_opens_a_file_with_the_old_tail_setting(qt_app, tmp_path):
+    """The stored setting of an older file is ignored, not applied."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    path = tmp_path / "tail_off.h5"
+    PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
+                    {"streamer_mode": "slow", "sample_rate": 596.0,
+                     "save_to_end_confirmed": False}).finalize()
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    assert not hasattr(panel.capture_config, "save_to_end_confirmed")
+    panel.close()
+    spin(qt_app)
+
+
+def test_dual_stats_carry_the_median_skew():
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "fast", T0, T0 + 1.0, 100000.0)
+    _feed_to(d, "slow", T0, T0 + 1.0, 1000.0)
+    for k, off in enumerate((0.0010, 0.0016, 0.0030)):
+        p = _pair(k + 1, 0.3)
+        for key in ("slow_summary", "fast_summary"):
+            p[key].update(duration_s=0.01, start_time=T0 + 0.3,
+                          saved_end_time=T0 + 0.32)
+        p["time_offset"] = off
+        d._on_matcher_pair(p)
+    st = d.stats()
+    assert st["stream_skew_n"] == 3
+    assert st["stream_skew_s"] == pytest.approx(0.0016)
+    d.stop()
+
+
+def test_both_mode_status_counts_samples_dropped_per_stream(qt_app):
+    """A stream whose packets carry no usable timestamp loses every
+    sample; the status line says which stream and how many."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    panel._last_stats = {"pairs_matched": 0, "pairs_unmatched": 0,
+                         "slow": {"total_pulses": 1, "dropped_invalid_ts": 0},
+                         "fast": {"total_pulses": 0, "dropped_invalid_ts": 24000}}
+    panel._refresh_status_line()
+    assert "fast 24000 dropped (no timestamp)" in panel.status_label.text()
+    assert "slow 0" not in panel.status_label.text()
+    panel.close()
+    spin(qt_app)
+
+
+def test_a_fast_event_shorter_than_a_slow_sample_still_shows_slow_samples():
+    """A 0.3 ms fast record at a 1 kHz slow rate holds no slow sample;
+    its window widens to two slow samples about its centre."""
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession as D
+    T = 43000.0
+    pair = {"slow_summary": None,
+            "fast_summary": {"timestamp": T, "start_time": T,
+                             "trigger_time": T + 0.0001, "duration_s": 0.0002,
+                             "saved_end_time": T + 0.0003}}
+    t0, t1 = D._union_window(pair, slow_period=0.001)
+    assert t1 - t0 >= 0.002
+    assert (t0 + t1) / 2 == pytest.approx(T + 0.00015)
+
+    d, pairs = _dual_for_deferral()
+    T0 = 43000.0
+    _feed_to(d, "slow", T0, T0 + 1.0, 1000.0)
+    _feed_to(d, "fast", T0, T0 + 1.0, 100000.0)
+    d._on_matcher_pair({"channel": 1, "pair_idx": 1, "slow_idx": None, "fast_idx": 1,
+                        "slow_summary": None,
+                        "fast_summary": {"timestamp": T0 + 0.5, "start_time": T0 + 0.5,
+                                         "trigger_time": T0 + 0.5001, "duration_s": 0.0002,
+                                         "saved_end_time": T0 + 0.5003},
+                        "time_offset": None})
+    assert pairs and pairs[0].get("slow_tod") is not None
+    assert 2 <= len(pairs[0]["slow_tod"]["Time"]) <= 3
+    d.stop()
+
+
+def test_decision_labels_step_down_so_they_do_not_overlap(qt_app):
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+    panel = PulseCapturePanel(dark_mode=False)
+    T = 43000.0
+    wf = {"Time": T + np.arange(20) / 1000.0,
+          "trigger_index": 2, "trigger_time": T + 0.002,
+          "below_threshold_index": 6, "below_threshold_time": T + 0.006,
+          "end_index": 9, "end_time": T + 0.009}
+    panel.pulse_plot_i.clear()
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I", prefix="slow ")
+    panel._annotate_decisions(panel.pulse_plot_i, wf, T, "I", prefix="fast ")
+    positions = [it.label.orthoPos for it in panel.pulse_plot_i.getPlotItem().items
+                 if isinstance(it, pg.InfiniteLine) and it.label is not None]
+    assert len(positions) == 6
+    assert len(set(round(p, 3) for p in positions)) == 6
+    assert positions == sorted(positions, reverse=True)
+    panel.close()
+    spin(qt_app)
+
+
+# ─────────────── Both mode: fast data for the streamed subset ───────────────
+
+def _both_task(active, channels):
+    """A both-mode task whose session records what the check did to it."""
+    from types import SimpleNamespace
+    t, errors, calls = _task_with_pfb(active)
+    t.mode = "both"
+    warnings_ = []
+    t.signals.warning = type(t.signals.error)()
+    t.signals.warning.emit = warnings_.append
+    log = []
+    t.session = SimpleNamespace(
+        channels=list(channels),
+        set_fast_channels=lambda subset: log.append(("fast", list(subset))),
+        start=lambda: log.append("start"))
+    return t, errors, warnings_, log
+
+
+def test_both_mode_takes_fast_data_for_the_streamed_subset():
+    """Slow on every channel, fast on the ones the PFB streamer carries,
+    and a warning naming them; the capture starts."""
+    t, errors, warned, log = _both_task([2, 1], [1, 2, 3, 4])
+    assert asyncio.run(t._start_after_streamer_check()) == [1, 2, 3, 4]
+    assert log == [("fast", [1, 2]), "start"]
+    assert errors == []
+    assert warned and "[1, 2]" in warned[0] and "2 channel(s)" in warned[0]
+
+
+def test_both_mode_with_every_channel_streamed_warns_nothing():
+    t, errors, warned, log = _both_task([1, 2], [1, 2])
+    assert asyncio.run(t._start_after_streamer_check()) == [1, 2]
+    assert log == [("fast", [1, 2]), "start"] and warned == []
+
+
+def test_both_mode_with_no_streamed_channel_fails_before_starting():
+    t, errors, warned, log = _both_task([7], [1, 2])
+    assert asyncio.run(t._start_after_streamer_check()) is None
+    assert errors and "none of channels [1, 2]" in errors[0]
+    assert log == []
+
+
+def test_fast_mode_still_needs_every_channel_streamed():
+    from types import SimpleNamespace
+    t, errors, calls = _task_with_pfb([1])
+    t.mode = "fast"
+    started = []
+    t.session = SimpleNamespace(channels=[1, 2], start=lambda: started.append(1))
+    assert asyncio.run(t._start_after_streamer_check()) is None
+    assert errors and "needs channels [1, 2]" in errors[0] and not started
+
+
+def test_a_slow_only_channel_pairs_at_once():
+    """A slow pulse on a channel the fast stream does not carry goes out
+    one-sided as soon as the slow ring covers its window, with no wait
+    on the fast stream at all."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=50.0, noise_train_ms=50.0)
+    pairs = []
+    d = DualPulseCaptureSession(
+        channels=[1, 2], fast_channels=[1], module=1, slow_rate=1000.0,
+        fast_rate=100000.0, config=cfg, hdf5_path=None,
+        pair_window_wait_s=3.0, on_pair=pairs.append, on_error=lambda m: None)
+    assert d.fast.channels == [1] and d.fast_feed.channels == [1]
+    assert d.slow.channels == [1, 2]
+    d.start()
+    T = 43000.0
+    for ch in (1, 2):
+        d.feed_slow_block(ch, np.zeros(100), np.zeros(100), T + np.arange(100) / 1000.0)
+    summary = {"trigger_time": T + 0.1, "timestamp": T + 0.09,
+               "duration_s": 0.01, "saved_end_time": T + 0.12}
+    d._on_stream_pulse("slow", 2, 1, summary, {})
+    for ch in (1, 2):
+        d.feed_slow_block(ch, np.zeros(300), np.zeros(300),
+                          T + 0.1 + np.arange(300) / 1000.0)
+    d.stop()
+    assert len(pairs) == 1
+    assert pairs[0]["channel"] == 2 and pairs[0]["fast_idx"] is None
+    assert pairs[0]["slow_idx"] == 1
+
+
+def test_fast_channels_outside_the_capture_are_refused():
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession
+    with pytest.raises(ValueError):
+        DualPulseCaptureSession(channels=[1, 2], fast_channels=[3], module=1,
+                                slow_rate=1000.0, hdf5_path=None)
+
+
+def test_fast_channels_reach_the_file(tmp_path):
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    from rfmux.pulse_capture.hdf5 import DualPulseHDF5Writer, PulseHDF5Reader
+    path = tmp_path / "subset.h5"
+    DualPulseHDF5Writer(path, [1, 2], {"streamer_mode": "both",
+                                       "fast_channels": [1]}).finalize()
+    with PulseHDF5Reader(path) as r:
+        assert list(r.metadata["fast_channels"]) == [1]
+        assert list(r.metadata["channels"]) == [1, 2]
+
+
+def test_template_tab_picks_its_own_stream(qt_app):
+    """In both mode the Template tab stacks the stream its own selector
+    names, independent of the histogram tab's."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    slow, fast = {}, {}
+    panel._on_templates({"stream": "slow", "data": slow})
+    panel._on_templates({"stream": "fast", "data": fast})
+    assert panel._template_data is slow
+    panel.template_stream_combo.setCurrentText("fast")
+    assert panel._template_data is fast
+    assert panel.hist_stream_combo.currentText() == "slow"
+    panel._on_templates({"stream": "slow", "data": {}})
+    assert panel._template_data is fast, "the other stream's update is kept, not shown"
+    panel.close()
+    spin(qt_app)
+
+
+def test_the_dual_file_records_the_pulse_settings(tmp_path):
+    """Min pulse, max pulse, training and the confirmation length per
+    stream reach the dual file, so a fragment's absence can be read
+    against the setting that dropped it."""
+    from rfmux.pulse_capture.capture_session import (
+        DualPulseCaptureSession, PulseCaptureConfig)
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+    cfg = PulseCaptureConfig(min_pulse_ms=1.5, max_pulse_ms=40.0,
+                             noise_train_ms=50.0)
+    path = tmp_path / "dual.h5"
+    d = DualPulseCaptureSession(channels=[1], module=1, slow_rate=1000.0,
+                                fast_rate=100000.0, config=cfg, hdf5_path=path,
+                                on_error=lambda m: None)
+    d.start()
+    d.stop()
+    with PulseHDF5Reader(path) as r:
+        m = r.metadata
+        assert m["min_pulse_ms"] == pytest.approx(1.5)
+        assert m["max_pulse_ms"] == pytest.approx(40.0)
+        assert m["noise_train_ms"] == pytest.approx(50.0)
+        assert int(m["trigger_samples_slow"]) == 1
+        assert int(m["trigger_samples_fast"]) == 2
+
+
+def test_pair_rows_carry_the_pileup_marker(qt_app):
+    """A both-mode row shows what its summaries hold."""
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._both_mode = True
+    panel._reset_results([1], started=None)
+    base = {"channel": 1, "slow_idx": 1, "fast_idx": 1, "time_offset": 0.0,
+            "has_slow_tod": True, "has_fast_tod": True}
+    panel._on_pair_matched(dict(base, pair_idx=1,
+                                slow_summary={"timestamp": 43000.0, "snr": 9.0}))
+    panel._on_pair_matched(dict(base, pair_idx=2,
+                                slow_summary={"timestamp": 43000.5, "snr": 9.0,
+                                              "pileup": True}))
+    panel._on_pair_matched(dict(base, pair_idx=3, fast_idx=None,
+                                slow_summary={"timestamp": 43001.0, "snr": 9.0,
+                                              "truncated": True}))
+    ch_item = panel._channel_items[1]
+    texts = [ch_item.child(i).text(0) for i in range(3)]   # newest first
+    assert texts == ["⊘ slow only", "⚠ slow + fast", "◆ slow + fast"]
+    panel.close()
+    spin(qt_app)

@@ -33,12 +33,16 @@ KEY_SESSION_DIRECTORY = "session/last_base_directory"
 KEY_SESSION_MODE = "session/last_mode"
 KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
+KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
 DEFAULT_MODULE = 1
 DEFAULT_SESSION_MODE = "new"
+DEFAULT_FONT_SCALE = 1.0
+FONT_SCALE_MIN = 0.6
+FONT_SCALE_MAX = 2.5
 
 
 def _get_settings() -> QSettings:
@@ -120,6 +124,34 @@ def set_last_module(module: int) -> None:
         raise ValueError(f"Module must be 1-8, got: {module}")
     settings = _get_settings()
     settings.setValue(KEY_MODULE, module)
+
+
+def get_font_scale() -> float:
+    """
+    Get the UI font scale factor (Ctrl+/Ctrl-/Ctrl+0).
+
+    Returns:
+        float: scale factor, clamped to [FONT_SCALE_MIN, FONT_SCALE_MAX]
+    """
+    settings = _get_settings()
+    try:
+        value = float(settings.value(KEY_FONT_SCALE, DEFAULT_FONT_SCALE))
+    except (TypeError, ValueError):
+        return DEFAULT_FONT_SCALE
+    return max(FONT_SCALE_MIN, min(FONT_SCALE_MAX, value))
+
+
+def set_font_scale(scale: float) -> None:
+    """
+    Save the UI font scale factor.
+
+    Args:
+        scale: scale factor (clamped to the supported range)
+    """
+    settings = _get_settings()
+    settings.setValue(
+        KEY_FONT_SCALE,
+        max(FONT_SCALE_MIN, min(FONT_SCALE_MAX, float(scale))))
 
 
 # ─────────────────────────────────────────────────────────────────

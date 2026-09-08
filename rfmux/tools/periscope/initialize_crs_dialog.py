@@ -1,11 +1,7 @@
 """Dialog to initialize CRS."""
 
 from .utils import (
-    QtWidgets, QtCore, QRegularExpression, QRegularExpressionValidator,
-    QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
-    DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    UnitConverter, traceback
+    QtWidgets
 )
 
 class InitializeCRSDialog(QtWidgets.QDialog):

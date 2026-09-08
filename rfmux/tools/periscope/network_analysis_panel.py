@@ -1,16 +1,13 @@
 """Panel class for network analysis results (dockable)."""
-import datetime # Added for MultisweepWindow export
-import pickle   # Added for MultisweepWindow export
-import os 
-import csv
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
+from .layouts import FlowLayout, labelled
 from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
-from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog, MultisweepDialog
+from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog
 from .network_analysis_export import NetworkAnalysisExportMixin
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
@@ -84,8 +81,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Toolbar 1: Global Controls (Top Row)
         # Use QWidget container instead of QToolBar for compatibility with QWidget base class
         toolbar_global = QtWidgets.QWidget()
-        toolbar_global_layout = QtWidgets.QHBoxLayout(toolbar_global)
-        toolbar_global_layout.setContentsMargins(5, 5, 5, 5)
+        # Both rows wrap as the panel narrows.
+        toolbar_global_layout = FlowLayout(toolbar_global)
 
         # Export button
         export_btn = QtWidgets.QPushButton("💾")
@@ -113,9 +110,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
         toolbar_global_layout.addWidget(self.edit_resonances_cb)
 
-        # Add spacer to push the unit controls to the far right
-        toolbar_global_layout.addStretch(1)
-
         # Normalize Magnitudes checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
@@ -140,18 +134,16 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
         # Toolbar 2: Module-Specific Controls (Bottom Row)
         toolbar_module = QtWidgets.QWidget()
-        toolbar_module_layout = QtWidgets.QHBoxLayout(toolbar_module)
-        toolbar_module_layout.setContentsMargins(5, 5, 5, 5)
+        toolbar_module_layout = FlowLayout(toolbar_module)
 
         # Cable length control
-        self.cable_length_label = QtWidgets.QLabel("Cable Length (m):")
         self.cable_length_spin = QtWidgets.QDoubleSpinBox()
         self.cable_length_spin.setRange(0.0, 1000.0)
         self.cable_length_spin.setValue(DEFAULT_CABLE_LENGTH)
         self.cable_length_spin.setSingleStep(0.05)
         self.cable_length_spin.valueChanged.connect(self._on_cable_length_changed)
-        toolbar_module_layout.addWidget(self.cable_length_label)
-        toolbar_module_layout.addWidget(self.cable_length_spin)
+        toolbar_module_layout.addWidget(
+            labelled("Cable Length (m):", self.cable_length_spin))
 
         # Unwrap Cable Delay button
         unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
@@ -171,8 +163,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
         self.take_multisweep_btn.setEnabled(False) # Initially disabled
         toolbar_module_layout.addWidget(self.take_multisweep_btn)
-        
-        toolbar_module_layout.addStretch(1)
         
         layout.addWidget(toolbar_module)
 

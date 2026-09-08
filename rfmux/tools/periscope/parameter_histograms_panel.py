@@ -1,14 +1,13 @@
 """Panel for displaying multisweep parameter histograms (dockable)."""
 import numpy as np
-from PyQt6 import QtCore, QtWidgets
-from PyQt6.QtCore import Qt
+from PyQt6 import QtWidgets
 import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
-    ScreenshotMixin, find_parent_with_attr, TABLEAU10_COLORS, LINE_WIDTH,
-    UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
+    ScreenshotMixin, TABLEAU10_COLORS, UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
 )
+from .layouts import FlowLayout
 from .multisweep_grid_helpers import create_amplitude_color_map
 from .amplitude_colorbar import AmplitudeColorBar
 
@@ -88,7 +87,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _setup_toolbar(self, layout):
         """Create toolbar with controls."""
         toolbar = QtWidgets.QWidget()
-        toolbar_layout = QtWidgets.QHBoxLayout(toolbar)
+        toolbar_layout = FlowLayout(toolbar)
         toolbar_layout.setContentsMargins(5, 5, 5, 5)
         
         # Amplitude selector
@@ -97,9 +96,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.amp_combo.setMinimumWidth(150)
         self.amp_combo.currentIndexChanged.connect(self._amplitude_changed)
         toolbar_layout.addWidget(self.amp_combo)
-        
-        toolbar_layout.addStretch(1)
-        
+
         # Bin count control
         toolbar_layout.addWidget(QtWidgets.QLabel("Bins:"))
         self.bins_spin = QtWidgets.QSpinBox()

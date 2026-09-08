@@ -81,8 +81,11 @@ samples = await crs.get_samples(1000, channel=1, module=1)
 - **[Firmware Guide](docs/guides/firmware.md)** - Fetching, managing, and flashing firmware
 - **[Pulse Capture Guide](docs/guides/pulse-capture.md)** - Detecting and recording detector pulses, in Periscope and from a script
 - **[Release Notes](docs/release-notes/)** - What changed in each release
-- **[Tuning KIDs](rfmux/reference-notebooks/Demos/simplified_tuning_flow.md)** - Sweeping, fitting, biasing, measuring noise
-- **[Pulse Capture](rfmux/reference-notebooks/Demos/pulse_capture.md)** - Detecting and recording detector pulses
+
+## Executable Jupytex Notebooks
+
+- **[Detailed KID Tuning](rfmux/reference-notebooks/Demos/simplified_tuning_flow.md)** - Sweeping, fitting, biasing, measuring noise
+- **[Detailed Pulse Capture](rfmux/reference-notebooks/Demos/pulse_capture.md)** - Detecting and recording detector pulses
 
 The last two are runnable notebooks that ship with the package. See
 [reference-notebooks/README.md](rfmux/reference-notebooks/README.md) for how to

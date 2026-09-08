@@ -1085,6 +1085,9 @@ class BiasKidsTask(QtCore.QThread):
             kwargs['bandpass_params'] = self.bias_params['bandpass_params']
         if 'num_phase_samples' in self.bias_params:
             kwargs['num_phase_samples'] = self.bias_params['num_phase_samples']
+        for key in ('measure_calibration', 'calibration_step'):
+            if key in self.bias_params:
+                kwargs[key] = self.bias_params[key]
         
         # Call bias_kids with all parameters
         result = await bias_kids(**kwargs)

@@ -2368,6 +2368,8 @@ class PeriscopeRuntime:
             "lowcut": 5.0,
             "highcut": 20.0,
             "fs": 597.0,
+            "measure_calibration": True,
+            "calibration_step": 0.05,
         }
         _assert_param_keys(
             self.bias_params,

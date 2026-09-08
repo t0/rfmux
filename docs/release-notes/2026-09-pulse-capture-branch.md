@@ -385,7 +385,9 @@ The Pulse Capture panel is described in the how-to. Beyond it:
 - Find Resonances dialog: a "require isolation" checkbox, off by default.
 - Bias KIDs dialog: the fit method choice, preselected to the fit the sweeps
   carry; the nonlinearity threshold greys out under the skewed fit; the
-  phase-step control is gone.
+  phase-step control is gone. A df Calibration group carries the headless
+  options: measure by a tone step (on) and the step as a fraction of the
+  fitted linewidth (0.05).
 - Mock Configuration dialog: bias power shown and edited in dBm; a TLS noise
   group; pulse changes apply without a rebuild; an untouched round trip is not
   a change.

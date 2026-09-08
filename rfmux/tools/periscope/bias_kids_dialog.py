@@ -130,7 +130,35 @@ class BiasKidsDialog(QDialog):
         
         basic_group.setLayout(basic_layout)
         layout.addWidget(basic_group)
-        
+
+        # df calibration group: the same two choices as headless bias_kids
+        cal_group = QGroupBox("df Calibration")
+        cal_layout = QFormLayout()
+        self.measure_cal_checkbox = QCheckBox("Measure by a tone step")
+        self.measure_cal_checkbox.setChecked(True)
+        self.measure_cal_checkbox.setToolTip(
+            "Measure the df calibration where each detector ends up: every\n"
+            "tone steps down and up in lockstep and the samples are read,\n"
+            "two reads for the module, no model beyond a curvature\n"
+            "correction from the fit. Unchecked, the fit's own calibration\n"
+            "is used. The fit's is kept as df_calibration_fit either way.")
+        cal_layout.addRow("", self.measure_cal_checkbox)
+        self.cal_step_spin = QtWidgets.QDoubleSpinBox()
+        self.cal_step_spin.setRange(0.005, 1.0)
+        self.cal_step_spin.setDecimals(3)
+        self.cal_step_spin.setSingleStep(0.01)
+        self.cal_step_spin.setValue(0.05)
+        self.cal_step_spin.setSuffix(" × linewidth")
+        self.cal_step_spin.setToolTip(
+            "Each detector's half-step as a fraction of its fitted linewidth,\n"
+            "rounded to the tone grid (multiples of 298 Hz) and never less\n"
+            "than one grid step. At 0.05 the central difference is within 2%\n"
+            "of the slope before the curvature correction.")
+        cal_layout.addRow("Step:", self.cal_step_spin)
+        self.measure_cal_checkbox.toggled.connect(self.cal_step_spin.setEnabled)
+        cal_group.setLayout(cal_layout)
+        layout.addWidget(cal_group)
+
         # Phase optimization group
         phase_group = QGroupBox("Phase Optimization")
         phase_layout = QFormLayout()
@@ -462,6 +490,8 @@ class BiasKidsDialog(QDialog):
             'fallback_to_lowest': self.fallback_checkbox.isChecked(),
             'optimize_phase': self.optimize_phase_checkbox.isChecked(),
             'num_phase_samples': self.num_samples_spin.value(),
+            'measure_calibration': self.measure_cal_checkbox.isChecked(),
+            'calibration_step': self.cal_step_spin.value(),
         }
         
         # Only include bandpass parameters if phase optimization is enabled

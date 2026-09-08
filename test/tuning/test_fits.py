@@ -32,7 +32,7 @@ from rfmux.tuning.fits import (
     skewed_model_magnitude,
 )
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
-from rfmux.tuning.sweep_results import pack_results, pack_sweep
+from rfmux.tuning.sweep_results import pack_multisweep
 
 pytestmark = pytest.mark.portable
 
@@ -96,11 +96,12 @@ def a_multisweep(sections=None, direction="upward"):
     """
     if sections is None:
         sections = {"R0001": a_sweep()}
-    return pack_sweep(
-        sections,
+    return pack_multisweep(
+        {0: {direction: sections}},
         module_id=MODULE_ID,
         module=2,
-        sweep_direction=direction,
+        amp_schedule=AmplitudeSchedule(),
+        directions=(direction,),
         span_hz=600e3,
         npoints_per_sweep=201,
         nsamps=10,
@@ -109,7 +110,7 @@ def a_multisweep(sections=None, direction="upward"):
 
 
 def a_ladder(directions=("upward", "downward")):
-    """A packed multiamp_multisweep result over three amplitude steps."""
+    """A packed multisweep result over three amplitude steps."""
     catalog = a_catalog()
     schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, 3)
     steps = schedule.steps(catalog)
@@ -126,7 +127,7 @@ def a_ladder(directions=("upward", "downward")):
         }
         for step in steps
     }
-    return pack_results(
+    return pack_multisweep(
         sweeps,
         module_id=MODULE_ID,
         module=2,
@@ -430,11 +431,12 @@ def test_an_iteration_a_single_sweep_does_not_have_says_what_it_has():
 
 
 def test_the_whole_container_is_refused_with_the_subscript_to_use():
-    whole = pack_sweep(
-        {"R0001": a_sweep()},
+    whole = pack_multisweep(
+        {0: {"upward": {"R0001": a_sweep()}}},
         module_id=MODULE_ID,
         module=2,
-        sweep_direction="upward",
+        amp_schedule=AmplitudeSchedule(),
+        directions=("upward",),
         span_hz=600e3,
         npoints_per_sweep=201,
         nsamps=10,

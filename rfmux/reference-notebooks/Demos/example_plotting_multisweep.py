@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Example plots for multisweep data, and a skeleton for your own.
 
-Every function here takes what a sweep macro returned — ``crs.multisweep`` or
-``crs.multiamp_multisweep``, one module's value out of the dict they are keyed
-by — and draws the whole array at once, a panel per resonator::
+Every function here takes what ``crs.multisweep`` returned — one module's value
+out of the dict it is keyed by — and draws the whole array at once, a panel per
+resonator. One amplitude or twenty, the shape is the same, so these plotters do
+not care how wide the call that produced the data was::
 
     import pickle
     import example_plotting_multisweep as msplots
@@ -464,12 +465,12 @@ def plot_magnitude_panels(
 
     Args:
         results: one module's sweep results — the value of ``sweeps[module_id]``
-            for whatever ``multisweep`` or ``multiamp_multisweep`` returned.
+            for whatever ``multisweep`` returned, at whatever width.
         names: which sweep sections to draw. A name, a list of names, or
             ``None`` for the whole array.
         iterations: which amplitude steps to draw. A step number, a list of
-            them, or ``None`` for all of them. A plain ``multisweep`` has only
-            step 0.
+            them, or ``None`` for all of them. A sweep taken without an
+            amplitude schedule has only step 0.
         directions: which frequency directions to draw, as a string or a list.
             Pass ``"upward"`` for one direction only. Directions that were not
             swept are skipped, so the default is safe on a single-direction

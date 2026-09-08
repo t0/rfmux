@@ -13,7 +13,6 @@ from . import py_get_samples
 from . import take_netanal
 from . import py_get_pfb_samples
 from . import multisweep
-from . import multiamp_multisweep
 from . import bias_kids
 from . import channel_selection
 from . import streamer_config
@@ -25,7 +24,6 @@ __all__ = [
     "take_netanal",
     "py_get_pfb_samples",
     "multisweep",
-    "multiamp_multisweep",
     "bias_kids",
     "channel_selection",
     "streamer_config",

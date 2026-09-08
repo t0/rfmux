@@ -33,7 +33,7 @@ Typical headless use::
     # ^ writes the search into the netanal, beside the trace it searched
     catalog = search.to_catalog(module=2, amplitude=0.001)
 
-    sweeps = await crs.multiamp_multisweep(catalog)
+    sweeps = await crs.multisweep(catalog)
     module_sweeps = sweeps[crs.module[2].index()]
     fit_sweeps(module_sweeps)   # writes each sweep's fits alongside the sweep
 
@@ -94,8 +94,7 @@ from .sweep_results import (
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
     merge_modules,
-    pack_results,
-    pack_sweep,
+    pack_multisweep,
 )
 
 __all__ = [
@@ -144,6 +143,5 @@ __all__ = [
     "find_iteration_matching_amplitude",
     "get_amplitudes_at_iteration",
     "merge_modules",
-    "pack_results",
-    "pack_sweep",
+    "pack_multisweep",
 ]

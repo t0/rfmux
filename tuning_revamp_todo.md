@@ -49,27 +49,31 @@ mock streamer die with the kernel that made it (a parent-death watch, or a
 heartbeat the server times out on), and/or surface the conflict as a pytest
 `skip`/`error` with the real message rather than an opaque notebook assertion.
 
-## Periscope's `data_callback` is two arguments too narrow for a multi-amplitude sweep
+## Periscope's `data_callback` is two arguments too narrow
 
-`multiamp_multisweep` calls `data_callback(module, partial_results, step,
-direction)`, where `multisweep` calls it `(module, partial_results)`. The extra
-pair is not decoration: inside a multi-amplitude sweep a consumer plotting
-partial data has no way to tell which amplitude step and direction the points
-belong to, which is exactly what the live multisweep grid needs.
+`multisweep` calls `data_callback(module, partial_results, step, direction)`.
+The last pair is not decoration: a consumer plotting partial data inside a
+multi-amplitude sweep has no way to tell which amplitude step and direction the
+points belong to, which is exactly what the live multisweep grid needs, and a
+single sweep's `(0, "upward")` is a fact about it rather than padding.
 
-`multisweep` itself is unchanged, so nothing is broken today — but a Periscope
-task that passes its narrow callback to the driver will `TypeError` on the first
-partial-data emission. To carry across when Periscope is rewired (step 5 of
-`tuning_multisweep_amplitudes_plan.md`):
+Nothing in Periscope passes a `data_callback` to `multisweep` today — only
+`take_netanal`, whose callback is a different signature entirely — so this is
+not broken right now. It becomes load-bearing when Periscope is rewired (step 5
+of `tuning_multisweep_amplitudes_plan.md`):
 
-* `MultisweepTask.run` (`tools/periscope/tasks.py:508`) is where the loop over
-  amplitude steps lives today; it goes away in favour of one driver call.
+* `MultisweepTask.run` (`tools/periscope/tasks.py:632`) loops over amplitude
+  steps and directions itself, calling `crs.multisweep` once per sweep. That
+  whole loop goes away in favour of one call passing `amp=AmplitudeSchedule(…)`
+  and `sweep_direction=("upward", "downward")`.
 * Its `data_callback` and the `multisweep_signals` it re-emits need the two new
-  coordinates plumbed through, replacing whatever it currently derives from its
-  own loop counter.
+  coordinates plumbed through, replacing what it currently derives from its own
+  loop counter.
 * `sweep_callback(record)` is the replacement for the task's per-step
   bookkeeping — it carries `step`, `direction`, `amplitudes`, `factor`,
   `completed` and `total`, which is everything the progress UI reads.
+* `progress_callback` now runs across the whole call rather than resetting per
+  sweep, so the task's progress bar no longer has to be rescaled by hand.
 
 ## multisweep's measurement loop is nearly untested
 
@@ -97,9 +101,11 @@ The macro no longer rotates, re-centres or df-calibrates. Removed: the
 arguments, the `_get_recalculated_center_freq` helper, and the whole per-NCO-
 region TOD acquisition that fed the rotation. A section entry is now
 `channel`, `frequencies`, `iq_counts`, `iq_volts`, `original_center_frequency`,
-`sweep_direction`, `sweep_amplitude` — and nothing else. `multiamp_multisweep`
-lost the same three pass-throughs, `pack_results` dropped them from
-`call_params`, and `RESULTS_SCHEMA_VERSION` went to 2.
+`sweep_direction`, `sweep_amplitude` — and nothing else. The then-separate
+`multiamp_multisweep` lost the same three pass-throughs, its packer dropped them
+from `call_params`, and `RESULTS_SCHEMA_VERSION` went to 2. (That second macro
+has since been folded into `multisweep` itself, and the two packers into
+`pack_multisweep` — schema 5.)
 
 Two things to bring back, deliberately, when there is something to bring them
 back *for*:
@@ -230,9 +236,9 @@ What is left:
    `RESULTS_SCHEMA_VERSION = 2`. It was also the last of the ad-hoc
    `pickle_filepath_or_data` / `output_pickle_filepath` file handling, which
    `store.py` replaces.
-4. **A flag on `multiamp_multisweep`** to fit as it goes. Deliberately not
-   built: the driver measures, and a caller who wants every amplitude step
-   fitted calls `fit_sweeps` on what came back. If it is ever added it should take the
+4. **A flag on `multisweep`** to fit as it goes. Deliberately not built: the
+   macro measures, and a caller who wants every amplitude step fitted calls
+   `fit_sweeps` on what came back. If it is ever added it should take the
    fitting arguments and hand them straight over, so there is one fitter and
    not two.
 

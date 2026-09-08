@@ -700,7 +700,7 @@ def find_sweeps_with_nearby_resonances(
     ----------
     module_sweeps : dict
         One module's sweep result — ``sweeps[module_id]``, what ``multisweep``
-        or ``multiamp_multisweep`` returned for a single module.
+        returned for a single module.
     min_separation_hz : float
         The separation two dips have to clear to be allowed as distinct
         resonances; anything closer is a collision and the section is culled.

@@ -1,16 +1,24 @@
 """How multisweep decides what to sweep, what to call it, and at what amplitude.
 
 These cover the resolution step only — the part that turns a catalog, or a bare
-list of frequencies, into one normalized list of sweep targets. The measurement
-loop below it needs a board and is not exercised here.
+list of frequencies, into one normalized list of sweep targets and the amplitude
+every pass probes them at. The loop over amplitude steps is in
+``test_multisweep_ladder.py``; the measurement loop below both needs a board and
+is not exercised here.
+
+The amplitude tests go through ``_resolve_schedule``, which is the path the
+macro actually takes: a bare ``amp`` becomes a one-rung schedule, and the
+complaints on the way have to name ``amp`` rather than the ``base`` that same
+value would be called had the caller built the schedule themselves.
 """
 
 import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.tuning import AmplitudeSchedule
 from rfmux.algorithms.measurement.multisweep import (
-    _resolve_amplitudes,
+    _resolve_schedule,
     _resolve_section_names,
     _resolve_sweep_targets,
 )
@@ -34,18 +42,20 @@ def a_catalog(amplitudes=(0.001, 0.002, 0.004)):
 
 
 def for_catalog(catalog, amp):
-    """``_resolve_amplitudes`` as the catalog path calls it."""
-    return _resolve_amplitudes(
-        [r.name for r in catalog],
+    """The amplitudes one pass over *catalog* would be swept at."""
+    resonators = catalog.resonators(order="frequency")
+    schedule = _resolve_schedule(
         amp,
-        defaults={r.name: r.bias.amplitude for r in catalog},
-        allow_sequence=False,
+        [r.name for r in resonators],
+        {r.name: r.bias.amplitude for r in resonators},
     )
+    return schedule.steps(catalog)[0].amplitudes
 
 
 def for_sections(names, amp):
-    """``_resolve_amplitudes`` as the frequency-list path calls it."""
-    return _resolve_amplitudes(names, amp, defaults=None, allow_sequence=True)
+    """The same, for a bare frequency list, which has nothing to fall back to."""
+    schedule = _resolve_schedule(amp, names, None)
+    return schedule.steps(names)[0].amplitudes
 
 
 # ─── amplitude resolution, with a catalog ─────────────────────────────────────
@@ -104,6 +114,16 @@ def test_a_single_amplitude_applies_to_every_section():
     assert for_sections(["S0001", "S0002"], 0.004) == {"S0001": 0.004, "S0002": 0.004}
 
 
+@pytest.mark.parametrize(
+    "amps", [[0.001, 0.002, 0.003], (0.001, 0.002, 0.003), np.array([1e-3, 2e-3, 3e-3])]
+)
+def test_one_amplitude_per_section_pairs_off_positionally(amps):
+    """The ordering is the caller's own here, unlike a catalog's."""
+    assert for_sections(["S0001", "S0002", "S0003"], amps) == pytest.approx(
+        {"S0001": 0.001, "S0002": 0.002, "S0003": 0.003}
+    )
+
+
 def test_a_mismatched_amplitude_list_is_an_error():
     with pytest.raises(ValueError, match="2 amplitudes for 3"):
         for_sections(["S0001", "S0002", "S0003"], [0.001, 0.002])
@@ -118,6 +138,43 @@ def test_sections_accept_a_mapping_too():
     """Sections are named, so they can be addressed by name like resonators."""
     amps = {"low": 0.001, "high": 0.002}
     assert for_sections(["low", "high"], amps) == amps
+
+
+# ─── a bare amp and a schedule are the same argument ──────────────────────────
+
+
+def test_a_bare_amp_becomes_a_one_rung_schedule():
+    """Which is what one amplitude is — so the loop above has one thing to walk
+    whichever way the caller spelled it."""
+    schedule = _resolve_schedule(0.005, ["S0001"], None)
+
+    assert isinstance(schedule, AmplitudeSchedule)
+    assert schedule.nsteps == 1
+    # Kept verbatim, so call_params still records the request.
+    assert schedule.base == 0.005
+
+
+def test_a_schedule_is_passed_through_untouched():
+    ladder = AmplitudeSchedule.ramp(1e-3, 1e-2, 4)
+    assert _resolve_schedule(ladder, ["S0001"], None) is ladder
+
+
+def test_a_bare_amp_is_complained_about_in_amps_own_words():
+    """A caller who wrote amp= should not be told to fix base=, even though the
+    two resolve through one function."""
+    with pytest.raises(ValueError, match=r"^amp is missing an amplitude"):
+        for_catalog(a_catalog(), {"R0001": 0.5})
+
+
+def test_a_schedules_base_is_complained_about_in_the_schedules_words():
+    """The other half of the same rule: this caller really does have to fix
+    base=."""
+    with pytest.raises(ValueError, match=r"^base is missing an amplitude"):
+        _resolve_schedule(
+            AmplitudeSchedule.multiplicative(1.0, 2.0, 2, base={"R0001": 0.5}),
+            ["R0001", "R0002"],
+            None,
+        ).steps(["R0001", "R0002"])
 
 
 # ─── section naming ───────────────────────────────────────────────────────────
@@ -162,16 +219,23 @@ def test_names_must_be_strings():
 
 def test_targets_come_from_the_catalog_in_channel_order():
     catalog = a_catalog()
-    targets = _resolve_sweep_targets(catalog, None, None, None)
+    targets = _resolve_sweep_targets(catalog, None, None)
 
     assert [t.name for t in targets] == ["R0001", "R0002", "R0003"]
     assert [t.channel for t in targets] == [1, 2, 3]
-    assert [t.amplitude for t in targets] == [0.001, 0.002, 0.004]
+
+
+def test_a_target_says_what_is_swept_and_not_how_loud():
+    """A target is resolved once and swept at every step of the schedule, so an
+    amplitude on it could only be one step's."""
+    (target,) = _resolve_sweep_targets(a_catalog(amplitudes=(0.001,)), None, None)
+
+    assert not hasattr(target, "amplitude")
 
 
 def test_sweep_centres_are_the_catalogs_bias_frequencies():
     catalog = a_catalog()
-    targets = _resolve_sweep_targets(catalog, None, None, None)
+    targets = _resolve_sweep_targets(catalog, None, None)
     assert [t.center_frequency_hz for t in targets] == [
         r.bias.frequency_hz for r in catalog
     ]
@@ -194,7 +258,7 @@ def test_the_catalogs_channels_are_used_not_a_fresh_1_to_n():
         ],
         module=2,
     )
-    targets = _resolve_sweep_targets(catalog, None, None, None)
+    targets = _resolve_sweep_targets(catalog, None, None)
     # Bias-frequency order, so R0001 leads despite sitting on the higher
     # channel, and each target keeps the channel its resonator was bound to.
     assert [(t.name, t.channel) for t in targets] == [("R0001", 7), ("R0002", 3)]
@@ -203,35 +267,34 @@ def test_the_catalogs_channels_are_used_not_a_fresh_1_to_n():
 def test_names_alongside_a_catalog_is_an_error():
     """A catalog's resonators are already named; renaming belongs to it."""
     with pytest.raises(ValueError, match="names applies to center_frequencies"):
-        _resolve_sweep_targets(a_catalog(), None, ["a", "b", "c"], None)
+        _resolve_sweep_targets(a_catalog(), None, ["a", "b", "c"])
 
 
 def test_neither_input_is_an_error():
     with pytest.raises(ValueError, match="exactly one"):
-        _resolve_sweep_targets(None, None, None, 0.001)
+        _resolve_sweep_targets(None, None, None)
 
 
 def test_both_inputs_is_an_error():
     with pytest.raises(ValueError, match="exactly one"):
-        _resolve_sweep_targets(a_catalog(), [1.0e9], None, 0.001)
+        _resolve_sweep_targets(a_catalog(), [1.0e9], None)
 
 
 # ─── target resolution, with a frequency list ─────────────────────────────────
 
 
 def test_a_frequency_list_is_named_by_section_and_channelled_by_position():
-    targets = _resolve_sweep_targets(None, [1.0e9, 1.1e9], None, 0.003)
+    targets = _resolve_sweep_targets(None, [1.0e9, 1.1e9], None)
 
     assert [t.name for t in targets] == ["S0001", "S0002"]
     assert [t.channel for t in targets] == [1, 2]
     assert [t.center_frequency_hz for t in targets] == [1.0e9, 1.1e9]
-    assert [t.amplitude for t in targets] == [0.003, 0.003]
 
 
 def test_a_frequency_list_keeps_the_order_it_was_given():
     """Unlike a catalog, this form is not sorted — S0001 is what you passed
     first, whatever its frequency."""
-    targets = _resolve_sweep_targets(None, [1.5e9, 1.0e9, 1.2e9], None, 0.003)
+    targets = _resolve_sweep_targets(None, [1.5e9, 1.0e9, 1.2e9], None)
     assert [(t.name, t.center_frequency_hz) for t in targets] == [
         ("S0001", 1.5e9),
         ("S0002", 1.0e9),
@@ -240,30 +303,10 @@ def test_a_frequency_list_keeps_the_order_it_was_given():
 
 
 def test_supplied_names_become_the_target_names():
-    targets = _resolve_sweep_targets(None, [1.0e9, 1.1e9], ["low", "high"], 0.003)
+    targets = _resolve_sweep_targets(None, [1.0e9, 1.1e9], ["low", "high"])
     assert [(t.name, t.center_frequency_hz) for t in targets] == [
         ("low", 1.0e9),
         ("high", 1.1e9),
     ]
     # Channels are still positional, independent of what the sections are called.
     assert [t.channel for t in targets] == [1, 2]
-
-
-@pytest.mark.parametrize(
-    "amps", [[0.001, 0.002, 0.003], (0.001, 0.002, 0.003), np.array([1e-3, 2e-3, 3e-3])]
-)
-def test_one_amplitude_per_frequency_pairs_off_positionally(amps):
-    targets = _resolve_sweep_targets(None, [1.0e9, 1.1e9, 1.2e9], None, amps)
-    assert [t.amplitude for t in targets] == [0.001, 0.002, 0.003]
-
-
-def test_amplitudes_can_be_keyed_by_supplied_names():
-    targets = _resolve_sweep_targets(
-        None, [1.0e9, 1.1e9], ["low", "high"], {"low": 0.001, "high": 0.002}
-    )
-    assert [(t.name, t.amplitude) for t in targets] == [("low", 0.001), ("high", 0.002)]
-
-
-def test_a_frequency_list_needs_an_amplitude():
-    with pytest.raises(ValueError, match="amp is required"):
-        _resolve_sweep_targets(None, [1.0e9], None, None)

@@ -5,9 +5,9 @@ Bias finding asks two questions about each resonator, in that order:
 
 **Which amplitude?** The one just below where the resonator bifurcates — as
 much probe power as it will take while its sweep still describes a resonance.
-Answering it needs a ``multiamp_multisweep``, because "just below" is only
-meaningful against amplitude steps that were actually measured, and the answer
-is one of them.
+Answering it needs a sweep taken over an ``AmplitudeSchedule``, because "just
+below" is only meaningful against amplitude steps that were actually measured,
+and the answer is one of them.
 
 **Which frequency, within that sweep?** The sweep centre is only where we
 *looked*; the resonance is wherever it turned out to be, up to half a span
@@ -23,10 +23,9 @@ so a saved sweep is biased the same way a live one is.
 What goes in, what comes out
 ----------------------------
 In: **one module's** sweep result, as everything in this package takes it —
-``sweeps[crs.module[m].index()]``, from either sweep macro. A single
-``multisweep`` is one amplitude step, which is a legitimate thing to bias off
-if you already know the amplitude; the search then has nothing to go back to
-and says so.
+``sweeps[crs.module[m].index()]``. A ``multisweep`` that was given no schedule
+is one amplitude step, which is a legitimate thing to bias off if you already
+know the amplitude; the search then has nothing to go back to and says so.
 
 Out: a :class:`BiasReport`, whose ``catalog`` is a **new**
 :class:`~rfmux.core.resonators.ResonatorCatalog` carrying the operating points
@@ -490,8 +489,8 @@ def find_bias_points(
     ``flagged_because`` means and why there is no unbiased outcome.
 
     Args:
-        sweeps: **one module's** value out of what ``multisweep`` or
-            ``multiamp_multisweep`` returned — ``sweeps[crs.module[m].index()]``.
+        sweeps: **one module's** value out of what ``multisweep`` returned —
+            ``sweeps[crs.module[m].index()]``.
             The whole container, keyed by module, is refused: a report is about
             one module, and which one is your choice to make.
         catalog: the resonators to bias, and the source of everything the new
@@ -626,7 +625,7 @@ def find_bias_points(
     # the file would outlive a rename only by restoring into a state BiasReport
     # would have refused to build.
     sweeps["bias_report"] = report.to_dict()
-    store.maybe_save(sweeps, _measurement_type(sweeps), save=save, label=label)
+    store.maybe_save(sweeps, "multisweep", save=save, label=label)
     return report
 
 
@@ -1582,19 +1581,6 @@ def _directions_swept(sweeps) -> set[str]:
         for by_direction in _iterations(sweeps).values()
         for direction in by_direction
     }
-
-
-def _measurement_type(sweeps) -> str:
-    """What to call the file, for sweeps that have never been in one.
-
-    Bias finding writes back into the sweep it read, and that sweep is usually
-    in a file already — in which case this only re-stamps the type it had. What
-    it is for is the sweep taken with ``save=False`` and written for the first
-    time here: it should be named after what it is, and a ladder is the only
-    thing that records an ``amp_schedule``.
-    """
-    schedule = (sweeps.get("call_params") or {}).get("amp_schedule")
-    return "multiamp_multisweep" if schedule else "multisweep"
 
 
 def _catalog_swept(sweeps) -> ResonatorCatalog:

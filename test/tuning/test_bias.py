@@ -40,7 +40,7 @@ from rfmux.tuning.bias import (
 )
 from rfmux.tuning.fits import nonlinear_iq
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
-from rfmux.tuning.sweep_results import pack_results, pack_sweep
+from rfmux.tuning.sweep_results import pack_multisweep
 
 pytestmark = pytest.mark.portable
 
@@ -126,16 +126,17 @@ def amplitude_iterations(
     }
 
 
-def a_multiamp_multisweep(
+def a_ladder(
     nonlinearities=(0.0, 0.0, JUMPED),
     directions=("upward", "downward"),
     catalog=None,
     names=("R0001", "R0002"),
 ):
-    """One module's worth of a packed multiamp_multisweep return.
+    """One module's worth of a packed multisweep return, over a ladder
+    of amplitude steps.
 
     Through the real packer, so these tests cannot drift from the shape the
-    macros actually produce. Both resonators get the same series of ``a``.
+    macro actually produces. Both resonators get the same series of ``a``.
     """
     catalog = a_catalog() if catalog is None else catalog
     schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, len(nonlinearities))
@@ -155,7 +156,7 @@ def a_multiamp_multisweep(
         }
         for step in steps
     }
-    return pack_results(
+    return pack_multisweep(
         sweeps,
         module_id=MODULE_ID,
         module=2,
@@ -832,7 +833,7 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
     catalog = a_catalog()
     before = catalog.to_dict()
 
-    report = find_bias_points(a_multiamp_multisweep(), catalog)
+    report = find_bias_points(a_ladder(), catalog)
 
     assert isinstance(report, BiasReport)
     assert report.catalog is not catalog
@@ -843,7 +844,7 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
 def test_the_sweep_entries_come_back_as_they_went_in():
     """The diagnostics of an analysis do not belong written onto the sweeps the
     analysis was handed. The report itself does, and goes on the output."""
-    sweeps = a_multiamp_multisweep()
+    sweeps = a_ladder()
     entry = sweeps["results"][0]["upward"]["R0001"]
     keys = set(entry)
     output_keys = set(sweeps)
@@ -855,7 +856,7 @@ def test_the_sweep_entries_come_back_as_they_went_in():
 
 
 def test_the_bias_point_carries_the_calibration_measured_at_it():
-    report = find_bias_points(a_multiamp_multisweep())
+    report = find_bias_points(a_ladder())
     bias = report.catalog["R0001"].bias
     finding = report["R0001"]
 
@@ -870,9 +871,9 @@ def test_the_bias_point_carries_the_calibration_measured_at_it():
 def test_the_calibration_belongs_to_the_tone_that_will_be_played():
     """Quantized first, then differentiated: the derivatives are the ones at
     the frequency the hardware will actually put the tone on."""
-    report = find_bias_points(a_multiamp_multisweep())
+    report = find_bias_points(a_ladder())
     bias = report.catalog["R0001"].bias
-    entry = report_entry(a_multiamp_multisweep(), report["R0001"])
+    entry = report_entry(a_ladder(), report["R0001"])
 
     assert bias.frequency_hz == pytest.approx(
         round(bias.frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
@@ -888,7 +889,7 @@ def report_entry(sweeps, finding, direction="upward"):
 
 
 def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
-    report = find_bias_points(a_multiamp_multisweep())
+    report = find_bias_points(a_ladder())
 
     assert report.catalog["R0001"].bias.iq_rotation_deg is None
 
@@ -896,7 +897,7 @@ def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
 def test_identity_and_channels_survive_the_new_catalog():
     catalog = a_catalog()
 
-    report = find_bias_points(a_multiamp_multisweep(catalog=catalog), catalog)
+    report = find_bias_points(a_ladder(catalog=catalog), catalog)
 
     assert [r.name for r in report.catalog] == [r.name for r in catalog]
     assert [r.channel for r in report.catalog] == [r.channel for r in catalog]
@@ -904,7 +905,7 @@ def test_identity_and_channels_survive_the_new_catalog():
 
 
 def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
-    report = find_bias_points(a_multiamp_multisweep((0.0, 0.0, JUMPED)))
+    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)))
 
     for finding in report.findings:
         assert report.catalog[finding.name].bias.amplitude == pytest.approx(
@@ -913,18 +914,19 @@ def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
 
 
 def test_the_catalog_defaults_to_the_one_the_sweep_recorded():
-    report = find_bias_points(a_multiamp_multisweep())
+    report = find_bias_points(a_ladder())
 
     assert len(report.catalog) == 2
     assert all(f.good for f in report.findings)
 
 
 def test_a_sweep_of_bare_frequencies_has_no_catalog_to_bias():
-    sweeps = pack_sweep(
-        {"section_0": a_sweep()},
+    sweeps = pack_multisweep(
+        {0: {"upward": {"section_0": a_sweep()}}},
         module_id=MODULE_ID,
         module=2,
-        sweep_direction="upward",
+        amp_schedule=AmplitudeSchedule(1e-3),
+        directions=("upward",),
         span_hz=SPAN,
         npoints_per_sweep=201,
         nsamps=10,
@@ -947,11 +949,11 @@ def test_a_catalog_resonator_these_sweeps_do_not_cover_is_the_callers_mistake():
     )
 
     with pytest.raises(KeyError, match="R0003"):
-        find_bias_points(a_multiamp_multisweep(), catalog)
+        find_bias_points(a_ladder(), catalog)
 
 
 def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
-    sweeps = a_multiamp_multisweep()
+    sweeps = a_ladder()
     for by_direction in sweeps["results"].values():
         for sections in by_direction.values():
             sections["R0001"]["iq_volts"] = None
@@ -963,7 +965,7 @@ def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
 def test_there_is_one_finding_per_catalog_resonator_in_channel_order():
     """Sections in the sweep that are not in the catalog are not detectors we
     were asked to bias, so they are not reported on."""
-    report = find_bias_points(a_multiamp_multisweep(), a_catalog_of_one())
+    report = find_bias_points(a_ladder(), a_catalog_of_one())
 
     assert [f.name for f in report.findings] == ["R0001"]
     with pytest.raises(KeyError):
@@ -984,7 +986,7 @@ def a_catalog_of_one():
 def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
     catalog = a_catalog()
 
-    report = find_bias_points(a_multiamp_multisweep(catalog=catalog), catalog)
+    report = find_bias_points(a_ladder(catalog=catalog), catalog)
 
     assert len(report.findings) == len(catalog)
     for resonator in report.catalog:
@@ -993,7 +995,7 @@ def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
 
 
 def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
-    report = find_bias_points(a_multiamp_multisweep((JUMPED, JUMPED, JUMPED)))
+    report = find_bias_points(a_ladder((JUMPED, JUMPED, JUMPED)))
     finding = report["R0001"]
 
     assert report.catalog["R0001"].bias.amplitude == pytest.approx(finding.amplitude)
@@ -1003,7 +1005,7 @@ def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
 
 
 def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
-    report = find_bias_points(a_multiamp_multisweep((0.0, 0.0, 0.0)))
+    report = find_bias_points(a_ladder((0.0, 0.0, 0.0)))
     finding = report["R0001"]
 
     assert finding.bifurcated_at is None
@@ -1012,7 +1014,7 @@ def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
 
 
 def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
-    report = find_bias_points(a_multiamp_multisweep((0.0, 0.0, JUMPED)))
+    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)))
 
     assert report.flagged == []
     assert [f.name for f in report.good] == ["R0001", "R0002"]
@@ -1038,7 +1040,7 @@ def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
     in a trace the resonance has left. Moving the tone onto it would be worse
     than not moving it at all — so the sweep centre is kept, and flagged."""
     sweeps = with_the_sweep_centre_moved(
-        a_multiamp_multisweep((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=5e3)
@@ -1060,7 +1062,7 @@ def test_the_calibration_is_measured_where_the_tone_ended_up():
     """Falling back moves the frequency, so the derivatives have to be read
     there rather than at the peak that was rejected."""
     sweeps = with_the_sweep_centre_moved(
-        a_multiamp_multisweep((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     finding = find_bias_points(sweeps, max_distance_hz=5e3)["R0001"]
@@ -1077,7 +1079,7 @@ def test_the_calibration_is_measured_where_the_tone_ended_up():
 
 def test_a_believable_distance_leaves_the_measured_peak_alone():
     sweeps = with_the_sweep_centre_moved(
-        a_multiamp_multisweep((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=50e3)
@@ -1090,7 +1092,7 @@ def test_only_the_first_concern_is_reported():
     """A resonator whose sweeps never bifurcated has a bigger problem than one
     whose tone landed off centre, and hearing about both at once helps nobody."""
     sweeps = with_the_sweep_centre_moved(
-        a_multiamp_multisweep((0.0, 0.0, 0.0)), "R0001", -20e3
+        a_ladder((0.0, 0.0, 0.0)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=5e3)
@@ -1104,26 +1106,26 @@ def test_comparing_directions_on_a_one_direction_sweep_is_refused_once_not_per_r
 ):
     with pytest.raises(ValueError, match=f"The {amplitude_method!r} method"):
         find_bias_points(
-            a_multiamp_multisweep(directions=("upward",)),
+            a_ladder(directions=("upward",)),
             amplitude_method=amplitude_method,
         )
 
 
 def test_a_direction_that_was_not_swept_is_refused():
     with pytest.raises(ValueError, match="was not swept"):
-        find_bias_points(a_multiamp_multisweep(directions=("upward",)),
+        find_bias_points(a_ladder(directions=("upward",)),
                          amplitude_method="derivative", direction="downward")
 
 
 def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
-    sweeps = a_multiamp_multisweep()
+    sweeps = a_ladder()
 
     with pytest.raises(TypeError, match="keyed by module"):
         find_bias_points({MODULE_ID: sweeps})
 
 
 def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
-    report = find_bias_points(a_multiamp_multisweep(), max_discrepancy=0.4)
+    report = find_bias_points(a_ladder(), max_discrepancy=0.4)
 
     assert report.settings["amplitude_method"] == "both"
     assert report.settings["frequency_method"] == "iq_derivative"
@@ -1133,7 +1135,7 @@ def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
 
 
 def test_the_report_reads_like_what_happened():
-    report = find_bias_points(a_multiamp_multisweep((0.0, 0.0, 0.0)))
+    report = find_bias_points(a_ladder((0.0, 0.0, 0.0)))
 
     assert len(report) == 2
     assert "2 biased, 2 flagged" in repr(report)
@@ -1146,7 +1148,7 @@ def test_the_report_reads_like_what_happened():
 
 
 def test_a_report_survives_a_round_trip_through_builtins():
-    report = find_bias_points(a_multiamp_multisweep(), save=False)
+    report = find_bias_points(a_ladder(), save=False)
     restored = BiasReport.from_dict(report.to_dict())
 
     assert restored.findings == report.findings
@@ -1157,7 +1159,7 @@ def test_a_report_survives_a_round_trip_through_builtins():
 
 def test_a_reports_dict_holds_no_rfmux_classes():
     """Files have to open on a machine that has never heard of rfmux."""
-    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+    d = find_bias_points(a_ladder(), save=False).to_dict()
 
     assert d["schema_version"] == BiasReport.SCHEMA_VERSION
     assert type(d["catalog"]).__name__ == "dict"
@@ -1175,7 +1177,7 @@ def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
     """A combined check nests one level deeper than any other, so it is the
     one that would take a NamedTuple into a file if to_dict stopped early."""
     report = find_bias_points(
-        a_multiamp_multisweep(), amplitude_method="both", save=False
+        a_ladder(), amplitude_method="both", save=False
     )
     d = report.to_dict()
 
@@ -1189,7 +1191,7 @@ def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
 
 def test_a_single_test_check_carries_no_parts():
     report = find_bias_points(
-        a_multiamp_multisweep(), amplitude_method="derivative", save=False
+        a_ladder(), amplitude_method="derivative", save=False
     )
 
     assert all(
@@ -1200,14 +1202,14 @@ def test_a_single_test_check_carries_no_parts():
 
 
 def test_check_keys_stay_the_amplitude_steps_they_name():
-    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+    d = find_bias_points(a_ladder(), save=False).to_dict()
     assert all(
         isinstance(k, int) for f in d["findings"] for k in f["checks"]
     )
 
 
 def test_a_report_from_another_version_is_refused():
-    d = find_bias_points(a_multiamp_multisweep(), save=False).to_dict()
+    d = find_bias_points(a_ladder(), save=False).to_dict()
     d["schema_version"] = BiasReport.SCHEMA_VERSION + 1
 
     with pytest.raises(ValueError, match="schema_version"):
@@ -1215,7 +1217,7 @@ def test_a_report_from_another_version_is_refused():
 
 
 def test_the_report_goes_into_the_sweeps_it_was_found_from():
-    sweeps = a_multiamp_multisweep()
+    sweeps = a_ladder()
 
     report = find_bias_points(sweeps, save=False)
 
@@ -1225,7 +1227,7 @@ def test_the_report_goes_into_the_sweeps_it_was_found_from():
 
 
 def test_a_second_analysis_replaces_the_stored_one():
-    sweeps = a_multiamp_multisweep()
+    sweeps = a_ladder()
 
     find_bias_points(sweeps, save=False)
     report = find_bias_points(sweeps, save=False, frequency_method="minimum")
@@ -1241,10 +1243,10 @@ def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
 
     store.set_output_directory(tmp_path)
     try:
-        sweeps = a_multiamp_multisweep()
+        sweeps = a_ladder()
         report = find_bias_points(sweeps, save=True, label="cooldown3")
 
-        path = next(store.session_directory().glob("multiamp_multisweep_*.pkl"))
+        path = next(store.session_directory().glob("multisweep_*.pkl"))
         assert path.stem.endswith("_cooldown3")
 
         restored = BiasReport.from_dict(store.load(path)["bias_report"])

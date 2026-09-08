@@ -1,10 +1,10 @@
 """The shape a sweep comes back in, written and read in one place.
 
-``multiamp_multisweep`` produces the dict :func:`pack_results` assembles; the
-readers under it are the supported way to get things back out. One module owns
-both ends, because a reader resolving ``ladder[iteration]`` has to agree with
-the packer about what a rung means, and two files agreeing about one contract is
-one file too many.
+``multisweep`` produces the dict :func:`pack_multisweep` assembles; the readers
+under it are the supported way to get things back out. One module owns both
+ends, because a reader resolving ``ladder[iteration]`` has to agree with the
+packer about what a rung means, and two files agreeing about one contract is one
+file too many.
 
 ``take_netanal`` packs through :func:`pack_netanal` into the same shape, so
 every driver in the package returns one container shape. What sits under a
@@ -28,8 +28,7 @@ from .multisweep_amplitudes import AmplitudeSchedule, _named
 
 __all__ = [
     "RESULTS_SCHEMA_VERSION",
-    "pack_sweep",
-    "pack_results",
+    "pack_multisweep",
     "pack_netanal",
     "merge_modules",
     "collect_amplitude_iterations_for",
@@ -58,11 +57,21 @@ __all__ = [
 #    where a sweep carries {name: section} — the one place the two differ, and
 #    the reason a reader has to be able to tell them apart. The netanal's own
 #    'iq_complex'/'phase_degrees' became 'iq_counts'/'iq_volts' on the way in.
-RESULTS_SCHEMA_VERSION = 4
+#
+# 5: multiamp_multisweep was folded into multisweep, which now takes an
+#    AmplitudeSchedule as its 'amp' and a sequence as its 'sweep_direction'. So
+#    'measurement' is 'multisweep' whether one amplitude was swept or twenty,
+#    and call_params records the pair every sweep now has — 'amp_schedule' and
+#    'directions' — in place of the 'amp'/'sweep_direction' a single sweep used
+#    to record. A one-rung schedule is the faithful record of amp=0.005; what
+#    each resonator was actually probed at is, as before, 'sweep_amplitude' on
+#    its own entry.
+RESULTS_SCHEMA_VERSION = 5
 
 
-# The iteration a plain multisweep's one sweep sits at. Not a placeholder: one
-# call is one amplitude step, so 0 is its number in a ladder of length one.
+# The iteration a netanal's one trace sits at. Not a placeholder: a netanal is
+# one amplitude sweeping upward in frequency, so 0 is its number in a ladder of
+# length one.
 SINGLE_SWEEP_ITERATION = 0
 
 
@@ -113,11 +122,11 @@ def _packed(
     flattened the single-module case would make the common script differ from
     the general one.
 
-    *measurement* names the driver: ``"multisweep"``, ``"multiamp_multisweep"``
-    or ``"netanal"``. Three outputs that are structurally identical down to
-    the direction and then are not — a netanal has no sections — so the readers
-    below need a way to tell that is not sniffing ``call_params`` for
-    ``span_hz``, which is the kind of test this shape exists to delete.
+    *measurement* names the driver: ``"multisweep"`` or ``"netanal"``. Two
+    outputs that are structurally identical down to the direction and then are
+    not — a netanal has no sections — so the readers below need a way to tell
+    that is not sniffing ``call_params`` for ``span_hz``, which is the kind of
+    test this shape exists to delete.
     """
     return {
         module_id: {
@@ -130,46 +139,63 @@ def _packed(
     }
 
 
-def pack_sweep(
-    sections: Mapping[str, dict],
+def pack_multisweep(
+    sweeps: Mapping[int, Mapping[str, dict]],
     *,
     module_id: str,
     module: int,
-    sweep_direction: str,
+    amp_schedule: AmplitudeSchedule,
+    directions: Sequence[str],
     span_hz: float,
     npoints_per_sweep: int,
     nsamps: int,
-    amp=None,
     catalog=None,
     center_frequencies: Sequence[float] | None = None,
     names: Sequence[str] | None = None,
     requested_module: int | None = None,
 ) -> dict:
-    """Assemble what a single ``multisweep`` returns.
+    """Assemble what ``multisweep`` returns.
 
-    The same shape :func:`pack_results` builds, holding the one iteration in the
-    one direction that a single sweep is. Reading it needs no knowledge of which
-    macro produced it, which is the point: the readers below and the fitters
-    take either without asking.
+    One packer for one sweep and for twenty, because they are the same
+    measurement at different extents. A call that swept one amplitude in one
+    direction arrives here as a *sweeps* of one iteration holding one direction
+    — which is what it is, not a padded slot — so reading a result needs no
+    knowledge of how wide the call that made it was.
 
     Args:
-        sections: ``{name: entry}`` — what the sweep measured.
+        sweeps: ``{iteration: {direction: {name: entry}}}``, in the order
+            measured.
         module_id: the board-and-module identifier this comes back under, from
             ``crs.module[m].index()``.
         module: the module actually swept — resolved, never None.
-        sweep_direction: the direction this sweep was taken in, which is the key
-            *sections* sits under.
-        amp: the ``amp`` argument verbatim — None, a number, a list or a
-            mapping. What each resonator was actually probed at is already
-            ``sweep_amplitude`` in its own entry, so nothing is lost by not
-            resolving it here, and recording the request keeps *call_params*
-            meaning what was asked for.
-        requested_module: the ``module`` argument as the caller passed it, None
-            whenever it came from the catalog instead.
+        amp_schedule: the schedule the amplitudes came from, normalized — a
+            bare ``amp=0.005`` reaches here as the one-rung schedule it is.
+            Snapshotted with ``to_dict`` for provenance.
+        directions: the directions swept, in the order measured.
+        requested_module: the ``module`` argument as the caller passed it, which
+            is None whenever it came from the catalog instead, and the list
+            itself for a call that fanned out over several. Recorded as-is,
+            because *call_params* says what was asked for and not what was
+            worked out from it.
+        catalog: the ``ResonatorCatalog`` swept, or None in frequency-list mode.
+            Snapshotted with ``to_dict`` for provenance.
 
     Returns:
         dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``module``, ``call_params`` and ``results``.
+        ``schema_version``, ``measurement``, ``module``, ``call_params`` and
+        ``results``.
+
+        ``results`` is keyed by amplitude iteration, numbered from 0 in the
+        order measured, and an iteration holds one entry per direction swept
+        and nothing else.
+
+        Nothing is duplicated into the iteration level. What a resonator was
+        probed at is already ``sweep_amplitude`` in its own entry — see
+        :func:`get_amplitudes_at_iteration` — and the rung that produced it is
+        ``call_params["amp_schedule"]["ladder"][iteration]``. Sweep centres are
+        recorded only as passed: a later step may re-centre between amplitudes,
+        at which point a top-level copy would be a lie while each sweep's own
+        ``original_center_frequency`` cannot be.
     """
     call_params = _call_params(
         catalog=catalog,
@@ -180,14 +206,14 @@ def pack_sweep(
         nsamps=nsamps,
         requested_module=requested_module,
     )
-    call_params["amp"] = amp
-    call_params["sweep_direction"] = sweep_direction
+    call_params["amp_schedule"] = amp_schedule.to_dict()
+    call_params["directions"] = list(directions)
 
     return _packed(
         module_id,
         module,
         call_params,
-        {SINGLE_SWEEP_ITERATION: {sweep_direction: dict(sections)}},
+        {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
         measurement="multisweep",
     )
 
@@ -210,8 +236,9 @@ def pack_netanal(
 ) -> dict:
     """Assemble what ``take_netanal`` returns.
 
-    The same shape :func:`pack_sweep` builds, holding the one wideband trace a
-    netanal is where a sweep holds a section per resonator. The iteration and
+    The same shape :func:`pack_multisweep` builds, holding the one wideband
+    trace a netanal is where a sweep holds a section per resonator. The
+    iteration and
     direction levels are kept — a netanal is one amplitude sweeping upward in
     frequency, which is what iteration 0 of ``"upward"`` means — so walking down
     to a measurement is the same walk whichever driver wrote the file.
@@ -332,73 +359,6 @@ def _refuse_netanal(obj) -> None:
         )
 
 
-def pack_results(
-    sweeps: Mapping[int, Mapping[str, dict]],
-    *,
-    module_id: str,
-    module: int,
-    amp_schedule: AmplitudeSchedule,
-    directions: Sequence[str],
-    span_hz: float,
-    npoints_per_sweep: int,
-    nsamps: int,
-    catalog=None,
-    center_frequencies: Sequence[float] | None = None,
-    names: Sequence[str] | None = None,
-    requested_module: int | None = None,
-) -> dict:
-    """Assemble what ``multiamp_multisweep`` returns.
-
-    Args:
-        sweeps: ``{iteration: {direction: {name: entry}}}``, in the order
-            measured.
-        module_id: the board-and-module identifier this comes back under, from
-            ``crs.module[m].index()``.
-        module: the module actually swept — resolved, never None.
-        requested_module: the ``module`` argument as the caller passed it, which
-            is None whenever it came from the catalog instead. Recorded as-is,
-            because *call_params* says what was asked for and not what was
-            worked out from it.
-        catalog: the ``ResonatorCatalog`` swept, or None in frequency-list mode.
-            Snapshotted with ``to_dict`` for provenance.
-
-    Returns:
-        dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``module``, ``call_params`` and ``results``.
-
-        ``results`` is keyed by amplitude iteration, numbered from 0 in the
-        order measured, and an iteration holds one entry per direction swept
-        and nothing else.
-
-        Nothing is duplicated into the iteration level. What a resonator was
-        probed at is already ``sweep_amplitude`` in its own entry — see
-        :func:`get_amplitudes_at_iteration` — and the rung that produced it is
-        ``call_params["amp_schedule"]["ladder"][iteration]``. Sweep centres are
-        recorded only as passed: a later step may re-centre between amplitudes,
-        at which point a top-level copy would be a lie while each sweep's own
-        ``original_center_frequency`` cannot be.
-    """
-    call_params = _call_params(
-        catalog=catalog,
-        center_frequencies=center_frequencies,
-        names=names,
-        span_hz=span_hz,
-        npoints_per_sweep=npoints_per_sweep,
-        nsamps=nsamps,
-        requested_module=requested_module,
-    )
-    call_params["amp_schedule"] = amp_schedule.to_dict()
-    call_params["directions"] = list(directions)
-
-    return _packed(
-        module_id,
-        module,
-        call_params,
-        {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
-        measurement="multiamp_multisweep",
-    )
-
-
 def _iterations(results: Mapping) -> dict:
     """The ``results`` block, with a useful error when handed the wrong dict."""
     _refuse_container(results)
@@ -424,7 +384,7 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
     """Every sweep of one resonator, across the amplitude iterations.
 
     Args:
-        results: what ``multiamp_multisweep`` returned.
+        results: what ``multisweep`` returned, for a single module.
         name: the resonator or section to pull out.
 
     Returns:
@@ -463,7 +423,7 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
     is why the packed dict does not carry one.
 
     Args:
-        results: what ``multiamp_multisweep`` returned.
+        results: what ``multisweep`` returned, for a single module.
         iteration: which amplitude iteration.
 
     Returns:
@@ -492,7 +452,7 @@ def find_iteration_matching_amplitude(
     """The sweep of *name* taken closest to *amplitude*.
 
     Args:
-        results: what ``multiamp_multisweep`` returned.
+        results: what ``multisweep`` returned, for a single module.
         name: whose amplitudes to match against. Required, because a relative
             ladder gives every resonator its own: BOTA walking 1→2→4 µ and
             KOZR walking 3→6→12 µ share an iteration number and nothing else,

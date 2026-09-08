@@ -17,12 +17,12 @@ import asyncio
 import numpy as np
 import pytest
 
-from rfmux.tuning import fit_sweeps, netanal_trace
+from rfmux.tuning import AmplitudeSchedule, fit_sweeps, netanal_trace
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
+    pack_multisweep,
     pack_netanal,
-    pack_sweep,
 )
 
 MODULE = 1
@@ -68,7 +68,7 @@ class TestPacking:
 
         # A literal, not the constant: bumping the version should mean editing
         # a test, because it is a claim about what readers of older files need.
-        assert module_netanal["schema_version"] == 4
+        assert module_netanal["schema_version"] == 5
         assert module_netanal["schema_version"] == RESULTS_SCHEMA_VERSION
         assert module_netanal["measurement"] == "netanal"
         assert module_netanal["module"] == 1
@@ -128,11 +128,12 @@ def a_sweep_output():
         "sweep_direction": "upward",
         "sweep_amplitude": 1e-3,
     }
-    return pack_sweep(
-        {"R0001": section},
+    return pack_multisweep(
+        {0: {"upward": {"R0001": section}}},
         module_id="crs0000_rmod1",
         module=MODULE,
-        sweep_direction="upward",
+        amp_schedule=AmplitudeSchedule(1e-3),
+        directions=("upward",),
         span_hz=1e5,
         npoints_per_sweep=8,
         nsamps=10,

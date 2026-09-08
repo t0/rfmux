@@ -37,7 +37,7 @@ you can run any combination of them:
 |---|---|
 | The fitters, and the entry points used below | `rfmux.tuning.fits` |
 | The sweep being fitted | `rfmux.algorithms.measurement.multisweep` (`crs.multisweep`) |
-| Iterating the sweep over amplitudes | `rfmux.algorithms.measurement.multiamp_multisweep` |
+| Iterating the sweep over amplitudes | `rfmux.tuning.multisweep_amplitudes` |
 | The array bookkeeping | `rfmux.core.resonators` |
 
 This notebook starts from an array that has already been tuned, i.e. a
@@ -218,7 +218,8 @@ Now we need some multisweep data. For example, let's look at the
 array swept at five amplitudes, in both frequency directions, which gives 40
 traces from four resonators.
 
-This is one `multiamp_multisweep` call.
+This is one `multisweep` call — the amplitude schedule goes in as its `amp`,
+where a single number would otherwise go.
 `multisweep.md` covers this call in detail; here it is just the input to the
 fitting. 
 
@@ -234,24 +235,24 @@ print(amplitude_schedule)
 for step in amplitude_schedule.steps(catalog):
     print(step)
 
-multiamp_ms = await crs.multiamp_multisweep(
+multi_amplitude_ms = await crs.multisweep(
     catalog,
     span_hz=LADDER_SPAN_HZ,
     npoints_per_sweep=NPOINTS_PER_SWEEP//2,
     nsamps=NSAMPS,
-    amp_schedule=amplitude_schedule,
-    directions=("upward", "downward"),
+    amp=amplitude_schedule,
+    sweep_direction=("upward", "downward"),
 )
 
 # A sweep comes back keyed by module
 # fit_sweeps takes one module's output at a time, so we index into it and
 # everything below is about this module.
-multiamp_results = multiamp_ms[crs.module[MODULE].index()]
+multi_amplitude_results = multi_amplitude_ms[crs.module[MODULE].index()]
 
-print(f"\nmodules:         {list(multiamp_ms)}")
-print(f"amplitude steps: {list(multiamp_results['results'])}")
-print(f"directions:      {list(multiamp_results['results'][0])}")
-print(f"resonators:      {list(multiamp_results['results'][0]['upward'])}")
+print(f"\nmodules:         {list(multi_amplitude_ms)}")
+print(f"amplitude steps: {list(multi_amplitude_results['results'])}")
+print(f"directions:      {list(multi_amplitude_results['results'][0])}")
+print(f"resonators:      {list(multi_amplitude_results['results'][0]['upward'])}")
 ```
 
 ### Looking at the traces before fitting them
@@ -349,7 +350,7 @@ def plot_sections_at_iteration(results, iteration, direction="upward", ncols=4):
 
 # Step 1 is the factor-of-1.0 rung, so this is the array as it sits at its own
 # bias amplitudes — four different amplitudes, hence four different colours.
-plot_sections_at_iteration(multiamp_results, 1)
+plot_sections_at_iteration(multi_amplitude_results, 1)
 ```
 
 And one resonator across the whole ladder. This is the measurement section 7
@@ -388,7 +389,7 @@ def plot_amplitude_iterations(results, name, direction="upward"):
     plt.show()
 
 
-plot_amplitude_iterations(multiamp_results, first_resonator)
+plot_amplitude_iterations(multi_amplitude_results, first_resonator)
 ```
 
 <!-- #region -->
@@ -470,7 +471,7 @@ def show_sweep_section(sweep_section, indent=""):
             print(f"{indent}{key:<28} {value!r}")
 
 
-show_sweep_section(sections_of(multiamp_results)[first_resonator])
+show_sweep_section(sections_of(multi_amplitude_results)[first_resonator])
 ```
 
 ## 3. Fitting the data
@@ -487,7 +488,7 @@ traces and want to know how it went.
 ```python
 from rfmux.tuning import fit_sweeps
 
-fit_report = fit_sweeps(multiamp_results)
+fit_report = fit_sweeps(multi_amplitude_results)
 
 print(fit_report)
 ```
@@ -556,7 +557,7 @@ Here is the same sweep section entry we looked at in section 2, now with one
 extra key on it:
 
 ```python
-fitted_sweep_section = sections_of(multiamp_results)[first_resonator]
+fitted_sweep_section = sections_of(multi_amplitude_results)[first_resonator]
 
 show_sweep_section(fitted_sweep_section)
 ```
@@ -577,10 +578,10 @@ for model, fit in fitted_sweep_section["fits"].items():
 ```
 
 Putting that together, here is the whole layout, from the top of a
-`multiamp_multisweep` result down to a single fitted trace:
+multi-amplitude multisweep result down to a single fitted trace:
 
 ```text
-multiamp_results
+multi_amplitude_results
 ├── schema_version
 ├── module
 ├── call_params                             what the driver was asked for
@@ -732,7 +733,7 @@ def plot_skewed_fits(results, iteration=0, direction="upward", linewidths=6):
     plt.show()
 
 
-plot_skewed_fits(multiamp_results)
+plot_skewed_fits(multi_amplitude_results)
 ```
 
 Since we are working with a simulated array, there is a sanity check available
@@ -893,7 +894,7 @@ For this section we will work on a copy of the iterated multiple with the `fits`
 back off it, so that you can see which entries each selection actually touched:
 
 ```python
-unfitted_results = copy.deepcopy(multiamp_results)
+unfitted_results = copy.deepcopy(multi_amplitude_results)
 for by_direction in unfitted_results["results"].values():
     for sections in by_direction.values():
         for sweep_section in sections.values():
@@ -943,7 +944,7 @@ low readout amplitude, it is worth leaving the
 nonlinear model out.
 
 Since running one model leaves the other models' results alone, you can fit
-`skewed` across the whole multiamp multisweep and then run `nonlinear` only where you
+`skewed` across the whole multi-amplitude multisweep and then run `nonlinear` only where you
 actually need it:
 
 ```python
@@ -957,12 +958,12 @@ print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept"
 
 ### At the amplitude each resonator is biased at
 
-This is a common thing to want after running a multiamp multisweep measurement. The multiple amplitude steps were
+This is a common thing to want after sweeping over an amplitude schedule. The multiple amplitude steps were
 measured in order to find a sensible operating amplitude (`bias_finding.md` covers how that one gets chosen), and it is the operating
 amplitude itself that you now want fitted.
 `rfmux.tuning.fit_sweeps_at_bias_amplitude` works out that
 step for each resonator individually, reading each one's bias amplitude from the
-catalog snapshot that `multiamp_multisweep` recorded in `call_params`.
+catalog snapshot that `multisweep` recorded in `call_params`.
 
 ```python
 from rfmux.tuning import fit_sweeps_at_bias_amplitude
@@ -1087,7 +1088,7 @@ def plot_fitted_traces(results, name=None, direction="upward", linewidths=8):
     plt.show()
 
 
-plot_fitted_traces(multiamp_results)
+plot_fitted_traces(multi_amplitude_results)
 ```
 
 Pulling the fitted parameters out is just a walk over the same nesting. The
@@ -1145,7 +1146,7 @@ def plot_fitted_parameters_vs_amplitude(results, model="skewed", direction="upwa
     plt.show()
 
 
-plot_fitted_parameters_vs_amplitude(multiamp_results)
+plot_fitted_parameters_vs_amplitude(multi_amplitude_results)
 ```
 
 Because the two fitters are independent, and fitting different things (one the
@@ -1158,7 +1159,7 @@ is struggling.
 print(f"{'':<8}{'amplitude':>12}{'skewed Qr':>12}{'nonlinear Qr':>14}"
       f"{'a':>8}{'residual':>11}")
 for name in (first_resonator, fourth_resonator):
-    for by_direction in collect_amplitude_iterations_for(multiamp_results, name).values():
+    for by_direction in collect_amplitude_iterations_for(multi_amplitude_results, name).values():
         sweep_section = by_direction["upward"]
         skewed_fit = sweep_section["fits"]["skewed"]
         nonlinear_fit = sweep_section["fits"]["nonlinear"]
@@ -1183,7 +1184,7 @@ nonlinear fit uses to decide whether a converged fit is a good one; setting it
 absurdly tight means every fit converges and every one is then rejected:
 
 ```python
-fussy_results = copy.deepcopy(multiamp_results)
+fussy_results = copy.deepcopy(multi_amplitude_results)
 
 fussy_report = fit_sweeps(
     fussy_results,

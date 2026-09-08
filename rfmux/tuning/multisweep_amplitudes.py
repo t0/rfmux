@@ -2,10 +2,10 @@
 
 :class:`AmplitudeSchedule` answers one question — *at what amplitude is each
 resonator swept, on each pass?* — and answers it with no board in sight.  The
-loop that acts on it is
-``rfmux.algorithms.measurement.multiamp_multisweep``; the shape the answers come
-back in is :mod:`rfmux.tuning.sweep_results`, which reads a schedule's
-``to_dict()`` out of the dict it packs.
+loop that acts on it is ``rfmux.algorithms.measurement.multisweep``, which takes
+a schedule as its ``amp``; the shape the answers come back in is
+:mod:`rfmux.tuning.sweep_results`, which reads a schedule's ``to_dict()`` out of
+the dict it packs.
 
 Everything in this module can be built, printed, validated and unit-tested with
 no hardware and no GUI in sight.
@@ -41,10 +41,15 @@ and the iterating forms are classmethods::
     AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                      # absolute, log-spaced
     AmplitudeSchedule.explicit([1e-3, 3e-3, 1e-2])             # absolute, arbitrary
 
-and then::
+A schedule is handed to ``multisweep`` as its ``amp``, which is the whole of
+how one is used::
+
+    sweeps = await crs.multisweep(catalog, amp=schedule)
+
+and ``steps`` is what that call walks, should you want to walk it yourself::
 
     for step in schedule.steps(catalog):
-        sections = await crs.multisweep(catalog, amp=step.amplitudes, ...)
+        print(step.step, step.amplitudes)
 
 ``steps`` keys its amplitudes by resonator **name**, which is what retires the
 "the list must match ``res_info_dict.keys()`` order" coupling of the Periscope
@@ -85,12 +90,86 @@ def _named(names: Sequence[str]) -> str:
     return f"{shown} (and {extra} more)" if extra > 0 else shown
 
 
+def resolve_amplitudes(
+    names: Sequence[str],
+    value: float | Sequence[float] | Mapping[str, float] | None,
+    *,
+    defaults: Mapping[str, float] | None,
+    allow_sequence: bool,
+    what: str,
+    of: str = "sections",
+) -> dict[str, float]:
+    """An amplitude for every name, from the one vocabulary two arguments share.
+
+    ``multisweep``'s ``amp`` and a schedule's ``base`` are the same question
+    asked at different moments — *what amplitude does each sweep start from?* —
+    so they are one function, and *what* is the name of the argument the caller
+    actually typed, so each says so when it complains. *of* is what the names
+    are, for the one message that has to count them.
+
+    ``None`` falls back to *defaults* (a catalog's own bias amplitudes) and is
+    an error where there are none. A number applies to everything. A mapping
+    sets them individually and must name every sweep, because a half-applied
+    amplitude override is the kind of thing that is only noticed after the data
+    is taken. A positional sequence is only accepted where the caller supplied
+    the ordering — i.e. alongside ``center_frequencies``, never alongside a
+    catalog.
+    """
+    names = list(names)
+
+    if value is None:
+        if defaults is None:
+            raise ValueError(
+                f"{what} is required when sweeping center_frequencies: pass a "
+                f"single amplitude for all of them, one per frequency, or a "
+                f"{{name: amplitude}} mapping. (A ResonatorCatalog carries an "
+                f"amplitude per resonator, so there {what} is optional.)"
+            )
+        return {n: float(defaults[n]) for n in names}
+
+    if isinstance(value, Mapping):
+        unknown = sorted(set(value) - set(names))
+        if unknown:
+            raise ValueError(
+                f"{what} names {unknown} are not being swept. The names in play "
+                f"are {names[:_MAX_NAMED]}"
+                f"{' …' if len(names) > _MAX_NAMED else ''}."
+            )
+        missing = sorted(set(names) - set(value))
+        if missing:
+            raise ValueError(
+                f"{what} is missing an amplitude for {missing}. Pass every "
+                f"name, or a single number for all of them."
+            )
+        return {n: float(value[n]) for n in names}
+
+    if isinstance(value, (list, tuple, np.ndarray)):
+        if not allow_sequence:
+            raise TypeError(
+                f"{what} cannot be a positional sequence alongside a catalog — "
+                f"a catalog is an unordered collection of resonators, so "
+                f"pairing to it by position means knowing which order it was "
+                f"pulled out in. Pass a {{name: amplitude}} mapping, a single "
+                f"number, or None. (A positional list *is* accepted alongside "
+                f"center_frequencies, where the ordering is your own.)"
+            )
+        values = [float(v) for v in value]
+        if len(values) != len(names):
+            raise ValueError(
+                f"{what} has {len(values)} amplitudes for {len(names)} {of}. "
+                f"Pass one each, in the same order, or a single number for all."
+            )
+        return dict(zip(names, values))
+
+    return {n: float(value) for n in names}
+
+
 @dataclass(frozen=True, slots=True)
 class AmplitudeStep:
     """One amplitude step: what every sweep section is probed at, for one pass.
 
-    ``amplitudes`` goes straight into ``crs.multisweep(amp=...)`` — it is keyed
-    by the same names the sweep sections come back under.
+    ``amplitudes`` is what one pass of ``multisweep`` probes at — keyed by the
+    same names the sweep sections come back under.
     """
 
     step: int  # execution order, 0-based
@@ -408,58 +487,26 @@ class AmplitudeSchedule:
     ) -> dict[str, float]:
         """The base amplitude of every sweep, keyed by name.
 
-        Same three-way vocabulary as ``multisweep``'s ``amp``, deliberately: a
-        mapping must name every sweep, because a half-applied amplitude is the
-        kind of thing that is only noticed after the data is taken.
+        The same vocabulary ``multisweep``'s ``amp`` speaks, because it is the
+        same function — see :func:`resolve_amplitudes`. The one case a base has
+        that ``amp`` does not is having no catalog to fall back on *and* an
+        absolute alternative to suggest, which is why that message is here.
         """
-        base = self.base
-
-        if base is None:
-            if defaults is None:
-                raise ValueError(
-                    "A base amplitude is required when scheduling by name: "
-                    "there is no catalog to take one from. Pass base= as a "
-                    "single number, one per name, or a {name: amplitude} "
-                    "mapping — or use ramp()/explicit(), whose rungs are "
-                    "absolute amplitudes and need no base."
-                )
-            return dict(defaults)
-
-        if isinstance(base, Mapping):
-            unknown = sorted(set(base) - set(names))
-            if unknown:
-                raise ValueError(
-                    f"base names {unknown} are not being swept. The names in "
-                    f"play are {names[:_MAX_NAMED]}"
-                    f"{' …' if len(names) > _MAX_NAMED else ''}."
-                )
-            missing = sorted(set(names) - set(base))
-            if missing:
-                raise ValueError(
-                    f"base is missing an amplitude for {missing}. Pass every "
-                    f"name, or a single number for all of them."
-                )
-            return {n: float(base[n]) for n in names}
-
-        if isinstance(base, (list, tuple, np.ndarray)):
-            if not allow_sequence:
-                raise TypeError(
-                    "base cannot be a positional sequence alongside a catalog "
-                    "— a catalog is an unordered collection of resonators, so "
-                    "pairing to it by position means knowing which order it "
-                    "was pulled out in. Pass a {name: amplitude} mapping, a "
-                    "single number, or None for the catalog's own."
-                )
-            values = [float(v) for v in base]
-            if len(values) != len(names):
-                raise ValueError(
-                    f"base has {len(values)} amplitudes for {len(names)} "
-                    f"sections. Pass one per section, in the same order, or a "
-                    f"single number for all."
-                )
-            return dict(zip(names, values))
-
-        return {n: float(base) for n in names}
+        if self.base is None and defaults is None:
+            raise ValueError(
+                "A base amplitude is required when scheduling by name: "
+                "there is no catalog to take one from. Pass base= as a "
+                "single number, one per name, or a {name: amplitude} "
+                "mapping — or use ramp()/explicit(), whose rungs are "
+                "absolute amplitudes and need no base."
+            )
+        return resolve_amplitudes(
+            names,
+            self.base,
+            defaults=defaults,
+            allow_sequence=allow_sequence,
+            what="base",
+        )
 
     def _amplitudes_per_step(
         self, target: ResonatorCatalog | Sequence[str]

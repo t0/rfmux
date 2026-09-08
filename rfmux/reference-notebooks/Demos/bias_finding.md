@@ -43,7 +43,7 @@ file rather than leaving a second one beside it.
 | Piece | Module |
 |---|---|
 | The bias finding functions used below | `rfmux.tuning.bias` |
-| The multi-amplitude multisweep data used to inform the bias finding routines | `rfmux.algorithms.measurement.multiamp_multisweep` |
+| The multi-amplitude multisweep data used to inform the bias finding routines | `rfmux.algorithms.measurement.multisweep` |
 | The `ResonatorCatalog` and related array bookkeeping | `rfmux.core.resonators` |
 | Writing measurements to disk and reading them back | `rfmux.tuning.store` |
 
@@ -116,7 +116,7 @@ MODULE = 2
 # date and time of the writing into every filename it makes — your own sweeps
 # land in `store.output_directory()` under names of exactly this shape.
 DEMOS = Path(rfmux.__file__).parent / "reference-notebooks" / "Demos"
-MULTISWEEP_PKL = max(DEMOS.glob("multiamp_multisweep_*_demo_biasfind1.pkl"))
+MULTISWEEP_PKL = max(DEMOS.glob("multisweep_*_demo_biasfind1.pkl"))
 
 print(MULTISWEEP_PKL)
 ```
@@ -136,19 +136,19 @@ traces come out identical up to noise, and the hysteresis test in section 2
 would have nothing to find.
 
 The file is nothing special otherwise: it is an ordinary measurement file, the
-kind `multiamp_multisweep` writes for itself, holding five resonators swept over
+kind `multisweep` writes for itself, holding five resonators swept over
 five amplitude steps from 0.0008 to 0.008, in both directions. Getting it was one
 call, which saved itself into `store.output_directory()` on the way out, and
 everything below this section is unchanged by the fact that it happened
 yesterday rather than in the cell above:
 
-    multiamp_ms = await crs.multiamp_multisweep(
+    multi_amplitude_ms = await crs.multisweep(
         catalog,
         span_hz=75e3,
         npoints_per_sweep=101,
         nsamps=10,
-        amp_schedule=AmplitudeSchedule.multiplicative(0.8, 8.0, 5),
-        directions=("upward", "downward"),
+        amp=AmplitudeSchedule.multiplicative(0.8, 8.0, 5),
+        sweep_direction=("upward", "downward"),
     )
 
 `store.load` is `pickle.load` plus one correction: the path the file recorded
@@ -159,20 +159,20 @@ the file *you* opened rather than to a path on a computer you may not even be
 on.
 
 ```python
-multiamp_ms = store.load(MULTISWEEP_PKL)
+multi_amplitude_ms = store.load(MULTISWEEP_PKL)
 
 # A sweep comes back keyed by module identifier, and every function below takes
 # one module's value out of it. Ours only has the one.
-print(f"modules: {list(multiamp_ms)}")
+print(f"modules: {list(multi_amplitude_ms)}")
 
-multiamp_module_results = multiamp_ms[list(multiamp_ms)[0]]
+multi_amplitude_module_results = multi_amplitude_ms[list(multi_amplitude_ms)[0]]
 
-print(f"schema_version:  {multiamp_module_results['schema_version']}")
-print(f"measurement:     {multiamp_module_results['measurement']}")
-print(f"module:          {multiamp_module_results['module']}")
-print(f"amplitude steps: {list(multiamp_module_results['results'])}")
-print(f"directions:      {list(multiamp_module_results['results'][0])}")
-print(f"resonators:      {list(multiamp_module_results['results'][0]['upward'])}")
+print(f"schema_version:  {multi_amplitude_module_results['schema_version']}")
+print(f"measurement:     {multi_amplitude_module_results['measurement']}")
+print(f"module:          {multi_amplitude_module_results['module']}")
+print(f"amplitude steps: {list(multi_amplitude_module_results['results'])}")
+print(f"directions:      {list(multi_amplitude_module_results['results'][0])}")
+print(f"resonators:      {list(multi_amplitude_module_results['results'][0]['upward'])}")
 ```
 
 Every saved measurement also carries a `file_metadata` block saying what it is,
@@ -181,7 +181,7 @@ module's output rather than at the top of the file, so you reach it wherever
 you happen to be already working:
 
 ```python
-for key, value in multiamp_module_results["file_metadata"].items():
+for key, value in multi_amplitude_module_results["file_metadata"].items():
     print(f"{key:<18} {value}")
 ```
 
@@ -199,7 +199,7 @@ yourself.
 
 ```python
 swept_catalog = ResonatorCatalog.from_dict(
-    multiamp_module_results["call_params"]["catalog"]
+    multi_amplitude_module_results["call_params"]["catalog"]
 )
 
 print(swept_catalog)
@@ -212,7 +212,7 @@ that the resonance finding netanal was performed at.
 
 ### Take a look at the data
 
-Here we demonstrate extracting and plotting the multiamp multisweep data. We'll draft the plotting
+Here we demonstrate extracting and plotting the multi-amplitude multisweep data. We'll draft the plotting
 functions by hand as an exercise, but canned example
 plotting functions can also be found under `Demos/example_plotting_{...}.py`, for the various
 topics covered in these notebooks.
@@ -226,8 +226,8 @@ from rfmux.tuning import (
     get_amplitudes_at_iteration,
 )
 
-for iteration in multiamp_module_results["results"]:
-    amplitudes = get_amplitudes_at_iteration(multiamp_module_results, iteration)
+for iteration in multi_amplitude_module_results["results"]:
+    amplitudes = get_amplitudes_at_iteration(multi_amplitude_module_results, iteration)
     print(f"step {iteration}: {amplitudes}")
 
 
@@ -307,8 +307,8 @@ def plot_amplitude_steps(results, resonator_names, directions=["upward", 'downwa
     plt.show()
 
 
-resonator_names = list(multiamp_module_results["results"][0]["upward"])
-plot_amplitude_steps(multiamp_module_results, resonator_names)
+resonator_names = list(multi_amplitude_module_results["results"][0]["upward"])
+plot_amplitude_steps(multi_amplitude_module_results, resonator_names)
 ```
 
 <!-- #region -->
@@ -343,7 +343,7 @@ resonator at a time. Its arguments:
 
 | Argument | Default | Does |
 |---|---|---|
-| `iterations` | required | multiamplitude multisweep measurements of a resonator in the usual form: `{iteration: {direction: entry}}`. This can be extracted using the convenience wrapper `rfmux.tuning.collect_amplitude_iterations_for` |
+| `iterations` | required | multi-amplitude multisweep measurements of a resonator in the usual form: `{iteration: {direction: entry}}`. This can be extracted using the convenience wrapper `rfmux.tuning.collect_amplitude_iterations_for` |
 | `method` | `"both"` | which bifurcation detection method to apply. Options are: `"derivative"` (reads the shape of a single trace and looks for jumps), `"hysteresis"` (compares the two sweep directions against each other to see when they diverge), and `"both"` (runs the two and takes a step as bifurcated if either says so) |
 | `spike_prominence_factor` | `0.5` | `"derivative"` and `"both"`: how far a spike has to stand out from its surroundings to count as a jump, as a multiple of the arc speed's range. Larger is less sensitive |
 | `max_discrepancy` | `0.1` | `"hysteresis"` and `"both"`: how far the upward and downward traces may part company, in the units `compare` measures in, before the step is called bifurcated |
@@ -361,7 +361,7 @@ demonstrate calling it on the first resonator in the array:
 from rfmux.tuning import collect_amplitude_iterations_for, find_bias_amplitude
 
 iterations_of_BRUL = collect_amplitude_iterations_for(
-    multiamp_module_results, "BRUL"
+    multi_amplitude_module_results, "BRUL"
 )
 amplitude_choice = find_bias_amplitude(iterations_of_BRUL, method="derivative")
 
@@ -466,7 +466,7 @@ def plot_derivative_test(results, names, direction="upward"):
     plt.show()
 
 
-plot_derivative_test(multiamp_module_results, resonator_names)
+plot_derivative_test(multi_amplitude_module_results, resonator_names)
 
 
 ```
@@ -518,7 +518,7 @@ if str(DEMOS) not in sys.path:
 import example_plotting_bias as biasplots
 
 biasplots.plot_bifurcation_verdict_map(
-    multiamp_module_results,
+    multi_amplitude_module_results,
     noise_gate_factor=0.0,
     title="Only looking at spike prominence without considering noise",
 )
@@ -535,7 +535,7 @@ Below we make the same plot on the same data, but turning on the noise gate to i
 
 ```python
 biasplots.plot_bifurcation_verdict_map(
-    multiamp_module_results,
+    multi_amplitude_module_results,
     title="With the noise gate activated at its default value",
 )
 ```
@@ -554,7 +554,7 @@ bifurcation. In that case, lower `noise_gate_factor`.
 
 ```python
 biasplots.plot_bifurcation_verdict_map(
-    multiamp_module_results,
+    multi_amplitude_module_results,
     noise_gate_factor=20,
     title="Smaller noise gate",
 )
@@ -635,7 +635,7 @@ def plot_prominence_bar(results, names, direction="upward",
     plt.show()
 
 
-plot_prominence_bar(multiamp_module_results, resonator_names)
+plot_prominence_bar(multi_amplitude_module_results, resonator_names)
 ```
 
 <!-- #region -->
@@ -759,7 +759,7 @@ def plot_magnitude_hysteresis(results, names, max_discrepancy=0.1):
     plt.show()
 
 
-plot_magnitude_hysteresis(multiamp_module_results, resonator_names,
+plot_magnitude_hysteresis(multi_amplitude_module_results, resonator_names,
                           max_discrepancy=0.1)
 ```
 
@@ -912,7 +912,7 @@ def plot_frequency_methods(results, names, direction="upward"):
     plt.show()
 
 
-plot_frequency_methods(multiamp_module_results, resonator_names)
+plot_frequency_methods(multi_amplitude_module_results, resonator_names)
 ```
 
 The two methods land within a single sweep point of each other on all five — the
@@ -1087,7 +1087,7 @@ result.
 
 | Argument | Default | Does |
 |---|---|---|
-| `sweeps` | required | **one module's** `multiamp_multisweep` outputs, i.e. `multiamp_ms[crs.module[MODULE].index()]` |
+| `sweeps` | required | **one module's** `multisweep` outputs, i.e. `multi_amplitude_ms[crs.module[MODULE].index()]` |
 | `catalog` | `None` | the resonators to bias, which must match the catalog used to make the above multisweeps. `None` uses the one recorded in the sweep's `call_params`, which is the usual case. |
 | `amplitude_method` | `"both"` | which bifurcation test the amplitude search uses — section 2. The default and `"hysteresis"` require the sweeps to have been taken in both directions; `"derivative"` is the one that reads a single trace. |
 | `frequency_method` | `"iq_derivative"` | what method to use to determine what frequency to bias at — section 3 |
@@ -1112,7 +1112,7 @@ lands in the file beside the data it describes.
 ```python
 from rfmux.tuning import find_bias_points
 
-bias_report = find_bias_points(multiamp_module_results, save=False)
+bias_report = find_bias_points(multi_amplitude_module_results, save=False)
 
 print(bias_report)
 print(bias_report.catalog)
@@ -1159,13 +1159,13 @@ that fit:
 ```python
 from rfmux.tuning import BiasReport
 
-print(BiasReport.from_dict(multiamp_module_results["bias_report"]))
+print(BiasReport.from_dict(multi_amplitude_module_results["bias_report"]))
 
 ```
 
 That happens whether or not you save. `save=` is only the question of whether
 the file on disk is brought up to date to match — and had we left it alone here,
-this would have rewritten the `multiamp_multisweep_*_demo_biasfind1.pkl` the
+this would have rewritten the `multisweep_*_demo_biasfind1.pkl` the
 notebook loaded, in place, report and all. That is the point of it: the ladder
 and the operating point read off it stay one file.
 
@@ -1224,7 +1224,7 @@ where it is not true. Run the hysteresis detector on its own and two resonators
 come back flagged:
 
 ```python
-print(find_bias_points(multiamp_module_results,
+print(find_bias_points(multi_amplitude_module_results,
                        amplitude_method="hysteresis", save=False))
 ```
 
@@ -1303,7 +1303,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
     plt.show()
 
 
-plot_bias_points_on_sweeps(multiamp_module_results, bias_report)
+plot_bias_points_on_sweeps(multi_amplitude_module_results, bias_report)
 ```
 
 <!-- #region -->

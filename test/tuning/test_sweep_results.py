@@ -20,8 +20,7 @@ from rfmux.tuning.sweep_results import (
     find_iteration_matching_amplitude,
     get_amplitudes_at_iteration,
     merge_modules,
-    pack_results,
-    pack_sweep,
+    pack_multisweep,
 )
 
 pytestmark = pytest.mark.portable
@@ -92,7 +91,7 @@ def container(
         requested_module=None,
     )
     kwargs.update(overrides)
-    return pack_results(sweeps, **kwargs)
+    return pack_multisweep(sweeps, **kwargs)
 
 
 def packed(**kwargs):
@@ -100,24 +99,29 @@ def packed(**kwargs):
     return container(**kwargs)[MODULE_ID]
 
 
-def swept(sections=None, direction="upward", **overrides):
-    """A single sweep's whole return, keyed by module."""
+def swept(sections=None, direction="upward", amp=None, **overrides):
+    """A single sweep's whole return, keyed by module.
+
+    The same packer, handed the one iteration in the one direction a single
+    sweep is — which is what the macro hands it, since a narrow call and a wide
+    one go round the same loop.
+    """
     if sections is None:
         sections = {"R0001": a_sweep_entry(0.001, direction)}
 
     kwargs = dict(
         module_id=MODULE_ID,
         module=2,
-        sweep_direction=direction,
+        amp_schedule=AmplitudeSchedule(amp),
+        directions=(direction,),
         span_hz=200e3,
         npoints_per_sweep=101,
         nsamps=10,
-        amp=None,
         catalog=a_catalog(),
         requested_module=None,
     )
     kwargs.update(overrides)
-    return pack_sweep(sections, **kwargs)
+    return pack_multisweep({0: {direction: sections}}, **kwargs)
 
 
 # ─── one shape, whatever measured it ──────────────────────────────────────────
@@ -132,8 +136,8 @@ def test_a_single_sweep_is_one_iteration_in_one_direction():
 
 
 def test_a_sweep_and_a_ladder_nest_identically():
-    """The property the fitters rely on: nothing downstream has to ask which
-    macro produced a result."""
+    """The property the fitters rely on: nothing downstream has to ask how wide
+    the call that produced a result was."""
     sweep = swept()[MODULE_ID]
     ladder = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3))
 
@@ -148,8 +152,8 @@ def test_a_sweep_records_the_call_as_made():
     result = swept(amp={"R0001": 0.004}, nsamps=7, direction="downward")[MODULE_ID]
     params = result["call_params"]
 
-    assert params["amp"] == {"R0001": 0.004}
-    assert params["sweep_direction"] == "downward"
+    assert params["amp_schedule"]["base"] == {"R0001": 0.004}
+    assert params["directions"] == ["downward"]
     assert params["nsamps"] == 7
     assert params["span_hz"] == 200e3
     assert params["catalog"]["module"] == 2
@@ -159,16 +163,19 @@ def test_a_sweep_records_the_call_as_made():
 
 def test_a_sweep_records_a_bare_amp_verbatim_rather_than_resolving_it():
     """What each resonator was probed at is already `sweep_amplitude` in its own
-    entry, so call_params can stay a record of the request."""
+    entry, so call_params can stay a record of the request — a one-rung
+    schedule keeping the number the caller typed as its base."""
     result = swept(amp=0.005)[MODULE_ID]
 
-    assert result["call_params"]["amp"] == 0.005
+    assert result["call_params"]["amp_schedule"]["base"] == 0.005
+    assert result["call_params"]["amp_schedule"]["ladder"] == [1.0]
 
 
-def test_the_two_packers_agree_on_the_shared_call_params():
-    shared = set(swept()[MODULE_ID]["call_params"]) & set(packed()["call_params"])
-
-    assert shared == {
+def test_one_sweep_and_twenty_record_the_same_call_params():
+    """One packer, so there is nothing for a reader to sniff for. A narrow call
+    is not a different measurement with a different provenance block; it is the
+    same one with a one-rung ladder."""
+    assert set(swept()[MODULE_ID]["call_params"]) == set(packed()["call_params"]) == {
         "catalog",
         "center_frequencies",
         "names",
@@ -176,20 +183,15 @@ def test_the_two_packers_agree_on_the_shared_call_params():
         "npoints_per_sweep",
         "nsamps",
         "module",
+        "amp_schedule",
+        "directions",
     }
 
 
-def test_the_amplitude_spec_is_the_only_thing_that_differs():
-    sweep_only = set(swept()[MODULE_ID]["call_params"]) - set(packed()["call_params"])
-    ladder_only = set(packed()["call_params"]) - set(swept()[MODULE_ID]["call_params"])
-
-    assert sweep_only == {"amp", "sweep_direction"}
-    assert ladder_only == {"amp_schedule", "directions"}
-
-
-def test_both_packers_stamp_the_schema_version():
-    assert swept()[MODULE_ID]["schema_version"] == RESULTS_SCHEMA_VERSION
-    assert packed()["schema_version"] == RESULTS_SCHEMA_VERSION
+def test_a_sweep_of_any_width_is_a_multisweep():
+    for result in (swept()[MODULE_ID], packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3))):
+        assert result["measurement"] == "multisweep"
+        assert result["schema_version"] == RESULTS_SCHEMA_VERSION
 
 
 # ─── the module is the outermost key, even when there is one ──────────────────
@@ -267,7 +269,7 @@ def test_one_modules_output_is_what_the_readers_take():
 # ─── packing and reading a ladder ─────────────────────────────────────────────
 
 
-def test_pack_results_puts_the_iterations_under_results_keyed_by_number():
+def test_pack_multisweep_puts_the_iterations_under_results_keyed_by_number():
     result = packed(
         schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3),
         directions=("upward", "downward"),
@@ -278,7 +280,7 @@ def test_pack_results_puts_the_iterations_under_results_keyed_by_number():
         assert set(iteration) == {"upward", "downward"}
 
 
-def test_pack_results_records_the_call_as_made():
+def test_pack_multisweep_records_the_call_as_made():
     schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
     catalog = a_catalog()
     result = packed(schedule=schedule, catalog=catalog, nsamps=7)
@@ -292,7 +294,7 @@ def test_pack_results_records_the_call_as_made():
     assert result["schema_version"] == RESULTS_SCHEMA_VERSION
 
 
-def test_pack_results_is_plain_builtins():
+def test_pack_multisweep_is_plain_builtins():
     result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
     assert pickle.loads(pickle.dumps(result)) == result
 

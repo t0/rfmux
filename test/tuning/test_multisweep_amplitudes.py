@@ -502,20 +502,29 @@ def test_a_step_converts_to_a_plain_dict():
     }
 
 
-# ─── the amplitudes go straight into multisweep ───────────────────────────────
+# ─── the amplitudes go straight into a sweep ──────────────────────────────────
 
 
-def test_a_step_is_accepted_by_multisweeps_own_amplitude_resolution():
-    """The contract that lets the driver be a loop and nothing more."""
-    from rfmux.algorithms.measurement.multisweep import _resolve_amplitudes
-
+def test_a_step_is_keyed_by_the_names_the_sweep_comes_back_under():
+    """The contract that lets multisweep's loop be a loop and nothing more: a
+    step is handed to the measurement as-is, so its keys have to be the section
+    names already, not something needing a second resolution."""
     catalog = a_catalog()
     step = AmplitudeSchedule.multiplicative(2.0, 2.0, 1).steps(catalog)[0]
 
-    resolved = _resolve_amplitudes(
-        [r.name for r in catalog],
-        step.amplitudes,
-        defaults={r.name: r.bias.amplitude for r in catalog},
-        allow_sequence=False,
+    assert set(step.amplitudes) == {r.name for r in catalog}
+    assert step.amplitudes == pytest.approx(
+        {"R0001": 0.002, "R0002": 0.004, "R0003": 0.008}
     )
-    assert resolved == pytest.approx({"R0001": 0.002, "R0002": 0.004, "R0003": 0.008})
+
+
+def test_multisweep_takes_a_schedule_wherever_it_takes_an_amplitude():
+    """The other half of the same contract: there is one amplitude argument,
+    and a ladder is one of the things it accepts."""
+    import inspect
+
+    from rfmux.algorithms.measurement.multisweep import multisweep
+
+    parameters = inspect.signature(multisweep.__wrapped__).parameters
+    assert "AmplitudeSchedule" in str(parameters["amp"].annotation)
+    assert "amp_schedule" not in parameters

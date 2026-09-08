@@ -3,7 +3,7 @@ Fit resonator models to sweeps that have already been measured.
 
 Fitting is a separate step, run by hand on data that exists::
 
-    sweeps = await crs.multiamp_multisweep(catalog)
+    sweeps = await crs.multisweep(catalog)
 
     module_sweeps = sweeps[crs.module[2].index()]
     report = fit_sweeps(module_sweeps)
@@ -331,13 +331,12 @@ def fit_sweeps(
     nonlinear model after the skewed one does not throw the skewed one away.
 
     Args:
-        sweeps: **one module's** value out of what ``multisweep`` or
-            ``multiamp_multisweep`` returned —
-            ``sweeps[crs.module[m].index()]``. The two macros return the same
-            shape, so either is fitted the same way, and the entries are
-            written in place. The whole dict, keyed by module, is refused with
-            a message naming the modules it holds: a report is about one
-            module, and which one is your choice to make.
+        sweeps: **one module's** value out of what ``multisweep`` returned —
+            ``sweeps[crs.module[m].index()]``. One amplitude or twenty, the
+            shape is the same, so either is fitted the same way, and the
+            entries are written in place. The whole dict, keyed by module, is
+            refused with a message naming the modules it holds: a report is
+            about one module, and which one is your choice to make.
         models: which models to run, from :data:`MODELS`. All three by default.
             ``nonlinear`` is much the most expensive: it is a seven-parameter
             complex fit run up to three times per sweep, where ``skewed`` is
@@ -436,8 +435,9 @@ def fit_sweeps_at_bias_amplitude(
     either way.
 
     Args:
-        sweeps: what ``multiamp_multisweep`` returned. The packed form only:
-            matching an amplitude means having more than one to choose from.
+        sweeps: what ``multisweep`` returned, for a single module. A call
+            that swept an amplitude schedule, in practice: matching an
+            amplitude means having more than one to choose from.
         amplitude: the amplitude to match, in normalized DAC units. Defaults to
             each resonator's own bias amplitude from the catalog snapshot in
             ``call_params``.
@@ -477,7 +477,7 @@ def fit_sweeps_at_bias_amplitude(
             f"amplitude survived directions={directions!r}."
         )
     report = _fit(sections, module=sweeps.get("module"), **settings)
-    store.maybe_save(sweeps, "multiamp_multisweep", save=save, label=label)
+    store.maybe_save(sweeps, "multisweep", save=save, label=label)
     return report
 
 
@@ -657,18 +657,17 @@ class _Section:
 def _walk(sweeps):
     """Every sweep in one module's result, with its coordinates.
 
-    One nesting, because there is only one shape: a single ``multisweep`` and a
-    whole ``multiamp_multisweep`` ladder nest identically, the sweep simply
-    being the ladder of length one that it is.
+    One nesting, because there is only one shape: a call that swept one
+    amplitude and a call that walked a ladder of twenty nest identically, the
+    single sweep simply being the ladder of length one that it is.
     """
     _refuse_container(sweeps)
     _refuse_netanal(sweeps)
 
     if not isinstance(sweeps, Mapping):
         raise TypeError(
-            f"Expected one module's sweep result — what multisweep or "
-            f"multiamp_multisweep returned, indexed by module — got "
-            f"{type(sweeps).__name__}."
+            f"Expected one module's sweep result — what multisweep "
+            f"returned, indexed by module — got {type(sweeps).__name__}."
         )
     if "results" not in sweeps:
         raise TypeError(

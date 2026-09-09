@@ -63,7 +63,7 @@ d = s.query(rfmux.CRS).one()
 
 async def enable():
     await d.resolve()
-    await d.set_channel_streamer(channels=128, module=<module>, sample_trunc="HIGH")
+    await d.set_channel_streamer(channels=128, module=<module>, sample_trunc="LOW")
 
 asyncio.run(enable())
 
@@ -72,10 +72,14 @@ with fastrx.PacketWriter("/data/run.fastrx", pipes=[1]) as w:
     print("packets", w.packets, "overruns", w.overruns, "dropouts", w.dropouts)
 ```
 
-`sample_trunc="HIGH"` keeps bits 23:8 of each sample, which is exactly the
-ADC count the 1G paths report; the other truncations clip large signals.
-`overruns` counts records the disk was too slow to take. To check that
-packets are flowing before recording, `rfmux fastrx hud --pipe 1`.
+`sample_trunc` picks 16 of the 24 bits of each sample, which is in ADC
+counts: `"LOW"` keeps bits 15:0 and is exact while the signal stays within
+±32767 counts, `"MID"` keeps bits 19:4 (counts/16) and `"HIGH"` bits 23:8
+(counts/256), each dropping the finer bits. With DC levels of a few
+thousand counts and noise of a few hundred, HIGH leaves about one bit of
+noise; LOW or MID keeps it. The viewer scales every truncation back to
+counts. `overruns` counts records the disk was too slow to take. To check
+that packets are flowing before recording, `rfmux fastrx hud --pipe 1`.
 
 Leaving the `with` block finalizes the file. The parser stops on Ctrl-C and
 the pulse capture in Periscope; the daemon can stay up.

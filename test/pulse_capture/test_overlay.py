@@ -47,7 +47,7 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     for i, ti in enumerate(t):
         block = np.zeros((128, 2), dtype=np.int16)
         block[71, 0] = int(round(float(_shape(ti))))
-        recs.append(record(0b11, i, ts=seconds_ts(ti), recent=True,
+        recs.append(record(0b11, i, ts=seconds_ts(ti), recent=True, sample_trunc=0,
                            iq={2: block}))
     return Recording(write(tmp_path, [file_header(0b11, len(recs))]
                              + recs))

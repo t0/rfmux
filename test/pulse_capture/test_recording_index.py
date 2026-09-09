@@ -41,9 +41,9 @@ def test_index_and_window_over_a_gap_and_an_undisciplined_stamp(tmp_path):
     # Records 100..109 were lost (a seq gap); record 7's stamp is not
     # disciplined.
     seqs = [s for s in range(300) if not 100 <= s < 110]
-    f = Recording(_file(tmp_path, seqs, recent=lambda s: s != 7))
+    f = Recording(_file(tmp_path, seqs, recent=lambda s: s != 7, sample_trunc=0))
     assert f.t_first == pytest.approx(T0)
-    assert f.counts_per_lsb == 1.0            # HIGH: exact counts
+    assert f.counts_per_lsb == 1.0            # LOW: counts
 
     # Stamp of record k (seq s) is T0 + s*DT: the bisect lands on it.
     for k, s in ((0, 0), (50, 50), (99, 99), (100, 110), (289, 299)):
@@ -95,9 +95,12 @@ def test_no_disciplined_stamp_means_no_time_axis(tmp_path):
 
 
 def test_truncation_scales_to_counts(tmp_path):
+    # LOW is counts; HIGH keeps the top 16 of 24 bits, counts/256.
     f = Recording(_file(tmp_path, range(4), sample_trunc=0))
-    assert f.sample_trunc == 0
-    assert f.channel(1, 0, 1)[0] == pytest.approx((100 + 0) / 256 * (1 - 1j))
+    assert f.sample_trunc == 0 and f.counts_per_lsb == 1.0
+    assert f.channel(1, 0, 1)[0] == pytest.approx(100 * (1 - 1j))
+    f = Recording(_file(tmp_path, range(4), sample_trunc=2))
+    assert f.channel(1, 0, 1)[0] == pytest.approx(100 * 256 * (1 - 1j))
 
 
 def test_empty_recording_has_no_time_axis(tmp_path):

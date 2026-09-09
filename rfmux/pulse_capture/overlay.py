@@ -36,10 +36,12 @@ CHANNELS_PER_PIPE = 128
 NUM_PIPELINES = 8
 
 #: Scale from the truncated int16 on the wire to the ADC counts the 1G
-#: paths report (the /256 packetizer gain taken out), by sample_trunc:
-#: HIGH keeps bits 23:8 and is exact; MID and LOW keep lower windows, so
-#: they are exact only while the signal stays inside them.
-COUNTS_PER_LSB = {0: 1.0 / 256, 1: 1.0 / 16, 2: 1.0}
+#: paths report, by sample_trunc.  The 24-bit sample is in counts: LOW
+#: (bits 15:0) is exact while |counts| < 32768, MID (bits 19:4) is
+#: counts/16 and HIGH (bits 23:8) counts/256, each dropping the bits
+#: below its window.  Measured on board 0156: HIGH against the parser's
+#: counts reads 256 to 268, the excess being the dropped bits.
+COUNTS_PER_LSB = {0: 1.0, 1: 16.0, 2: 256.0}
 
 _DAY_S = 86400.0
 #: Records probed past an undisciplined stamp before giving up on it.

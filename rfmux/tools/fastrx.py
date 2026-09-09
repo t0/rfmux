@@ -386,10 +386,11 @@ class HUD(QMainWindow):
         self._draw()
 
         gaps = int(np.count_nonzero(np.diff(seq.astype(np.int64)) != 1))
+        rms = float(np.sqrt(np.mean(i_ch ** 2 + q_ch ** 2)))
         self._status.setText(
             f"module {self.module} ch {ch + 1}  packets={n}  "   # channel 1-indexed for display
             f"grabs={self._n_grabs}  seq={seq[0]}..{seq[-1]}  gaps={gaps}  "
-            f"rms={np.hypot(i_ch, q_ch).std():.1f}")
+            f"rms={rms:.1f}")
 
     @staticmethod
     def _autoscale_y(ax, lo, hi):

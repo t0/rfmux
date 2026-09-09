@@ -21,17 +21,17 @@ its own as well, so a saved one says which array it holds. Save it to keep your
 tuning settings, then load it when you’re ready to continue working with this
 array.
 
-This notebook starts from a saved network analysis and resonance search.
-Everything here runs without hardware.
+This notebook starts from a biased mock array and builds a catalog of its tones.
+Everything here runs without hardware or bundled measurement files.
 
 | Task | Module |
 |---|---|
 | Manage the catalog and bias points | `rfmux.core.resonators` |
-| Find resonances and build a catalog | `rfmux.tuning.find_resonances` |
+| Create a biased mock array and catalog | `rfmux.mock.standard_array` |
 | Save and load files | `rfmux.tuning.store` |
 
 See `network_analysis_find_resonances.md` to take a network analysis and find
-resonances. Here, we’ll pick up from its saved results.
+resonances when the detector frequencies are not already known.
 
 ## How to use this document
 
@@ -66,64 +66,25 @@ from pathlib import Path
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
-from rfmux.tuning import ResonanceSearch, netanal_trace, store
+from rfmux.mock.standard_array import standard_array
+from rfmux.tuning import store
 ```
 
-## 1. Start from a saved network analysis
+## 1. Start from a biased mock array
 
-The demo file contains a network analysis of ten simulated resonators across
-0.6–1.05 GHz. It also includes the saved resonance search and measurement settings.
-`find_resonances_in_netanal` stored the search in the trace when it was run.
+`standard_array()` creates eight simulated resonators in 1.00–1.10 GHz with a
+fixed random seed and lets the simulator bias them. It reads their tone
+frequencies relative to the NCO, adds the NCO frequency to get absolute Hz,
+and builds a `ResonatorCatalog` with `from_frequencies()`, using the configured
+bias amplitude. Channels are assigned 1..N in frequency order; names are derived
+from the frequencies so they repeat across runs.
 
-`store.load()` loads the pickle and updates its file metadata to the current
-path. This lets the file be moved between machines without keeping its old path.
-
-```python
-# Find the newest matching demo file inside the installed package.
-# The timestamp in its name sorts in date order.
-demos = Path(rfmux.__file__).parent / "reference-notebooks" / "Demos"
-netanal_path = max(demos.glob("netanal_*_demo_catalog1.pkl"))
-print(f"starting from: {netanal_path.name}")
-netanal = store.load(netanal_path)
-
-# A netanal is keyed by module; file_metadata lives inside each module.
-# This file contains a single module.
-module_id, = netanal
-module_netanal = netanal[module_id]
-
-# results holds the trace directly, including the saved resonance search.
-trace = netanal_trace(module_netanal)
-
-print(f"module id  : {module_id}")
-print(f"called with: {module_netanal['call_params']}")
-print(f"measured   : {list(trace)}")
-```
-
-Rebuild the search object from the saved dictionary. This reads the existing
-result; it does not run the search again.
+This setup needs no network analysis, resonance search, or UDP streaming.
+The returned board is available for later measurements; the examples below
+operate on catalogs.
 
 ```python
-search = ResonanceSearch.from_dict(trace["resonance_search"])
-print(search)
-print(f"settings used: {search.settings}")
-```
-
-### Build the catalog
-
-`ResonanceSearch.to_catalog()` gives each detected resonance a name, a hardware
-channel, and a `BiasPoint` at its found frequency. Later sweeps and bias finding will
-help refine these initial operating points.
-
-Supply `module` and `amplitude` from the measurement. The search itself does
-not store them. Channels are assigned 1..N in frequency order.
-
-```python
-# Read the module and probe amplitude directly from the saved measurement.
-catalog = search.to_catalog(
-    module=module_netanal["module"],
-    amplitude=trace["sweep_amplitude"],
-)
-print(f"module {catalog.module}, probed at {trace['sweep_amplitude']} normalized DAC units\n")
+crs, catalog = await standard_array()
 print(catalog)
 ```
 
@@ -580,11 +541,11 @@ except ValueError as e:
     print(f"missing bias amplitude: {e}")
 ```
 
-Finally, save the catalog built from the network analysis in both formats:
+Finally, save the mock array’s catalog in both formats:
 
 ```python
-(output_dir / "found.csv").write_text(catalog.to_csv())
-store.save(catalog.to_dict(), "catalog", label="found", directory=output_dir)
+(output_dir / "mock_array.csv").write_text(catalog.to_csv())
+store.save(catalog.to_dict(), "catalog", label="mock_array", directory=output_dir)
 print(f"wrote {len(catalog)} resonators to {output_dir}")
 for output_path in sorted(output_dir.iterdir()):
     print(f"  {output_path.name:<16} {output_path.stat().st_size:>7} bytes")

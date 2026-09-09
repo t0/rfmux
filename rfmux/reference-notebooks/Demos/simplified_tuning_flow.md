@@ -8,7 +8,7 @@ jupyter:
       format_version: '1.3'
       jupytext_version: 1.19.5
   kernelspec:
-    display_name: Python 3 (ipykernel)
+    display_name: rfmux-tuning
     language: python
     name: python3
 ---
@@ -71,7 +71,7 @@ import rfmux
 from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for,
     find_bias_amplitude, find_bias_frequency, find_bias_points,
-    find_resonances_in_netanal, fit_sweeps, netanal_trace, store,
+    find_resonances_in_netanal, magnitude_db, netanal_trace, store,
 )
 
 MODE = "mock"                 # "mock", "hardware", or "attached"
@@ -178,34 +178,16 @@ plt.show()
 Inspect the trace before continuing. The depth cut is dip prominence; the Q
 bounds limit accepted widths. `min_separation_hz` rejects both members of a
 close pair. See `network_analysis_find_resonances.md` for rejected candidates
-and tuning those cuts. Catalog names identify resonators; channels identify
-where they are played. Neither is a frequency or an amplitude-step index.
+and tuning those cuts. Catalog names identify resonators; channels refer to the
+hardware channel that will synthesize and digitize the resonator's bias tone.
 
-If the real RF path needs cable-delay compensation, set it before the narrow
-sweeps. This optional cell fits the unwrapped network-analysis phase and adds
-the residual delay to the current cable length. Inspect the phase over a
-suitable band before enabling it.
 
-```python
-CORRECT_CABLE_DELAY = False
-if CORRECT_CABLE_DELAY:
-    from rfmux.core.transferfunctions import (
-        calculate_new_cable_length, fit_cable_delay,
-    )
-    delay = fit_cable_delay(
-        trace["frequencies"], np.degrees(np.angle(trace["iq_counts"])))
-    old_length = await crs.get_cable_length(module=MODULE)
-    new_length = calculate_new_cable_length(old_length, delay)
-    await crs.set_cable_length(length=new_length, module=MODULE)
-    print(f"residual delay {delay * 1e9:+.3f} ns; cable length {new_length:.3f} m")
-```
+
 
 ## 3. Resolve the resonances with a multisweep
 
 A catalog-driven multisweep measures each resonator on its assigned channel.
-First take a single upward sweep at the probe amplitude and fit the skewed
-model for characterization. Fits are stored beside each measured section;
-this fit does not choose or apply the final operating points.
+First take a single upward sweep at the probe amplitude and plot it, for a quick look at the array.
 
 ```python
 initial_sweeps = await crs.multisweep(
@@ -214,45 +196,47 @@ initial_sweeps = await crs.multisweep(
     save=True, label="tuning_probe",
 )
 module_initial = initial_sweeps[module_id]
-fit_report = fit_sweeps(module_initial, models=("skewed",), save=True)
-print(fit_report)
 ```
+
 
 The structure is `results[step][direction][resonator_name]`. A section contains
-`frequencies`, `iq_counts`, `iq_volts`, and `sweep_amplitude`. The helper below
-plots all resonators and works for both a single sweep and an amplitude scan.
-Dividing magnitude by the drive amplitude lets us compare trace shapes.
+`frequencies`, `iq_counts`, `iq_volts`, and `sweep_amplitude`.
+
+The standard `plot_magnitude_panels()` from `example_plotting_multisweep.py`
+plots one panel per resonator. Import the examples shipped with this rfmux
+installation so the cell also works when you save the notebook elsewhere.
+If the plotter file is already beside your notebook, a plain
+`import example_plotting_multisweep as msplots` is sufficient.
 
 ```python
-def plot_sweeps(module_sweeps: dict, names: list[str]) -> None:
-    columns = min(4, len(names))
-    rows = (len(names) + columns - 1) // columns
-    fig, axes = plt.subplots(rows, columns, figsize=(3.4 * columns, 2.8 * rows),
-                             squeeze=False, constrained_layout=True)
-    for ax, name in zip(axes.flat, names):
-        for step, directions in module_sweeps["results"].items():
-            for direction, sections in directions.items():
-                entry = sections[name]
-                offset = (entry["frequencies"] - entry["original_center_frequency"]) / 1e3
-                magnitude = np.abs(entry["iq_counts"]) / entry["sweep_amplitude"]
-                ax.plot(offset, 20 * np.log10(np.maximum(magnitude, 1e-30)),
-                        color=f"C{step % 10}",
-                        ls="-" if direction == "upward" else "--",
-                        label=f"{entry['sweep_amplitude']:.4g}" if direction == "upward" else None)
-        ax.set(title=name, xlabel="offset from sweep centre [kHz]",
-               ylabel="magnitude / drive [dB counts]")
-    for ax in list(axes.flat)[len(names):]:
-        ax.set_visible(False)
-    axes.flat[0].legend(title="DAC amplitude", fontsize=8)
-    plt.show()
+import sys
 
-plot_sweeps(module_initial, catalog.names())
+DEMO_DIR = Path(rfmux.__file__).resolve().parent / "reference-notebooks" / "Demos"
+if str(DEMO_DIR) not in sys.path:
+    sys.path.insert(0, str(DEMO_DIR))
+import example_plotting_multisweep as msplots
+
+msplots.plot_magnitude_panels(
+    module_initial, directions="upward", normalize=True, ncols=4,
+    title="Initial multisweep at the probe amplitude",
+)
 ```
+
+Here `normalize=True` divides raw IQ counts by each trace's drive amplitude
+before converting magnitude to dB. It removes the drive scaling so sweep
+shapes can be compared; it does not set the off-resonance baseline to 0 dB.
+The custom bias-point panels in section 5 use median normalization instead.
+
+The same plotter handles multiple amplitudes and directions, with a shared
+amplitude colour scale and batches of 50 resonators per figure by default.
+Use `names=catalog.names()[:4]`, `iterations=0`, or `directions="upward"`
+to inspect a subset. `msplots.plot_iq_panels()` accepts the same selections
+for an IQ view; see `example_plotting_multisweep.py` for the full options.
 
 Check that each sweep contains its dip. Adjust the span, point count, or catalog
 centres if necessary before spending time on the amplitude scan.
 
-## 4. Iterate multisweeps over drive amplitude
+## 4. Iterate multisweeps over various amplitudes
 
 `AmplitudeSchedule.ramp()` specifies five absolute amplitudes, logarithmically
 spaced from 0.002 to 0.032. Each step measures the whole catalog in both
@@ -265,7 +249,8 @@ that resonator's catalog amplitude. Edit `SCHEDULE` and rerun this section to
 extend or refine the range based on the bias report below.
 
 The mock evaluates frequency points independently and does not reproduce
-physical hysteresis. It demonstrates drive-dependent traces and the analysis
+physical hysteresis. (TODO - this is a bug, and will be fixed!)
+However, it still demonstrates drive-dependent traces and the analysis
 flags; its detected threshold is not a validation of a real array's limit.
 
 ```python
@@ -277,21 +262,25 @@ amplitude_sweeps = await crs.multisweep(
     save=True, label="tuning_amplitudes",
 )
 module_amplitudes = amplitude_sweeps[module_id]
-plot_sweeps(module_amplitudes, catalog.names())
+msplots.plot_magnitude_panels(
+    module_amplitudes, normalize=True, ncols=4,
+    title="Amplitude scan: both sweep directions",
+)
 ```
 
 Solid lines are upward sweeps; dashed lines are downward sweeps.
 
-## 5. Choose amplitude, then frequency at that amplitude
+## 5. Choose the bias amplitude, then the bias frequency at that amplitude
 
-The amplitude finder examines measured levels from low to high and chooses
-the step below the first detected bifurcation. `"derivative"` looks for jumps
+The bias amplitude finder examines measured levels from low to high and chooses
+the step below the first detected bifurcation. The bifurcation detection method `"derivative"` looks for jumps
 in normalized IQ arc speed; `"hysteresis"` compares the two directions;
 `"both"` flags either test. Use the derivative test for this mock, and both
 for the hardware example. The thresholds below are explicit so they can be
 adjusted after inspecting the traces (see `bias_finding.md`).
 
-This first cell exposes the two decisions for one resonator. Frequency selection
+This first cell exposes the two decisions for one resonator: first choosing the amplitude, then the frequency.
+ Frequency selection
 uses the **chosen amplitude's** upward trace: `"iq_derivative"` selects the
 largest IQ motion per hertz. `"minimum"` is the alternative dip minimum.
 
@@ -316,9 +305,47 @@ selected = iterations[choice.iteration]["upward"]
 frequency = find_bias_frequency(selected, method=BIAS_SETTINGS["frequency_method"])
 print(f"{name}: step {choice.iteration}, amplitude {choice.amplitude:g}, "
       f"frequency {frequency / 1e6:.6f} MHz")
-for step, check in choice.checks.items():
-    print(f"step {step}: bifurcated={check.bifurcated}, metrics={check.metric}")
+
+columns = min(3, len(iterations))
+rows = (len(iterations) + columns - 1) // columns
+fig, axes = plt.subplots(
+    rows, columns, figsize=(3.8 * columns, 3.0 * rows),
+    sharex=True, sharey=True, squeeze=False, constrained_layout=True,
+)
+for ax, (step, entries) in zip(axes.flat, iterations.items()):
+    amplitude = entries["upward"]["sweep_amplitude"]
+    check = choice.checks.get(step)
+    verdict = f"bifurcated={check.bifurcated}" if check else "not checked"
+    chosen = step == choice.iteration
+    for direction, entry in entries.items():
+        offset = (entry["frequencies"] - selected["original_center_frequency"]) / 1e3
+        ax.plot(offset, magnitude_db(entry["iq_volts"]),
+                ls="-" if direction == "upward" else "--", label=direction)
+    ax.set_title(f"step {step}: amplitude {amplitude:g}"
+                 f"{' — CHOSEN' if chosen else ''}\n{verdict}", fontsize=10)
+    if chosen:
+        ax.set_facecolor("#eaf5e9")
+        for spine in ax.spines.values():
+            spine.set_color("#287a35")
+            spine.set_linewidth(2)
+        ax.axvline((frequency - selected["original_center_frequency"]) / 1e3,
+                   color="black", ls=":", label="bias frequency")
+    ax.legend(fontsize=8)
+for ax in list(axes.flat)[len(iterations):]:
+    ax.set_visible(False)
+fig.supxlabel("offset from sweep centre [kHz]")
+fig.supylabel("median-normalized magnitude [dB]")
+fig.suptitle(f"{name}: selecting amplitude and frequency")
+plt.show()
 ```
+
+Each panel is one measured amplitude, with both sweep directions. The green
+panel is the selected step; its dotted line marks the selected frequency.
+The search stops at the first detected bifurcation, so higher measured levels
+can be labelled **not checked**. Each trace is normalized by its own median
+magnitude before conversion to dB; shared axes make dip depths comparable.
+The median is an estimate of the off-resonance baseline, so the span should
+include enough of that baseline.
 
 `find_bias_points()` performs those steps for every resonator and returns a
 `BiasReport` with a new catalog. It rounds bias frequencies onto the tone grid
@@ -329,12 +356,7 @@ phase rotation is performed by this call. The input catalog is preserved.
 ```python
 bias_report = find_bias_points(module_amplitudes, **BIAS_SETTINGS, save=True)
 print(bias_report)
-for finding in bias_report.findings:
-    print(f"{finding.name}: step {finding.iteration}, "
-          f"amplitude {finding.amplitude:g}, "
-          f"frequency {finding.frequency_hz / 1e6:.6f} MHz, "
-          f"bifurcated at {finding.bifurcated_at}; "
-          f"{finding.flagged_because or 'bracketed operating point'}")
+
 ```
 
 Review the flags and selected traces before applying to a real array:
@@ -351,25 +373,35 @@ remove them. This demonstration applies the entire report catalog below.
 Changing the analysis settings only requires rerunning section 5, not acquiring
 new data. The report is also saved inside the amplitude measurement.
 
+The following panels show each resonator's selected sweep, normalized by its
+own median magnitude in dB, with shared axes. Zero frequency offset marks its
+bias frequency. Panel titles identify the selected amplitude and any flags;
+the report above explains the flags.
+
 ```python
-fig, axes = plt.subplots(1, 2, figsize=(10, 3.5), constrained_layout=True)
-for finding in bias_report.findings:
-    resonator = bias_report.catalog[finding.name]
-    entry = resonator.bias.bias_sweep
-    f = entry["frequencies"]
-    iq = entry["iq_volts"]
-    offset = (f - finding.frequency_hz) / 1e3
-    axes[0].plot(offset, np.abs(iq), label=finding.name)
-    axes[1].plot(iq.real, iq.imag)
-axes[0].axvline(0, color="black", ls=":", label="selected frequency")
-axes[0].set(xlabel="offset from bias frequency [kHz]", ylabel="magnitude [V]",
-            title="Each resonator at its selected amplitude")
-axes[1].set(xlabel="I [V]", ylabel="Q [V]", title="Selected IQ sweeps")
-axes[0].legend(fontsize=7, ncol=2)
+columns = min(4, len(bias_report.findings))
+rows = (len(bias_report.findings) + columns - 1) // columns
+fig, axes = plt.subplots(
+    rows, columns, figsize=(3.4 * columns, 2.7 * rows),
+    sharex=True, sharey=True, squeeze=False, constrained_layout=True,
+)
+for ax, finding in zip(axes.flat, bias_report.findings):
+    entry = bias_report.catalog[finding.name].bias.bias_sweep
+    offset = (entry["frequencies"] - finding.frequency_hz) / 1e3
+    ax.plot(offset, magnitude_db(entry["iq_volts"]), lw=1.2)
+    ax.axvline(0, color="black", ls=":", lw=1)
+    ax.axhline(0, color="0.7", lw=0.6)
+    ax.set_title(f"{finding.name}: amplitude {finding.amplitude:g}"
+                 f"{' (flagged)' if finding.flagged_because else ''}", fontsize=10)
+for ax in list(axes.flat)[len(bias_report.findings):]:
+    ax.set_visible(False)
+fig.supxlabel("offset from bias frequency [kHz]")
+fig.supylabel("median-normalized magnitude [dB]")
+fig.suptitle("Each resonator at its selected amplitude; dotted line = bias frequency")
 plt.show()
 ```
 
-## 6. Apply the bias catalog and read back the tones
+## 6. Apply the bias catalog
 
 `crs.apply_bias()` programs each catalog resonator's frequency and amplitude
 on its assigned channel. It uses the catalog's module and moves the NCO only
@@ -378,26 +410,15 @@ points: that was analysis in section 5.
 
 ```python
 await crs.apply_bias(bias_report.catalog)
-nco = await crs.get_nco_frequency(module=MODULE)
-frequency_errors = []
-amplitude_errors = []
-for resonator in bias_report.catalog:
-    frequency = nco + await crs.get_frequency(channel=resonator.channel, module=MODULE)
-    amplitude = await crs.get_amplitude(channel=resonator.channel, module=MODULE)
-    frequency_errors.append(abs(frequency - resonator.bias.frequency_hz))
-    amplitude_errors.append(abs(amplitude - resonator.bias.amplitude))
-    print(f"{resonator.name}: channel {resonator.channel}, "
-          f"{frequency / 1e6:.6f} MHz, amplitude {amplitude:g}")
-print(f"maximum frequency readback error: {max(frequency_errors):.3g} Hz")
-print(f"maximum amplitude readback error: {max(amplitude_errors):.3g}")
+
 ```
 
 ## 7. Keep and reload the result
 
-Measurements were saved through `rfmux.tuning.store`; the resonance search,
-fits, and bias report were saved back alongside their source measurements.
+Measurements were saved through `rfmux.tuning.store`; the resonance search
+and bias report were saved back alongside their source measurements.
 Reload the amplitude file and reconstruct the catalog without a board or a
-new sweep. Only load measurement files you trust, since the format is pickle.
+new sweep.
 
 ```python
 for measurement in (module_netanal, module_initial, module_amplitudes):

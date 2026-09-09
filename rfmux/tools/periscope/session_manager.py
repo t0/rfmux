@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
 
+from ...tuning import store
+
 
 class SessionManager(QtCore.QObject):
     """
@@ -166,6 +168,8 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        # The library writes into the session folder, flat, as the notebooks do.
+        store.set_output_directory(session_path)
         
         # Save the full session path so it's pre-selected next time
         from . import settings
@@ -228,6 +232,7 @@ class SessionManager(QtCore.QObject):
         
         # Set the session path
         self._session_path = path
+        store.set_output_directory(path)
         self._session_start_time = datetime.datetime.now()
         
         # Try to load existing metadata
@@ -269,6 +274,7 @@ class SessionManager(QtCore.QObject):
         session_name = self.session_name
         
         # Clear state
+        store.set_output_directory(None)
         self._session_path = None
         self._export_count = 0
         self._session_start_time = None

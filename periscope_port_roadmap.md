@@ -59,9 +59,15 @@ module imports cleanly; the breaks are at runtime:
 * Find Resonances and Bias KIDs still work in signature, through the
   deprecated shims, and would flood the console with `DeprecationWarning`
   the moment they received data (Periscope runs as `__main__`).
-* `test/periscope/test_periscope_flow.py` mocks the signals and injects a
-  pre-baked `results_by_detector`; `crs.multisweep` is never called. That is
-  why both breaks landed silently.
+* Nothing caught either break, because the only test of this path was a
+  mocked smoke test whose data and scaffolding lived in shipped code:
+  `test_dialog_params`, `_ui_mock_context` and `run_ui_mock_smoke_test` in
+  `app_runtime.py`, 530 lines, injecting a `results_by_detector` keyed by
+  `(0.1, "up")` with a literal `"some_data": [1, 2, 3]`, with every dialog,
+  task and signal on the path a MagicMock and `assert True` at the end. It
+  could not fail, and it made the old dict shape a contract of the package
+  rather than of a test. Deleted in stage 0, with its test and the
+  `unittest.mock` import from the GUI.
 
 Beyond the breaks, this Periscope carries its own amplitude loop, its own
 re-centring history (`_get_closest_remembered_cf`), inline fitting during the
@@ -175,6 +181,20 @@ and from the merge decisions of 2026-09-08.
    in one commit.
 9. **Nothing that changes a DAC or ADC phase.** IQ rotation returns as a
    separate, later step that records `iq_rotation_deg` on the `BiasPoint`.
+10. **Periscope reads what the library wrote and reconstructs nothing.** No
+    reader that rebuilds a shape out of a file, opens a file to guess what it
+    holds, back-fills a missing key, or re-derives a quantity the container
+    already carries. Each such reader is deleted in the same commit as the
+    panel that used it — netanal's in stage 1, multisweep's in stage 2 — so no
+    stage leaves Periscope parsing a shape the library does not produce. The
+    instances known today: the `results_by_iteration` loader
+    (`app_runtime.py:1618`), the `bias_kids_output` df extraction
+    (`app_runtime.py:1568`, `:1636`), the two dialogs' bare `pickle.load`
+    payload readers (`multisweep_dialog.py:37`, `bias_kids_dialog.py:33`), and
+    `session_manager.py`'s own `pickle.dump` (`:346`), `pickle.load` (`:546`)
+    and open-it-and-look file typing (`:555`), which `store`'s `file_metadata`
+    replaces. That is what has been found so far, not what exists; §8 says how
+    to recognise the rest.
 
 ---
 
@@ -190,12 +210,15 @@ and from the merge decisions of 2026-09-08.
 | `tasks.py` | `BiasKidsTask`, `DfCalibrationTask` | `FindBiasTask`, `ApplyBiasTask` |
 | `multisweep_panel.py` | `results_by_detector`, `update_data`'s injection of `amplitude/direction/iteration`, the three restructurings, `_get_closest_remembered_cf`, `last_output_cfs_by_amp_and_conceptual_idx`, `_get_fit_frequencies`, `_fits_present`, dead `_intermediate_*` | catalog plus module block, `sweep_results` readers |
 | `multisweep_dialog.py` | Bias Frequency Method combo, Rotate Saved Data checkbox, `_get_frequencies` precedence chain, legacy `results_by_iteration` reader, `resonance_frequencies` legacy key | `AmplitudeSchedule` view; catalog in, catalog out |
+| `multisweep_panel.py` | `handle_error`'s modal `QMessageBox.critical` (`:1163`), which blocks the GUI thread until dismissed and deadlocks a headless run | a transient status label, per AGENTS.md's rule on dialogs |
 | `detector_digest_panel.py` | skewed-fit denormalisation guess, `gain_complex` re-multiplication, `rotation_tod` plot, `is_bifurcated` rows, `float(key.split(":")[0])` | `skewed_model_magnitude`, `nonlinear_model_iq`, `BiasFinding` |
 | `app.py` | `apply_bias_output`, `_set_bias` NCO midpoint, mock-mode `_start_df_calibration`, `handle_bias_kids` payload plumbing | `crs.apply_bias(catalog)`; see §6 for mock-mode df |
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
 | `network_analysis_export.py`, `network_analysis_panel.py` | the private `parameters/modules` export payload, `raw_data` tuples, `iq = amps * exp(j phase)` reconstruction, GUI-thread `find_resonances` | the netanal container; `find_resonances_in_netanal` in a task |
 | `find_resonances_dialog.py`, `utils.py` | Data Exponent field, `DEFAULT_DATA_EXPONENT`, `min_resonance_separation_hz` | `find_resonances` kwargs |
-| `utils.py` | `migrate_flat_fit_keys`, `migrate_results_by_detector` | none; old files open on the old branch |
+| `app_runtime.py` | `run_ui_mock_smoke_test`, `_ui_mock_context`, the module-scope `unittest.mock` import, and with them `test/periscope/test_periscope_flow.py` | the flow test, on real widgets offscreen (stage 0) |
+| `multisweep_dialog.py`, `bias_kids_dialog.py` | the bare `pickle.load` payload readers | `store.load`, `ResonatorCatalog.from_dict` |
+| `notebook_panel.py` | the starter notebook's `pickle.load` helper | a `store.load` line, so the panel teaches the supported reader |
 | `session_manager.py` | pickle writing and `_last_exported_per_identifier` overwrite tracking | `store` with the session folder as output directory |
 
 ### Deleted from the library, last
@@ -228,18 +251,48 @@ amplitude group and DAC-scale fetch, the pulse capture panel and task
 Each stage is one or a few commits, each gated on `pytest --tier=quick` plus
 the new flow test, and each leaves the tree runnable. Sizes are relative.
 
-### Stage 0. Guardrails (small)
+### Stage 0. Guardrails (small) — done
 
-The two things that let every later stage be checked rather than asserted.
+The things that let every later stage be checked rather than asserted, and
+the removal of the one thing that made the old shape look checked when it was
+not.
 
+What landed differed from the plan in four ways, each recorded where it
+belongs: the mocked scaffolding was 530 lines rather than 350, because
+`test_dialog_params` turned out to be part of it (its five `self.*_params`
+dicts are assigned nowhere else in the app, and only `_ui_mock_context`
+called it); `store` already supported a flat output directory, so that
+library change was not needed (§5 item 1); driving a real board from a worker
+thread needed the hardware map warmed first (§5 item 1b); and
+`MultisweepPanel.handle_error` was found to open a modal dialog from a signal
+handler, which deadlocks a headless run (§3, stage 2). The two runtime breaks
+are now strict xfails that name the stage which clears them.
+
+* **Delete the mocked smoke test and its scaffolding, first.**
+  `test/periscope/test_periscope_flow.py`, `run_ui_mock_smoke_test`
+  (`app_runtime.py:2648`), `_ui_mock_context` (`app_runtime.py:2403`) and the
+  `unittest.mock` import at `app_runtime.py:8`: about 350 lines, most of them
+  shipped GUI code. Two reasons, and the second is the one that matters. It
+  cannot catch a break, because every dialog, task and signal on the path is a
+  MagicMock and the only assertion is `assert True` — which is how the two
+  runtime breaks of §1.2 got through. And it does not merely imitate the old
+  data shape: it makes that shape a contract of production code, so deleting
+  `results_by_detector` in stage 2 would break `app_runtime.py` rather than a
+  test. Periscope is to hold what the library returns and nothing else, which
+  leaves no place in `rfmux/` for a hand-built
+  `{(0.1, "up"): {"some_data": [1, 2, 3]}}`. What the helper nominally
+  covered — dialogs construct, windows register in `netanal_windows` and
+  `multisweep_windows` — the flow test covers with real widgets offscreen.
 * **A real Periscope flow test.** `test/periscope/test_tuning_flow.py`
   builds the panels and tasks against `standard_array()` (RPC only, so quick
   tier) with the offscreen Qt platform, and drives the real drivers through
   the real tasks: netanal, find resonances, multisweep schedule, fits, bias,
-  apply. It starts by pinning that the current netanal and multisweep tasks
-  fail (the two runtime breaks), so it is red before stage 1 and green after
-  each stage extends it. The existing `test_periscope_flow.py` smoke test
-  stays for the UI plumbing it covers.
+  apply. Nothing on the data path is mocked, and the assertions compare panel
+  state against the container the driver returned rather than restating a
+  shape in the test, so the test cannot drift into describing a structure the
+  library stopped producing. It starts by pinning that the current netanal and
+  multisweep tasks fail (the two runtime breaks), so it is red before stage 1
+  and green after each stage extends it.
 * **`store` and the session folder.** `store.set_created_by("periscope")` at
   startup. The session manager sets `store.set_output_directory(session_dir)`
   when a session starts and clears it when it ends. `store.session_directory()`
@@ -450,10 +503,31 @@ Not part of enabling the basic flow, listed so they are not lost.
 
 Small, and each belongs in the library rather than in Periscope.
 
-1. **`store`: a flat output directory.** Periscope's session folder must not
-   grow an `ipy_session_YYYYMMDD` inside it. One option on
-   `set_output_directory` (or a `dated=False` flag consulted by
-   `session_directory()`), with a test.
+1. ~~**`store`: a flat output directory.**~~ Already there:
+   `set_output_directory` adds no dated folder, and `session_directory()`
+   only reaches for `ipy_session_YYYYMMDD` when nothing was set. The session
+   manager just calls it (stage 0).
+1b. **The hardware map has to be readable from a worker thread** (done in
+   stage 0). Every Periscope measurement runs on a QThread, and this branch's
+   drivers name their output block with `crs.module[m].index()`, an ORM read
+   (`take_netanal.py:417`, `multisweep.py:878`). Main has both drivers but
+   keys its outputs by module number, so it never reads the map from a task.
+   The map is one in-memory SQLite database that only the thread which opened
+   it may read, so the first such read from a task raised
+   `sqlite3.ProgrammingError`. `warm_for_threads(crs)` in
+   `core/hardware_map.py` loads those attributes on the map's own thread, where
+   they stay cached on the instance; `Periscope.__init__` calls it when it
+   takes a board. Two tests in `test_tuning_flow.py` hold it: one drives a
+   netanal from a worker, one expires an attribute and pins the
+   `ProgrammingError` that the warm-up prevents.
+
+   Decided against making the engine itself thread-shared
+   (`check_same_thread=False` plus a `StaticPool`), which would remove the
+   class of problem but change core behaviour for real boards. The warm-up
+   holds only while nothing commits the session after startup —
+   `expire_on_commit` defaults to true, and a commit would un-warm every
+   instance — and the only `hwm.commit()` is at load time
+   (`core/session.py:278`). Revisit if that changes.
 2. **`find_bias_frequency(method="fit")`**: the fitted `fr` from
    `entry["fits"]`, listed in the todo as the reason the function takes an
    entry rather than two arrays. Needed for the re-run dialog's "from fitted
@@ -519,7 +593,7 @@ Listed so they can be overruled.
 
 | Stage | Adds | Where |
 |---|---|---|
-| 0 | flow test skeleton pinning the two runtime breaks; per-panel signals test; store-in-session-folder test | `test/periscope/test_tuning_flow.py`, `test/tuning/test_store.py` |
+| 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
 | 1 | flow steps 1-2; dialog fields; netanal block rendering | `test/periscope/` |
 | 2 | flow step 3 through the task; rendering on the shipped multisweep pickle; dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
@@ -529,3 +603,46 @@ Listed so they can be overruled.
 Everything runs in the quick tier: the standard array is RPC-only and Qt
 runs offscreen. Nothing in the port touches the acquisition tier, pulse
 capture or `simplified_tuning_flow`.
+
+---
+
+## 8. Holdovers to keep watching for
+
+The mocked smoke test was not an isolated defect, it was one instance of a
+habit. Old Periscope carried the tuning flow itself, so it grew a layer of
+code whose job was to package, re-package, reconstruct and guess at data — a
+layer the library makes unnecessary. §3 lists the instances found so far. The
+rest will surface while porting, and the reason for writing this down is that
+the response is deletion, not translation: when a stage uncovers one it goes
+in that stage's commit, and the row is added to §3 rather than to a follow-up
+list.
+
+The shapes it takes, so they are recognisable at a glance:
+
+* **Reconstruction.** Rebuilding something the container already carries:
+  `iq = amps * exp(j phase)` in the netanal export, denormalising a skewed fit
+  in the digest, re-multiplying `gain_complex`, generating model curves during
+  a sweep. The readers in `fits.py` and `sweep_results.py` rebuild curves from
+  stored parameters; call them.
+* **Re-packaging.** Restructuring a result into a second private shape to hand
+  it to the next panel: `results_by_detector`, `res_info_dict`, the
+  `"amp:direction"` string keys, the three restructurings in
+  `multisweep_panel.py`. A container plus a `ResonatorCatalog` is the only
+  shape that crosses a boundary inside Periscope.
+* **Guessing.** Deciding what a file holds by opening it and looking,
+  back-filling `iq_volts`, precedence chains like the dialog's
+  `_get_frequencies`, a `'nan'`-string test for whether a fit succeeded.
+  `file_metadata`, typed returns and `failed_because` replace all of it.
+* **Fabrication.** Test or demo data hand-written in the shape of a
+  measurement, anywhere under `rfmux/` — the stage 0 deletion. A test that
+  needs an array calls `standard_array()`, which builds one in under a second
+  with no UDP; a test that needs sweeps loads a shipped pickle of real ones.
+* **A private copy of a library job.** A second bifurcation detector, a second
+  fit orchestrator, an amplitude loop, a re-centring history, an
+  `apply_bias_output` that programs tones beside an `apply_bias` that already
+  does.
+
+Two greps worth running at the end of each stage. `grep -rn "unittest.mock"
+rfmux/` should be empty from stage 0 onwards. `grep -rn "pickle\." rfmux/tools/`
+should be empty by stage 5, including the starter notebook that
+`notebook_panel.py` writes, which should hand the user `store.load`.

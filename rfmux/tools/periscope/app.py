@@ -68,6 +68,8 @@ from .session_startup_dialog import UnifiedStartupDialog
 from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
+from rfmux.tuning import store
+from rfmux.core.hardware_map import warm_for_threads
 import asyncio
 import datetime
 import time
@@ -166,6 +168,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Sets up data sources, buffers, UI elements, worker threads, and timers.
         """
         super().__init__()
+
+        # Files this session writes say which tool wrote them.
+        store.set_created_by("periscope")
+
+        # Measurements run on QThreads and name their output block from the
+        # hardware map, which only this thread may read from.
+        if crs is not None:
+            warm_for_threads(crs)
 
         # --- Core Parameters ---
         self.host: str = host                    # UDP host for data stream
@@ -330,9 +340,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.crs_init_signals.success.connect(self._crs_init_success)
         self.crs_init_signals.error.connect(self._crs_init_error)
         
-        # Multisweep analysis signals and tracking.
-        # MultisweepSignals and MultisweepTask are from .tasks.
-        self.multisweep_signals = MultisweepSignals()
+        # Multisweep tracking.  Each task carries its own MultisweepSignals,
+        # built where the task is started.
         self.multisweep_windows: Dict[str, Dict] = {} # Stores multisweep window instances
         self.multisweep_window_count: int = 0        # Counter for unique multisweep window_ids
         self.multisweep_tasks: Dict[str, MultisweepTask] = {} # Stores active Multisweep tasks

@@ -663,6 +663,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.progress_group:
             self.progress_group.hide()
 
+    def connect_task_signals(self, signals):
+        """Route one task's signals to this panel's slots.
+
+        Each task carries its own signals object, so several panels can sweep
+        at once.
+        """
+        queued = QtCore.Qt.ConnectionType.QueuedConnection
+        signals.progress.connect(self.update_progress, queued)
+        signals.starting_iteration.connect(self.handle_starting_iteration, queued)
+        signals.data_update.connect(self.update_data, queued)
+        signals.completed_iteration.connect(
+            lambda module, iteration, amplitude, direction:
+                self.completed_amplitude_sweep(module, amplitude),
+            queued)
+        signals.all_completed.connect(self.all_sweeps_completed, queued)
+        signals.error.connect(self.handle_error, queued)
+        signals.fitting_progress.connect(self.handle_fitting_progress, queued)
+
     def update_progress(self, module, progress_percentage):
         """
         Updates the progress bar if the update is for the target module.

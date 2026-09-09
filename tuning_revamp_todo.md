@@ -373,11 +373,18 @@ call_params, results}}` like every other driver, with the trace *at* `results`
 and its arrays named `iq_counts`/`iq_volts`. It also takes `sweep_direction`,
 one direction per call, and a downward netanal comes back descending. That is a
 breaking change to the shape Periscope reads, and Periscope was deliberately
-left on the old one:
+left on the old one. This is stage 1 of `periscope_port_roadmap.md`, which
+stages the whole port; what follows is the netanal part of it.
 
-* `tools/periscope/tasks.py:447` unpacks `result['frequencies']`,
-  `result['iq_complex']` and `result['phase_degrees']` straight off the top, and
-  `tasks.py:691` reads `iq_complex` out of a stored dict.
+* `tools/periscope/tasks.py:479` unpacks `result['frequencies']`,
+  `result['iq_complex']` and `result['phase_degrees']` straight off the top.
+  `NetworkAnalysisTask` catches the resulting `KeyError` and emits it on its
+  error signal, so the completion signal never fires and a multi-amplitude
+  netanal stops after the first amplitude.
+  `test/periscope/test_tuning_flow.py` pins this as a strict xfail; clearing it
+  is what marks stage 1 done.
+* `detector_digest_panel.py` reads `iq_complex` off stored sweep entries
+  (`:653`, `:810`), which is the multisweep half of the same change (stage 2).
 * `network_analysis_panel.py` and `network_analysis_export.py` carry their own
   `parameters`/`modules` payload, which `call_params` now duplicates.
 

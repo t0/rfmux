@@ -1,9 +1,8 @@
 """The isolation switch reaches the algorithm, and the defaults agree.
 
-The dialog's keys and Periscope's defaults are checked against each other
-at startup by _assert_param_keys, which raises rather than warns -- so a
-parameter added to one and not the other stops the GUI from opening at
-all.  This catches that here instead.
+A parameter added to the dialog and not to Periscope's defaults, or to
+neither and still splatted into find_resonances, is a TypeError at the end
+of a network analysis.  Nothing but these tests checks that.
 """
 
 import pytest
@@ -33,8 +32,7 @@ def test_isolation_round_trips(qt_app):
 
 
 def test_the_dialog_and_the_defaults_agree():
-    """What Periscope seeds find_params with must be what the dialog asks
-    for; the runtime turns a mismatch into an AssertionError at startup."""
+    """What Periscope seeds the finder with must be what the dialog asks for."""
     from rfmux.tools.periscope import utils
 
     keys = ParamKeyExtractor(

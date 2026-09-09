@@ -14,6 +14,7 @@ __all__ = [
     "HardwareMap",
     "Boolean",
     "Session",
+    "warm_for_threads",
 ]
 
 import logging
@@ -494,6 +495,24 @@ def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs
             bind=e, query_cls=HWMQuery, class_=Session, *args, **kwargs
         )
     )
+
+
+def warm_for_threads(crs) -> None:
+    """Load *crs*'s modules now, so another thread can read them later.
+
+    The map is one in-memory SQLite database, opened on whichever thread called
+    :func:`HardwareMap`, and SQLite refuses that connection to any other thread.
+    A caller that drives measurements from worker threads therefore has to
+    resolve every ORM attribute those measurements touch before handing the
+    board over: the drivers name their output block with
+    ``crs.module[m].index()``, and the loaded collection is cached on the
+    instance, so afterwards no query fires and no connection is shared.
+
+    Call it once, on the thread that opened the map, after ``resolve()``.
+    Committing the session afterwards expires these attributes and undoes it.
+    """
+    for module in crs.module.values():
+        module.index()
 
 
 # vim: sts=4 ts=4 sw=4 tw=78 smarttab expandtab

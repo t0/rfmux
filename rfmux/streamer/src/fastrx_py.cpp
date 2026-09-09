@@ -372,16 +372,22 @@ public:
 
 	/* Collect exactly n_packets, or fewer on timeout.
 	 *
-	 * pipe selects the pipeline block within a packet; module selects whose
-	 * packets to keep.  Both are 1-indexed.
+	 * channels keeps the module's first that many I/Q pairs of each packet
+	 * (1..MAX_SAMPLES_PER_PACKET); module (1-indexed) selects whose packets
+	 * to keep.  Innermost first, as the API orders (channel, module).  The
+	 * result is (n_packets, channels): the same geometry as PacketWriter, a
+	 * prefix of the module's channels fixed for the whole capture, spanning
+	 * pipes 1..ceil(channels / 128) with a pipe the packet lacks zero-filled
+	 * and counted in 'dropouts'.
 	 *
 	 * Blocks the calling (Python) thread with the GIL released. Exactly one
 	 * futex wake per capture: the hot thread signals when the buffer is full,
 	 * not when each packet lands. */
-	py::dict capture(uint32_t n_packets, int pipe, int module, double timeout_s) {
-		if (pipe < 1 || pipe > NUM_PIPELINES)
+	py::dict capture(uint32_t n_packets, int channels, int module, double timeout_s) {
+		if (channels < 1 || channels > MAX_SAMPLES_PER_PACKET)
 			throw py::value_error(std::format(
-					"pipe must be in 1..{}, got {}", NUM_PIPELINES, pipe));
+					"channels must be in 1..{}, got {}", MAX_SAMPLES_PER_PACKET,
+					channels));
 		if (module < 1 || module > NUM_MODULES)
 			throw py::value_error(std::format(
 					"module must be in 1..{}, got {}", NUM_MODULES, module));
@@ -399,12 +405,12 @@ public:
 
 		/* Allocated fresh, and never reused: this memory leaves for Python at
 		 * the end of the call, so there is nothing to hand back or share. */
-		const size_t n_iq = (size_t)n_packets * SAMPLES_PER_PIPELINE * 2;
+		const size_t n_iq = (size_t)n_packets * channels * 2;
 		auto iq = std::make_unique<int16_t[]>(n_iq);
 		auto seqs = std::make_unique<uint32_t[]>(n_packets);
 
 		/* Fault in every page before the hot thread can be asked to write it. */
-		std::memset(iq.get(), 0, (size_t)n_packets * SAMPLES_PER_PIPELINE * 2 * sizeof(int16_t));
+		std::memset(iq.get(), 0, n_iq * sizeof(int16_t));
 		std::memset(seqs.get(), 0, (size_t)n_packets * sizeof(uint32_t));
 
 		{
@@ -416,11 +422,12 @@ public:
 			iq_ = iq.get();
 			seqs_ = seqs.get();
 			want_ = n_packets;
-			pipe_ = pipe - 1;
 			module_ = module - 1;
+			channels_ = channels;
 			modules_seen_.store(0, std::memory_order_relaxed);
 			count_.store(0, std::memory_order_relaxed);
 			restarts_.store(0, std::memory_order_relaxed);
+			dropouts_.store(0, std::memory_order_relaxed);
 			state_.store(State::capturing, std::memory_order_release);
 
 			/* Only now ask fastrxd to send anything. Between captures our slot
@@ -505,9 +512,6 @@ private:
 		if (hdr.module < NUM_MODULES)
 			modules_seen_.fetch_or(1u << hdr.module, std::memory_order_relaxed);
 
-		if (!iq[pipe_])
-			return; /* our pipe is absent from this packet */
-
 		if (hdr.module != module_)
 			return; /* another module's packet */
 
@@ -530,9 +534,26 @@ private:
 			return;
 		}
 
-		std::memcpy(iq_ + (size_t)i * SAMPLES_PER_PIPELINE * 2,
-				iq[pipe_],
-				SAMPLES_PER_PIPELINE * 2 * sizeof(int16_t));
+		/* The module's first channels_ I/Q pairs: whole pipe blocks until the
+		 * last, which holds the remainder.  As in PacketWriter, a pipe the
+		 * packet lacks is zero-filled rather than the packet skipped, so the
+		 * geometry never depends on what the transmitter happens to send. */
+		int16_t* dst = iq_ + (size_t)i * channels_ * 2;
+		size_t remaining = channels_;
+		bool dropout = false;
+		for (int pipe = 0; remaining; pipe++) {
+			const size_t n = std::min<size_t>(remaining, SAMPLES_PER_PIPELINE);
+			if (iq[pipe])
+				std::memcpy(dst, iq[pipe], n * 2 * sizeof(int16_t));
+			else {
+				std::memset(dst, 0, n * 2 * sizeof(int16_t));
+				dropout = true;
+			}
+			dst += n * 2;
+			remaining -= n;
+		}
+		if (dropout)
+			dropouts_.fetch_add(1, std::memory_order_relaxed);
 		seqs_[i] = hdr.seq;
 		last_snapshot_.store(hdr.pipe_snapshot, std::memory_order_relaxed);
 		count_.store(i + 1, std::memory_order_release);
@@ -545,7 +566,7 @@ private:
 			uint32_t want) {
 
 		const py::ssize_t n = got;
-		const py::ssize_t ch = SAMPLES_PER_PIPELINE;
+		const py::ssize_t ch = channels_;
 		const py::ssize_t s2 = sizeof(int16_t);
 
 		int16_t* iq_raw = iq.get();
@@ -567,10 +588,11 @@ private:
 			"i"_a=arr_i,
 			"q"_a=arr_q,
 			"seq"_a=arr_s,
-			"pipe"_a=pipe_ + 1,
 			"module"_a=module_ + 1,
+			"channels"_a=channels_,
 			"complete"_a=(got == want),
 			"restarts"_a=restarts_.load(std::memory_order_relaxed),
+			"dropouts"_a=dropouts_.load(std::memory_order_relaxed),
 			"pipe_snapshot"_a = last_snapshot_.load(std::memory_order_relaxed),
 			"modules_seen"_a = modules_seen_.load(std::memory_order_relaxed));
 	}
@@ -588,8 +610,12 @@ private:
 	int16_t* iq_ = nullptr;
 	uint32_t* seqs_ = nullptr;
 	uint32_t want_ = 0;
-	int pipe_ = 0; /* set by capture(), read by on_packet() */
-	int module_ = 0; /* likewise; 0-indexed, as on the wire */
+	int module_ = 0; /* set by capture(), read by on_packet(); 0-indexed, as on the wire */
+	int channels_ = MAX_SAMPLES_PER_PACKET; /* likewise; I/Q pairs kept per packet */
+
+	/* Packets in this capture that lacked a pipe the geometry needed and were
+	 * zero-filled there. */
+	std::atomic<uint64_t> dropouts_{0};
 
 	/* Bit m set once a packet from (0-indexed) module m has been seen during
 	 * this capture, filtered or not.  A header naming a module that does not
@@ -633,14 +659,15 @@ class PacketWriter : public Consumer {
 public:
 	PacketWriter(std::string socket_path,
 			std::string path,
-			uint8_t pipe_mask,
+			std::optional<int> channels,
 			uint64_t n_packets,
 			uint64_t ring_bytes,
 			unsigned queue_depth)
 		: Consumer(std::move(socket_path)),
 		  path_(std::move(path)),
-		  mask_(pipe_mask),
-		  stride_(stride_for(pipe_mask)),
+		  channels_((uint16_t)channels.value_or(MAX_SAMPLES_PER_PACKET)),
+		  n_pipes_((channels_ + SAMPLES_PER_PIPELINE - 1) / SAMPLES_PER_PIPELINE),
+		  stride_(stride_for(channels_)),
 		  limit_(n_packets),
 		  queue_depth_(queue_depth),
 		  ring_bytes_((ring_bytes + kChunkAlign - 1) & ~(kChunkAlign - 1)) {
@@ -648,12 +675,19 @@ public:
 		if (path_.empty())
 			throw py::value_error("path must not be empty");
 
-		/* Deliberately required: latching geometry from the stream instead
-		 * would make the file's shape depend on whichever packet won the
-		 * race with start(). A caller who wants "record what is streaming
-		 * now" reads pipe_snapshot from a capture, and says so. */
-		if (!mask_)
-			throw py::value_error("pipe_mask must name at least one pipe");
+		/* The geometry is fixed here, for the whole recording: every record
+		 * has the same stride, so PacketFile can hand back strided views
+		 * rather than parse.  It is deliberately not latched from the
+		 * stream, which would make the file's shape depend on whichever
+		 * packet won the race with start(); None means the whole module,
+		 * i.e. all NUM_PIPELINES pipes, whether or not they are being sent.
+		 * A pipe the layout needs but a packet lacks is zero-filled (see
+		 * on_packet).  Checked against the int given rather than channels_,
+		 * which has already been through a uint16 cast. */
+		if (const int n = channels.value_or(MAX_SAMPLES_PER_PACKET);
+				n < 1 || n > MAX_SAMPLES_PER_PACKET)
+			throw py::value_error(std::format(
+					"channels must be in 1..{}, got {}", MAX_SAMPLES_PER_PACKET, n));
 
 		if (queue_depth_ < 1 || queue_depth_ > 1024)
 			throw py::value_error("queue_depth must be in 1..1024");
@@ -670,7 +704,7 @@ public:
 	uint64_t dropouts() const { return dropouts_.load(std::memory_order_relaxed); }
 	const std::string& path() const { return path_; }
 
-	uint8_t pipe_mask() const { return mask_; }
+	uint16_t channels() const { return channels_; }
 
 	std::optional<std::string> error() {
 		std::lock_guard<std::mutex> lk(err_mu_);
@@ -744,24 +778,27 @@ protected:
 		std::memcpy(rec, &hdr, sizeof(hdr));
 		uint8_t* p = rec + sizeof(hdr);
 
-		/* Zero-extend over pipeline drop-out: a recorded pipe missing from
-		 * this packet gets a zero block rather than costing the whole
+		/* Zero-extend over pipeline drop-out: a pipe the layout needs but
+		 * this packet lacks gets a zero block rather than costing the whole
 		 * record. The record's own pipe_snapshot says which blocks are
 		 * real, so provenance is per-record and free -- and the file's
 		 * timeline stays contiguous across a transmitter reconfiguration.
 		 * In the happy path the branch below is always taken and costs
 		 * nothing. */
 		bool dropout = false;
-		for (int pipe = 0; pipe < NUM_PIPELINES; pipe++) {
-			if (!(mask_ & (1u << pipe)))
-				continue;
+		size_t remaining = channels_; /* I/Q pairs still to write */
+		for (int pipe = 0; pipe < n_pipes_; pipe++) {
+			/* Whole blocks until the last pipe, which holds the remainder. */
+			const size_t n = std::min<size_t>(remaining, SAMPLES_PER_PIPELINE);
+			const size_t bytes = n * 2 * sizeof(int16_t);
 			if (iq[pipe])
-				std::memcpy(p, iq[pipe], kBlockBytes);
+				std::memcpy(p, iq[pipe], bytes);
 			else {
-				std::memset(p, 0, kBlockBytes);
+				std::memset(p, 0, bytes);
 				dropout = true;
 			}
-			p += kBlockBytes;
+			p += bytes;
+			remaining -= n;
 		}
 		std::memset(p, 0, stride_ - (size_t)(p - rec)); /* <= 7 pad bytes */
 
@@ -826,8 +863,6 @@ protected:
 	}
 
 private:
-	static constexpr size_t kBlockBytes = SAMPLES_PER_PIPELINE * 2 * sizeof(int16_t);
-
 	/* O_DIRECT submission granularity: every write is this-aligned in both
 	 * file offset and length, which satisfies O_DIRECT on any device with
 	 * logical blocks up to 4 KiB (i.e. all of them). It doubles as the page
@@ -842,8 +877,8 @@ private:
 	static_assert(kChunkMax % kChunkAlign == 0,
 			"chunks are built from whole alignment units");
 
-	static uint32_t stride_for(uint8_t mask) {
-		size_t s = sizeof(fastrx_packet_header) + (size_t)__builtin_popcount(mask) * kBlockBytes;
+	static uint32_t stride_for(uint16_t channels) {
+		size_t s = sizeof(fastrx_packet_header) + (size_t)channels * 2 * sizeof(int16_t);
 		return (uint32_t)((s + 7) & ~size_t(7));
 	}
 
@@ -1081,8 +1116,7 @@ private:
 		h->magic = FASTRX_FILE_MAGIC;
 		h->version = FASTRX_FILE_VERSION;
 		h->record_stride = stride_;
-		h->samples_per_pipe = SAMPLES_PER_PIPELINE;
-		h->pipe_mask = mask_;
+		h->channels = channels_;
 		h->num_records = count;
 
 		ssize_t n = pwrite(fd_, hdr_scratch_, FASTRX_FILE_HEADER_BYTES, 0);
@@ -1126,7 +1160,8 @@ private:
 
 	/* Geometry, fixed at construction: settled before any thread exists,
 	 * so the hot path never negotiates structure with the stream. */
-	const uint8_t mask_;
+	const uint16_t channels_;   /* I/Q pairs per record: the module's first that many */
+	const int n_pipes_;         /* pipes that span them: 1..n_pipes_ */
 	const uint32_t stride_;
 
 	uint64_t limit_; /* records to stop after; 0 = unbounded */
@@ -1195,19 +1230,19 @@ public:
 					h->version, FASTRX_FILE_VERSION));
 
 		stride_ = h->record_stride;
-		spp_ = h->samples_per_pipe;
-		pipe_mask_ = h->pipe_mask;
-		n_pipes_ = __builtin_popcount(pipe_mask_);
+		channels_ = h->channels;
 		num_records_ = h->num_records;
 
-		if (!pipe_mask_)
-			throw std::runtime_error("PacketFile: no pipes recorded");
+		if (channels_ < 1 || channels_ > MAX_SAMPLES_PER_PACKET)
+			throw std::runtime_error(std::format(
+					"PacketFile: {} channels (this build reads 1..{})",
+					channels_, MAX_SAMPLES_PER_PACKET));
 
-		const size_t payload = (size_t)n_pipes_ * spp_ * 2 * sizeof(int16_t);
+		const size_t payload = (size_t)channels_ * 2 * sizeof(int16_t);
 		if (stride_ < sizeof(fastrx_packet_header) + payload || stride_ % 8)
 			throw std::runtime_error(std::format(
-					"PacketFile: record stride {} cannot hold {} pipes "
-					"of {} samples", stride_, n_pipes_, spp_));
+					"PacketFile: record stride {} cannot hold {} channels",
+					stride_, channels_));
 
 		/* The file may end with up to a chunk of O_DIRECT padding beyond
 		 * the last record, so the size bounds the count rather than
@@ -1241,19 +1276,8 @@ public:
 	PacketFile& operator=(const PacketFile&) = delete;
 
 	size_t num_packets() const { return num_records_; }
-	uint16_t samples_per_pipe() const { return spp_; }
-	uint16_t pipe_mask() const { return pipe_mask_; }
+	uint16_t channels() const { return channels_; }
 	uint32_t record_stride() const { return stride_; }
-	int n_pipes() const { return n_pipes_; }
-
-	/* The recorded pipes, 1-indexed as everywhere in the Python API. */
-	std::vector<int> pipes() const {
-		std::vector<int> out;
-		for (int p = 0; p < NUM_PIPELINES; p++)
-			if (pipe_mask_ & (1u << p))
-				out.push_back(p + 1);
-		return out;
-	}
 
 	py::array_t<uint32_t> seq() const {
 		return py::array_t<uint32_t>(
@@ -1284,25 +1308,14 @@ public:
 				py::cast(this));
 	}
 
-	/* (num_packets, samples_per_pipe, 2) int16 view of one pipe's I/Q,
-	 * zero-copy over the mapping. pipe is 1-indexed. */
-	py::array_t<int16_t> pipe_iq(int pipe) const {
-		if (pipe < 1 || pipe > NUM_PIPELINES)
-			throw py::value_error(std::format(
-					"pipe must be in 1..{}, got {}", NUM_PIPELINES, pipe));
-		uint8_t bit = (uint8_t)(1u << (pipe - 1));
-		if (!(pipe_mask_ & bit))
-			throw py::value_error(std::format(
-					"pipe {} was not recorded in this file", pipe));
-
-		size_t rank = (size_t)__builtin_popcount(pipe_mask_ & (bit - 1));
-		const uint8_t* base = record(0) + sizeof(fastrx_packet_header)
-				+ rank * (size_t)spp_ * 2 * sizeof(int16_t);
+	/* (num_packets, channels, 2) int16 view of every record's whole payload:
+	 * the module's channels 1..channels.  Zero-copy over the mapping. */
+	py::array_t<int16_t> iq() const {
 		return py::array_t<int16_t>(
-				{(py::ssize_t)num_records_, (py::ssize_t)spp_, (py::ssize_t)2},
+				{(py::ssize_t)num_records_, (py::ssize_t)channels_, (py::ssize_t)2},
 				{(py::ssize_t)stride_, (py::ssize_t)(2 * sizeof(int16_t)),
 					(py::ssize_t)sizeof(int16_t)},
-				reinterpret_cast<const int16_t*>(base),
+				reinterpret_cast<const int16_t*>(record(0) + sizeof(fastrx_packet_header)),
 				py::cast(this));
 	}
 
@@ -1316,17 +1329,15 @@ private:
 	size_t file_size_ = 0;
 	uint64_t num_records_ = 0;
 	uint32_t stride_ = 0;
-	uint16_t spp_ = 0;
-	uint16_t pipe_mask_ = 0;
-	int n_pipes_ = 0;
+	uint16_t channels_ = 0;
 };
 
 PYBIND11_MODULE(_fastrx, m) {
 	m.doc() = "AF_XDP fast packet capture for channel-stream data";
 
-	m.attr("NUM_PIPELINES") = NUM_PIPELINES;
 	m.attr("NUM_MODULES") = NUM_MODULES;
 	m.attr("MAX_SAMPLES") = SAMPLES_PER_PIPELINE;
+	m.attr("MAX_CHANNELS") = MAX_SAMPLES_PER_PACKET;
 	m.attr("ABI_VERSION") = FASTRXD_ABI_VERSION;
 	m.attr("MAX_CLIENTS") = FASTRXD_MAX_CLIENTS;
 
@@ -1347,13 +1358,16 @@ PYBIND11_MODULE(_fastrx, m) {
 			 "socket_path"_a)
 		.def_property_readonly("socket_path", &PacketCapture::socket_path)
 		.def("capture", &PacketCapture::capture,
-			 "n_packets"_a, "pipe"_a, "module"_a, "timeout"_a = 5.0,
+			 "n_packets"_a, "channels"_a, "module"_a, "timeout"_a = 5.0,
 			 "Collect exactly n_packets, or fewer on timeout.\n\n"
-			 "pipe and module are 1-indexed.  Each streaming module sends its "
-			 "own packets with its own sequence counter, so a capture keeps "
-			 "one module's and module is required.  'modules_seen' in the "
-			 "result is a bitmask (bit m-1 for module m) of every module "
-			 "observed during the capture, filtered or not.\n\n"
+			 "channels keeps the module's first that many channels "
+			 "(1..MAX_CHANNELS), so 'i' and 'q' are (n_packets, channels); a "
+			 "pipe the transmitter is not sending reads as zeros and counts in "
+			 "'dropouts'.  module is 1-indexed.  Each streaming module sends "
+			 "its own packets with its own sequence counter, so a capture "
+			 "keeps one module's.  'modules_seen' in the result is a bitmask "
+			 "(bit m-1 for module m) of every module observed during the "
+			 "capture, filtered or not.\n\n"
 			 "Reusable: call as often as you like on one instance. The returned "
 			 "'i' and 'q' arrays are strided views over one buffer whose "
 			 "ownership passes to Python, so nothing is copied.")
@@ -1370,15 +1384,16 @@ PYBIND11_MODULE(_fastrx, m) {
 
 	py::class_<PacketWriter>(m, "PacketWriter")
 		.def(py::init([](std::string socket_path, std::string path,
-					uint8_t pipe_mask, uint64_t n_packets,
+					std::optional<int> channels, uint64_t n_packets,
 					uint64_t ring_bytes, unsigned queue_depth) {
 				 auto w = std::make_unique<PacketWriter>(
 						 std::move(socket_path), std::move(path),
-						 pipe_mask, n_packets, ring_bytes, queue_depth);
+						 channels, n_packets, ring_bytes, queue_depth);
 				 w->start();
 				 return w.release();
 			 }),
-			 "socket_path"_a, "path"_a, "pipe_mask"_a, "n_packets"_a = 0,
+			 "socket_path"_a, "path"_a,
+			 "channels"_a = py::none(), "n_packets"_a = 0,
 			 "ring_bytes"_a = (uint64_t)256 << 20, "queue_depth"_a = 32)
 		.def("wait", [](PacketWriter& w, double timeout) {
 				bool done;
@@ -1410,7 +1425,8 @@ PYBIND11_MODULE(_fastrx, m) {
 			"Raises if the recording failed at any point (e.g. a disk "
 			"error). Overruns are not failures; check .overruns.")
 		.def_property_readonly("path", &PacketWriter::path)
-		.def_property_readonly("pipe_mask", &PacketWriter::pipe_mask)
+		.def_property_readonly("channels", &PacketWriter::channels,
+			 "I/Q pairs recorded per record: the module's first that many")
 		.def_property_readonly("packets", &PacketWriter::packets)
 		.def_property_readonly("bytes_written", &PacketWriter::bytes_written)
 		.def_property_readonly("overruns", &PacketWriter::overruns)
@@ -1443,14 +1459,15 @@ PYBIND11_MODULE(_fastrx, m) {
 
 	py::class_<PacketFile>(m, "PacketFile",
 			"Zero-copy reader for PacketWriter recordings.\n\n"
-			"Arrays returned by seq(), ts() and pipe_iq() are strided views "
+			"Arrays returned by seq(), ts() and iq() are strided views "
 			"over the file mapping, valid for the life of this object.")
 		.def(py::init<const std::string&>(), "path"_a)
 		.def_property_readonly("num_packets", &PacketFile::num_packets)
-		.def_property_readonly("samples_per_pipe", &PacketFile::samples_per_pipe)
-		.def_property_readonly("pipe_mask", &PacketFile::pipe_mask)
-		.def_property_readonly("pipes", &PacketFile::pipes)
-		.def_property_readonly("n_pipes", &PacketFile::n_pipes)
+		.def_property_readonly("channels", &PacketFile::channels,
+			 "I/Q pairs per record: module channels 1..channels (PacketWriter's channels=)")
+		.def("iq", &PacketFile::iq,
+			 "(num_packets, channels, 2) int16 view of the whole payload, "
+			 "i.e. module channels 1..channels.  Zero-copy.")
 		.def_property_readonly("record_stride", &PacketFile::record_stride)
 		.def("seq", &PacketFile::seq)
 		.def("ts", &PacketFile::ts)
@@ -1458,7 +1475,6 @@ PYBIND11_MODULE(_fastrx, m) {
 			 "Every record's wire header, as a structured array.\n\n"
 			 "Stream metadata (serial, sample_trunc, module, pipe_snapshot, "
 			 "...) is read from here, usually from element 0.")
-		.def("pipe_iq", &PacketFile::pipe_iq, "pipe"_a)
 		.def("__len__", &PacketFile::num_packets)
 		.def("__enter__", [](PacketFile& f) -> PacketFile& { return f; },
 			 py::return_value_policy::reference)

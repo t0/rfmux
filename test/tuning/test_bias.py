@@ -848,6 +848,16 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
     assert report.catalog.to_dict() != before
 
 
+def test_the_catalog_name_survives_the_measurement():
+    """Which array this is has to come out the far end, through the snapshot in
+    the sweeps, or naming the catalog was not bookkeeping."""
+    named = ResonatorCatalog.from_dict(a_catalog().to_dict(), name="wafer B")
+
+    report = find_bias_points(a_schedule(catalog=named), save=False)
+
+    assert report.catalog.name == "wafer B"
+
+
 def test_the_sweep_entries_come_back_as_they_went_in():
     """The diagnostics of an analysis do not belong written onto the sweeps the
     analysis was handed. The report itself does, and goes on the output."""

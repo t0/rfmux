@@ -304,6 +304,15 @@ class ResonatorCatalog:
         report = find_bias_points(sweeps[crs.module[2].index()])
         await crs.apply_bias(report.catalog)
 
+    ``name`` names the catalog itself — the array, the wafer, the cooldown —
+    and travels with it through ``to_dict``, so a file that turns up later says
+    which array it holds instead of leaving you to recognize the frequencies.
+    It defaults to ``"module <module>"``, the only thing a catalog knows about
+    itself at construction; pass your own as soon as two of them could be
+    confused. Nothing keys off it, and it need not be unique. Note the
+    neighbours: ``catalog.name`` is the catalog, ``catalog.names()`` is the
+    resonators in it.
+
     Lookup is by name. Iteration is in bias-frequency order — the members
     themselves are an unordered collection, so ``resonators()`` and ``names()``
     take the order you want to pull them out in.
@@ -337,7 +346,7 @@ class ResonatorCatalog:
     # Stamped into to_dict output and checked by from_dict, so a file written by
     # a version of this module that shaped things differently fails loudly
     # instead of being half-understood. Bump it whenever the dict shape changes.
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     # Older shapes from_dict can still read. Version 1 stored `resonators` as a
     # list of entries each carrying its own `name`; 2 keys them by name, so a
@@ -350,13 +359,18 @@ class ResonatorCatalog:
     # None, which is what a bias point that never had one says. The bump is for
     # the other direction, so that a file written now fails on an older reader
     # rather than arriving there as an unexpected keyword.
-    READABLE_SCHEMA_VERSIONS = (1, 2, 3)
+    #
+    # 4 added `name`, the catalog's own. A file without one reads back under the
+    # default, so again the bump is for the other direction: a reader that would
+    # drop the name on the floor should refuse the file instead.
+    READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
     def __init__(
         self,
         resonators: Iterable[Resonator],
         module: int,
         min_separation_hz: float | None = None,
+        name: str | None = None,
     ):
         """
         Args:
@@ -366,12 +380,24 @@ class ResonatorCatalog:
                 closer. The default, ``None``, allows any spacing, including
                 none at all; 0.0 rejects only exactly equal frequencies. See
                 ``_check_frequency``.
+            name: what this catalog is — an array, a wafer, a cooldown — for
+                your own bookkeeping. Free-form. Defaults to
+                ``"module <module>"``.
         """
         if min_separation_hz is not None and min_separation_hz < 0:
             raise ValueError(
                 f"min_separation_hz={min_separation_hz}: must be a separation in "
                 f"Hz (>= 0), or None to allow any spacing."
             )
+        default_name = f"module {module}"
+        if name is None:
+            name = default_name
+        elif not isinstance(name, str) or not name.strip():
+            raise ValueError(
+                f"name={name!r}: a catalog's name is free-form text. Pass None "
+                f"to take the default, {default_name!r}."
+            )
+        self.name = name
         self.module = module
         self.min_separation_hz = min_separation_hz
         # The one store. Channel is read off the resonators themselves rather
@@ -615,7 +641,10 @@ class ResonatorCatalog:
     # -- display --------------------------------------------------------------
 
     def __repr__(self) -> str:
-        head = f"ResonatorCatalog(module={self.module}, {len(self)} resonators)"
+        head = (
+            f"ResonatorCatalog({self.name!r}, module={self.module}, "
+            f"{len(self)} resonators)"
+        )
         rows = [f"  {'name':<7}{'ch':>3}  {'bias MHz':>12}  {'amp':>7}"]
         for r in self:
             rows.append(
@@ -641,11 +670,13 @@ class ResonatorCatalog:
         but nothing needs to lean on that — ``from_dict`` takes the order back
         off the frequencies, the same as everywhere else.
 
-        ``min_separation_hz`` is part of the record like every other field,
-        and :meth:`from_dict` reads it back and applies it.
+        ``name`` and ``min_separation_hz`` are part of the record like every
+        other field, and :meth:`from_dict` reads them back — the separation rule
+        applied, the name carried.
         """
         return {
             "schema_version": self.SCHEMA_VERSION,
+            "name": self.name,
             "module": self.module,
             "min_separation_hz": self.min_separation_hz,
             "resonators": {
@@ -671,6 +702,11 @@ class ResonatorCatalog:
         catalog whose tones were walked together after it was built fails on
         the way back in rather than coming back claiming a spacing it does
         not have.
+
+        The name comes back the same way, and ``from_dict(d, name=...)``
+        renames the catalog on the way in — a file written before catalogs had
+        names carries none, and comes back under the default like any other
+        unnamed catalog.
 
         ``from_dict(d, min_separation_hz=...)`` reads the file under a rule of
         your own instead — a tighter one to audit it with, or ``None`` to open a
@@ -708,16 +744,17 @@ class ResonatorCatalog:
         # field did not need a schema bump: neither direction of the round trip
         # loses a resonator over it.
         kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
+        kwargs.setdefault("name", d.get("name"))
         return cls(resonators, module=d["module"], **kwargs)
 
     # -- CSV ------------------------------------------------------------------
     #
     # A spreadsheet-editable bias table. Deliberately lossy: it carries the
-    # operating point and nothing else. `notes`,
-    # `bias_frequency_quantized` and every calibration field — `df_calibration`
-    # and `bias_sweep` with them — are dropped; a trace does not go in a cell
-    # anyway. Pass the separation rule to
-    # `from_csv` if the table needs it, and note that a row read back comes in
+    # operating point and nothing else. `notes`, `bias_frequency_quantized` and
+    # every calibration field — `df_calibration` and `bias_sweep` with them —
+    # are dropped; a trace does not go in a cell anyway. So is the catalog's own
+    # `name`, which is not a per-row fact: pass it, and the separation rule, to
+    # `from_csv` alongside `module`, and note that a row read back comes in
     # quantized whether or not it was written that way. Use to_dict for a
     # faithful round-trip.
 

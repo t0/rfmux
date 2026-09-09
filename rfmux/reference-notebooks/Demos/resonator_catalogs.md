@@ -16,8 +16,10 @@ jupyter:
 # Resonator catalogs
 
 A `rfmux.core.resonators.ResonatorCatalog` records the detectors in one module:
-their names, hardware channels, and bias points. Save it to keep your tuning
-settings, then load it when you’re ready to continue working with this array.
+their names, hardware channels, and bias points. The catalog carries a name of
+its own as well, so a saved one says which array it holds. Save it to keep your
+tuning settings, then load it when you’re ready to continue working with this
+array.
 
 This notebook starts from a saved network analysis and resonance search.
 Everything here runs without hardware.
@@ -274,6 +276,31 @@ Names are assigned when the catalog is built. They key the catalog and sweep
 sections, and are included in dictionary and CSV exports. Loading a saved catalog
 restores its names.
 
+### Name the catalog
+
+The catalog has a name of its own, separate from the names of the resonators in
+it. Use it for bookkeeping: which array, which wafer, which cooldown. It
+defaults to the module the catalog is on, which is all the catalog knows about
+itself, and it travels with the catalog into `to_dict()`, so a file you open
+months later says what it holds. Nothing keys off it, so name it whatever you
+will recognize.
+
+```python
+print(f"default: {named_catalog.name}")
+
+array_catalog = ResonatorCatalog.from_frequencies(
+    [1.05e9, 1.01e9, 1.03e9],
+    module=2,
+    amplitude=0.01,
+    name="wafer B, cooldown 7",
+)
+print(f"named  : {array_catalog.name}")
+print(array_catalog)
+```
+
+Mind the two neighbours: `catalog.name` is the catalog, and `catalog.names()`
+is the resonators in it.
+
 ### Read catalog entries
 
 Look up a resonator by name with `catalog[name]`, or by hardware channel with
@@ -441,13 +468,16 @@ can be serialized with pickle or JSON, or stored as suitable HDF5 attributes.
 The `resonators` dictionary is keyed by name. For example,
 `catalog_dict["resonators"]["red"]` contains that resonator’s fields.
 
-To check separation while loading, pass a rule such as
-`ResonatorCatalog.from_dict(catalog_dict, min_separation_hz=100e3)`.
-The saved `min_separation_hz` value is not automatically applied.
+The catalog’s `name` and its `min_separation_hz` rule are both in the
+dictionary, and `from_dict()` reads both back: a catalog you load is the catalog
+you saved. Pass either one to load it under something else instead, such as
+`ResonatorCatalog.from_dict(catalog_dict, min_separation_hz=100e3)` to audit the
+file against a tighter rule, or `name="wafer B, cooldown 8"` to rename it.
 
 ```python
 catalog_dict = by_hand_catalog.to_dict()
 print(f"schema_version : {catalog_dict['schema_version']}")
+print(f"catalog name   : {catalog_dict['name']}")
 print(f"top-level keys : {list(catalog_dict)}")
 print(f"resonator names: {list(catalog_dict['resonators'])}")
 print(f"one resonator  : {catalog_dict['resonators']['red']}")
@@ -504,9 +534,9 @@ Only load pickle files you trust: unpickling can execute code from the file.
 
 ### CSV
 
-CSV keeps the names, channels, and operating points. It drops notes and all
-calibration fields. Use it to share or edit a bias table; use a dictionary or
-pickle when you need the full catalog.
+CSV keeps the resonator names, channels, and operating points. It drops notes,
+all calibration fields, and the catalog’s own name. Use it to share or edit a
+bias table; use a dictionary or pickle when you need the full catalog.
 
 ```python
 bias_table_csv_path = output_dir / "bias_table.csv"
@@ -514,8 +544,9 @@ bias_table_csv_path.write_text(by_hand_catalog.to_csv())
 print(bias_table_csv_path.read_text())
 ```
 
-`from_csv()` takes CSV text and a module number. The module is not stored in the
-CSV. Columns are matched by header name and may appear in any order.
+`from_csv()` takes CSV text and a module number, and `name=` if you want the
+catalog named; neither the module nor the name is stored in the CSV. Columns
+are matched by header name and may appear in any order.
 
 ```python
 reloaded_catalog = ResonatorCatalog.from_csv(

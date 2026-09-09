@@ -331,6 +331,24 @@ def test_from_frequencies_seeds_a_bias_with_no_calibration():
     assert r.bias.iq_rotation_deg is None and r.bias.bifurcated_at is None
 
 
+# ─── the catalog's own name ───────────────────────────────────────────────────
+
+
+def test_a_catalog_names_itself_after_its_module_by_default():
+    assert a_catalog().name == "module 2"
+
+
+def test_a_catalog_takes_the_name_it_is_given():
+    assert a_catalog(name="wafer B, cooldown 7").name == "wafer B, cooldown 7"
+
+
+@pytest.mark.parametrize("name", ["", "   ", 7])
+def test_a_name_that_is_not_free_form_text_is_refused(name):
+    """A blank name is worse than the default it displaced."""
+    with pytest.raises(ValueError, match="free-form text"):
+        a_catalog(name=name)
+
+
 # ─── how a catalog gets its names ─────────────────────────────────────────────
 
 
@@ -711,6 +729,7 @@ def test_copy_preserves_catalog_metadata():
     c = m.copy()
     assert c.module == 3
     assert c.min_separation_hz == 1e3
+    assert c.name == m.name
 
 
 # ─── persistence ──────────────────────────────────────────────────────────────
@@ -878,6 +897,25 @@ def test_from_dict_reads_a_schema_version_1_file():
     assert back["R0002"].notes == {"flagged": "noisy"}
 
 
+def test_a_dict_round_trip_brings_the_catalog_name_back():
+    m = a_catalog(name="wafer B, cooldown 7")
+    assert ResonatorCatalog.from_dict(m.to_dict()).name == "wafer B, cooldown 7"
+
+
+def test_from_dict_renames_the_catalog_when_asked():
+    m = a_catalog(name="wafer B, cooldown 7")
+    back = ResonatorCatalog.from_dict(m.to_dict(), name="wafer B, cooldown 8")
+    assert back.name == "wafer B, cooldown 8"
+
+
+def test_a_file_written_before_catalogs_had_names_reads_under_the_default():
+    d = a_catalog().to_dict()
+    del d["name"]
+    d["schema_version"] = 3
+
+    assert ResonatorCatalog.from_dict(d).name == "module 2"
+
+
 def test_dict_round_trip_preserves_module():
     m = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01)
     back = ResonatorCatalog.from_dict(m.to_dict())
@@ -1006,11 +1044,20 @@ def test_csv_is_lossy_by_design():
     assert back["R0001"].notes == {}
 
 
+def test_a_csv_read_back_is_named_by_the_caller():
+    """The table has no row for the catalog's own name, so from_csv takes it
+    the way it takes the module."""
+    text = a_catalog(name="wafer B").to_csv()
+    assert "wafer B" not in text
+    assert ResonatorCatalog.from_csv(text, module=2, name="wafer B").name == "wafer B"
+
+
 # ─── repr ─────────────────────────────────────────────────────────────────────
 
 
 def test_repr_shows_counts_and_rows():
-    text = repr(a_catalog())
+    text = repr(a_catalog(name="wafer B"))
+    assert "'wafer B'" in text
     assert "module=2" in text
     assert "3 resonators" in text
     assert "R0001" in text and "R0003" in text

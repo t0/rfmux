@@ -1121,18 +1121,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 modules_to_run = selected_module_param
             else:
                 modules_to_run = [selected_module_param]
-            if not hasattr(self, 'dac_scales'):
-                QtWidgets.QMessageBox.critical(self, "Error", 
-                    "DAC scales are not available. Please run the network analysis configuration again.")
-                return
-            
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            
-            # Create panel
+
+            # Create panel. Without a DAC scale the panel says it cannot show
+            # dBm, which is a legend, not a reason to refuse the measurement.
             window_signals = NetworkAnalysisSignals()
-            dac_scales_local = self.dac_scales.copy()
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
             panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode)
             panel.set_params(params)
             

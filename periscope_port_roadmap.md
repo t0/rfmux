@@ -216,6 +216,7 @@ and from the merge decisions of 2026-09-08.
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
 | `network_analysis_export.py`, `network_analysis_panel.py` | the private `parameters/modules` export payload, `raw_data` tuples, `iq = amps * exp(j phase)` reconstruction, GUI-thread `find_resonances` | the netanal container; `find_resonances_in_netanal` in a task |
 | `network_analysis_export.py` | `build_export_dict`, `_export_to_pickle`, `_export_to_csv` and the Export-As dialog with its update-suppression dance (stage 1) | `save_netanal()`, one `store.save` |
+| `app.py` | `_start_network_analysis`'s modal refusal when `self.dac_scales` is unset (stage 1), which blocks the GUI thread with nobody there to dismiss it, and is set only by the dialogs | nothing; the panel warns that it cannot show dBm and the sweep runs |
 | `network_analysis_panel.py`, `app.py` | `_last_export_filename` and `export_data(filename_override=)` for netanal (stage 1) | `store`'s re-save in place, off `file_metadata` |
 | `network_analysis_dialog.py`, `app.py` | `dac_scales_used` in the file, and the `"modules" in params` test that told a loaded payload from a new measurement (stage 1) | the board's DAC scale; `dialog.loaded_container` |
 | `session_manager.py` | the netanal `pickle.dump` path, `pickle.load` in `load_file`, and the `'parameters' and 'modules'` file typing (stage 1) | `store.load` and `file_metadata`'s `measurement_type` |
@@ -350,7 +351,9 @@ are now strict xfails that name the stage which clears them.
   Export-As file dialog and its update-suppression dance, `dac_scales_used`,
   the session manager's own `pickle.dump` for netanal and its
   open-it-and-look netanal typing, and the starter notebook's `pickle.load`
-  helper. §6 judgement calls 13-16 cover the choices.
+  helper. §6 judgement calls 13-16 cover the choices. Since the DAC scale is
+  no longer carried in the file, the modal dialog that refused to start a
+  sweep without one is gone too: it is a legend, not a measurement.
 * Find Resonances runs `find_resonances_in_netanal` in a small task, not on
   the GUI thread. Markers come from `search.candidates`; rejected candidates
   are drawn differently with `rejected_because` in the tooltip; the count

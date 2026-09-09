@@ -5,8 +5,6 @@ so they pin the on-disk format itself (see rfmux/streamer/include/fastrx.h)
 rather than merely whatever the writer happens to emit. No daemon, no NIC.
 """
 
-import struct
-
 import numpy as np
 import pytest
 
@@ -14,72 +12,8 @@ fastrx = pytest.importorskip(
     "rfmux.fastrx", reason="this rfmux build does not include fastrx"
 )
 
-FILE_MAGIC = 0x58464843
-FILE_VERSION = 1
-HEADER_BYTES = 4096
-PACKET_MAGIC = 0x4348414E
-SPP = 128  # SAMPLES_PER_PIPELINE
-BLOCK = SPP * 2 * 2  # bytes per pipe block
-
-
-def stride_for(mask: int) -> int:
-    return (86 + bin(mask).count("1") * BLOCK + 7) & ~7
-
-
-def file_header(mask: int, num_records: int, stride: int | None = None,
-                *, magic=FILE_MAGIC, version=FILE_VERSION) -> bytes:
-    if stride is None:
-        stride = stride_for(mask)
-    h = struct.pack(
-        "<IIIHHQ",
-        magic, version,
-        stride, SPP, mask, num_records,
-    )
-    return h.ljust(HEADER_BYTES, b"\0")
-
-
-def record(mask: int, seq: int, *, snapshot=None, serial=42) -> bytes:
-    """One record: wire header plus one I/Q block per pipe in mask.
-
-    Each pipe's samples are filled with a value derived from (seq, pipe), so a
-    misplaced stride or block rank shows up as wrong data, not just wrong
-    shape. A pipe in mask but absent from snapshot is zero-filled, as the
-    writer does during a pipeline drop-out.
-    """
-    if snapshot is None:
-        snapshot = mask
-    ts = (2026, 238, 12, 34, 56, 1000 + seq, 0, 0)
-    hdr = struct.pack(
-        "<IIBBBBHHH6x8I30x",
-        PACKET_MAGIC, seq,
-        snapshot, 2, 1, 0,   # pipe_snapshot, sample_trunc, module, version
-        0, serial,           # tag, serial
-        bin(snapshot).count("1") * SPP,
-        *ts,
-    )
-    assert len(hdr) == 86
-
-    blocks = b""
-    for p in range(8):
-        if not mask & (1 << p):
-            continue
-        if not snapshot & (1 << p):
-            blocks += b"\0" * BLOCK
-            continue
-        value = 100 * (p + 1) + seq
-        iq = np.empty(2 * SPP, dtype=np.int16)
-        iq[0::2] = value       # I
-        iq[1::2] = -value      # Q
-        blocks += iq.tobytes()
-
-    rec = hdr + blocks
-    return rec.ljust(stride_for(mask), b"\0")
-
-
-def write(tmp_path, chunks, name="capture.fastrx"):
-    path = tmp_path / name
-    path.write_bytes(b"".join(chunks))
-    return str(path)
+from test.fastrx_helpers import (FILE_MAGIC, PACKET_MAGIC, SPP, file_header,
+                                 record, stride_for, write)
 
 
 def test_round_trip(tmp_path):

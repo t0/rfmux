@@ -393,9 +393,33 @@ are now strict xfails that name the stage which clears them.
 * **Multi-module** runs one panel, one task and one call per module (a
   catalog is one module).
 * Test: flow test step 3 runs the schedule `multiplicative(0.5, 8, 5)` in both
-  directions through the task and checks the panel's block is the driver's;
-  a rendering test on the shipped `multisweep_20260906_162610_demo_biasfind1.pkl`
-  covers the tabs without a board.
+  directions through the task and checks the panel's block is the driver's.
+* **Test: the same measurement, run both ways, writes the same file.** Sweep
+  the same seeded mock array twice — once through Periscope in mock mode,
+  once headlessly the way a notebook does — and compare the two pickles
+  `store` wrote. That is one test covering three things a rendering test does
+  not: the file (the `{type}_{date}_{time}_{label}.pkl` naming and the
+  `file_metadata` keys), the data (the seven measurement keys, their dtypes
+  and their values), and the tuning results derived from them (fits, and the
+  bias points and `bias_report` once stages 3 and 4 land). If Periscope ever
+  grows a private shape again, this is what says so, and it says it about the
+  artefact a user actually keeps.
+
+  Two fields are *expected* to differ and should be asserted to differ rather
+  than compared: `created_by`, which is `"periscope"` on one and `"script"` on
+  the other, and the timestamp in the name. Everything else agrees or the port
+  has gone wrong.
+
+  Two practical notes for whoever writes it. The seed fixes the *array*, not
+  the readout: `STANDARD_ARRAY` leaves the simulator's noise on deliberately,
+  so an exact value comparison needs noise turned off through `overrides`,
+  while the structural comparison — keys, dtypes, shapes, `call_params` —
+  holds either way and is the half that catches a re-packaging. And one array
+  per process, so the two runs are two processes or one array driven twice.
+
+  This replaces the plan's rendering test on the shipped
+  `multisweep_*_demo_biasfind1.pkl`, which the demo notebooks are no longer
+  guaranteed to ship.
 
 ### Stage 3. Fits on a button (medium)
 
@@ -595,7 +619,7 @@ Listed so they can be overruled.
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
 | 1 | flow steps 1-2; dialog fields; netanal block rendering | `test/periscope/` |
-| 2 | flow step 3 through the task; rendering on the shipped multisweep pickle; dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
+| 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |
 | 5 | deletions; tier counts in `AGENTS.md` and `test/README.md` | root |
@@ -636,7 +660,8 @@ The shapes it takes, so they are recognisable at a glance:
 * **Fabrication.** Test or demo data hand-written in the shape of a
   measurement, anywhere under `rfmux/` — the stage 0 deletion. A test that
   needs an array calls `standard_array()`, which builds one in under a second
-  with no UDP; a test that needs sweeps loads a shipped pickle of real ones.
+  with no UDP; a test that needs sweeps measures them, and compares them
+  against the same measurement made the other way (stage 2).
 * **A private copy of a library job.** A second bifurcation detector, a second
   fit orchestrator, an amplitude loop, a re-centring history, an
   `apply_bias_output` that programs tones beside an `apply_bias` that already

@@ -216,8 +216,32 @@ def mock_crs():
         },
         verbose=False,
     ))
-    yield loop, crs
-    loop.close()
+    try:
+        yield loop, crs
+    finally:
+        try:
+            loop.run_until_complete(crs.stop_udp_streaming())
+        finally:
+            loop.close()
+
+
+@pytest.mark.portable
+def test_mock_fixture_stops_streaming(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from rfmux.mock import helpers
+
+    crs = SimpleNamespace(stop_udp_streaming=AsyncMock())
+    monkeypatch.setattr(helpers, "create_mock_crs", AsyncMock(return_value=crs))
+    fixture = mock_crs.__wrapped__()
+    loop, _ = next(fixture)
+    try:
+        fixture.close()
+        crs.stop_udp_streaming.assert_awaited_once()
+        assert loop.is_closed()
+    finally:
+        loop.close()
 
 
 @pytest.mark.slow_acquisition

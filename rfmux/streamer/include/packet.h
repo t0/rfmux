@@ -122,6 +122,12 @@ struct readout_packet_header {
 
 #define NUM_PIPELINES              8
 #define SAMPLES_PER_PIPELINE       128
+
+/* Readout modules a CRS can stream. Each module sends its own packets with its
+ * own sequence counter; fastrx_packet_header.module says which one a packet
+ * belongs to, 0-indexed on the wire (the board API and everything in Python
+ * count from 1). */
+#define NUM_MODULES                4
 #define MAX_SAMPLES_PER_PACKET     (NUM_PIPELINES * SAMPLES_PER_PIPELINE)
 
 /* Sample truncation window applied by firmware (16-of-24 bits of I/Q). */

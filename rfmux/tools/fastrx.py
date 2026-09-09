@@ -52,7 +52,8 @@ DEPTH_MAX_LOG2 = 16
 
 
 class HUD(QMainWindow):
-    def __init__(self, channel: int = 0, pipe: int = 1, depth: int = DEFAULT_DEPTH,
+    def __init__(self, channel: int = 0, pipe: int = 1, module: int = 1,
+                 depth: int = DEFAULT_DEPTH,
                  *, interface: str | None = None, socket: str | None = None):
         super().__init__()
         # Imported here, not at module level: the native extension may not be
@@ -64,6 +65,7 @@ class HUD(QMainWindow):
 
         self.channel = channel
         self.pipe = pipe
+        self.module = module
         self.depth = depth
         self._consumer = fastrx.PacketCapture(interface=interface, socket=socket)
         self._n_grabs = 0
@@ -166,9 +168,17 @@ class HUD(QMainWindow):
         win_box.addWidget(self._window_combo)
         ctrl.addLayout(win_box)
 
-        # self.pipe is 1-indexed, like every pipeline identifier in the API, so
-        # the spin box shows it as-is.  self.channel stays 0-indexed: it selects a
-        # numpy column, and those are 0-based.
+        # self.pipe and self.module are 1-indexed, like every pipeline and module
+        # identifier in the API, so the spin boxes show them as-is.  self.channel
+        # stays 0-indexed: it selects a numpy column, and those are 0-based.
+        mod_box = QVBoxLayout()
+        mod_box.addWidget(QLabel("Module"))
+        self._mod_spin = QSpinBox()
+        self._mod_spin.setRange(1, fastrx.NUM_MODULES)
+        self._mod_spin.setValue(module)
+        mod_box.addWidget(self._mod_spin)
+        ctrl.addLayout(mod_box)
+
         pipe_box = QVBoxLayout()
         pipe_box.addWidget(QLabel("Pipe"))
         self._pipe_spin = QSpinBox()
@@ -198,11 +208,12 @@ class HUD(QMainWindow):
         self._status = QLabel("starting...")
         layout.addWidget(self._status)
 
-        # Each tick grabs afresh, so both controls take effect on the next
-        # frame with nothing to restart: channel reselects a column, pipe
-        # changes which pipe the next get_samples() asks for.
+        # Each tick grabs afresh, so all three controls take effect on the next
+        # frame with nothing to restart: channel reselects a column, pipe and
+        # module change what the next capture() asks for.
         self._ch_spin.valueChanged.connect(self._on_channel_changed)
         self._pipe_spin.valueChanged.connect(self._on_pipe_changed)
+        self._mod_spin.valueChanged.connect(self._on_module_changed)
 
         # The display rate bounds the work done. Otherwise, the HUD would grab
         # and redraw hundreds of times a second and progressively bog down as
@@ -261,6 +272,9 @@ class HUD(QMainWindow):
     def _on_pipe_changed(self, value: int):
         self.pipe = value # both 1-indexed
 
+    def _on_module_changed(self, value: int):
+        self.module = value # both 1-indexed
+
     # Grab timeout.  Bounded by the frame interval rather than generous, because
     # _tick() runs inline on the GUI thread: a grab that waits longer than a frame
     # freezes the window for exactly as long as it waits.  A pipe the transmitter
@@ -281,7 +295,8 @@ class HUD(QMainWindow):
         """
         try:
             d = self._consumer.capture(
-                    self.depth, pipe=self.pipe, timeout=self.GRAB_TIMEOUT)
+                    self.depth, pipe=self.pipe, module=self.module,
+                    timeout=self.GRAB_TIMEOUT)
         except Exception as exc:                # noqa: BLE001 - surfaced in the UI
             # No reconnect attempt: a failure here (e.g. fastrxd restarting)
             # is reported and the HUD needs to be relaunched to recover.
@@ -289,11 +304,20 @@ class HUD(QMainWindow):
             return
 
         if len(d["seq"]) == 0:
-            # Distinguish "this pipe is not in the stream" from "nothing is
-            # arriving at all" -- the remedies are completely different, and the
-            # snapshot tells us which it is.
+            # Distinguish "this module is not in the stream" and "this pipe is
+            # not in the stream" from "nothing is arriving at all" -- the
+            # remedies are completely different, and the capture tells us
+            # which it is: modules_seen accumulates every module observed
+            # while capturing, and pipe_snapshot is the last header's.
+            seen = d.get("modules_seen", 0)
             snap = d.get("pipe_snapshot", 0)
-            if snap and not (snap & (1 << (self.pipe - 1))):
+            if seen and not (seen & (1 << (self.module - 1))):
+                present = ", ".join(str(m + 1) for m in range(self._fastrx.NUM_MODULES)
+                                    if seen & (1 << m))
+                self._status.setText(
+                    f"module {self.module} is not being transmitted "
+                    f"(streaming: {present})")
+            elif snap and not (snap & (1 << (self.pipe - 1))):
                 present = ", ".join(str(p + 1) for p in range(self._fastrx.NUM_PIPELINES)
                                     if snap & (1 << p))
                 self._status.setText(
@@ -359,7 +383,7 @@ class HUD(QMainWindow):
 
         gaps = int(np.count_nonzero(np.diff(seq.astype(np.int64)) != 1))
         self._status.setText(
-            f"pipe {self.pipe} ch {ch + 1}  packets={n}  "   # channel 1-indexed for display
+            f"module {self.module} pipe {self.pipe} ch {ch + 1}  packets={n}  "   # channel 1-indexed for display
             f"grabs={self._n_grabs}  seq={seq[0]}..{seq[-1]}  gaps={gaps}  "
             f"rms={np.hypot(i_ch, q_ch).std():.1f}")
 
@@ -479,6 +503,8 @@ class HUD(QMainWindow):
               help="channel to plot (1-indexed)")
 @click.option("--pipe", type=int, default=1, show_default=True,
               help="fastrxd pipeline to read from (1-indexed)")
+@click.option("--module", type=int, default=1, show_default=True,
+              help="readout module to display (1-indexed)")
 @click.option("--depth", type=int, default=DEFAULT_DEPTH, show_default=True,
               help="packets per capture")
 @click.option("--interface", type=str, default=None,
@@ -487,14 +513,13 @@ class HUD(QMainWindow):
 @click.option("--socket", "socket_path", type=str, default=None,
               help="fastrxd socket path (for --socket-path daemons; "
                    "give --interface or this, not both)")
-def hud(channel: int, pipe: int, depth: int,
+def hud(channel: int, pipe: int, module: int, depth: int,
         interface: str | None, socket_path: str | None):
-    """Launch the HUD.  `channel` and `pipe` are 1-indexed, matching the GUI.
+    """Launch the HUD."""
 
-    Identify the daemon by `interface` or `socket`, as for fastrx.Consumer."""
     app = QApplication.instance() or QApplication(sys.argv)
     try:
-        w = HUD(channel=channel - 1, pipe=pipe, depth=depth,
+        w = HUD(channel=channel - 1, pipe=pipe, module=module, depth=depth,
                 interface=interface, socket=socket_path)
     except ImportError as exc:
         click.echo(

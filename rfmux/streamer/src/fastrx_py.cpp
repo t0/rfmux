@@ -372,13 +372,19 @@ public:
 
 	/* Collect exactly n_packets, or fewer on timeout.
 	 *
+	 * pipe selects the pipeline block within a packet; module selects whose
+	 * packets to keep.  Both are 1-indexed.
+	 *
 	 * Blocks the calling (Python) thread with the GIL released. Exactly one
 	 * futex wake per capture: the hot thread signals when the buffer is full,
 	 * not when each packet lands. */
-	py::dict capture(uint32_t n_packets, int pipe, double timeout_s) {
+	py::dict capture(uint32_t n_packets, int pipe, int module, double timeout_s) {
 		if (pipe < 1 || pipe > NUM_PIPELINES)
 			throw py::value_error(std::format(
 					"pipe must be in 1..{}, got {}", NUM_PIPELINES, pipe));
+		if (module < 1 || module > NUM_MODULES)
+			throw py::value_error(std::format(
+					"module must be in 1..{}, got {}", NUM_MODULES, module));
 		if (n_packets == 0)
 			throw py::value_error("n_packets must be positive");
 		if (state_.load(std::memory_order_acquire) != State::idle)
@@ -411,6 +417,8 @@ public:
 			seqs_ = seqs.get();
 			want_ = n_packets;
 			pipe_ = pipe - 1;
+			module_ = module - 1;
+			modules_seen_.store(0, std::memory_order_relaxed);
 			count_.store(0, std::memory_order_relaxed);
 			restarts_.store(0, std::memory_order_relaxed);
 			state_.store(State::capturing, std::memory_order_release);
@@ -420,17 +428,45 @@ public:
 			 * filling a ring we would only drain to discard. */
 			slot_->ready.store(1, std::memory_order_release);
 
-			std::unique_lock<std::mutex> lk(done_mu_);
-			done_cv_.wait_for(lk, std::chrono::duration<double>(timeout_s), [this] {
-				return state_.load(std::memory_order_acquire) == State::full
-					|| stop_.load(std::memory_order_relaxed);
-			});
+			/* The mutex exists only to make the predicate and the hot thread's
+			 * notify race-free, so hold it for the wait alone.  Holding it
+			 * through the busy_ spin below would deadlock: the hot thread's
+			 * buffer-full branch takes this same mutex before notifying, and if
+			 * that packet coincides with our timeout it blocks on the mutex
+			 * with busy_ still set while we spin waiting for busy_ to clear. */
+			{
+				std::unique_lock<std::mutex> lk(done_mu_);
+				done_cv_.wait_for(lk, std::chrono::duration<double>(timeout_s), [this] {
+					return state_.load(std::memory_order_acquire) == State::full
+						|| stop_.load(std::memory_order_relaxed);
+				});
+			}
 
-			/* Stop the flow first, then close the gate: with ready clear
-			 * fastrxd stops choosing us, so no further packet can be written
-			 * into a buffer we are about to hand to Python. */
-			slot_->ready.store(0, std::memory_order_release);
-			state_.store(State::idle, std::memory_order_release);
+			/* Stop the flow first, then close the gate: with ready
+			 * clear fastrxd stops choosing us, so no further
+			 * packet can be written into a buffer we are about to
+			 * hand to Python.
+			 *
+			 * Closing the gate is not enough on its own.  On a
+			 * timeout the hot thread may be inside on_packet()
+			 * right now, past its state check and about to memcpy
+			 * into iq_ -- which is nulled a few lines down.
+			 * Rather than segfaulting, wait for busy_ to clear.
+			 * This store and that load are seq_cst, pairing with
+			 * the seq_cst store/load at the top of on_packet():
+			 * whichever thread comes second sees the other's
+			 * write, so either on_packet() sees idle and touches
+			 * nothing, or we see busy and wait for it to finish.
+			 * The wait is bounded by one packet's worth of work.
+			 */
+			state_.store(State::idle, std::memory_order_seq_cst);
+			while (busy_.load(std::memory_order_seq_cst))
+				_mm_pause();
+
+			/* on_packet() may have moved us to 'full' after our
+			 * store above but before it saw idle; it has now left,
+			 * so settle the state. */
+			state_.store(State::idle, std::memory_order_relaxed);
 			iq_ = nullptr;
 			seqs_ = nullptr;
 		}
@@ -446,15 +482,34 @@ protected:
 	/* Hot thread: append to the capture buffer, or discard.
 	 *
 	 * No allocation, no lock, no notify except once at the end. The only writes
-	 * are a memcpy into memory nobody else touches and a relaxed store. */
+	 * are a memcpy into memory nobody else touches and a few flag stores, one
+	 * of them seq_cst (busy_, see below). */
 	void on_packet(const int16_t* const iq[NUM_PIPELINES],
 				const fastrx_packet_header& hdr) override {
 
-		if (state_.load(std::memory_order_acquire) != State::capturing)
-			return;
+		/* Announce before checking: see the matching wait in capture(). */
+		busy_.store(1, std::memory_order_seq_cst);
+		if (state_.load(std::memory_order_seq_cst) == State::capturing)
+			accept(iq, hdr);
+		busy_.store(0, std::memory_order_release);
+	}
+
+private:
+	/* The body of on_packet(), run only while capturing and bracketed by
+	 * busy_.  Everything here may touch iq_/seqs_. */
+	void accept(const int16_t* const iq[NUM_PIPELINES],
+			const fastrx_packet_header& hdr) {
+		/* Who is streaming, for the "module N is not being transmitted"
+		 * diagnostic.  Accumulated over every packet the capture window sees,
+		 * before any filtering. */
+		if (hdr.module < NUM_MODULES)
+			modules_seen_.fetch_or(1u << hdr.module, std::memory_order_relaxed);
 
 		if (!iq[pipe_])
 			return; /* our pipe is absent from this packet */
+
+		if (hdr.module != module_)
+			return; /* another module's packet */
 
 		uint32_t i = count_.load(std::memory_order_relaxed);
 
@@ -483,7 +538,6 @@ protected:
 		count_.store(i + 1, std::memory_order_release);
 	}
 
-private:
 	/* Turn the filled buffers into numpy arrays, transferring ownership. */
 	py::dict pack(std::unique_ptr<int16_t[]> iq,
 			std::unique_ptr<uint32_t[]> seqs,
@@ -514,9 +568,11 @@ private:
 			"q"_a=arr_q,
 			"seq"_a=arr_s,
 			"pipe"_a=pipe_ + 1,
+			"module"_a=module_ + 1,
 			"complete"_a=(got == want),
 			"restarts"_a=restarts_.load(std::memory_order_relaxed),
-			"pipe_snapshot"_a = last_snapshot_.load(std::memory_order_relaxed));
+			"pipe_snapshot"_a = last_snapshot_.load(std::memory_order_relaxed),
+			"modules_seen"_a = modules_seen_.load(std::memory_order_relaxed));
 	}
 
 	/* Where the hot thread stands relative to a capture.
@@ -533,6 +589,18 @@ private:
 	uint32_t* seqs_ = nullptr;
 	uint32_t want_ = 0;
 	int pipe_ = 0; /* set by capture(), read by on_packet() */
+	int module_ = 0; /* likewise; 0-indexed, as on the wire */
+
+	/* Bit m set once a packet from (0-indexed) module m has been seen during
+	 * this capture, filtered or not.  A header naming a module that does not
+	 * exist is a malformed packet and sets nothing. */
+	static_assert(NUM_MODULES <= 32, "modules_seen_ is a 32-bit mask");
+	std::atomic<uint32_t> modules_seen_{0};
+
+	/* Set while the hot thread is inside on_packet() and may be writing to
+	 * iq_/seqs_.  capture()'s timeout path spins on it before reclaiming
+	 * them. */
+	std::atomic<uint32_t> busy_{0};
 	std::atomic<uint32_t> count_{0};
 
 	/* Sequence number of the previous accepted packet, for the contiguity
@@ -1257,6 +1325,7 @@ PYBIND11_MODULE(_fastrx, m) {
 	m.doc() = "AF_XDP fast packet capture for channel-stream data";
 
 	m.attr("NUM_PIPELINES") = NUM_PIPELINES;
+	m.attr("NUM_MODULES") = NUM_MODULES;
 	m.attr("MAX_SAMPLES") = SAMPLES_PER_PIPELINE;
 	m.attr("ABI_VERSION") = FASTRXD_ABI_VERSION;
 	m.attr("MAX_CLIENTS") = FASTRXD_MAX_CLIENTS;
@@ -1278,8 +1347,13 @@ PYBIND11_MODULE(_fastrx, m) {
 			 "socket_path"_a)
 		.def_property_readonly("socket_path", &PacketCapture::socket_path)
 		.def("capture", &PacketCapture::capture,
-			 "n_packets"_a, "pipe"_a = 1, "timeout"_a = 5.0,
+			 "n_packets"_a, "pipe"_a, "module"_a, "timeout"_a = 5.0,
 			 "Collect exactly n_packets, or fewer on timeout.\n\n"
+			 "pipe and module are 1-indexed.  Each streaming module sends its "
+			 "own packets with its own sequence counter, so a capture keeps "
+			 "one module's and module is required.  'modules_seen' in the "
+			 "result is a bitmask (bit m-1 for module m) of every module "
+			 "observed during the capture, filtered or not.\n\n"
 			 "Reusable: call as often as you like on one instance. The returned "
 			 "'i' and 'q' arrays are strided views over one buffer whose "
 			 "ownership passes to Python, so nothing is copied.")

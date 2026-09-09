@@ -17,7 +17,8 @@ jupyter:
 
 Run this notebook from top to bottom to generate an unbiased mock array, find
 its resonances, measure narrow sweeps, step the drive amplitude through
-bifurcation, select operating points, and program the tones. The measurements
+bifurcation, select operating points, program the tones, and acquire slow-stream
+and PFB noise. The measurements
 use the CRS API; analysis uses `rfmux.tuning`, and a `ResonatorCatalog` carries
 the named resonators, channels, amplitudes, and frequencies between steps.
 
@@ -35,8 +36,8 @@ read-only notebook.
 
 Keep `MODE = "mock"` for a standalone simulation. It uses the same compact,
 seeded array as `network_analysis_find_resonances.md`, with no automatic biasing.
-The seed fixes the array; measurement noise can still vary. RPC measurements
-suffice for this workflow, so this simulation does not start a UDP streamer.
+The seed fixes the array; measurement noise can still vary. Tuning measurements
+use RPC. Section 7 starts and stops the mock UDP streamer for noise acquisition.
 
 For a real array:
 
@@ -96,6 +97,7 @@ started = time.perf_counter()
 ```
 
 ```python
+created_mock = False
 if MODE == "mock":
     from rfmux.mock.config import apply_overrides
 
@@ -119,6 +121,7 @@ if MODE == "mock":
         "T": 0.23,
     })
     count, _ = await crs.generate_resonators(mock_config)
+    created_mock = True
     print(f"generated {count} unbiased mock resonators")
 elif MODE in ("hardware", "attached"):
     if MODE == "attached":
@@ -413,7 +416,157 @@ await crs.apply_bias(bias_report.catalog)
 
 ```
 
-## 7. Keep and reload the result
+## 7. Acquire slow-stream and PFB noise
+
+With the bias catalog applied, collect a slow-stream timestream for all channels
+on the module and a PFB capture for each catalog resonator. These are short
+example captures; increase the sample counts for a longer noise measurement.
+`reference="absolute"` gives time-domain I/Q in volts and PSDs in dBm/Hz.
+`nsegments` sets the number of segments used for spectral averaging.
+
+`py_get_samples()` receives UDP readout packets. For our own mock, this cell
+checks for an existing stream, starts the UDP sender, and stops it in `finally`,
+even if acquisition fails or is interrupted. Rerunning the cell starts a fresh
+stream. For hardware or an attached Periscope session, it uses the existing
+readout stream and leaves that sender running. The board must have a valid
+clock/timestamp source and its UDP readout must reach this computer.
+
+`py_get_pfb_samples()` captures through RPC (Remote Procedure Call—the notebook calls a function on the CRS or mock server and receives its result)and applies the PFB spectral
+correction; it does not require enabling the PFB UDP streamer. It measures one
+channel at a time. `reset_NCO=False` preserves the tuned NCO and tone settings.
+The **mock RPC PFB capture is uniform synthetic noise**, not the resonator
+model's response; its spectrum exercises acquisition and processing, but is
+not a detector noise prediction. The slow mock stream does use the resonator
+model. The mock settings above disable pulses and TLS noise and retain a small
+quasiparticle-noise term.
+
+```python
+from tuber.codecs import TuberResult
+from rfmux.core.transferfunctions import decimation_to_sampling, PFB_SAMPLING_FREQ
+
+SLOW_NOISE_PARAMS = dict(
+    num_samples=1_000, module=MODULE, channel=None,
+    return_spectrum=True, scaling="psd", reference="absolute",
+    nsegments=5, spectrum_cutoff=0.9,
+)
+PFB_NOISE_PARAMS = dict(
+    nsamps=20_000, module=MODULE, binlim=1e6, trim=False,
+    nsegments=5, reference="absolute", reset_NCO=False,
+)
+
+
+def noise_record(data: TuberResult, channel_index: int | None = None) -> dict:
+    def values(value: list) -> np.ndarray:
+        return np.asarray(value if channel_index is None else value[channel_index])
+
+    return {
+        "i": values(data.i), "q": values(data.q),
+        "freq_iq": np.asarray(data.spectrum.freq_iq),
+        "freq_dsb": np.asarray(data.spectrum.freq_dsb),
+        "psd_i": values(data.spectrum.psd_i),
+        "psd_q": values(data.spectrum.psd_q),
+        "psd_dual_sideband": values(data.spectrum.psd_dual_sideband),
+    }
+
+
+noise_results = {
+    "module_id": module_id, "module": MODULE,
+    "catalog": bias_report.catalog.to_dict(),
+    "slow_params": SLOW_NOISE_PARAMS.copy(),
+    "pfb_params": PFB_NOISE_PARAMS.copy(),
+    "resonators": {},
+}
+noise_started = time.perf_counter()
+started_mock_stream = False
+try:
+    if created_mock:
+        from rfmux.streamer import find_streamer_conflict
+
+        conflict = find_streamer_conflict()
+        if conflict:
+            raise RuntimeError(
+                f"Cannot start a second mock stream: {conflict}. "
+                "Stop the other sender/receiver or use MODE='attached' "
+                "to measure the existing session.")
+        started_mock_stream = await crs.start_udp_streaming()
+
+    slow_rate = decimation_to_sampling(await crs.get_decimation())
+    noise_results["slow_sample_rate_hz"] = slow_rate
+    noise_results["pfb_sample_rate_hz"] = PFB_SAMPLING_FREQ
+    slow_data = await crs.py_get_samples(**SLOW_NOISE_PARAMS)
+    for resonator in bias_report.catalog:
+        noise_results["resonators"][resonator.name] = {
+            "channel": resonator.channel,
+            "slow": noise_record(slow_data, resonator.channel - 1),
+        }
+    del slow_data  # retain only the catalog channels, not every packet channel
+
+    for resonator in bias_report.catalog:
+        pfb_data = await crs.py_get_pfb_samples(
+            channel=resonator.channel, **PFB_NOISE_PARAMS)
+        noise_results["resonators"][resonator.name]["pfb"] = noise_record(pfb_data)
+        print(f"noise acquired: {resonator.name}, channel {resonator.channel}")
+finally:
+    if started_mock_stream:
+        await crs.stop_udp_streaming()
+        print("notebook's mock UDP streamer stopped")
+
+noise_path = store.save(noise_results, "noise", label="tuning_noise")
+print(f"slow capture: {SLOW_NOISE_PARAMS['num_samples'] / slow_rate:.3f} s, "
+      f"{slow_rate:.1f} samples/s")
+print(f"PFB capture per resonator: "
+      f"{PFB_NOISE_PARAMS['nsamps'] / PFB_SAMPLING_FREQ * 1e3:.2f} ms")
+print(f"noise acquisition completed in {time.perf_counter() - noise_started:.1f} s")
+print(f"saved noise: {noise_path}")
+```
+
+The saved noise file keeps each resonator's channel, I/Q timestreams, spectra,
+acquisition settings, sample rates, and the applied catalog. Its `resonators`
+dictionary is keyed by catalog name; the slow packet arrays were indexed using
+each resonator's actual channel number.
+
+### Noise spectra
+
+Plot I and Q together, with one panel per resonator and a separate figure for
+each stream. The horizontal axes differ because the sample rates differ.
+Omit the zero-frequency bin, which contains the carrier/DC contribution.
+For the slow spectrum, also omit its first neighbor: the Hann window spreads
+the retained carrier into that bin. The saved spectra keep all bins. These
+are absolute PSDs, without per-trace normalization.
+
+```python
+def plot_noise_spectra(records: dict, stream: str) -> None:
+    columns = min(4, len(records))
+    rows = (len(records) + columns - 1) // columns
+    fig, axes = plt.subplots(
+        rows, columns, figsize=(3.4 * columns, 2.7 * rows),
+        sharex=True, sharey=True, squeeze=False, constrained_layout=True,
+    )
+    for ax, (name, record) in zip(axes.flat, records.items()):
+        data = record[stream]
+        first_bin = 2 if stream == "slow" else 1
+        ax.semilogx(data["freq_iq"][first_bin:], data["psd_i"][first_bin:],
+                    color="#3366CC", lw=0.8, label="I")
+        ax.semilogx(data["freq_iq"][first_bin:], data["psd_q"][first_bin:],
+                    color="#CC6633", lw=0.8, label="Q")
+        ax.set_title(f"{name} · channel {record['channel']}", fontsize=10)
+    for ax in list(axes.flat)[len(records):]:
+        ax.set_visible(False)
+    axes.flat[0].legend(fontsize=8)
+    fig.supxlabel("frequency [Hz]")
+    fig.supylabel("PSD [dBm/Hz]")
+    title = "Slow readout noise" if stream == "slow" else "PFB noise"
+    if stream == "pfb" and created_mock:
+        title += " (mock RPC: synthetic uniform noise)"
+    fig.suptitle(title)
+    plt.show()
+
+
+plot_noise_spectra(noise_results["resonators"], "slow")
+plot_noise_spectra(noise_results["resonators"], "pfb")
+```
+
+## 8. Keep and reload the results
 
 Measurements were saved through `rfmux.tuning.store`; the resonance search
 and bias report were saved back alongside their source measurements.
@@ -428,11 +581,14 @@ saved_sweeps = store.load(store.saved_path(module_amplitudes))
 restored_report = BiasReport.from_dict(saved_sweeps[module_id]["bias_report"])
 restored_catalog = restored_report.catalog
 print(restored_catalog)
+restored_noise = store.load(noise_path)
+print(f"reloaded noise for {len(restored_noise['resonators'])} resonators")
 # To reapply later, after connecting to the intended board:
 # await crs.apply_bias(restored_catalog)
 print(f"workflow completed in {time.perf_counter() - started:.1f} s")
 ```
 
-The board is left biased. This notebook started no UDP streamer to tear down.
+The board is left biased. Section 7 stops only the mock streamer owned by this
+notebook; it leaves hardware and attached-session streams running.
 For further characterization, see `fitting_resonators.md` and `bias_finding.md`;
 for timestreams and pulse capture, see `pulse_capture.md`.

@@ -1,16 +1,18 @@
-"""PacketFile's time index: seconds of day from the IRIG stamps, a bisect
-that touches one record per step, and one channel's samples over a
-window.  Files are built byte-by-byte (test/fastrx_helpers.py)."""
+"""Recording: a time index over a fastrx file, seconds of day from the
+IRIG stamps, a bisect that touches one record per step, and one
+channel's samples over a window.  Files are built byte-by-byte with
+the helpers in test/test_fastrx_file.py."""
 
 import numpy as np
 import pytest
 
-fastrx = pytest.importorskip(
+pytest.importorskip(
     "rfmux.fastrx", reason="this rfmux build does not include fastrx"
 )
 
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
-from test.fastrx_helpers import file_header, record, seconds_ts, write
+from rfmux.pulse_capture.overlay import Recording, channel_location
+from test.test_fastrx_file import file_header, record, seconds_ts, write
 
 T0 = 43000.0
 DT = 1.0 / PFB_SAMPLING_FREQ
@@ -25,21 +27,21 @@ def _file(tmp_path, seqs, *, t0=T0, mask=0b11, recent=lambda s: True,
 
 
 def test_channel_location_follows_the_parser_order():
-    assert fastrx.channel_location(1) == (1, 0)
-    assert fastrx.channel_location(128) == (1, 127)
-    assert fastrx.channel_location(129) == (2, 0)
-    assert fastrx.channel_location(200) == (2, 71)
-    assert fastrx.channel_location(1024) == (8, 127)
+    assert channel_location(1) == (1, 0)
+    assert channel_location(128) == (1, 127)
+    assert channel_location(129) == (2, 0)
+    assert channel_location(200) == (2, 71)
+    assert channel_location(1024) == (8, 127)
     for bad in (0, 1025):
         with pytest.raises(ValueError):
-            fastrx.channel_location(bad)
+            channel_location(bad)
 
 
 def test_index_and_window_over_a_gap_and_an_undisciplined_stamp(tmp_path):
     # Records 100..109 were lost (a seq gap); record 7's stamp is not
     # disciplined.
     seqs = [s for s in range(300) if not 100 <= s < 110]
-    f = fastrx.PacketFile(_file(tmp_path, seqs, recent=lambda s: s != 7))
+    f = Recording(_file(tmp_path, seqs, recent=lambda s: s != 7))
     assert f.t_first == pytest.approx(T0)
     assert f.counts_per_lsb == 1.0            # HIGH: exact counts
 
@@ -73,7 +75,7 @@ def test_index_and_window_over_a_gap_and_an_undisciplined_stamp(tmp_path):
 
 def test_a_recording_across_midnight_stays_monotone(tmp_path):
     t0 = 86400.0 - 3 * DT
-    f = fastrx.PacketFile(_file(tmp_path, range(10), t0=t0))
+    f = Recording(_file(tmp_path, range(10), t0=t0))
     t = f.seconds()
     assert np.all(np.diff(t) > 0)
     assert t[3] == pytest.approx(86400.0)
@@ -83,7 +85,7 @@ def test_a_recording_across_midnight_stays_monotone(tmp_path):
 
 
 def test_no_disciplined_stamp_means_no_time_axis(tmp_path):
-    f = fastrx.PacketFile(_file(tmp_path, range(10), recent=lambda s: False))
+    f = Recording(_file(tmp_path, range(10), recent=lambda s: False))
     assert f.t_first is None
     with pytest.raises(ValueError, match="no disciplined"):
         f.index_at(T0)
@@ -93,12 +95,12 @@ def test_no_disciplined_stamp_means_no_time_axis(tmp_path):
 
 
 def test_truncation_scales_to_counts(tmp_path):
-    f = fastrx.PacketFile(_file(tmp_path, range(4), sample_trunc=0))
+    f = Recording(_file(tmp_path, range(4), sample_trunc=0))
     assert f.sample_trunc == 0
     assert f.channel(1, 0, 1)[0] == pytest.approx((100 + 0) / 256 * (1 - 1j))
 
 
 def test_empty_recording_has_no_time_axis(tmp_path):
-    f = fastrx.PacketFile(write(tmp_path, [file_header(0b1, 0)]))
+    f = Recording(write(tmp_path, [file_header(0b1, 0)]))
     assert f.t_first is None and f.module is None
     assert f.seconds().shape == (0,)

@@ -10,7 +10,7 @@ Receives and processes packets from CRS boards, with options to:
 
 A readout dirfile's ``timebase`` has the decimated stream's CIC group delay
 taken out, so it reads on the PFB stream's clock; ``ts_sbs``/``ts_ss`` keep
-the stamp as the board sent it and ``fir_stage`` says which delay applied.
+the stamp as the board sent it and ``dec_stage`` says which delay applied.
 """
 
 # make type annotations lazy in case pygetdata is not present
@@ -39,9 +39,9 @@ from rfmux.streamer import (
 )
 from rfmux.core.transferfunctions import decimated_stream_delay_s
 
-#: Low bits of a readout packet's fir_stage: the decimation stage.  Bit 3
-#: flags short packets.
-FIR_STAGE_MASK = 0x7
+#: Low bits of a readout packet's fir_stage field: the decimation stage.
+#: Bit 3 flags short packets.
+DEC_STAGE_MASK = 0x7
 
 TOTAL_CHANNELS = 1024
 TOTAL_MODULES = 4
@@ -184,14 +184,14 @@ def setup_dirfile_for_module(
     raw_field = f"m{module+1:02d}_raw32"
     ts_sbs_field = f"m{module+1:02d}_ts_sbs"
     ts_ss_field = f"m{module+1:02d}_ts_ss"
-    fir_stage_field = f"m{module+1:02d}_fir_stage"
+    dec_stage_field = f"m{module+1:02d}_dec_stage"
     ts_delay_field = f"m{module+1:02d}_ts_delay"
 
     module_stats.dirfile_fields = {
         "raw": raw_field,
         "ts_sbs": ts_sbs_field,
         "ts_ss": ts_ss_field,
-        "fir_stage": fir_stage_field,
+        "dec_stage": dec_stage_field,
         "ts_delay": ts_delay_field,
     }
 
@@ -199,11 +199,9 @@ def setup_dirfile_for_module(
     df.add(gd.entry(gd.RAW_ENTRY, ts_sbs_field, 0, (gd.INT32, 1)))
     df.add(gd.entry(gd.RAW_ENTRY, ts_ss_field, 0, (gd.INT32, 1)))
 
-    # The board stamps the decimated stream late by its CIC group delay,
-    # which depends on the packet's decimation stage.  Both are stored per
-    # frame so the timebase below can take the delay out while the raw
-    # stamp fields keep what the board sent.
-    df.add(gd.entry(gd.RAW_ENTRY, fir_stage_field, 0, (gd.UINT8, 1)))
+    # The decimation stage and its CIC group delay (seconds), per frame:
+    # the board stamps the decimated stream late by that delay.
+    df.add(gd.entry(gd.RAW_ENTRY, dec_stage_field, 0, (gd.UINT8, 1)))
     df.add(gd.entry(gd.RAW_ENTRY, ts_delay_field, 0, (gd.FLOAT64, 1)))
     df.hide(ts_delay_field)
 
@@ -244,8 +242,7 @@ def setup_dirfile_for_module(
 
             ch_offset += 1
 
-    # Timebase: the packet stamp, in seconds, with the CIC group delay
-    # taken out so it reads on the PFB stream's clock.
+    # Add timebase field: the stamp with the CIC group delay taken out
     timebase_field = f"m{module+1:02d}_timebase"
     df.add(
         gd.entry(
@@ -259,6 +256,15 @@ def setup_dirfile_for_module(
 
     # Flush metadata so dirfile can be read immediately
     df.metaflush()
+
+
+def write_dec_stage(df, fields: dict, frame: int, pkt) -> None:
+    """Frame *frame*'s decimation stage and CIC group delay."""
+    stage = pkt.fir_stage & DEC_STAGE_MASK
+    df.putdata(fields["dec_stage"], np.array([stage], dtype=np.uint8),
+               first_frame=frame)
+    df.putdata(fields["ts_delay"], np.array([decimated_stream_delay_s(stage)]),
+               first_frame=frame)
 
 
 def main(*args):
@@ -550,35 +556,38 @@ def main_readout(args, serials, module_channels, interface_ip, board_stats):
                         if mstats.dirfile_fields is None:
                             setup_dirfile_for_module(bstats, mstats, module, clipped_channels)
 
-                        write_readout_frame(
-                            bstats.dirfile, mstats.dirfile_fields,
-                            mstats.dirfile_frame, pkt, clipped_channels)
+                        df = bstats.dirfile
+                        fields = mstats.dirfile_fields
+
+                        # Use per-module frame counter
+                        frame = mstats.dirfile_frame
+
+                        # Write timestamp
+                        ts = pkt.ts
+                        df.putdata(
+                            fields["ts_sbs"],
+                            np.array([ts.sbs], dtype=np.int32),
+                            first_frame=frame,
+                        )
+                        df.putdata(
+                            fields["ts_ss"],
+                            np.array([ts.ss], dtype=np.int32),
+                            first_frame=frame,
+                        )
+                        write_dec_stage(df, fields, frame, pkt)
+
+                        # Write channel data from raw int32 I/Q pairs.
+                        # Each pkt.raw_samples[slice] is a zero-copy view.
+                        sample_offset = 0
+                        for r in clipped_channels:
+                            df.putdata(fields["raw"],
+                                       pkt.raw_samples[2*r.start:2*r.stop],
+                                       first_frame=frame,
+                                       first_sample=2*sample_offset)
+                            sample_offset += len(r)
+
+                        # Increment per-module frame counter
                         mstats.dirfile_frame += 1
-
-
-def write_readout_frame(df, fields: dict, frame: int, pkt,
-                        channels: list[range]) -> None:
-    """One readout packet as dirfile frame *frame*: its stamp, its
-    decimation stage and that stage's CIC delay, and the raw I/Q of
-    *channels*."""
-    ts = pkt.ts
-    df.putdata(fields["ts_sbs"], np.array([ts.sbs], dtype=np.int32),
-               first_frame=frame)
-    df.putdata(fields["ts_ss"], np.array([ts.ss], dtype=np.int32),
-               first_frame=frame)
-    stage = pkt.fir_stage & FIR_STAGE_MASK
-    df.putdata(fields["fir_stage"], np.array([stage], dtype=np.uint8),
-               first_frame=frame)
-    df.putdata(fields["ts_delay"],
-               np.array([decimated_stream_delay_s(stage)]),
-               first_frame=frame)
-
-    # Each pkt.raw_samples[slice] is a zero-copy view.
-    sample_offset = 0
-    for r in channels:
-        df.putdata(fields["raw"], pkt.raw_samples[2*r.start:2*r.stop],
-                   first_frame=frame, first_sample=2*sample_offset)
-        sample_offset += len(r)
 
 
 def main_pfb(args, serials, modules, channels, interface_ip, board_stats):

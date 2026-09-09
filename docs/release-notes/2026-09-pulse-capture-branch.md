@@ -482,7 +482,7 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   clocks share one axis. The shift is recorded as `slow_time_offset_s`, 0
   when not applied; pass `time_offset_s=0.0` (`slow_time_offset_s=0.0` on
   the dual session) to opt out. The parser's dirfile `timebase` applies
-  the same shift per packet from its `fir_stage`; the raw stamp fields
+  the same shift per packet from its `dec_stage`; the raw stamp fields
   are unchanged.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.

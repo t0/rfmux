@@ -6,12 +6,12 @@ All three streams are stamped by the board's IRIG clock.  The channel
 stream shares the PFB stream's tap, so their stamps agree; the
 decimated (slow) stream is stamped late by its CIC group delay, which
 the capture session and the parser take out where they write
-(``slow_time_offset_s`` in a capture file, ``fir_stage`` beside the
+(``slow_time_offset_s`` in a capture file, ``dec_stage`` beside the
 dirfile's corrected timebase).  Files written before that carry raw
 stamps, and :func:`slow_shift_s` supplies the shift for them.
 
-Nothing here imports the fastrx extension: a :class:`rfmux.fastrx.PacketFile`
-is passed in, so the module loads where the extension does not build.
+The fastrx extension is imported only when a :class:`Recording` is
+opened from a path, so this module loads where it does not build.
 """
 
 from __future__ import annotations
@@ -24,8 +24,181 @@ import numpy as np
 from ..core.transferfunctions import (PFB_SAMPLING_FREQ,
                                       decimated_stream_delay_s,
                                       sampling_to_decimation)
+from ..streamer import SS_PER_SECOND
 from .hdf5 import PulseHDF5Reader
 
+# ── The recording ─────────────────────────────────────────────────
+
+#: Channels per pipeline block: channel c (1-indexed, as everywhere in
+#: rfmux) is column (c-1) % 128 of pipe (c-1) // 128 + 1, the parser's
+#: channel order.
+CHANNELS_PER_PIPE = 128
+NUM_PIPELINES = 8
+
+#: Scale from the truncated int16 on the wire to the ADC counts the 1G
+#: paths report (the /256 packetizer gain taken out), by sample_trunc:
+#: HIGH keeps bits 23:8 and is exact; MID and LOW keep lower windows, so
+#: they are exact only while the signal stays inside them.
+COUNTS_PER_LSB = {0: 1.0 / 256, 1: 1.0 / 16, 2: 1.0}
+
+_DAY_S = 86400.0
+#: Records probed past an undisciplined stamp before giving up on it.
+_PROBE = 64
+_RECENT = 0x80000000
+
+
+def channel_location(channel: int) -> tuple[int, int]:
+    """(pipe, column) of a 1-indexed channel."""
+    top = NUM_PIPELINES * CHANNELS_PER_PIPE
+    if not 1 <= channel <= top:
+        raise ValueError(f"channel must be in 1..{top}, got {channel}")
+    return (channel - 1) // CHANNELS_PER_PIPE + 1, (channel - 1) % CHANNELS_PER_PIPE
+
+
+def _seconds_of_day(ts) -> np.ndarray:
+    """Seconds of day of IRIG stamps (a structured array or one element),
+    NaN where the stamp is not disciplined."""
+    ts = np.asarray(ts)
+    t = (ts["h"].astype(np.float64) * 3600.0 + ts["m"] * 60.0 + ts["s"]
+         + ts["ss"] / SS_PER_SECOND)
+    return np.where(ts["c"] & _RECENT, t, np.nan)
+
+
+@dataclass
+class Window:
+    """One channel's samples over a time window of a recording.
+
+    ``times`` are seconds of day (see :meth:`Recording.seconds`), NaN
+    where a record's stamp is not disciplined; ``samples`` are complex
+    ADC counts.  ``seq_gaps`` counts sequence discontinuities inside the
+    window and ``dropouts`` the records whose pipe the transmitter was
+    not sending (zero-filled by the writer)."""
+    channel: int
+    start: int
+    stop: int
+    times: np.ndarray
+    samples: np.ndarray
+    seq_gaps: int
+    dropouts: int
+
+
+class Recording:
+    """A fastrx recording with a time index over its IRIG stamps.
+
+    Wraps a ``rfmux.fastrx.PacketFile`` (or opens one from a path).  The
+    extension maps the file and hands back strided views; nothing here
+    reads more of it than the records asked for.  Every record is one
+    sample of each channel in its pipes, stamped by the board, so a
+    stamp is a sample time with no first-or-last-in-packet ambiguity.
+
+    Time is seconds of day, the axis pulse-capture files and parser
+    dirfiles use.  A recording that crosses midnight is unwrapped: any
+    stamp more than half a day before the first one is taken as the next
+    day, and queries are read the same way.
+    """
+
+    def __init__(self, source):
+        if isinstance(source, (str, bytes)) or hasattr(source, "__fspath__"):
+            from ..fastrx import PacketFile
+            source = PacketFile(str(source))
+        self.file = source
+        self._ts = source.ts()
+        self._seq = source.seq()
+        n = self.num_packets
+        hdr0 = source.headers()[0] if n else None
+        #: fastrx_trunc_t of the recording (from the first record).
+        self.sample_trunc = int(hdr0["sample_trunc"]) if n else 2
+        #: Wire module field of the first record, as sent.
+        self.module = int(hdr0["module"]) if n else None
+        self.counts_per_lsb = COUNTS_PER_LSB[self.sample_trunc]
+        #: Seconds of day of the first disciplined stamp; None when the
+        #: recording has none near its start, in which case there is no
+        #: time axis to index by.
+        self.t_first = None
+        t, _ = self._second_from(0)
+        self.t_first = None if t != t else float(t)
+
+    @property
+    def num_packets(self) -> int:
+        return self.file.num_packets
+
+    def __len__(self) -> int:
+        return self.num_packets
+
+    # ── time ──────────────────────────────────────────────────────
+
+    def _unwrap(self, t):
+        """Seconds of day onto the recording's monotone axis."""
+        if self.t_first is None:
+            return t
+        return np.where(t < self.t_first - _DAY_S / 2, t + _DAY_S, t)
+
+    def seconds(self, start: int = 0, stop: int | None = None) -> np.ndarray:
+        """Seconds of day of records ``start:stop``, NaN where the stamp
+        is not disciplined.  Touches only those records."""
+        return self._unwrap(_seconds_of_day(self._ts[start:stop]))
+
+    def _second_from(self, i: int):
+        """(seconds, index) of the first disciplined stamp at or after
+        record *i* within the probe distance; (NaN, i) if none."""
+        for j in range(i, min(i + _PROBE, self.num_packets)):
+            t = _seconds_of_day(self._ts[j])
+            if t == t:
+                return float(self._unwrap(t)), j
+        return float("nan"), i
+
+    def index_at(self, t: float, side: str = "left") -> int:
+        """Record index for seconds-of-day *t*: the first record stamped
+        at or after *t* (``side="left"``) or after it (``"right"``).
+        A bisect, so a query costs about log2(records) page touches
+        rather than a read of the file.  A record with no usable stamp
+        is placed with the next disciplined one (so it can open a
+        window, NaN-timed); a stretch of them longer than the probe
+        distance is treated as beyond the end."""
+        if self.t_first is None:
+            raise ValueError("recording has no disciplined timestamp to "
+                             "index by")
+        t = float(self._unwrap(np.float64(t)))
+        lo, hi = 0, self.num_packets
+        while lo < hi:
+            mid = (lo + hi) // 2
+            tm, j = self._second_from(mid)
+            if tm != tm:                       # nothing usable ahead of mid
+                hi = mid
+            elif tm < t or (side == "right" and tm == t):
+                lo = j + 1
+            else:
+                hi = mid
+        return lo
+
+    # ── samples ───────────────────────────────────────────────────
+
+    def channel(self, channel: int, start: int = 0,
+                stop: int | None = None) -> np.ndarray:
+        """One channel's samples over records ``start:stop`` as complex
+        ADC counts."""
+        pipe, col = channel_location(channel)
+        iq = self.file.pipe_iq(pipe)[start:stop, col, :]
+        z = iq[:, 0].astype(np.float32) + 1j * iq[:, 1].astype(np.float32)
+        return z * np.float32(self.counts_per_lsb)
+
+    def window(self, t0: float, t1: float, channel: int) -> Window:
+        """*channel* over seconds-of-day ``[t0, t1]``."""
+        start = self.index_at(t0)
+        stop = self.index_at(t1, side="right")
+        pipe, _ = channel_location(channel)
+        seq = self._seq[start:stop].astype(np.int64)
+        snap = self.file.headers()[start:stop]["pipe_snapshot"]
+        return Window(
+            channel=channel, start=start, stop=stop,
+            times=self.seconds(start, stop),
+            samples=self.channel(channel, start, stop),
+            seq_gaps=int(np.count_nonzero(np.diff(seq) != 1)) if seq.size else 0,
+            dropouts=int(np.count_nonzero((snap & (1 << (pipe - 1))) == 0)),
+        )
+
+
+# ── The 1G side ───────────────────────────────────────────────────
 
 def slow_shift_s(reader: PulseHDF5Reader) -> float:
     """Seconds to add to a file's slow ``Time`` arrays to put them on the
@@ -66,8 +239,9 @@ class Overlay:
     """One pulse and the same channel from a fastrx recording, on one
     time axis (seconds of day, PFB clock) and in the file's stored
     units.  ``fast`` is the paired fast-stream pulse of a dual file;
-    ``lag_s`` is where the fastrx trace best matches the fast one,
-    fastrx stamp minus fast stamp of the same feature."""
+    ``dirfile`` the parser's slow trace when one was given; ``lag_s``
+    is where the fastrx trace best matches the fast one, fastrx stamp
+    minus fast stamp of the same feature."""
     channel: int
     pulse_idx: int
     stream: str
@@ -76,8 +250,6 @@ class Overlay:
     pulse: Dict[str, np.ndarray]
     fastrx: Dict[str, np.ndarray]
     fast: Optional[Dict[str, np.ndarray]] = None
-    #: The parser dirfile's slow trace over the same window, in the
-    #: same units, when one was given.
     dirfile: Optional[Dict[str, np.ndarray]] = None
     lag_s: Optional[float] = None
     seq_gaps: int = 0
@@ -88,6 +260,12 @@ def _tod(pulse: Dict[str, Any], shift: float = 0.0) -> Dict[str, np.ndarray]:
     return {"times": np.asarray(pulse["Time"], dtype=np.float64) + shift,
             "I": np.asarray(pulse["Amp_I"], dtype=np.float64),
             "Q": np.asarray(pulse["Amp_Q"], dtype=np.float64)}
+
+
+def _in_units(times, z: np.ndarray, factor: complex) -> Dict[str, np.ndarray]:
+    z = np.asarray(z) * factor
+    return {"times": np.asarray(times, dtype=np.float64),
+            "I": z.real.astype(np.float64), "Q": z.imag.astype(np.float64)}
 
 
 def correlation_lag_s(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray],
@@ -118,23 +296,17 @@ def correlation_lag_s(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray],
     return float(t_b0 - t_a0 + s * dt)
 
 
-def _in_units(times, z: np.ndarray, factor: complex) -> Dict[str, np.ndarray]:
-    z = np.asarray(z) * factor
-    return {"times": np.asarray(times, dtype=np.float64),
-            "I": z.real.astype(np.float64), "Q": z.imag.astype(np.float64)}
-
-
-def pulse_overlay(reader: PulseHDF5Reader, recording, channel: int,
-                  pulse_idx: int, stream: str = "slow",
+def pulse_overlay(reader: PulseHDF5Reader, recording: Recording,
+                  channel: int, pulse_idx: int, stream: str = "slow",
                   pad_s: float = 0.0, dirfile=None,
                   module: Optional[int] = None) -> Overlay:
-    """Pulse *pulse_idx* of *channel* with the fastrx samples over its
-    window (plus *pad_s* either side), converted to the file's stored
-    units.  *recording* is a :class:`rfmux.fastrx.PacketFile`.  For a
-    slow pulse of a dual file the paired fast pulse comes too, with the
-    correlation lag between it and the fastrx trace.  With *dirfile* (a
-    board's parser subdirfile) its slow trace over the window comes
-    too, in the same units; *module* defaults to the capture's."""
+    """Pulse *pulse_idx* of *channel* with the recording's samples over
+    its window (plus *pad_s* either side), converted to the file's
+    stored units.  For a slow pulse of a dual file the paired fast pulse
+    comes too, with the correlation lag between it and the fastrx
+    trace.  With *dirfile* (a board's parser subdirfile) its slow trace
+    over the window comes too, in the same units; *module* defaults to
+    the capture's."""
     stream_key = stream if reader.dual else None
     pulse = reader.get_pulse(channel, pulse_idx, stream_key)
     if pulse is None:
@@ -178,7 +350,7 @@ def dirfile_window(path, module: int, channel: int, t0: float,
                    t1: float) -> Dict[str, Any]:
     """*channel* of *module* over seconds-of-day ``[t0, t1]`` from a
     parser dirfile (one board's subdirfile), as complex ADC counts on
-    the PFB clock.  A dirfile written with ``fir_stage`` has its
+    the PFB clock.  A dirfile written with ``dec_stage`` has its
     timebase corrected already; an older one is shifted here by the
     delay of the stage inferred from its frame spacing.  Only the
     timebase is read whole; the channel is read for the window."""
@@ -191,7 +363,7 @@ def dirfile_window(path, module: int, channel: int, t0: float,
     tb = np.asarray(df.getdata(prefix + "timebase", gd.FLOAT64),
                     dtype=np.float64)
     shift = 0.0
-    if prefix + "fir_stage" not in fields and tb.size > 1:
+    if prefix + "dec_stage" not in fields and tb.size > 1:
         step = float(np.median(np.diff(tb)))
         if step > 0:
             shift = -decimated_stream_delay_s(sampling_to_decimation(1.0 / step))
@@ -199,10 +371,10 @@ def dirfile_window(path, module: int, channel: int, t0: float,
     i0 = int(np.searchsorted(tb, t0, side="left"))
     i1 = int(np.searchsorted(tb, t1, side="right"))
     z = np.asarray(df.getdata(prefix + f"c{channel:04d}", gd.COMPLEX128,
-                              first_frame=int(i0), num_frames=int(i1 - i0)))
+                              first_frame=i0, num_frames=i1 - i0))
     df.close()
     # A channel field is phase-shifted out of the raw block, so the
     # last frame can come back short: keep the samples the read covered.
     i1 = i0 + len(z)
     return {"times": tb[i0:i1], "I": z.real, "Q": z.imag,
-            "shift_s": shift, "start": int(i0), "stop": int(i1)}
+            "shift_s": shift, "start": i0, "stop": i1}

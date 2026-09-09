@@ -11,7 +11,7 @@ arbitrary because the index reads stamps, not a rate.
 import numpy as np
 import pytest
 
-fastrx = pytest.importorskip(
+pytest.importorskip(
     "rfmux.fastrx", reason="this rfmux build does not include fastrx"
 )
 
@@ -22,8 +22,9 @@ from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig, PulseCaptureSession)
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader, PulseHDF5Writer
 from rfmux.pulse_capture.overlay import (
-    correlation_lag_s, counts_to_stored, pulse_overlay, slow_shift_s)
-from test.fastrx_helpers import file_header, record, seconds_ts, write
+    Recording, correlation_lag_s, counts_to_stored, pulse_overlay,
+    slow_shift_s)
+from test.test_fastrx_file import file_header, record, seconds_ts, write
 
 FS = decimation_to_sampling(6)                    # 596 Hz slow stream
 LATE = decimated_stream_delay_s(sampling_to_decimation(FS))
@@ -48,8 +49,8 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
         block[71, 0] = int(round(float(_shape(ti))))
         recs.append(record(0b11, i, ts=seconds_ts(ti), recent=True,
                            iq={2: block}))
-    return fastrx.PacketFile(write(tmp_path, [file_header(0b11, len(recs))]
-                                   + recs))
+    return Recording(write(tmp_path, [file_header(0b11, len(recs))]
+                             + recs))
 
 
 def _capture(tmp_path):
@@ -158,12 +159,11 @@ def test_correlation_lag_reads_a_known_offset():
 
 def _dirfile(tmp_path, channel=CHANNEL):
     """The event as the parser writes it: long packets stamped late by
-    the board, fir_stage 6, so the timebase is corrected as written."""
+    the board, dec stage 6, so the timebase is corrected as written."""
     gd = pytest.importorskip("pygetdata")
     from rfmux.streamer import ReadoutPacket, Timestamp, TimestampSource
     from rfmux.tools.parser import (BoardStats, ModuleStats,
-                                    setup_dirfile_for_module,
-                                    write_readout_frame)
+                                    setup_dirfile_for_module, write_dec_stage)
     path = str(tmp_path / "serial_0042")
     board = BoardStats()
     board.dirfile = gd.dirfile(path, gd.CREAT | gd.RDWR | gd.EXCL)
@@ -185,8 +185,15 @@ def _dirfile(tmp_path, channel=CHANNEL):
                            s=whole % 60, ss=int((late - whole) * 156_250_000),
                            c=0, sbs=whole, source=TimestampSource.TEST,
                            recent=True)
-        write_readout_frame(board.dirfile, mod.dirfile_fields, frame, pkt,
-                            [range(channel - 1, channel)])
+        df, fields = board.dirfile, mod.dirfile_fields
+        df.putdata(fields["ts_sbs"], np.array([pkt.ts.sbs], dtype=np.int32),
+                   first_frame=frame)
+        df.putdata(fields["ts_ss"], np.array([pkt.ts.ss], dtype=np.int32),
+                   first_frame=frame)
+        write_dec_stage(df, fields, frame, pkt)
+        df.putdata(fields["raw"],
+                   pkt.raw_samples[2 * (channel - 1):2 * channel],
+                   first_frame=frame, first_sample=0)
     board.dirfile.close()
     return path
 

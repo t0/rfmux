@@ -517,8 +517,8 @@ def hud(channel: int, pipe: int, depth: int,
 
 
 def _open_recording(path):
-    from rfmux import fastrx
-    rec = fastrx.PacketFile(path)
+    from rfmux.pulse_capture.overlay import Recording
+    rec = Recording(path)
     if rec.t_first is None:
         raise click.ClickException(
             f"{path}: no disciplined timestamp to index by")
@@ -571,7 +571,7 @@ def overlay(capture, recording, channel, pulse_idx, stream, pad, dirfile,
     calibration.  Press n / p to step through the pulses.
 
     The slow stream's CIC delay is already taken out of a capture the
-    session wrote and of a dirfile the parser wrote with fir_stage; an
+    session wrote and of a dirfile the parser wrote with dec_stage; an
     older file is shifted by the delay of its slow rate.  For a slow
     pulse of a dual file the paired fast pulse is drawn too, with the
     lag at which the recording best matches it."""
@@ -655,7 +655,7 @@ def overlay_dirfile(dirfile, recording, module, channel, t0, t1, save):
     """Overplot a window of DIRFILE (one board's parser subdirfile, e.g.
     run/serial_0042) with the same channel of RECORDING, in ADC counts.
 
-    A dirfile the parser wrote with `fir_stage` has the slow stream's CIC
+    A dirfile the parser wrote with `dec_stage` has the slow stream's CIC
     delay taken out of its timebase; an older one is shifted here by the
     delay of the stage its frame spacing implies."""
     import matplotlib

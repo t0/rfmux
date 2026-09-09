@@ -134,7 +134,8 @@ test, so run it by hand when its notebook changes.
 A few tests skip on macOS or Windows because they pin platform behaviour:
 `recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT` (absent on
 Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT` to a
-process group). `test/test_fastrx_file.py`, `test/test_fastrx_index.py` and
+process group). `test/test_fastrx_file.py`,
+`test/pulse_capture/test_recording_index.py` and
 `test/pulse_capture/test_overlay.py` skip at collection unless the fastrx
 extension was built. That needs Linux with clang, libxdp, libbpf and
 liburing present at install time (`rfmux/streamer/CMakeLists.txt`).

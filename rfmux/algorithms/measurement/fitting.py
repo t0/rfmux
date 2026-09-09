@@ -1,4 +1,8 @@
 """
+**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
+ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
+here warns on call and names its replacement (see ``_legacy.py``).
+
 The legacy dict-walking analysis surface for multisweep data.
 
 The resonance finder and the resonator fitters that used to live here have
@@ -32,6 +36,7 @@ from ...tuning.fits import (
     fit_skewed,
     s21_skewed,
 )
+from ._legacy import deprecated
 
 # Listed so a linter reports the imports above as re-exports rather than as
 # five unused names, and so this module's surface is stated in one place.
@@ -49,6 +54,7 @@ __all__ = [
 ]
 
 
+@deprecated("rfmux.tuning.bifurcated_by_either (or bifurcated_by_derivative / bifurcated_by_hysteresis) on a sweep entry")
 def identify_bifurcation(iq_complex: np.ndarray, threshold_factor: float = 5.0, min_peak_prominence_factor: float = 0.5, min_points_for_detection: int = 10) -> bool:
     """
     Identifies potential bifurcations in a resonator sweep by looking for

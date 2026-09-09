@@ -1,4 +1,8 @@
 """
+**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
+ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
+here warns on call and names its replacement (see ``_legacy.py``).
+
 The legacy dict-walking surface for nonlinear resonator fitting.
 
 The model and its fitter have moved to :mod:`rfmux.tuning.fits` — they are
@@ -51,22 +55,8 @@ __all__ = [
     "nonlinear_iq",
     "remove_gain",
     # Still implemented here.
-    "estimate_and_remove_gain",
     "fit_nonlinear_iq_multisweep",
 ]
-
-
-def estimate_and_remove_gain(frequencies, iq_complex, n_extrema_points: int = 5):
-    """Deprecated. Use :func:`rfmux.tuning.fits.remove_gain`.
-
-    The same estimate, split back into a magnitude and a phase — which is what
-    the replacement's single complex gain was always multiplied back together
-    from.
-    """
-    corrected, gain = remove_gain(
-        frequencies, iq_complex, n_extrema_points=n_extrema_points
-    )
-    return corrected, float(np.abs(gain)), float(np.angle(gain))
 
 
 def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) -> Tuple[Union[int, np.integer], Dict]:

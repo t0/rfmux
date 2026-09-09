@@ -1,4 +1,8 @@
 """
+**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
+ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
+here warns on call and names its replacement (see ``_legacy.py``).
+
 bias_kids: A measurement algorithm for biasing KIDs at their optimal operating points
 based on multisweep characterization data.
 """
@@ -11,9 +15,11 @@ from scipy.signal import butter, filtfilt
 from ...core.transferfunctions import BASE_FREQUENCY, convert_roc_to_volts
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
                              ensure_fits, fitted_linewidth, step_slope_correction)
+from ._legacy import deprecated
 
 
 
+@deprecated("scipy.signal.butter/filtfilt directly", note="Only the phase optimiser used it, and phase changes are not part of the current flow.")
 def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, order: int = 4) -> np.ndarray:
     """
     Apply a bandpass filter to the data.
@@ -33,6 +39,7 @@ def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, 
     return filtfilt(b, a, data)
 
 
+@deprecated("nothing yet", note="Setting the ADC phase is deliberately not part of the current tuning flow (see main_merge_conflict_survey.md §9.2).")
 async def find_optimal_phases_parallel(
     crs,
     bias_configs: Dict[int, Dict],
@@ -155,6 +162,7 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
     return results_by_detector, metadata
 
 
+@deprecated("rfmux.tuning.iq_derivatives_at, read off the bias sweep and carried on the BiasPoint", note="A stepped-tone calibration is noted for later, not implemented (survey §9.2).")
 async def measure_calibrations_by_step(crs, bias_configs: Dict[int, Dict], module: int,
                                        steps: Dict[int, float], num_samples: int = 100
                                        ) -> Dict[int, complex]:
@@ -226,6 +234,7 @@ def _bias_point_from_fit(entry: Dict, fit_method: str) -> None:
         entry['bias_frequency_source'] = fit_method
 
 
+@deprecated("rfmux.tuning.find_bias_points on a multisweep over an AmplitudeSchedule, then crs.apply_bias(report.catalog)")
 async def bias_kids(
     crs,
     multisweep_results: Union[Dict, List[Dict]],
@@ -590,6 +599,7 @@ async def bias_kids(
     return successfully_biased
 
 
+@deprecated("rfmux.tuning.find_bias_points, which reads the amplitude ladder a multisweep returns")
 def analyze_multiamp_data(
     results_by_detector: Dict[int, Dict],
     nonlinear_threshold: float = 0.77,

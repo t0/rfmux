@@ -208,10 +208,10 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 864 tests, ~1 min
-pytest --tier=portable              # No CRS, no GUI: 42 tests, ~9 s
-pytest --tier=full                  # All 884 that run without a board, ~4 min
-pytest --tier=acquisition           # MockCRS server + real UDP: 20 tests, ~3 min (inside full)
+pytest --tier=quick                 # Edit loop: 1461 tests, ~1 min
+pytest --tier=portable              # No CRS, no GUI: 621 tests, ~9 s
+pytest --tier=full                  # All 1498 that run without a board, ~4 min
+pytest --tier=acquisition           # MockCRS server + real UDP: 37 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope

@@ -495,8 +495,10 @@ print(catalog_from_disk)
 ```
 
 Omit `directory=` to use the normal measurement folder,
-`~/rfmux_data/ipy_session_<today>/`. `store.output_directory()` reports that path;
-see `rfmux.tuning.store` for ways to change it.
+`~/rfmux_data/ipy_session_<today>/` by default. `store.session_directory()` reports
+that path. Call `store.set_output_directory("~/rfmux_data/cooldown7")` to save
+directly in a named folder for this kernel session; pass `None` to restore dated
+folders.
 
 The filename includes a timestamp. The saved dictionary also gains `file_metadata`,
 which `ResonatorCatalog.from_dict()` ignores when rebuilding the catalog.

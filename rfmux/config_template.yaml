@@ -29,7 +29,8 @@ store:
   # "~" expands to your home directory. A relative path is taken from wherever
   # Python is running, which is rarely what you want — prefer an absolute one.
   #
-  # Override with $RFMUX_DATA_DIR, or for one session:
+  # Override this root with $RFMUX_DATA_DIR. For one Python session, choose
+  # an exact destination (no dated subfolder):
   #     rfmux.tuning.store.set_output_directory("/data/cooldown7")
   directory: ~/rfmux_data
 

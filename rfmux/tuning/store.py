@@ -5,13 +5,17 @@ from being a measurement that never happened. So the drivers save by default:
 :func:`~rfmux.algorithms.measurement.multisweep.multisweep` and its neighbours
 take ``save=`` and hand what they produced to :func:`maybe_save` on the way out.
 
-**The folder is keyed by date, not by session.** Periscope makes one folder per
+**By default the folder is keyed by date.** Periscope makes one folder per
 session because clicking *New Session* is an unambiguous moment. From a notebook
 there is no such moment — you open a kernel on Monday and are still in it on
 Wednesday — so rfmux makes one ``ipy_session_YYYYMMDD`` folder per day inside
 your output directory and puts the date and time in the filename instead::
 
     ~/rfmux_data/ipy_session_20260904/multisweep_20260904_142231_cooldown3.pkl
+
+Call ``set_output_directory("~/rfmux_data/cooldown7")`` to put new outputs
+directly in that folder for this Python session, without a dated subfolder.
+``set_output_directory(None)`` restores the default dated layout.
 
 That is also why the names look different from Periscope's
 ``multisweep_module1_142231.pkl``: two tools writing two layouts should be
@@ -92,7 +96,7 @@ _created_by: str | None = None
 
 
 def output_directory() -> Path:
-    """The directory the dated session folders are made in.
+    """The explicit destination, or the root for default dated folders.
 
     Resolved highest-first: :func:`set_output_directory`, then
     ``$RFMUX_DATA_DIR``, then ``store.directory`` in your config file, then
@@ -114,23 +118,26 @@ def output_directory() -> Path:
 
 
 def set_output_directory(directory: Path | str | None) -> None:
-    """Send output somewhere else for the rest of this Python session.
+    """Send new output directly to this folder for this Python session.
 
     The notebook knob — one line at the top of a cooldown's notebook, no file to
-    edit. ``None`` puts it back to whatever the environment and config say.
+    edit. No dated subfolder is added. ``None`` restores dated folders under
+    the root selected by the environment and config.
     """
     global _output_directory
     _output_directory = None if directory is None else Path(directory).expanduser()
 
 
 def session_directory(*, create: bool = True) -> Path:
-    """Today's folder inside :func:`output_directory`, made if it isn't there.
+    """The active output folder, made if requested and it isn't there.
 
-    Named for the date it was made, not for when you started working: a kernel
-    left open overnight starts writing into tomorrow's folder tomorrow, which is
-    where you would look for it.
+    An explicit :func:`set_output_directory` destination is used directly.
+    Otherwise use today's dated folder under :func:`output_directory`;
+    a kernel left open overnight switches to the next day's folder.
     """
-    folder = output_directory() / f"{SESSION_PREFIX}{_now():%Y%m%d}"
+    folder = output_directory()
+    if _output_directory is None:
+        folder = folder / f"{SESSION_PREFIX}{_now():%Y%m%d}"
     if create:
         folder.mkdir(parents=True, exist_ok=True)
     return folder

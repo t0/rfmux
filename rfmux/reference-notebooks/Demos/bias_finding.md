@@ -114,7 +114,7 @@ MODULE = 2
 # than by a relative path, so it works whichever directory the kernel started
 # in. Matched by pattern rather than named outright, because `store` puts the
 # date and time of the writing into every filename it makes — your own sweeps
-# land in `store.output_directory()` under names of exactly this shape.
+# land in `store.session_directory()` under names of exactly this shape.
 DEMOS = Path(rfmux.__file__).parent / "reference-notebooks" / "Demos"
 MULTISWEEP_PKL = max(DEMOS.glob("multisweep_*_demo_biasfind1.pkl"))
 
@@ -138,7 +138,7 @@ would have nothing to find.
 The file is nothing special otherwise: it is an ordinary measurement file, the
 kind `multisweep` writes for itself, holding five resonators swept over
 five amplitude steps from 0.0008 to 0.008, in both directions. Getting it was one
-call, which saved itself into `store.output_directory()` on the way out, and
+call, which saved itself into `store.session_directory()` on the way out, and
 everything below this section is unchanged by the fact that it happened
 yesterday rather than in the cell above:
 

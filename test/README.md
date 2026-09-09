@@ -7,12 +7,12 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 614 | ~12 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1454 | ~3 min | Default while editing. |
-| `pytest --tier=acquisition` | 28 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1482 | ~5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 621 | ~12 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1461 | ~3 min | Default while editing. |
+| `pytest --tier=acquisition` | 37 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 1498 | ~5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 959 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 1573 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem

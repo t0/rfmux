@@ -111,6 +111,22 @@ def test_asking_where_output_goes_does_not_create_anything(output_dir):
     assert store.session_directory(create=False).exists() is False
 
 
+def test_explicit_output_directory_saves_without_dated_folder(output_dir):
+    destination = output_dir / "cooldown7" / "run03"
+    store.set_output_directory(destination)
+    assert store.session_directory(create=False) == destination
+    assert not destination.exists()
+    path = store.maybe_save(a_container(2), "multisweep")
+    assert path.parent == destination
+
+
+def test_reset_output_directory_restores_dated_folder(output_dir):
+    store.set_output_directory(output_dir / "run03")
+    store.set_output_directory(None)
+    path = store.save(a_container(2), "multisweep")
+    assert path.parent == output_dir / f"ipy_session_{datetime.date.today():%Y%m%d}"
+
+
 def test_filename_carries_type_date_time_and_label(output_dir):
     path = store.save(a_container(2), "multisweep", label="cooldown3")
     stem = path.stem

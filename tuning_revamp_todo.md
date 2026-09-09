@@ -60,7 +60,7 @@ single sweep's `(0, "upward")` is a fact about it rather than padding.
 Nothing in Periscope passes a `data_callback` to `multisweep` today — only
 `take_netanal`, whose callback is a different signature entirely — so this is
 not broken right now. It becomes load-bearing when Periscope is rewired (step 5
-of `tuning_multisweep_amplitudes_plan.md`):
+of `tuning_multisweep_amplitudes_plan.md`, a plan that landed and was removed 2026-09-08; it is in git history):
 
 * `MultisweepTask.run` (`tools/periscope/tasks.py:632`) loops over amplitude
   steps and directions itself, calling `crs.multisweep` once per sweep. That
@@ -144,7 +144,7 @@ loudly, so check them off when their rewrite lands:
 
 All of the above now have a second layer to absorb: a sweep no longer returns
 `{name: entry}` at all. It returns `{module_id: {..., "results": {iteration:
-{direction: {name: entry}}}}}` — see `tuning_sweep_result_shape_plan.md`. So
+{direction: {name: entry}}}}}` — see `tuning_sweep_result_shape_plan.md` in git history — the plan landed and was removed 2026-09-08. So
 each rewrite starts with `sweeps[crs.module[m].index()]["results"][…]`, or
 better, the readers in `rfmux/tuning/sweep_results.py`. `bias_kids.py:231`
 reaching for `multisweep_results['results_by_detector']` is the oldest of these
@@ -243,6 +243,26 @@ What is left:
    not two.
 
 ## Calibrate the bifurcation thresholds against a real array
+
+**2026-09-08, on the standard simulated array (`rfmux/mock/standard_array.py`,
+`test/notebooks/test_standard_mock_array.md`):** both detectors fire too
+early. Over the ladder `multiplicative(0.5, 8, 5)` the nonlinear fit puts every
+one of the eight resonators' bifurcation between rungs 3 and 4 (`a` ≈ 0.4 then
+≈ 0.85–0.9), yet `derivative` picks rung 0–2 on seven of eight and
+`hysteresis` scatters from rung 0 to 4; `both` agrees with the fit on 0 of 8,
+and three resonators come back flagged "the quietest amplitude measured was
+already bifurcated". The paragraph below about the simulator's two passes being
+identical is no longer true: main's mock now has TLS 1/f frequency wander on
+by default (`tls_noise_enabled`, ~1e-7 df/f), so upward and downward traces
+taken seconds apart differ by a drift the hysteresis test reads as a jump.
+The derivative test is presumably reading the readout noise (`udp_noise_level`
+11 counts) on a 5 dB dip. Next steps, in this order: rerun the notebook's
+comparison with `tls_noise_enabled=False` and with `nqp_noise_enabled=False`
+to attribute each detector's false positives; then decide whether the
+thresholds move, the metrics change, or the fitted `a` becomes the check the
+post-merge plan describes (survey §9.4). The notebook's comparison table is
+the harness for this; nothing else needs building first.
+
 
 `rfmux/tuning/bias.py` ships two tests for spotting a bifurcated amplitude step
 — plus `both`, which runs them and takes either verdict, so it has no threshold

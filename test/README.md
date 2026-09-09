@@ -7,10 +7,10 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 42 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 864 | ~1 min | Default while editing. |
-| `pytest --tier=acquisition` | 20 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 884 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 614 | ~12 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1454 | ~3 min | Default while editing. |
+| `pytest --tier=acquisition` | 28 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 1482 | ~5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
 | `pytest --tier=all --serial 0024` | 959 | needs a board | Before a release. |
 
@@ -29,7 +29,9 @@ fail: a CI runner missing it goes green having not run them.
 ## What each tier covers
 
 - **portable:** hardware-map YAML/CSV parsing, schema validation, session
-  threading. Runs on a bare install: no PyQt6, no board. This is the subset
+  threading, and the tuning analysis (`test/tuning/`) on synthetic traces:
+  resonance finding, fitting, bias finding, the sweep shape and the output
+  folder. Runs on a bare install: no PyQt6, no board. This is the subset
   `tox` runs on Python 3.10, 3.11 and 3.12, which is what keeps
   `requires-python = ">=3.10"` honest. The floor is 3.10 because
   `rfmux/core/crs.py` uses `match`.
@@ -39,7 +41,9 @@ fail: a CI runner missing it goes green having not run them.
   and the receiver tests feed themselves hand-built packets over loopback. A
   MockCRS server spawned for its RPC surface alone (`load_session` on the
   `rfmux.mock` flavour, as in `test_channel_selection.py`) stays in this
-  tier; the mock sends UDP only after `start_udp_streaming()`.
+  tier; the mock sends UDP only after `start_udp_streaming()`. The tuning flow
+  tests run that way against the *standard simulated array* (below): a real
+  netanal, multisweep ladder and bias, over RPC, in under a minute.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
   Covers what no unit test can: streamer config taking effect, and the slow
   (~38 kHz) and PFB (~2.44 MHz) sources feeding a session. Also decimation
@@ -49,6 +53,25 @@ fail: a CI runner missing it goes green having not run them.
 
 A test marked `portable` that needs PyQt6 or a board does not fail there, it
 *skips*, so the matrix goes green having tested nothing.
+
+## The standard simulated array
+
+`rfmux/mock/standard_array.py` fixes one simulated array for tests to share:
+eight seeded resonators in 1.00-1.10 GHz, biased by the simulator itself, with
+its default physics and noise except a warmer bath (0.23 K, so Q is near 5e4
+and a 20 kHz linewidth is resolvable on the default sweep grids). It is served
+over RPC with no UDP, so tests against it are quick-tier. `standard_array()`
+returns the board and a catalog of its tones; `test/tuning/conftest.py`
+provides it module-scoped as `standard_array_board`, because a second
+`load_session` in one process detaches the first board's objects. One array per
+test module.
+
+`test/notebooks/test_standard_mock_array.md` builds it and runs the whole
+tuning flow across it, printing what the array looks like and asserting the
+properties the tests lean on: every resonator found, every fit converging, and
+the test ladder bracketing bifurcation. Read it before writing a test against
+the array; change the array there first. A test that needs a different array
+passes `overrides` and says so in its name.
 
 ## Hardware tests
 
@@ -109,6 +132,7 @@ Directories mirror the package under test.
 | `streamer/` | `rfmux/streamer/`: packet decode, the batched getters, port conflict probes |
 | `mock/` | `rfmux/mock/`: simulator fidelity, config plumbing, TLS noise, JIT dispatch, multicast selection |
 | `algorithms/` | `rfmux/algorithms/measurement/`: measurement flows, streamer config |
+| `tuning/` | `rfmux/tuning/`, `rfmux/core/resonators.py`, `rfmux/algorithms/operation/`: resonance finding, fits, bias finding, catalogs, the sweep shape, the output folder; and the flow end to end on the standard simulated array |
 | `periscope/` | `rfmux/tools/periscope/`: panels, dialogs, receiver, shutdown |
 | `pulse_capture/` | `rfmux/pulse_capture/`: detection, session, ingest, HDF5, plus its Periscope panel and task |
 | `notebooks/` | Jupyter-based tests |
@@ -126,7 +150,9 @@ writes output must write to a temp directory, since the reference copies are
 provisioned read-only. Of the `.py` scripts beside the demos,
 `simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier
 (`test_measurement_flow.py`); `pulse_capture_flow.py` is not executed by any
-test, so run it by hand when its notebook changes.
+test, so run it by hand when its notebook changes. Every `Demos/*.md` is
+collected, so a draft notebook left in that directory is executed too: keep
+drafts elsewhere until they are ready to run.
 
 ## Platform skips
 

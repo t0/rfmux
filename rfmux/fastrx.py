@@ -15,6 +15,7 @@ from .streamer._fastrx import (
     ABI_VERSION,
     MAX_CLIENTS,
     MAX_SAMPLES,
+    NUM_MODULES,
     NUM_PIPELINES,
     SOCKET_DIR,
     PacketFile,
@@ -28,6 +29,7 @@ __all__ = [
     "PacketFile",
     "get_samples",
     "resolve_socket",
+    "NUM_MODULES",
     "NUM_PIPELINES",
     "MAX_SAMPLES",
     "ABI_VERSION",
@@ -83,7 +85,9 @@ class PacketCapture(_PacketCapture):
         PacketCapture(interface="enp9s0f0np0")
         PacketCapture(socket="/tmp/fastrxd.sock")
 
-    The pipeline is chosen per capture() call, not here.
+    The pipeline and module are chosen per capture() call:
+
+        d = c.capture(1024, pipe=1, module=2)
     """
 
     def __init__(
@@ -150,8 +154,9 @@ class PacketWriter(_PacketWriter):
         )
 
 
-def get_samples(n_packets: int, pipe: int = 1, timeout: float = 5.0, **kwargs):
-    """Grab the next `n_packets` from one pipe, then tear everything down.
+def get_samples(n_packets: int, pipe: int, module: int,
+                timeout: float = 5.0, **kwargs):
+    """Grab the next n_packets from one pipe and module.
 
     A short-lived PacketCapture, for callers who want one grab and no lifetime
     to manage.  Everything expensive is per-connection rather than per-packet,
@@ -160,10 +165,10 @@ def get_samples(n_packets: int, pipe: int = 1, timeout: float = 5.0, **kwargs):
 
         c = fastrx.PacketCapture(interface="enp9s0f0np0")
         while True:
-            d = c.capture(1024)
+            d = c.capture(1024, pipe=1, module=1)
     """
 
     if n_packets <= 0:
         raise ValueError(f"n_packets must be positive, got {n_packets}")
     with PacketCapture(**kwargs) as c:
-        return c.capture(n_packets, pipe, timeout)
+        return c.capture(n_packets, pipe, module, timeout)

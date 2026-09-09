@@ -16,7 +16,6 @@ from typing import Tuple, Optional, Union
 
 from .utils import *
 from .dialogs import MultisweepDialog
-from .tasks import SetCableLengthTask, SetCableLengthSignals
 
 
 class NetworkAnalysisExportMixin:
@@ -28,8 +27,7 @@ class NetworkAnalysisExportMixin:
     the host class provides various properties and UI elements related to network analysis.
     
     Requirements from the host class:
-    - data: Dictionary of data to export
-    - raw_data: Dictionary of raw data including IQ information
+    - netanal_traces: module -> probe amplitude -> the trace take_netanal measured
     - current_params: Dictionary of current analysis parameters
     - resonance_freqs: Dictionary of resonance frequencies per module
     - plots: Dictionary of plot information per module
@@ -61,7 +59,7 @@ class NetworkAnalysisExportMixin:
             )
             return
             
-        if not self.data:
+        if not self.netanal_traces:
             QtWidgets.QMessageBox.warning(self, "No Data", "No data to export yet.")
             return
         
@@ -159,49 +157,37 @@ class NetworkAnalysisExportMixin:
             'modules': {}
         }
         
-        for module, data_dict in self.raw_data.items():
+        for module, traces in self.netanal_traces.items():
             export_data['modules'][module] = {}
             meas_idx = 0
-            
-            for key, data_tuple in data_dict.items():
-                if key == 'default':
-                    # The display's copy of the latest sweep; every sweep
-                    # is also stored under its own amplitude key.
-                    continue
-                # Extract and convert data for export
-                amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
-                
-                # Perform unit conversions
-                counts = amps
-                volts = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts")
-                dbm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm")
-                counts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="counts", normalize=True)
-                volts_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="volts", normalize=True)
-                dbm_norm = UnitConverter.convert_amplitude(amps, iq_data, unit_mode="dbm", normalize=True)
-                
-                # Store converted data
+
+            for amplitude, trace in traces.items():
+                freqs, iq_data = trace['frequencies'], trace['iq_counts']
+                magnitude = np.abs(iq_data)
+
+                def in_units(unit_mode, normalize=False):
+                    return UnitConverter.convert_amplitude(
+                        magnitude, iq_data, unit_mode=unit_mode, normalize=normalize
+                    ).tolist()
+
                 export_data['modules'][module][meas_idx] = {
                     'sweep_amplitude': amplitude,
                     'frequency': {'values': freqs.tolist(), 'unit': 'Hz'},
                     'magnitude': {
-                        'counts': {
-                            'raw': counts.tolist(), 
-                            'normalized': counts_norm.tolist(), 
-                            'unit': 'counts'
-                        },
-                        'volts': {
-                            'raw': volts.tolist(), 
-                            'normalized': volts_norm.tolist(), 
-                            'unit': 'V'
-                        },
-                        'dbm': {
-                            'raw': dbm.tolist(), 
-                            'normalized': dbm_norm.tolist(), 
-                            'unit': 'dBm'
-                        }
+                        'counts': {'raw': in_units("counts"),
+                                   'normalized': in_units("counts", True),
+                                   'unit': 'counts'},
+                        'volts': {'raw': in_units("volts"),
+                                  'normalized': in_units("volts", True),
+                                  'unit': 'V'},
+                        'dbm': {'raw': in_units("dbm"),
+                                'normalized': in_units("dbm", True),
+                                'unit': 'dBm'},
                     },
-                    'phase': {'values': phases.tolist(), 'unit': 'degrees'},
-                    'complex': {'real': iq_data.real.tolist(), 'imag': iq_data.imag.tolist()}
+                    'phase': {'values': np.degrees(np.angle(iq_data)).tolist(),
+                              'unit': 'degrees'},
+                    'complex': {'real': iq_data.real.tolist(),
+                                'imag': iq_data.imag.tolist()},
                 }
                 meas_idx += 1
             
@@ -264,18 +250,16 @@ class NetworkAnalysisExportMixin:
                     writer.writerow([f'Module {module}', ','.join(map(str, freqs))])
         
         # Write data files - one per module/sweep/unit
-        for module, data_dict in self.raw_data.items():
+        for module, traces in self.netanal_traces.items():
             idx = 0
-            for key, data_tuple in data_dict.items():
-                if key == 'default':
-                    # The display's copy of the latest sweep; every sweep
-                    # is also stored under its own amplitude key.
-                    continue
-                amplitude, freqs, amps, phases, iq_data = self._extract_data_for_export(key, data_tuple)
-                
+            for amplitude, trace in traces.items():
+                freqs, iq_data = trace['frequencies'], trace['iq_counts']
+                magnitude = np.abs(iq_data)
+                phases = np.degrees(np.angle(iq_data))
+
                 # Export data in different unit modes
                 for unit_mode in ["counts", "volts", "dbm"]:
-                    converted_amps = UnitConverter.convert_amplitude(amps, iq_data, unit_mode=unit_mode)
+                    converted_amps = UnitConverter.convert_amplitude(magnitude, iq_data, unit_mode=unit_mode)
                     unit_label = "dBm" if unit_mode == "dbm" else ("V" if unit_mode == "volts" else unit_mode)
                     
                     # Create CSV filename for this specific data
@@ -283,7 +267,7 @@ class NetworkAnalysisExportMixin:
                     
                     with open(csv_filename, 'w', newline='') as f:
                         writer = csv.writer(f)
-                        writer.writerow(['# Amplitude:', f"{amplitude}" if 'amplitude' in locals() else "Unknown"])
+                        writer.writerow(['# Amplitude:', f"{amplitude}"])
                         
                         # Determine column header based on unit mode
                         header = [
@@ -299,47 +283,6 @@ class NetworkAnalysisExportMixin:
                 
                 idx += 1
     
-    def _extract_data_for_export(
-        self, 
-        key: str, 
-        data_tuple: Union[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray], 
-                         Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, float]]
-    ) -> Tuple[float, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Extract and prepare data for export from a data tuple.
-        
-        Args:
-            key: The key identifying the data within the raw_data dictionary
-            data_tuple: Tuple containing frequency, amplitude, phase, and IQ data,
-                       optionally with amplitude value
-        
-        Returns:
-            Tuple containing (amplitude, frequencies, amplitudes, phases, iq_data)
-        """
-        # Default amplitude if not available in the data
-        amplitude = DEFAULT_AMPLITUDE 
-        
-        if key != 'default':
-            # Extract data from the tuple, handling different tuple formats
-            if len(data_tuple) >= 5:
-                freqs, amps, phases, iq_data, amplitude = data_tuple
-            else:
-                freqs, amps, phases, iq_data = data_tuple
-                # Try to extract amplitude from the key
-                try:
-                    amplitude = float(key.split('_')[-1])
-                except (ValueError, IndexError):
-                    pass
-        else:
-            # Default data format
-            freqs, amps, phases, iq_data = data_tuple
-            
-        return amplitude, freqs, amps, phases, iq_data
-
-    #
-    # 2. Cable Delay Management Methods
-    #
-
     def _unwrap_cable_delay_action(self) -> None:
         """
         Fit the phase data of the first curve in the active module's plot,
@@ -352,28 +295,18 @@ class NetworkAnalysisExportMixin:
         3. Calculates a new cable length
         4. Updates the phase plots with adjusted phase values
         5. Updates the cable length spinner
-        6. Sets the cable length on the CRS hardware
         """
-        # Check if there's data to process
-        if not self.raw_data:
-            QtWidgets.QMessageBox.information(self, "No Data", "No data to process.")
-            return
-            
         # Get the active module
         active_module = self._get_active_module()
         if active_module is None:
             return
-            
-        # Get data for the active module
-        data_tuple = self._get_module_data_for_cable_delay(active_module)
-        if data_tuple is None:
+
+        block = self._sweep_for_cable_delay(active_module)
+        if block is None:
             return
-            
-        # Extract frequency and phase data
-        freqs_active, phases_displayed_active_deg = self._extract_freq_and_phase(data_tuple)
-        if freqs_active is None or phases_displayed_active_deg is None:
-            return
-            
+        freqs_active = trace['frequencies']
+        phases_displayed_active_deg = np.degrees(np.angle(trace['iq_counts']))
+
         # Calculate new cable length
         L_old_physical, L_new_physical = self._calculate_cable_length(active_module, freqs_active, phases_displayed_active_deg)
         if L_new_physical is None:
@@ -387,9 +320,6 @@ class NetworkAnalysisExportMixin:
         self.cable_length_spin.blockSignals(True)
         self.cable_length_spin.setValue(L_new_physical)
         self.cable_length_spin.blockSignals(False)
-
-        # Set cable length on CRS hardware
-        self._set_cable_length_on_crs(active_module, L_new_physical)
 
     def _get_active_module(self) -> Optional[int]:
         """
@@ -415,71 +345,21 @@ class NetworkAnalysisExportMixin:
             )
             return None
 
-    def _get_module_data_for_cable_delay(self, active_module: int) -> Optional[Tuple]:
-        """
-        Get the appropriate data tuple for cable delay calculation.
-        
-        Args:
-            active_module: The module identifier
-            
-        Returns:
-            The data tuple to use for cable delay calculation or None if no suitable data is found
-        """
-        if active_module not in self.raw_data or not self.raw_data[active_module]:
-            QtWidgets.QMessageBox.information(
-                self, 
-                "No Data", 
-                f"No data for Module {active_module}."
-            )
-            return None
-            
-        module_data_dict = self.raw_data[active_module]
-        target_key = None
-        
-        # Try to get data for the first amplitude setting
-        if 'amps' in self.original_params and self.original_params['amps']:
-            first_amplitude_setting = self.original_params['amps'][0]
-            potential_key = f"{active_module}_{first_amplitude_setting}"
-            if potential_key in module_data_dict:
-                target_key = potential_key
-                
-        # Fallback to default if available
-        if target_key is None and 'default' in module_data_dict:
-            target_key = 'default'
-            
-        # Last resort: take the first key available
-        if target_key is None:
-            if module_data_dict:
-                target_key = next(iter(module_data_dict))
-            else:
-                QtWidgets.QMessageBox.information(
-                    self, 
-                    "No Data", 
-                    f"No sweep data for Module {active_module}."
-                )
-                return None
-                
-        return module_data_dict[target_key]
+    def _sweep_for_cable_delay(self, active_module: int) -> Optional[dict]:
+        """The sweep the delay fit runs on: the weakest probe that was taken.
 
-    def _extract_freq_and_phase(self, data_tuple: Tuple) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        The cable's phase slope is the same at every probe power, and the
+        weakest sweep is the one least distorted by the resonators.
         """
-        Extract frequency and phase data from a data tuple.
-        
-        Args:
-            data_tuple: The data tuple containing measurement results
-            
-        Returns:
-            Tuple of (frequencies, phases) arrays or (None, None) if data format is unexpected
-        """
-        if len(data_tuple) == 5:
-            freqs_active, _, phases_displayed_active_deg, _, _ = data_tuple
-            return freqs_active, phases_displayed_active_deg
-        elif len(data_tuple) == 4:
-            freqs_active, _, phases_displayed_active_deg, _ = data_tuple
-            return freqs_active, phases_displayed_active_deg
-        else:
-            QtWidgets.QMessageBox.critical(self, "Error", "Unexpected data format.")
-            return None, None
+        traces = self.netanal_traces.get(active_module)
+        if not traces:
+            QtWidgets.QMessageBox.information(
+                self, "No Data", f"No data for Module {active_module}.")
+            return None
+        for amplitude in self.original_params.get('amps', []):
+            if amplitude in traces:
+                return traces[amplitude]
+        return traces[min(traces)]
 
     def _calculate_cable_length(
         self, 
@@ -532,111 +412,24 @@ class NetworkAnalysisExportMixin:
         """
         if active_module not in self.plots:
             return
-            
+
         plot_info = self.plots[active_module]
-        module_data_dict = self.raw_data[active_module]
-        
-        # Update amplitude sweep curves if they exist
-        for amp_key_iter, curve_item in plot_info['phase_curves'].items():
-            raw_data_key_for_curve = f"{active_module}_{amp_key_iter}"
-            
-            if raw_data_key_for_curve in module_data_dict:
-                self._update_individual_phase_curve(
-                    module_data_dict[raw_data_key_for_curve],
-                    curve_item,
-                    L_old_physical,
-                    L_new_physical
-                )
-        
-        # Update default curve if no amplitude sweep curves exist
-        if not plot_info['phase_curves'] and 'default' in module_data_dict:
-            main_curve_item = plot_info['phase_curve']
-            data_tuple_main = module_data_dict['default']
-            
-            if len(data_tuple_main) == 4:
-                self._update_individual_phase_curve(
-                    data_tuple_main,
-                    main_curve_item,
-                    L_old_physical,
-                    L_new_physical
-                )
-        
-        # Enable autorange for phase plot Y axis
+        traces = self.netanal_traces.get(active_module, {})
+
+        for amplitude, curve_item in plot_info['phase_curves'].items():
+            trace = traces.get(amplitude)
+            if trace is None or len(trace['frequencies']) == 0:
+                continue
+            freqs = trace['frequencies']
+            phases = recalculate_displayed_phase(
+                freqs, np.degrees(np.angle(trace['iq_counts'])),
+                L_old_physical, L_new_physical,
+            )
+            if len(phases) > 0:
+                phases = phases - phases[0]
+            curve_item.setData(freqs, ((phases + 180) % 360) - 180)
+
         plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
-
-    def _update_individual_phase_curve(
-        self, 
-        data_tuple: Tuple, 
-        curve_item: pg.PlotDataItem,
-        L_old_physical: float, 
-        L_new_physical: float
-    ) -> None:
-        """
-        Update an individual phase curve with recalculated phase values.
-        
-        Args:
-            data_tuple: The data tuple containing frequency and phase values
-            curve_item: The plot curve item to update
-            L_old_physical: The old cable length in meters
-            L_new_physical: The new cable length in meters
-        """
-        if len(data_tuple) >= 4:  # Ensure we have at least 4 elements
-            if len(data_tuple) == 5:
-                freqs_curve, _, phases_deg_current_display_curve, _, _ = data_tuple
-            else:  # len == 4
-                freqs_curve, _, phases_deg_current_display_curve, _ = data_tuple
-                
-            if len(freqs_curve) > 0:
-                # Recalculate phase with new cable length
-                new_phases_deg_for_curve = recalculate_displayed_phase(
-                    freqs_curve, 
-                    phases_deg_current_display_curve, 
-                    L_old_physical, 
-                    L_new_physical
-                )
-                
-                if len(new_phases_deg_for_curve) > 0:
-                    # Normalize the phase to start from zero
-                    first_point_phase = new_phases_deg_for_curve[0]
-                    new_phases_deg_for_curve = new_phases_deg_for_curve - first_point_phase
-                
-                # Wrap phase to [-180, 180] range
-                new_phases_deg_for_curve = ((new_phases_deg_for_curve + 180) % 360) - 180
-                
-                # Update the curve
-                curve_item.setData(freqs_curve, new_phases_deg_for_curve)
-
-    def _set_cable_length_on_crs(self, active_module: int, new_length: float) -> None:
-        """
-        Set the cable length on the CRS hardware.
-        
-        Args:
-            active_module: The module identifier
-            new_length: The new cable length in meters
-        """
-        # Ensure the main application has the crs object and thread pool
-        main_app = self.window()
-        if hasattr(main_app, 'crs') and main_app.crs is not None and \
-           hasattr(main_app, 'pool') and main_app.pool is not None:
-            
-            # Ensure signals for this task are initialized
-            if not hasattr(self, 'set_cable_length_signals'):
-                self.set_cable_length_signals = SetCableLengthSignals()
-
-            # Create and start the task
-            set_length_task = SetCableLengthTask(
-                crs=main_app.crs,
-                module_id=active_module,
-                length=new_length,
-                signals=self.set_cable_length_signals 
-            )
-            main_app.pool.start(set_length_task)
-        else:
-            QtWidgets.QMessageBox.warning(
-                self, 
-                "CRS Error", 
-                "Could not send set_cable_length command: CRS or thread pool not available from parent."
-            )
 
     def _on_cable_length_changed(self, new_length: float) -> None:
         """

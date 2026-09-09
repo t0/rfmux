@@ -216,6 +216,10 @@ and from the merge decisions of 2026-09-08.
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
 | `network_analysis_export.py`, `network_analysis_panel.py` | the private `parameters/modules` export payload, `raw_data` tuples, `iq = amps * exp(j phase)` reconstruction, GUI-thread `find_resonances` | the netanal container; `find_resonances_in_netanal` in a task |
 | `find_resonances_dialog.py`, `utils.py` | Data Exponent field, `DEFAULT_DATA_EXPONENT`, `min_resonance_separation_hz` | `find_resonances` kwargs |
+| `network_analysis_dialog.py` | Cable Length field, "Clear all channels first" checkbox (stage 1) | nothing; neither is `take_netanal`'s to do |
+| `network_analysis_export.py` | the board write at the end of the cable-delay unwrap (stage 1) | nothing; the unwrap adjusts the display only |
+| `utils.py` | `NETANAL_UPDATE_INTERVAL` (stage 1), a throttle whose interval was recomputed and then ignored | nothing |
+| `test/periscope/test_netanal_export_pairing.py` | hand-built sweep tuples (stage 1) | the same contract in the flow test, over measured sweeps |
 | `app_runtime.py` | `run_ui_mock_smoke_test`, `_ui_mock_context`, the module-scope `unittest.mock` import, and with them `test/periscope/test_periscope_flow.py` | the flow test, on real widgets offscreen (stage 0) |
 | `multisweep_dialog.py`, `bias_kids_dialog.py` | the bare `pickle.load` payload readers | `store.load`, `ResonatorCatalog.from_dict` |
 | `notebook_panel.py` | the starter notebook's `pickle.load` helper | a `store.load` line, so the panel teaches the supported reader |
@@ -309,13 +313,17 @@ are now strict xfails that name the stage which clears them.
 
 ### Stage 1. Netanal and Find Resonances on the container (medium)
 
-* `NetworkAnalysisTask` keeps the live `data_callback` plotting and, on
-  completion, emits the module's block from the container. The panel stores
-  the block per (module, amplitude) instead of `raw_data` tuples; magnitude
-  and phase are `abs` and `np.angle` of `iq_counts` at draw time. The export
-  button and the session export save the container through `store`;
+* **The data path (done).** `NetworkAnalysisTask` emits the module's measured
+  trace, live and on completion, as one `data_update(module, amplitude, trace)`
+  signal. The panel stores it per (module, amplitude) in `netanal_traces`
+  instead of `raw_data` tuples; magnitude and phase are `abs` and `np.angle`
+  of `iq_counts` at draw time, in the panel, once. The cable-delay unwrap
+  re-derives phase from `iq_counts`. What differed from the plan is in §5
+  item 6 and §6 judgement calls 7-10.
+* The export button and the session export save the container through `store`;
   loading reads it back. `network_analysis_export.py` loses its private
-  payload and the cable-delay unwrap re-derives phase from `iq_counts`.
+  payload. Still to do: `build_export_dict` currently walks the traces and
+  writes the same six-unit `parameters/modules` payload it always did.
 * Find Resonances runs `find_resonances_in_netanal` in a small task, not on
   the GUI thread. Markers come from `search.candidates`; rejected candidates
   are drawn differently with `rejected_because` in the tooltip; the count
@@ -569,6 +577,20 @@ Small, and each belongs in the library rather than in Periscope.
 5. **Possibly `ResonatorCatalog.with_names(mapping)`** for attaching a name
    map to a freshly found array (design doc §13 open question). Not needed
    for the basic flow.
+6. **`take_netanal`'s `data_callback` hands over a partial trace** (done in
+   stage 1). It computed `np.abs` and `np.degrees(np.angle(...))` and passed
+   `(module, freqs, amps, phases)`, so the live path carried a polar
+   projection of data the return value carries as IQ, under names the block
+   does not use, and every consumer round-tripped it back
+   (`amps * exp(1j * radians(phases))` in the netanal panel). It now passes
+   `(module, partial)` with the block's own keys, `frequencies` and
+   `iq_counts`, growing as points arrive — the shape `multisweep`'s
+   `data_callback` already used. No measurement algorithm computes magnitude
+   or phase now; the returns never did.
+
+   Note the word: `amp` is the DAC drive amplitude and `amp_array` was |S21|,
+   twelve lines apart in the same function. Where a GUI needs it, it is
+   *magnitude*.
 
 ---
 
@@ -605,8 +627,37 @@ Listed so they can be overruled.
 6. **Find bias after sweep and fit after sweep are checkboxes that press
    the buttons**, not flags on the drivers. Keeps rule 4 intact and the
    drivers measurement-only.
-7. **The bifurcation thresholds ship uncalibrated**, with the verdict view
-   in stage 4 as the tool to calibrate them. The finding in the todo (both
+7. **Nothing Periscope does to the board that the driver does not.** The
+   netanal task called `crs.clear_channels()` and
+   `crs.set_cable_length()` before every sweep; neither is in `take_netanal`,
+   which sets the NCO it needs and zeroes its own tones on the way out.
+   Both are gone, with the dialog's Cable Length field. Cable length is
+   ruled out entirely for now under §2 rule 9 — it rotates the phase of
+   everything the board reads — so the unwrap in `network_analysis_export.py`
+   still fits a delay and adjusts the *displayed* phase, but no longer writes
+   the result to the board. `SetCableLengthTask` and `SetCableLengthSignals`
+   stay in `tasks.py` with no callers. If cable length comes back it comes
+   back as an analysis helper that removes a phase slope from measured data,
+   never as a board write.
+8. **One `data_update` signal, carrying the trace.** `data_update` and
+   `data_update_with_amp` were the same payload one float apart, both emitted
+   at both emit sites, and the panel stored each trace twice — under
+   `'default'` and under `f"{module}_{amplitude}"`. One signal now, always
+   with the amplitude. It carries the trace (`block["results"]`) rather than
+   the whole block, because that is the part the panel plots and it is the
+   shape the live partial has; the container is what gets saved, and
+   `completed` grows to carry it when the save moves to `store`.
+9. **Three copies of the redraw became one.** `_toggle_normalization`,
+   `_update_unit_mode` and `_redraw_all_plots` each walked `raw_data` with
+   the same body and the same `'default'` special case. They call
+   `_redraw_magnitudes(module)`. The single-trace `amp_curve`/`phase_curve`
+   plot items are now only ever cleared; they go with the export rewrite.
+10. **`UnitConverter.convert_amplitude` takes an `iq_data` argument it never
+    reads.** Left alone: it is called from four panels, and removing a dead
+    parameter across all of them belongs with whichever stage touches them,
+    not with netanal's.
+11. **The bifurcation thresholds ship uncalibrated**, with the verdict view
+    in stage 4 as the tool to calibrate them. The finding in the todo (both
    detectors fire early on the standard array) is a library question, not a
    port question, and the GUI should not paper over it with its own
    detector.
@@ -618,7 +669,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 | flow steps 1-2; dialog fields; netanal block rendering | `test/periscope/` |
+| 1 (data path done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; a two-amplitude export tags each sweep with its own amplitude, over measured sweeps rather than hand-built tuples. Still to come: dialog fields, the store-based save and load | `test/periscope/test_tuning_flow.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

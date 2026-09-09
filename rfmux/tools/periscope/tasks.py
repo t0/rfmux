@@ -2,12 +2,12 @@
 
 from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
                      # streamer, np, asyncio, time, socket, queue, traceback, sys,
-                     # DEFAULT_AMPLITUDE, NETANAL_UPDATE_INTERVAL, DENSITY_GRID,
+                     # DEFAULT_AMPLITUDE, DENSITY_GRID,
                      # SCATTER_POINTS, spectrum_from_slow_tod, pg,
                      # gaussian_filter, convolve, SMOOTH_SIGMA, LOG_COMPRESS,
                      # DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_NSAMPLES,
                      # DEFAULT_NPOINTS, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-                     # DEFAULT_CABLE_LENGTH, concurrent, fitting (from rfmux.algorithms.measurement)
+                     # concurrent, fitting (from rfmux.algorithms.measurement)
 
 # fitting is already imported via 'from .utils import *' if utils.py imports it from rfmux.algorithms.measurement
 # However, to be explicit for this module's direct dependency:
@@ -380,9 +380,11 @@ class CRSInitializeSignals(QObject):
     success = pyqtSignal(str); error = pyqtSignal(str)
 
 class NetworkAnalysisSignals(QObject):
-    progress = pyqtSignal(int, float)
-    data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)
-    data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, float)
+    progress = pyqtSignal(int, float)          # module, percent
+    # module, probe amplitude, trace. The trace is the module's measured arrays
+    # out of what take_netanal returned: partial while the sweep runs, whole on
+    # the last one, with the same keys either way.
+    data_update = pyqtSignal(int, float, dict)
     completed = pyqtSignal(int); error = pyqtSignal(str)
 
 class DACScaleFetcher(QtCore.QThread):
@@ -413,10 +415,8 @@ class NetworkAnalysisTask(QtCore.QThread):
     def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals, amplitude=None):
         super().__init__()
         self.crs, self.module, self.params, self.signals = crs, module, params, signals
-        # DEFAULT_AMPLITUDE, NETANAL_UPDATE_INTERVAL from .utils
         self.amplitude = amplitude if amplitude is not None else params.get('amp', DEFAULT_AMPLITUDE)
-        self._running, self._last_update_time = True, 0
-        self._update_interval = NETANAL_UPDATE_INTERVAL
+        self._running = True
         self._task, self._loop = None, None
         
     def stop(self):
@@ -442,15 +442,11 @@ class NetworkAnalysisTask(QtCore.QThread):
         try:
             progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
             task_params = self._extract_parameters()
-            
-            # Setup phase: Clear channels and set cable length
-            if task_params['clear_channels'] and not self.isInterruptionRequested():
-                loop.run_until_complete(self.crs.clear_channels(module=self.module))
-                
-            if not self.isInterruptionRequested():
-                loop.run_until_complete(self.crs.set_cable_length(length=task_params['cable_length'], module=self.module))
-            
-            # Main analysis phase
+
+            # No setup here. take_netanal sets the NCO it needs and zeroes its
+            # own tones on the way out; anything else -- clearing channels,
+            # cable length -- is the operator's, and cable length in particular
+            # rotates the phase of everything the board reads.
             if not self.isInterruptionRequested():
                 # Combine parameters for the take_netanal call
                 netanal_params = {
@@ -476,10 +472,8 @@ class NetworkAnalysisTask(QtCore.QThread):
                 
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
-                    fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
-                    phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
-                    self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
+                    self.signals.data_update.emit(
+                        self.module, self.amplitude, self._trace_of(result))
                     self.signals.completed.emit(self.module)
             
         except asyncio.CancelledError:
@@ -487,7 +481,7 @@ class NetworkAnalysisTask(QtCore.QThread):
             if loop.is_running():
                 loop.run_until_complete(self._cleanup_channels())
         except KeyError as ke:
-            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
+            err_msg = f"Module {self.module} is not in what take_netanal returned: {ke}"
             print(f"ERROR: {err_msg}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             self.signals.error.emit(err_msg)
@@ -504,16 +498,21 @@ class NetworkAnalysisTask(QtCore.QThread):
     def _create_progress_callback(self):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
         
+    def _trace_of(self, container):
+        """The module's measured arrays, out of what take_netanal returned."""
+        return container[self.crs.module[self.module].index()]['results']
+
     def _create_data_callback(self):
-        def data_cb(module_idx, freqs_raw, amps_raw, phases_raw): # Renamed module
-            if self._running:
-                sort_idx = np.argsort(freqs_raw)
-                freqs, amps, phases = freqs_raw[sort_idx], amps_raw[sort_idx], phases_raw[sort_idx]
-                current_time = time.time()
-                if current_time - self._last_update_time >= self._update_interval:
-                    self._last_update_time = current_time                    
-                self.signals.data_update.emit(module_idx, freqs, amps, phases)
-                self.signals.data_update_with_amp.emit(module_idx, freqs, amps, phases, self.amplitude)
+        def data_cb(module_idx, partial):
+            if not self._running:
+                return
+            # Acquisition order is a stride pattern within each comb; the panel
+            # plots a line, so hand it the sweep sorted the way the finished
+            # trace is sorted.
+            order = np.argsort(partial['frequencies'])
+            self.signals.data_update.emit(module_idx, self.amplitude, {
+                key: value[order] for key, value in partial.items()
+            })
         return data_cb
     
     def _extract_parameters(self):
@@ -521,7 +520,7 @@ class NetworkAnalysisTask(QtCore.QThread):
         return {'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
                 'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
-                'cable_length': self.params.get('cable_length', DEFAULT_CABLE_LENGTH), 'clear_channels': self.params.get('clear_channels', True)}
+                }
         
     async def _process_network_analysis(self, loop, netanal_params):
         """Process a single network analysis operation asynchronously.

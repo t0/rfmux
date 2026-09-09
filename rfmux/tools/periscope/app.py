@@ -1157,10 +1157,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: panel.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: panel.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val: panel.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                panel.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
@@ -1246,13 +1243,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 sweeps = [v for k, v in params['modules'][mod].items()
                           if isinstance(k, int)]
                 for sweep in sweeps:
-                    freqs = np.array(sweep['frequency']['values'])
-                    amps = np.array(sweep['magnitude']['counts']['raw'])
-                    phases = np.array(sweep['phase']['values'])
-
-                    panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases,
-                                               sweep['sweep_amplitude'])
+                    complex_iq = sweep['complex']
+                    panel.update_data(mod, sweep['sweep_amplitude'], {
+                        'frequencies': np.array(sweep['frequency']['values']),
+                        'iq_counts': np.array(complex_iq['real'])
+                                     + 1j * np.array(complex_iq['imag']),
+                    })
                 
                 r_freq = params['modules'][mod]['resonances_hz']
                 panel._use_loaded_resonances(mod, r_freq)
@@ -1321,11 +1317,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                window_instance.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
                 lambda mod: self._handle_analysis_completed(mod, window_id),
@@ -1414,7 +1406,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
-            window.data.clear(); window.raw_data.clear()
+            window.netanal_traces.clear()
             for mod, pbar in window.progress_bars.items(): 
                 pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)

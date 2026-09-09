@@ -5,12 +5,12 @@ The tasks are the real tasks, the drivers are the real drivers, and the board is
 mocked, so a break in Periscope's calls into ``rfmux.tuning`` shows up here as a
 failure rather than as a mock that happily accepts anything.
 
-Periscope on this branch still calls the pre-library drivers, so the two steps
-that do are marked ``xfail(strict=True)``: they say what the port owes, they
+Periscope's multisweep still calls the pre-library driver, so the step that does
+is marked ``xfail(strict=True)``: it says what the port owes, it
 keep the suite green until it is delivered, and they turn into a failure the
 moment a stage makes them pass, which is the reminder to drop the marker.
-Stage 1 of ``periscope_port_roadmap.md`` clears the netanal one, stage 2 the
-multisweep one, and each later stage adds its step here.
+Stage 2 of ``periscope_port_roadmap.md`` clears the multisweep one, and each
+later stage adds its step here.
 
 The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
 """
@@ -19,6 +19,7 @@ import asyncio
 import inspect
 import threading
 
+import numpy as np
 import sqlalchemy.orm
 
 import pytest
@@ -36,6 +37,9 @@ from rfmux.tools.periscope.tasks import (  # noqa: E402
     NetworkAnalysisTask,
 )
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
+from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
+    NetworkAnalysisPanel,
+)
 
 #: The array's band, so a netanal over it is one NCO setting and a second of work.
 FMIN, FMAX = 1.00e9, 1.10e9
@@ -115,27 +119,73 @@ def test_an_unwarmed_attribute_is_what_would_break(board):
         warm_for_threads(crs)     # leave the board as the other tests expect
 
 
-@pytest.mark.xfail(strict=True, reason="stage 1: the task reads the pre-library "
-                                       "netanal shape (tasks.py:479)")
-def test_network_analysis_task_finishes_without_error(board, qt_app):
-    """A netanal through the real task reaches its completion signal."""
-    _, crs, catalog = board
+def _run_netanal(crs, module, qt_app, amplitude=0.001, npoints=400):
+    """``(errors, completed, updates)`` from one netanal through the real task."""
     signals = NetworkAnalysisSignals()
-    completed, errors = [], []
+    completed, errors, updates = [], [], []
     signals.completed.connect(completed.append)
     signals.error.connect(errors.append)
+    signals.data_update.connect(
+        lambda mod, amp, block: updates.append((mod, amp, block)))
 
     task = NetworkAnalysisTask(
-        crs=crs, module=catalog.module, signals=signals, amplitude=0.001,
-        params={"fmin": FMIN, "fmax": FMAX, "npoints": 400, "nsamps": 10,
-                "cable_length": 0.0, "clear_channels": True},
+        crs=crs, module=module, signals=signals, amplitude=amplitude,
+        params={"fmin": FMIN, "fmax": FMAX, "npoints": npoints, "nsamps": 10},
     )
     task.start()
     assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
     spin(qt_app)          # the signals are queued to this thread; deliver them
+    return errors, completed, updates
+
+
+def test_network_analysis_task_finishes_without_error(board, qt_app):
+    """A netanal through the real task reaches its completion signal."""
+    _, crs, catalog = board
+    errors, completed, _ = _run_netanal(crs, catalog.module, qt_app)
 
     assert errors == []
     assert completed == [catalog.module]
+
+
+def test_network_analysis_task_emits_the_measured_trace(board, qt_app):
+    """What the task hands the panel is the driver's trace, not a shape of its
+    own: the same keys, and IQ rather than a magnitude and a phase derived from
+    it. The last update is the finished sweep."""
+    _, crs, catalog = board
+    errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
+
+    assert errors == []
+    assert updates, "no data reached the panel"
+
+    module, amplitude, trace = updates[-1]
+    assert (module, amplitude) == (catalog.module, 0.001)
+    assert set(trace) >= {"frequencies", "iq_counts"}
+    assert np.iscomplexobj(trace["iq_counts"])
+    assert len(trace["frequencies"]) == len(trace["iq_counts"]) == 200
+
+    # Sorted ascending, as an upward sweep's trace is.
+    assert np.all(np.diff(trace["frequencies"]) > 0)
+
+
+def test_network_analysis_panel_holds_the_trace(board, qt_app):
+    """The panel stores what it was handed, keyed by probe amplitude, and draws
+    magnitude from the measured IQ."""
+    _, crs, catalog = board
+    panel = NetworkAnalysisPanel(modules=[catalog.module])
+    panel.original_params = {"amps": [0.001]}
+
+    errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
+    assert errors == []
+    for module, amplitude, trace in updates:
+        panel.update_data(module, amplitude, trace)
+
+    stored = panel.netanal_traces[catalog.module][0.001]
+    assert stored is updates[-1][2]
+
+    curve = panel.plots[catalog.module]["amp_curves"][0.001]
+    drawn_freqs, drawn_magnitude = curve.getData()
+    assert np.allclose(drawn_freqs, stored["frequencies"])
+    assert np.allclose(drawn_magnitude, np.abs(stored["iq_counts"]))
 
 
 @pytest.mark.xfail(strict=True, reason="stage 2: the task passes "
@@ -174,3 +224,31 @@ def test_multisweep_task_finishes_without_error(board, qt_app):
 
     assert errors == []
     assert finished == [True]
+
+
+def test_export_holds_one_tagged_sweep_per_amplitude(board, qt_app):
+    """A multi-amplitude export holds one sweep per probe amplitude, each
+    tagged with its own, so a loader pairing by the tag rather than by
+    position gets every curve on the power it was taken at."""
+    _, crs, catalog = board
+    amplitudes = [0.001, 0.004]
+
+    panel = NetworkAnalysisPanel(modules=[catalog.module])
+    panel.original_params = {"amps": amplitudes}
+    panel.current_params = {"amps": amplitudes}
+    panel.dac_scales = {catalog.module: -0.5}
+
+    for amplitude in amplitudes:
+        errors, _, updates = _run_netanal(
+            crs, catalog.module, qt_app, amplitude=amplitude, npoints=60)
+        assert errors == []
+        panel.update_data(*updates[-1])
+
+    sweeps = [value for key, value in
+              panel.build_export_dict()["modules"][catalog.module].items()
+              if isinstance(key, int)]
+
+    assert [sweep["sweep_amplitude"] for sweep in sweeps] == amplitudes
+    for sweep, amplitude in zip(sweeps, amplitudes):
+        measured = panel.netanal_traces[catalog.module][amplitude]["iq_counts"]
+        assert np.allclose(sweep["magnitude"]["counts"]["raw"], np.abs(measured))

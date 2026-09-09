@@ -92,7 +92,12 @@ async def take_netanal(
     progress_callback : callable, optional
         Callback function that receives (module, progress_percentage) updates.
     data_callback : callable, optional
-        Callback function that receives (module, freqs, amps, phases) updates.
+        ``(module, partial)`` during acquisition, where *partial* carries the
+        same keys as the finished block -- ``frequencies`` and ``iq_counts``,
+        in acquisition order -- growing as points arrive. A live consumer and a
+        consumer of the return value therefore read the same thing. Magnitude
+        and phase are the reader's to take; see the note on ``phase_degrees``
+        under Returns.
     save : bool, optional
         Write the result to the output folder when the measurement finishes.
         Defaults to whatever ``rfmux.tuning.store.autosave_enabled()`` says,
@@ -359,11 +364,11 @@ async def take_netanal(
 
 
             if data_callback and chunk_fs_full:
-                fs_array = np.array(fs_all + chunk_fs_full)
-                iq_array = np.array(iq_all + chunk_iq_full)
-                amp_array = np.abs(iq_array)
-                phase_array = np.degrees(np.angle(iq_array))
-                data_callback(module, fs_array, amp_array, phase_array)
+                data_callback(module, {
+                    'frequencies': np.array(fs_all + chunk_fs_full),
+                    'iq_counts': np.array(iq_all + chunk_iq_full,
+                                          dtype=np.complex128),
+                })
 
             # Report progress
             if progress_callback:
@@ -376,11 +381,10 @@ async def take_netanal(
 
         # Report the data this chunk added.
         if data_callback:
-            fs_array = np.array(fs_all)
-            iq_array = np.array(iq_all)
-            amp_array = np.abs(iq_array)
-            phase_array = np.degrees(np.angle(iq_array))
-            data_callback(module, fs_array, amp_array, phase_array)
+            data_callback(module, {
+                'frequencies': np.array(fs_all),
+                'iq_counts': np.array(iq_all, dtype=np.complex128),
+            })
 
     # Clean up before exiting
     async with crs.tuber_context() as ctx:

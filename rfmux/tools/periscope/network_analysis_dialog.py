@@ -1,7 +1,7 @@
 """Network analysis parameter dialogs."""
 
 from .utils import (
-    QtWidgets, QtCore, QtGui, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_CABLE_LENGTH,
+    QtWidgets, QtCore, QtGui, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
     traceback
 )
@@ -98,8 +98,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
         param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
 
-        self.cable_length_edit = QtWidgets.QLineEdit(str(DEFAULT_CABLE_LENGTH)) # Default cable length
-        param_layout.addRow("Cable Length (m):", self.cable_length_edit)
         
         self.setup_amplitude_group(param_layout) # Add shared amplitude settings
         
@@ -115,9 +113,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.max_span_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_SPAN / 1e6)) # Default in MHz
         param_layout.addRow("Max Span (MHz):", self.max_span_edit)
         
-        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setChecked(True) # Default to clearing channels
-        param_layout.addRow("", self.clear_channels_cb)
         
         layout.addWidget(param_group)
         
@@ -260,14 +255,11 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     
         set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
-        set_if_present("cable_length", self.cable_length_edit, lambda v: f"{float(v):g}")
         set_if_present("npoints", self.points_edit, lambda v: str(int(float(v))))
         set_if_present("nsamps", self.samples_edit, lambda v: str(int(float(v))))
         set_if_present("max_chans", self.max_chans_edit, lambda v: str(int(float(v))))
         set_if_present("max_span", self.max_span_edit, lambda v: f"{float(v) / 1e6:g}")
     
-        if "clear_channels" in params:
-            self.clear_channels_cb.setChecked(bool(params["clear_channels"]))
     
         self._update_dac_scale_info()
         self._update_dbm_from_normalized()
@@ -309,12 +301,10 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'module': selected_module_param, # Can be None (interpreted as all by backend) or list of modules
                     'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
                     'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                    'cable_length': float(self.cable_length_edit.text()),
                     'npoints': int(self.points_edit.text()),
                     'nsamps': int(self.samples_edit.text()),
                     'max_chans': int(self.max_chans_edit.text()),
                     'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                    'clear_channels': self.clear_channels_cb.isChecked()
                 }
                 # Basic validation for frequency range
                 if params_dict['fmin'] >= params_dict['fmax']:
@@ -405,9 +395,6 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         self.max_span_edit = QtWidgets.QLineEdit(max_span_mhz)
         form.addRow("Max Span (MHz):", self.max_span_edit)
         
-        self.clear_channels_cb = QtWidgets.QCheckBox("Clear all channels first")
-        self.clear_channels_cb.setChecked(self.params.get('clear_channels', True))
-        form.addRow("", self.clear_channels_cb)
         
         layout.addLayout(form)
         
@@ -467,7 +454,6 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
-                'clear_channels': self.clear_channels_cb.isChecked()
             })
             # Basic validation for frequency range
             if params_dict['fmin'] >= params_dict['fmax']:

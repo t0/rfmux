@@ -132,7 +132,7 @@ DEFAULT_BUFFER_SIZE = 5_000
 DEFAULT_REFRESH_MS = 33
 
 # GUI update intervals
-NETANAL_UPDATE_INTERVAL = 0.1  # seconds
+
 
 # ICON_PATH needs to be relative to this file's new location
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons', 'periscope-icon.svg')

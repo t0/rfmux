@@ -49,7 +49,7 @@ mock streamer die with the kernel that made it (a parent-death watch, or a
 heartbeat the server times out on), and/or surface the conflict as a pytest
 `skip`/`error` with the real message rather than an opaque notebook assertion.
 
-## Periscope's `data_callback` is two arguments too narrow
+## Periscope's multisweep `data_callback` is two arguments too narrow
 
 `multisweep` calls `data_callback(module, partial_results, step, direction)`.
 The last pair is not decoration: a consumer plotting partial data inside a
@@ -58,8 +58,9 @@ points belong to, which is exactly what the live multisweep grid needs, and a
 single sweep's `(0, "upward")` is a fact about it rather than padding.
 
 Nothing in Periscope passes a `data_callback` to `multisweep` today — only
-`take_netanal`, whose callback is a different signature entirely — so this is
-not broken right now. It becomes load-bearing when Periscope is rewired (step 5
+`take_netanal`, whose callback now hands over `(module, partial)` with the
+trace's keys, the same idea one level up — so this is not broken right now. It
+becomes load-bearing when Periscope is rewired (step 5
 of `tuning_multisweep_amplitudes_plan.md`, a plan that landed and was removed 2026-09-08; it is in git history):
 
 * `MultisweepTask.run` (`tools/periscope/tasks.py:632`) loops over amplitude
@@ -163,10 +164,12 @@ shim that forwards to `rfmux/tuning/find_resonances.py` and rebuilds the old
 `{'resonance_frequencies', 'resonances_details'}` dict. Two callers still go
 through it. Once both move, the shim and everything below it goes.
 
-1. **Periscope netanal panel** —
-   `tools/periscope/network_analysis_panel.py:683`, in
-   `_run_and_plot_resonances`. It only reads `resonance_frequencies`, so it maps
-   onto `ResonanceSearch.resonance_frequencies_hz` directly.
+1. **Periscope netanal panel** — `_run_and_plot_resonances` in
+   `tools/periscope/network_analysis_panel.py`. It only reads
+   `resonance_frequencies`, so it maps onto
+   `ResonanceSearch.resonance_frequencies_hz` directly. It now hands the finder
+   `frequencies`/`iq_counts` from the trace, but still calls the shim, and
+   still on the GUI thread.
 2. **`FindResonancesDialog`** — `tools/periscope/find_resonances_dialog.py`.
    The **Data Exponent** field now controls nothing: the parameter was removed
    from the finder (it was a multiplier in dB, so it scaled dips and noise
@@ -376,17 +379,22 @@ breaking change to the shape Periscope reads, and Periscope was deliberately
 left on the old one. This is stage 1 of `periscope_port_roadmap.md`, which
 stages the whole port; what follows is the netanal part of it.
 
-* `tools/periscope/tasks.py:479` unpacks `result['frequencies']`,
-  `result['iq_complex']` and `result['phase_degrees']` straight off the top.
-  `NetworkAnalysisTask` catches the resulting `KeyError` and emits it on its
-  error signal, so the completion signal never fires and a multi-amplitude
-  netanal stops after the first amplitude.
-  `test/periscope/test_tuning_flow.py` pins this as a strict xfail; clearing it
-  is what marks stage 1 done.
+* ~~`tools/periscope/tasks.py:479` unpacks `result['frequencies']`,
+  `result['iq_complex']` and `result['phase_degrees']` straight off the top.~~
+  Done. `NetworkAnalysisTask` reads the module's trace out of the container and
+  emits it, live and on completion, as one
+  `data_update(module, amplitude, trace)`; the panel keeps it in
+  `netanal_traces` keyed by probe amplitude and takes `abs`/`np.angle` at draw
+  time. `take_netanal`'s `data_callback` was changed to match: it passed
+  `(module, freqs, amps, phases)` and now passes `(module, partial)` with the
+  trace's own keys, so no measurement algorithm computes magnitude or phase.
 * `detector_digest_panel.py` reads `iq_complex` off stored sweep entries
   (`:653`, `:810`), which is the multisweep half of the same change (stage 2).
 * `network_analysis_panel.py` and `network_analysis_export.py` carry their own
-  `parameters`/`modules` payload, which `call_params` now duplicates.
+  `parameters`/`modules` payload, which `call_params` now duplicates. Still
+  open: `build_export_dict` walks the traces but writes that payload, and the
+  loader in `app.py` reads it back. `store.save`/`store.load` replace both, and
+  that is the rest of stage 1's file work.
 
 Phase is `np.angle(iq_counts)` at the point of use; the module number is in
 each module's output rather than passed alongside. `store.py`'s `_blocks` has
@@ -423,3 +431,22 @@ pyqtgraph, so no pure module can be imported without the GUI stack — including
 everything in `rfmux/tuning/`, whose entire point is to be usable from a plain
 script. Already recorded as an xfail in `test/core/test_resonators.py`; it flips
 to XPASS when the import becomes lazy.
+
+## Cable length as an analysis, never a board write
+
+Periscope used to set the cable length on the board twice: before every netanal
+(`NetworkAnalysisTask`, from a dialog field) and again at the end of the
+cable-delay unwrap, which fitted a residual delay off the trace and wrote the
+new length back. Both are gone as of stage 1 of `periscope_port_roadmap.md`,
+under §2 rule 9 — the board's cable length rotates the phase of everything it
+reads, and this branch changes no DAC or ADC phase. Nothing calls
+`SetCableLengthTask` or `SetCableLengthSignals` in `tools/periscope/tasks.py`
+any more; they are left in place, unwired.
+
+The unwrap itself stays and is still useful: it fits the delay and adjusts the
+*displayed* phase, which is the honest version of what it was doing. If cable
+length comes back it comes back like that — a helper that removes a known phase
+slope from measured data, taking the length as an argument and returning
+corrected phase, so a notebook and Periscope get the same correction and the
+board is never touched. `Demos/simplified_tuning_flow.py:258` still calls
+`crs.set_cable_length`; it is on the roadmap's delete-and-rewrite list.

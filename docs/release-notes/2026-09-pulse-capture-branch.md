@@ -239,8 +239,8 @@ Old values are main at the merge base (e46fc41).
   sat far from the baseline and the return test judged against it.
 - Dual capture file: `min_pulse_ms`, `max_pulse_ms`, `noise_train_ms`,
   `trigger_samples_slow` and `trigger_samples_fast` are recorded.
-- Periscope pulse list: rows carry the marker alone (the index is in the
-  info line), and a both-mode row reads "slow + fast", "slow only" or
+- Periscope pulse list: a slow- or fast-mode row carries the marker and
+  the pulse index; a both-mode row reads "slow + fast", "slow only" or
   "fast only" instead of "Pair #n", with the pileup or truncated marker
   taken from its summaries.
 - Split child: dated at the onset of its rise, the sample of least

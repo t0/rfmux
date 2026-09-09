@@ -108,7 +108,10 @@ def correlation_lag_s(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray],
     xb = xb - xb.mean()
     if not xa.any() or not xb.any():
         return None
-    c = np.correlate(xb, xa, mode="full")
+    # FFT: a 2.44 MHz pulse window is tens of thousands of samples, and a
+    # direct correlation of two of them is minutes per pulse.
+    from scipy.signal import correlate
+    c = correlate(xb, xa, mode="full", method="fft")
     s = int(np.argmax(c)) - (len(xa) - 1)   # a's sample i sits at b's i + s
     t_a0 = ta[fa][0] - dt * np.flatnonzero(fa)[0]
     t_b0 = tb[fb][0] - dt * np.flatnonzero(fb)[0]

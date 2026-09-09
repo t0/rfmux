@@ -257,3 +257,44 @@ def test_hertz_capture_projects_the_others_onto_its_axis(tmp_path):
             float(_shape(ov.pulse["times"][j])) * VOLTS_PER_ROC * abs(cal),
             rel=0.02)
         assert abs(ov.pulse["Q"][j]) < 0.05 * ov.pulse["I"][j]
+
+
+def test_a_dual_file_brings_the_fast_pulse_and_its_lag(tmp_path):
+    """A slow pulse of a dual file comes with its paired fast pulse, and
+    the lag at which the recording matches the fast trace: both are on
+    the PFB clock, so it reads zero to within a couple of samples."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    from rfmux.pulse_capture.capture_session import DualPulseCaptureSession
+    fs_fast = PFB_SAMPLING_FREQ
+    rec = _recording(tmp_path, spacing=1.0 / fs_fast, span=(-0.002, 0.035))
+    path = str(tmp_path / "dual.h5")
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=20.0, noise_train_ms=200.0)
+    d = DualPulseCaptureSession(channels=[CHANNEL], slow_rate=FS,
+                                fast_rate=fs_fast, config=cfg,
+                                hdf5_path=path)
+    d.start()
+    rng = np.random.default_rng(7)
+    # Training first on both streams (triggering waits for both), then
+    # the event: slow stamped late as the board does, fast on time.
+    for feed, rate, late in ((d.feed_slow_block, FS, LATE),
+                             (d.feed_fast_block, fs_fast, 0.0)):
+        n = cfg.noise_samples(rate) + 50
+        t = T0 + np.arange(n) / rate
+        feed(CHANNEL, rng.normal(0, 1, n), rng.normal(0, 1, n), t + late)
+    for feed, rate, late in ((d.feed_slow_block, FS, LATE),
+                             (d.feed_fast_block, fs_fast, 0.0)):
+        n0 = cfg.noise_samples(rate) + 50
+        t = T0 + np.arange(n0, int(2.1 * rate)) / rate
+        feed(CHANNEL, _shape(t) + rng.normal(0, 1, len(t)),
+             rng.normal(0, 1, len(t)), t + late)
+    d.stop()
+    with PulseHDF5Reader(path) as r:
+        assert r.dual and r.pulse_count(CHANNEL, "slow") >= 1
+        ov = pulse_overlay(r, rec, CHANNEL, 1, stream="slow")
+        assert ov.fast is not None, "the slow pulse should have its pair"
+        assert ov.lag_s is not None
+        assert abs(ov.lag_s) < 2.0 / fs_fast
+        # The fast pulse itself overlays the recording the same way.
+        ovf = pulse_overlay(r, rec, CHANNEL, 1, stream="fast")
+        assert ovf.fast is None and abs(ovf.lag_s) < 2.0 / fs_fast

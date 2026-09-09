@@ -74,7 +74,7 @@ def record(mask: int, seq: int, *, snapshot=None, serial=42,
             assert block.shape == (SPP, 2)
             blocks += block.tobytes()
             continue
-        value = 100 * (p + 1) + seq
+        value = np.int64(100 * (p + 1) + seq).astype(np.int16)  # wraps
         samples = np.empty(2 * SPP, dtype=np.int16)
         samples[0::2] = value       # I
         samples[1::2] = -value      # Q

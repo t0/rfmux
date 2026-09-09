@@ -2319,7 +2319,8 @@ class TestPostNoiseHoldIsBounded:
         assert s.state.name == "ESTIMATING"
         held_I, _held_Q, held_T = s._pending_post_noise[1]
         assert held_I.shape[0] == s.noise_samples
-        assert held_T[-1] == pytest.approx((k - 1) / 1e4), "the newest are kept"
+        assert held_T[-1] == pytest.approx(s.shifted((k - 1) / 1e4)), \
+            "the newest are kept"
 
 
 class TestInPulseNoise:

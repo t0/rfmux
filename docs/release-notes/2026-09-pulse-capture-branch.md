@@ -476,11 +476,14 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   packets by stamp until it is within 0.125 s, counting them as
   `flushed_packets`. `lost_packets` comes from the queue's own sequence
   accounting. `busy` is processing time over wall time.
-- The dual session shifts every slow timestamp by minus the CIC group delay
+- Every slow capture shifts its timestamps by minus the CIC group delay
   (2.8 to 3.0 slow samples at stages 3 to 6, 1.5 at stage 0; 4.99 ms at
-  stage 6) before the engine, the matcher and the file. The shift is
-  recorded as `slow_time_offset_s`, 0 when not applied; pass
-  `slow_time_offset_s=0.0` to opt out.
+  stage 6) before the engine, the matcher and the file, so slow and PFB
+  clocks share one axis. The shift is recorded as `slow_time_offset_s`, 0
+  when not applied; pass `time_offset_s=0.0` (`slow_time_offset_s=0.0` on
+  the dual session) to opt out. The parser's dirfile `timebase` applies
+  the same shift per packet from its `fir_stage`; the raw stamp fields
+  are unchanged.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

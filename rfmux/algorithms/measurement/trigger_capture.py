@@ -117,10 +117,10 @@ class PulseCaptureResult:
     start_time: Optional[float] = None
     slow: Optional[StreamResult] = None
     fast: Optional[StreamResult] = None
-    #: ``"both"`` mode only: seconds added to every slow timestamp
-    #: (pulse ``Time`` arrays and summaries) to put the CIC-delayed slow
-    #: clock on the fast stream's axis.  Subtract it to compare against
-    #: raw packet timestamps.  Same value as the file's
+    #: Seconds added to every slow timestamp (pulse ``Time`` arrays and
+    #: summaries) to put the CIC-delayed slow clock on the PFB stream's
+    #: axis, in ``"slow"`` and ``"both"`` modes.  Subtract it to compare
+    #: against raw packet timestamps.  Same value as the file's
     #: ``slow_time_offset_s`` attribute.
     slow_time_offset_s: Optional[float] = None
     #: ``"both"`` mode only: the captured channels the PFB streamer
@@ -392,6 +392,8 @@ async def _run_single(result, host, channels, module, streamer_mode,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
         **result.config.session_kwargs(rate))
+    if not is_fast:
+        result.slow_time_offset_s = capture_session.time_offset_s
     capture_session.start()
     result.start_time = time.time()
     try:

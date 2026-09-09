@@ -69,6 +69,7 @@ from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
 from rfmux.tuning import store
+from rfmux.tuning.find_resonances import ResonanceSearch
 from rfmux.core.hardware_map import warm_for_threads
 import asyncio
 import datetime
@@ -1087,15 +1088,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
         if dialog.exec():
             self.dac_scales = dialog.dac_scales.copy()
+            if dialog.load_data_available:
+                self._load_network_analysis(dialog.loaded_container)
+                return
             params = dialog.get_parameters()
             if params:
-                if "modules" in params.keys():
-                    self._load_network_analysis(params)
-                else:
-                    if self.crs is None:
-                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
-                        return
-                    self._start_network_analysis(params)
+                if self.crs is None:
+                    QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
+                    return
+                self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
         """
@@ -1154,16 +1155,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 panel.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
+                lambda mod, container: self._handle_analysis_completed(mod, container, window_id),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
                 lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
                 QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Connect data_ready signal for session auto-export
-            # Use default arg to capture panel reference for filename storage
-            panel.data_ready.connect(
-                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
+
+            panel.analysis_finished.connect(
+                lambda p=panel: self._save_netanal_to_session(p, modules_to_run)
             )
             
             for mod_iter in modules_to_run:
@@ -1183,41 +1182,37 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             raise
 
 
-    def _load_network_analysis(self, params: dict):
+    def _load_network_analysis(self, container: dict):
         """
-        Load network analysis data from file and display in a docked panel.
+        Show a saved network analysis in a docked panel.
 
         Args:
-            params (dict): Loaded network analysis data with 'parameters' and 'modules' keys
+            container (dict): what take_netanal returned, as store.load read it
+                back: one output block per module, keyed by module identifier.
         """
         try:
             # Allow loading without CRS in offline mode
             if self.crs is None and self.host != "OFFLINE":
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-                
-            selected_module_param = params['parameters'].get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
-            
-            # Restore DAC scales from loaded data (using existing 'dac_scales_used' key)
-            self.dac_scales = params['dac_scales_used']
-            
+
+            blocks = list(container.values())
+            modules_to_run = [block['module'] for block in blocks]
+
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            
-            # Create panel
-            dac_scales_local = self.dac_scales.copy()
+
+            # Create panel. DAC scale is the board's to state, not the file's,
+            # so a loaded netanal shows dBm when a board is connected and says
+            # it cannot when none is.
             window_signals = NetworkAnalysisSignals()
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
             panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
             panel._hide_progress_bars()
-            panel.set_params(params['parameters'])
-            
+            panel.set_params(dict(blocks[0]['call_params']))
+            panel.netanal_container = container
+
             # Wrap panel in dock
             dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
@@ -1226,18 +1221,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
             # Load data into panel
-            for mod in modules_to_run:
-                sweep = params['modules'][mod]['sweep']
-                complex_iq = sweep['complex']
-                panel.update_data(mod, {
-                    'frequencies': np.array(sweep['frequency']['values']),
-                    'iq_counts': np.array(complex_iq['real'])
-                                 + 1j * np.array(complex_iq['imag']),
-                    'sweep_amplitude': sweep['sweep_amplitude'],
-                })
-
-                r_freq = params['modules'][mod]['resonances_hz']
-                panel._use_loaded_resonances(mod, r_freq)
+            for block in blocks:
+                trace = block['results']
+                panel.update_data(block['module'], trace)
+                if 'resonance_search' in trace:
+                    search = ResonanceSearch.from_dict(trace['resonance_search'])
+                    panel._use_loaded_resonances(
+                        block['module'], list(search.resonance_frequencies_hz))
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1251,16 +1241,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _load_network_analysis: {e}")
             traceback.print_exc()
 
-    def _handle_analysis_completed(self, module_param: int, window_id: str): # Renamed module
+    def _handle_analysis_completed(self, module_param: int, container: dict, window_id: str):
         """
         Handle the completion of a network analysis sweep for a specific module.
 
         This method is called when a `NetworkAnalysisTask` signals completion.
-        It updates the corresponding `NetworkAnalysisWindow` to mark the module's
-        analysis as complete.
+        It hands the panel the container take_netanal returned and marks the
+        module's analysis as complete.
 
         Args:
             module_param (int): The module index for which the analysis completed.
+            container (dict): What take_netanal returned, keyed by module identifier.
             window_id (str): The unique identifier of the `NetworkAnalysisWindow`
                              associated with this analysis.
         """
@@ -1268,7 +1259,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if window_id not in self.netanal_windows: return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
-            window.complete_analysis(module_param)
+            window.complete_analysis(module_param, container)
             for task_key in list(self.netanal_tasks.keys()):
                 if task_key.startswith(f"{window_id}_{module_param}"):
                     self.netanal_tasks.pop(task_key, None)
@@ -1290,7 +1281,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 window_instance.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
+                lambda mod, container: self._handle_analysis_completed(mod, container, window_id),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
                 lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
@@ -1370,6 +1361,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
             window.netanal_traces.clear()
+            # A re-run is a new measurement, so it writes a new file rather
+            # than overwriting the one the last container remembers.
+            window.netanal_container.clear()
             for mod, pbar in window.progress_bars.items(): 
                 pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
@@ -1703,38 +1697,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
     
-    def _handle_netanal_data_ready(self, modules: list, data: dict, panel=None):
-        """
-        Handle data_ready signal from NetworkAnalysisPanel for session auto-export.
+    def _save_netanal_to_session(self, panel, modules: list):
+        """Save a finished network analysis into the session folder.
 
-        Args:
-            modules: List of module IDs that were analyzed
-            data: Full export data dictionary (may contain '_filename_override' key)
-            panel: Optional reference to the NetworkAnalysisPanel for storing export filename
+        The panel writes the container through ``store``, which puts it in the
+        session folder because the session manager is what set store's output
+        directory. The session manager is told the file exists so the browser
+        shows it; it no longer writes the file itself.
         """
         if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
             return
 
-        # Create identifier from module list
-        if len(modules) == 1:
-            identifier = f"module{modules[0]}"
-        else:
-            identifier = f"modules_{'_'.join(map(str, modules))}"
-
-        # Extract filename override if present (for overwriting previous export)
-        filename_override = data.pop('_filename_override', None)
-
-        # Export via session manager
-        exported_path = self.session_manager.export_data(
-            'netanal', identifier, data, filename_override=filename_override
-        )
-        
-        # Store the exported filename on the panel for future overwrites
-        if exported_path and panel and hasattr(panel, '_last_export_filename'):
-            panel._last_export_filename = exported_path.name
-        
-        action = "updated" if filename_override else "exported"
-        print(f"[Session] Auto-{action} network analysis: {identifier}")
+        identifier = (f"module{modules[0]}" if len(modules) == 1
+                      else f"modules_{'_'.join(map(str, modules))}")
+        try:
+            path = panel.save_netanal()
+        except Exception as e:
+            print(f"[Session] Could not save network analysis: {e}", file=sys.stderr)
+            return
+        if path is None:
+            return
+        self.session_manager.register_external_file(str(path), 'netanal', identifier)
+        print(f"[Session] Saved network analysis: {path.name}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""
@@ -2849,7 +2833,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create appropriate panel based on file type
         try:
             if file_type == 'netanal':
-                self._load_netanal_from_session(data, file_path)
+                self._load_network_analysis(data)
             elif file_type == 'multisweep':
                 self._load_multisweep_from_session(data, file_path)
             elif file_type == 'bias':
@@ -2902,23 +2886,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._dock_pulse_capture_panel(
             panel, f"Pulses: {Path(file_path).stem}", f"pulse_review_{n}")
 
-    def _load_netanal_from_session(self, data: dict, file_path: str):
-        """Load network analysis data from session file into a new panel."""
-        # Check if data has the expected structure
-        if 'parameters' not in data and 'modules' not in data:
-            # Try to wrap it in expected format
-            QtWidgets.QMessageBox.information(
-                self,
-                "Network Analysis Loaded",
-                f"Loaded network analysis data.\n"
-                f"File: {file_path}\n\n"
-                "(Direct panel display not yet implemented for this format)"
-            )
-            return
-        
-        # Use existing load mechanism
-        self._load_network_analysis(data)
-    
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""
         if 'results_by_detector' not in data and 'results_by_iteration' not in data:

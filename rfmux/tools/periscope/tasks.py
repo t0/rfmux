@@ -385,7 +385,10 @@ class NetworkAnalysisSignals(QObject):
     # take_netanal returned: partial while the sweep runs, whole on the last
     # one, with the same keys either way.
     data_update = pyqtSignal(int, dict)
-    completed = pyqtSignal(int); error = pyqtSignal(str)
+    # module, container. The container is take_netanal's whole return, keyed by
+    # module identifier: what gets saved, and what the panel keeps so a save
+    # after the fact writes the measurement rather than a view of it.
+    completed = pyqtSignal(int, object); error = pyqtSignal(str)
 
 class DACScaleFetcher(QtCore.QThread):
     dac_scales_ready = QtCore.pyqtSignal(dict)
@@ -473,7 +476,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 if not self.isInterruptionRequested() and result:
                     self.signals.data_update.emit(
                         self.module, self._trace_of(result))
-                    self.signals.completed.emit(self.module)
+                    self.signals.completed.emit(self.module, result)
             
         except asyncio.CancelledError:
             self.signals.error.emit(f"Analysis canceled for module {self.module}")

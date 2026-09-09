@@ -1,8 +1,8 @@
 """
-Export and cable-delay utilities for NetworkAnalysisWindow.
+Save and cable-delay utilities for NetworkAnalysisWindow.
 
 This module defines the NetworkAnalysisExportMixin class, which provides functionality for:
-1. Exporting network analysis data to various file formats (pickle, CSV)
+1. Saving the measurement through rfmux.tuning.store
 2. Managing cable delays and cable length adjustments
 3. Handling resonance-related UI updates
 4. Configuring and launching multisweep analysis
@@ -12,22 +12,25 @@ capabilities while maintaining separation of concerns.
 """
 
 from __future__ import annotations
+from pathlib import Path
 from typing import Tuple, Optional, Union
 
 from .utils import *
 from .dialogs import MultisweepDialog
+from ...tuning import store
 
 
 class NetworkAnalysisExportMixin:
     """
-    Mixin providing export and cable-delay logic for NetworkAnalysisWindow.
+    Mixin providing save and cable-delay logic for NetworkAnalysisWindow.
     
     This mixin is designed to be included in the NetworkAnalysisWindow class to add
-    capabilities for exporting data and managing cable delay configuration. It assumes
+    capabilities for saving data and managing cable delay configuration. It assumes
     the host class provides various properties and UI elements related to network analysis.
     
     Requirements from the host class:
     - netanal_traces: module -> the trace take_netanal measured
+    - netanal_container: the modules' outputs, keyed by module identifier
     - current_params: Dictionary of current analysis parameters
     - resonance_freqs: Dictionary of resonance frequencies per module
     - plots: Dictionary of plot information per module
@@ -39,241 +42,34 @@ class NetworkAnalysisExportMixin:
     """
 
     #
-    # 1. Data Export Methods
+    # 1. Saving
     #
 
-    def _export_data(self) -> None:
+    def save_netanal(self) -> Optional[Path]:
+        """Write the measurement through ``store``, and return where it went.
+
+        One file for however many modules the panel ran, keyed by module
+        identifier the way a driver's return is, so it opens in a notebook with
+        ``store.load``. Saving the same panel twice overwrites the same file:
+        the container carries the path it was written to.
         """
-        Export the collected data with all unit conversions and metadata.
-        
-        This method initiates a non-blocking file dialog to export network analysis data
-        to either pickle or CSV format. Before showing the dialog, it ensures GUI responsiveness
-        by pausing any live updates and disabling plot updates.
-        """
-        # Thread marshalling - ensure we're on the main GUI thread
-        if QtCore.QThread.currentThread() != QtWidgets.QApplication.instance().thread():
-            QtCore.QMetaObject.invokeMethod(
-                self, 
-                "_export_data", 
-                QtCore.Qt.ConnectionType.QueuedConnection
-            )
-            return
-            
-        if not self.netanal_traces:
-            QtWidgets.QMessageBox.warning(self, "No Data", "No data to export yet.")
-            return
-        
-        # 1. Pause any live updates - pause the parent's timer if it exists
-        self._timer_was_active = False
-        if hasattr(self.parent(), 'timer') and self.parent().timer.isActive():
-            self.parent().timer.stop()
-            self._timer_was_active = True
-            
-        # 2. Disable updates on graphics views if they exist
-        if hasattr(self, 'plots'):
-            for module_plots in self.plots.values():
-                for plot_type in ['mag_plot', 'phase_plot']:
-                    if plot_type in module_plots and hasattr(module_plots[plot_type], 'setUpdatesEnabled'):
-                        module_plots[plot_type].setUpdatesEnabled(False)
-        
-        # 3. Create a non-blocking file dialog
-        dlg = QtWidgets.QFileDialog(self, "Export Data")
-        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
-        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-        dlg.setNameFilters(["Pickle Files (*.pkl)", "CSV Files (*.csv)", "All Files (*)"])
-        dlg.setDefaultSuffix("pkl")
-        
-        # 4. Connect signals for handling dialog completion
-        dlg.fileSelected.connect(self._handle_export_file_selected)
-        dlg.finished.connect(self._resume_updates_after_export_dialog)
-        
-        # 5. Show the dialog non-modally
-        dlg.open()  # Returns immediately, doesn't block
-    
-    def _resume_updates_after_export_dialog(self, result: int) -> None:
-        """
-        Resume updates after export dialog closes, regardless of whether a file was selected.
-        
-        Args:
-            result: The dialog result code (unused but required for signal connection)
-        """
-        # Re-enable updates on graphics views
-        if hasattr(self, 'plots'):
-            for module_plots in self.plots.values():
-                for plot_type in ['mag_plot', 'phase_plot']:
-                    if plot_type in module_plots and hasattr(module_plots[plot_type], 'setUpdatesEnabled'):
-                        module_plots[plot_type].setUpdatesEnabled(True)
-        
-        # Restart the timer if it was active
-        if hasattr(self, '_timer_was_active') and self._timer_was_active and hasattr(self.parent(), 'timer'):
-            self.parent().timer.start()
-    
-    def _handle_export_file_selected(self, filename: str) -> None:
-        """
-        Handle the file selection from the non-blocking dialog.
-        
-        Args:
-            filename: The path to the file selected by the user
-        """
-        if not filename:
-            return
-            
+        if not self.netanal_container:
+            return None
+        return store.save(self.netanal_container, "netanal",
+                          label=self.current_params.get("label"))
+
+    def _save_netanal_action(self) -> None:
+        """The Save button: write the file, say where, and dialog only on failure."""
         try:
-            if filename.endswith('.pkl'):
-                self._export_to_pickle(filename)
-            elif filename.endswith('.csv'):
-                self._export_to_csv(filename)
-            else:
-                self._export_to_pickle(filename)
-            
-            QtWidgets.QMessageBox.information(
-                self, 
-                "Export Complete", 
-                f"Data exported to {filename}"
-            )
+            path = self.save_netanal()
         except Exception as e:
-            traceback.print_exc() 
+            traceback.print_exc()
             QtWidgets.QMessageBox.critical(
-                self, 
-                "Export Error", 
-                f"Error exporting data: {str(e)}"
-            )
-    
-    def build_export_dict(self) -> dict:
-        """
-        Build the export data dictionary with comprehensive metadata.
-        
-        This method creates a hierarchical dictionary structure containing all measurement
-        data, parameters, and module information. Can be used for both file export and
-        session auto-export.
-        
-        Returns:
-            Dictionary containing all export data
-        """
-        export_data = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
-            'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
-            'modules': {}
-        }
-        
-        for module, trace in self.netanal_traces.items():
-            freqs, iq_data = trace['frequencies'], trace['iq_counts']
-            magnitude = np.abs(iq_data)
+                self, "Save Error", f"Could not save this network analysis:\n{e}")
+            return
+        print(f"[Netanal] Saved {path}" if path
+              else "[Netanal] Nothing measured yet, so nothing to save.")
 
-            def in_units(unit_mode, normalize=False):
-                return UnitConverter.convert_amplitude(
-                    magnitude, iq_data, unit_mode=unit_mode, normalize=normalize
-                ).tolist()
-
-            export_data['modules'][module] = {
-                'sweep': {
-                    'sweep_amplitude': trace.get('sweep_amplitude'),
-                    'frequency': {'values': freqs.tolist(), 'unit': 'Hz'},
-                    'magnitude': {
-                        'counts': {'raw': in_units("counts"),
-                                   'normalized': in_units("counts", True),
-                                   'unit': 'counts'},
-                        'volts': {'raw': in_units("volts"),
-                                  'normalized': in_units("volts", True),
-                                  'unit': 'V'},
-                        'dbm': {'raw': in_units("dbm"),
-                                'normalized': in_units("dbm", True),
-                                'unit': 'dBm'},
-                    },
-                    'phase': {'values': np.degrees(np.angle(iq_data)).tolist(),
-                              'unit': 'degrees'},
-                    'complex': {'real': iq_data.real.tolist(),
-                                'imag': iq_data.imag.tolist()},
-                },
-                'resonances_hz': self.resonance_freqs.get(module, []),
-            }
-
-        return export_data
-    
-    def _export_to_pickle(self, filename: str) -> None:
-        """
-        Export data to a pickle file with comprehensive metadata.
-        
-        Uses build_export_dict() to create the data structure, then saves to file.
-        
-        Args:
-            filename: The path to the pickle file to create
-        """
-        export_data = self.build_export_dict()
-        
-        # Write the data to file
-        with open(filename, 'wb') as f:
-            pickle.dump(export_data, f)
-    
-    def _export_to_csv(self, filename: str) -> None:
-        """
-        Export data to CSV files, creating multiple files as needed.
-        
-        This method creates:
-        1. A metadata CSV file with measurement parameters
-        2. Multiple CSV files (one per module/amplitude) containing measurement data
-        
-        Args:
-            filename: The path to use as the base filename for the CSV files
-        """
-        # Create metadata file
-        base, ext = os.path.splitext(filename)
-        meta_filename = f"{base}_metadata{ext}"
-        
-        # Write metadata
-        with open(meta_filename, 'w', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(['Parameter', 'Value'])
-            writer.writerow(['Export Date', datetime.datetime.now().isoformat()])
-            
-            if hasattr(self, 'current_params'):
-                writer.writerow(['', ''])
-                writer.writerow(['Measurement Parameters', ''])
-                
-                for param, value in self.current_params.items():
-                    if param in ['fmin', 'fmax', 'max_span'] and isinstance(value, (int, float)):
-                        writer.writerow([param, f"{value/1e6} MHz"])
-                    else:
-                        writer.writerow([param, value])
-            
-            if self.resonance_freqs:
-                writer.writerow(['', ''])
-                writer.writerow(['Resonances (Hz)', ''])
-                
-                for module, freqs in self.resonance_freqs.items():
-                    writer.writerow([f'Module {module}', ','.join(map(str, freqs))])
-        
-        # Write data files - one per module/unit
-        for module, trace in self.netanal_traces.items():
-            freqs, iq_data = trace['frequencies'], trace['iq_counts']
-            magnitude = np.abs(iq_data)
-            phases = np.degrees(np.angle(iq_data))
-
-            # Export data in different unit modes
-            for unit_mode in ["counts", "volts", "dbm"]:
-                converted_amps = UnitConverter.convert_amplitude(magnitude, iq_data, unit_mode=unit_mode)
-                unit_label = "dBm" if unit_mode == "dbm" else ("V" if unit_mode == "volts" else unit_mode)
-
-                # Create CSV filename for this specific data
-                csv_filename = f"{base}_module{module}_{unit_mode}{ext}"
-
-                with open(csv_filename, 'w', newline='') as f:
-                    writer = csv.writer(f)
-                    writer.writerow(['# Amplitude:', f"{trace.get('sweep_amplitude')}"])
-
-                    # Determine column header based on unit mode
-                    header = [
-                        'Frequency (Hz)', 
-                        f'Power ({unit_label})' if unit_mode == "dbm" else f'Amplitude ({unit_label})', 
-                        'Phase (deg)'
-                    ]
-                    writer.writerow(header)
-
-                    # Write data rows
-                    for freq, amp, phase in zip(freqs, converted_amps, phases):
-                        writer.writerow([freq, amp, phase])
-    
     def _unwrap_cable_delay_action(self) -> None:
         """
         Fit the phase data of the first curve in the active module's plot,

@@ -215,6 +215,10 @@ and from the merge decisions of 2026-09-08.
 | `app.py` | `apply_bias_output`, `_set_bias` NCO midpoint, mock-mode `_start_df_calibration`, `handle_bias_kids` payload plumbing | `crs.apply_bias(catalog)`; see §6 for mock-mode df |
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
 | `network_analysis_export.py`, `network_analysis_panel.py` | the private `parameters/modules` export payload, `raw_data` tuples, `iq = amps * exp(j phase)` reconstruction, GUI-thread `find_resonances` | the netanal container; `find_resonances_in_netanal` in a task |
+| `network_analysis_export.py` | `build_export_dict`, `_export_to_pickle`, `_export_to_csv` and the Export-As dialog with its update-suppression dance (stage 1) | `save_netanal()`, one `store.save` |
+| `network_analysis_panel.py`, `app.py` | `_last_export_filename` and `export_data(filename_override=)` for netanal (stage 1) | `store`'s re-save in place, off `file_metadata` |
+| `network_analysis_dialog.py`, `app.py` | `dac_scales_used` in the file, and the `"modules" in params` test that told a loaded payload from a new measurement (stage 1) | the board's DAC scale; `dialog.loaded_container` |
+| `session_manager.py` | the netanal `pickle.dump` path, `pickle.load` in `load_file`, and the `'parameters' and 'modules'` file typing (stage 1) | `store.load` and `file_metadata`'s `measurement_type` |
 | `find_resonances_dialog.py`, `utils.py` | Data Exponent field, `DEFAULT_DATA_EXPONENT`, `min_resonance_separation_hz` | `find_resonances` kwargs |
 | `network_analysis_dialog.py` | Cable Length field, "Clear all channels first" checkbox (stage 1) | nothing; neither is `take_netanal`'s to do |
 | `network_analysis_export.py` | the board write at the end of the cable-delay unwrap (stage 1) | nothing; the unwrap adjusts the display only |
@@ -332,16 +336,29 @@ are now strict xfails that name the stage which clears them.
   probed at, read off the trace's own `sweep_amplitude` -- and the export holds
   one `sweep` per module rather than an index. §6 judgement call 12 covers the
   dialogs, which still offer a list.
-* The export button and the session export save the container through `store`;
-  loading reads it back. `network_analysis_export.py` loses its private
-  payload. Still to do: `build_export_dict` currently walks the traces and
-  writes the same six-unit `parameters/modules` payload it always did.
+* **Files through `store` (done).** The completion signal carries the
+  container, the panel keeps it (`netanal_container`, a union keyed by module
+  identifier), and Save writes it with `store.save(container, "netanal",
+  label=)`. The measurement name in the dialogs is that `label`, so the file is
+  `netanal_YYYYMMDD_HHMMSS_<name>.pkl` wherever it is written from. Saving the
+  same panel twice overwrites the same file, which is the `file_metadata`
+  mechanism that replaces `filename_override` and `_last_export_filename`, and
+  a re-run clears the container so it writes a new file. Loading is
+  `store.load` plus the blocks the driver wrote. Gone with it:
+  `build_export_dict`'s six-unit `parameters/modules` payload, the CSV export
+  (three unit copies of one trace, per §6 judgement call 13), the
+  Export-As file dialog and its update-suppression dance, `dac_scales_used`,
+  the session manager's own `pickle.dump` for netanal and its
+  open-it-and-look netanal typing, and the starter notebook's `pickle.load`
+  helper. §6 judgement calls 13-16 cover the choices.
 * Find Resonances runs `find_resonances_in_netanal` in a small task, not on
   the GUI thread. Markers come from `search.candidates`; rejected candidates
   are drawn differently with `rejected_because` in the tooltip; the count
   goes in the plot title. The search is already persisted into the netanal
   block, so the re-export-in-place the panel does today is a `store.save` of
-  the same block.
+  the same block. Until it lands, a netanal is saved once, when it finishes:
+  the re-save after a search went with `build_export_dict`, because the
+  legacy shim's frequency list has nowhere in the container to live.
 * The Find Resonances settings become the persistent settings panel from
   the section-amplitudes branch, as a view over the finder's arguments:
   delete Data Exponent; relabel Min Separation as the collision cut it now
@@ -682,6 +699,33 @@ Listed so they can be overruled.
     `AmplitudeSchedule` view. One resolving line in the caller beats a flag
     threaded through a base class that is about to go. It is the one place
     left where a netanal knows the word `amps`.
+13. **The CSV export is deleted rather than rewritten** (stage 1). It wrote
+    one metadata file plus three data files per module — the same trace in
+    counts, volts and dBm, with a phase column derived from the IQ it did not
+    write — which is `build_export_dict`'s unit fan-out in another format. A
+    netanal file opens with `store.load` and converts in two lines. Alternative:
+    a four-column CSV (frequency, I, Q) from the trace. Recommended: none until
+    someone asks for it; the request will say which columns.
+14. **Save writes through `store`'s naming, with the user naming the label.**
+    There is no Save-As: the button writes
+    `netanal_YYYYMMDD_HHMMSS_<measurement name>.pkl` into `store`'s output
+    directory, which is the session folder while a session is open. That is
+    what makes a Periscope file and a notebook file the same file. Alternative:
+    a `path=` argument on `store.save` so a file dialog can name it. Not added;
+    the filename is the library's to compose, and the label is the part a user
+    actually wants to choose.
+15. **The DAC scale is not written into the file** (stage 1). It was carried as
+    `dac_scales_used` and restored on load, which is a display setting of the
+    board taking a ride in a measurement file. A loaded netanal shows dBm from
+    the connected board's scale and says it cannot when there is none. If the
+    probe power in dBm turns out to be provenance worth keeping, the driver
+    should record it, not the GUI.
+16. **A netanal is saved once, when it finishes** (stage 1). The re-save after
+    Find Resonances is restored in the same commit as the search task, when the
+    search is written into the block by `find_resonances_in_netanal`; the
+    legacy shim's frequency list is a panel attribute with nowhere in the
+    container to live, and inventing a key for it is the re-packaging this port
+    is for deleting.
 
 ---
 
@@ -690,7 +734,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (data path done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the export holds the module's measured sweep tagged with the amplitude it was taken at; the cable-delay unwrap runs over that trace. Still to come: dialog fields, the store-based save and load | `test/periscope/test_tuning_flow.py` |
+| 1 (data path and files done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Still to come: the Find Resonances task and settings panel, the catalog handover, the remaining QoL | `test/periscope/test_tuning_flow.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

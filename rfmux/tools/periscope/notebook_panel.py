@@ -786,7 +786,7 @@ class NotebookPanel(QtWidgets.QWidget):
             "",
             "import rfmux",
             "from rfmux import load_session, CRS",
-            "import pickle",
+            "from rfmux.tuning import store",
             "from pathlib import Path",
             "",
         ]
@@ -819,14 +819,13 @@ class NotebookPanel(QtWidgets.QWidget):
         
         # Add helper code for loading session data
         setup_lines.extend([
-            "# Helper: Load a pickle file from the session",
+            "# Helper: read a measurement out of the session folder",
             "def load_data(filename):",
-            "    \"\"\"Load data from a session pickle file.\"\"\"",
+            "    \"\"\"Load a saved measurement, the way the library saved it.\"\"\"",
             "    filepath = session_path / filename if session_path else Path(filename)",
-            "    with open(filepath, 'rb') as f:",
-            "        return pickle.load(f)",
+            "    return store.load(filepath)",
             "",
-            "# Example: data = load_data('multisweep_xxx.pkl')",
+            "# Example: netanal = load_data('netanal_20260101_120000_cooldown.pkl')",
         ])
         
         # For Jupyter notebook format, each line must end with \n (except last)

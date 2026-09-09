@@ -540,16 +540,18 @@ class SessionManager(QtCore.QObject):
     def load_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Load data from a pickle file.
-        
+
+        Through ``store``, so a file that was moved is told where it now is and
+        an analysis re-saves it in place rather than beside itself.
+
         Args:
             file_path: Path to the pickle file to load
-        
+
         Returns:
             Dictionary of loaded data, or None if load fails
         """
         try:
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
+            return store.load(file_path)
         except Exception as e:
             print(f"[Session] Error loading file {file_path}: {e}")
             return None
@@ -562,8 +564,9 @@ class SessionManager(QtCore.QObject):
         or data structures. This makes it robust against filename changes.
         
         Detection priority:
-        1. Check '_session_export' metadata (for files exported by session manager)
-        2. Inspect data structure (for older files or external files)
+        1. Check store's file_metadata (for files written through store)
+        2. Check '_session_export' metadata (for files exported by session manager)
+        3. Inspect data structure (for older files or external files)
         
         Args:
             file_path: Path to the pickle file
@@ -587,13 +590,22 @@ class SessionManager(QtCore.QObject):
         if data is None or not isinstance(data, dict):
             return None
         
-        # 1. Check for session export metadata (most reliable)
+        # 1. A file written through store says what it is, whoever wrote it:
+        # a container carries file_metadata in each module's block, and a
+        # to_dict payload carries it at the top.
+        for block in [data, *data.values()]:
+            if isinstance(block, dict) and store.METADATA_KEY in block:
+                measurement_type = block[store.METADATA_KEY].get('measurement_type')
+                if measurement_type:
+                    return measurement_type
+
+        # 2. Files the session manager wrote itself, before store
         if '_session_export' in data:
             metadata = data['_session_export']
             if isinstance(metadata, dict) and 'data_type' in metadata:
                 return metadata['data_type']
         
-        # 2. Fall back to structure-based detection for older files
+        # 3. Fall back to structure-based detection for older files
         # Priority order matters: bias and noise are subsets of multisweep
         
         # Check for multisweep data (either old or new format)
@@ -611,10 +623,6 @@ class SessionManager(QtCore.QObject):
         if has_multisweep:
             return 'multisweep'
         
-        # Network analysis files: have 'parameters' and 'modules' keys
-        if 'parameters' in data and 'modules' in data:
-            return 'netanal'
-
         if 'channel_noise_data' in data and data['channel_noise_data'] is not None:
             return 'channel_noise'
         

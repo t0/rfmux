@@ -18,17 +18,20 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     is preserved.
     
     Signals:
-        data_ready: Emitted when analysis completes with full export data dict
+        analysis_finished: Emitted once every module's sweep is in, so the
+            session can save the measurement.
     """
-    
-    # Signal for session auto-export
-    data_ready = QtCore.pyqtSignal(dict)  # Full export data dictionary
+
+    analysis_finished = QtCore.pyqtSignal()
     
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
         self.modules = modules or []
         # module -> the trace take_netanal measured
         self.netanal_traces = {}
+        # Every module's output under its module identifier, the shape
+        # take_netanal returns and store saves. One file per panel.
+        self.netanal_container = {}
         self.unit_mode = "dbm"  # Default to dBm instead of counts
         self.normalize_magnitudes = False  # Add this flag to track normalization state
         self.first_setup = True  # Flag to track initial setup
@@ -46,9 +49,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
         self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
-        
-        # Track last session export filename for overwriting
-        self._last_export_filename: Optional[str] = None
 
         # Setup the UI components
         self._setup_ui()
@@ -78,11 +78,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Both rows wrap as the panel narrows.
         toolbar_global_layout = FlowLayout(toolbar_global)
 
-        # Export button
-        export_btn = QtWidgets.QPushButton("💾")
-        export_btn.setToolTip("Export data")
-        export_btn.clicked.connect(self._export_data)
-        toolbar_global_layout.addWidget(export_btn)
+        # Save button
+        save_btn = QtWidgets.QPushButton("💾")
+        save_btn.setToolTip("Save this network analysis to the session folder")
+        save_btn.clicked.connect(self._save_netanal_action)
+        toolbar_global_layout.addWidget(save_btn)
 
         # Edit Other Parameters button (renamed to Re-run Analysis)
         edit_params_btn = QtWidgets.QPushButton("Re-run analysis")
@@ -570,14 +570,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
         self._update_multisweep_button_state(active_module)
-        
-        # Emit data_ready signal for session auto-export after finding resonances
-        # Include filename override if this panel has exported before (to update existing file)
-        export_data = self.build_export_dict()  # Use inherited method from mixin
-        if self._last_export_filename:
-            export_data['_filename_override'] = self._last_export_filename
-        self.data_ready.emit(export_data)
-        
+
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
         if active_module in self.plots:
             plot_info = self.plots[active_module]
@@ -791,16 +784,17 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if module in self.progress_bars:
             self.progress_bars[module].setValue(int(progress))
     
-    def complete_analysis(self, module: int):
-        """Mark analysis as complete for a module and emit data_ready signal."""
+    def complete_analysis(self, module: int, container: dict):
+        """Take a module's finished measurement, and say when they are all in."""
+        # A union keyed by module identifier: each module's task returns a
+        # container of its own, and a re-measured module replaces its block.
+        self.netanal_container.update(container)
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()
-            
-        # Emit data_ready signal for session auto-export
+
         if self._all_modules_complete():
-            export_data = self.build_export_dict()  # Use inherited method from mixin
-            self.data_ready.emit(export_data)
+            self.analysis_finished.emit()
     
     def _all_modules_complete(self) -> bool:
         """Check if all modules have completed analysis."""

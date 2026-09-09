@@ -13,83 +13,52 @@ jupyter:
     name: python3
 ---
 
-<!-- #region -->
 # Network analysis → find resonances
 
-This notebook works through the first two steps of characterizing and tuning an
-array: doing a frequency sweep (S21 vs frequency, "network analysis"-->"netanal"),
-and using it to find resonances. It ends by seeding a resonator catalog, which is
-a bookkeeping object that rfmux provides to keep track of your resonators and
-their properties, and which every later tuning step takes in and hands back.
+This notebook starts array tuning with a broad frequency sweep (a network
+analysis, or “netanal”) and a search for resonance dips. It ends with a
+`ResonatorCatalog` that records their names, channels, and initial bias points.
 
-
-| Piece | Module |
+| Task | API |
 |---|---|
-| The sweep | `rfmux.algorithms.measurement.take_netanal` (`crs.take_netanal`) |
-| The resonance finder | `rfmux.tuning.find_resonances` |
-| The convenience function to run the resonance finder on one module's netanal | `rfmux.tuning.find_resonances_in_netanal` |
-| The array bookkeeping | `rfmux.core.resonators` |
+| Measure a network analysis | `crs.take_netanal()` |
+| Search frequency and IQ arrays | `rfmux.tuning.find_resonances()` |
+| Search one module’s netanal and store the result | `rfmux.tuning.find_resonances_in_netanal()` |
+| Manage the catalog | `rfmux.core.resonators` |
 
-The finder is split into two parts: `find_resonances` takes two plain arrays, while
-`find_resonances_in_netanal` is a thin wrapper that unpacks one module's output
-out of what `crs.take_netanal()` returned and calls the finder. The wrapper also
-puts the search back into that output, beside the trace it searched, so the
-search is saved as part of the netanal rather than as a second file to keep
-paired with it.
+`find_resonances_in_netanal()` takes one module’s output and stores the search
+beside its trace. This keeps the measurement and search in the same file.
+Call it separately for each module so you can choose suitable depth and Q limits.
 
-Like every other analysis in `rfmux.tuning`, the wrapper takes **one module at a
-time** — `netanal[module_id]`, not the whole netanal. How deep a dip has to be
-and how wide it may get depend on the band a module looks at and the resonators
-in it, so eight modules are eight decisions, and writing eight calls (or a loop
-you can see) is what keeps them from being made by accident.
-
-The catalog itself — building one by hand, reading and amending it, the
-invariants it enforces, and the file formats it round-trips through — is the
-subject of `resonator_catalogs.md`. That notebook picks up from the netanal file
-this one leaves on disk, so the two run back to back.
-
-
+See `resonator_catalogs.md` for working with the catalog after this step.
 
 ## How to use this document
 
-**This is a runnable notebook, not a web page.** Every grey block below is a live
-code cell: put the cursor in it and press **Shift+Enter** to execute it.
+This is a runnable Jupytext notebook. Select a code cell and press **Shift+Enter**.
 
-- **Run the cells in order, top to bottom.** Later cells use variables the
-  earlier ones defined, so skipping ahead fails with a `NameError`. *Kernel →
-  Restart Kernel and Run All Cells* starts clean.
-- **The outputs you see are the ones you just produced.** This file is stored as
-  jupytext markdown, which keeps no saved outputs, so a cell is blank until you
-  run it. Nothing here can show you a stale number from someone else's run.
-- **Editing is encouraged.** Change the band, the dip-depth threshold, the Q
-  limits, and re-run — that is what this document is for. The shipped copy is
-  read-only, so *File → Save Notebook As…* to keep your changes.
-- **How you open it depends on your editor.** This file is jupytext markdown,
-  not `.ipynb`. In the JupyterLab session Periscope launches it opens as a
-  notebook on double-click; in a JupyterLab you started yourself, right-click →
-  *Open With* → *Notebook*. **In VS Code it opens as plain text**, so pair it
-  instead: with a jupytext extension installed, right-click → *Open Paired
-  Notebook* (the exact wording varies by extension) creates an `.ipynb` beside
-  this file and keeps the two in step — run and edit the notebook, and your
-  changes flow back into the markdown. If that command does nothing, the
-  extension could not find jupytext: it runs whichever interpreter VS Code
-  resolved, which is often the base environment rather than the one rfmux is
-  installed in. Install jupytext there, point the extension at the right
-  interpreter, or skip the extension and run `jupytext --sync <this file>.md`
-  from a shell that has it. The `.ipynb` is a local working copy and is
-  gitignored; the markdown is the version that is kept, reviewed and tested.
-- **Check which kernel you are running.** rfmux has to be importable from the
-  interpreter the notebook uses, and if you have more than one checkout, it must
-  be the environment installed against *this* one. Getting that wrong looks like
-  a `ModuleNotFoundError` for a module you can plainly see on disk, because you
-  are importing a different copy of rfmux than the one you are reading. This
-  says which copy you actually got:
+- Run cells from top to bottom. Later cells use variables defined earlier.
+  Use *Kernel → Restart Kernel and Run All Cells* to start again.
+- The markdown file stores no outputs. Run a cell to see its results.
+- Feel free to change the band, dip-depth threshold, and Q limits and rerun the cells to explore them. The shipped
+  copy is read-only; use *File → Save Notebook As…* to keep your changes.
+- In Periscope's JupyterLab, double-click this file. In another JupyterLab
+  session, use *Open With → Notebook*.
+- VS Code opens this file as text. With a Jupytext extension, use *Open Paired
+  Notebook* (the command name may vary). If pairing fails, check that the
+  extension's Python environment has Jupytext installed. You can also run
+  `jupytext --sync <this file>.md` in an environment with Jupytext. The paired
+  `.ipynb` is a local, gitignored copy; the markdown is kept in version control.
 
-  ```python
-  import sys, rfmux; print(sys.executable); print(rfmux.__file__)
-  ```
+The kernel must use the environment where this checkout of rfmux is installed.
+Check the interpreter and package paths:
 
-<!-- #endregion -->
+```python
+import sys
+import rfmux
+
+print(sys.executable)
+print(rfmux.__file__)
+```
 
 ```python
 %matplotlib inline
@@ -97,106 +66,107 @@ code cell: put the cursor in it and press **Shift+Enter** to execute it.
 import numpy as np
 import matplotlib.pyplot as plt
 
-import rfmux
-from rfmux.tuning import store
+from rfmux.tuning import netanal_trace, store
 
 MODULE = 1
-
-# The band to sweep. The simulated array in section 1 is placed inside it.
-FMIN, FMAX = 0.6e9, 1.05e9
-PROBE_AMPLITUDE = 0.001   # normalized DAC units, shared by the sweep and the
-                          # catalog's bias points
-
-# By default, measurements save in a dated folder under ~/rfmux_data
-# (or the root configured with RFMUX_DATA_DIR or store.directory).
-# Uncomment to save directly in a named folder for this kernel session:
-# store.set_output_directory("~/rfmux_data/cooldown7/resonance_search")
-# Use store.set_output_directory(None) to restore dated folders.
-print(f"measurements → {store.session_directory()}")
 ```
 
 ## 1. Simulate a board
 
-We will generate 10 simulated LEKIDs spread across the band using a fixed random seed in rfmux's
-mock mode, so this
-notebook will produce the same array and the same numbers every time it is run.
+Let’s generate ten simulated LEKIDs with seed 42. The seed fixes the array;
+measurement noise can still vary between runs.
 
-To run the rest of the notebook against real hardware instead, replace this one
-cell with a session on your board — everything after it is unchanged:
+For real hardware, replace the next cell with your board session:
 
     session = rfmux.load_session('!HardwareMap [ !CRS { serial: "0042" } ]')
     crs = session.query(rfmux.CRS).one()
     await crs.resolve()
 
-Note that a network analysis overwrites every channel's frequency and amplitude
-on the module it sweeps, so do not point it at a module someone else is using.
+A network analysis overwrites channel frequencies and amplitudes on the module
+it sweeps. Use a module available for this measurement.
 
 ```python
 from rfmux.mock.helpers import create_mock_crs
 
 MOCK_CONFIG = {
     "num_resonances": 10,
-    "freq_start": 0.6e9,          # inside [FMIN, FMAX] so the sweep can see them
+    "freq_start": 0.6e9,          # inside the 0.6–1.05 GHz sweep band
     "freq_end": 1.0e9,
     "resonator_random_seed": 42,  # same array every run
-    "auto_bias_kids": False,      # nothing is tuned yet — that is the point
+    "auto_bias_kids": False,      # start without bias tones
+    "pulse_mode": "none",
+    "tls_noise_enabled": False,
+    "nqp_noise_std_factor": 0.001,
+    "T" : 0.23 # K
 }
 
 crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
-print(f"simulated CRS with {MOCK_CONFIG['num_resonances']} resonators "
-      f"between {MOCK_CONFIG['freq_start']/1e9:.2f} and "
-      f"{MOCK_CONFIG['freq_end']/1e9:.2f} GHz")
 ```
 
 ## 2. Run the network analysis
 
-`crs.take_netanal()` measures complex S21 across a band. 
+`crs.take_netanal()` measures complex S21 across a band. Choose enough points
+to sample the resonance dips. Here, 40,000 points across 450 MHz give about
+11.25 kHz spacing.
 
-When searching for resonances, we need to take sufficient measurement points per
-frequency span that we have a good chance that one or more points falls within a 
-resonance's bandwidth. This is decided with the `npoints` parameter.
+```python
+netanal = await crs.take_netanal(
+    amp=0.001,
+    fmin=0.6e9,
+    fmax=1.05e9,
+    npoints=40_000,
+    nsamps=10,          # averages per point
+    max_chans=1023,     # frequencies measured simultaneously
+    module=MODULE,
+)
+
+# Select one module, then access its trace (the results dictionary).
+module_id = crs.module[MODULE].index()
+module_netanal_outputs = netanal[module_id]
+netanal_measured = netanal_trace(module_netanal_outputs)
+netanal_frequencies = netanal_measured["frequencies"]
+netanal_iq_counts = netanal_measured["iq_counts"]
+
+print(f"{len(netanal_frequencies):,} points, "
+      f"{np.mean(np.diff(netanal_frequencies))/1e3:.2f} kHz spacing")
+```
+
+The returned dictionary and saved `.pkl` use the same structure, even when
+only one module is measured:
+
+```text
+netanal[module_id]                  # e.g. "crs0042_rmod1"
+    schema_version                 # measurement schema version (7)
+    measurement                    # "netanal"
+    module                         # numeric module
+    call_params                    # arguments used for the measurement
+    results
+        frequencies                # Hz
+        iq_counts                  # complex readout counts
+        iq_volts                   # complex volts at the board input
+        sweep_amplitude            # normalized amplitude per tone
+        sweep_direction            # "upward" or "downward"
+        resonance_search           # added by the resonance finder
+    file_metadata                  # added when saved
+```
+
+`netanal_trace(module_netanal_outputs)` returns that module's `results`
+dictionary. There are no iteration, direction, or resonator keys between
+`results` and the arrays. Derive phase from `np.angle(iq_counts)`; it is not
+stored separately. Select a module before calling the accessor or finder.
 
 `sweep_direction` decides which end of the band the measurement starts at, and
 defaults to `"upward"`. A downward netanal visits the same points and comes back
 descending — the order it measured them in — so `frequencies[0]` is the top of
 the band. One direction per call: `find_resonances_in_netanal()` reads either,
 and to compare the two you call `take_netanal()` twice and keep both results.
+The search stores frequencies in ascending order; candidate indices refer to
+`resonance_search.frequencies_hz` and `magnitude_db`, including for a downward
+sweep.
 
-```python
-netanal = await crs.take_netanal(
-    amp=PROBE_AMPLITUDE,
-    fmin=FMIN,
-    fmax=FMAX,
-    npoints=60_000,
-    nsamps=10,          # averages per point
-    max_chans=1023,     # frequencies measured simultaneously
-    module=MODULE,
-)
-
-# take_netanal returns a dict keyed by module — one entry per module swept —
-# and each module's outputs contain the measured data, as well as a record of 
-# how the measurement was called.
-# A netanal measures the band once, so results is the trace itself.
-module_netanal_outputs = netanal[crs.module[MODULE].index()]
-netanal_measured = module_netanal_outputs["results"]
-netanal_frequencies = netanal_measured["frequencies"]
-netanal_iq_counts = netanal_measured["iq_counts"]
-
-print(f"modules: {list(netanal)}")
-print(f"called with: {module_netanal_outputs['call_params']}")
-print(f"measured: {list(netanal_measured)}")
-print(f"{len(netanal_frequencies)} points, "
-      f"{netanal_frequencies[0]/1e6:.1f}–{netanal_frequencies[-1]/1e6:.1f} MHz, "
-      f"{np.mean(np.diff(netanal_frequencies))/1e3:.2f} kHz spacing")
-print(f"saved to: {store.saved_path(netanal)}")
-```
-
-Now a quick example plotter to take a look at the data. We draft the plotters in
-this notebook by hand as an exercise, but canned versions of all three of them
-live in `Demos/example_plotting_netanal.py`, next to this notebook —
-`plot_netanal` here, and `plot_resonance_search` and `plot_candidate_details` for
-the two plots in section 3. There is one such file per topic covered in these
-notebooks.
+Plot magnitude and phase across the band. Magnitude is normalized by its median
+to make the dips easier to compare. These cells show the plotting steps directly;
+reusable versions are in `example_plotting_netanal.py`.
 
 ```python
 fig, (magnitude_panel, phase_panel) = plt.subplots(
@@ -211,34 +181,26 @@ magnitude_panel.set_ylabel("|S21| [dB, normalized]")
 
 phase_panel.plot(netanal_frequencies / 1e6,
                  np.degrees(np.angle(netanal_iq_counts)), lw=0.6)
-phase_panel.set_ylabel("phase [deg]"); phase_panel.set_xlabel("frequency [MHz]")
+phase_panel.set_ylabel("phase [deg]")
+phase_panel.set_xlabel("frequency [MHz]")
 
 magnitude_panel.set_title("network analysis")
-plt.tight_layout(); plt.show()
+plt.tight_layout()
+plt.show()
 ```
 
 ## 3. Find the resonances
 
-`rfmux.tuning.find_resonances_in_netanal` unpacks one module's sweep and
-searches it.
-The search
-converts `|S21|` to dB, inverts it (since the peak finder algorithm expects 
-positive peaks), and hands it to
-`scipy.signal.find_peaks` with two physical constraints:
+The finder converts magnitude to dB, inverts the dips, and uses
+`scipy.signal.find_peaks` to locate them.
 
-- **`min_dip_depth_db`** — how deep a dip has to be to count, as a prominence
-  against the local baseline. Lower it for shallower resonators, and
-  increase it to reduce the likelihood of picking up on noise spikes.
-
-- **`min_Q` / `max_Q`** — converted to a width window. `min_Q` sets the *widest*
-  dip accepted and `max_Q` the *narrowest*; the narrow end helps to reject
-  single-sample noise spikes.
-
-**Collision mitigation:**
-
-There is a optional parameter, `min_separation_hz`, which defaults to 0 Hz and so does nothing
-here. It is a collision cut: candidate resonances that are closer together than the threshold are
-**all** removed. 
+- `min_dip_depth_db` sets the minimum prominence relative to the local baseline.
+  Lower it to include shallower dips; raise it to reject smaller features.
+- `min_Q` and `max_Q` set the accepted width range. `min_Q` limits the widest
+  dips; `max_Q` limits the narrowest, helping reject single-sample spikes.
+- `min_separation_hz` rejects both members of a pair this close or closer.
+  The default, `0.0`, only rejects coincident frequencies. Use a positive value
+  to reject nearby candidates, or `None` to disable this check.
 
 ```python
 from rfmux.tuning import find_resonances_in_netanal
@@ -249,64 +211,36 @@ resonance_search = find_resonances_in_netanal(
     min_Q=1e4,
     max_Q=1e7,
 )
-print(resonance_search)
-```
-
-The search also went *into* `module_netanal_outputs`, beside the trace it
-searched, under `resonance_search`.
-
-The netanal file was rewritten in place as part of that call, so the file
-`take_netanal` announced in section 2 now holds the trace *and* the search. 
-
-You can retrieve the resonance search from the netanal dictionary and turn it back 
-into a `ResonanceSearch` class using the `from_dict` method, the same as for any
-class rfmux stores in a file:
-
-```python
-print(module_netanal_outputs.keys())
-print(module_netanal_outputs['results'].keys())
-```
-
-```python
 
 ```
+
+The call stores a plain search dictionary at
+`module_netanal_outputs["results"]["resonance_search"]`.
+With autosave enabled, it also updates the measurement file.
+
+Use `ResonanceSearch.from_dict()` to rebuild the search object. To load a saved
+measurement without a board, select its module identifier from the file:
 
 ```python
 from rfmux.tuning import ResonanceSearch
 
-# or, for example, if you have loaded your netanal from a file:
-#   netanal = store.load(".../netanal_20260904_142231.pkl")
-#   netanal_measured = netanal[crs.module[MODULE].index()]["results"]
+# For a saved file, run these lines with your path and module identifier:
+# netanal = store.load("path/to/netanal.pkl")
+# print(list(netanal))
+# module_netanal_outputs = netanal["crs0042_rmod1"]
+# netanal_measured = netanal_trace(module_netanal_outputs)
+# Run the finder first if the file has no resonance_search yet.
 stored_search = ResonanceSearch.from_dict(netanal_measured["resonance_search"])
-print(stored_search)
-print(f"the file holding both: {store.saved_path(netanal)}")
 ```
 
-The result is a `rfmux.tuning.ResonanceSearch`. It carries the accepted
-candidates, everything a rejection pass threw out and why, the processed trace
-that was searched, and the settings used:
+The search contains accepted candidates, rejected candidates and their reasons,
+the processed trace, and the settings used. Mark the results on that trace:
 
-```python
-for candidate in resonance_search.candidates:
-    print(f"  {candidate.frequency_hz/1e6:11.4f} MHz   "
-          f"depth {candidate.depth_db:5.2f} dB   "
-          f"width {candidate.width_hz/1e3:6.2f} kHz   "
-          f"Q estimate ≈ {candidate.q_estimate:.3g}")
 
-print(f"\n{len(resonance_search)} accepted, "
-      f"{len(resonance_search.rejected)} rejected")
-for candidate in resonance_search.rejected:
-    print(f"  {candidate.frequency_hz/1e6:11.4f} MHz — "
-          f"{candidate.rejected_because}")
 
-print(f"\nthe simulated array has {MOCK_CONFIG['num_resonances']}")
-assert len(resonance_search) > 0, "found nothing — check the sweep in section 2"
-```
-
-Note that `q_estimate` is `frequency / width` — the rough figure the `min_Q` / `max_Q`
-window screens on. **It is not a measurement of the resonators' qualtiy factors.**
-Determining a resonator's
-real Q factors is done using multisweep type data -- we will talk about that in a separate walkthrough notebook.
+`q_estimate` is frequency divided by dip width. It is a screening estimate,
+not a fitted resonator Q. Use detailed multisweeps and fits to measure Q;
+see `fitting_resonators.md`.
 
 ```python
 # the trace the finder actually saw, and just the frequencies it accepted
@@ -321,31 +255,34 @@ plt.plot(resonance_search.frequencies_hz / 1e6, searched_magnitude_db,
 plt.scatter(resonance_frequencies_hz / 1e6,
             searched_magnitude_db[candidate_indices],
             s=140, facecolor="none", edgecolor="red", zorder=3, label="found")
-for candidate in resonance_search.rejected:
+for index, candidate in enumerate(resonance_search.rejected):
     plt.axvline(candidate.frequency_hz / 1e6, color="darkorange", ls="--",
-                alpha=0.6)
+                alpha=0.6, label="rejected" if index == 0 else None)
+    # Rejection reasons are useful when something was actually removed.
+    print(f"Rejected {candidate.frequency_hz/1e6:.4f} MHz: {candidate.rejected_because}")
 plt.xlabel("frequency [MHz]")
 plt.ylabel("|S21| [dB, normalized]")
-plt.title(f"{len(resonance_search)} resonances")
-plt.legend(); plt.tight_layout(); plt.show()
+plt.title(f"{len(resonance_search)} accepted, {len(resonance_search.rejected)} rejected")
+plt.legend()
+plt.tight_layout()
+plt.show()
 ```
 
-### Look at the candidates one at a time
+### Inspect individual candidates
 
-The overview plot shows *where* the finder placed the resonances. To see *what
-it measured*, zoom in on each candidate and draw the two numbers on: the red
-vertical bar is the dip depth (its prominence) and the horizontal bar is the
-width, at half that depth.
-
-This is the plot to reach for when a sweep gives you a count you did not expect.
-The samples are drawn as points, so you can see how much of each dip the sweep
-actually caught.
+Zoom in to see which samples define each dip. The vertical red bar shows depth
+(prominence); the horizontal bar shows width at half that depth.
+This is a useful first check when the number of resonances is unexpected.
 
 ```python
-def plot_candidate_details(search, ncols=5, span_widths=4.0, limit=25):
+def plot_candidate_details(search: ResonanceSearch, ncols: int = 5,
+                           span_widths: float = 4.0) -> None:
     """One panel per candidate, with the measured depth and width drawn on."""
     point_spacing_hz = float(np.mean(np.diff(search.frequencies_hz)))
-    shown_candidates = search.candidates[:limit]
+    shown_candidates = search.candidates
+    if not shown_candidates:
+        print("No accepted candidates. Inspect the overview and search settings.")
+        return
     nrows = int(np.ceil(len(shown_candidates) / ncols))
 
     fig, axes = plt.subplots(nrows, ncols, squeeze=False,
@@ -356,9 +293,7 @@ def plot_candidate_details(search, ncols=5, span_widths=4.0, limit=25):
     for panel, candidate in zip(axes.flat, shown_candidates):
         panel.axis("on")
 
-        # A window a few widths wide, but never so few samples that there is
-        # nothing to look at — an unresolved dip is exactly the case this plot
-        # exists to show.
+        # Include a few widths and at least eight samples on either side.
         half_window = max(
             int(np.ceil(span_widths * candidate.width_hz / point_spacing_hz)), 8
         )
@@ -389,11 +324,7 @@ def plot_candidate_details(search, ncols=5, span_widths=4.0, limit=25):
 
     fig.supxlabel("offset from the candidate [kHz]", fontsize=9)
     fig.supylabel("|S21| [dB, normalized]", fontsize=9)
-    fig.suptitle(
-        f"{len(shown_candidates)} of {len(search)} candidates"
-        if len(shown_candidates) < len(search)
-        else f"{len(shown_candidates)} candidates"
-    )
+    fig.suptitle(f"{len(shown_candidates)} candidates")
     fig.tight_layout()
     plt.show()
 
@@ -401,87 +332,111 @@ def plot_candidate_details(search, ncols=5, span_widths=4.0, limit=25):
 plot_candidate_details(resonance_search)
 ```
 
-These are clean dips with several points down each side — a comfortable result,
-and a tidier one than a real array usually gives you. On hardware, expect
-shallower dips, a baseline that slopes and ripples, and candidates where the
-sweep caught only a point or two. When that happens, these plots can be useful
-for diagnosis. More `npoints` is usually the answer.
+Look for several samples across each dip. Real arrays may also show shallow
+dips, baseline ripples, or unresolved neighbours. If a dip has only one or two
+samples, a finer sweep can help.
 
-### Sweep resolution decides what you can find
+### Compare sweep resolution
 
-A survey sweep is usually much coarser than the resonators in it, and the failure
-mode is quiet: the finder simply returns fewer resonances than might truly exist. 
-Compare the same array swept at a quarter the resolution:
+Measure the same band with 5,000 points instead of 40,000: about 90 kHz spacing
+instead of 11.25 kHz. Keep the search thresholds unchanged so we can compare the
+effect of sampling alone.
+
+The first panel compares detection counts. The close-ups show the samples around
+the first two candidates found in the fine sweep.
 
 ```python
 from rfmux.tuning import find_resonances
 
 coarse_netanal = await crs.take_netanal(
-    amp=PROBE_AMPLITUDE, fmin=FMIN, fmax=FMAX, npoints=5_000,
-    nsamps=10, max_chans=1023, module=MODULE)
+    amp=0.001,
+    fmin=0.6e9,
+    fmax=1.05e9,
+    npoints=5_000,
+    nsamps=10,
+    max_chans=1023,
+    module=MODULE,
+)
+coarse_trace = netanal_trace(coarse_netanal[crs.module[MODULE].index()])
+coarse_search = find_resonances(
+    coarse_trace["frequencies"], coarse_trace["iq_counts"],
+    min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,
+)
 
-for label, netanal_to_search in (("coarse", coarse_netanal), ("fine", netanal)):
-    measured = netanal_to_search[crs.module[MODULE].index()]["results"]
-    frequencies = measured["frequencies"]
-    n_resonances = len(find_resonances(
-        frequencies, measured["iq_counts"],
-        min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7))
-    print(f"{label:>7}: {len(frequencies):>6} points, "
-          f"{np.mean(np.diff(frequencies))/1e3:>6.2f} kHz spacing "
-          f"→ {n_resonances} resonances")
+# Use the existing fine search; both searches used identical thresholds.
+searches = [("coarse", coarse_search), ("fine", resonance_search)]
+closeups = resonance_search.candidates[:2]
+fig, axes = plt.subplots(1, 1 + len(closeups),
+                         figsize=(4 * (1 + len(closeups)), 3.8),
+                         constrained_layout=True, squeeze=False)
+count_panel = axes[0, 0]
+bars = count_panel.bar([label for label, search in searches],
+                       [len(search) for label, search in searches],
+                       color=["tab:orange", "tab:blue"])
+count_panel.bar_label(bars, padding=3)
+count_panel.set_ylim(0, max(1, len(coarse_search), len(resonance_search)) * 1.2)
+count_panel.set_ylabel("accepted resonances")
+count_panel.set_title("Same thresholds, different sampling")
+
+for panel, candidate in zip(axes[0, 1:], closeups):
+    # A 200 kHz window includes nearby coarse samples as well as the fine dip.
+    for (label, search), colour in zip(searches, ["tab:orange", "tab:blue"]):
+        offset_khz = (search.frequencies_hz - candidate.frequency_hz) / 1e3
+        nearby = np.abs(offset_khz) <= 200
+        spacing_khz = np.mean(np.diff(search.frequencies_hz)) / 1e3
+        panel.plot(offset_khz[nearby], search.magnitude_db[nearby], ".-",
+                   color=colour, lw=0.8, ms=5,
+                   label=f"{label}: {spacing_khz:.1f} kHz spacing")
+    panel.axvline(0, color="0.7", lw=0.7)
+    panel.set_title(f"{candidate.frequency_hz/1e6:.3f} MHz")
+    panel.set_xlabel("offset from candidate [kHz]")
+    panel.set_ylabel("|S21| [dB, normalized]")
+    panel.legend(fontsize=8)
+plt.show()
 ```
 
-A dip narrower than the point spacing is one or two samples deep at best, and
-whether it is caught depends on where the samples happen to land. If a count
-comes back low, the first thing to change is `npoints`, not the thresholds — and
-if you already know roughly where the array is, sweeping a narrower band at the
-same `npoints` buys the same resolution for less time.
+A narrow dip can fall between coarse samples and be missed entirely. If the
+count is low, inspect sampling before changing the thresholds. More points, or
+a narrower band with the same number of points, improves frequency resolution.
 
-### Remaining collisions - see multisweep data
+### Check for unresolved neighbours
 
-`min_separation_hz` above can only cut pairs the survey sweep managed to
-distinguish as separate resonators. If two resonators are quite close together,
-they may remain. Multisweep data makes these more apparent, but this is the topic 
-of a separate workbook. However, we note here that rfmux provides 
-`rfmux.tuning.find_sweeps_with_nearby_resonances` to prune collided resonances
-using multisweep data. 
+The separation cut only rejects pairs that the survey resolves as distinct dips.
+Detailed multisweeps can reveal closer neighbours. See
+`rfmux.tuning.find_sweeps_with_nearby_resonances` for checking those sweeps.
 
-## 4. Seed a resonator catalog
+## 4. Build a resonator catalog
 
-`rfmux.tuning.ResonanceSearch.to_catalog()` is where anonymous dips become tracked
-resonators. Each gets a name (a string of the format of your choosing), a hardware channel, and a
-`rfmux.core.resonators.BiasPoint` at its found
-frequency — the operating point as first guessed. Multisweep and bias finding
-will refine and update this BiasPoint as we progress through the tuning flow.
+`ResonanceSearch.to_catalog()` assigns each candidate a name, a channel, and an
+initial `BiasPoint`. Channels are assigned 1..N in frequency order.
 
-`amplitude` is required, and here is assigned automatically to be the amplitude
- used for the netanal. Channels
-are assigned 1..N in frequency order.
+Read the required module and amplitude from the measurement. Later sweeps and
+bias finding refine these initial operating points.
 
 ```python
-catalog = resonance_search.to_catalog(module=MODULE, amplitude=PROBE_AMPLITUDE)
+catalog = resonance_search.to_catalog(
+    module=module_netanal_outputs["module"],
+    amplitude=netanal_measured["sweep_amplitude"],
+)
 print(catalog)
+
+# The file contains the measurement and, when autosaved, its resonance search.
+print(f"Measurement file: {store.saved_path(module_netanal_outputs)}")
 ```
 
-That object is what the rest of tuning consumes and returns. From here you would
-run iterative multisweeps at various amplitudes around each bias frequency, pick bias points,
-apply fits, etc — see
-`multisweep.md` for more info on these.
+The catalog is ready for multisweeps, fitting, and bias finding. Continue with
+`multisweep.md`, or explore the catalog in `resonator_catalogs.md`.
 
-The catalog on its own is described in more detail in
-`resonator_catalogs.md`. It starts from a saved netanal exactly like the one this
-notebook just wrote, so you can carry on there directly.
+## 5. Periscope controls
 
-## 5. Where this maps in Periscope
+The GUI wiring is being updated; this table maps the controls to the workflow
+shown here, rather than documenting the current internal implementation.
 
-TODO: revisit this once we have updated periscope to use the new code architecture
-
-| Periscope control | API equivalent |
+| Periscope control | Workflow API |
 |---|---|
-| *Network Analysis* panel, **Take Netanal** | `crs.take_netanal(...)` |
-| **Find Resonances** button + its dialog | `find_resonances_in_netanal(...)` |
-| Expected / Min Dip Depth / Min Q / Max Q fields | the same-named arguments |
-| The red dashed markers on the plot | `ResonanceSearch.candidates` |
-| The resonance list the multisweep dialog inherits | `ResonanceSearch.to_catalog(...)` |
-
+| **Take Netanal** | `crs.take_netanal(...)` |
+| **Find Resonances** | `find_resonances_in_netanal(...)` |
+| Expected count, minimum depth, and Q limits | `expected_resonances`, `min_dip_depth_db`, `min_Q`, `max_Q` |
+| Resonance markers | `ResonanceSearch.candidates` |
+| Catalog for multisweep | `ResonanceSearch.to_catalog(...)` |
 

@@ -64,7 +64,7 @@ from pathlib import Path
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
-from rfmux.tuning import ResonanceSearch, store
+from rfmux.tuning import ResonanceSearch, netanal_trace, store
 ```
 
 ## 1. Start from a saved network analysis
@@ -84,14 +84,13 @@ netanal_path = max(demos.glob("netanal_*_demo_catalog1.pkl"))
 print(f"starting from: {netanal_path.name}")
 netanal = store.load(netanal_path)
 
-# A netanal is keyed by module, one entry per module swept, with the file's own
-# metadata beside them. This one swept a single module.
-module_id, = [key for key in netanal if key != store.METADATA_KEY]
+# A netanal is keyed by module; file_metadata lives inside each module.
+# This file contains a single module.
+module_id, = netanal
 module_netanal = netanal[module_id]
 
-# A network analysis measures the band once, so results is the trace itself —
-# no amplitude step, no direction key and no resonator-name layer above it.
-trace = module_netanal["results"]
+# results holds the trace directly, including the saved resonance search.
+trace = netanal_trace(module_netanal)
 
 print(f"module id  : {module_id}")
 print(f"called with: {module_netanal['call_params']}")
@@ -495,10 +494,8 @@ print(catalog_from_disk)
 ```
 
 Omit `directory=` to use the normal measurement folder,
-`~/rfmux_data/ipy_session_<today>/` by default. `store.session_directory()` reports
-that path. Call `store.set_output_directory("~/rfmux_data/cooldown7")` to save
-directly in a named folder for this kernel session; pass `None` to restore dated
-folders.
+`~/rfmux_data/ipy_session_<today>/`. `store.session_directory()` reports that path;
+see `rfmux.tuning.store` for ways to change it.
 
 The filename includes a timestamp. The saved dictionary also gains `file_metadata`,
 which `ResonatorCatalog.from_dict()` ignores when rebuilding the catalog.

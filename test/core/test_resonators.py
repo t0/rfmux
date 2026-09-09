@@ -193,10 +193,10 @@ def test_a_frequency_below_half_a_step_is_refused_not_zeroed():
         BiasPoint(frequency_hz=BASE_FREQUENCY / 4, amplitude=0.01)
 
 
-def test_set_bias_quantizes_the_new_frequency():
+def test_update_bias_point_quantizes_the_new_frequency():
     """Retuning goes through the same door as construction."""
     r = a_resonator()
-    r.set_bias(frequency_hz=1_010_000_123.456)
+    r.update_bias_point(frequency_hz=1_010_000_123.456)
     assert on_the_grid(r.bias.frequency_hz)
 
 
@@ -221,20 +221,20 @@ def test_resonator_cannot_exist_without_a_bias():
         Resonator("R0001", channel=1)
 
 
-# ─── set_bias: stale calibration must be unrepresentable ─────────────────────
+# ─── update_bias_point: stale calibration must be unrepresentable ─────────────────────
 
 
-def test_set_bias_moves_the_tone():
+def test_update_bias_point_moves_the_tone():
     r = a_resonator()
-    r.set_bias(frequency_hz=1.0100003e9, amplitude=0.012)
+    r.update_bias_point(frequency_hz=1.0100003e9, amplitude=0.012)
     assert r.bias.frequency_hz == pytest.approx(1.0100003e9, abs=BASE_FREQUENCY / 2)
     assert r.bias.amplitude == 0.012
 
 
 def test_moving_the_frequency_drops_calibration():
     r = a_resonator()
-    r.set_bias(dI_df=1e-9, dQ_df=2e-9, bifurcated_at=0.02)
-    r.set_bias(frequency_hz=1.0100009e9)
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9, bifurcated_at=0.02)
+    r.update_bias_point(frequency_hz=1.0100009e9)
     assert r.bias.df_calibration is None
     assert r.bias.dI_df is None and r.bias.bifurcated_at is None
 
@@ -242,23 +242,23 @@ def test_moving_the_frequency_drops_calibration():
 def test_moving_the_amplitude_drops_calibration():
     r = a_resonator()
     parked_at = r.bias.frequency_hz
-    r.set_bias(iq_rotation_deg=12.0)
-    r.set_bias(amplitude=0.02)
+    r.update_bias_point(iq_rotation_deg=12.0)
+    r.update_bias_point(amplitude=0.02)
     assert r.bias.iq_rotation_deg is None
     assert r.bias.frequency_hz == parked_at
 
 
 def test_moving_the_tone_keeps_calibration_passed_explicitly():
     r = a_resonator()
-    r.set_bias(dI_df=1e-9, dQ_df=2e-9)
-    r.set_bias(frequency_hz=1.02e9, dI_df=3e-9, dQ_df=4e-9)
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9)
+    r.update_bias_point(frequency_hz=1.02e9, dI_df=3e-9, dQ_df=4e-9)
     assert r.bias.df_calibration == 1.0 / complex(3e-9, 4e-9)
 
 
 def test_amending_only_calibration_leaves_the_tone_alone():
     r = a_resonator()
     parked_at = r.bias.frequency_hz
-    r.set_bias(dI_df=1e-9, dQ_df=2e-9)
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9)
     assert r.bias.frequency_hz == parked_at
     assert r.bias.amplitude == 0.01
     assert r.bias.df_calibration is not None
@@ -268,8 +268,8 @@ def test_moving_the_tone_drops_the_stored_sweep_with_the_rest():
     """A trace taken at the old amplitude is not the working behind a
     calibration measured at the new one, so it goes when they go."""
     r = a_resonator()
-    r.set_bias(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
-    r.set_bias(amplitude=0.02)
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
+    r.update_bias_point(amplitude=0.02)
     assert r.bias.bias_sweep is None
 
 
@@ -698,7 +698,7 @@ def test_remove_does_not_touch_a_copy():
 def test_copy_is_independent():
     m = a_catalog()
     c = m.copy()
-    c["R0001"].set_bias(amplitude=0.02)
+    c["R0001"].update_bias_point(amplitude=0.02)
     c["R0002"].notes["worker"] = True
     assert m["R0001"].bias.amplitude == 0.01
     assert m["R0002"].notes == {}
@@ -727,7 +727,7 @@ def test_to_dict_keys_resonators_by_name():
 
 def test_dict_round_trip():
     m = a_catalog()
-    m["R0001"].set_bias(
+    m["R0001"].update_bias_point(
         frequency_hz=1.0100003e9,
         amplitude=0.012,
         dI_df=1e-9,
@@ -773,7 +773,7 @@ def test_from_dict_quantizes_files_written_before_the_flag_existed():
 def test_dict_round_trip_carries_the_stored_sweep():
     m = a_catalog()
     sweep = a_sweep()
-    m["R0001"].set_bias(dI_df=1e-9, dQ_df=-2e-9, bias_sweep=sweep)
+    m["R0001"].update_bias_point(dI_df=1e-9, dQ_df=-2e-9, bias_sweep=sweep)
 
     back = ResonatorCatalog.from_dict(m.to_dict())
 
@@ -788,7 +788,7 @@ def test_to_dict_copies_the_sweep_dict_but_not_the_traces():
     multisweep does one to snapshot its catalog — would be paid for nothing."""
     m = a_catalog()
     sweep = a_sweep()
-    m["R0001"].set_bias(bias_sweep=sweep)
+    m["R0001"].update_bias_point(bias_sweep=sweep)
 
     d = m.to_dict()
     d["resonators"]["R0001"]["bias"]["bias_sweep"]["injected"] = True
@@ -810,7 +810,7 @@ def test_to_dict_holds_only_builtins_and_the_stored_traces():
     nothing in the model cares which it is.
     """
     m = a_catalog()
-    m["R0001"].set_bias(
+    m["R0001"].update_bias_point(
         dI_df=1e-9,
         bias_sweep=a_sweep(
             npoints=2, frequencies=array("d", [1.01e9, 1.01e9 + 1])
@@ -911,14 +911,14 @@ def test_a_dict_round_trip_brings_the_separation_rule_back():
 
 
 def test_a_dict_round_trip_re_checks_the_rule_it_brings_back():
-    """Which is the one thing the round trip can discover: set_bias is not
+    """Which is the one thing the round trip can discover: update_bias_point is not
     policed, so a catalog whose tones were walked together after it was built
     fails on the way back in rather than claiming a spacing it does not have."""
     m = ResonatorCatalog.from_frequencies(
         [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
     )
     walked = m.names(order="frequency")[1]
-    m[walked].set_bias(frequency_hz=1e9 + 500.0)
+    m[walked].update_bias_point(frequency_hz=1e9 + 500.0)
 
     with pytest.raises(ValueError, match="collides"):
         ResonatorCatalog.from_dict(m.to_dict())
@@ -956,7 +956,7 @@ def test_from_dict_applies_the_separation_rule_it_is_given():
 
 def test_csv_round_trip_carries_the_operating_point():
     m = a_catalog()
-    m["R0001"].set_bias(frequency_hz=1.0100003e9, amplitude=0.012)
+    m["R0001"].update_bias_point(frequency_hz=1.0100003e9, amplitude=0.012)
     back = ResonatorCatalog.from_csv(m.to_csv(), module=2)
     assert [r.name for r in back] == ["R0001", "R0002", "R0003"]
     assert back["R0001"].bias.frequency_hz == pytest.approx(1.0100003e9)
@@ -998,7 +998,7 @@ def test_csv_bad_number_reports_the_line():
 def test_csv_is_lossy_by_design():
     """Calibration and notes do not survive; to_dict is the faithful path."""
     m = a_catalog()
-    m["R0001"].set_bias(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
+    m["R0001"].update_bias_point(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
     m["R0001"].notes["x"] = 1
     back = ResonatorCatalog.from_csv(m.to_csv(), module=2)
     assert back["R0001"].bias.df_calibration is None

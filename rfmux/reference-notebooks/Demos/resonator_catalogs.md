@@ -141,7 +141,7 @@ A resonator’s name identifies it across tuning steps and measurement files.
 Keep the name when you retune it; replace its bias point as needed.
 
 A `BiasPoint` is immutable. Its calibration belongs to a specific frequency and
-amplitude, so changing the tone requires a new bias point. `set_bias()` handles
+amplitude, so changing the tone requires a new bias point. `update_bias_point()` handles
 this replacement and clears old calibration when you supply a frequency or amplitude.
 Bias frequencies snap to the hardware tone grid by default.
 
@@ -303,7 +303,7 @@ print(f"module        : {named_catalog.module}")
 
 ### Update a bias point
 
-`Resonator.set_bias()` creates and assigns a new `BiasPoint`.
+`Resonator.update_bias_point()` creates and assigns a new `BiasPoint`.
 Supplying `frequency_hz` or `amplitude` clears the calibration fields unless you
 also supply new calibration values. Updating calibration alone keeps the tone unchanged.
 
@@ -312,11 +312,11 @@ red_resonator = by_hand_catalog["red"]
 print(f"before      : {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}")
 
-red_resonator.set_bias(frequency_hz=1.0505e9)        # moving the tone
+red_resonator.update_bias_point(frequency_hz=1.0505e9)        # moving the tone
 print(f"tone moved  : {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}   <- calibration dropped")
 
-red_resonator.set_bias(iq_rotation_deg=15.0)         # calibration only
+red_resonator.update_bias_point(iq_rotation_deg=15.0)         # calibration only
 print(f"recalibrated: {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}   <- tone untouched")
 ```
@@ -389,7 +389,7 @@ Frequency checks depend on `min_separation_hz`:
 
 All catalog constructors accept this setting, including `from_dict` and `from_csv`.
 Supply it when loading if you want a separation check; the saved setting is only
-a record. Calling a member’s `set_bias()` does not rerun the catalog’s separation check.
+a record. Calling a member’s `update_bias_point()` does not rerun the catalog’s separation check.
 
 These examples catch and print the expected errors so you can keep running the notebook:
 

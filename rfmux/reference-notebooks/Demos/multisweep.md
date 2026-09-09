@@ -430,8 +430,8 @@ the specified amplitudes for all resonators.
 Change two catalog amplitudes to show the difference:
 
 ```python
-catalog[second_resonator].set_bias(amplitude=0.001 * 4)
-catalog[third_resonator].set_bias(amplitude=0.001 / 2)
+catalog[second_resonator].update_bias_point(amplitude=0.001 * 4)
+catalog[third_resonator].update_bias_point(amplitude=0.001 / 2)
 
 for r in list(catalog)[:4]:
     print(f"{r.name}  bias amplitude {r.bias.amplitude:.5f}")

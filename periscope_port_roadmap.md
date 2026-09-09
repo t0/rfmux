@@ -25,7 +25,7 @@ whole sequence against the standard mock array over RPC, in the quick tier).
 |---|---|---|---|
 | Network analysis | `crs.take_netanal(amp, fmin, fmax, npoints, nsamps, module=, progress_callback=, data_callback=, save=, label=)` | container, trace at `[module_id]["results"][0]["upward"]` | `data_callback(module, freqs, amps, phases)` for live plotting |
 | Find resonances | `find_resonances_in_netanal(module_netanal, min_dip_depth_db=, min_Q=, max_Q=, min_separation_hz=, require_isolation=, expected_resonances=)` | `ResonanceSearch`: `candidates`, `rejected` (with `rejected_because`), `frequencies_hz`, `magnitude_db`; written into the netanal as `trace["resonance_search"]` | `candidate.index` into the trace, for markers |
-| Seed the array | `search.to_catalog(module, amplitude, names=)` or `ResonatorCatalog.from_frequencies(...)` | `ResonatorCatalog` (module-scoped, named resonators, one `BiasPoint` each) | `copy()` for workers; `set_bias()`; `remove()`; `to_dict`/`from_dict`/`to_csv`/`from_csv` |
+| Seed the array | `search.to_catalog(module, amplitude, names=)` or `ResonatorCatalog.from_frequencies(...)` | `ResonatorCatalog` (module-scoped, named resonators, one `BiasPoint` each) | `copy()` for workers; `update_bias_point()`; `remove()`; `to_dict`/`from_dict`/`to_csv`/`from_csv` |
 | Amplitude ladder | `AmplitudeSchedule()` / `(x)` / `.explicit()` / `.ramp()` / `.multiplicative()` | frozen dataclass | `.describe(catalog, n_directions, dac_scale_dbm)` and `.validate(...)` for a live dialog preview; `.steps()` |
 | Multisweep | one `crs.multisweep(catalog, span_hz=, npoints_per_sweep=, nsamps=, amp=schedule, sweep_direction=(...), progress_callback=, data_callback=, sweep_callback=, save=, label=)` | container, `[module_id]["results"][step][direction][name]` with seven measurement keys | `sweep_callback(record)` once per sweep (`step, direction, amplitudes, factor, completed, total`); `data_callback(module, partial, step, direction)`; progress across the whole call |
 | Read sweeps | `collect_amplitude_iterations_for`, `get_amplitudes_at_iteration`, `find_iteration_matching_amplitude` | plain dicts | the accessors the design doc's `SweepSet` was going to be |
@@ -404,7 +404,7 @@ The two things that let every later stage be checked rather than asserted.
 * The main-window Bias KIDs button becomes "Apply Bias from File": load a
   catalog (`from_dict` from a catalog or multisweep file, `from_csv` for a
   CSV), show it in a table for editing (frequency and amplitude per name,
-  `set_bias`), then `apply_bias`. Custom bias in the multisweep panel is the
+  `update_bias_point`), then `apply_bias`. Custom bias in the multisweep panel is the
   same table over `self.catalog`. No frequency-order matching.
 * "Load bias amplitudes" in the multisweep dialog is the default
   `AmplitudeSchedule()` once the panel's catalog is the report's.

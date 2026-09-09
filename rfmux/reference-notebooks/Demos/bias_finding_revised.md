@@ -129,8 +129,8 @@ catalog = ResonatorCatalog.from_frequencies(
     bias_frequencies, module=MODULE, amplitude=0.001,
 )
 first_resonator, second_resonator, third_resonator, *_ = catalog.names()
-catalog[second_resonator].set_bias(amplitude=0.002)
-catalog[third_resonator].set_bias(amplitude=0.0005)
+catalog[second_resonator].update_bias_point(amplitude=0.002)
+catalog[third_resonator].update_bias_point(amplitude=0.0005)
 
 # A broad span covers frequency shifts with drive. 401 points give 500 Hz spacing.
 multi_amplitude_ms = await crs.multisweep(

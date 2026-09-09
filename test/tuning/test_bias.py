@@ -962,7 +962,7 @@ def test_retuning_a_biased_resonator_drops_the_sweep_with_the_calibration():
     resonator = report.catalog["R0001"]
     assert resonator.bias.bias_sweep is not None
 
-    resonator.set_bias(amplitude=resonator.bias.amplitude * 2)
+    resonator.update_bias_point(amplitude=resonator.bias.amplitude * 2)
 
     assert resonator.bias.bias_sweep is None
     assert resonator.bias.df_calibration is None

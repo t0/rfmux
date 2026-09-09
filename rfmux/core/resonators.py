@@ -13,8 +13,8 @@ where each one's guarantees hold. A bias point validated at construction stays
 valid for as long as it exists, so a tone can never be carrying a calibration
 that was measured somewhere else. A resonator's guarantee is narrower: its
 identity is meant to be permanent, but its operating point moves
-all through tuning, and ``set_bias`` is the chokepoint that keeps calibration
-from outliving the tone it belongs to. A catalog checks its members as they
+all through tuning, and ``update_bias_point`` keeps calibration from outliving
+the tone it belongs to. A catalog checks its members as they
 join and does
 not re-check them afterwards.
 
@@ -121,7 +121,7 @@ class BiasPoint:
     bias_sweep: dict | None = None  # the trace dI_df/dQ_df were read off
 
     # Fields that describe *this* tone and are therefore invalidated by moving
-    # it. Consumed by Resonator.set_bias.
+    # it. Consumed by Resonator.update_bias_point.
     _CAL_FIELDS = (
         "dI_df",
         "dQ_df",
@@ -272,7 +272,7 @@ class Resonator:
     bias: BiasPoint
     notes: dict = field(default_factory=dict)  # explicitly the junk drawer
 
-    def set_bias(self, **changes) -> BiasPoint:
+    def update_bias_point(self, **changes) -> BiasPoint:
         """Amend this resonator's ``BiasPoint``.
 
         Moving the tone (``frequency_hz`` or ``amplitude``) drops calibration
@@ -318,9 +318,9 @@ class ResonatorCatalog:
     given one. ``from_dict`` defaults to the rule recorded in the file rather
     than to ``None``: a catalog read back is the catalog that was written.
 
-    Retuning through ``Resonator.set_bias`` is not re-checked — two tones can be
-    walked onto one frequency after the fact. Worth a ``validate()`` pass once
-    there is a caller that retunes in bulk.
+    Retuning through ``Resonator.update_bias_point`` is not re-checked — two
+    tones can be walked onto one frequency after the fact. Worth a
+    ``validate()`` pass once there is a caller that retunes in bulk.
 
     There is deliberately no NCO frequency here. A catalog is free to span more
     frequency than one NCO can carry — multisweep already re-tunes the NCO as it
@@ -667,9 +667,10 @@ class ResonatorCatalog:
         instead of deciding what to make of it. The rule arrives the way it
         does in every other constructor, which means it is checked against the
         frequencies in the file — and that is a check worth having here, since
-        retuning through ``Resonator.set_bias`` is not policed: a catalog whose
-        tones were walked together after it was built fails on the way back in
-        rather than coming back claiming a spacing it does not have.
+        retuning through ``Resonator.update_bias_point`` is not policed: a
+        catalog whose tones were walked together after it was built fails on
+        the way back in rather than coming back claiming a spacing it does
+        not have.
 
         ``from_dict(d, min_separation_hz=...)`` reads the file under a rule of
         your own instead — a tighter one to audit it with, or ``None`` to open a

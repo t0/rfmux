@@ -146,8 +146,8 @@ first_resonator, second_resonator, third_resonator, fourth_resonator, *_ = (
     catalog.names()
 )
 
-catalog[second_resonator].set_bias(amplitude=0.001 * 2)
-catalog[third_resonator].set_bias(amplitude=0.001 / 2)
+catalog[second_resonator].update_bias_point(amplitude=0.001 * 2)
+catalog[third_resonator].update_bias_point(amplitude=0.001 / 2)
 
 print(catalog)
 for resonator in catalog:

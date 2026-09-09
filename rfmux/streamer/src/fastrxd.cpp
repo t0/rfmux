@@ -184,6 +184,52 @@ static bool force_single_rx_queue(const std::string& ifname) {
 	return true;
 }
 
+/* Post as many RX descriptors as the NIC allows.
+ *
+ * The hardware ring is the only buffer between the wire and the NAPI poller:
+ * when it is full the NIC discards, and no amount of UMEM helps.  Drivers
+ * default to about 2048 descriptors, which at 5 Mpps is 400 us -- less than
+ * a C-state exit plus a coalesced interrupt -- so the maximum is asked for.
+ * Defensive: the pool has frames to spare, and a poller that is late once is
+ * a loss forever.  Best effort: a shallow ring drops more, it does not
+ * break. */
+static void deepen_rx_ring(const std::string& ifname) {
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (s < 0) {
+		std::perror("fastrxd: socket for ethtool");
+		return;
+	}
+
+	struct ifreq ifr = {};
+	std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+
+	struct ethtool_ringparam rp = {};
+	rp.cmd = ETHTOOL_GRINGPARAM;
+	ifr.ifr_data = (caddr_t)&rp;
+	if (ioctl(s, SIOCETHTOOL, &ifr) < 0) {
+		warn("cannot query the RX ring size on %s (%s); leaving it alone",
+				ifname.c_str(), std::strerror(errno));
+		close(s);
+		return;
+	}
+
+	if (rp.rx_pending < rp.rx_max_pending) {
+		std::fprintf(stderr,
+				"fastrxd: %s RX ring holds %u of a possible %u descriptors; "
+				"deepening it\n",
+				ifname.c_str(), rp.rx_pending, rp.rx_max_pending);
+		rp.cmd = ETHTOOL_SRINGPARAM;
+		rp.rx_pending = rp.rx_max_pending;
+		if (ioctl(s, SIOCETHTOOL, &ifr) < 0)
+			std::fprintf(stderr,
+					"fastrxd: could not deepen the %s RX ring: %s\n"
+					"fastrxd: run manually:  sudo ethtool -G %s rx %u\n",
+					ifname.c_str(), std::strerror(errno), ifname.c_str(),
+					rp.rx_max_pending);
+	}
+	close(s);
+}
+
 /* The client cannot name libxdp's constant (it does not link libxdp), so the
  * value is stated in fastrx.h; check the two agree here, where both are visible. */
 static_assert(FASTRXD_FRAME_SIZE == XSK_UMEM__DEFAULT_FRAME_SIZE,
@@ -1129,6 +1175,7 @@ int main(int argc, char** argv) {
 	 * resets the rings. */
 	if (!force_single_rx_queue(ifname))
 		return 1;
+	deepen_rx_ring(ifname);
 
 	/* Ownership splits at the fork below: the parent destroys the Session (which
 	 * detaches the XDP program), the child releases it without destroying, since

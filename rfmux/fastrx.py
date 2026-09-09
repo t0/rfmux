@@ -13,10 +13,10 @@ import os
 
 from .streamer._fastrx import (
     ABI_VERSION,
+    MAX_CHANNELS,
     MAX_CLIENTS,
     MAX_SAMPLES,
     NUM_MODULES,
-    NUM_PIPELINES,
     SOCKET_DIR,
     PacketFile,
 )
@@ -30,7 +30,7 @@ __all__ = [
     "get_samples",
     "resolve_socket",
     "NUM_MODULES",
-    "NUM_PIPELINES",
+    "MAX_CHANNELS",
     "MAX_SAMPLES",
     "ABI_VERSION",
     "MAX_CLIENTS",
@@ -85,9 +85,9 @@ class PacketCapture(_PacketCapture):
         PacketCapture(interface="enp9s0f0np0")
         PacketCapture(socket="/tmp/fastrxd.sock")
 
-    The pipeline and module are chosen per capture() call:
+    The channel count and module are chosen per capture() call:
 
-        d = c.capture(1024, pipe=1, module=2)
+        d = c.capture(1024, channels=16, module=2)   # d["i"] is (1024, 16)
     """
 
     def __init__(
@@ -102,43 +102,43 @@ class PacketCapture(_PacketCapture):
 class PacketWriter(_PacketWriter):
     """Records the stream to disk (for readback using PacketFile).
 
-        with PacketWriter("run.fastrx", pipes=[1], n_packets=1_000_000) as w:
+        with PacketWriter("run.fastrx", channels=200, n_packets=1_000_000) as w:
             w.wait()
         # stop() (via __exit__) flushes, finalizes and closes.
 
     n_packets (defaults to None) bounds the recording.
 
-    pipes selects which pipelines to record (1-indexed) and is required.
+    channels records the module's first that many channels of every packet,
+    1..MAX_CHANNELS (None: all of them).  A pipe carries MAX_SAMPLES
+    consecutive channels, so channels=200 records pipes 1 and 2: all of the
+    first and 72 of the second.  It is fixed for the whole file, so every
+    record has the same stride and PacketFile can return strided views
+    instead of parsing; it is not inferred from what happens to be
+    streaming.
 
     If the disk falls behind, records are dropped and counted in .overruns
     rather than ever blocking the packet path.
 
-    A recorded pipe that goes missing mid-stream (transmitter
-    reconfiguration) is zero-filled rather than dropped, counted in
-    .dropouts; each record's pipe_snapshot (PacketFile.headers()) says
-    which blocks are real.
+    A pipe the layout needs that a packet lacks (not streaming, or a
+    transmitter reconfiguration mid-run) is zero-filled rather than
+    dropped, counted in .dropouts; each record's pipe_snapshot
+    (PacketFile.headers()) says which blocks are real.
     """
 
     def __init__(
         self,
         path: str | os.PathLike,
         *,
-        pipes: list[int],
+        channels: int | None = None,
         n_packets: int | None = None,
         interface: str | None = None,
         socket: str | None = None,
         ring_mb: int = 256,
         queue_depth: int = 32,
     ):
-        mask = 0
-        pipes = list(pipes)
-        if not pipes:
-            raise ValueError("pipes must name at least one pipeline")
-        for p in pipes:
-            if not 1 <= p <= NUM_PIPELINES:
-                raise ValueError(
-                    f"pipe must be in 1..{NUM_PIPELINES}, got {p}")
-            mask |= 1 << (p - 1)
+        if channels is not None and not 1 <= channels <= MAX_CHANNELS:
+            raise ValueError(
+                f"channels must be in 1..{MAX_CHANNELS}, got {channels}")
 
         if n_packets is not None and n_packets <= 0:
             raise ValueError(
@@ -147,16 +147,19 @@ class PacketWriter(_PacketWriter):
         super().__init__(
             resolve_socket(interface, socket),
             os.fspath(path),
-            pipe_mask=mask,
+            channels=channels,
             n_packets=n_packets or 0,
             ring_bytes=ring_mb << 20,
             queue_depth=queue_depth,
         )
 
 
-def get_samples(n_packets: int, pipe: int, module: int,
+def get_samples(n_packets: int, channels: int, module: int,
                 timeout: float = 5.0, **kwargs):
-    """Grab the next n_packets from one pipe and module.
+    """Grab the next n_packets from one module.
+
+    channels keeps the module's first that many channels (1..MAX_CHANNELS),
+    so the returned arrays are (n_packets, channels).
 
     A short-lived PacketCapture, for callers who want one grab and no lifetime
     to manage.  Everything expensive is per-connection rather than per-packet,
@@ -165,10 +168,10 @@ def get_samples(n_packets: int, pipe: int, module: int,
 
         c = fastrx.PacketCapture(interface="enp9s0f0np0")
         while True:
-            d = c.capture(1024, pipe=1, module=1)
+            d = c.capture(1024, channels=MAX_CHANNELS, module=1)
     """
 
     if n_packets <= 0:
         raise ValueError(f"n_packets must be positive, got {n_packets}")
     with PacketCapture(**kwargs) as c:
-        return c.capture(n_packets, pipe, module, timeout)
+        return c.capture(n_packets, channels, module, timeout)

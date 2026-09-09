@@ -542,5 +542,76 @@ def hud(channel: int, module: int, depth: int,
     app.exec()
 
 
+@cli.command(name="bench")
+@click.option("--seconds", type=float, default=10.0, show_default=True,
+              help="how long to watch")
+@click.option("--module", "modules", type=int, multiple=True, default=(1,),
+              show_default=True,
+              help="module to watch, one client each (repeatable)")
+@click.option("--interface", type=str, default=None,
+              help="NIC name whose fastrxd to attach to (default: the only "
+                   "one running)")
+@click.option("--socket", "socket_path", type=str, default=None,
+              help="fastrxd socket path (for --socket-path daemons; "
+                   "give --interface or this, not both)")
+def bench(seconds: float, modules: tuple[int, ...],
+          interface: str | None, socket_path: str | None):
+    """Count packet drops as a client sees them.
+
+    Per module: sequence gaps, i.e. packets missing from the stream this
+    client received, and ring drops, i.e. packets fastrxd could not hand it
+    because it had fallen behind.  A gap without a ring drop was lost
+    upstream of the client; "ss --xdp -e" shows the kernel's counters for
+    that (a FILL ring found empty means fastrxd itself fell behind), and a
+    PacketWriter recording shows exactly which packets went missing.  The
+    NIC's own rx_dropped is not a measure of this stream's loss.
+    """
+    import threading
+    import time
+
+    from rfmux import fastrx
+
+    path = fastrx.resolve_socket(interface, socket_path)
+
+    # Captures restart on a gap, so restarts over a window counts them.  The
+    # window is watched in short grabs whose buffers are sized never to fill.
+    # Short, because each grab zeroes a fresh buffer on this thread, and if
+    # the scheduler lands that on a hot thread's core the hot thread stalls
+    # for the duration: a tenth of a second keeps the stall well inside the
+    # descriptor ring's slack.  The moment between grabs is not watched.
+    grab_s = 0.1
+    grab = int(2 * PACKET_RATE * grab_s)
+
+    def watch(module: int, out: dict):
+        c = fastrx.PacketCapture(socket=path)
+        gaps = 0
+        seen = 0
+        t0 = time.monotonic()
+        while (elapsed := time.monotonic() - t0) < seconds:
+            d = c.capture(grab, channels=1, module=module,
+                          timeout=min(grab_s, seconds - elapsed))
+            gaps += d["restarts"]
+            seen |= d["modules_seen"]
+        out[module] = dict(gaps=gaps, ring_drops=c.ring_drops, seen=seen,
+                           elapsed=time.monotonic() - t0)
+        c.stop()
+
+    results: dict[int, dict] = {}
+    threads = [threading.Thread(target=watch, args=(m, results))
+               for m in dict.fromkeys(modules)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for m, r in sorted(results.items()):
+        streaming = ", ".join(str(i + 1) for i in range(fastrx.NUM_MODULES)
+                              if r["seen"] & (1 << i)) or "none"
+        click.echo(f"module {m}: {r['gaps']} gaps "
+                   f"({r['gaps'] / r['elapsed']:.1f}/s), "
+                   f"{r['ring_drops']} ring drops, {r['elapsed']:.1f} s "
+                   f"(streaming: {streaming})")
+
+
 if __name__ == "__main__":
     cli()

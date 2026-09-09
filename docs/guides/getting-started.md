@@ -103,7 +103,7 @@ netanal = await crs.take_netanal(
 
 # Keyed by module, one entry per module swept, the way every measurement
 # algorithm returns its results. Under each module's output is what it measured.
-trace = netanal[crs.module[1].index()]["results"][0]["upward"]
+trace = netanal[crs.module[1].index()]["results"]
 frequencies, iq_counts = trace["frequencies"], trace["iq_counts"]
 ```
 

@@ -2,12 +2,12 @@
 take_netanal: A measurement algorithm that handles the book-keeping of assigning NCO, frequency, and channel
 pairings in order to measure the complex S21 across a large bandwidth. Often used for finding resonances.
 
-It returns what ``multisweep`` returns — a container keyed by module, each
-module's output recording how the measurement was called alongside what it
-measured — because a netanal and a sweep being two shapes was costing three
-separate pieces of book-keeping and telling nobody anything. What differs is
-under the direction: a netanal measured one wideband trace, not a section per
-resonator.
+It returns the container ``multisweep`` returns — keyed by module, each module's
+output recording how the measurement was called alongside what it measured —
+because a netanal and a sweep being two shapes was costing three separate pieces
+of book-keeping and telling nobody anything. What differs is ``results``: a
+netanal measured one wideband trace, so the trace is what is there, where a
+sweep has an amplitude iteration per step of its schedule.
 """
 
 import warnings
@@ -17,7 +17,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import CREST_FACTOR, convert_roc_to_volts
 from ...tuning import store
-from ...tuning.sweep_results import merge_modules, pack_netanal
+from ...tuning.sweep_results import merge_modules, pack_netanal, resolve_direction
 
 
 @macro(CRS, register=True)
@@ -32,6 +32,7 @@ async def take_netanal(
     max_span: float = 500e6,
     rotate_phase_to_0: bool = True,
     *,
+    sweep_direction: str = "upward",
     module,
     progress_callback=None,
     data_callback=None,
@@ -47,6 +48,11 @@ async def take_netanal(
     The chunks partition the frequency grid: every frequency is measured once,
     by exactly one of them. No phase stitching is performed between chunks, so
     the phase of the trace is not continuous across an NCO change.
+
+    One direction per call, and the band is measured once in it. Both
+    directions is two calls whose results you keep side by side — unlike
+    ``multisweep``, which takes a sequence and returns a key per direction,
+    because it walks a resonance point by point and a netanal does not.
 
     Parameters
     ----------
@@ -68,9 +74,16 @@ async def take_netanal(
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
     rotate_phase_to_0 : bool, optional
-        If True, applies an arbitrary global phase rotation to make the first point
-        have zero phase. This makes it easier to compare phase responses across
-        different measurements, by default True.
+        If True, applies an arbitrary global phase rotation to make the first
+        point *measured* have zero phase — the lowest frequency of an upward
+        netanal, the highest of a downward one. This makes it easier to compare
+        phase responses across different measurements, by default True.
+    sweep_direction : {'upward', 'downward'}, optional
+        Which way through the band, by default 'upward'. The chunks are visited
+        in that order and the tones within each are programmed in it, and the
+        trace comes back in the order it was measured — so a downward netanal
+        has descending ``frequencies``, the way a downward ``multisweep`` sweep
+        does. One direction per call; a sequence is refused.
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
@@ -97,12 +110,17 @@ async def take_netanal(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 4,
+                    "schema_version": 7,
                     "measurement": "netanal",
                     "module": 2,           # resolved, never None
                     "call_params": {...},  # verbatim, as this macro was called
-                    "results": {
-                        0: {"upward": {...}},
+                    "results": {           # the trace itself
+                        'frequencies': np.ndarray (Hz),
+                        'iq_counts': np.ndarray (complex),  # readout counts
+                        'iq_volts': np.ndarray (complex),   # the same, in volts
+                                                            # at the board input
+                        'sweep_amplitude': float,  # normalized, per tone
+                        'sweep_direction': 'upward',
                     },
                 },
             }
@@ -114,23 +132,18 @@ async def take_netanal(
         results into one dict of this shape, each module's output recording
         its own module in ``call_params["module"]``.
 
-        This is the container ``multisweep`` returns, and for the same reason:
-        a netanal is one amplitude sweeping upward in frequency, so it is
-        iteration 0 of ``"upward"`` — which is what it is, not a padded slot.
-        Under the direction is the one trace the netanal measured, sorted by
-        frequency::
+        ``frequencies`` is in the order it was measured: ascending for an
+        upward netanal, descending for a downward one. Not acquisition order —
+        the tones within a chunk are measured interleaved, which is a stride
+        pattern every reader would have to undo — but monotonic in the
+        direction that was swept.
+        :func:`rfmux.tuning.netanal_trace` is the accessor, and
+        :func:`rfmux.tuning.find_resonances_in_netanal` searches either
+        direction.
 
-            {
-                'frequencies': np.ndarray (Hz),
-                'iq_counts': np.ndarray (complex),  # in readout counts
-                'iq_volts': np.ndarray (complex),   # the same, in volts at the
-                                                    # board input port
-                'sweep_amplitude': float,  # normalized amplitude per tone
-                'sweep_direction': 'upward',
-            }
-
-        A sweep result has ``{name: section}`` here instead — one section per
-        resonator — which is the one place the two shapes differ, and why the
+        A sweep result has ``{iteration: {direction: {name: section}}}`` under
+        ``results`` instead, because it has an amplitude schedule and a section
+        per resonator; that is where the two shapes part company, and why the
         output says which it is. The readers in
         :mod:`rfmux.tuning.sweep_results` and the fitters in
         :mod:`rfmux.tuning.fits` want sections and say so rather than walking a
@@ -140,6 +153,7 @@ async def take_netanal(
         wanted, and naming it phase in here invites reading it as the
         resonators' rather than the readout chain's.
     """
+    sweep_direction = resolve_direction(sweep_direction)
 
     # What call_params records: the argument as passed. The fan-out below calls
     # this macro again with a single module, so each module's output ends up
@@ -173,6 +187,7 @@ async def take_netanal(
                 max_chans=max_chans,
                 max_span=max_span,
                 rotate_phase_to_0=rotate_phase_to_0,
+                sweep_direction=sweep_direction,
                 module=m,
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -243,6 +258,13 @@ async def take_netanal(
 
         i_start = i_end + 1
 
+    # Downward measures the same chunks in the opposite order. A chunk is a band
+    # of the grid and an NCO setting, neither of which the direction changes;
+    # what it changes is which end the measurement starts at, and the order the
+    # tones inside a chunk are programmed in.
+    if sweep_direction == "downward":
+        chunks.reverse()
+
     # Prepare arrays for final data across all chunks.
     fs_all, iq_all = [], []
     first_point_rotation = None  # Store rotation to set first point phase to 0
@@ -253,6 +275,8 @@ async def take_netanal(
     
     for i, (start_idx, end_idx) in enumerate(chunks):
         freqs_chunk = freqs_global[start_idx:end_idx + 1]
+        if sweep_direction == "downward":
+            freqs_chunk = freqs_chunk[::-1]
         if not len(freqs_chunk):
             continue
 
@@ -367,10 +391,14 @@ async def take_netanal(
     fs_all_np = np.array(fs_all)
     iq_all_np = np.array(iq_all, dtype=np.complex128)
 
-    # Sorted by frequency, not by the order the comb happened to take them in:
-    # the tones within a chunk are measured interleaved, so acquisition order is
-    # a stride pattern that every reader of a netanal would have to undo.
+    # Sorted in the direction that was swept, not by the order the comb happened
+    # to take the tones in: within a chunk they are measured interleaved, so
+    # acquisition order is a stride pattern every reader would have to undo. A
+    # downward netanal therefore comes back descending, which is what a downward
+    # multisweep sweep does and what 'sweep_direction' beside the arrays says.
     sort_indices = np.argsort(fs_all_np)
+    if sweep_direction == "downward":
+        sort_indices = sort_indices[::-1]
     fs_sorted = fs_all_np[sort_indices]
     iq_sorted = iq_all_np[sort_indices]
 
@@ -384,7 +412,7 @@ async def take_netanal(
             'iq_counts': iq_sorted,
             'iq_volts': convert_roc_to_volts(iq_sorted),
             'sweep_amplitude': amp,
-            'sweep_direction': 'upward',
+            'sweep_direction': sweep_direction,
         },
         module_id=crs.module[module].index(),
         module=module,
@@ -396,6 +424,7 @@ async def take_netanal(
         max_chans=max_chans,
         max_span=max_span,
         rotate_phase_to_0=rotate_phase_to_0,
+        sweep_direction=sweep_direction,
         requested_module=requested_module,
     )
 

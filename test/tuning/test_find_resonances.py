@@ -465,28 +465,32 @@ def test_a_missing_iq_key_says_what_the_sweep_holds():
 # ─── netanal wrapper ──────────────────────────────────────────────────────────
 
 
-def a_module_netanal(module=1, **kwargs):
+def a_module_netanal(module=1, sweep_direction="upward", **kwargs):
     """One module's netanal output, packed the way take_netanal packs it."""
     frequencies, magnitude = a_sweep(**kwargs)
     iq = magnitude.astype(complex)
+    fmin, fmax = frequencies[0], frequencies[-1]
+    if sweep_direction == "downward":
+        frequencies, iq = frequencies[::-1], iq[::-1]
     return pack_netanal(
         {
             "frequencies": frequencies,
             "iq_counts": iq,
             "iq_volts": iq * 1e-7,
             "sweep_amplitude": 0.001,
-            "sweep_direction": "upward",
+            "sweep_direction": sweep_direction,
         },
         module_id=f"crs0000_rmod{module}",
         module=module,
         amp=0.001,
-        fmin=frequencies[0],
-        fmax=frequencies[-1],
+        fmin=fmin,
+        fmax=fmax,
         npoints=len(frequencies),
         nsamps=10,
         max_chans=1023,
         max_span=500e6,
         rotate_phase_to_0=True,
+        sweep_direction=sweep_direction,
         requested_module=module,
     )[f"crs0000_rmod{module}"]
 
@@ -513,6 +517,47 @@ def test_wrapper_matches_calling_the_search_directly():
     assert np.array_equal(
         find_resonances_in_netanal(module_netanal).resonance_frequencies_hz,
         direct.resonance_frequencies_hz,
+    )
+
+
+def test_wrapper_searches_a_downward_netanal():
+    """Its trace is descending — the order it was measured in — and the finder
+    reads a trace in ascending order, so the wrapper flips it."""
+    truth = TRUTH
+    found = find_resonances_in_netanal(
+        a_module_netanal(resonances=truth, sweep_direction="downward"),
+        min_Q=1e4,
+        max_Q=1e6,
+    )
+
+    assert matched(found.resonance_frequencies_hz, truth) == len(truth)
+
+
+def test_a_downward_search_carries_the_grid_it_searched():
+    """candidate.index indexes search.frequencies_hz, which is ascending — not
+    the descending array sitting beside it in the netanal."""
+    module_netanal = a_module_netanal(sweep_direction="downward")
+    measured = netanal_trace(module_netanal)["frequencies"]
+
+    found = find_resonances_in_netanal(module_netanal)
+
+    assert np.array_equal(found.frequencies_hz, measured[::-1])
+    for candidate in found.candidates:
+        assert found.frequencies_hz[candidate.index] == pytest.approx(
+            candidate.frequency_hz
+        )
+
+
+def test_a_downward_netanal_finds_what_the_upward_one_does():
+    """The flip is the only difference the direction makes to the search."""
+    truth = TRUTH
+    up = find_resonances_in_netanal(a_module_netanal(resonances=truth))
+    down = find_resonances_in_netanal(
+        a_module_netanal(resonances=truth, sweep_direction="downward")
+    )
+
+    assert down.resonance_frequencies_hz == pytest.approx(
+        up.resonance_frequencies_hz
     )
 
 

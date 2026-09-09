@@ -107,9 +107,11 @@ FMIN, FMAX = 0.6e9, 1.05e9
 PROBE_AMPLITUDE = 0.001   # normalized DAC units, shared by the sweep and the
                           # catalog's bias points
 
-# Where the measurements below save themselves. Nothing in this notebook picks
-# a directory: `take_netanal` calls `store.save` on its way out, and this is
-# the folder it writes into — one per day, inside `store.output_directory()`.
+# By default, measurements save in a dated folder under ~/rfmux_data
+# (or the root configured with RFMUX_DATA_DIR or store.directory).
+# Uncomment to save directly in a named folder for this kernel session:
+# store.set_output_directory("~/rfmux_data/cooldown7/resonance_search")
+# Use store.set_output_directory(None) to restore dated folders.
 print(f"measurements → {store.session_directory()}")
 ```
 
@@ -154,6 +156,12 @@ When searching for resonances, we need to take sufficient measurement points per
 frequency span that we have a good chance that one or more points falls within a 
 resonance's bandwidth. This is decided with the `npoints` parameter.
 
+`sweep_direction` decides which end of the band the measurement starts at, and
+defaults to `"upward"`. A downward netanal visits the same points and comes back
+descending — the order it measured them in — so `frequencies[0]` is the top of
+the band. One direction per call: `find_resonances_in_netanal()` reads either,
+and to compare the two you call `take_netanal()` twice and keep both results.
+
 ```python
 netanal = await crs.take_netanal(
     amp=PROBE_AMPLITUDE,
@@ -168,9 +176,9 @@ netanal = await crs.take_netanal(
 # take_netanal returns a dict keyed by module — one entry per module swept —
 # and each module's outputs contain the measured data, as well as a record of 
 # how the measurement was called.
-# The data is sorted by amplitude iteration index, and then by sweep direction
+# A netanal measures the band once, so results is the trace itself.
 module_netanal_outputs = netanal[crs.module[MODULE].index()]
-netanal_measured = module_netanal_outputs["results"][0]["upward"]
+netanal_measured = module_netanal_outputs["results"]
 netanal_frequencies = netanal_measured["frequencies"]
 netanal_iq_counts = netanal_measured["iq_counts"]
 
@@ -256,7 +264,7 @@ class rfmux stores in a file:
 
 ```python
 print(module_netanal_outputs.keys())
-print(module_netanal_outputs['results'][0]['upward'].keys())
+print(module_netanal_outputs['results'].keys())
 ```
 
 ```python
@@ -268,7 +276,7 @@ from rfmux.tuning import ResonanceSearch
 
 # or, for example, if you have loaded your netanal from a file:
 #   netanal = store.load(".../netanal_20260904_142231.pkl")
-#   netanal_measured = netanal[crs.module[MODULE].index()]["results"][0]["upward"]
+#   netanal_measured = netanal[crs.module[MODULE].index()]["results"]
 stored_search = ResonanceSearch.from_dict(netanal_measured["resonance_search"])
 print(stored_search)
 print(f"the file holding both: {store.saved_path(netanal)}")
@@ -413,7 +421,7 @@ coarse_netanal = await crs.take_netanal(
     nsamps=10, max_chans=1023, module=MODULE)
 
 for label, netanal_to_search in (("coarse", coarse_netanal), ("fine", netanal)):
-    measured = netanal_to_search[crs.module[MODULE].index()]["results"][0]["upward"]
+    measured = netanal_to_search[crs.module[MODULE].index()]["results"]
     frequencies = measured["frequencies"]
     n_resonances = len(find_resonances(
         frequencies, measured["iq_counts"],
@@ -475,6 +483,5 @@ TODO: revisit this once we have updated periscope to use the new code architectu
 | Expected / Min Dip Depth / Min Q / Max Q fields | the same-named arguments |
 | The red dashed markers on the plot | `ResonanceSearch.candidates` |
 | The resonance list the multisweep dialog inherits | `ResonanceSearch.to_catalog(...)` |
-
 
 

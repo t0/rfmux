@@ -6,10 +6,13 @@ ends, because a reader resolving ``schedule.steps[iteration]`` has to agree with
 packer about what a step means, and two files agreeing about one contract is one
 file too many.
 
-``take_netanal`` packs through :func:`pack_netanal` into the same shape, so
-every driver in the package returns one container shape. What sits under a
-direction differs — a sweep has a section per resonator, a netanal has the one
-trace it measured — which is what ``measurement`` is in the output to say.
+``take_netanal`` packs through :func:`pack_netanal` into the same container, so
+every driver in the package returns one container shape: keyed by module, each
+module's output recording ``schema_version``, ``measurement``, ``module``,
+``call_params`` and ``results``. What ``results`` holds differs — a sweep has an
+amplitude iteration per step, holding a direction per sweep, holding a section
+per resonator; a netanal has the one trace it measured, directly — which is
+what ``measurement`` is in the output to say.
 
 This lived in :mod:`rfmux.tuning.multisweep_amplitudes` while a schedule was the
 only thing that produced it. It is not the schedule's shape any more — it is every
@@ -28,6 +31,8 @@ from .multisweep_amplitudes import AmplitudeSchedule, _named
 
 __all__ = [
     "RESULTS_SCHEMA_VERSION",
+    "DIRECTIONS",
+    "resolve_direction",
     "pack_multisweep",
     "pack_netanal",
     "merge_modules",
@@ -73,13 +78,20 @@ __all__ = [
 #    what lets find_bias_points work off the sweep alone, and why this is a bump
 #    rather than a field quietly filling in: a reader that needs the catalog
 #    cannot absorb a 5 that has none.
-RESULTS_SCHEMA_VERSION = 6
+#
+# 7: a netanal's 'results' is the trace itself. It used to sit under an
+#    iteration and a direction, borrowed from multisweep so that the walk down
+#    to a measurement would be the same for both. But take_netanal has no
+#    amplitude schedule and measures one direction per call, so those two levels
+#    could only ever be 0 and the direction — two constants a reader had to type
+#    and could get wrong. The direction is still recorded, beside the arrays as
+#    'sweep_direction', where it says what was measured rather than indexes it.
+RESULTS_SCHEMA_VERSION = 7
 
 
-# The iteration a netanal's one trace sits at. Not a placeholder: a netanal is
-# one amplitude sweeping upward in frequency, so 0 is its number in a schedule of
-# length one.
-SINGLE_SWEEP_ITERATION = 0
+# The directions a sweep can run in. Here rather than in either driver, because
+# both record one in the shape this module defines.
+DIRECTIONS = ("upward", "downward")
 
 
 def _call_params(
@@ -132,11 +144,11 @@ def _packed(
     flattened the single-module case would make the common script differ from
     the general one.
 
-    *measurement* names the driver: ``"multisweep"`` or ``"netanal"``. Two
-    outputs that are structurally identical down to the direction and then are
-    not — a netanal has no sections — so the readers below need a way to tell
-    that is not sniffing ``call_params`` for ``span_hz``, which is the kind of
-    test this shape exists to delete.
+    *measurement* names the driver: ``"multisweep"`` or ``"netanal"``. The two
+    agree on everything down to ``results`` and part company inside it — a sweep
+    keys by amplitude iteration, a netanal is the trace — so the readers below
+    need a way to tell them apart that is not sniffing ``call_params`` for
+    ``span_hz``, which is the kind of test this shape exists to delete.
     """
     return {
         module_id: {
@@ -231,12 +243,36 @@ def pack_multisweep(
     )
 
 
+def resolve_direction(sweep_direction) -> str:
+    """One direction, validated — what a netanal measures per call.
+
+    A netanal is a comb: up to a thousand tones are on at once, so a call
+    sweeps the band once, in one direction, and both directions is two calls
+    whose results a caller keeps side by side. Hence one string in and one
+    string out, and a sequence refused with a message that says so rather than
+    quietly measuring its first element.
+    """
+    if sweep_direction in DIRECTIONS:
+        return sweep_direction
+
+    if isinstance(sweep_direction, str):
+        raise ValueError(
+            f"Invalid sweep_direction: {sweep_direction!r}. Must be one of "
+            f"{DIRECTIONS}."
+        )
+
+    raise TypeError(
+        f"sweep_direction must be one of {DIRECTIONS}, got "
+        f"{type(sweep_direction).__name__}. A netanal measures the band once "
+        f"per call, so both directions is two calls."
+    )
+
+
 def pack_netanal(
     trace: Mapping,
     *,
     module_id: str,
     module: int,
-    sweep_direction: str = "upward",
     amp: float,
     fmin: float,
     fmax: float,
@@ -245,16 +281,17 @@ def pack_netanal(
     max_chans: int,
     max_span: float,
     rotate_phase_to_0: bool,
+    sweep_direction: str,
     requested_module=None,
 ) -> dict:
     """Assemble what ``take_netanal`` returns.
 
-    The same shape :func:`pack_multisweep` builds, holding the one wideband
-    trace a netanal is where a sweep holds a section per resonator. The
-    iteration and
-    direction levels are kept — a netanal is one amplitude sweeping upward in
-    frequency, which is what iteration 0 of ``"upward"`` means — so walking down
-    to a measurement is the same walk whichever driver wrote the file.
+    The container :func:`pack_multisweep` builds, with the one wideband trace a
+    netanal is under ``results`` where a sweep has its amplitude iterations. No
+    iteration and no direction key above it: a netanal has no amplitude
+    schedule and measures one direction per call, so those levels could only
+    ever be constants a reader had to type. Which direction it was is beside
+    the arrays, in the trace's own ``sweep_direction``.
 
     Args:
         trace: the ``frequencies``/``iq_counts``/``iq_volts`` arrays and the
@@ -262,6 +299,9 @@ def pack_netanal(
         module_id: the board-and-module identifier this comes back under, from
             ``crs.module[m].index()``.
         module: the module actually measured — resolved, never None.
+        sweep_direction: the direction measured, recorded in ``call_params``.
+            The copy the trace carries is what a reader of the arrays wants;
+            this one is the argument, alongside every other argument.
         requested_module: the ``module`` argument as the caller passed it, which
             is the list itself for a call that fanned out over several. Recorded
             as-is, because *call_params* says what was asked for and not what
@@ -281,6 +321,7 @@ def pack_netanal(
         "max_chans": int(max_chans),
         "max_span": float(max_span),
         "rotate_phase_to_0": bool(rotate_phase_to_0),
+        "sweep_direction": resolve_direction(sweep_direction),
         "module": requested_module,
     }
 
@@ -288,7 +329,7 @@ def pack_netanal(
         module_id,
         module,
         call_params,
-        {SINGLE_SWEEP_ITERATION: {sweep_direction: dict(trace)}},
+        dict(trace),
         measurement="netanal",
     )
 
@@ -354,20 +395,20 @@ def _refuse_container(obj, *, what: str = "sweep result", variable: str = "sweep
 def _refuse_netanal(obj) -> None:
     """Raise if handed a netanal's output where a sweep's was wanted.
 
-    Everything above a direction is identical between the two, and below it a
-    netanal has the arrays where a sweep has ``{name: section}``. So a reader
+    Everything down to ``results`` is identical between the two, and a netanal
+    has the arrays there where a sweep has its amplitude iterations. So a reader
     that walked a netanal would find ``frequencies`` and ``iq_counts`` where it
-    expected resonator names and hand back arrays dressed as sweeps — no
+    expected iteration numbers and hand back arrays dressed as sweeps — no
     exception anywhere, just results that are wrong. Hence a guard rather than
-    a docstring: this is the one confusion the shared shape makes possible,
+    a docstring: this is the one confusion the shared container makes possible,
     and it is silent.
     """
     if isinstance(obj, Mapping) and obj.get("measurement") == "netanal":
         raise TypeError(
             "This is a netanal, not a sweep. A netanal measures one wideband "
             "trace rather than a section per resonator, so there is nothing "
-            "here to look up by name — its arrays are "
-            "netanal['results'][0]['upward']. To find resonances in it, use "
+            "here to look up by name — its arrays are netanal['results']. To "
+            "find resonances in it, use "
             "rfmux.tuning.find_resonances_in_netanal()."
         )
 

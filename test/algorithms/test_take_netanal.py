@@ -2,23 +2,30 @@
 
 Two tiers. The portable half exercises :func:`pack_netanal` and the guards that
 keep a netanal out of the sweep readers — a module's output is shaped the same
-as ``multisweep``'s down to the direction and then is not, and that is the one
-confusion the shared shape makes possible.
+as ``multisweep``'s down to ``results`` and then is not, and that is the one
+confusion the shared container makes possible.
 
 The acquisition half runs the driver against a MockCRS. It is there for the
 properties the packing cannot show on its own: that the frequency grid comes
-back whole, once each and in order, across however many NCO settings it took to
-measure. Chunks used to overlap by a point so their phases could be stitched
-together, so "npoints in, npoints out" is a claim worth a test.
+back whole, once each and in the direction that was swept, across however many
+NCO settings it took to measure. Chunks used to overlap by a point so their
+phases could be stitched together, so "npoints in, npoints out" is a claim worth
+a test.
 """
 
 import asyncio
+import copy
 
 import numpy as np
 import pytest
 
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule, fit_sweeps, netanal_trace
+from rfmux.tuning import (
+    AmplitudeSchedule,
+    find_resonances_in_netanal,
+    fit_sweeps,
+    netanal_trace,
+)
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
@@ -29,9 +36,11 @@ from rfmux.tuning.sweep_results import (
 MODULE = 1
 
 
-def a_netanal(npoints=8, module=MODULE):
+def a_netanal(npoints=8, module=MODULE, sweep_direction="upward"):
     """One module's netanal, packed the way the driver packs it."""
     frequencies = np.linspace(1.0e9, 1.5e9, npoints)
+    if sweep_direction == "downward":
+        frequencies = frequencies[::-1]
     iq = np.ones(npoints, dtype=complex)
     return pack_netanal(
         {
@@ -39,7 +48,7 @@ def a_netanal(npoints=8, module=MODULE):
             "iq_counts": iq,
             "iq_volts": iq * 1e-7,
             "sweep_amplitude": 1e-3,
-            "sweep_direction": "upward",
+            "sweep_direction": sweep_direction,
         },
         module_id=f"crs0000_rmod{module}",
         module=module,
@@ -51,6 +60,7 @@ def a_netanal(npoints=8, module=MODULE):
         max_chans=1023,
         max_span=500e6,
         rotate_phase_to_0=True,
+        sweep_direction=sweep_direction,
         requested_module=module,
     )
 
@@ -69,7 +79,7 @@ class TestPacking:
 
         # A literal, not the constant: bumping the version should mean editing
         # a test, because it is a claim about what readers of older files need.
-        assert module_netanal["schema_version"] == 6
+        assert module_netanal["schema_version"] == 7
         assert module_netanal["schema_version"] == RESULTS_SCHEMA_VERSION
         assert module_netanal["measurement"] == "netanal"
         assert module_netanal["module"] == 1
@@ -86,16 +96,25 @@ class TestPacking:
             "max_chans": 1023,
             "max_span": 500e6,
             "rotate_phase_to_0": True,
+            "sweep_direction": "upward",
             "module": 1,
         }
 
-    def test_the_trace_sits_where_a_sweep_does(self):
-        """One amplitude, sweeping upward: iteration 0 of 'upward'."""
+    def test_the_trace_is_the_results(self):
+        """No iteration and no direction above it: a netanal measures once."""
         module_netanal = a_netanal()["crs0000_rmod1"]
 
-        assert list(module_netanal["results"]) == [0]
-        assert list(module_netanal["results"][0]) == ["upward"]
-        assert netanal_trace(module_netanal) is module_netanal["results"][0]["upward"]
+        assert netanal_trace(module_netanal) is module_netanal["results"]
+
+    def test_a_direction_is_one_direction(self):
+        """Both directions is two calls, so a sequence is refused rather than
+        having its first element quietly measured."""
+        with pytest.raises(TypeError, match="two calls"):
+            a_netanal(sweep_direction=["upward", "downward"])
+
+    def test_an_unknown_direction_is_refused(self):
+        with pytest.raises(ValueError, match="Invalid sweep_direction"):
+            a_netanal(sweep_direction="sideways")
 
     def test_the_trace_carries_counts_volts_and_what_it_was_probed_at(self):
         trace = netanal_trace(a_netanal()["crs0000_rmod1"])
@@ -267,4 +286,65 @@ class TestTheDriver:
         assert params["npoints"] == self.NPOINTS
         assert params["max_span"] == self.MAX_SPAN
         assert params["amp"] == 1e-3
+        assert params["sweep_direction"] == "upward"
         assert params["module"] == MODULE
+
+
+@pytest.mark.slow_acquisition
+class TestDownward(TestTheDriver):
+    """The same band, measured from the top down.
+
+    Inherits every claim above, so a downward netanal has to satisfy them too —
+    bar the three that name the direction or the ends of the band, overridden
+    below. The chunks are visited in reverse and the tones inside them
+    programmed in reverse, so what this pins is that reversing the traversal
+    still measures the whole grid, once each, and hands the finder something it
+    can read.
+    """
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def netanal(cls, mock_crs):
+        loop, crs = mock_crs
+        return crs, loop.run_until_complete(crs.take_netanal(
+            amp=1e-3, fmin=cls.FMIN, fmax=cls.FMAX, npoints=cls.NPOINTS,
+            nsamps=1, max_chans=128, max_span=cls.MAX_SPAN,
+            sweep_direction="downward", module=MODULE, save=False,
+        ))
+
+    def test_the_trace_is_sorted_by_frequency(self, netanal):
+        """Descending: the order it was measured in, as for a downward sweep."""
+        crs, result = netanal
+        trace = netanal_trace(result[crs.module[MODULE].index()])
+
+        assert np.all(np.diff(trace["frequencies"]) < 0)
+        assert trace["sweep_direction"] == "downward"
+
+    def test_it_spans_the_band_it_was_asked_for(self, netanal):
+        crs, result = netanal
+        frequencies = netanal_trace(result[crs.module[MODULE].index()])["frequencies"]
+
+        # Highest first, and dithered by tens of Hz off the grid at each end.
+        assert frequencies[0] == pytest.approx(self.FMAX, abs=1e3)
+        assert frequencies[-1] == pytest.approx(self.FMIN, abs=1e3)
+
+    def test_call_params_records_what_it_was_called_with(self, netanal):
+        crs, result = netanal
+        params = result[crs.module[MODULE].index()]["call_params"]
+
+        assert params["sweep_direction"] == "downward"
+
+    def test_the_resonance_finder_reads_it(self, netanal):
+        """A descending trace is flipped on the way into the finder, which wants
+        ascending frequencies, so the search carries the grid it really searched
+        and candidate.index indexes that."""
+        crs, result = netanal
+        # A copy: the finder writes its search into the netanal, and this
+        # fixture is shared with the tests above.
+        module_netanal = copy.deepcopy(result[crs.module[MODULE].index()])
+        frequencies = netanal_trace(module_netanal)["frequencies"]
+
+        search = find_resonances_in_netanal(module_netanal, save=False)
+
+        assert np.array_equal(search.frequencies_hz, frequencies[::-1])
+        assert np.all(np.diff(search.frequencies_hz) > 0)

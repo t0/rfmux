@@ -369,8 +369,9 @@ Two smaller follow-ups it should pick up:
 ## Rewire Periscope onto the netanal container shape
 
 `take_netanal` now returns `{module_id: {schema_version, measurement, module,
-call_params, results}}` like every other driver, with the trace at
-`results[0]["upward"]` and its arrays named `iq_counts`/`iq_volts`. That is a
+call_params, results}}` like every other driver, with the trace *at* `results`
+and its arrays named `iq_counts`/`iq_volts`. It also takes `sweep_direction`,
+one direction per call, and a downward netanal comes back descending. That is a
 breaking change to the shape Periscope reads, and Periscope was deliberately
 left on the old one:
 

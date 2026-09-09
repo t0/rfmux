@@ -59,9 +59,7 @@ from ...core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from ...core.transferfunctions import ALLOWED_NCO_BANDWIDTH_HZ, convert_roc_to_volts
 from ...tuning import store
 from ...tuning.multisweep_amplitudes import AmplitudeSchedule, resolve_amplitudes
-from ...tuning.sweep_results import merge_modules, pack_multisweep
-
-DIRECTIONS = ("upward", "downward")
+from ...tuning.sweep_results import DIRECTIONS, merge_modules, pack_multisweep
 
 
 @dataclass(frozen=True, slots=True)
@@ -701,7 +699,7 @@ async def multisweep(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 6,
+                    "schema_version": 7,
                     "measurement": "multisweep",
                     "module": 2,           # resolved, never None
                     "call_params": {...},  # verbatim, as this macro was called,

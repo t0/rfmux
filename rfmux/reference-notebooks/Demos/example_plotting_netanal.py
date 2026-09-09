@@ -208,7 +208,9 @@ def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title
 
             panels[-1].set_xlabel("frequency [MHz]")
 
-            span = f"{frequencies[0] / 1e6:.1f}–{frequencies[-1] / 1e6:.1f} MHz"
+            # min/max, not the ends: a downward netanal comes back descending,
+            # in the order it was measured, and the band is still the band.
+            span = f"{frequencies.min() / 1e6:.1f}–{frequencies.max() / 1e6:.1f} MHz"
             _titled(fig, title if title is not None else (
                 f"network analysis{f' — {label}' if label else ''}: "
                 f"{len(frequencies)} points over {span}"

@@ -116,16 +116,22 @@ netanal = await crs.take_netanal(
     module=MODULE,
 )
 
-# Select one module, then amplitude step 0 and its upward trace.
-# call_params holds the measurement settings; results holds the arrays.
+# Select one module. call_params holds the measurement settings; results holds
+# the arrays — a netanal measures the band once, so the trace is what is there.
 module_netanal_outputs = netanal[crs.module[MODULE].index()]
-netanal_measured = module_netanal_outputs["results"][0]["upward"]
+netanal_measured = module_netanal_outputs["results"]
 netanal_frequencies = netanal_measured["frequencies"]
 netanal_iq_counts = netanal_measured["iq_counts"]
 
 print(f"{len(netanal_frequencies):,} points, "
       f"{np.mean(np.diff(netanal_frequencies))/1e3:.2f} kHz spacing")
 ```
+
+`sweep_direction` decides which end of the band the measurement starts at, and
+defaults to `"upward"`. A downward netanal visits the same points and comes back
+descending — the order it measured them in — so `frequencies[0]` is the top of
+the band. One direction per call: `find_resonances_in_netanal()` reads either,
+and to compare the two you call `take_netanal()` twice and keep both results.
 
 Plot magnitude and phase across the band. Magnitude is normalized by its median
 to make the dips easier to compare. These cells show the plotting steps directly;
@@ -178,7 +184,7 @@ resonance_search = find_resonances_in_netanal(
 ```
 
 The call stores a plain search dictionary at
-`module_netanal_outputs["results"][0]["upward"]["resonance_search"]`.
+`module_netanal_outputs["results"]["resonance_search"]`.
 With autosave enabled, it also updates the measurement file.
 
 Use `ResonanceSearch.from_dict()` to rebuild the search object, including after
@@ -187,9 +193,9 @@ loading a saved netanal:
 ```python
 from rfmux.tuning import ResonanceSearch
 
-# After loading a file, follow the same module → step → direction path.
+# After loading a file, follow the same module → results path.
 # netanal = store.load("path/to/netanal.pkl")
-# netanal_measured = netanal[crs.module[MODULE].index()]["results"][0]["upward"]
+# netanal_measured = netanal[crs.module[MODULE].index()]["results"]
 stored_search = ResonanceSearch.from_dict(netanal_measured["resonance_search"])
 ```
 
@@ -317,7 +323,7 @@ coarse_netanal = await crs.take_netanal(
     max_chans=1023,
     module=MODULE,
 )
-coarse_trace = coarse_netanal[crs.module[MODULE].index()]["results"][0]["upward"]
+coarse_trace = coarse_netanal[crs.module[MODULE].index()]["results"]
 coarse_search = find_resonances(
     coarse_trace["frequencies"], coarse_trace["iq_counts"],
     min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,

@@ -89,9 +89,9 @@ netanal = store.load(netanal_path)
 module_id, = [key for key in netanal if key != store.METADATA_KEY]
 module_netanal = netanal[module_id]
 
-# results is keyed by amplitude step, then sweep direction.
-# A network analysis has one trace here, with no resonator-name layer.
-trace = module_netanal["results"][0]["upward"]
+# A network analysis measures the band once, so results is the trace itself —
+# no amplitude step, no direction key and no resonator-name layer above it.
+trace = module_netanal["results"]
 
 print(f"module id  : {module_id}")
 print(f"called with: {module_netanal['call_params']}")

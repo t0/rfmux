@@ -682,7 +682,7 @@ async def test_the_result_carries_a_schema_version(sweeps):
     result = await drive(FakeCRS(), a_catalog())
     # A literal, not the constant: bumping the version should mean editing a
     # test, because it is a claim that readers of older files need to know.
-    assert result["schema_version"] == 6
+    assert result["schema_version"] == 7
 
 
 @pytest.mark.asyncio

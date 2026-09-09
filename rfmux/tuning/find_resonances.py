@@ -12,10 +12,10 @@ Two entry points, and the split between them is the point of the module:
 ``find_resonances_in_netanal(module_netanal, ...)``
     A convenience wrapper over the above: it unpacks one module's output out of
     what ``crs.take_netanal()`` returned — ``netanal[module_id]``, one module at
-    a time as everywhere else in this package — and searches the trace in it. It
-    also writes the search into that output, beside the trace it searched, so
-    saving is an update to the netanal file rather than a second file to keep in
-    step with it.
+    a time as everywhere else in this package — and searches the trace in it,
+    either direction. It also writes the search into that output, beside the
+    trace it searched, so saving is an update to the netanal file rather than a
+    second file to keep in step with it.
 
 A third function comes at the same question from the other end, once the array
 has been swept properly:
@@ -600,10 +600,15 @@ def _count_pass(candidates, expected: int, who: str):
 def netanal_trace(module_netanal) -> dict:
     """The one trace inside one module's netanal output.
 
-    A netanal is one amplitude sweeping upward in frequency, so its arrays live
-    at ``results[0]["upward"]`` — the same walk a sweep takes to reach a
-    section, one level shorter because there is nothing to key by name. This is
-    that walk, with an error worth reading when the output is not a netanal's.
+    A netanal measures the band once, so its arrays are ``results`` itself. The
+    index is trivial; what this is for is the error when the output is not a
+    netanal's. A sweep's ``results`` is a dict at the same place, keyed by
+    amplitude iteration, so indexing it directly finds no ``frequencies`` and
+    says nothing about why.
+
+    The dict returned is the one inside *module_netanal*, not a copy — writing
+    to it, as :func:`find_resonances_in_netanal` does with ``resonance_search``,
+    writes into the netanal.
 
     Args:
         module_netanal: one module's netanal output, ``netanal[module_id]``.
@@ -624,8 +629,8 @@ def netanal_trace(module_netanal) -> dict:
             f"indexed by module — got {got}."
         )
     # Strictly, rather than treating a missing 'measurement' as permission: a
-    # sweep's output walks to this same depth and holds {name: section} there,
-    # so a tolerant check would hand back a dict of sections dressed as a trace.
+    # sweep's output has a dict at 'results' too, so a tolerant check would hand
+    # back its amplitude iterations dressed as a trace.
     if module_netanal.get("measurement") != "netanal":
         raise TypeError(
             f"This is a "
@@ -635,10 +640,10 @@ def netanal_trace(module_netanal) -> dict:
             f"rfmux.tuning.sweep_results."
         )
 
-    for by_direction in module_netanal["results"].values():
-        for trace in by_direction.values():
-            return trace
-    raise ValueError("This netanal has no trace in it — nothing was measured.")
+    trace = module_netanal["results"]
+    if not trace:
+        raise ValueError("This netanal has no trace in it — nothing was measured.")
+    return trace
 
 
 def find_resonances_in_netanal(
@@ -679,6 +684,14 @@ def find_resonances_in_netanal(
         trace = netanal_trace(module_netanal)
         search = ResonanceSearch.from_dict(trace["resonance_search"])
 
+    A downward netanal is searched too. Its trace comes back descending, which
+    is the order it was measured in and the opposite of what a peak finder
+    reads, so it is flipped on the way in. The search then carries the ascending
+    grid it actually searched — ``search.frequencies_hz`` — and
+    ``candidate.index`` indexes *that*, not the descending array beside it in
+    the netanal. Plot a candidate against the search's own arrays and the two
+    directions look alike; index the netanal's with it and they do not.
+
     ``label`` names the trace in warnings, and defaults to the module this
     output came from, so a script working through eight of them says which one
     complained. It is also the name a *first* save puts on the file — a netanal
@@ -699,10 +712,18 @@ def find_resonances_in_netanal(
     # Every shape but one module's netanal is refused in here, container first.
     trace = netanal_trace(module_netanal)
 
+    frequencies = np.asarray(trace["frequencies"])
+    iq_counts = np.asarray(trace["iq_counts"])
+    # Read off the array rather than off 'sweep_direction': the finder needs
+    # ascending frequencies, and whether it has them is a property of the array
+    # and not of a label that could disagree with it.
+    if frequencies.size > 1 and frequencies[0] > frequencies[-1]:
+        frequencies, iq_counts = frequencies[::-1], iq_counts[::-1]
+
     module = module_netanal.get("module")
     search = find_resonances(
-        trace["frequencies"],
-        trace["iq_counts"],
+        frequencies,
+        iq_counts,
         label=label or (f"module {module}" if module is not None else None),
         **kwargs,
     )
@@ -711,11 +732,14 @@ def find_resonances_in_netanal(
     #
     # The whole to_dict, searched trace included, so what goes into the netanal
     # is a complete ResonanceSearch dict that ResonanceSearch.from_dict reads
-    # with no help. It looks like it duplicates the arrays beside it and mostly
-    # does not: the search's frequencies *are* the trace's array, which pickle
-    # stores once and restores shared, so the file grows by the dB copy of the
-    # magnitudes and nothing else. Cheap enough not to trade for a block that
-    # only means something to a reader who knows to put the arrays back.
+    # with no help. It looks like it duplicates the arrays beside it and for an
+    # upward netanal mostly does not: the search's frequencies *are* the trace's
+    # array, which pickle stores once and restores shared, so the file grows by
+    # the dB copy of the magnitudes and nothing else. A downward netanal was
+    # flipped above, and a reversed view pickles as a copy, so its file also
+    # carries a second frequency array. Cheap enough either way not to trade for
+    # a block that only means something to a reader who knows to put the arrays
+    # back.
     trace["resonance_search"] = search.to_dict()
     # label, not the derived one: a module number belongs in a warning, not in
     # the name of a file that may hold seven other modules. No module= either —

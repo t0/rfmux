@@ -72,20 +72,16 @@ def a_netanal_output(module=1, npoints=4, iq=None):
     if iq is None:
         iq = np.ones(npoints, dtype=complex)
     return {
-        "schema_version": 4,
+        "schema_version": 7,
         "measurement": "netanal",
         "module": module,
         "call_params": {"amp": 1e-3, "fmin": 1e9, "fmax": 2e9},
         "results": {
-            0: {
-                "upward": {
-                    "frequencies": frequencies,
-                    "iq_counts": iq,
-                    "iq_volts": iq * 1e-7,
-                    "sweep_amplitude": 1e-3,
-                    "sweep_direction": "upward",
-                }
-            }
+            "frequencies": frequencies,
+            "iq_counts": iq,
+            "iq_volts": iq * 1e-7,
+            "sweep_amplitude": 1e-3,
+            "sweep_direction": "upward",
         },
     }
 
@@ -459,7 +455,7 @@ def a_searchable_netanal(module=2):
     frequencies = np.linspace(0.999e9, 1.001e9, 801)
     iq = 1 - 0.9 / (1 + 2j * 1e4 * (frequencies - 1e9) / 1e9)
     netanal = a_netanal(module, npoints=801, iq=iq)
-    netanal[f"crs0042_rmod{module}"]["results"][0]["upward"]["frequencies"] = frequencies
+    netanal[f"crs0042_rmod{module}"]["results"]["frequencies"] = frequencies
     return netanal
 
 
@@ -505,7 +501,7 @@ def test_searching_a_saved_netanal_updates_the_file_it_came_from(output_dir):
     reloaded = store.load(path)
     assert len(stored_search(reloaded["crs0042_rmod2"])) >= 1
     # The measurement is still all there beside the search.
-    assert reloaded["crs0042_rmod2"]["results"][0]["upward"]["iq_counts"].size == 801
+    assert reloaded["crs0042_rmod2"]["results"]["iq_counts"].size == 801
 
 
 def test_searching_one_module_leaves_the_others_in_the_file(output_dir):

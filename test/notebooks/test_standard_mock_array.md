@@ -140,7 +140,7 @@ assert np.all(np.abs(found_hz - tones_hz) < 50e3)
 ```
 
 ```python
-trace = module_netanal["results"][0]["upward"]
+trace = module_netanal["results"]
 fig, ax = plt.subplots(figsize=(9, 3))
 ax.plot(trace["frequencies"] / 1e6, 20 * np.log10(np.abs(trace["iq_counts"])), lw=0.6)
 for f in found_hz:

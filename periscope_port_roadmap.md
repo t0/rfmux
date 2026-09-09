@@ -23,7 +23,7 @@ whole sequence against the standard mock array over RPC, in the quick tier).
 
 | Step | Call | Comes back as | Hooks a GUI wants |
 |---|---|---|---|
-| Network analysis | `crs.take_netanal(amp, fmin, fmax, npoints, nsamps, module=, progress_callback=, data_callback=, save=, label=)` | container, trace at `[module_id]["results"][0]["upward"]` | `data_callback(module, freqs, amps, phases)` for live plotting |
+| Network analysis | `crs.take_netanal(amp, fmin, fmax, npoints, nsamps, sweep_direction=, module=, progress_callback=, data_callback=, save=, label=)` | container, trace at `[module_id]["results"]` (descending when `sweep_direction="downward"`) | `data_callback(module, freqs, amps, phases)` for live plotting |
 | Find resonances | `find_resonances_in_netanal(module_netanal, min_dip_depth_db=, min_Q=, max_Q=, min_separation_hz=, require_isolation=, expected_resonances=)` | `ResonanceSearch`: `candidates`, `rejected` (with `rejected_because`), `frequencies_hz`, `magnitude_db`; written into the netanal as `trace["resonance_search"]` | `candidate.index` into the trace, for markers |
 | Seed the array | `search.to_catalog(module, amplitude, names=)` or `ResonatorCatalog.from_frequencies(...)` | `ResonatorCatalog` (module-scoped, named resonators, one `BiasPoint` each) | `copy()` for workers; `update_bias_point()`; `remove()`; `to_dict`/`from_dict`/`to_csv`/`from_csv` |
 | Amplitude schedule | `AmplitudeSchedule()` / `(x)` / `.explicit()` / `.ramp()` / `.multiplicative()` | frozen dataclass | `.describe(catalog, n_directions, dac_scale_dbm)` and `.validate(...)` for a live dialog preview; `.resolve_steps()` |

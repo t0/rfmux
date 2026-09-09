@@ -10,6 +10,8 @@ import pytest
 
 gd = pytest.importorskip("pygetdata")
 
+pytestmark = pytest.mark.portable
+
 from rfmux.core.transferfunctions import decimated_stream_delay_s
 from rfmux.streamer import (ReadoutPacket, Timestamp, TimestampSource,
                             SS_PER_SECOND)
@@ -30,9 +32,9 @@ def _packet(fir_stage: int, seconds: int, ss: int) -> ReadoutPacket:
 
 
 def test_timebase_takes_out_the_stage_delay_and_keeps_the_raw_stamp(tmp_path):
+    path = str(tmp_path / "board")
     board = BoardStats()
-    board.dirfile = gd.dirfile(str(tmp_path / "board"),
-                               gd.CREAT | gd.RDWR | gd.EXCL)
+    board.dirfile = gd.dirfile(path, gd.CREAT | gd.RDWR | gd.EXCL)
     mod = ModuleStats()
     setup_dirfile_for_module(board, mod, 0, [range(0, 2)])
     df, fields = board.dirfile, mod.dirfile_fields
@@ -42,8 +44,10 @@ def test_timebase_takes_out_the_stage_delay_and_keeps_the_raw_stamp(tmp_path):
     for frame, (stage, s, ss) in enumerate(stamps):
         write_readout_frame(df, fields, frame, _packet(stage, s, ss),
                             [range(0, 2)])
-    df.flush()
+    df.close()
 
+    # Read back as a consumer would: a fresh read-only handle.
+    df = gd.dirfile(path, gd.RDONLY)
     timebase = df.getdata("m01_timebase", gd.FLOAT64, num_frames=2)
     raw = (df.getdata("m01_ts_sbs", gd.FLOAT64, num_frames=2)
            + df.getdata("m01_ts_ss", gd.FLOAT64, num_frames=2) / SS_PER_SECOND)

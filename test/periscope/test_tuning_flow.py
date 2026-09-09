@@ -125,12 +125,12 @@ def _run_netanal(crs, module, qt_app, amplitude=0.001, npoints=400):
     completed, errors, updates = [], [], []
     signals.completed.connect(completed.append)
     signals.error.connect(errors.append)
-    signals.data_update.connect(
-        lambda mod, amp, block: updates.append((mod, amp, block)))
+    signals.data_update.connect(lambda mod, trace: updates.append((mod, trace)))
 
     task = NetworkAnalysisTask(
-        crs=crs, module=module, signals=signals, amplitude=amplitude,
-        params={"fmin": FMIN, "fmax": FMAX, "npoints": npoints, "nsamps": 10},
+        crs=crs, module=module, signals=signals,
+        params={"amp": amplitude, "fmin": FMIN, "fmax": FMAX,
+                "npoints": npoints, "nsamps": 10},
     )
     task.start()
     assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
@@ -157,9 +157,10 @@ def test_network_analysis_task_emits_the_measured_trace(board, qt_app):
     assert errors == []
     assert updates, "no data reached the panel"
 
-    module, amplitude, trace = updates[-1]
-    assert (module, amplitude) == (catalog.module, 0.001)
+    module, trace = updates[-1]
+    assert module == catalog.module
     assert set(trace) >= {"frequencies", "iq_counts"}
+    assert trace["sweep_amplitude"] == 0.001
     assert np.iscomplexobj(trace["iq_counts"])
     assert len(trace["frequencies"]) == len(trace["iq_counts"]) == 200
 
@@ -168,21 +169,20 @@ def test_network_analysis_task_emits_the_measured_trace(board, qt_app):
 
 
 def test_network_analysis_panel_holds_the_trace(board, qt_app):
-    """The panel stores what it was handed, keyed by probe amplitude, and draws
-    magnitude from the measured IQ."""
+    """The panel stores what it was handed and draws magnitude from the
+    measured IQ."""
     _, crs, catalog = board
     panel = NetworkAnalysisPanel(modules=[catalog.module])
-    panel.original_params = {"amps": [0.001]}
 
     errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
     assert errors == []
-    for module, amplitude, trace in updates:
-        panel.update_data(module, amplitude, trace)
+    for module, trace in updates:
+        panel.update_data(module, trace)
 
-    stored = panel.netanal_traces[catalog.module][0.001]
-    assert stored is updates[-1][2]
+    stored = panel.netanal_traces[catalog.module]
+    assert stored is updates[-1][1]
 
-    curve = panel.plots[catalog.module]["amp_curves"][0.001]
+    curve = panel.plots[catalog.module]["amp_curve"]
     drawn_freqs, drawn_magnitude = curve.getData()
     assert np.allclose(drawn_freqs, stored["frequencies"])
     assert np.allclose(drawn_magnitude, np.abs(stored["iq_counts"]))
@@ -226,29 +226,43 @@ def test_multisweep_task_finishes_without_error(board, qt_app):
     assert finished == [True]
 
 
-def test_export_holds_one_tagged_sweep_per_amplitude(board, qt_app):
-    """A multi-amplitude export holds one sweep per probe amplitude, each
-    tagged with its own, so a loader pairing by the tag rather than by
-    position gets every curve on the power it was taken at."""
-    _, crs, catalog = board
-    amplitudes = [0.001, 0.004]
-
+def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):
+    """A netanal panel holding one measured sweep of the standard array."""
     panel = NetworkAnalysisPanel(modules=[catalog.module])
-    panel.original_params = {"amps": amplitudes}
-    panel.current_params = {"amps": amplitudes}
+    panel.current_params = {"amp": amplitude}
     panel.dac_scales = {catalog.module: -0.5}
 
-    for amplitude in amplitudes:
-        errors, _, updates = _run_netanal(
-            crs, catalog.module, qt_app, amplitude=amplitude, npoints=60)
-        assert errors == []
-        panel.update_data(*updates[-1])
+    errors, _, updates = _run_netanal(
+        crs, catalog.module, qt_app, amplitude=amplitude, npoints=npoints)
+    assert errors == []
+    panel.update_data(*updates[-1])
+    return panel
 
-    sweeps = [value for key, value in
-              panel.build_export_dict()["modules"][catalog.module].items()
-              if isinstance(key, int)]
 
-    assert [sweep["sweep_amplitude"] for sweep in sweeps] == amplitudes
-    for sweep, amplitude in zip(sweeps, amplitudes):
-        measured = panel.netanal_traces[catalog.module][amplitude]["iq_counts"]
-        assert np.allclose(sweep["magnitude"]["counts"]["raw"], np.abs(measured))
+def test_export_holds_the_measured_sweep(board, qt_app):
+    """A netanal is one sweep at one probe amplitude, and the export says which:
+    the sweep carries the amplitude it was taken at, and its magnitude is the
+    measured IQ's, not a shape rebuilt beside it."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+
+    sweep = panel.build_export_dict()["modules"][catalog.module]["sweep"]
+
+    assert sweep["sweep_amplitude"] == 0.004
+    measured = panel.netanal_traces[catalog.module]["iq_counts"]
+    assert np.allclose(sweep["magnitude"]["counts"]["raw"], np.abs(measured))
+
+
+def test_unwrapping_cable_delay_redraws_the_measured_phase(board, qt_app):
+    """Unwrap Cable Delay fits a delay off the module's sweep and adjusts the
+    phase it draws. It reads the trace it was handed; nothing else is in scope
+    for it to reach for."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    before = panel.plots[catalog.module]["phase_curve"].getData()[1].copy()
+
+    panel._unwrap_cable_delay_action()
+
+    assert catalog.module in panel.module_cable_lengths
+    after = panel.plots[catalog.module]["phase_curve"].getData()[1]
+    assert not np.allclose(before, after)

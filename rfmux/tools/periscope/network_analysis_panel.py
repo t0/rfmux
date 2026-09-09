@@ -27,7 +27,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
         self.modules = modules or []
-        # module -> probe amplitude -> the trace take_netanal measured
+        # module -> the trace take_netanal measured
         self.netanal_traces = {}
         self.unit_mode = "dbm"  # Default to dBm instead of counts
         self.normalize_magnitudes = False  # Add this flag to track normalization state
@@ -209,11 +209,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             progress_layout = QtWidgets.QVBoxLayout(self.progress_group)
             
             self.progress_bars = {}
-            self.progress_labels = {}  # Add labels to show amplitude progress
             for module in self.modules:
-                vlayout = QtWidgets.QVBoxLayout()
-                
-                # Main progress layout
                 hlayout = QtWidgets.QHBoxLayout()
                 label = QtWidgets.QLabel(f"Module {module}:")
                 pbar = QtWidgets.QProgressBar()
@@ -221,21 +217,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 pbar.setValue(0)
                 hlayout.addWidget(label)
                 hlayout.addWidget(pbar)
-                vlayout.addLayout(hlayout)
-                
-                # Amplitude progress label
-                amp_label = QtWidgets.QLabel("")
-                amp_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                vlayout.addWidget(amp_label)
-                
-                progress_layout.addLayout(vlayout)
+
+                progress_layout.addLayout(hlayout)
                 self.progress_bars[module] = pbar
-                self.progress_labels[module] = amp_label
-                
+
             layout.addWidget(self.progress_group)
         else:
             self.progress_bars = {}
-            self.progress_labels = {}
 
     def _hide_progress_bars(self):
         """Hide the entire Analysis Progress group."""
@@ -244,15 +232,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
     def _show_progress_bars(self, reset=False):
         """Show the Analysis Progress group again.
-           If reset=True, reset progress bars and labels to defaults.
+           If reset=True, reset the progress bars to zero.
         """
         if self.progress_group:
             self.progress_group.show()
             if reset:
                 for module, pbar in self.progress_bars.items():
                     pbar.setValue(0)  # reset progress
-                for module, label in self.progress_labels.items():
-                    label.clear()     # clear amplitude text
     
     def _setup_plot_area(self, layout):
         """Set up the plot area with tabs for each module."""
@@ -293,7 +279,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
                 plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
             
-            # Add legends for multiple amplitude plots with proper text color
+            # Legends carrying the probe power, in the panel's text colour
             bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
             amp_legend = plot_item_amp.addLegend(offset=(30, 10), labelTextColor=pen_color) if plot_item_amp else None
             phase_legend = plot_item_phase.addLegend(offset=(30, 10), labelTextColor=pen_color) if plot_item_phase else None
@@ -313,8 +299,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 'phase_curve': phase_curve,
                 'amp_legend': amp_legend,
                 'phase_legend': phase_legend,
-                'amp_curves': {},  # Will store multiple curves for different amplitudes
-                'phase_curves': {},  # Will store multiple curves for different amplitudes
                 'resonance_lines_mag': [], # For storing magnitude resonance lines
                 'resonance_lines_phase': [] # For storing phase resonance lines
             }
@@ -355,31 +339,16 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """Clear all plots, curves, and legends."""
         for module_id_iter in self.plots: 
             plot_info = self.plots[module_id_iter]
-            amp_plot = plot_info['amp_plot']
-            phase_plot = plot_info['phase_plot']
-            
+
             plot_info['amp_legend'].clear()
             plot_info['phase_legend'].clear()
-            
-            for amp, curve in list(plot_info['amp_curves'].items()):
-                amp_plot.removeItem(curve)
-            for amp, curve in list(plot_info['phase_curves'].items()):
-                phase_plot.removeItem(curve)
-            
-            plot_info['amp_curves'].clear()
-            plot_info['phase_curves'].clear()
-            
+
             plot_info['amp_curve'].setData([], [])
             plot_info['phase_curve'].setData([], [])
 
             self._remove_faux_resonance_legend_entry(module_id_iter)
             self._update_multisweep_button_state(module_id_iter) 
 
-
-    def update_amplitude_progress(self, module: int, current_amp: int, total_amps: int, amplitude: float):
-        """Update the amplitude progress display for a module."""
-        if hasattr(self, 'progress_labels') and module in self.progress_labels:
-            self.progress_labels[module].setText(f"Amplitude {current_amp}/{total_amps} ({amplitude})")
 
     def _toggle_normalization(self, checked):
         """Toggle normalization of magnitude plots."""
@@ -468,27 +437,30 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._update_legends_for_unit_mode()
 
     def _update_legends_for_unit_mode(self):
-        """Update the legend entries to reflect the current unit mode."""
-        for module in self.plots:
-            self.plots[module]['amp_legend'].clear()
-            self.plots[module]['phase_legend'].clear()
+        """Label each module's trace with the power it was probed at.
 
-            for amplitude, curve in self.plots[module]['amp_curves'].items():
-                # Check DAC scale availability for physical-unit modes
-                if self.unit_mode in ("dbm", "volts") and module not in self.dac_scales:
-                    unit_name = "dBm" if self.unit_mode == "dbm" else "Volts"
-                    print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in {unit_name}.")
-                    self.rb_counts.setChecked(True)
-                    return
+        A partial sweep carries no ``sweep_amplitude`` -- take_netanal writes it
+        with the finished trace -- so the label arrives when the sweep does.
+        """
+        for module, plot_info in self.plots.items():
+            plot_info['amp_legend'].clear()
+            plot_info['phase_legend'].clear()
 
-                dac_scale = self.dac_scales.get(module)
-                label = UnitConverter.format_probe_label(amplitude, self.unit_mode, dac_scale)
+            amplitude = self.netanal_traces.get(module, {}).get('sweep_amplitude')
+            if amplitude is None:
+                continue
 
-                self.plots[module]['amp_legend'].addItem(curve, label)
+            # Check DAC scale availability for physical-unit modes
+            if self.unit_mode in ("dbm", "volts") and module not in self.dac_scales:
+                unit_name = "dBm" if self.unit_mode == "dbm" else "Volts"
+                print(f"Warning: No DAC scale available for module {module}, cannot display accurate probe power in {unit_name}.")
+                self.rb_counts.setChecked(True)
+                return
 
-                phase_curve = self.plots[module]['phase_curves'].get(amplitude)
-                if phase_curve:
-                    self.plots[module]['phase_legend'].addItem(phase_curve, label)
+            label = UnitConverter.format_probe_label(
+                amplitude, self.unit_mode, self.dac_scales.get(module))
+            plot_info['amp_legend'].addItem(plot_info['amp_curve'], label)
+            plot_info['phase_legend'].addItem(plot_info['phase_curve'], label)
     
     def _update_amplitude_labels(self, plot):
         """Update plot labels based on current unit mode and normalization state."""
@@ -533,23 +505,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             if params:
                 self._run_and_plot_resonances(active_module, params)
 
-    def _sweep_to_search(self, module: int):
-        """The sweep Find Resonances runs on: the strongest probe that was taken.
-
-        Dips are deepest there, and it is the last sweep of a rising ladder.
-        """
-        traces = self.netanal_traces.get(module)
-        if not traces:
-            return None, None
-        for amplitude in reversed(self.original_params.get('amps', [])):
-            if amplitude in traces:
-                return traces[amplitude], amplitude
-        amplitude = max(traces)
-        return traces[amplitude], amplitude
-
     def _run_and_plot_resonances(self, active_module: int, find_resonances_params: dict):
         """Run find_resonances and plot the results on the active module's plots."""
-        trace, amplitude = self._sweep_to_search(active_module)
+        trace = self.netanal_traces.get(active_module)
         if trace is None:
             QtWidgets.QMessageBox.warning(self, "No Data", f"No data found for module {active_module}.")
             self._update_multisweep_button_state(active_module)
@@ -561,13 +519,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._update_multisweep_button_state(active_module)
             return
 
-        target_sweep_key = f"amp {amplitude}"
-
         try:
             resonance_results = fitting.find_resonances(
                 frequencies=frequencies,
                 iq_complex=iq_complex,
-                module_identifier=f"Module {active_module} (Sweep: {target_sweep_key})",
+                module_identifier=f"Module {active_module}",
                 **find_resonances_params
             )
         except Exception as e:
@@ -718,33 +674,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """
         if not self.progress_group:
             return
-        
-        # Walk up parent hierarchy to find Periscope instance
-        # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
-        parent = self._get_periscope_parent()
-        
-        if not parent:
-            return
-            
-        window_id = None
-        for w_id, w_data in parent.netanal_windows.items():
-            if w_data['window'] == self:
-                window_id = w_id
-                break
-        
-        if not window_id:
-            return
-            
-        window_data = parent.netanal_windows[window_id]
-        
-        no_pending_amplitudes = True
-        for module in window_data['amplitude_queues']:
-            if window_data['amplitude_queues'][module]:
-                no_pending_amplitudes = False
-                break
-        
-        all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
-        if all_complete and no_pending_amplitudes:
+
+        if all(pbar.value() == 100 for pbar in self.progress_bars.values()):
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
@@ -826,47 +757,18 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self.plots[module]['amp_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
             self.plots[module]['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
     
-    def update_data(self, module: int, amplitude: float, trace: dict):
-        """Show a module's netanal, partial or finished, at one probe amplitude."""
-        self.netanal_traces.setdefault(module, {})[amplitude] = trace
+    def update_data(self, module: int, trace: dict):
+        """Show a module's netanal, partial or finished."""
+        self.netanal_traces[module] = trace
 
         if module in self.plots:
             freqs, iq = trace['frequencies'], trace['iq_counts']
             plot_info = self.plots[module]
-
-            amps_list = self.original_params.get('amps', [amplitude])
-            if amplitude in amps_list:
-                amp_index = amps_list.index(amplitude)
-            else:
-                amp_index = len(plot_info['amp_curves']) % len(TABLEAU10_COLORS)
-            color = self._amplitude_color(amp_index, len(amps_list))
-
-            is_new_curve = amplitude not in plot_info['amp_curves']
-            if is_new_curve:
-                plot_info['amp_curves'][amplitude] = plot_info['amp_plot'].plot(
-                    pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
-                plot_info['phase_curves'][amplitude] = plot_info['phase_plot'].plot(
-                    pen=pg.mkPen(color, width=LINE_WIDTH), name=f"Amp: {amplitude}")
-
-            plot_info['amp_curves'][amplitude].setData(freqs, self._magnitude(iq))
-            plot_info['phase_curves'][amplitude].setData(
-                freqs, np.degrees(np.angle(iq)))
-
-            if is_new_curve:
+            plot_info['amp_curve'].setData(freqs, self._magnitude(iq))
+            plot_info['phase_curve'].setData(freqs, np.degrees(np.angle(iq)))
+            if trace.get('sweep_amplitude') is not None:
                 self._update_legends_for_unit_mode()
         self._update_multisweep_button_state(module)
-
-    def _amplitude_color(self, amp_index: int, num_amplitudes: int):
-        """Distinct colours for a few amplitudes, a colormap ramp for many."""
-        if num_amplitudes <= 5:
-            return TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)]
-
-        cmap = pg.colormap.get(COLORMAP_CHOICES["AMPLITUDE_SWEEP"])
-        if cmap is None:
-            return TABLEAU10_COLORS[amp_index % len(TABLEAU10_COLORS)]
-        fraction = amp_index / (num_amplitudes - 1) if num_amplitudes > 1 else 0.0
-        # Dark backgrounds want the bright end of the map, light ones the dark end.
-        return cmap.map(0.3 + fraction * 0.7 if self.dark_mode else fraction * 0.75)
 
     def _magnitude(self, iq: np.ndarray) -> np.ndarray:
         """|S21| of a measured sweep, in the units the panel is showing."""
@@ -875,13 +777,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             magnitude, iq, self.unit_mode, normalize=self.normalize_magnitudes)
 
     def _redraw_magnitudes(self, module_id: int):
-        """Redraw one module's magnitude curves, after a units change."""
+        """Redraw one module's magnitude curve, after a units change."""
         plot_info = self.plots[module_id]
         self._update_amplitude_labels(plot_info['amp_plot'])
-        for amplitude, trace in self.netanal_traces.get(module_id, {}).items():
-            curve = plot_info['amp_curves'].get(amplitude)
-            if curve is not None:
-                curve.setData(trace['frequencies'], self._magnitude(trace['iq_counts']))
+        trace = self.netanal_traces.get(module_id)
+        if trace is not None:
+            plot_info['amp_curve'].setData(
+                trace['frequencies'], self._magnitude(trace['iq_counts']))
         plot_info['amp_plot'].autoRange()
 
     def update_progress(self, module: int, progress: float):

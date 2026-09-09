@@ -314,12 +314,24 @@ are now strict xfails that name the stage which clears them.
 ### Stage 1. Netanal and Find Resonances on the container (medium)
 
 * **The data path (done).** `NetworkAnalysisTask` emits the module's measured
-  trace, live and on completion, as one `data_update(module, amplitude, trace)`
-  signal. The panel stores it per (module, amplitude) in `netanal_traces`
-  instead of `raw_data` tuples; magnitude and phase are `abs` and `np.angle`
-  of `iq_counts` at draw time, in the panel, once. The cable-delay unwrap
-  re-derives phase from `iq_counts`. What differed from the plan is in §5
-  item 6 and §6 judgement calls 7-10.
+  trace, live and on completion, as one `data_update(module, trace)` signal.
+  The panel stores it per module in `netanal_traces` instead of `raw_data`
+  tuples; magnitude and phase are `abs` and `np.angle` of `iq_counts` at draw
+  time, in the panel, once. The cable-delay unwrap re-derives phase from
+  `iq_counts`. What differed from the plan is in §5 item 6 and §6 judgement
+  calls 7-10.
+* **One netanal is one probe amplitude (done).** `take_netanal` takes a scalar
+  `amp` and returns one trace tagged with it; there is no amplitude axis to
+  iterate. Periscope's ladder is gone with it: the per-window amplitude queues
+  and `current_amp_index`, the completion handler that started the next
+  amplitude, `_start_next_amplitude_task` (now `_start_netanal_task`, one task
+  per module), the `amp_curves`/`phase_curves` dicts and `_amplitude_color`
+  that coloured them, the "Amplitude n/N" progress label, and the two
+  precedence chains that picked which of several sweeps to search and to fit a
+  delay from. The legend keeps its job -- it names the power the trace was
+  probed at, read off the trace's own `sweep_amplitude` -- and the export holds
+  one `sweep` per module rather than an index. §6 judgement call 12 covers the
+  dialogs, which still offer a list.
 * The export button and the session export save the container through `store`;
   loading reads it back. `network_analysis_export.py` loses its private
   payload. Still to do: `build_export_dict` currently walks the traces and
@@ -650,8 +662,9 @@ Listed so they can be overruled.
 9. **Three copies of the redraw became one.** `_toggle_normalization`,
    `_update_unit_mode` and `_redraw_all_plots` each walked `raw_data` with
    the same body and the same `'default'` special case. They call
-   `_redraw_magnitudes(module)`. The single-trace `amp_curve`/`phase_curve`
-   plot items are now only ever cleared; they go with the export rewrite.
+   `_redraw_magnitudes(module)`. With the amplitude ladder gone the
+   single-trace `amp_curve`/`phase_curve` plot items are the curves again, and
+   the per-amplitude dicts beside them are deleted.
 10. **`UnitConverter.convert_amplitude` takes an `iq_data` argument it never
     reads.** Left alone: it is called from four panels, and removing a dead
     parameter across all of them belongs with whichever stage touches them,
@@ -661,6 +674,14 @@ Listed so they can be overruled.
    detectors fire early on the standard array) is a library question, not a
    port question, and the GUI should not paper over it with its own
    detector.
+12. **The netanal dialogs are left offering a list of amplitudes**, and
+    `_start_netanal_task` takes the first. They are rewritten in this stage
+    anyway -- measurement name, filename preview, the persistent settings
+    panel -- and the shared `NetworkAnalysisDialogBase` amplitude group is
+    still a multisweep amplitude ladder until stage 2 replaces it with an
+    `AmplitudeSchedule` view. One resolving line in the caller beats a flag
+    threaded through a base class that is about to go. It is the one place
+    left where a netanal knows the word `amps`.
 
 ---
 
@@ -669,7 +690,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (data path done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; a two-amplitude export tags each sweep with its own amplitude, over measured sweeps rather than hand-built tuples. Still to come: dialog fields, the store-based save and load | `test/periscope/test_tuning_flow.py` |
+| 1 (data path done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the export holds the module's measured sweep tagged with the amplitude it was taken at; the cable-delay unwrap runs over that trace. Still to come: dialog fields, the store-based save and load | `test/periscope/test_tuning_flow.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

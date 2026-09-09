@@ -381,10 +381,10 @@ class CRSInitializeSignals(QObject):
 
 class NetworkAnalysisSignals(QObject):
     progress = pyqtSignal(int, float)          # module, percent
-    # module, probe amplitude, trace. The trace is the module's measured arrays
-    # out of what take_netanal returned: partial while the sweep runs, whole on
-    # the last one, with the same keys either way.
-    data_update = pyqtSignal(int, float, dict)
+    # module, trace. The trace is the module's measured arrays out of what
+    # take_netanal returned: partial while the sweep runs, whole on the last
+    # one, with the same keys either way.
+    data_update = pyqtSignal(int, dict)
     completed = pyqtSignal(int); error = pyqtSignal(str)
 
 class DACScaleFetcher(QtCore.QThread):
@@ -412,10 +412,9 @@ class DACScaleFetcher(QtCore.QThread):
 
 class NetworkAnalysisTask(QtCore.QThread):
     """QThread subclass for performing network analysis operations without blocking the GUI."""
-    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals, amplitude=None):
+    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals):
         super().__init__()
         self.crs, self.module, self.params, self.signals = crs, module, params, signals
-        self.amplitude = amplitude if amplitude is not None else params.get('amp', DEFAULT_AMPLITUDE)
         self._running = True
         self._task, self._loop = None, None
         
@@ -450,7 +449,7 @@ class NetworkAnalysisTask(QtCore.QThread):
             if not self.isInterruptionRequested():
                 # Combine parameters for the take_netanal call
                 netanal_params = {
-                    'amp': self.amplitude,
+                    'amp': task_params['amp'],
                     'fmin': task_params['fmin'],
                     'fmax': task_params['fmax'],
                     'nsamps': task_params['nsamps'],
@@ -473,7 +472,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
                     self.signals.data_update.emit(
-                        self.module, self.amplitude, self._trace_of(result))
+                        self.module, self._trace_of(result))
                     self.signals.completed.emit(self.module)
             
         except asyncio.CancelledError:
@@ -510,14 +509,15 @@ class NetworkAnalysisTask(QtCore.QThread):
             # plots a line, so hand it the sweep sorted the way the finished
             # trace is sorted.
             order = np.argsort(partial['frequencies'])
-            self.signals.data_update.emit(module_idx, self.amplitude, {
+            self.signals.data_update.emit(module_idx, {
                 key: value[order] for key, value in partial.items()
             })
         return data_cb
     
     def _extract_parameters(self):
         # Constants from .utils
-        return {'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
+        return {'amp': self.params.get('amp', DEFAULT_AMPLITUDE),
+                'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
                 'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
                 }

@@ -27,7 +27,7 @@ class NetworkAnalysisExportMixin:
     the host class provides various properties and UI elements related to network analysis.
     
     Requirements from the host class:
-    - netanal_traces: module -> probe amplitude -> the trace take_netanal measured
+    - netanal_traces: module -> the trace take_netanal measured
     - current_params: Dictionary of current analysis parameters
     - resonance_freqs: Dictionary of resonance frequencies per module
     - plots: Dictionary of plot information per module
@@ -157,21 +157,18 @@ class NetworkAnalysisExportMixin:
             'modules': {}
         }
         
-        for module, traces in self.netanal_traces.items():
-            export_data['modules'][module] = {}
-            meas_idx = 0
+        for module, trace in self.netanal_traces.items():
+            freqs, iq_data = trace['frequencies'], trace['iq_counts']
+            magnitude = np.abs(iq_data)
 
-            for amplitude, trace in traces.items():
-                freqs, iq_data = trace['frequencies'], trace['iq_counts']
-                magnitude = np.abs(iq_data)
+            def in_units(unit_mode, normalize=False):
+                return UnitConverter.convert_amplitude(
+                    magnitude, iq_data, unit_mode=unit_mode, normalize=normalize
+                ).tolist()
 
-                def in_units(unit_mode, normalize=False):
-                    return UnitConverter.convert_amplitude(
-                        magnitude, iq_data, unit_mode=unit_mode, normalize=normalize
-                    ).tolist()
-
-                export_data['modules'][module][meas_idx] = {
-                    'sweep_amplitude': amplitude,
+            export_data['modules'][module] = {
+                'sweep': {
+                    'sweep_amplitude': trace.get('sweep_amplitude'),
                     'frequency': {'values': freqs.tolist(), 'unit': 'Hz'},
                     'magnitude': {
                         'counts': {'raw': in_units("counts"),
@@ -188,12 +185,10 @@ class NetworkAnalysisExportMixin:
                               'unit': 'degrees'},
                     'complex': {'real': iq_data.real.tolist(),
                                 'imag': iq_data.imag.tolist()},
-                }
-                meas_idx += 1
-            
-            # Include resonance frequencies for the module
-            export_data['modules'][module]['resonances_hz'] = self.resonance_freqs.get(module, [])
-        
+                },
+                'resonances_hz': self.resonance_freqs.get(module, []),
+            }
+
         return export_data
     
     def _export_to_pickle(self, filename: str) -> None:
@@ -249,39 +244,35 @@ class NetworkAnalysisExportMixin:
                 for module, freqs in self.resonance_freqs.items():
                     writer.writerow([f'Module {module}', ','.join(map(str, freqs))])
         
-        # Write data files - one per module/sweep/unit
-        for module, traces in self.netanal_traces.items():
-            idx = 0
-            for amplitude, trace in traces.items():
-                freqs, iq_data = trace['frequencies'], trace['iq_counts']
-                magnitude = np.abs(iq_data)
-                phases = np.degrees(np.angle(iq_data))
+        # Write data files - one per module/unit
+        for module, trace in self.netanal_traces.items():
+            freqs, iq_data = trace['frequencies'], trace['iq_counts']
+            magnitude = np.abs(iq_data)
+            phases = np.degrees(np.angle(iq_data))
 
-                # Export data in different unit modes
-                for unit_mode in ["counts", "volts", "dbm"]:
-                    converted_amps = UnitConverter.convert_amplitude(magnitude, iq_data, unit_mode=unit_mode)
-                    unit_label = "dBm" if unit_mode == "dbm" else ("V" if unit_mode == "volts" else unit_mode)
-                    
-                    # Create CSV filename for this specific data
-                    csv_filename = f"{base}_module{module}_idx{idx}_{unit_mode}{ext}"
-                    
-                    with open(csv_filename, 'w', newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(['# Amplitude:', f"{amplitude}"])
-                        
-                        # Determine column header based on unit mode
-                        header = [
-                            'Frequency (Hz)', 
-                            f'Power ({unit_label})' if unit_mode == "dbm" else f'Amplitude ({unit_label})', 
-                            'Phase (deg)'
-                        ]
-                        writer.writerow(header)
-                        
-                        # Write data rows
-                        for freq, amp, phase in zip(freqs, converted_amps, phases):
-                            writer.writerow([freq, amp, phase])
-                
-                idx += 1
+            # Export data in different unit modes
+            for unit_mode in ["counts", "volts", "dbm"]:
+                converted_amps = UnitConverter.convert_amplitude(magnitude, iq_data, unit_mode=unit_mode)
+                unit_label = "dBm" if unit_mode == "dbm" else ("V" if unit_mode == "volts" else unit_mode)
+
+                # Create CSV filename for this specific data
+                csv_filename = f"{base}_module{module}_{unit_mode}{ext}"
+
+                with open(csv_filename, 'w', newline='') as f:
+                    writer = csv.writer(f)
+                    writer.writerow(['# Amplitude:', f"{trace.get('sweep_amplitude')}"])
+
+                    # Determine column header based on unit mode
+                    header = [
+                        'Frequency (Hz)', 
+                        f'Power ({unit_label})' if unit_mode == "dbm" else f'Amplitude ({unit_label})', 
+                        'Phase (deg)'
+                    ]
+                    writer.writerow(header)
+
+                    # Write data rows
+                    for freq, amp, phase in zip(freqs, converted_amps, phases):
+                        writer.writerow([freq, amp, phase])
     
     def _unwrap_cable_delay_action(self) -> None:
         """
@@ -301,8 +292,8 @@ class NetworkAnalysisExportMixin:
         if active_module is None:
             return
 
-        block = self._sweep_for_cable_delay(active_module)
-        if block is None:
+        trace = self._sweep_for_cable_delay(active_module)
+        if trace is None:
             return
         freqs_active = trace['frequencies']
         phases_displayed_active_deg = np.degrees(np.angle(trace['iq_counts']))
@@ -346,20 +337,12 @@ class NetworkAnalysisExportMixin:
             return None
 
     def _sweep_for_cable_delay(self, active_module: int) -> Optional[dict]:
-        """The sweep the delay fit runs on: the weakest probe that was taken.
-
-        The cable's phase slope is the same at every probe power, and the
-        weakest sweep is the one least distorted by the resonators.
-        """
-        traces = self.netanal_traces.get(active_module)
-        if not traces:
+        """The module's sweep, which the delay fit runs on."""
+        trace = self.netanal_traces.get(active_module)
+        if trace is None:
             QtWidgets.QMessageBox.information(
                 self, "No Data", f"No data for Module {active_module}.")
-            return None
-        for amplitude in self.original_params.get('amps', []):
-            if amplitude in traces:
-                return traces[amplitude]
-        return traces[min(traces)]
+        return trace
 
     def _calculate_cable_length(
         self, 
@@ -414,12 +397,9 @@ class NetworkAnalysisExportMixin:
             return
 
         plot_info = self.plots[active_module]
-        traces = self.netanal_traces.get(active_module, {})
+        trace = self.netanal_traces.get(active_module)
 
-        for amplitude, curve_item in plot_info['phase_curves'].items():
-            trace = traces.get(amplitude)
-            if trace is None or len(trace['frequencies']) == 0:
-                continue
+        if trace is not None and len(trace['frequencies']) > 0:
             freqs = trace['frequencies']
             phases = recalculate_displayed_phase(
                 freqs, np.degrees(np.angle(trace['iq_counts'])),
@@ -427,7 +407,7 @@ class NetworkAnalysisExportMixin:
             )
             if len(phases) > 0:
                 phases = phases - phases[0]
-            curve_item.setData(freqs, ((phases + 180) % 360) - 180)
+            plot_info['phase_curve'].setData(freqs, ((phases + 180) % 360) - 180)
 
         plot_info['phase_plot'].enableAutoRange(pg.ViewBox.YAxis, True)
 

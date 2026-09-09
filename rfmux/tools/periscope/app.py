@@ -1102,16 +1102,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Initialize and start a new network analysis process.
 
         This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget 
-        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
-        It handles single or multiple module sweeps and iterates through specified
-        amplitudes if provided.
+        and one `NetworkAnalysisTask` per module, each performing its sweep in a
+        background thread.
 
         Args:
             params (dict): A dictionary of parameters for the network analysis,
                            typically obtained from `NetworkAnalysisDialog`.
-                           Expected keys include 'module' (int or list of ints),
-                           'amps' (list of floats), 'amp' (float, fallback if 'amps'
-                           is not present), and other sweep-specific settings.
         """
         try:
             if self.crs is None:
@@ -1148,8 +1144,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'window': panel,  # Keep 'window' key for compatibility
                 'dock': dock,
                 'signals': window_signals,
-                'amplitude_queues': {},
-                'current_amp_index': {}
             }
             
             # Connect signals (same as before)
@@ -1172,13 +1166,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
             )
             
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
-            window_data = self.netanal_windows[window_id]
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
             for mod_iter in modules_to_run:
-                panel.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+                self._start_netanal_task(mod_iter, params, window_id)
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1238,18 +1227,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
             # Load data into panel
             for mod in modules_to_run:
-                # Each sweep carries its own probe amplitude; pairing by
-                # position would trust the file's ordering instead.
-                sweeps = [v for k, v in params['modules'][mod].items()
-                          if isinstance(k, int)]
-                for sweep in sweeps:
-                    complex_iq = sweep['complex']
-                    panel.update_data(mod, sweep['sweep_amplitude'], {
-                        'frequencies': np.array(sweep['frequency']['values']),
-                        'iq_counts': np.array(complex_iq['real'])
-                                     + 1j * np.array(complex_iq['imag']),
-                    })
-                
+                sweep = params['modules'][mod]['sweep']
+                complex_iq = sweep['complex']
+                panel.update_data(mod, {
+                    'frequencies': np.array(sweep['frequency']['values']),
+                    'iq_counts': np.array(complex_iq['real'])
+                                 + 1j * np.array(complex_iq['imag']),
+                    'sweep_amplitude': sweep['sweep_amplitude'],
+                })
+
                 r_freq = params['modules'][mod]['resonances_hz']
                 panel._use_loaded_resonances(mod, r_freq)
             
@@ -1271,8 +1257,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         This method is called when a `NetworkAnalysisTask` signals completion.
         It updates the corresponding `NetworkAnalysisWindow` to mark the module's
-        analysis as complete. If there are more amplitudes to sweep for this
-        module, it starts the next `NetworkAnalysisTask`.
+        analysis as complete.
 
         Args:
             module_param (int): The module index for which the analysis completed.
@@ -1285,23 +1270,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window = window_data['window']
             window.complete_analysis(module_param)
             for task_key in list(self.netanal_tasks.keys()):
-                if task_key.startswith(f"{window_id}_{module_param}_"):
+                if task_key.startswith(f"{window_id}_{module_param}"):
                     self.netanal_tasks.pop(task_key, None)
-            if module_param in window_data['amplitude_queues'] and window_data['amplitude_queues'][module_param]:
-                window_data['current_amp_index'][module_param] += 1
-                total_amps = len(window.original_params.get('amps', []))
-                next_amp = window_data['amplitude_queues'][module_param][0]
-                window.update_amplitude_progress(
-                    module_param, 
-                    window_data['current_amp_index'][module_param] + 1,
-                    total_amps,
-                    next_amp
-                )
-                if module_param in window.progress_bars:
-                    window.progress_bars[module_param].setValue(0)
-                    if window.progress_group:
-                        window.progress_group.setVisible(True)
-                self._start_next_amplitude_task(module_param, window.original_params, window_id)
         except Exception as e:
             print(f"Error in _handle_analysis_completed: {e}")
             traceback.print_exc()
@@ -1331,19 +1301,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
     
     
-    def _start_next_amplitude_task(self, module_param: int, params: dict, window_id: str): # Renamed module
+    def _start_netanal_task(self, module_param: int, params: dict, window_id: str): # Renamed module
         """
-        Start the next network analysis task for a given module and amplitude.
-
-        This is called iteratively when sweeping through multiple amplitudes.
-        It retrieves the next amplitude from the queue for the specified module
-        and window, then creates and starts a new `NetworkAnalysisTask`.
+        Start one module's network analysis sweep.
 
         Args:
             module_param (int): The module index for which to start the task.
-            params (dict): The base parameters for the network analysis sweep.
-                           The 'amplitude' for this specific task will be taken
-                           from the queue.
+            params (dict): The parameters for the network analysis sweep.
             window_id (str): The unique identifier of the `NetworkAnalysisWindow`
                              associated with this analysis.
         """
@@ -1352,23 +1316,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_data = self.netanal_windows[window_id]
             self.check_connection(window_data, window_id)
             signals = window_data['signals']
-            if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
-                return
-            amplitude = window_data['amplitude_queues'][module_param].pop(0)
             task_params = params.copy()
             task_params['module'] = module_param
+            # The dialogs still offer a list of amplitudes; take_netanal measures
+            # at one. Resolved here until they are rewritten.
+            task_params['amp'] = params.get(
+                'amps', [params.get('amp', DEFAULT_AMPLITUDE)])[0]
             module_specific_cable_length = params.get('module_cable_lengths', {}).get(module_param)
             if module_specific_cable_length is not None:
                 task_params['cable_length'] = module_specific_cable_length
-            task_key = f"{window_id}_{module_param}_amp_{amplitude}"
+            task_key = f"{window_id}_{module_param}"
             # NetworkAnalysisTask from .tasks
-            task = NetworkAnalysisTask(
-                self.crs, module_param, task_params, signals, amplitude=amplitude
-            )
+            task = NetworkAnalysisTask(self.crs, module_param, task_params, signals)
             self.netanal_tasks[task_key] = task
             task.start()  # Start the QThread directly since NetworkAnalysisTask is now a QThread
         except Exception as e:
-            print(f"Error in _start_next_amplitude_task: {e}")
+            print(f"Error in _start_netanal_task: {e}")
             traceback.print_exc()
 
     def _rerun_network_analysis(self, params: dict, source_panel=None):
@@ -1417,13 +1380,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             for task_key in list(self.netanal_tasks.keys()):
                 if task_key.startswith(f"{window_id}_"):
                     task = self.netanal_tasks.pop(task_key); task.stop()
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
             if window.progress_group: window.progress_group.setVisible(True)
             for mod_iter in modules_to_run: # Renamed
-                window.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+                self._start_netanal_task(mod_iter, params, window_id)
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()

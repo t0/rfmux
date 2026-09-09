@@ -357,7 +357,7 @@ def fit_sweeps(
             iteration 0, so this selects everything or nothing there.
             :func:`fit_sweeps_at_bias_amplitude` covers the common case of "the
             iteration where each resonator is actually biased", which is a
-            different iteration per resonator under a relative ladder and so
+            different iteration per resonator under a relative schedule and so
             cannot be spelled here.
         directions: which sweep directions to fit, as for *iterations*.
         approx_Qr: the skewed fit's initial guess for Qr.
@@ -432,12 +432,12 @@ def fit_sweeps_at_bias_amplitude(
 ) -> FitReport:
     """Fit each resonator only at the amplitude it is biased at.
 
-    The usual question after a ladder: the other rungs were measured to find
+    The usual question after a schedule: the other steps were measured to find
     the operating point, and it is the operating point you want fitted.
 
     The iteration is resolved per resonator, which is why it cannot be spelled
-    as ``iterations=`` on :func:`fit_sweeps`. A *relative* ladder happens to
-    match every resonator at the same rung — the one whose factor is 1.0 — but
+    as ``iterations=`` on :func:`fit_sweeps`. A *relative* schedule happens to
+    match every resonator at the same step — the one whose factor is 1.0 — but
     an absolute one (``ramp``, ``explicit``) over resonators biased at
     different amplitudes does not, and an explicit *amplitude* parts them
     either way.
@@ -461,7 +461,7 @@ def fit_sweeps_at_bias_amplitude(
 
     Nearest wins, as in
     :func:`~rfmux.tuning.sweep_results.find_iteration_matching_amplitude`
-    — floats from a ladder rarely compare equal. Check the match with
+    — floats from a schedule rarely compare equal. Check the match with
     ``get_amplitudes_at_iteration`` if it has to be close.
     """
     all_sections = list(_walk(sweeps))
@@ -666,8 +666,8 @@ def _walk(sweeps):
     """Every sweep in one module's result, with its coordinates.
 
     One nesting, because there is only one shape: a call that swept one
-    amplitude and a call that walked a ladder of twenty nest identically, the
-    single sweep simply being the ladder of length one that it is.
+    amplitude and a call that walked a schedule of twenty nest identically, the
+    single sweep simply being the schedule of length one that it is.
     """
     _refuse_container(sweeps)
     _refuse_netanal(sweeps)
@@ -828,7 +828,7 @@ def _fit(
         max_workers=max(1, max_workers)
     ) as executor:
         # Submitted all at once, read back in the order measured, so the report
-        # reads like the ladder even though the fits finished out of order.
+        # reads like the schedule even though the fits finished out of order.
         submitted = [executor.submit(fit_one, s) for s in sections]
 
         for completed, (section, future) in enumerate(

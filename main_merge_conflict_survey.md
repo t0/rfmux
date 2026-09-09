@@ -599,7 +599,7 @@ comparison (`bias_kids._suitable`): a fit is consulted only when it
 converged with finite `a`, the skewed fit has no `a` and is not asked, and
 the threshold defaults to the bifurcation value `4√3/9`. An `a` near or
 above that on the chosen step means the detectors let too much power
-through; an `a` near zero on the loudest step means the ladder never
+through; an `a` near zero on the loudest step means the schedule never
 reached the nonlinear regime. This depends on §9.1's model fix: `a` from the
 pre-fork equation is not comparable to `4√3/9`. `fit_sweeps_at_bias_amplitude`
 already exists in `fits.py` and is the natural hook.
@@ -684,17 +684,17 @@ one-array-per-process (a second `load_session` detaches the first).
 `test_multisweep_result.py`, skipped at the merge, are deleted; their contracts
 live in `test/tuning/test_flow_on_standard_array.py` in this branch's terms:
 a sweep entry carries no verdicts; every resonator gets a bias point at a
-ladder rung, on the tone grid, inside its sweep; the calibration lives on the
+schedule step, on the tone grid, inside its sweep; the calibration lives on the
 `BiasPoint` with the sweep it was read from; bias finding on a bifurcating
-ladder warns about nothing; `apply_bias` puts every tone where the catalog
+schedule warns about nothing; `apply_bias` puts every tone where the catalog
 says. Main's `test_nonlinear_fit_on_mock.py` checks (pull downward, `a`
-rising with drive) are restated against the same ladder sweeps through
-`fit_sweeps`, and a new one pins that the ladder brackets bifurcation for
+rising with drive) are restated against the same schedule sweeps through
+`fit_sweeps`, and a new one pins that the schedule brackets bifurcation for
 every resonator. Main's original `test_nonlinear_fit_on_mock.py` still passes
 through the forwarders and is left in place.
 
 **Finding.** The notebook's detector-versus-fit table shows the bias finder's
-detectors firing well below the rung where the fitted nonlinearity crosses
+detectors firing well below the step where the fitted nonlinearity crosses
 `BIFURCATION_A`, on all eight resonators. Recorded in `tuning_revamp_todo.md`
 with the attribution experiment to run next; it is the §9.4 work item and was
 not acted on.

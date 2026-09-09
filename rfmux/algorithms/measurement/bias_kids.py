@@ -599,7 +599,7 @@ async def bias_kids(
     return successfully_biased
 
 
-@deprecated("rfmux.tuning.find_bias_points, which reads the amplitude ladder a multisweep returns")
+@deprecated("rfmux.tuning.find_bias_points, which reads the amplitude schedule a multisweep returns")
 def analyze_multiamp_data(
     results_by_detector: Dict[int, Dict],
     nonlinear_threshold: float = 0.77,

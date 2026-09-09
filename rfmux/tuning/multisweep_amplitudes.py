@@ -46,15 +46,14 @@ how one is used::
 
     sweeps = await crs.multisweep(catalog, amp=schedule)
 
-and ``steps`` is what that call walks, should you want to walk it yourself::
+Inspect the configured values with ``schedule.steps``. To resolve amplitudes
+for each resonator::
 
-    for step in schedule.steps(catalog):
+    for step in schedule.resolve_steps(catalog):
         print(step.step, step.amplitudes)
 
-``steps`` keys its amplitudes by resonator **name**, which is what retires the
-"the list must match ``res_info_dict.keys()`` order" coupling of the Periscope
-dialog this replaces, and makes per-resonator amplitudes available on every step
-rather than only on a single-sweep one.
+``resolve_steps`` returns amplitudes keyed by resonator **name**, so callers
+do not need to match the catalog's iteration order.
 """
 
 from __future__ import annotations
@@ -73,10 +72,10 @@ __all__ = [
 ]
 
 
-# Spacings a ladder can be generated with. "explicit" and "none" are what the
+# Spacings steps can be generated with. "explicit" and "none" are what the
 # constructors that don't generate one report instead.
-LADDER_SPACINGS = ("log", "linear")
-_SPACING_LABELS = LADDER_SPACINGS + ("explicit", "none")
+STEP_SPACINGS = ("log", "linear")
+_SPACING_LABELS = STEP_SPACINGS + ("explicit", "none")
 
 # How many offenders an error message names before it summarises the rest.
 _MAX_NAMED = 4
@@ -174,7 +173,7 @@ class AmplitudeStep:
 
     step: int  # execution order, 0-based
     amplitudes: dict[str, float]  # normalized DAC units, by section name
-    factor: float | None  # the rung, or None when the ladder was absolute
+    factor: float | None  # the multiplier, or None for absolute amplitudes
 
     def to_dict(self) -> dict:
         return {
@@ -185,7 +184,7 @@ class AmplitudeStep:
 
     @classmethod
     def from_dict(cls, d: Mapping) -> AmplitudeStep:
-        # Unversioned, like the to_dict above it: a step is a rung's worth of
+        # Unversioned, like the to_dict above it: a step carries
         # provenance inside a schedule's output, not a file of its own.
         return cls(
             step=int(d["step"]),
@@ -200,14 +199,14 @@ class AmplitudeStep:
             if len(set(values)) == 1
             else f"{min(values):g}…{max(values):g}"
         )
-        rung = "" if self.factor is None else f", ×{self.factor:g}"
+        factor = "" if self.factor is None else f", ×{self.factor:g}"
         return (
             f"AmplitudeStep(step={self.step}, {len(values)} sweep sections "
-            f"at {span}{rung})"
+            f"at {span}{factor})"
         )
 
 
-def _build_ladder(
+def _build_steps(
     start: float,
     stop: float,
     nsteps: int,
@@ -215,15 +214,15 @@ def _build_ladder(
     *,
     what: str,
 ) -> tuple[float, ...]:
-    """*nsteps* rungs from *start* to *stop*, log- or linear-spaced.
+    """*nsteps* steps from *start* to *stop*, log- or linear-spaced.
 
     ``nsteps=1`` is only accepted when the endpoints agree.  Silently keeping
     the start and discarding the stop is how the dialog this replaces ended up
     shipping a one-step "uniform sweep" that had quietly become something else.
     """
-    if spacing not in LADDER_SPACINGS:
+    if spacing not in STEP_SPACINGS:
         raise ValueError(
-            f"spacing={spacing!r}: must be one of {LADDER_SPACINGS}."
+            f"spacing={spacing!r}: must be one of {STEP_SPACINGS}."
         )
     nsteps = int(nsteps)
     if nsteps < 1:
@@ -238,7 +237,7 @@ def _build_ladder(
     if spacing == "log" and (start <= 0 or stop <= 0):
         raise ValueError(
             f"spacing='log' needs positive endpoints, got {start:g} to "
-            f"{stop:g}. Use spacing='linear' if a rung really must be zero or "
+            f"{stop:g}. Use spacing='linear' if a step really must be zero or "
             f"negative — though as {what} neither is likely to be meaningful."
         )
     if nsteps == 1:
@@ -264,63 +263,60 @@ class AmplitudeSchedule:
     sets by hand with any regularity.
     """
 
-    # Stamped into to_dict output and required exactly by from_dict, so a file
-    # from another version of this module fails loudly rather than being half
-    # understood. Bump whenever the dict shape changes in a way from_dict
-    # cannot absorb.
-    SCHEMA_VERSION = 1
+    # Version 2 writes steps; version 1 remains readable for saved sweeps.
+    SCHEMA_VERSION = 2
 
     base: float | Mapping[str, float] | Sequence[float] | None = None
-    ladder: tuple[float, ...] = (1.0,)
+    steps: tuple[float, ...] = (1.0,)
     relative: bool = True
     # Provenance only: how the steps were generated, for describe() and
-    # to_dict() to report. Nothing computes with it — the ladder itself is the
+    # to_dict() to report. Nothing computes with it — the step values are the
     # truth — so it is excluded from equality, and two schedules that measure
     # the same thing compare equal however they were spelled.
     spacing: str = field(default="none", compare=False)
 
     def __post_init__(self):
-        ladder = tuple(float(v) for v in self.ladder)
-        if not ladder:
+        steps = tuple(float(v) for v in self.steps)
+        if not steps:
             raise ValueError(
-                "ladder is empty: a schedule with no steps measures nothing."
+                "steps tuple is empty: a schedule with no steps measures nothing."
             )
-        if not all(math.isfinite(v) for v in ladder):
-            raise ValueError(f"ladder={list(ladder)}: every rung must be finite.")
+        if not all(math.isfinite(v) for v in steps):
+            raise ValueError(f"steps={list(steps)}: every step must be finite.")
         if self.spacing not in _SPACING_LABELS:
             raise ValueError(
                 f"spacing={self.spacing!r}: must be one of {_SPACING_LABELS}."
             )
 
         if self.relative:
-            bad = [v for v in ladder if v <= 0]
+            bad = [v for v in steps if v <= 0]
             if bad:
                 raise ValueError(
-                    f"ladder rungs {bad} are not positive. A relative ladder "
-                    f"multiplies the base amplitude, so a rung of zero silences "
+                    f"steps {bad} are not positive. A relative schedule "
+                    f"multiplies the base amplitude, so a step of zero silences "
                     f"the tone and a negative one is not a scaling at all."
                 )
         else:
             if self.base is not None:
                 raise ValueError(
-                    "An absolute ladder takes no base: its rungs *are* the "
+                    "An absolute schedule takes no base: its steps *are* the "
                     "amplitudes, so there is nothing for a base to contribute. "
-                    "Use multiplicative(..., base=...) for a ladder that multiplies a "
-                    "base you chose."
+                    "Use multiplicative(..., base=...) for a schedule that "
+                    "multiplies a base you chose."
                 )
-            # Absolute rungs are amplitudes, so they answer to the same domain
+            # Absolute steps are amplitudes, so they answer to the same domain
             # BiasPoint enforces. Relative ones cannot be checked until a base
             # is known — that happens in _amplitudes_per_step.
-            bad = [v for v in ladder if not 0 < v <= 1]
+            bad = [v for v in steps if not 0 < v <= 1]
             if bad:
                 raise ValueError(
-                    f"ladder rungs {bad} are outside (0, 1]: an absolute ladder "
+                    f"steps {bad} are outside (0, 1]: an absolute schedule "
                     f"is in normalized DAC units. (A negative value usually "
                     f"means dBm — convert with "
                     f"amplitude = 10**((dbm - dac_scale_dbm) / 20).)"
                 )
 
-        object.__setattr__(self, "ladder", ladder)
+        object.__setattr__(self, "steps", steps)
 
     # ─── constructors ────────────────────────────────────────────────────────
     #
@@ -339,7 +335,7 @@ class AmplitudeSchedule:
         spacing: str = "log",
         base: float | Mapping[str, float] | Sequence[float] | None = None,
     ) -> AmplitudeSchedule:
-        """A ladder of factors, each multiplying the base amplitude.
+        """A sequence of factors, each multiplying the base amplitude.
 
         Every resonator keeps its own scale, so an array biased across a spread
         of amplitudes walks that spread up and down together::
@@ -358,7 +354,7 @@ class AmplitudeSchedule:
                 number for all of them, or a ``{name: amplitude}`` mapping.
         """
         return cls(
-            ladder=_build_ladder(start, stop, nsteps, spacing, what="factors"),
+            steps=_build_steps(start, stop, nsteps, spacing, what="factors"),
             relative=True,
             base=base,
             spacing=spacing,
@@ -373,7 +369,7 @@ class AmplitudeSchedule:
         *,
         spacing: str = "log",
     ) -> AmplitudeSchedule:
-        """A ladder of absolute amplitudes, the same for every resonator.
+        """A sequence of absolute amplitudes, the same for every resonator.
 
         Args:
             start: amplitude of the first step, normalized DAC units in (0, 1].
@@ -382,7 +378,7 @@ class AmplitudeSchedule:
             spacing: ``"log"`` (the default) or ``"linear"``.
         """
         return cls(
-            ladder=_build_ladder(start, stop, nsteps, spacing, what="amplitudes"),
+            steps=_build_steps(start, stop, nsteps, spacing, what="amplitudes"),
             relative=False,
             spacing=spacing,
         )
@@ -391,21 +387,21 @@ class AmplitudeSchedule:
     def explicit(cls, levels: Sequence[float]) -> AmplitudeSchedule:
         """Absolute amplitudes, exactly as given, in the order given.
 
-        The escape hatch for a ladder no spacing rule produces.
+        The escape hatch for a sequence no spacing rule produces.
         """
-        return cls(ladder=tuple(levels), relative=False, spacing="explicit")
+        return cls(steps=tuple(levels), relative=False, spacing="explicit")
 
-    # ─── the ladder, without needing a catalog ───────────────────────────────
+    # ─── the steps, without needing a catalog ───────────────────────────────
 
     @property
     def nsteps(self) -> int:
         """How many amplitude steps. Not how many sweeps — one sweep is a
         whole multisweep measurement, and the driver's ``directions``
         multiplies this to get that count."""
-        return len(self.ladder)
+        return len(self.steps)
 
     def __len__(self) -> int:
-        return len(self.ladder)
+        return len(self.steps)
 
     def __repr__(self) -> str:
         kind = "relative" if self.relative else "absolute"
@@ -417,15 +413,15 @@ class AmplitudeSchedule:
             of = f"a base of {len(self.base)} positional amplitudes"
         else:
             of = f"a base of {float(self.base):g}"
-        rungs = (
-            f"{self.ladder[0]:g}"
-            if len(self.ladder) == 1
-            else f"{self.ladder[0]:g}…{self.ladder[-1]:g}, {self.spacing}"
+        steps = (
+            f"{self.steps[0]:g}"
+            if len(self.steps) == 1
+            else f"{self.steps[0]:g}…{self.steps[-1]:g}, {self.spacing}"
         )
         tail = f" of {of}" if self.relative else ""
         return (
             f"AmplitudeSchedule({self.nsteps} "
-            f"step{'' if self.nsteps == 1 else 's'}, {kind} {rungs}{tail})"
+            f"step{'' if self.nsteps == 1 else 's'}, {kind} {steps}{tail})"
         )
 
     # ─── resolution against what is being swept ──────────────────────────────
@@ -497,7 +493,7 @@ class AmplitudeSchedule:
                 "A base amplitude is required when scheduling by name: "
                 "there is no catalog to take one from. Pass base= as a "
                 "single number, one per name, or a {name: amplitude} "
-                "mapping — or use ramp()/explicit(), whose rungs are "
+                "mapping — or use ramp()/explicit(), whose steps are "
                 "absolute amplitudes and need no base."
             )
         return resolve_amplitudes(
@@ -512,28 +508,28 @@ class AmplitudeSchedule:
         self, target: ResonatorCatalog | Sequence[str]
     ) -> tuple[list[str], list[dict[str, float]], list[float | None]]:
         """The whole resolution, in one place: names, per-step amplitudes, and
-        the rung each step came from.  Shared by :meth:`steps`,
+        the multiplier for each step.  Shared by :meth:`resolve_steps`,
         :meth:`validate` and :meth:`describe` so the three cannot disagree."""
         names, defaults, allow_sequence = self._resolve_targets(target)
 
         if not self.relative:
-            # The rungs are the amplitudes; every sweep gets the same one.
+            # The steps are the amplitudes; every sweep gets the same one.
             return (
                 names,
-                [{n: level for n in names} for level in self.ladder],
-                [None] * len(self.ladder),
+                [{n: level for n in names} for level in self.steps],
+                [None] * len(self.steps),
             )
 
         base = self._resolve_base(names, defaults, allow_sequence)
         return (
             names,
-            [{n: base[n] * factor for n in names} for factor in self.ladder],
-            list(self.ladder),
+            [{n: base[n] * factor for n in names} for factor in self.steps],
+            list(self.steps),
         )
 
     # ─── the steps ───────────────────────────────────────────────────────────
 
-    def steps(
+    def resolve_steps(
         self, target: ResonatorCatalog | Sequence[str]
     ) -> list[AmplitudeStep]:
         """The numbered amplitude steps, resolved against what is being swept.
@@ -552,7 +548,7 @@ class AmplitudeSchedule:
                 base mapping does not name every sweep. Both are caught here,
                 before the first sweep runs, rather than after some of the data
                 has been taken — ``multisweep`` itself only rejects
-                non-positive amplitudes, so a ladder that overshoots full scale
+                non-positive amplitudes, so a schedule that overshoots full scale
                 would otherwise reach the hardware unchallenged.
         """
         names, per_step, factors = self._amplitudes_per_step(target)
@@ -611,7 +607,7 @@ class AmplitudeSchedule:
         """Derived quantities for display, resolved against *target*.
 
         What a dialog or a notebook renders instead of deriving its own. Raises
-        the same things :meth:`steps` does — call :meth:`validate` first if the
+        the same things :meth:`resolve_steps` does — call :meth:`validate` first if the
         input might not be sound.
         """
         names, per_step, factors = self._amplitudes_per_step(target)
@@ -621,7 +617,7 @@ class AmplitudeSchedule:
             "nsteps": self.nsteps,
             "relative": self.relative,
             "spacing": self.spacing,
-            "ladder": list(self.ladder),
+            "steps": list(self.steps),
             "n_sections": len(names),
             "n_directions": n_directions,
             # The number that actually predicts how long this takes.
@@ -650,7 +646,7 @@ class AmplitudeSchedule:
 
         Never raises: a caller that is rendering a live preview of a
         half-entered form wants the complaint as text, not as a traceback. The
-        errors here are the ones :meth:`steps` raises on.
+        errors here are the ones :meth:`resolve_steps` raises on.
         """
         try:
             names, per_step, factors = self._amplitudes_per_step(target)
@@ -659,11 +655,11 @@ class AmplitudeSchedule:
 
         issues = self._range_issues(per_step)
 
-        repeated = sorted({v for v in self.ladder if self.ladder.count(v) > 1})
+        repeated = sorted({v for v in self.steps if self.steps.count(v) > 1})
         if repeated:
             issues.append((
                 "warning",
-                f"Ladder repeats {', '.join(f'{v:g}' for v in repeated)}: those "
+                f"Schedule repeats {', '.join(f'{v:g}' for v in repeated)}: those "
                 f"steps measure the same thing twice.",
             ))
 
@@ -690,7 +686,7 @@ class AmplitudeSchedule:
             base = float(self.base)
         return {
             "schema_version": self.SCHEMA_VERSION,
-            "ladder": list(self.ladder),
+            "steps": list(self.steps),
             "relative": self.relative,
             "base": base,
             "spacing": self.spacing,
@@ -699,14 +695,14 @@ class AmplitudeSchedule:
     @classmethod
     def from_dict(cls, d: Mapping) -> AmplitudeSchedule:
         version = d.get("schema_version")
-        if version != cls.SCHEMA_VERSION:
+        if version not in (1, cls.SCHEMA_VERSION):
             raise ValueError(
                 f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
                 f"this dict was written by a different version of "
                 f"AmplitudeSchedule."
             )
         return cls(
-            ladder=tuple(d["ladder"]),
+            steps=tuple(d["ladder"] if version == 1 else d["steps"]),
             relative=bool(d["relative"]),
             base=d.get("base"),
             spacing=d.get("spacing", "none"),

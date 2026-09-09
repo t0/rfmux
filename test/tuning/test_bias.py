@@ -117,7 +117,7 @@ def amplitude_iterations(
     needs — so a test of the *search* gets the search a caller actually gets.
     The two passes are drawn from the same model and so are identical, which
     leaves the hysteresis half of that method with nothing to find: what fires
-    on these ladders is the jump, exactly as under ``"derivative"`` alone.
+    on these schedules is the jump, exactly as under ``"derivative"`` alone.
     """
     if amplitudes is None:
         amplitudes = [1e-3 * 2**i for i in range(len(nonlinearities))]
@@ -127,13 +127,13 @@ def amplitude_iterations(
     }
 
 
-def a_ladder(
+def a_schedule(
     nonlinearities=(0.0, 0.0, JUMPED),
     directions=("upward", "downward"),
     catalog=None,
     names=("R0001", "R0002"),
 ):
-    """One module's worth of a packed multisweep return, over a ladder
+    """One module's worth of a packed multisweep return, over a schedule
     of amplitude steps.
 
     Through the real packer, so these tests cannot drift from the shape the
@@ -141,7 +141,7 @@ def a_ladder(
     """
     catalog = a_catalog() if catalog is None else catalog
     schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, len(nonlinearities))
-    steps = schedule.steps(catalog)
+    steps = schedule.resolve_steps(catalog)
     sweeps = {
         step.step: {
             direction: {
@@ -834,7 +834,7 @@ def test_a_sweep_with_no_volts_cannot_be_calibrated():
 
 def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
     catalog = a_catalog()
-    sweeps = a_ladder(catalog=catalog)
+    sweeps = a_schedule(catalog=catalog)
     before = catalog.to_dict()
 
     report = find_bias_points(sweeps, save=False)
@@ -851,7 +851,7 @@ def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
 def test_the_sweep_entries_come_back_as_they_went_in():
     """The diagnostics of an analysis do not belong written onto the sweeps the
     analysis was handed. The report itself does, and goes on the output."""
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     entry = sweeps["results"][0]["upward"]["R0001"]
     keys = set(entry)
     output_keys = set(sweeps)
@@ -863,7 +863,7 @@ def test_the_sweep_entries_come_back_as_they_went_in():
 
 
 def test_the_bias_point_carries_the_calibration_measured_at_it():
-    report = find_bias_points(a_ladder())
+    report = find_bias_points(a_schedule())
     bias = report.catalog["R0001"].bias
     finding = report["R0001"]
 
@@ -878,9 +878,9 @@ def test_the_bias_point_carries_the_calibration_measured_at_it():
 def test_the_calibration_belongs_to_the_tone_that_will_be_played():
     """Quantized first, then differentiated: the derivatives are the ones at
     the frequency the hardware will actually put the tone on."""
-    report = find_bias_points(a_ladder())
+    report = find_bias_points(a_schedule())
     bias = report.catalog["R0001"].bias
-    entry = report_entry(a_ladder(), report["R0001"])
+    entry = report_entry(a_schedule(), report["R0001"])
 
     assert bias.frequency_hz == pytest.approx(
         round(bias.frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
@@ -899,7 +899,7 @@ def report_entry(sweeps, finding, direction="upward"):
 
 
 def test_the_bias_point_carries_the_sweep_its_calibration_came_off():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     report = find_bias_points(sweeps, save=False)
     bias = report.catalog["R0001"].bias
     entry = report_entry(sweeps, report["R0001"])
@@ -915,7 +915,7 @@ def test_the_bias_point_carries_the_sweep_its_calibration_came_off():
 def test_the_calibration_can_be_re_derived_from_the_catalog_alone():
     """The point of storing it: the same call as on the sweeps, on a catalog
     that has been carried away from the file they live in."""
-    report = find_bias_points(a_ladder(), save=False)
+    report = find_bias_points(a_schedule(), save=False)
     bias = report.catalog["R0001"].bias
 
     assert (bias.dI_df, bias.dQ_df) == pytest.approx(
@@ -924,8 +924,8 @@ def test_the_calibration_can_be_re_derived_from_the_catalog_alone():
 
 
 def test_the_stored_sweep_is_the_step_that_was_chosen():
-    """One trace at one amplitude, not the ladder it was picked out of."""
-    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)), save=False)
+    """One trace at one amplitude, not the schedule it was picked out of."""
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)), save=False)
 
     for finding in report.findings:
         stored = report.catalog[finding.name].bias.bias_sweep
@@ -935,7 +935,7 @@ def test_the_stored_sweep_is_the_step_that_was_chosen():
 def test_the_stored_sweep_leaves_behind_what_is_recoverable_or_known():
     """``iq_counts`` is iq_volts over a constant, and ``channel`` is the
     resonator's own — a second copy is a second thing to keep in agreement."""
-    report = find_bias_points(a_ladder(), save=False)
+    report = find_bias_points(a_schedule(), save=False)
     stored = report.catalog["R0001"].bias.bias_sweep
 
     assert set(stored) == set(BiasPoint.BIAS_SWEEP_KEYS)
@@ -944,7 +944,7 @@ def test_the_stored_sweep_leaves_behind_what_is_recoverable_or_known():
 
 
 def test_the_stored_sweep_survives_the_report_round_trip():
-    report = find_bias_points(a_ladder(), save=False)
+    report = find_bias_points(a_schedule(), save=False)
 
     back = BiasReport.from_dict(report.to_dict())
     stored = back.catalog["R0001"].bias.bias_sweep
@@ -958,7 +958,7 @@ def test_the_stored_sweep_survives_the_report_round_trip():
 
 
 def test_retuning_a_biased_resonator_drops_the_sweep_with_the_calibration():
-    report = find_bias_points(a_ladder(), save=False)
+    report = find_bias_points(a_schedule(), save=False)
     resonator = report.catalog["R0001"]
     assert resonator.bias.bias_sweep is not None
 
@@ -969,7 +969,7 @@ def test_retuning_a_biased_resonator_drops_the_sweep_with_the_calibration():
 
 
 def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
-    report = find_bias_points(a_ladder())
+    report = find_bias_points(a_schedule())
 
     assert report.catalog["R0001"].bias.iq_rotation_deg is None
 
@@ -977,7 +977,7 @@ def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
 def test_identity_and_channels_survive_the_new_catalog():
     catalog = a_catalog()
 
-    report = find_bias_points(a_ladder(catalog=catalog))
+    report = find_bias_points(a_schedule(catalog=catalog))
 
     assert [r.name for r in report.catalog] == [r.name for r in catalog]
     assert [r.channel for r in report.catalog] == [r.channel for r in catalog]
@@ -989,13 +989,13 @@ def test_the_separation_rule_survives_the_new_catalog_too():
     under the rule it was built under rather than under no rule at all."""
     catalog = a_catalog(min_separation_hz=1e3)
 
-    report = find_bias_points(a_ladder(catalog=catalog))
+    report = find_bias_points(a_schedule(catalog=catalog))
 
     assert report.catalog.min_separation_hz == 1e3
 
 
 def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
-    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)))
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)))
 
     for finding in report.findings:
         assert report.catalog[finding.name].bias.amplitude == pytest.approx(
@@ -1004,7 +1004,7 @@ def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
 
 
 def test_the_catalog_biased_is_the_one_the_sweep_recorded():
-    report = find_bias_points(a_ladder())
+    report = find_bias_points(a_schedule())
 
     assert len(report.catalog) == 2
     assert all(f.good for f in report.findings)
@@ -1014,7 +1014,7 @@ def test_a_sweep_with_no_catalog_recorded_in_it_has_nothing_to_bias():
     """Every multisweep records a catalog since schema_version 6, a bare
     center_frequencies call included, so nothing writes this any more. An older
     file still can, and it is the one input this function cannot work from."""
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     sweeps["call_params"]["catalog"] = None
 
     with pytest.raises(ValueError, match="No catalog in these sweeps"):
@@ -1025,7 +1025,7 @@ def test_a_catalog_resonator_these_sweeps_do_not_cover_says_so():
     """The catalog and the sweeps come out of one file, so a resonator with no
     data means a result that disagrees with itself — not a detector that could
     not be biased."""
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     sweeps["call_params"]["catalog"] = ResonatorCatalog(
         [*a_catalog(),
          Resonator(name="R0003", channel=3,
@@ -1038,7 +1038,7 @@ def test_a_catalog_resonator_these_sweeps_do_not_cover_says_so():
 
 
 def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     for by_direction in sweeps["results"].values():
         for sections in by_direction.values():
             sections["R0001"]["iq_volts"] = None
@@ -1052,7 +1052,7 @@ def test_the_recorded_catalog_is_what_the_findings_are_counted_from():
     sweep holding a section its catalog does not name — the sections come from
     the catalog — so this is a doctored file, and the point of it is that the
     catalog is what is walked and the sections are what get looked up."""
-    sweeps = a_ladder()
+    sweeps = a_schedule()
     sweeps["call_params"]["catalog"] = a_catalog_of_one().to_dict()
 
     report = find_bias_points(sweeps, save=False)
@@ -1076,7 +1076,7 @@ def a_catalog_of_one():
 def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
     catalog = a_catalog()
 
-    report = find_bias_points(a_ladder(catalog=catalog))
+    report = find_bias_points(a_schedule(catalog=catalog))
 
     assert len(report.findings) == len(catalog)
     for resonator in report.catalog:
@@ -1085,7 +1085,7 @@ def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
 
 
 def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
-    report = find_bias_points(a_ladder((JUMPED, JUMPED, JUMPED)))
+    report = find_bias_points(a_schedule((JUMPED, JUMPED, JUMPED)))
     finding = report["R0001"]
 
     assert report.catalog["R0001"].bias.amplitude == pytest.approx(finding.amplitude)
@@ -1095,7 +1095,7 @@ def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
 
 
 def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
-    report = find_bias_points(a_ladder((0.0, 0.0, 0.0)))
+    report = find_bias_points(a_schedule((0.0, 0.0, 0.0)))
     finding = report["R0001"]
 
     assert finding.bifurcated_at is None
@@ -1104,7 +1104,7 @@ def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
 
 
 def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
-    report = find_bias_points(a_ladder((0.0, 0.0, JUMPED)))
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)))
 
     assert report.flagged == []
     assert [f.name for f in report.good] == ["R0001", "R0002"]
@@ -1130,7 +1130,7 @@ def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
     in a trace the resonance has left. Moving the tone onto it would be worse
     than not moving it at all — so the sweep centre is kept, and flagged."""
     sweeps = with_the_sweep_centre_moved(
-        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=5e3)
@@ -1152,7 +1152,7 @@ def test_the_calibration_is_measured_where_the_tone_ended_up():
     """Falling back moves the frequency, so the derivatives have to be read
     there rather than at the peak that was rejected."""
     sweeps = with_the_sweep_centre_moved(
-        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     finding = find_bias_points(sweeps, max_distance_hz=5e3)["R0001"]
@@ -1169,7 +1169,7 @@ def test_the_calibration_is_measured_where_the_tone_ended_up():
 
 def test_a_believable_distance_leaves_the_measured_peak_alone():
     sweeps = with_the_sweep_centre_moved(
-        a_ladder((0.0, 0.0, JUMPED)), "R0001", -20e3
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=50e3)
@@ -1182,7 +1182,7 @@ def test_only_the_first_concern_is_reported():
     """A resonator whose sweeps never bifurcated has a bigger problem than one
     whose tone landed off centre, and hearing about both at once helps nobody."""
     sweeps = with_the_sweep_centre_moved(
-        a_ladder((0.0, 0.0, 0.0)), "R0001", -20e3
+        a_schedule((0.0, 0.0, 0.0)), "R0001", -20e3
     )
 
     report = find_bias_points(sweeps, max_distance_hz=5e3)
@@ -1196,26 +1196,26 @@ def test_comparing_directions_on_a_one_direction_sweep_is_refused_once_not_per_r
 ):
     with pytest.raises(ValueError, match=f"The {amplitude_method!r} method"):
         find_bias_points(
-            a_ladder(directions=("upward",)),
+            a_schedule(directions=("upward",)),
             amplitude_method=amplitude_method,
         )
 
 
 def test_a_direction_that_was_not_swept_is_refused():
     with pytest.raises(ValueError, match="was not swept"):
-        find_bias_points(a_ladder(directions=("upward",)),
+        find_bias_points(a_schedule(directions=("upward",)),
                          amplitude_method="derivative", direction="downward")
 
 
 def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
 
     with pytest.raises(TypeError, match="keyed by module"):
         find_bias_points({MODULE_ID: sweeps})
 
 
 def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
-    report = find_bias_points(a_ladder(), max_discrepancy=0.4)
+    report = find_bias_points(a_schedule(), max_discrepancy=0.4)
 
     assert report.settings["amplitude_method"] == "both"
     assert report.settings["frequency_method"] == "iq_derivative"
@@ -1225,7 +1225,7 @@ def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
 
 
 def test_the_report_reads_like_what_happened():
-    report = find_bias_points(a_ladder((0.0, 0.0, 0.0)))
+    report = find_bias_points(a_schedule((0.0, 0.0, 0.0)))
 
     assert len(report) == 2
     assert "2 biased, 2 flagged" in repr(report)
@@ -1238,7 +1238,7 @@ def test_the_report_reads_like_what_happened():
 
 
 def test_a_report_survives_a_round_trip_through_builtins():
-    report = find_bias_points(a_ladder(), save=False)
+    report = find_bias_points(a_schedule(), save=False)
     restored = BiasReport.from_dict(report.to_dict())
 
     assert restored.findings == report.findings
@@ -1249,7 +1249,7 @@ def test_a_report_survives_a_round_trip_through_builtins():
 
 def test_a_reports_dict_holds_no_rfmux_classes():
     """Files have to open on a machine that has never heard of rfmux."""
-    d = find_bias_points(a_ladder(), save=False).to_dict()
+    d = find_bias_points(a_schedule(), save=False).to_dict()
 
     assert d["schema_version"] == BiasReport.SCHEMA_VERSION
     assert type(d["catalog"]).__name__ == "dict"
@@ -1267,7 +1267,7 @@ def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
     """A combined check nests one level deeper than any other, so it is the
     one that would take a NamedTuple into a file if to_dict stopped early."""
     report = find_bias_points(
-        a_ladder(), amplitude_method="both", save=False
+        a_schedule(), amplitude_method="both", save=False
     )
     d = report.to_dict()
 
@@ -1281,7 +1281,7 @@ def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
 
 def test_a_single_test_check_carries_no_parts():
     report = find_bias_points(
-        a_ladder(), amplitude_method="derivative", save=False
+        a_schedule(), amplitude_method="derivative", save=False
     )
 
     assert all(
@@ -1292,14 +1292,14 @@ def test_a_single_test_check_carries_no_parts():
 
 
 def test_check_keys_stay_the_amplitude_steps_they_name():
-    d = find_bias_points(a_ladder(), save=False).to_dict()
+    d = find_bias_points(a_schedule(), save=False).to_dict()
     assert all(
         isinstance(k, int) for f in d["findings"] for k in f["checks"]
     )
 
 
 def test_a_report_from_another_version_is_refused():
-    d = find_bias_points(a_ladder(), save=False).to_dict()
+    d = find_bias_points(a_schedule(), save=False).to_dict()
     d["schema_version"] = BiasReport.SCHEMA_VERSION + 1
 
     with pytest.raises(ValueError, match="schema_version"):
@@ -1307,7 +1307,7 @@ def test_a_report_from_another_version_is_refused():
 
 
 def test_the_report_goes_into_the_sweeps_it_was_found_from():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
 
     report = find_bias_points(sweeps, save=False)
 
@@ -1317,7 +1317,7 @@ def test_the_report_goes_into_the_sweeps_it_was_found_from():
 
 
 def test_a_second_analysis_replaces_the_stored_one():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
 
     find_bias_points(sweeps, save=False)
     report = find_bias_points(sweeps, save=False, frequency_method="minimum")
@@ -1333,7 +1333,7 @@ def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
 
     store.set_output_directory(tmp_path)
     try:
-        sweeps = a_ladder()
+        sweeps = a_schedule()
         report = find_bias_points(sweeps, save=True, label="cooldown3")
 
         path = next(store.session_directory().glob("multisweep_*.pkl"))
@@ -1344,7 +1344,7 @@ def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
         assert restored.catalog.module == report.catalog.module
 
         # And a second analysis updates that file rather than leaving a near
-        # copy of a ladder beside it.
+        # copy of a schedule beside it.
         find_bias_points(sweeps, save=True, frequency_method="minimum")
         assert [p.name for p in store.session_directory().glob("*.pkl")] == [
             path.name

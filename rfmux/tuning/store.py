@@ -394,7 +394,7 @@ def _unused(target: Path) -> Path:
     """A path nothing is at yet, suffixing ``_1``, ``_2`` … if need be.
 
     Two measurements can finish in the same second — the amplitude steps of a
-    ladder, saved individually, routinely do — and the loser should not silently
+    schedule, saved individually, routinely do — and the loser should not silently
     land on top of the winner.
     """
     if not target.exists():

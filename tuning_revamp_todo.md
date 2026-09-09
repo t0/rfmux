@@ -246,10 +246,10 @@ What is left:
 
 **2026-09-08, on the standard simulated array (`rfmux/mock/standard_array.py`,
 `test/notebooks/test_standard_mock_array.md`):** both detectors fire too
-early. Over the ladder `multiplicative(0.5, 8, 5)` the nonlinear fit puts every
-one of the eight resonators' bifurcation between rungs 3 and 4 (`a` ≈ 0.4 then
-≈ 0.85–0.9), yet `derivative` picks rung 0–2 on seven of eight and
-`hysteresis` scatters from rung 0 to 4; `both` agrees with the fit on 0 of 8,
+early. Over the schedule `multiplicative(0.5, 8, 5)` the nonlinear fit puts every
+one of the eight resonators' bifurcation between steps 3 and 4 (`a` ≈ 0.4 then
+≈ 0.85–0.9), yet `derivative` picks step 0–2 on seven of eight and
+`hysteresis` scatters from step 0 to 4; `both` agrees with the fit on 0 of 8,
 and three resonators come back flagged "the quietest amplitude measured was
 already bifurcated". The paragraph below about the simulator's two passes being
 identical is no longer true: main's mock now has TLS 1/f frequency wander on

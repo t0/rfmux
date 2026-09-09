@@ -1,7 +1,7 @@
 """Fixtures for the tuning tests.
 
 Most of ``test/tuning`` works on synthetic traces and needs nothing from here.
-The tests that drive the real flow — a sweep, a ladder, a bias — run against
+The tests that drive the real flow — a sweep, a schedule, a bias — run against
 the standard simulated array, ``rfmux.mock.standard_array``, built once per
 test module: building it is cheap, but a second ``load_session`` in one
 process detaches the first board's objects, so one module is one array.

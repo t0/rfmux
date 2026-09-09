@@ -184,7 +184,7 @@ def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
     """A colour scale graded over *amplitudes*, and the colourbar's handle.
 
     Colour a trace with ``mappable.to_rgba(sweep["sweep_amplitude"])`` rather
-    than by its position in the ladder. Under a *multiplicative* amplitude
+    than by its position in the schedule. Under a *multiplicative* amplitude
     schedule each resonator is driven at its own amplitude on the same step, so
     step number and drive are not the same thing.
 
@@ -569,7 +569,7 @@ def plot_bifurcation_checks(
     Every series is in the detector's own units, so they belong on one axes.
 
     Note that a detector stops examining steps once it fires, so a resonator
-    that bifurcated part-way up the ladder has fewer points here than it has
+    that bifurcated part-way up the schedule has fewer points here than it has
     amplitude steps. That is the search being efficient, not data missing. A
     single-amplitude sweep gives one point per panel, which still answers the
     only question there is to ask of it — whether that one step was already
@@ -830,7 +830,7 @@ The tinted part of a row is where the noise gate rather than the span bar is
 
     for batch_number, batch in enumerate(batches, start=1):
         with plt.rc_context({**PLOT_STYLE, "axes.grid": False}):
-            # A panel is as tall as it has steps, so a five-step ladder is five
+            # A panel is as tall as it has steps, so a five-step schedule is five
             # readable rows rather than five slivers.
             iterations = {
                 name: collect_amplitude_iterations_for(results, name)
@@ -994,7 +994,7 @@ def plot_arc_speed_panels(
 
     Every step drawn is evaluated here, which is not the same set the amplitude
     search examined — it stops at the first step that fires, so the loud end of
-    the ladder usually has no recorded check. That is the point of doing it
+    the schedule usually has no recorded check. That is the point of doing it
     again: a threshold is calibrated on the steps past the one that tripped it,
     and :func:`plot_bifurcation_checks` can only show what was recorded.
 

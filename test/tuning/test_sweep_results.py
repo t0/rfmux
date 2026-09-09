@@ -56,7 +56,7 @@ def a_sweep_entry(amplitude, direction):
 def container(
     schedule=None, catalog=None, names=None, directions=("upward",), **overrides
 ):
-    """A ladder's whole return, keyed by module, as the driver builds it."""
+    """A schedule's whole return, keyed by module, as the driver builds it."""
     catalog = catalog if catalog is not None else a_catalog()
     schedule = schedule if schedule is not None else AmplitudeSchedule()
     target = catalog
@@ -69,7 +69,7 @@ def container(
             }
             for direction in directions
         }
-        for step in schedule.steps(target)
+        for step in schedule.resolve_steps(target)
     }
 
     kwargs = dict(
@@ -129,14 +129,14 @@ def test_a_single_sweep_is_one_iteration_in_one_direction():
     assert list(result["results"][0]["downward"]) == ["R0001"]
 
 
-def test_a_sweep_and_a_ladder_nest_identically():
+def test_a_sweep_and_a_schedule_nest_identically():
     """The property the fitters rely on: nothing downstream has to ask how wide
     the call that produced a result was."""
     sweep = swept()[MODULE_ID]
-    ladder = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3))
+    schedule = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3))
 
-    assert set(sweep) == set(ladder)
-    for result in (sweep, ladder):
+    assert set(sweep) == set(schedule)
+    for result in (sweep, schedule):
         for by_direction in result["results"].values():
             for sections in by_direction.values():
                 assert all(isinstance(entry, dict) for entry in sections.values())
@@ -157,18 +157,18 @@ def test_a_sweep_records_the_call_as_made():
 
 def test_a_sweep_records_a_bare_amp_verbatim_rather_than_resolving_it():
     """What each resonator was probed at is already `sweep_amplitude` in its own
-    entry, so call_params can stay a record of the request — a one-rung
+    entry, so call_params can stay a record of the request — a one-step
     schedule keeping the number the caller typed as its base."""
     result = swept(amp=0.005)[MODULE_ID]
 
     assert result["call_params"]["amp_schedule"]["base"] == 0.005
-    assert result["call_params"]["amp_schedule"]["ladder"] == [1.0]
+    assert result["call_params"]["amp_schedule"]["steps"] == [1.0]
 
 
 def test_one_sweep_and_twenty_record_the_same_call_params():
     """One packer, so there is nothing for a reader to sniff for. A narrow call
     is not a different measurement with a different provenance block; it is the
-    same one with a one-rung ladder."""
+    same one with a one-step schedule."""
     assert set(swept()[MODULE_ID]["call_params"]) == set(packed()["call_params"]) == {
         "catalog",
         "center_frequencies",
@@ -260,7 +260,7 @@ def test_one_modules_output_is_what_the_readers_take():
     )
 
 
-# ─── packing and reading a ladder ─────────────────────────────────────────────
+# ─── packing and reading a schedule ─────────────────────────────────────────────
 
 
 def test_pack_multisweep_puts_the_iterations_under_results_keyed_by_number():
@@ -321,7 +321,7 @@ def test_one_resonators_sweeps_across_every_iteration():
 
 
 def test_collecting_keeps_the_order_measured_rather_than_sorting():
-    """An explicit ladder may run in any order, and re-sorting would lose the
+    """An explicit schedule may run in any order, and re-sorting would lose the
     order things actually happened in."""
     result = packed(schedule=AmplitudeSchedule.explicit([0.01, 0.001, 0.004]))
 
@@ -361,7 +361,7 @@ def test_the_amplitudes_of_an_iteration_come_from_the_sweeps_themselves():
     )
 
 
-def test_an_absolute_ladder_probes_everything_at_the_same_amplitude():
+def test_an_absolute_schedule_probes_everything_at_the_same_amplitude():
     result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
 
     amplitudes = get_amplitudes_at_iteration(result, 1)
@@ -386,7 +386,7 @@ def test_the_iteration_nearest_a_given_amplitude():
     result = packed(schedule=AmplitudeSchedule.explicit([1e-3, 1e-2, 1e-1]))
 
     assert matched_iteration(result, "R0001", 1e-2) == 1
-    # nearest, not exact — a ladder's floats rarely compare equal
+    # nearest, not exact — a schedule's floats rarely compare equal
     assert matched_iteration(result, "R0001", 9.6e-3) == 1
 
 
@@ -403,7 +403,7 @@ def test_the_match_comes_back_as_the_sweep_that_was_matched():
     assert iteration == 1
     assert set(matched) == {"upward", "downward"}
     assert matched["upward"]["sweep_amplitude"] == pytest.approx(1e-2)
-    # the same rung collect_amplitude_iterations_for hands back
+    # the same step collect_amplitude_iterations_for hands back
     assert matched == collect_amplitude_iterations_for(result, "R0001")[1]
 
 
@@ -435,7 +435,7 @@ def test_a_sweep_holding_an_older_catalog_snapshot_still_answers():
     assert matched_iteration(result, "R0002") == 2
 
 
-def test_a_relative_ladder_gives_each_resonator_its_own_answer():
+def test_a_relative_schedule_gives_each_resonator_its_own_answer():
     """Which is why the reader takes a name: R0001 and R0002 share an iteration
     number and nothing else."""
     catalog = a_catalog(amplitudes=(0.001, 0.01))

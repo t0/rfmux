@@ -39,7 +39,7 @@ pytestmark = pytest.mark.portable
 FR = 1.0e9
 QR = 1e4
 
-# The fitters take one module's output, so a ladder built here is indexed out
+# The fitters take one module's output, so a schedule built here is indexed out
 # of the container the packer returns.
 MODULE_ID = "crs0030_rmod2"
 
@@ -109,11 +109,11 @@ def a_multisweep(sections=None, direction="upward"):
     )[MODULE_ID]
 
 
-def a_ladder(directions=("upward", "downward")):
+def a_schedule(directions=("upward", "downward")):
     """A packed multisweep result over three amplitude steps."""
     catalog = a_catalog()
     schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, 3)
-    steps = schedule.steps(catalog)
+    steps = schedule.resolve_steps(catalog)
     sweeps = {
         step.step: {
             direction: {
@@ -376,8 +376,8 @@ def test_a_single_multisweep_is_fitted_as_one_iteration():
     assert {f.direction for f in report.fits} == {"downward"}
 
 
-def test_a_packed_ladder_is_fitted_across_every_iteration_and_direction():
-    sweeps = a_ladder()
+def test_a_packed_schedule_is_fitted_across_every_iteration_and_direction():
+    sweeps = a_schedule()
 
     report = fit_sweeps(sweeps, models=("circle",))
 
@@ -388,7 +388,7 @@ def test_a_packed_ladder_is_fitted_across_every_iteration_and_direction():
 
 
 def test_the_selection_arguments_narrow_what_is_fitted():
-    sweeps = a_ladder()
+    sweeps = a_schedule()
 
     report = fit_sweeps(
         sweeps, models=("circle",), names="R0001", iterations=1, directions="upward"
@@ -400,7 +400,7 @@ def test_the_selection_arguments_narrow_what_is_fitted():
 
 
 def test_a_single_name_is_one_name_and_not_a_sequence_of_characters():
-    sweeps = a_ladder(directions=("upward",))
+    sweeps = a_schedule(directions=("upward",))
 
     report = fit_sweeps(sweeps, models=("circle",), names="R0001")
 
@@ -409,12 +409,12 @@ def test_a_single_name_is_one_name_and_not_a_sequence_of_characters():
 
 def test_a_name_that_was_not_swept_says_which_ones_were():
     with pytest.raises(ValueError, match=r"R9999.*R0001"):
-        fit_sweeps(a_ladder(), names="R9999")
+        fit_sweeps(a_schedule(), names="R9999")
 
 
 def test_a_filter_that_selects_nothing_says_what_there_was():
     with pytest.raises(ValueError, match=r"iterations=99.*\[0, 1, 2\]"):
-        fit_sweeps(a_ladder(), iterations=99)
+        fit_sweeps(a_schedule(), iterations=99)
 
 
 def test_iteration_zero_selects_the_one_sweep_a_multisweep_has():
@@ -466,18 +466,18 @@ def test_an_unknown_model_names_the_ones_that_exist():
 
 
 def test_fitting_at_the_bias_amplitude_picks_one_iteration_per_resonator():
-    sweeps = a_ladder(directions=("upward",))
+    sweeps = a_schedule(directions=("upward",))
 
     report = fit_sweeps_at_bias_amplitude(sweeps, models=("circle",))
 
     # ramp(1e-3, 4e-3, 3) is [1e-3, 2.5e-3, 4e-3]; R0001 is biased at 2e-3 and
-    # R0002 at 4e-3, so they are matched to different rungs of the same ladder.
+    # R0002 at 4e-3, so they are matched to different steps of the same schedule.
     at = {f.name: f.iteration for f in report.fits}
     assert at == {"R0001": 1, "R0002": 2}
 
 
 def test_an_explicit_amplitude_overrides_the_catalogs_bias_amplitudes():
-    sweeps = a_ladder(directions=("upward",))
+    sweeps = a_schedule(directions=("upward",))
 
     report = fit_sweeps_at_bias_amplitude(
         sweeps, amplitude=1e-3, models=("circle",)
@@ -487,7 +487,7 @@ def test_an_explicit_amplitude_overrides_the_catalogs_bias_amplitudes():
 
 
 def test_a_single_multisweep_matches_the_one_iteration_it_has():
-    """Nearest wins over a set of one, as it does over a ladder that does not
+    """Nearest wins over a set of one, as it does over a schedule that does not
     bracket the bias amplitude — see find_iteration_matching_amplitude."""
     report = fit_sweeps_at_bias_amplitude(a_multisweep(), models=("circle",))
 
@@ -498,7 +498,7 @@ def test_a_single_multisweep_matches_the_one_iteration_it_has():
 
 
 def test_the_report_counts_each_model_separately():
-    sweeps = a_ladder(directions=("upward",))
+    sweeps = a_schedule(directions=("upward",))
 
     report = fit_sweeps(sweeps, models=("skewed", "circle"))
 
@@ -518,8 +518,8 @@ def test_the_report_says_where_a_failure_was_as_well_as_why():
     assert "failed" in repr(report)
 
 
-def test_the_report_labels_a_ladder_fit_with_both_of_its_coordinates():
-    sweeps = a_ladder()
+def test_the_report_labels_a_schedule_fit_with_both_of_its_coordinates():
+    sweeps = a_schedule()
 
     report = fit_sweeps(sweeps, models=("circle",), names="R0001", iterations=2)
 
@@ -530,7 +530,7 @@ def test_the_report_labels_a_ladder_fit_with_both_of_its_coordinates():
 
 
 def test_progress_is_reported_per_sweep_and_not_per_fit():
-    sweeps = a_ladder(directions=("upward",))
+    sweeps = a_schedule(directions=("upward",))
     ticks = []
 
     fit_sweeps(

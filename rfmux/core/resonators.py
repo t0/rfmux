@@ -21,7 +21,7 @@ not re-check them afterwards.
 The catalog holds identity, the operating point, the calibrations downstream
 measurements need, and — for a bias point that has one — the single sweep its
 calibration was read off. The sweeps themselves are *not* stored here: analysis
-reduces a ladder of amplitudes and directions to the handful of scalars that
+reduces a schedule of amplitudes and directions to the handful of scalars that
 belong on a ``BiasPoint``, plus the one trace behind them, and everything else
 stays with the caller. That trace is a few kB per resonator, so a catalog for a
 large array is a few MB rather than the handful of bytes it used to be. It is

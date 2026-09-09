@@ -123,7 +123,7 @@ def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
     """A colour scale graded over *amplitudes*, and the colourbar's handle.
 
     Colour a trace with ``mappable.to_rgba(sweep["sweep_amplitude"])`` rather
-    than by its position in the ladder. Under a *multiplicative* amplitude
+    than by its position in the schedule. Under a *multiplicative* amplitude
     schedule each resonator is driven at its own amplitude on the same step, so
     step number and drive are not the same thing, and a colourbar that claims
     to show drive has to be built from the drives.

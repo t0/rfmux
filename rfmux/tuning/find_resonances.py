@@ -777,7 +777,7 @@ def find_sweeps_with_nearby_resonances(
     iteration : int or None, optional
         Look only at this amplitude iteration. The default, ``None``, looks at
         all of them and culls a name if *any* amplitude shows the collision. A
-        bifurcated sweep at the top of an amplitude ladder can occasionally
+        bifurcated sweep at the top of an amplitude schedule can occasionally
         split into two minima, so pass ``0`` if that turns up as a false hit.
     direction : str or None, optional
         Look only at this sweep direction. Default ``None``, both.

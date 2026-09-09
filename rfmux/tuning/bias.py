@@ -92,7 +92,7 @@ be played.
 
 The sweep they were read off goes onto the bias point with them, as
 ``bias_sweep`` — the one trace at the chosen amplitude and direction, not the
-ladder around it. It is there so a calibration can be re-derived, checked or
+schedule around it. It is there so a calibration can be re-derived, checked or
 plotted from the catalog alone, which is what gets carried to the places these
 sweeps do not reach. It is a calibration field like the derivatives are, so
 moving the tone drops it too.
@@ -925,7 +925,7 @@ def bifurcated_by_derivative(
     scatter, so their ratio lands in the same place — around 0.3 to 0.6 for a
     hundred-point sweep — no matter how quiet the drive was. A bar set as a
     fraction of the span is a bar that noise clears by construction, which is
-    why the quiet end of an amplitude ladder used to produce false positives
+    why the quiet end of an amplitude schedule used to produce false positives
     that no choice of factor could remove.
 
     *noise_gate_factor* asks the other question: is this spike bigger than what
@@ -1595,7 +1595,7 @@ def _stored_sweep(entry: Mapping) -> dict:
     A subset of the entry's own keys, under their own names, so what comes back
     is still a sweep entry as far as every reader here is concerned —
     ``iq_derivatives_at(resonator.bias.bias_sweep, f)`` is the same call as on
-    the sweeps. What it leaves behind is the ladder this trace was one rung of,
+    the sweeps. What it leaves behind is the schedule this trace was one step of,
     ``iq_counts`` (see :class:`~rfmux.core.resonators.BiasPoint`), and
     ``channel``, which the resonator already carries and should not be able to
     disagree with.

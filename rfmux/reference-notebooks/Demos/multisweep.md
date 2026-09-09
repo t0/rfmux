@@ -417,8 +417,9 @@ from rfmux.tuning import AmplitudeSchedule
 
 amplitude_schedule = AmplitudeSchedule.multiplicative(0.5, 4.0, 4)
 print(amplitude_schedule)
+print(amplitude_schedule.steps)  # configured multipliers
 
-for step in amplitude_schedule.steps(catalog):
+for step in amplitude_schedule.resolve_steps(catalog):
     print(step)
 ```
 
@@ -441,7 +442,7 @@ absolute = AmplitudeSchedule.ramp(1e-3, 2e-3, 2)
 
 for label, schedule in [("multiplicative (relative)", relative), ("ramp (absolute)", absolute)]:
     print(f"\n{label}:  {schedule}")
-    for step in schedule.steps(catalog):
+    for step in schedule.resolve_steps(catalog):
         shown = {n: f"{a:.5f}" for n, a in list(step.amplitudes.items())[:4]}
         print(f"  step {step.step}  {shown}")
 ```

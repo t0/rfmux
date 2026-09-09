@@ -4,10 +4,10 @@ high-resolution frequency sweeps around multiple specified center frequencies.
 
 One call is one *measurement*, which may be one sweep or many. The narrow case —
 one amplitude, one direction — is a call that said nothing about either. The
-wide case walks a ladder of probe amplitudes, in one or both frequency
+wide case walks a schedule of probe amplitudes, in one or both frequency
 directions, and returns every sweep it took in one dict.
 
-That is one macro rather than two because a ladder is not a different kind of
+That is one macro rather than two because a schedule is not a different kind of
 measurement from a sweep; it is more of one. The two used to be ``multisweep``
 and ``multiamp_multisweep``, whose arguments were near-identical and whose
 outputs were identical — ``results[step][direction][name]`` either way, with a
@@ -197,8 +197,8 @@ def _resolve_catalog(
     than quantized — a centre is a number the caller may be doing arithmetic
     with, and it agrees with each entry's ``original_center_frequency`` this
     way. *amplitudes* is step 0's, which is the amplitude the first pass
-    actually used; a ladder has no one amplitude, and the rung each later step
-    ran at is on its own sweeps.
+    actually used; a schedule has no one amplitude, and the amplitude for each later
+    step is on its own sweeps.
     """
     if catalog is not None:
         return catalog
@@ -271,7 +271,7 @@ def _resolve_schedule(
 ) -> AmplitudeSchedule:
     """The amplitude axis, as a schedule, whichever way it was spelled.
 
-    A bare ``amp`` is a one-rung schedule — that is what one amplitude is — so
+    A bare ``amp`` is a one-step schedule — that is what one amplitude is — so
     the loop below has one thing to walk either way. It is checked here, in
     ``amp``'s own words, before becoming a schedule's ``base``: the two speak
     the same vocabulary (see
@@ -453,7 +453,7 @@ async def _measure_sweep(
 
     # --- Format final results for each resonance ---
     #
-    # NOTE: re-centring is deliberately absent. A ladder of amplitudes wants the
+    # NOTE: re-centring is deliberately absent. A schedule of amplitudes wants the
     # sweep centre to follow a resonance that moves between steps, and that will
     # come back — as an adjustment to the *sweep centre* the next step is taken
     # at, made by whatever analysis found the dip. It was previously spelled
@@ -592,7 +592,7 @@ async def multisweep(
         amp (float | list[float] | Mapping[str, float] | AmplitudeSchedule | None, optional):
             Probe amplitude, in normalized DAC units, for one sweep — or an
             :class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` for
-            a ladder of them.
+            a schedule of them.
 
             One amplitude, with a *catalog*:
 
@@ -614,15 +614,15 @@ async def multisweep(
 
             Required in that case — there is nothing to fall back to.
 
-            Or a ladder, built through ``AmplitudeSchedule.multiplicative``
-            (rungs that scale each resonator's own amplitude, so an array
+            Or a schedule, built through ``AmplitudeSchedule.multiplicative``
+            (steps that scale each resonator's own amplitude, so an array
             biased across a spread walks that spread together), ``.ramp`` or
-            ``.explicit`` (rungs that *are* the amplitude). One sweep per rung
-            per direction, all in one result. The whole ladder is resolved
-            before the first sweep runs, so a rung that overshoots full scale
+            ``.explicit`` (steps that *are* the amplitude). One sweep per step
+            per direction, all in one result. The whole schedule is resolved
+            before the first sweep runs, so a step that overshoots full scale
             on step 5 is a ``ValueError`` now rather than after four steps of
             data. A schedule and a bare number are the same argument because
-            they answer the same question — a number is a ladder of one rung.
+            they answer the same question — a number is a schedule of one step.
         nsamps (int, optional): Number of samples to average per frequency
             point. Defaults to 10.
         sweep_direction (str | Sequence[str], optional): The direction of the
@@ -642,7 +642,7 @@ async def multisweep(
             are 1-based positions in this list. Pass this or *catalog*, not
             both. A catalog is generated from the list and recorded in
             ``call_params["catalog"]``, the same way one amplitude is recorded
-            as a one-rung schedule, so what comes back is the same result a
+            as a one-step schedule, so what comes back is the same result a
             catalog would have produced and every analysis downstream works on
             it unchanged. Each section's bias amplitude there is step 0's.
         names (list[str], optional): Names for the *center_frequencies*, one
@@ -659,7 +659,7 @@ async def multisweep(
             module. Each module runs the whole schedule, concurrently, and the
             results merge into one dict keyed by module.
         progress_callback (callable, optional): ``(module, pct)`` — progress
-            across the whole call, so a ladder of six steps in two directions
+            across the whole call, so a schedule of six steps in two directions
             reaches 100 only once, after the twelfth sweep. For *which* sweep
             is being taken, use *sweep_callback*.
         data_callback (callable, optional): ``(module, partial_results, step,
@@ -690,7 +690,7 @@ async def multisweep(
             whole measurement finishes. Defaults to whatever
             ``rfmux.tuning.store.autosave_enabled()`` says, which is on unless
             your config file or ``$RFMUX_AUTOSAVE`` turns it off. One file per
-            call — a ladder's steps are one measurement, and a list of modules
+            call — a schedule's steps are one measurement, and a list of modules
             produces one file covering all of them.
         label (str, optional): Your name for this sweep, appended to the
             filename. Ignored when nothing is being saved.
@@ -705,7 +705,7 @@ async def multisweep(
                     "measurement": "multisweep",
                     "module": 2,           # resolved, never None
                     "call_params": {...},  # verbatim, as this macro was called,
-                                           # plus the resolved catalog and ladder
+                                           # plus the resolved catalog and schedule
                     "results": {
                         0: {"upward": {"BOTA": {...}, "KOZR": {...}}},
                         1: {"upward": {...}},
@@ -741,8 +741,8 @@ async def multisweep(
         result and nothing else.
 
         Nothing is duplicated into the step level. What a resonator was probed
-        at is already ``sweep_amplitude`` in its own entry, and the rung that
-        produced it is ``call_params["amp_schedule"]["ladder"][step]``. The
+        at is already ``sweep_amplitude`` in its own entry, and the step that
+        produced it is ``call_params["amp_schedule"]["steps"][step]``. The
         readers beside the packer — ``collect_amplitude_iterations_for``,
         ``find_iteration_matching_amplitude`` and
         ``get_amplitudes_at_iteration`` — are the supported way back out, so
@@ -857,18 +857,20 @@ async def multisweep(
         else None,
     )
 
-    # Resolves the whole ladder up front, so an amplitude that overshoots full
+    # Resolves the whole schedule up front, so an amplitude that overshoots full
     # scale on step 5 is a ValueError now rather than after four steps of data.
-    # A call with nothing to sweep has nothing to resolve it against; the ladder
+    # A call with nothing to sweep has nothing to resolve it against; the schedule
     # it asked for is still reported below.
     steps = (
-        schedule.steps(catalog if catalog is not None else [t.name for t in targets])
+        schedule.resolve_steps(
+            catalog if catalog is not None else [t.name for t in targets]
+        )
         if targets
         else []
     )
 
     # Both ways of saying what to sweep, as one catalog — see _resolve_catalog.
-    # After the ladder because it takes the first step's amplitudes, and before
+    # After the schedule because it takes the first step's amplitudes, and before
     # the packing because that is where it is going.
     swept = _resolve_catalog(
         catalog, targets, steps[0].amplitudes if steps else {}, module

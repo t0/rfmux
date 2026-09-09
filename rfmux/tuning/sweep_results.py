@@ -2,8 +2,8 @@
 
 ``multisweep`` produces the dict :func:`pack_multisweep` assembles; the readers
 under it are the supported way to get things back out. One module owns both
-ends, because a reader resolving ``ladder[iteration]`` has to agree with the
-packer about what a rung means, and two files agreeing about one contract is one
+ends, because a reader resolving ``schedule.steps[iteration]`` has to agree with the
+packer about what a step means, and two files agreeing about one contract is one
 file too many.
 
 ``take_netanal`` packs through :func:`pack_netanal` into the same shape, so
@@ -11,8 +11,8 @@ every driver in the package returns one container shape. What sits under a
 direction differs — a sweep has a section per resonator, a netanal has the one
 trace it measured — which is what ``measurement`` is in the output to say.
 
-This lived in :mod:`rfmux.tuning.multisweep_amplitudes` while a ladder was the
-only thing that produced it. It is not the ladder's shape any more — it is every
+This lived in :mod:`rfmux.tuning.multisweep_amplitudes` while a schedule was the
+only thing that produced it. It is not the schedule's shape any more — it is every
 sweep's — so it has its own file, and the amplitudes module is back to being
 about amplitudes.
 
@@ -63,7 +63,7 @@ __all__ = [
 #    'measurement' is 'multisweep' whether one amplitude was swept or twenty,
 #    and call_params records the pair every sweep now has — 'amp_schedule' and
 #    'directions' — in place of the 'amp'/'sweep_direction' a single sweep used
-#    to record. A one-rung schedule is the faithful record of amp=0.005; what
+#    to record. A one-step schedule is the faithful record of amp=0.005; what
 #    each resonator was actually probed at is, as before, 'sweep_amplitude' on
 #    its own entry.
 #
@@ -77,7 +77,7 @@ RESULTS_SCHEMA_VERSION = 6
 
 
 # The iteration a netanal's one trace sits at. Not a placeholder: a netanal is
-# one amplitude sweeping upward in frequency, so 0 is its number in a ladder of
+# one amplitude sweeping upward in frequency, so 0 is its number in a schedule of
 # length one.
 SINGLE_SWEEP_ITERATION = 0
 
@@ -179,7 +179,7 @@ def pack_multisweep(
             ``crs.module[m].index()``.
         module: the module actually swept — resolved, never None.
         amp_schedule: the schedule the amplitudes came from, normalized — a
-            bare ``amp=0.005`` reaches here as the one-rung schedule it is.
+            bare ``amp=0.005`` reaches here as the one-step schedule it is.
             Snapshotted with ``to_dict`` for provenance.
         directions: the directions swept, in the order measured.
         requested_module: the ``module`` argument as the caller passed it, which
@@ -204,8 +204,8 @@ def pack_multisweep(
 
         Nothing is duplicated into the iteration level. What a resonator was
         probed at is already ``sweep_amplitude`` in its own entry — see
-        :func:`get_amplitudes_at_iteration` — and the rung that produced it is
-        ``call_params["amp_schedule"]["ladder"][iteration]``. Sweep centres are
+        :func:`get_amplitudes_at_iteration` — and the step that produced it is
+        ``call_params["amp_schedule"]["steps"][iteration]``. Sweep centres are
         recorded only as passed: a later step may re-centre between amplitudes,
         at which point a top-level copy would be a lie while each sweep's own
         ``original_center_frequency`` cannot be.
@@ -403,7 +403,7 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
     Returns:
         dict: ``{iteration: {direction: sweep}}`` — the same shape as
         ``results["results"]``, one resonator deep, in the order measured.
-        Measured order, not sorted by amplitude: an ``explicit`` ladder may run
+        Measured order, not sorted by amplitude: an ``explicit`` schedule may run
         in any order, and re-sorting silently would lose the order things
         actually happened in.
 
@@ -467,7 +467,7 @@ def find_iteration_matching_amplitude(
     Args:
         results: what ``multisweep`` returned, for a single module.
         name: whose amplitudes to match against. Required, because a relative
-            ladder gives every resonator its own: BOTA walking 1→2→4 µ and
+            schedule gives every resonator its own: BOTA walking 1→2→4 µ and
             KOZR walking 3→6→12 µ share an iteration number and nothing else,
             so "the iteration at 4 µ" is only a question about one of them.
         amplitude: the amplitude to match, in normalized DAC units. Defaults to
@@ -479,10 +479,10 @@ def find_iteration_matching_amplitude(
         tuple: ``({direction: sweep}, iteration)`` — the matching sweeps, one
         per direction measured, and the iteration they were taken at. The sweep
         comes first because it is what a caller wants next; the number is there
-        for indexing anything else by the same rung, and can be dropped with
+        for indexing anything else by the same step, and can be dropped with
         ``sweeps, _ =``.
 
-    Nearest wins, and there is always a nearest — floats from a ladder rarely
+    Nearest wins, and there is always a nearest — floats from a schedule rarely
     compare equal, so matching on equality would find nothing. A caller who
     needs the match to be close can read it off the sweeps it got back:
     ``sweeps["upward"]["sweep_amplitude"]``.

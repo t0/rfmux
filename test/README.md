@@ -43,7 +43,7 @@ fail: a CI runner missing it goes green having not run them.
   `rfmux.mock` flavour, as in `test_channel_selection.py`) stays in this
   tier; the mock sends UDP only after `start_udp_streaming()`. The tuning flow
   tests run that way against the *standard simulated array* (below): a real
-  netanal, multisweep ladder and bias, over RPC, in under a minute.
+  netanal, multisweep schedule and bias, over RPC, in under a minute.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
   Covers what no unit test can: streamer config taking effect, and the slow
   (~38 kHz) and PFB (~2.44 MHz) sources feeding a session. Also decimation
@@ -69,7 +69,7 @@ test module.
 `test/notebooks/test_standard_mock_array.md` builds it and runs the whole
 tuning flow across it, printing what the array looks like and asserting the
 properties the tests lean on: every resonator found, every fit converging, and
-the test ladder bracketing bifurcation. Read it before writing a test against
+the test schedule bracketing bifurcation. Read it before writing a test against
 the array; change the array there first. A test that needs a different array
 passes `overrides` and says so in its name.
 

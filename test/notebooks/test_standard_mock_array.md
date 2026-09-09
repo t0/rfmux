@@ -178,54 +178,54 @@ assert len(report.failed) == 0, report.failed
 assert all(sections[n]["fits"]["nonlinear"]["params"]["a"] < BIFURCATION_A for n in catalog.names())
 ```
 
-## 5. An amplitude ladder, and bias finding
+## 5. An amplitude schedule, and bias finding
 
-The bias finder needs a ladder that brackets bifurcation: quiet enough at the
+The bias finder needs a schedule that brackets bifurcation: quiet enough at the
 bottom that every resonator is linear, loud enough at the top that most of
-them have jumped. This is the ladder the tests use. What the check pins is
-that the ladder does its job on this array — at least one resonator bifurcates
+them have jumped. This is the schedule the tests use. What the check pins is
+that the schedule does its job on this array — at least one resonator bifurcates
 inside it — and that bias finding gives every resonator an operating point.
 
 ```python
-LADDER = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
-print(LADDER)
+SCHEDULE = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
+print(SCHEDULE)
 
 t = time.perf_counter()
-ladder_sweeps = await crs.multisweep(
+schedule_sweeps = await crs.multisweep(
     catalog, span_hz=100e3, npoints_per_sweep=101, nsamps=10,
-    amp=LADDER, sweep_direction=("upward", "downward"), save=False,
+    amp=SCHEDULE, sweep_direction=("upward", "downward"), save=False,
 )
-timings["ladder"] = time.perf_counter() - t
-module_ladder = ladder_sweeps[crs.module[MODULE].index()]
+timings["schedule"] = time.perf_counter() - t
+module_schedule = schedule_sweeps[crs.module[MODULE].index()]
 
-bias = find_bias_points(module_ladder, save=False)
-print(f"\nladder {timings['ladder']:.1f} s")
-print(f"{'name':6s} {'rung':>4s} {'amplitude':>10s} {'bias MHz':>12s} {'bifurcated at':>14s}  flagged")
+bias = find_bias_points(module_schedule, save=False)
+print(f"\nschedule {timings['schedule']:.1f} s")
+print(f"{'name':6s} {'step':>4s} {'amplitude':>10s} {'bias MHz':>12s} {'bifurcated at':>14s}  flagged")
 for f in bias.findings:
     bif = f"{f.bifurcated_at:.5f}" if f.bifurcated_at is not None else "-"
     print(f"{f.name:6s} {f.iteration:4d} {f.amplitude:10.5f} {f.frequency_hz/1e6:12.6f} {bif:>14s}  {f.flagged_because or ''}")
 
 assert len(bias.findings) == len(catalog.names())
 n_bifurcated = sum(f.bifurcated_at is not None for f in bias.findings)
-print(f"\n{n_bifurcated} of {len(bias.findings)} bifurcate inside the ladder; {len(bias.flagged)} flagged")
+print(f"\n{n_bifurcated} of {len(bias.findings)} bifurcate inside the schedule; {len(bias.flagged)} flagged")
 assert n_bifurcated >= 1
 ```
 
-What the check pins is that the ladder *brackets* bifurcation for every
+What the check pins is that the schedule *brackets* bifurcation for every
 resonator: the fitted nonlinearity is below `BIFURCATION_A` at the second
-rung from the top and above it at the top. The ladder is then wide enough
+step from the top and above it at the top. The schedule is then wide enough
 for any detector to have something to detect, and narrow enough that the
-answer is one of its rungs.
+answer is one of its steps.
 
 ```python
-fit_sweeps(module_ladder, models=("nonlinear",))
-top = len(LADDER.ladder) - 1
+fit_sweeps(module_schedule, models=("nonlinear",))
+top = len(SCHEDULE.steps) - 1
 
-def a_at(name, rung):
-    p = module_ladder["results"][rung]["upward"][name]["fits"]["nonlinear"]["params"]
+def a_at(name, step):
+    p = module_schedule["results"][step]["upward"][name]["fits"]["nonlinear"]["params"]
     return p["a"] if p else float("nan")
 
-print(f"{'name':6s}" + "".join(f"{f'rung {i}':>9s}" for i in range(top + 1)) + "   chosen")
+print(f"{'name':6s}" + "".join(f"{f'step {i}':>9s}" for i in range(top + 1)) + "   chosen")
 for f in bias.findings:
     print(f"{f.name:6s}" + "".join(f"{a_at(f.name, i):9.3f}" for i in range(top + 1)) + f"   {f.iteration}")
 
@@ -235,11 +235,11 @@ for f in bias.findings:
 
 ### Where the detectors and the fits disagree
 
-The fits put bifurcation between the top two rungs for every resonator, so the
-rung below the top is the amplitude a physics reading would choose. The
+The fits put bifurcation between the top two steps for every resonator, so the
+step below the top is the amplitude a physics reading would choose. The
 detectors chose lower on most of them, and on two they fired on the quietest
-rung there was. The table below runs each detector on the same sweeps and
-shows the rung each would pick, beside the rung the fit would. Nothing here is
+step there was. The table below runs each detector on the same sweeps and
+shows the step each would pick, beside the step the fit would. Nothing here is
 asserted: this is the comparison the post-merge plan wants to build into bias
 finding, and the array exists so it can be studied. What the detectors are
 reacting to on these traces is the open question — the simulator's 1/f
@@ -249,7 +249,7 @@ hysteresis test, and its readout noise for the derivative one.
 ```python
 by_method = {
     method: {f.name: f.iteration
-             for f in find_bias_points(module_ladder, amplitude_method=method, save=False).findings}
+             for f in find_bias_points(module_schedule, amplitude_method=method, save=False).findings}
     for method in ("derivative", "hysteresis", "both")
 }
 fit_choice = {f.name: max(i for i in range(top + 1) if a_at(f.name, i) < BIFURCATION_A)
@@ -265,15 +265,15 @@ print(f"\nthe default detector agrees with the fit on {agree} of {len(fit_choice
 
 ```python
 name = bias.findings[0].name
-fig, axes = plt.subplots(1, len(LADDER.ladder), figsize=(13, 2.6), sharex=True, sharey=True)
+fig, axes = plt.subplots(1, len(SCHEDULE.steps), figsize=(13, 2.6), sharex=True, sharey=True)
 for i, ax in enumerate(axes):
     for direction, color in (("upward", "C0"), ("downward", "C1")):
-        e = module_ladder["results"][i][direction][name]
+        e = module_schedule["results"][i][direction][name]
         ax.plot((e["frequencies"] - catalog[name].bias.frequency_hz) / 1e3,
                 np.abs(e["iq_volts"]), color=color, lw=0.8, label=direction)
-    ax.set_title(f"rung {i}: {module_ladder['results'][i]['upward'][name]['sweep_amplitude']:.4f}", fontsize=9)
+    ax.set_title(f"step {i}: {module_schedule['results'][i]['upward'][name]['sweep_amplitude']:.4f}", fontsize=9)
 axes[0].set(ylabel="|S21| V"); axes[0].legend(fontsize=7)
-fig.suptitle(f"{name} across the ladder, both directions", y=1.02)
+fig.suptitle(f"{name} across the schedule, both directions", y=1.02)
 plt.show()
 ```
 

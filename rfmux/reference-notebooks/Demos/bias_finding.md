@@ -1105,7 +1105,7 @@ The last three go to whichever test `amplitude_method` selected, and
 `"both"` — running both tests — is the one that reads all three.
 
 We pass `save=False` below for one reason that has nothing to do with bias
-finding: this notebook's ladder is the demo file that ships inside the rfmux
+finding: this notebook's schedule is the demo file that ships inside the rfmux
 package, and re-saving it would edit the copy every other reader gets. Your own
 sweeps came out of your own measurement, so leave `save` alone and the report
 lands in the file beside the data it describes.
@@ -1171,7 +1171,7 @@ print(BiasReport.from_dict(multi_amplitude_module_results["bias_report"]))
 That happens whether or not you save. `save=` is only the question of whether
 the file on disk is brought up to date to match — and had we left it alone here,
 this would have rewritten the `multisweep_*_demo_biasfind1.pkl` the
-notebook loaded, in place, report and all. That is the point of it: the ladder
+notebook loaded, in place, report and all. That is the point of it: the schedule
 and the operating point read off it stay one file.
 
 ### The report
@@ -1221,7 +1221,7 @@ print(f"flagged: {len(bias_report.flagged)}")
 ```
 
 All five are good under the default method: every one of them bifurcated at the
-loudest step and at none below it, so every bias amplitude is a step the ladder
+loudest step and at none below it, so every bias amplitude is a step the schedule
 established rather than a floor it ran into.
 
 That is worth not taking for granted, because it is easy to arrange a report
@@ -1241,7 +1241,7 @@ loudest step measured, not because anything established 0.008 as a limit.
 
 Those are bias points you can use, incidentally. They are just ones you should
 decide to use, having read that they are a floor rather than a finding — the
-right response being another ladder that goes louder.
+right response being another schedule that goes louder.
 
 Each flagged finding carries the sentence in `flagged_because`, so what you read
 here is per resonator and specific — not a bit that says something went wrong
@@ -1250,7 +1250,7 @@ somewhere.
 ### The whole answer, on the whole measurement
 
 Everything the report decided, drawn on the sweeps it decided it from. One panel
-per resonator: the full ladder colour-coded by drive, the chosen step picked out
+per resonator: the full schedule colour-coded by drive, the chosen step picked out
 in bold, and the chosen frequency marked on it.
 
 ```python
@@ -1345,7 +1345,7 @@ span more than one NCO bandwidth.
   them — `MELL`'s black bar stops at 0.56 where `TOEL`'s runs to 0.92 — and a
   different array with a different noise floor will not distribute itself the
   same way. Draw the verdict map on your own sweeps, the way section 2 does,
-  before trusting any of the defaults on them. A ladder that reaches high enough
+  before trusting any of the defaults on them. A schedule that reaches high enough
   for every resonator to bifurcate is the other half of the answer, and the
   cheaper half.
 

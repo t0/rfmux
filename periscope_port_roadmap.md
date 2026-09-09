@@ -26,11 +26,11 @@ whole sequence against the standard mock array over RPC, in the quick tier).
 | Network analysis | `crs.take_netanal(amp, fmin, fmax, npoints, nsamps, module=, progress_callback=, data_callback=, save=, label=)` | container, trace at `[module_id]["results"][0]["upward"]` | `data_callback(module, freqs, amps, phases)` for live plotting |
 | Find resonances | `find_resonances_in_netanal(module_netanal, min_dip_depth_db=, min_Q=, max_Q=, min_separation_hz=, require_isolation=, expected_resonances=)` | `ResonanceSearch`: `candidates`, `rejected` (with `rejected_because`), `frequencies_hz`, `magnitude_db`; written into the netanal as `trace["resonance_search"]` | `candidate.index` into the trace, for markers |
 | Seed the array | `search.to_catalog(module, amplitude, names=)` or `ResonatorCatalog.from_frequencies(...)` | `ResonatorCatalog` (module-scoped, named resonators, one `BiasPoint` each) | `copy()` for workers; `update_bias_point()`; `remove()`; `to_dict`/`from_dict`/`to_csv`/`from_csv` |
-| Amplitude ladder | `AmplitudeSchedule()` / `(x)` / `.explicit()` / `.ramp()` / `.multiplicative()` | frozen dataclass | `.describe(catalog, n_directions, dac_scale_dbm)` and `.validate(...)` for a live dialog preview; `.steps()` |
+| Amplitude schedule | `AmplitudeSchedule()` / `(x)` / `.explicit()` / `.ramp()` / `.multiplicative()` | frozen dataclass | `.describe(catalog, n_directions, dac_scale_dbm)` and `.validate(...)` for a live dialog preview; `.resolve_steps()` |
 | Multisweep | one `crs.multisweep(catalog, span_hz=, npoints_per_sweep=, nsamps=, amp=schedule, sweep_direction=(...), progress_callback=, data_callback=, sweep_callback=, save=, label=)` | container, `[module_id]["results"][step][direction][name]` with seven measurement keys | `sweep_callback(record)` once per sweep (`step, direction, amplitudes, factor, completed, total`); `data_callback(module, partial, step, direction)`; progress across the whole call |
 | Read sweeps | `collect_amplitude_iterations_for`, `get_amplitudes_at_iteration`, `find_iteration_matching_amplitude` | plain dicts | the accessors the design doc's `SweepSet` was going to be |
 | Fit | `fit_sweeps(module_sweeps, models=, progress_callback=(completed,total), ...)`, `fit_sweeps_at_bias_amplitude(...)` | `FitReport`; params written to `entry["fits"][model]` | `skewed_model_magnitude(entry)`, `nonlinear_model_iq(entry)`, `centered_iq`, `gain_corrected_iq` rebuild curves; `failed_because` per fit |
-| Find bias | `find_bias_points(module_sweeps, amplitude_method=, frequency_method=, spike_prominence_factor=, noise_gate_factor=, max_discrepancy=, compare=, max_distance_hz=)` | `BiasReport`: a new `catalog`, `findings` with `checks` per rung, `flagged`; written into the sweeps as `bias_report` | `BifurcationCheck.metric`/`threshold` per rung for a diagnostics view; `iq_arc_speed`, `normalized_arc_speed` |
+| Find bias | `find_bias_points(module_sweeps, amplitude_method=, frequency_method=, spike_prominence_factor=, noise_gate_factor=, max_discrepancy=, compare=, max_distance_hz=)` | `BiasReport`: a new `catalog`, `findings` with `checks` per step, `flagged`; written into the sweeps as `bias_report` | `BifurcationCheck.metric`/`threshold` per step for a diagnostics view; `iq_arc_speed`, `normalized_arc_speed` |
 | Apply | `await crs.apply_bias(report.catalog)` | nothing; raises if it cannot | owns the NCO |
 | Files | `store.save/load/maybe_save`, `set_output_directory`, `set_created_by` | pickle of builtins plus ndarrays, `file_metadata` inside each module block | analyses re-save in place |
 
@@ -106,7 +106,7 @@ digest; non-blocking file dialogs; netanal magnitude normalised by sweep
 power so the display is true dB; a "Load bias amplitudes" button that pulls
 the found amplitudes into the next sweep.
 
-**Not to be ported.** The dialog builds amplitude ladders and reads
+**Not to be ported.** The dialog builds amplitude schedules and reads
 `res_info_dict.values()` in dict order to do it (`AmplitudeSchedule` does
 this, keyed by name). The task loops over amplitudes and directions itself
 (`multisweep` does). `identify_bifurcation(threshold_factor=7)` runs during
@@ -235,7 +235,7 @@ The two things that let every later stage be checked rather than asserted.
 * **A real Periscope flow test.** `test/periscope/test_tuning_flow.py`
   builds the panels and tasks against `standard_array()` (RPC only, so quick
   tier) with the offscreen Qt platform, and drives the real drivers through
-  the real tasks: netanal, find resonances, multisweep ladder, fits, bias,
+  the real tasks: netanal, find resonances, multisweep schedule, fits, bias,
   apply. It starts by pinning that the current netanal and multisweep tasks
   fail (the two runtime breaks), so it is red before stage 1 and green after
   each stage extends it. The existing `test_periscope_flow.py` smoke test
@@ -322,7 +322,7 @@ The two things that let every later stage be checked rather than asserted.
   overview. The grid rule, widget caching, kHz offset axes, titles
   `NAME (f_central = ... MHz)`, TABLEAU10-then-inferno with the threshold
   of three, the shared colorbar with dBm and normalised labels, line style
-  for direction, stable colours from `schedule.steps()` known before the
+  for direction, stable colours from `schedule.resolve_steps()` known before the
   first sweep, square IQ axes, zoom box, batch navigation with a
   subplots-per-page spinbox, sort by frequency or name, Normalize Traces,
   units radios, double-click to digest. The digest and histograms tabs come
@@ -339,7 +339,7 @@ The two things that let every later stage be checked rather than asserted.
   sweep always knows its array. Legacy readers are deleted.
 * **Multi-module** runs one panel, one task and one call per module (a
   catalog is one module).
-* Test: flow test step 3 runs the ladder `multiplicative(0.5, 8, 5)` in both
+* Test: flow test step 3 runs the schedule `multiplicative(0.5, 8, 5)` in both
   directions through the task and checks the panel's block is the driver's;
   a rendering test on the shipped `multisweep_20260906_162610_demo_biasfind1.pkl`
   covers the tabs without a board.
@@ -367,7 +367,7 @@ The two things that let every later stage be checked rather than asserted.
   `BIFURCATION_A` reference where `a` is shown.
 * Mutual locking of Run Fit and Find Bias while one runs; transient
   "Fits complete" label.
-* Test: flow test step 4 fits the ladder and checks the panel reads the
+* Test: flow test step 4 fits the schedule and checks the panel reads the
   same params `fit_sweeps` wrote; `test_histogram_display.py` updated.
 
 ### Stage 4. Find Bias and Apply Bias (medium)
@@ -388,8 +388,8 @@ The two things that let every later stage be checked rather than asserted.
   line in the grid magnitude plots, cross on the IQ loop, star and `a` in the
   legend, dashed lines on the overview.
 * IQ Derivatives tab from `normalized_arc_speed` and `iq_arc_speed` for each
-  rung with the bias frequency marked, and a verdict view: for each
-  resonator, each rung's `BifurcationCheck.metric` against `threshold`, in
+  step with the bias frequency marked, and a verdict view: for each
+  resonator, each step's `BifurcationCheck.metric` against `threshold`, in
   the form `example_plotting_bias.plot_bifurcation_verdict_map` draws. This
   is the tool for calibrating the thresholds against a real array, which
   the todo file says has not been done.
@@ -408,7 +408,7 @@ The two things that let every later stage be checked rather than asserted.
   same table over `self.catalog`. No frequency-order matching.
 * "Load bias amplitudes" in the multisweep dialog is the default
   `AmplitudeSchedule()` once the panel's catalog is the report's.
-* Test: flow test steps 5 and 6 (bias report has no warnings on the ladder;
+* Test: flow test steps 5 and 6 (bias report has no warnings on the schedule;
   every tone lands where the catalog says); `test_bias_kids_dialog.py`
   replaced by a catalog-table test.
 
@@ -490,7 +490,7 @@ Listed so they can be overruled.
 3. **Mock-mode df units at startup.** Today `DfCalibrationTask` steps every
    tone at startup in mock mode so df units work without tuning. Its
    replacement in catalog terms: build the catalog from the simulator's
-   playing tones (as `standard_array` does), run a one-rung multisweep at
+   playing tones (as `standard_array` does), run a one-step multisweep at
    those amplitudes, read `iq_derivatives_at` at each catalog frequency onto
    the bias points, publish `df_calibration` per channel. That is a
    catalog-producing measurement, so it can be a small library function

@@ -213,7 +213,7 @@ async def test_no_schedule_means_one_sweep_at_the_catalogs_own_amplitudes(sweeps
 
 
 @pytest.mark.asyncio
-async def test_a_bare_amplitude_is_a_ladder_of_one_rung(sweeps):
+async def test_a_bare_amplitude_is_a_schedule_of_one_step(sweeps):
     """Which is what one amplitude is, so it goes through the same loop rather
     than round a second one."""
     result = await drive(FakeCRS(), a_catalog(), amp=0.005)
@@ -297,7 +297,7 @@ async def test_the_step_number_travels_with_the_sweep(sweeps):
 
 
 @pytest.mark.asyncio
-async def test_a_frequency_list_is_swept_at_a_ladder_of_absolute_amplitudes(sweeps):
+async def test_a_frequency_list_is_swept_at_a_schedule_of_absolute_amplitudes(sweeps):
     result = await drive(
         FakeCRS(),
         center_frequencies=[1.0e9, 1.1e9],
@@ -313,7 +313,7 @@ async def test_a_frequency_list_is_swept_at_a_ladder_of_absolute_amplitudes(swee
 @pytest.mark.asyncio
 async def test_a_frequency_list_is_recorded_as_the_catalog_it_became(sweeps):
     """The resolved form goes into call_params beside the request, the way a
-    bare amp is recorded as the one-rung schedule it became. That is what lets
+    bare amp is recorded as the one-step schedule it became. That is what lets
     the analysis downstream take a result and nothing else."""
     result = await drive(
         FakeCRS(),
@@ -467,7 +467,7 @@ async def test_a_relative_schedule_over_a_frequency_list_needs_its_own_base(swee
 
 
 @pytest.mark.asyncio
-async def test_a_module_list_runs_the_whole_ladder_on_each_module(sweeps):
+async def test_a_module_list_runs_the_whole_schedule_on_each_module(sweeps):
     container = await drive_macro(
         FakeCRS(),
         center_frequencies=[1.0e9],
@@ -537,7 +537,7 @@ async def test_a_frequency_list_needs_a_module():
 
 
 @pytest.mark.asyncio
-async def test_an_overshooting_ladder_is_refused_before_anything_is_measured(sweeps):
+async def test_an_overshooting_schedule_is_refused_before_anything_is_measured(sweeps):
     with pytest.raises(ValueError, match="above full scale"):
         await drive(
             FakeCRS(),
@@ -617,7 +617,7 @@ async def test_under_a_direction_is_exactly_what_the_measurement_returned(monkey
 
 @pytest.mark.asyncio
 async def test_the_amplitude_of_a_step_is_recoverable_without_being_stored_twice(sweeps):
-    """Per-resonator from the sweep, the rung from the schedule."""
+    """Per-resonator from the sweep, the step from the schedule."""
     result = await drive(
         FakeCRS(),
         a_catalog(amplitudes=(0.001, 0.002, 0.004)),
@@ -626,7 +626,7 @@ async def test_the_amplitude_of_a_step_is_recoverable_without_being_stored_twice
 
     step = result["results"][2]["upward"]
     assert step["R0001"]["sweep_amplitude"] == pytest.approx(0.004)
-    assert result["call_params"]["amp_schedule"]["ladder"][2] == pytest.approx(4.0)
+    assert result["call_params"]["amp_schedule"]["steps"][2] == pytest.approx(4.0)
 
 
 @pytest.mark.asyncio
@@ -654,13 +654,13 @@ async def test_call_params_records_the_arguments_as_given(sweeps):
 
 @pytest.mark.asyncio
 async def test_a_bare_amp_is_recorded_as_given_rather_than_resolved(sweeps):
-    """The one-rung schedule keeps the number the caller typed as its base, so
+    """The one-step schedule keeps the number the caller typed as its base, so
     call_params is still a record of the request. What each resonator was
     actually probed at is sweep_amplitude on its own entry."""
     result = await drive(FakeCRS(), a_catalog(), amp=0.005)
 
     assert result["call_params"]["amp_schedule"]["base"] == 0.005
-    assert result["call_params"]["amp_schedule"]["ladder"] == [1.0]
+    assert result["call_params"]["amp_schedule"]["steps"] == [1.0]
 
 
 @pytest.mark.asyncio
@@ -759,7 +759,7 @@ async def test_sweep_callback_fires_for_a_single_sweep_too(sweeps):
 
 
 @pytest.mark.asyncio
-async def test_sweep_callback_carries_the_step_amplitudes_and_its_rung(sweeps):
+async def test_sweep_callback_carries_the_step_amplitudes_and_its_step(sweeps):
     seen = []
 
     await drive(
@@ -774,7 +774,7 @@ async def test_sweep_callback_carries_the_step_amplitudes_and_its_rung(sweeps):
 
 
 @pytest.mark.asyncio
-async def test_an_absolute_step_reports_no_rung(sweeps):
+async def test_an_absolute_step_reports_no_step(sweeps):
     seen = []
 
     await drive(
@@ -812,7 +812,7 @@ async def test_sweep_callback_hands_over_every_sweep_that_finished_before_a_fail
 
 @pytest.mark.asyncio
 async def test_progress_runs_across_the_whole_call(monkeypatch):
-    """One call, one progress bar: a ladder reaches 100 once, at the end, not
+    """One call, one progress bar: a schedule reaches 100 once, at the end, not
     once per sweep."""
     seen = []
 
@@ -916,7 +916,7 @@ async def test_the_readers_work_on_what_the_macro_actually_returns(sweeps):
         {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}
     )
 
-    # ×1 sits in the middle of the ladder, so that is where each resonator is
+    # ×1 sits in the middle of the schedule, so that is where each resonator is
     # at its own bias amplitude — and the sweep taken there comes back with it.
     at_bias, iteration = find_iteration_matching_amplitude(result, "R0002")
     assert iteration == 2
@@ -944,12 +944,12 @@ async def test_the_readers_work_on_a_frequency_list_result_too(sweeps):
 
     # The catalog multisweep generated from the list is what the fallback
     # reads, so a frequency-list result has a bias amplitude like any other:
-    # step 0's, which for an absolute ramp is its first rung.
+    # step 0's, which for an absolute ramp is its first step.
     assert find_iteration_matching_amplitude(result, "S0002")[1] == 0
 
 
 @pytest.mark.asyncio
-async def test_a_single_sweep_reads_the_same_way_a_ladder_does(sweeps):
+async def test_a_single_sweep_reads_the_same_way_a_schedule_does(sweeps):
     """The property the merge exists to make true: one entry point, one shape,
     and the readers cannot tell how wide the call was."""
     from rfmux.tuning import collect_amplitude_iterations_for

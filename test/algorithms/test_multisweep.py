@@ -3,11 +3,11 @@
 These cover the resolution step only — the part that turns a catalog, or a bare
 list of frequencies, into one normalized list of sweep targets and the amplitude
 every pass probes them at. The loop over amplitude steps is in
-``test_multisweep_ladder.py``; the measurement loop below both needs a board and
+``test_multisweep_schedule.py``; the measurement loop below both needs a board and
 is not exercised here.
 
 The amplitude tests go through ``_resolve_schedule``, which is the path the
-macro actually takes: a bare ``amp`` becomes a one-rung schedule, and the
+macro actually takes: a bare ``amp`` becomes a one-step schedule, and the
 complaints on the way have to name ``amp`` rather than the ``base`` that same
 value would be called had the caller built the schedule themselves.
 """
@@ -49,13 +49,13 @@ def for_catalog(catalog, amp):
         [r.name for r in resonators],
         {r.name: r.bias.amplitude for r in resonators},
     )
-    return schedule.steps(catalog)[0].amplitudes
+    return schedule.resolve_steps(catalog)[0].amplitudes
 
 
 def for_sections(names, amp):
     """The same, for a bare frequency list, which has nothing to fall back to."""
     schedule = _resolve_schedule(amp, names, None)
-    return schedule.steps(names)[0].amplitudes
+    return schedule.resolve_steps(names)[0].amplitudes
 
 
 # ─── amplitude resolution, with a catalog ─────────────────────────────────────
@@ -143,7 +143,7 @@ def test_sections_accept_a_mapping_too():
 # ─── a bare amp and a schedule are the same argument ──────────────────────────
 
 
-def test_a_bare_amp_becomes_a_one_rung_schedule():
+def test_a_bare_amp_becomes_a_one_step_schedule():
     """Which is what one amplitude is — so the loop above has one thing to walk
     whichever way the caller spelled it."""
     schedule = _resolve_schedule(0.005, ["S0001"], None)
@@ -155,8 +155,8 @@ def test_a_bare_amp_becomes_a_one_rung_schedule():
 
 
 def test_a_schedule_is_passed_through_untouched():
-    ladder = AmplitudeSchedule.ramp(1e-3, 1e-2, 4)
-    assert _resolve_schedule(ladder, ["S0001"], None) is ladder
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 4)
+    assert _resolve_schedule(schedule, ["S0001"], None) is schedule
 
 
 def test_a_bare_amp_is_complained_about_in_amps_own_words():
@@ -174,7 +174,7 @@ def test_a_schedules_base_is_complained_about_in_the_schedules_words():
             AmplitudeSchedule.multiplicative(1.0, 2.0, 2, base={"R0001": 0.5}),
             ["R0001", "R0002"],
             None,
-        ).steps(["R0001", "R0002"])
+        ).resolve_steps(["R0001", "R0002"])
 
 
 # ─── section naming ───────────────────────────────────────────────────────────

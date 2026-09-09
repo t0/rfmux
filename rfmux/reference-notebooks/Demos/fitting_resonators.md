@@ -176,7 +176,7 @@ more detail in the IQ plots.
 amplitude_schedule = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
 print(amplitude_schedule)
 
-for step in amplitude_schedule.steps(catalog):
+for step in amplitude_schedule.resolve_steps(catalog):
     print(step)
 
 multi_amplitude_ms = await crs.multisweep(

@@ -26,7 +26,7 @@ The first four take the tuning flow a step at a time, in this order:
   round trips. It picks up from a saved network analysis, so it needs no
   hardware.
 - **`Demos/multisweep.md`** — look at each resonance closely: one narrow sweep
-  per resonator, all of them in parallel, and then the same array over a ladder
+  per resonator, all of them in parallel, and then the same array over a schedule
   of probe amplitudes.
 - **`Demos/fitting_resonators.md`** — turn those sweeps into numbers. The three
   resonator models, where their results land in the results dictionary, and what

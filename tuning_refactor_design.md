@@ -300,7 +300,7 @@ What this deletes from the GUI:
   `MultisweepDialog.get_parameters` — including multiplicative scaling, which
   today reaches into `self.params['res_info_dict']` from inside a dialog
   (`multisweep_dialog.py:1504`). As `SweepConfig.amplitude_arrays(catalog)`, a
-  script author gets the same ladder the GUI builds.
+  script author gets the same schedule the GUI builds.
 * per-dialog validation rules; dialogs render `describe()` live and show
   `validate()` through the existing issue banner, exactly as the pulse-capture
   settings dialog does.
@@ -365,7 +365,7 @@ and versioning it, so the format can move later without touching callers.
   which has to reach every tone and sit on the tone grid for those frequencies
   to mean what they say. **Landed.**
 * `tune_resonators` (new) — the `trigger_capture` analogue: one call that runs
-  netanal → find resonances → sweep ladder → find bias → apply → rotation, and
+  netanal → find resonances → sweep schedule → find bias → apply → rotation, and
   returns a result dataclass with the catalog, the sweeps and the output path.
   Users who want the whole routine call this; users who want the pieces import
   from `rfmux.tuning`.
@@ -403,7 +403,7 @@ Dialogs become views over the config dataclasses.
 | Custom-frequency re-run mints new codes, detectors lose identity | `Catalog.rekey()` |
 | Frequency lookups are 3-deep fallback chains in every consumer | `SweepEntry` accessors |
 | "Clear `bias_found`, keep `bias_amplitude`" is a comment | `Catalog.clear_bias_results()` |
-| Amplitude ladders and fraction→Hz resolution only exist inside dialogs | config dataclasses |
+| Amplitude schedules and fraction→Hz resolution only exist inside dialogs | config dataclasses |
 | Legacy file formats handled inline in the loader | `store.py` |
 | No detector names | `Resonator.name` |
 

@@ -103,6 +103,13 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
         min_pulse_ms, max_pulse_ms, noise_train_ms, trigger_basis, quiet):
     """Record the slow and channel streams of one module into a session."""
     if serial is None:
+        ctx = click.get_current_context()
+        given = [name for name in ctx.params if name != "quiet"
+                 and ctx.get_parameter_source(name)
+                 != click.core.ParameterSource.DEFAULT]
+        if given:
+            raise click.UsageError("--serial is required (with no options "
+                                   "at all, a dialog asks for everything)")
         from rfmux.tools.record_dialog import RecordDialog
         options = RecordDialog.ask()
         if options is None:

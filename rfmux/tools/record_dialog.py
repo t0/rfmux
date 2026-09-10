@@ -140,7 +140,14 @@ class RecordDialog(QtWidgets.QDialog):
             sample_rate=decimation_to_sampling(6), mode="slow")
         self.capture_form.setVisible(False)
         box.addWidget(self.capture_form)
+        stage_note = QtWidgets.QLabel(
+            "Sample counts and time scales above are for decimation "
+            "stage 6; the run derives them from the board's stage.")
+        stage_note.setWordWrap(True)
+        box.addWidget(stage_note)
+        stage_note.setVisible(False)
         self.capture_box.toggled.connect(self.capture_form.setVisible)
+        self.capture_box.toggled.connect(stage_note.setVisible)
         add(self.capture_box)
 
         self.status_label = QtWidgets.QLabel()
@@ -205,7 +212,18 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _channels(self):
         """(channels, note): the channel list the options resolve to, or
-        None with the reason."""
+        None with the reason.  Reading the bias exports costs a tenth
+        of a second, so the answer is kept until an input changes."""
+        key = (self.rb_ranges.isChecked(), self.channels_edit.text(),
+               self._session_folder(), self.module_spin.value())
+        cached = getattr(self, "_channels_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        result = self._resolve_channels()
+        self._channels_cache = (key, result)
+        return result
+
+    def _resolve_channels(self):
         if self.rb_ranges.isChecked():
             try:
                 chans = [c + 1 for r in parse_ranges(

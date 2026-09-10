@@ -291,6 +291,16 @@ def test_a_bare_record_command_asks_the_dialog(monkeypatch):
     assert runs == [{"serial": "0156", "quiet": False}]
 
 
+def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    from rfmux.tools.record_dialog import RecordDialog
+    monkeypatch.setattr(RecordDialog, "ask",
+                        classmethod(lambda cls: {"serial": "0156"}))
+    result = CliRunner().invoke(record.cli, ["--module", "2"])
+    assert result.exit_code == 2 and "--serial is required" in result.output
+
+
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     session = rs.open_session(base=tmp_path)
     assert session.name.startswith("session_")

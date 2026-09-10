@@ -391,8 +391,9 @@ are now strict xfails that name the stage which clears them.
   `ResonanceSearch.accept`/`reject` — so removing a resonance moves it to
   `rejected` with a reason and draws it as one of the crosses, where clicking
   it again brings it back exactly as the finder measured it, and adding one
-  measures a new candidate off the searched trace. §6 judgement call 1 records
-  the overrule; judgement call 20 covers what a new candidate is measured as.
+  accepts an arbitrary frequency with nothing claimed about it. §6 judgement
+  call 1 records the overrule; judgement call 20 covers why a hand-accepted
+  frequency carries `nan` rather than measurements.
 * **Take Multisweep hands over a `ResonatorCatalog` (done).** The search is
   the array: `_show_multisweep_dialog` calls
   `search.to_catalog(module, amplitude=<the netanal's probe amplitude>)` at the
@@ -404,9 +405,9 @@ are now strict xfails that name the stage which clears them.
   netanal holds the search it was built from, so a third file that has to be
   kept paired with both is exactly what `find_resonances_in_netanal`'s own
   reasoning rules out. Double-click add/subtract edits the search
-  (judgement call 1, overruled), through `accept`/`reject`, and
-  `record_search` writes the edited search back into the netanal block —
-  re-saving the file when there is one, as the search itself does. Gone with
+  (judgement call 1, overruled), through `accept`/`reject`; the panel writes
+  the edited search back into the netanal block and re-saves through `store`
+  when there is a file, as the search itself does. Gone with
   it: the panel's parallel `resonance_freqs` seed list, the `hand_added_freqs`
   set beside it, and the "No Resonances" modal, now the toolbar's status
   line. §6 judgement calls 20-22 cover the rest.
@@ -641,12 +642,15 @@ Small, and each belongs in the library rather than in Periscope.
 4b. **Editing a search by hand** (done in stage 1).
    `ResonanceSearch.reject(frequency_hz, reason=)` moves the nearest accepted
    candidate to `rejected`; `accept(frequency_hz)` restores a rejected one
-   exactly as it was found, or measures a new candidate off the searched trace
-   (§6, judgement call 20). `record_search(module_netanal, search, save=)` —
-   extracted from the tail of `find_resonances_in_netanal`, which now calls it
-   — writes a search into the netanal it searched. In the library because a
-   notebook edits a search for the same reasons a GUI does, and because
-   "where a search is stored" should stay one fact in one place.
+   exactly as it was found, or accepts an arbitrary frequency with its measured
+   fields `nan` (§6, judgement call 20). In the library because a notebook
+   edits a search for the same reasons a GUI does. **Nothing else was needed:**
+   writing the edit back is
+   `netanal_trace(block)["resonance_search"] = search.to_dict()` and then
+   `store.save`, which overwrites the file the block already knows it came
+   from. A `record_search` helper wrapping those two lines was written and
+   removed again — `store`'s save-in-place is the whole mechanism, and a
+   function to hide one dict assignment earns nothing.
 5. **Possibly `ResonatorCatalog.with_names(mapping)`** for attaching a name
    map to a freshly found array (design doc §13 open question). Not needed
    for the basic flow.
@@ -795,19 +799,28 @@ Listed so they can be overruled.
     lines would bury the trace; one hoverable scatter item per module carries
     every reason. Alternative: lines in a lighter pen behind a checkbox of
     their own.
-20. **A hand edit is measured, not blank** (stage 1). A resonance accepted
-    where the finder had no candidate gets its `depth_db`, `width_hz` and
-    `q_estimate` read off the trace the search carries, with the same scipy
-    `peak_prominences`/`peak_widths` calls `find_resonances` uses, so it
-    plots and filters like a found one. It lands on the searched grid, within
-    one point of where it was asked for: a dip's minimum falls between
-    samples, and scipy reads no prominence anywhere but a local minimum, so
-    the nearest point alone would record a resonance right on a dip as having
-    no depth. One point is the whole allowance — a search for the nearest dip
-    with nothing bounding it crosses megahertz of smooth trace to reach a
-    resonance that was not being pointed at, which is what the standard mock
-    array's noiseless stretches showed it doing. A point that is not a dip at
-    all records zeros, which is the honest answer.
+20. **A hand-accepted frequency is blank, not measured** (stage 1;
+    **maclean, 2026-09-10**, overruling a first attempt that measured it).
+    `accept` at a frequency the finder had no candidate for records that
+    frequency and sets `depth_db`, `width_hz` and `q_estimate` to `nan`. The
+    point of the gesture is that **an arbitrary frequency can join the array** —
+    it is a place someone wants a tone, not a claim that a resonator is there —
+    so there is nothing to characterise and `nan` says so. What this replaces:
+    reading prominence and width off the searched trace with the same scipy
+    calls the finder uses, plus a one-point nudge onto the local minimum,
+    because scipy reads no prominence anywhere but a local minimum and a dip's
+    minimum falls between samples. All of it deleted. `frequency_hz` is now
+    exactly what was asked for, unrounded, and is quantized once at the end,
+    where `to_catalog` builds a `BiasPoint`. `index` remains the nearest
+    searched point, which is what plots the marker.
+
+    Two consequences worth knowing. `nan` is never equal to itself, so two
+    hand-accepted candidates do not compare `==` even after a faithful round
+    trip through `to_dict`; the round-trip test compares them field by field.
+    And a `nan` depth is what the netanal panel's marker tooltip reads to say
+    "added by hand" instead of three nans — the only thing that now
+    distinguishes a hand-accepted candidate from a found one, since
+    `ResonanceCandidate` has no provenance field.
 21. **`to_catalog` is called at the press, and its names are not kept**
     (stage 1). Every press mints a fresh catalog, so a dialog opened and
     cancelled renames the array. That is only visible in a name, the sweep
@@ -826,7 +839,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, measures a new one off the searched trace, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
+| 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

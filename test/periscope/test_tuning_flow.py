@@ -466,11 +466,10 @@ def test_accepting_a_rejected_resonance_puts_it_back_as_found(board, qt_app):
     assert dropped not in [c.frequency_hz for c in search.rejected]
 
 
-def test_adding_a_resonance_measures_it_off_the_searched_trace(board, qt_app):
-    """A place the finder had no candidate for becomes an accepted candidate
-    carrying the same numbers a found one does -- prominence and width read off
-    the trace the search holds -- so it plots and filters like any other, and
-    lands on the grid that was searched rather than wherever the click was."""
+def test_adding_a_resonance_puts_a_tone_where_it_was_asked_for(board, qt_app):
+    """Double-clicking somewhere the finder had no candidate accepts that
+    frequency exactly, claiming nothing about a dip being there: it is a place
+    the operator wants a tone, and what it is for is reaching the catalog."""
     _, crs, catalog = board
     panel = _searched_panel(crs, catalog, qt_app)
     search = panel.resonance_searches[catalog.module]
@@ -479,13 +478,29 @@ def test_adding_a_resonance_measures_it_off_the_searched_trace(board, qt_app):
     panel._add_resonance(catalog.module, BETWEEN_RESONANCES_HZ)
 
     assert len(search.candidates) == found + 1
-    added = min(search.candidates,
-                key=lambda c: abs(c.frequency_hz - BETWEEN_RESONANCES_HZ))
+    added, = [c for c in search.candidates
+              if c.frequency_hz == BETWEEN_RESONANCES_HZ]
     assert added.accepted
-    # On the grid that was searched, within a point of where it was asked for.
-    assert added.frequency_hz == search.frequencies_hz[added.index]
-    assert abs(added.frequency_hz - BETWEEN_RESONANCES_HZ) <= 2 * abs(
-        np.mean(np.diff(search.frequencies_hz)))
+    assert np.isnan([added.depth_db, added.width_hz, added.q_estimate]).all()
+    # It reaches the catalog, quantized there and only there.
+    array = search.to_catalog(module=catalog.module, amplitude=0.001)
+    assert on_grid(BETWEEN_RESONANCES_HZ) in [
+        array[n].bias.frequency_hz for n in array.names()]
+
+
+def test_a_hand_added_resonance_says_so_on_its_marker(board, qt_app):
+    """Its tooltip cannot report a depth or a Q, because nothing measured one.
+    Saying which resonance it is instead is also the only thing that tells an
+    operator apart from a found one."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+
+    panel._add_resonance(catalog.module, BETWEEN_RESONANCES_HZ)
+
+    lines = panel.plots[catalog.module]["resonance_lines_mag"]
+    tooltips = [line.toolTip() for line in lines]
+    assert sum("added by hand" in tip for tip in tooltips) == 1
+    assert sum("dB deep" in tip for tip in tooltips) == len(lines) - 1
 
 
 def test_an_edit_by_hand_updates_the_file_the_search_is_in(board, qt_app, output_directory):

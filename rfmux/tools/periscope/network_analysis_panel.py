@@ -9,8 +9,23 @@ from .layouts import FlowLayout, grouped, labelled
 from .dialogs import NetworkAnalysisParamsDialog
 from .find_resonances_settings_panel import FindResonancesSettingsPanel
 from .tasks import FindResonancesSignals, FindResonancesTask
-from ...tuning import record_search, store
+from ...tuning import netanal_trace, store
 from .network_analysis_export import NetworkAnalysisExportMixin
+
+
+def _describe(candidate) -> str:
+    """A resonance marker's tooltip: what the finder measured, if it did.
+
+    A candidate accepted by hand carries no depth, width or Q -- it is a
+    frequency someone wants a tone at, not a dip anything measured -- so it
+    says that instead of three nans.
+    """
+    where = f"{candidate.frequency_hz / 1e6:.6f} MHz"
+    if not np.isfinite(candidate.depth_db):
+        return f"{where}\nadded by hand"
+    return (f"{where}\n{candidate.depth_db:.2f} dB deep\n"
+            f"Q ~ {candidate.q_estimate:.0f}")
+
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
     """
@@ -464,9 +479,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._show_status(str(e), ok=False)
             return
 
-        # save=False: the panel writes the whole container below, and only when
-        # there is already a file to overwrite.
-        record_search(block, search, save=False)
+        # The search lives in the netanal, so the edit goes there before the
+        # file is written; store's save overwrites the file the container
+        # already knows it came from.
+        netanal_trace(block)["resonance_search"] = search.to_dict()
         self.draw_search(module, search)
         message = f"Module {module}: {len(search.candidates)} resonances"
         if store.saved_path(self.netanal_container):
@@ -599,10 +615,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self._clear_resonance_lines(module)
         for candidate in search.candidates:
             self._add_resonance_line(
-                module, candidate.frequency_hz,
-                tooltip=(f"{candidate.frequency_hz / 1e6:.6f} MHz\n"
-                         f"{candidate.depth_db:.2f} dB deep\n"
-                         f"Q ~ {candidate.q_estimate:.0f}"))
+                module, candidate.frequency_hz, tooltip=_describe(candidate))
         self._place_rejected(module)
         self._update_resonance_title(module)
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())

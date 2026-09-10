@@ -410,17 +410,20 @@ Detailed multisweeps can reveal closer neighbours. See
 
 Looking at the trace is the last rejection pass. `reject()` moves the accepted
 candidate nearest a frequency into `rejected`, with a reason, rather than
-deleting it; `accept()` brings one back exactly as the finder measured it, or
-measures a new candidate off the searched trace where the finder had none. So
-the search stays the whole record of what is there and what was decided about
-it, and either edit undoes the other.
+deleting it; `accept()` brings a rejected one back exactly as the finder
+measured it. So the search stays the whole record of what is there and what was
+decided about it, and either edit undoes the other.
 
-An edit changes the object, not the file. `record_search()` writes it back into
-the netanal it searched, the same place the finder put it.
+`accept()` at a frequency the finder had no candidate for adds one anyway. That
+is how an arbitrary point joins the array: it is a place you want a tone, not a
+dip anything measured, so `depth_db`, `width_hz` and `q_estimate` are `nan` and
+only the frequency means anything.
+
+An edit changes the object, not the file. Write the search back into the netanal
+and save it: the block knows the file it came from, so `store.save` overwrites
+that one rather than leaving a copy beside it.
 
 ```python
-from rfmux.tuning import record_search
-
 dropped = resonance_search.reject(resonance_search.candidates[0].frequency_hz)
 print(f"rejected {dropped.frequency_hz / 1e6:.6f} MHz: {dropped.rejected_because}")
 print(f"{len(resonance_search)} accepted, {len(resonance_search.rejected)} rejected")
@@ -428,13 +431,16 @@ print(f"{len(resonance_search)} accepted, {len(resonance_search.rejected)} rejec
 restored = resonance_search.accept(dropped.frequency_hz)
 print(f"back as the finder measured it: {restored.depth_db == dropped.depth_db}")
 
-record_search(module_netanal_outputs, resonance_search)
-```
+by_hand = resonance_search.accept(0.6055e9)   # an arbitrary point, no dip needed
+print(f"added {by_hand.frequency_hz / 1e6:.6f} MHz, depth {by_hand.depth_db}")
 
-A resonance accepted where the finder had no candidate is measured at the
-nearest point of the searched grid, so it carries the same `depth_db`,
-`width_hz` and `q_estimate` a found one does. One that lands where there is no
-dip records zeros, which is the honest answer for it.
+# It would be swept like any other, so put the array back as the finder left it
+# before the rest of this notebook uses it.
+resonance_search.reject(by_hand.frequency_hz, reason="added for the example")
+
+netanal_measured["resonance_search"] = resonance_search.to_dict()
+store.save(module_netanal_outputs, "netanal")
+```
 
 ## 4. Build a resonator catalog
 
@@ -469,6 +475,6 @@ shown here, rather than documenting the current internal implementation.
 | **Find Resonances** | `find_resonances_in_netanal(...)` |
 | Expected count, minimum depth, and Q limits | `expected_resonances`, `min_dip_depth_db`, `min_Q`, `max_Q` |
 | Resonance markers | `ResonanceSearch.candidates` |
-| Edit a search by hand | `ResonanceSearch.reject(...)` / `.accept(...)`, then `record_search(...)` |
+| Edit a search by hand | `ResonanceSearch.reject(...)` / `.accept(...)`, then `store.save(...)` |
 | Catalog for multisweep | `ResonanceSearch.to_catalog(...)` |
 

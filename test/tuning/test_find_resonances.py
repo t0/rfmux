@@ -18,7 +18,6 @@ from rfmux.tuning import (
     find_resonances_in_netanal,
     find_sweeps_with_nearby_resonances,
     netanal_trace,
-    record_search,
 )
 from rfmux.tuning.sweep_results import pack_netanal
 
@@ -720,34 +719,43 @@ def test_accepting_a_threshold_rejection_is_the_same_move():
     assert len(found.rejected) == 1
 
 
-def test_accepting_somewhere_new_measures_the_trace_there():
-    """A resonance the finder had no candidate for carries the numbers a found
-    one does, read off the same trace with the same scipy calls."""
-    shallow_at = 1.05e9
-    frequencies, magnitude = a_sweep(
-        resonances=TRUTH + (shallow_at,),
-        qs=(2e4, 3e4, 2.5e4, 4e4, 3e4),
-        depths=[0.7] * 4 + [0.02],
-    )
-    found = find_resonances(frequencies, magnitude, min_Q=1e4, max_Q=1e6)
-    assert len(found.candidates) == len(TRUTH)   # the shallow one is under the floor
-
-    added = found.accept(shallow_at)
-
-    assert added.accepted
-    assert added.frequency_hz == pytest.approx(shallow_at, abs=2e3)
-    assert added.depth_db == pytest.approx(0.18, abs=0.05)
-    assert added.q_estimate == pytest.approx(3e4, rel=0.2)
-
-
-def test_an_accepted_candidate_lands_on_the_searched_grid():
-    """Not wherever the click was: a candidate indexes the trace, so its
-    frequency has to be a point of it."""
+def test_accepting_somewhere_new_records_the_frequency_and_nothing_else():
+    """An arbitrary frequency is a place someone wants a tone, not a dip: it
+    goes in as asked for, with nothing claimed about a resonance there."""
     found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
 
     added = found.accept(1.05e9 + 137.0)
 
-    assert added.frequency_hz == found.frequencies_hz[added.index]
+    assert added.accepted
+    assert added.frequency_hz == 1.05e9 + 137.0     # exactly, unrounded
+    assert np.isnan(added.depth_db)
+    assert np.isnan(added.width_hz)
+    assert np.isnan(added.q_estimate)
+
+
+def test_an_accepted_candidate_still_indexes_the_trace():
+    """``index`` is what plots a candidate against the trace, so even a
+    frequency between two samples gets the nearest one."""
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+
+    added = found.accept(1.05e9 + 137.0)
+
+    assert added.frequency_hz != found.frequencies_hz[added.index]
+    assert added.index == int(np.argmin(
+        np.abs(found.frequencies_hz - added.frequency_hz)))
+
+
+def test_a_resonance_can_be_accepted_where_there_is_no_dip_at_all():
+    """The whole point of accepting by hand: a tone goes where it is asked
+    for, whether or not the trace shows anything there."""
+    frequencies, magnitude = a_sweep(resonances=())
+    found = find_resonances(frequencies, magnitude, min_Q=1e4, max_Q=1e6)
+    assert found.candidates == []
+
+    added = found.accept(1.05e9)
+
+    assert [c.frequency_hz for c in found.candidates] == [1.05e9]
+    assert np.isnan(added.depth_db)
 
 
 def test_accepted_candidates_stay_in_frequency_order():
@@ -762,41 +770,30 @@ def test_accepted_candidates_stay_in_frequency_order():
     assert frequencies == sorted(frequencies)
 
 
-def test_accepting_where_one_is_already_accepted_says_so():
-    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
-    already = found.candidates[0].frequency_hz
-
-    with pytest.raises(ValueError, match="already an accepted resonance"):
-        found.accept(already)
-
-
 def test_a_hand_edited_search_round_trips_through_builtins():
     """The edits are candidates like any other, so the file needs no new keys
-    and reads back with the reason the operator's rejection carries."""
+    and reads back with the reason the operator's rejection carries.
+
+    A hand-accepted candidate is compared field by field rather than with
+    ``==``: its measured fields are ``nan``, which is never equal to itself.
+    """
     found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
     found.reject(TRUTH[0])
     found.accept(1.05e9)
 
     restored = ResonanceSearch.from_dict(found.to_dict())
 
-    assert restored.candidates == found.candidates
     assert restored.rejected == found.rejected
     assert restored.rejected[0].rejected_because == ResonanceSearch.BY_HAND
 
-
-def test_a_hand_edit_is_recorded_in_the_netanal_it_searched():
-    """``record_search`` is how an edit reaches the measurement, the same way
-    the search itself got there."""
-    module_netanal = a_module_netanal()
-    found = find_resonances_in_netanal(module_netanal, save=False)
-    found.reject(found.candidates[0].frequency_hz)
-
-    record_search(module_netanal, found, save=False)
-
-    stored = ResonanceSearch.from_dict(
-        netanal_trace(module_netanal)["resonance_search"])
-    assert stored.candidates == found.candidates
-    assert stored.rejected == found.rejected
+    by_hand = [c for c in restored.candidates if c.frequency_hz == 1.05e9]
+    found_by_finder = [c for c in restored.candidates if c.frequency_hz != 1.05e9]
+    assert found_by_finder == [c for c in found.candidates
+                               if c.frequency_hz != 1.05e9]
+    added, = by_hand
+    assert added.index == next(
+        c.index for c in found.candidates if c.frequency_hz == 1.05e9)
+    assert np.isnan([added.depth_db, added.width_hz, added.q_estimate]).all()
 
 
 # ─── handing the result onward ────────────────────────────────────────────────

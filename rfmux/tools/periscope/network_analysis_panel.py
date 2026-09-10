@@ -9,8 +9,14 @@ from .layouts import FlowLayout, grouped, labelled
 from .dialogs import NetworkAnalysisParamsDialog
 from .find_resonances_settings_panel import FindResonancesSettingsPanel
 from .tasks import FindResonancesSignals, FindResonancesTask
+from ...core.resonators import ResonatorCatalog, on_grid
 from ...tuning import store
 from .network_analysis_export import NetworkAnalysisExportMixin
+
+#: What a double-clicked resonance is labelled with, on its line and in the
+#: catalog note that records where it came from.
+HAND_ADDED = "added by hand"
+
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
     """
@@ -23,9 +29,12 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     Signals:
         analysis_finished: Emitted once every module's sweep is in, so the
             session can save the measurement.
+        catalog_minted: A module's resonators have just been named, so the
+            session can save the catalog beside the netanal it came from.
     """
 
     analysis_finished = QtCore.pyqtSignal()
+    catalog_minted = QtCore.pyqtSignal(int)
     
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
@@ -49,6 +58,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # module -> the ResonanceSearch behind them, kept for the rejected
         # candidates it carries and for the catalog it can seed.
         self.resonance_searches = {}
+        # module -> the ResonatorCatalog the seed list was named into.
+        self.resonance_catalogs = {}
+        # module -> the seed frequencies a double-click put there, so the
+        # catalog can record which of its resonators the search did not find.
+        self.hand_added_freqs = {}
         self.add_subtract_mode = False
         self.module_cable_lengths = {} # For Requirement 2
         self.dark_mode = dark_mode  # Store dark mode setting
@@ -445,8 +459,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """Add a resonance by hand. Edits the seed list, not the search."""
         if module not in self.plots:
             return
-        self._add_resonance_line(module, freq_hz, tooltip="added by hand")
+        self._add_resonance_line(module, freq_hz, tooltip=HAND_ADDED)
         self.resonance_freqs.setdefault(module, []).append(freq_hz)
+        self.hand_added_freqs.setdefault(module, set()).add(freq_hz)
+        self._seed_list_changed(module)
         self._update_resonance_title(module)
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
         self._update_multisweep_button_state(module)
@@ -464,7 +480,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         for lines, plot in (('resonance_lines_mag', 'amp_plot'),
                             ('resonance_lines_phase', 'phase_plot')):
             plot_info[plot].removeItem(plot_info[lines].pop(idx))
-        freqs.pop(idx)
+        self.hand_added_freqs.get(module, set()).discard(freqs.pop(idx))
+        self._seed_list_changed(module)
         self._update_resonance_title(module)
         self._update_multisweep_button_state(module)
 
@@ -587,6 +604,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.resonance_searches[module] = search
         self.resonance_freqs[module] = [
             c.frequency_hz for c in search.candidates]
+        self.hand_added_freqs.pop(module, None)
+        self._seed_list_changed(module)
 
         self._clear_resonance_lines(module)
         for candidate in search.candidates:
@@ -638,6 +657,43 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             title += f" - {count} resonances"
         _, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         self.plots[module]['amp_plot'].getPlotItem().setTitle(title, color=pen_color)
+
+    def _seed_list_changed(self, module: int) -> None:
+        """Drop the catalog: it is minted from the seed list, so it is stale."""
+        self.resonance_catalogs.pop(module, None)
+
+    def catalog_for_module(self, module: int) -> Optional[ResonatorCatalog]:
+        """The array a multisweep would run on: the seed frequencies, named.
+
+        Minted here rather than when the search finishes, so that double-click
+        edits are in it, and kept until the seed list changes again -- a name
+        keys every result dict a sweep produces, and ``from_frequencies`` draws
+        fresh names on every call, so a cancelled dialog must not rename the
+        array. ``None`` when there is nothing to name: no resonances, or a
+        sweep that has not finished and so has no probe amplitude yet.
+        """
+        kept = self.resonance_catalogs.get(module)
+        if kept is not None:
+            return kept
+
+        frequencies = self.resonance_freqs.get(module)
+        amplitude = self.netanal_traces.get(module, {}).get('sweep_amplitude')
+        if not frequencies or amplitude is None:
+            return None
+
+        catalog = ResonatorCatalog.from_frequencies(
+            frequencies, module=module, amplitude=float(amplitude))
+        # Both sides of the comparison go through the same snap, so a frequency
+        # the user typed in is found exactly rather than by nearest match.
+        by_hand = {on_grid(f) for f in self.hand_added_freqs.get(module, ())}
+        for resonator in catalog:
+            if resonator.bias.frequency_hz in by_hand:
+                resonator.notes['origin'] = HAND_ADDED
+
+        self.resonance_catalogs[module] = catalog
+        # A new array exists; the session saves it beside the netanal.
+        self.catalog_minted.emit(module)
+        return catalog
 
     def _active_module(self) -> Optional[int]:
         """The module whose tab is showing, or None if none is."""

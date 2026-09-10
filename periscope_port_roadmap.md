@@ -222,6 +222,7 @@ and from the merge decisions of 2026-09-08.
 | `session_manager.py` | the netanal `pickle.dump` path, `pickle.load` in `load_file`, and the `'parameters' and 'modules'` file typing (stage 1) | `store.load` and `file_metadata`'s `measurement_type` |
 | `find_resonances_dialog.py`, `utils.py` | the whole modal dialog, the Data Exponent field, and every `DEFAULT_*` finder constant (stage 1) | `FindResonancesSettingsPanel`, over `find_resonances`' own kwargs and defaults |
 | `network_analysis_panel.py` | `_run_and_plot_resonances`' GUI-thread `fitting.find_resonances` call and its four `QMessageBox`es, `_use_loaded_resonances`, the faux resonance legend entry and `_update_resonance_checkbox_text` (stage 1) | `FindResonancesTask`, one `draw_search`, the count in the plot title, a status label |
+| `network_analysis_export.py` | `_show_multisweep_dialog`'s "No Resonances" modal (stage 1) | the toolbar status line, which also covers a sweep that has not finished |
 | `extract_params.py` | `ParamKeyExtractor`, 102 lines of AST parsing to find the keys a dialog's `get_parameters` builds (stage 1) | calling `get_parameters()` and looking at the dict |
 | `network_analysis_dialog.py` | Cable Length field, "Clear all channels first" checkbox (stage 1) | nothing; neither is `take_netanal`'s to do |
 | `network_analysis_export.py` | the board write at the end of the cable-delay unwrap (stage 1) | nothing; the unwrap adjusts the display only |
@@ -388,11 +389,22 @@ are now strict xfails that name the stage which clears them.
   that seeds the catalog, not the search (§6, judgement call 1); a
   hand-added line says so in its tooltip, and the `Resonator.notes` half of
   that judgement call belongs to the step that builds the catalog.
-* **Take Multisweep hands over a `ResonatorCatalog`**, built with
-  `search.to_catalog(module, amplitude=<probe amplitude>)`, or from the
-  edited list with `ResonatorCatalog.from_frequencies`. The netanal panel
-  keeps that catalog per module, and the session export writes it beside the
-  netanal as a `catalog` file.
+* **Take Multisweep hands over a `ResonatorCatalog` (done).**
+  `catalog_for_module` names the module's seed frequencies with
+  `ResonatorCatalog.from_frequencies` at the probe amplitude the netanal
+  measured at, and the panel keeps it in `resonance_catalogs` until the seed
+  list changes -- so a cancelled dialog does not rename the array. It is
+  minted at the press rather than when the search finishes, which is what puts
+  double-click edits in it, and the resonators the operator added carry
+  `notes["origin"] = "added by hand"`, the `Resonator.notes` half of
+  judgement call 1. The dialog is given the catalog's own bias frequencies, so
+  the list it shows is a projection of the catalog rather than a second
+  source; `params["catalog"]` carries the object itself to
+  `_start_multisweep_analysis`, where stage 2's task picks it up. Minting
+  emits `catalog_minted`, and the session writes the catalog beside the
+  netanal as `catalog_YYYYMMDD_HHMMSS_<name>_module<n>.pkl` through `store`.
+  Gone with it: the "No Resonances" modal, which is now the toolbar's status
+  line. §6 judgement calls 20-23 cover the choices.
 * QoL in this stage: netanal magnitude normalised by sweep power (true dB in
   dBm mode), the filename in the plot title, measurement name plus custom
   suffix with a live filename preview, Enter as OK in the dialog.
@@ -764,6 +776,39 @@ Listed so they can be overruled.
     lines would bury the trace; one hoverable scatter item per module carries
     every reason. Alternative: lines in a lighter pen behind a checkbox of
     their own.
+20. **The catalog is minted from the seed list, not from the search**
+    (stage 1). The plan offered `search.to_catalog(...)` for an unedited list
+    and `from_frequencies` for an edited one, but `to_catalog` is
+    `from_frequencies` over `search.resonance_frequencies_hz` — the *unedited*
+    frequencies — so taking that branch would silently drop the operator's
+    double-clicks. One path, `from_frequencies` over the seed list, which is
+    the search's candidates until an edit changes it. `ResonanceSearch.to_catalog`
+    consequently has no caller in Periscope; it is still the notebook idiom.
+21. **A minted catalog is kept until the seed list changes** (stage 1), and
+    dropped at the three places that change it rather than compared against.
+    Names are drawn fresh by `from_frequencies` and key every result dict a
+    sweep produces, so opening the dialog and cancelling must not rename the
+    array. Invalidating at the mutation site beats testing the kept catalog
+    against the list, which would mean re-deriving the tone-grid snap to
+    compare. Alternative: mint at search time and reject edits afterwards.
+22. **The catalog file's label carries the module** (stage 1):
+    `catalog_<date>_<time>_<name>_module<n>.pkl`. One panel can hold several
+    modules and each mints its own catalog, which would otherwise be two files
+    a second apart under one name, told apart only by opening them. The label
+    is Periscope's to choose; the filename is still `store`'s to compose
+    (judgement call 14).
+23. **`params["catalog"]` has no reader until stage 2** (stage 1). The
+    catalog crosses the boundary now because that is where it is made and the
+    press is the handover; `MultisweepTask` still runs off the frequency list
+    the dialog produces, and picks the catalog up in stage 2 when the
+    frequency list goes. The alternative — mint the catalog in stage 2 instead
+    — would leave the netanal panel with no record of the array it seeded, and
+    the hand-added resonances nowhere on disk.
+24. **A catalog file in the session browser has no panel to open in** until
+    stage 4 gives it the bias table, so double-clicking one says "panel
+    creation for this type not yet implemented" — `app.py`'s generic fallback
+    for a type it does not handle, now reachable. Building a viewer for it
+    here would be a second catalog table to throw away.
 
 ---
 
@@ -772,7 +817,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (all but the catalog handover done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Still to come: the catalog handover, the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
+| 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: Take Multisweep names the array, keeps it until the seed list changes, marks the resonators added by hand, drops one that was removed, and the session writes it beside the netanal and reads it back as a catalog. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

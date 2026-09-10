@@ -6,11 +6,10 @@ mocked, so a break in Periscope's calls into ``rfmux.tuning`` shows up here as a
 failure rather than as a mock that happily accepts anything.
 
 Periscope's multisweep still calls the pre-library driver, so the step that does
-is marked ``xfail(strict=True)``: it says what the port owes, it
-keep the suite green until it is delivered, and they turn into a failure the
-moment a stage makes them pass, which is the reminder to drop the marker.
-Stage 2 of ``periscope_port_roadmap.md`` clears the multisweep one, and each
-later stage adds its step here.
+is marked ``xfail(strict=True)``: it says what the port owes, it keeps the suite
+green until that is delivered, and it turns into a failure the moment a stage
+makes it pass, which is the reminder to drop the marker. Stage 2 of
+``periscope_port_roadmap.md`` clears it, and each later stage adds its step here.
 
 The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
 """
@@ -32,6 +31,7 @@ from PyQt6 import QtWidgets  # noqa: E402
 from test.qt_helpers import spin, spin_until  # noqa: E402
 
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
+from rfmux.core.resonators import ResonatorCatalog, on_grid  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
 from rfmux.tuning import store  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
@@ -52,6 +52,7 @@ from rfmux.tools.periscope.tasks import (  # noqa: E402
 )
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
 from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
+    HAND_ADDED,
     NetworkAnalysisPanel,
 )
 
@@ -406,6 +407,129 @@ def test_a_search_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_dir
     _search_on(panel, catalog.module, qt_app)
 
     assert list(output_directory.glob("*.pkl")) == []
+
+
+#: A frequency inside the swept band, far enough from the array's resonances
+#: that it reads as a mark the operator made rather than one of them.
+BY_HAND_HZ = FMAX - 1.3e6
+
+
+def _searched_panel(crs, catalog, qt_app):
+    """A netanal panel whose resonances have been found, ready to hand over."""
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+    _search_on(panel, catalog.module, qt_app)
+    return panel
+
+
+def test_there_is_nothing_to_hand_over_before_a_search(board, qt_app):
+    """A sweep needs an array, and a netanal on its own is not one."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=200)
+
+    assert panel.catalog_for_module(catalog.module) is None
+
+
+def test_take_multisweep_names_the_array_it_hands_over(board, qt_app):
+    """What crosses from netanal to multisweep is a ``ResonatorCatalog``: the
+    search's anonymous dips, named, channelled in frequency order and put on
+    the tone grid at the amplitude the netanal probed them at."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+
+    array = panel.catalog_for_module(catalog.module)
+
+    assert array.module == catalog.module
+    assert len(array) == len(search.candidates)
+    names = array.names()
+    assert [array[n].bias.frequency_hz for n in names] == pytest.approx(
+        sorted(on_grid(f) for f in search.resonance_frequencies_hz))
+    assert {array[n].bias.amplitude for n in names} == {0.001}
+    assert [array[n].channel for n in names] == list(range(1, len(names) + 1))
+
+
+def test_the_catalog_is_kept_until_the_seed_list_changes(board, qt_app):
+    """A name keys every result dict a sweep produces, and drawing fresh names
+    is what ``from_frequencies`` does, so a cancelled dialog and a second press
+    must get the array as it was -- and an edited list must not."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+
+    first = panel.catalog_for_module(catalog.module)
+    assert panel.catalog_for_module(catalog.module) is first
+
+    panel._add_resonance(catalog.module, BY_HAND_HZ)
+    second = panel.catalog_for_module(catalog.module)
+
+    assert second is not first
+    assert len(second) == len(first) + 1
+
+
+def test_a_hand_added_resonance_says_so_in_the_catalog(board, qt_app):
+    """A dip the operator marked is the same thing as a found one to the sweep
+    that measures it, and a different thing to whoever reads the file later."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+
+    panel._add_resonance(catalog.module, BY_HAND_HZ)
+    array = panel.catalog_for_module(catalog.module)
+
+    marked = [n for n in array.names()
+              if array[n].notes.get("origin") == HAND_ADDED]
+    assert len(marked) == 1
+    assert array[marked[0]].bias.frequency_hz == on_grid(BY_HAND_HZ)
+
+
+def test_a_removed_resonance_leaves_the_catalog(board, qt_app):
+    """Double-clicking a line off the plot is an edit to the array that will be
+    swept, not to the search that found it."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    dropped = sorted(search.resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+    array = panel.catalog_for_module(catalog.module)
+
+    assert len(array) == len(search.candidates) - 1
+    assert on_grid(dropped) not in [array[n].bias.frequency_hz
+                                   for n in array.names()]
+
+
+def test_a_catalog_lands_in_the_session_folder(board, qt_app, tmp_path):
+    """The array a sweep was asked for is a record of its own, beside the
+    netanal it came from: it carries the names the sweep's results are keyed by
+    and the hand-added resonances the netanal's search does not have."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    panel.current_params["label"] = "an array"
+    panel._add_resonance(catalog.module, BY_HAND_HZ)
+
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), "session_under_test")
+    periscope = _periscope_with(manager)
+    panel.catalog_minted.connect(
+        lambda module: periscope._save_catalog_to_session(panel, module))
+    registered = []
+    manager.file_exported.connect(
+        lambda path, data_type: registered.append((path, data_type)))
+    try:
+        array = panel.catalog_for_module(catalog.module)
+    finally:
+        session_path = Path(manager.session_path or tmp_path / "session_under_test")
+        manager.end_session()
+
+    written = list(session_path.glob("catalog_*.pkl"))
+    assert len(written) == 1
+    assert written[0].name.endswith(f"_an_array_module{catalog.module}.pkl")
+    assert registered == [(str(written[0]), "catalog")]
+
+    reloaded = ResonatorCatalog.from_dict(store.load(written[0]))
+    assert reloaded.names() == array.names()
+    assert [reloaded[n].bias.frequency_hz for n in reloaded.names()] == pytest.approx(
+        [array[n].bias.frequency_hz for n in array.names()])
+    assert [reloaded[n].notes for n in reloaded.names()] == [
+        array[n].notes for n in array.names()]
 
 
 def _periscope_with(session_manager=None):

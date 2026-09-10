@@ -1160,6 +1160,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             panel.analysis_finished.connect(
                 lambda p=panel: self._save_netanal_to_session(p, modules_to_run)
             )
+            panel.catalog_minted.connect(
+                lambda module, p=panel: self._save_catalog_to_session(p, module)
+            )
             
             for mod_iter in modules_to_run:
                 self._start_netanal_task(mod_iter, params, window_id)
@@ -1208,6 +1211,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             panel._hide_progress_bars()
             panel.set_params(dict(blocks[0]['call_params']))
             panel.netanal_container = container
+            panel.catalog_minted.connect(
+                lambda module, p=panel: self._save_catalog_to_session(p, module)
+            )
 
             # Wrap panel in dock
             dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
@@ -1715,6 +1721,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             return
         self.session_manager.register_external_file(str(path), 'netanal', identifier)
         print(f"[Session] Saved network analysis: {path.name}")
+
+    def _save_catalog_to_session(self, panel, module: int):
+        """Save a module's catalog into the session folder, beside its netanal.
+
+        Minting a catalog is what Take Multisweep does before it opens its
+        dialog, so this is the record of which array a sweep was asked for --
+        including the resonances the operator added by hand, which the search
+        in the netanal file does not have.
+        """
+        if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
+            return
+
+        try:
+            path = panel.save_catalog(module)
+        except Exception as e:
+            print(f"[Session] Could not save catalog: {e}", file=sys.stderr)
+            return
+        if path is None:
+            return
+        self.session_manager.register_external_file(
+            str(path), 'catalog', f"module{module}")
+        print(f"[Session] Saved resonator catalog: {path.name}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""

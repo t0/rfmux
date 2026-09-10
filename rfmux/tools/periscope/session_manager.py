@@ -60,6 +60,7 @@ class SessionManager(QtCore.QObject):
     # Supported data types and their descriptions
     DATA_TYPES = {
         'netanal': 'Network Analysis',
+        'catalog': 'Resonator Catalog',
         'multisweep': 'Multisweep Analysis',
         'bias': 'Bias KIDs',
         'noise': 'Noise Spectrum',

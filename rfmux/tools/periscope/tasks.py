@@ -6,20 +6,12 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
                      # SCATTER_POINTS, spectrum_from_slow_tod, pg,
                      # gaussian_filter, convolve, SMOOTH_SIGMA, LOG_COMPRESS,
                      # DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_NSAMPLES,
-                     # DEFAULT_NPOINTS, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-                     # concurrent, fitting (from rfmux.algorithms.measurement)
+                     # DEFAULT_NPOINTS, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN
 
-# fitting is already imported via 'from .utils import *' if utils.py imports it from rfmux.algorithms.measurement
-# However, to be explicit for this module's direct dependency:
-from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alias to avoid conflict if utils also exports 'fitting'
-from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
 from rfmux.tuning.find_resonances import find_resonances_in_netanal
 
-# Additional imports for async fitting with ThreadPoolExecutor
-import os
-import concurrent.futures
 from typing import Dict, Any, Optional
 
 class UDPReceiver(QtCore.QThread):
@@ -644,378 +636,114 @@ class SetCableLengthTask(QRunnable):
             self._loop = None
 
 class MultisweepSignals(QObject):
-    progress = pyqtSignal(int, float)
-    # Updated data_update to include iteration and direction:
-    # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
-    # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
-    data_update = pyqtSignal(int, int, float, str, dict, dict) # module, iteration, amplitude, direction, results_for_plotting, results_for_history
-    completed_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
-    starting_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
-    fitting_progress = pyqtSignal(int, str) # module, status_message
-    all_completed = pyqtSignal()
-    error = pyqtSignal(int, float, str)
+    progress = pyqtSignal(int, float)          # module, percent across the whole call
+    # module, partial entries, amplitude step, direction: multisweep's
+    # data_callback, so a panel can draw a sweep while it is being measured.
+    partial_data = pyqtSignal(int, dict, int, str)
+    # One finished sweep, as sweep_callback handed it over: step, direction,
+    # amplitudes, factor, completed, total, data.
+    sweep_completed = pyqtSignal(dict)
+    # module, container. The container is multisweep's whole return, keyed by
+    # module identifier: what gets saved, and what the panel keeps.
+    completed = pyqtSignal(int, object)
+    error = pyqtSignal(str)
+
 
 class MultisweepTask(QtCore.QThread):
-    """QThread subclass for performing multisweep operations without blocking the GUI."""
-    def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: Any):
-        """
-        Initialize the MultisweepTask.
-        
-        Args:
-            crs: Control and Readout System object
-            params: Dictionary of parameters for the multisweep
-            signals: Signal object for communication with GUI
-            window: MultisweepWindow instance that will display the results
-        """
+    """Runs one ``crs.multisweep`` call off the GUI thread.
+
+    One call is the whole measurement -- every amplitude step of the schedule,
+    in every direction asked for -- so there is nothing here to loop over. The
+    driver's three callbacks become signals, and what it returns is handed over
+    whole.
+    """
+
+    def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals):
         super().__init__()
         self.crs = crs
-        self.params = params 
+        self.params = params
         self.signals = signals
-        self.window = window 
-        self.baseline_resonance_frequencies = list(params.get('resonance_frequencies', []))
+        # The worker sweeps a copy, so the panel is free to adopt a different
+        # catalog -- the one Find Bias returns, say -- while this sweep runs.
+        self.catalog = params['catalog'].copy()
+        # A catalog belongs to one module, which makes it the one place the
+        # module can be read from.
+        self.module = self.catalog.module
         self._running = True
-        self.current_amplitude = -1
-        self.current_iteration = -1
-        self.current_direction = ""
-        self._task_completed = asyncio.Event()
-        
-        # ThreadPool configuration for fitting operations
-        self._executor = None
-        # Use multiple workers for parallel fitting (reserve 1 core for GUI)
-        self._max_workers = max(1, min(4, (os.cpu_count() or 1) - 1))
-        self._fitting_future = None
 
     def stop(self):
         self._running = False
         self.requestInterruption()
 
-    def _progress_callback_wrapper(self, module_idx, progress_percentage):
-        if self._running: self.signals.progress.emit(module_idx, progress_percentage)
-
-
     def run(self):
         """QThread entry point - runs in a separate thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
-        module_idx = self.params.get('module')
-        if module_idx is None:
-            self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters.")
-            return
-        
         try:
-            amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
-            sweep_direction = self.params.get('sweep_direction', 'upward')
-            conceptual_frequencies_from_window = self.window.conceptual_section_frequencies
-            iteration_index = 0
-
-            for amp_val in amplitudes:
-                if self.isInterruptionRequested():
-                    self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
-                    return
-                
-                self.current_amplitude = amp_val
-                current_sweep_cfs_for_this_amp = []
-                # conceptual_idx_to_input_cf_map = {} # Not strictly needed if results are always index-keyed
-
-                if not conceptual_frequencies_from_window:
-                    self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
-                    return
-
-                for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
-                    remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
-                    chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
-                    current_sweep_cfs_for_this_amp.append(chosen_input_cf)
-                    # conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
-                
-                directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
-                
-                for direction_val in directions_to_sweep: # Renamed 'direction' to 'direction_val' to avoid conflict
-                    self.current_iteration = iteration_index
-                    self.current_direction = direction_val
-                    
-                    self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
-                    
-                    multisweep_params = {
-                        'center_frequencies': current_sweep_cfs_for_this_amp,
-                        'span_hz': self.params['span_hz'],
-                        'npoints_per_sweep': self.params['npoints_per_sweep'],
-                        'amp': amp_val,
-                        'nsamps': self.params.get('nsamps', 10),
-                        'module': module_idx,
-                        'progress_callback': self._progress_callback_wrapper,
-                        'bias_frequency_method': self.params.get('bias_frequency_method', 'max-diq'),
-                        'rotate_saved_data': self.params.get('rotate_saved_data', False),
-                        'sweep_direction': direction_val,
-                        # As above: SessionManager owns Periscope's files.
-                        'save': False,
-                    }
-                    
-                    raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
-                    
-                    if self.isInterruptionRequested():
-                        self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
-                        return
-                    
-                    # is_bifurcated comes with the multisweep's results.
-                    # Now apply fitting analysis using the (potentially) bifurcation-annotated data
-                    # Use async version with ThreadPoolExecutor for better responsiveness
-                    enhanced_results = loop.run_until_complete(
-                        self._process_fitting_async(raw_results_from_crs)
-                    )
-                    results_for_plotting = enhanced_results 
-                    
-                    results_for_history = {}
-                    if enhanced_results: 
-                        for res_idx, data_dict_val in enhanced_results.items():
-                            if isinstance(res_idx, (int, np.integer)):
-                                bias_freq = data_dict_val.get('bias_frequency', data_dict_val.get('original_center_frequency'))
-                                if bias_freq is not None:
-                                    # Convert 1-based detector index to 0-based conceptual index
-                                    conceptual_idx = res_idx - 1
-                                    results_for_history[conceptual_idx] = bias_freq
-                                else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
-                            else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
-                    
-                    if results_for_plotting is not None:
-                        self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction_val, results_for_plotting, results_for_history)
-                    
-                    self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
-                    iteration_index += 1
-            
-            self.signals.all_completed.emit()
+            # None is a cancelled sweep, which the panel that cancelled it
+            # already knows about. Anything else is the whole measurement,
+            # handed over even if Cancel arrived while it was being packed.
+            container = loop.run_until_complete(self._process_multisweep(loop))
+            if container is not None:
+                self.signals.completed.emit(self.module, container)
         except asyncio.CancelledError:
-            self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep task canceled by user.")
+            self.signals.error.emit(f"Multisweep canceled for module {self.module}")
         except Exception as e:
-            detailed_error = f"Error in MultisweepTask (amp {self.current_amplitude:.4f}): {type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-            self.signals.error.emit(module_idx, self.current_amplitude, detailed_error)
+            err_msg = (f"Multisweep failed on module {self.module}: "
+                       f"{type(e).__name__}: {e}")
+            print(f"ERROR: {err_msg}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(err_msg)
         finally:
             if loop.is_running():
                 loop.stop()
             loop.close()
 
-    async def _process_multisweep(self, loop, multisweep_params):
-        self._task_completed.clear()
-        multisweep_coro = self.crs.multisweep(**multisweep_params)
-        task = loop.create_task(multisweep_coro)
-        
+    def _multisweep_params(self):
+        return {
+            'catalog': self.catalog,
+            'span_hz': self.params['span_hz'],
+            'npoints_per_sweep': self.params['npoints_per_sweep'],
+            'nsamps': self.params['nsamps'],
+            # A number, a mapping or an AmplitudeSchedule, as the dialog built
+            # it; None sweeps each resonator at its own catalog amplitude.
+            'amp': self.params.get('amp'),
+            'sweep_direction': self.params.get('sweep_direction', 'upward'),
+            'progress_callback': self._progress_callback,
+            'data_callback': self._data_callback,
+            'sweep_callback': self._sweep_callback,
+            # Periscope writes its own session export through SessionManager.
+            # Leaving the driver's autosave on would put a second copy of every
+            # measurement in a second folder, in a second layout.
+            'save': False,
+        }
+
+    def _progress_callback(self, module_idx, progress_percentage):
+        if self._running:
+            self.signals.progress.emit(module_idx, progress_percentage)
+
+    def _data_callback(self, module_idx, partial, step, direction):
+        if self._running:
+            self.signals.partial_data.emit(module_idx, partial, step, direction)
+
+    def _sweep_callback(self, record):
+        if self._running:
+            self.signals.sweep_completed.emit(record)
+
+    async def _process_multisweep(self, loop):
+        """Run the one call, yielding often enough that Cancel is answered."""
+        task = loop.create_task(self.crs.multisweep(**self._multisweep_params()))
+
         while not task.done():
             if self.isInterruptionRequested():
                 task.cancel()
-                await asyncio.sleep(0.01) 
+                await asyncio.sleep(0.01)   # let the cancellation land
                 return None
-            await asyncio.sleep(0.1) 
-        
-        if not task.cancelled():
-            try:
-                return await task
-            except Exception as e:
-                print(f"Error in _process_multisweep: {e}", file=sys.stderr)
-                raise
-        return None
-    
-    async def _process_fitting_async(self, raw_results):
-        """Process fitting analysis asynchronously using ThreadPoolExecutor."""
-        if not raw_results:
-            return raw_results
-        
-        # For larger datasets, use parallel processing
-        return await self._process_fitting_multi_thread(raw_results)
-    
-    async def _process_fitting_multi_thread(self, raw_results):
-        """Process fitting using multiple threads for better performance."""
-        loop = asyncio.get_event_loop()
-        
-        # Split resonances into chunks for parallel processing
-        resonance_items = list(raw_results.items())
-        num_chunks = min(self._max_workers, len(resonance_items))
-        chunk_size = max(1, len(resonance_items) // num_chunks)
-        
-        chunks = []
-        for i in range(0, len(resonance_items), chunk_size):
-            chunk = dict(resonance_items[i:i + chunk_size])
-            if chunk:
-                chunks.append(chunk)
-        
-        # Process chunks in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
-            # Submit all chunks for processing
-            futures = []
-            for i, chunk in enumerate(chunks):
-                future = executor.submit(
-                    self._process_chunk_thread_safe,
-                    chunk,
-                    self.params.get('apply_skewed_fit', False),
-                    self.params.get('apply_nonlinear_fit', False),
-                    self.params.get('module'),
-                    i,
-                    len(chunks)
-                )
-                futures.append(asyncio.wrap_future(future))
-            
-            # Collect results as they complete
-            enhanced_results = {}
-            completed = 0
-            
-            for future in asyncio.as_completed(futures):
-                if self.isInterruptionRequested():
-                    # Cancel remaining futures
-                    for f in futures:
-                        f.cancel()
-                    return raw_results
-                
-                try:
-                    chunk_results = await future
-                    enhanced_results.update(chunk_results)
-                    completed += 1
-                    
-                    # Chunk completed (no progress emission to avoid clutter)
-                        
-                except Exception as e:
-                    print(f"Error processing chunk: {e}", file=sys.stderr)
-                    # Continue with other chunks
-            
-            return enhanced_results
-    
-    def _process_chunk_thread_safe(self, chunk, apply_skewed, apply_nonlinear, module_idx, chunk_idx, total_chunks):
-        """Process a chunk of resonances in a thread."""
-        # Process this chunk using the existing logic
-        return self._apply_fitting_analysis(chunk, apply_skewed, apply_nonlinear, module_idx)
-    
-    def _apply_fitting_analysis(self, raw_results, apply_skewed, apply_nonlinear, module_idx):
-        """Apply fitting analysis (skewed and/or nonlinear) to multisweep results.
-        
-        This method runs in a worker thread for parallel processing.
-        Emits progress signals for GUI updates (thread-safe via Qt's queued connections).
-        """
-        # This runs in a separate thread, so we need to be careful about Qt signals
-        
-        # Initialize enhanced_results as a copy to preserve raw data if fitting is skipped or fails
-        enhanced_results = {k: v.copy() for k, v in raw_results.items()}
-        
-        if not apply_skewed and not apply_nonlinear:
-            # If no fitting is requested, add flags indicating this
-            for res_idx in enhanced_results:
-                enhanced_results[res_idx]['skewed_fit_applied'] = False
-                enhanced_results[res_idx]['skewed_fit_success'] = False
-                enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            return enhanced_results
-        
-        try:
-            if apply_skewed:
-                # Emit progress signal (thread-safe via Qt's queued connections)
-                if module_idx is not None and self._running:
-                    self.signals.fitting_progress.emit(module_idx, 
-                        "Fitting in progress: Applying skewed fits")
-                
-                # Perform skewed fitting
-                skewed_results = fitting_module_direct.fit_skewed_multisweep(
-                    enhanced_results,
-                    approx_Q_for_fit=1e4,
-                    fit_resonances=True,
-                    center_iq_circle=True,
-                    normalize_fit=True
-                )
-                
-                # Update results
-                for res_idx in enhanced_results:
-                    if res_idx in skewed_results:
-                        enhanced_results[res_idx].update(skewed_results[res_idx])
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        fit_p = enhanced_results[res_idx].get('fit_params', {})
-                        enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
-                        
-                        # Generate skewed model magnitude if fit was successful
-                        if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if frequencies is not None:
-                                try:
-                                    # Generate magnitude model using fitted parameters
-                                    skewed_model_mag = fitting_module_direct.s21_skewed(
-                                        frequencies, 
-                                        fit_p['fr'], 
-                                        fit_p['Qr'], 
-                                        fit_p['Qcre'], 
-                                        fit_p['Qcim'], 
-                                        fit_p['A']
-                                    )
-                                    enhanced_results[res_idx]['skewed_model_mag'] = skewed_model_mag
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate skewed model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else:
-                        enhanced_results[res_idx]['skewed_fit_applied'] = True
-                        enhanced_results[res_idx]['skewed_fit_success'] = False
-            else:
-                for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['skewed_fit_applied'] = False
-                    enhanced_results[res_idx]['skewed_fit_success'] = False
-            
-            if apply_nonlinear:
-                # Emit progress signal
-                if module_idx is not None and self._running:
-                    self.signals.fitting_progress.emit(module_idx, 
-                        "Fitting in progress: Applying non-linear fits")
-                
-                # Perform nonlinear fitting
-                # Disable parallel processing since we're already in a thread
-                nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
-                    enhanced_results.copy(),
-                    fit_nonlinearity=True,
-                    n_extrema_points=5,
-                    verbose=False,
-                    parallel=False  # Avoid nested thread pools
-                )
-                
-                # Update results
-                for res_idx in enhanced_results:
-                    if res_idx in nonlinear_results:
-                        enhanced_results[res_idx].update(nonlinear_results[res_idx])
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
-                            enhanced_results[res_idx]['nonlinear_fit_success'] = False
-                        
-                        # Generate nonlinear model IQ if fit was successful
-                        if enhanced_results[res_idx].get('nonlinear_fit_success', False):
-                            nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
-                            frequencies = enhanced_results[res_idx].get('frequencies')
-                            if nl_params and frequencies is not None:
-                                try:
-                                    # Generate complex IQ model using fitted parameters
-                                    nonlinear_model_iq = fitting_nonlinear.nonlinear_iq(
-                                        frequencies,
-                                        nl_params['fr'],
-                                        nl_params['Qr'],
-                                        nl_params['amp'],
-                                        nl_params['phi'],
-                                        nl_params['a'],
-                                        nl_params['i0'],
-                                        nl_params['q0']
-                                    )
-                                    enhanced_results[res_idx]['nonlinear_model_iq'] = nonlinear_model_iq
-                                except Exception as e:
-                                    print(f"Warning: Failed to generate nonlinear model for resonance {res_idx}: {e}", file=sys.stderr)
-                    else:
-                        enhanced_results[res_idx]['nonlinear_fit_applied'] = True
-                        enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            else:
-                for res_idx in enhanced_results:
-                    enhanced_results[res_idx]['nonlinear_fit_applied'] = False
-                    enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            
-            # Emit completion
-            if module_idx is not None and self._running:
-                self.signals.fitting_progress.emit(module_idx, "Fitting Completed")
-            
-            return enhanced_results
-            
-        except Exception as e:
-            print(f"Error in thread-safe fitting analysis: {e}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            # Return results with error flags
-            for res_idx in enhanced_results:
-                enhanced_results[res_idx]['fitting_error'] = str(e)
-            return enhanced_results
+            await asyncio.sleep(0.1)
+
+        if task.cancelled():
+            return None
+        return await task
 
 
 class BiasKidsSignals(QObject):

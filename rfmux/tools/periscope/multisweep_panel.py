@@ -22,6 +22,7 @@ from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .parameter_histograms_panel import ParameterHistogramsPanel
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
+from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -88,6 +89,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.probe_amplitudes = list(self.current_run_amps) # Ensure it's a copy and reflects current run
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
+
+        # What the measurement is: multisweep's container, this module's block
+        # out of it, and the array that was swept.
+        self.multisweep_container = None
+        self.module_sweeps = None
+        self.catalog = None
 
         # Data storage and state — detector-based format:
         # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
@@ -671,15 +678,31 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         queued = QtCore.Qt.ConnectionType.QueuedConnection
         signals.progress.connect(self.update_progress, queued)
-        signals.starting_iteration.connect(self.handle_starting_iteration, queued)
-        signals.data_update.connect(self.update_data, queued)
-        signals.completed_iteration.connect(
-            lambda module, iteration, amplitude, direction:
-                self.completed_amplitude_sweep(module, amplitude),
-            queued)
-        signals.all_completed.connect(self.all_sweeps_completed, queued)
+        signals.sweep_completed.connect(self.handle_sweep_completed, queued)
+        signals.completed.connect(self.complete_multisweep, queued)
         signals.error.connect(self.handle_error, queued)
-        signals.fitting_progress.connect(self.handle_fitting_progress, queued)
+
+    def handle_sweep_completed(self, record: dict):
+        """One sweep of the call is finished: say which, and how far in."""
+        self.current_amp_label.setText(
+            f"Sweep {record['completed']}/{record['total']}: "
+            f"step {record['step']}, {record['direction']}")
+
+    def complete_multisweep(self, module: int, container: dict):
+        """The measurement, as ``multisweep`` returned it, and the array it swept.
+
+        The catalog is read back out of the measurement rather than kept beside
+        it: a sweep records the one it swept, so there is no second copy to
+        keep in step.
+        """
+        self.multisweep_container = container
+        self.module_sweeps = next(
+            block for block in container.values() if block['module'] == module)
+        self.catalog = ResonatorCatalog.from_dict(
+            self.module_sweeps['call_params']['catalog'])
+        self.progress_bar.setValue(100)
+        self.current_amp_label.setText(
+            f"{len(self.catalog.names())} resonators swept")
 
     def update_progress(self, module, progress_percentage):
         """
@@ -694,60 +717,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # Show progress group if it was hidden
             if hasattr(self, 'progress_group') and not self.progress_group.isVisible():
                 self.progress_group.setVisible(True)
-
-    def handle_starting_iteration(self, module: int, iteration: int, amplitude: float, direction: str):
-        """
-        Handler for the starting_iteration signal. Updates the status bar at the start of a sweep.
-        
-        Args:
-            module (int): The module reporting the start.
-            iteration (int): The iteration index (0-based).
-            amplitude (float): The probe amplitude for this iteration.
-            direction (str): The sweep direction ("upward" or "downward").
-        """
-        if module != self.target_module: return
-        
-        # Convert direction to user-friendly format
-        direction_text = "Down" if direction.lower().strip() == "downward" else "Up"
-        
-        # Convert to 1-based for display
-        current_display_iteration = iteration + 1
-        
-        # Make sure total_iterations is at least as large as the current iteration
-        self.total_iterations = max(self.total_iterations, current_display_iteration)
-        
-        # Set the status message BEFORE the sweep starts
-        status_message = f"Iteration {current_display_iteration}/{self.total_iterations}: Amplitude {amplitude:.4f} ({direction_text})"
-        self.current_amp_label.setText(status_message)
-
-    def handle_fitting_progress(self, module: int, status_message: str):
-        """
-        Handler for the fitting_progress signal. Updates the status bar with fitting progress.
-        
-        Args:
-            module (int): The module reporting fitting progress.
-            status_message (str): The fitting status message.
-        """
-        if module != self.target_module: return
-        
-        # Get the current status base (iteration info)
-        current_text = self.current_amp_label.text()
-        
-        # Split the text to separate iteration info from any fitting status
-        if " - " in current_text:
-            # Keep only the iteration part
-            base_text = current_text.split(" - ")[0]
-        else:
-            base_text = current_text
-        
-        # Extract just the fitting status part from the message
-        if "Fitting in progress: " in status_message:
-            fitting_status = status_message.replace("Fitting in progress: ", "")
-            updated_text = f"{base_text} - {fitting_status}"
-            self.current_amp_label.setText(updated_text)
-        elif status_message == "Fitting Completed":
-            # When fitting is completed, just show the base text
-            self.current_amp_label.setText(base_text)
         
     def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
         """
@@ -796,8 +765,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.histogram_panel.histogram_cache.clear()
         
         self._redraw_plots() # Refresh plots with the new data
-        
-        # Note: We now update the status in handle_starting_iteration() instead of here
 
     def _redraw_plots(self):
         """
@@ -1083,42 +1050,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Adjust plot ranges to fit all data
         self.combined_mag_plot.autoRange()
         self.combined_phase_plot.autoRange()
-
-    def completed_amplitude_sweep(self, module, amplitude):
-        """
-        Slot called when a sweep for a single amplitude is completed.
-        Updates the progress bar.
-
-        Args:
-            module (int): The module that completed the sweep.
-            amplitude (float): The amplitude for which the sweep was completed.
-        """
-        if module == self.target_module:
-            self.progress_bar.setValue(100) # Mark as 100% for this specific amplitude
-
-    def all_sweeps_completed(self):
-        """
-        Slot called when all amplitudes in the multisweep have been processed.
-        Updates UI elements to reflect completion and auto-opens detector digest for first detector.
-        """
-        self._check_all_complete()
-        self.current_amp_label.setText("All Amplitudes Processed")
-        
-        # Emit data_ready signal for session auto-export
-        if self.results_by_detector:
-            export_data = self._prepare_export_data()
-            identifier = f"module{self.target_module}"
-            self.data_ready.emit("multisweep", identifier, export_data)
-        
-        # Generate histogram plots once when all data is complete
-        if self.results_by_detector and not self.histograms_generated:
-            self._generate_histograms()
-            self.histograms_generated = True
-        
-        # Auto-populate detector digest for the first detector (lowest frequency)
-        # Don't switch focus — user should stay on the current tab (magnitude sweeps)
-        if self.results_by_detector:
-            self._open_detector_digest_for_index(1, switch_to_tab=False)
         
     def _check_all_complete(self):
         """
@@ -1148,24 +1079,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if not window_has_active_tasks and self.progress_bar.value() == 100:
             self.progress_group.setVisible(False)
 
-    def handle_error(self, module, amplitude, error_msg):
-        """
-        Handles errors reported during the multisweep process.
-        Displays an error message.
+    def handle_error(self, error_msg: str):
+        """Say what went wrong where the sweep's progress is reported.
 
-        Args:
-            module (int): The module where the error occurred, or -1 for a general error.
-            amplitude (float): The amplitude being processed when the error occurred, or -1.
-            error_msg (str): The error message.
+        A modal here is opened from a signal handler, which never returns on a
+        headless run and takes the window away from the operator on any other.
         """
-        if module == self.target_module or module == -1: # -1 can indicate a general non-amplitude-specific error
-            amp_str = f"for amplitude {amplitude:.4f}" if amplitude != -1 else "general"
-            QtWidgets.QMessageBox.critical(
-                self, 
-                "Multisweep Error", 
-                f"Error {amp_str} on Module {self.target_module}:\n{error_msg}"
-            )
-            self.progress_group.setVisible(False) # Hide progress bar on error
+        self.current_amp_label.setText(error_msg)
+        self.progress_bar.setValue(0)
 
     def _export_data(self):
         """

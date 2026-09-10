@@ -6,6 +6,7 @@ from .utils import (
     MULTISWEEP_DEFAULT_NSAMPLES, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
+from rfmux.tuning import AmplitudeSchedule
 from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
 import pickle
 import numpy as np
@@ -141,6 +142,22 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self._update_dac_scale_info()
         self._update_dbm_from_normalized()
 
+    @staticmethod
+    def _direction_text(sweep_direction) -> str:
+        """The combo entry for one of multisweep's own *sweep_direction* values.
+
+        Both directions is a sequence there, so a re-run seeded from a previous
+        call's arguments finds "Both" rather than falling back to Upward.
+        """
+        if not isinstance(sweep_direction, str):
+            if not sweep_direction:
+                return "Upward"
+            if len(sweep_direction) > 1:
+                return "Both"
+            sweep_direction = sweep_direction[0]
+        return {"upward": "Upward", "downward": "Downward"}.get(
+            str(sweep_direction).lower(), "Upward")
+
     def _get_selected_modules(self) -> list[int]:
         """
         Returns the module relevant for this multisweep dialog.
@@ -270,56 +287,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         
         self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
 
-        
-        # Option to recalculate center frequencies
-        self.recalc_cf_combo = QtWidgets.QComboBox()
-        self.recalc_cf_combo.addItems(["max-dIQ","min-S21","None"])
-        
-        # Set initial value for bias_frequency_method
-        default_recalc_setting = self.params.get('bias_frequency_method', "max-diq")
 
-        if default_recalc_setting == "min-s21":
-            self.recalc_cf_combo.setCurrentText("min-S21")
-        elif default_recalc_setting == "max-diq":
-            self.recalc_cf_combo.setCurrentText("max-dIQ")
-        else: # Covers None or any other unexpected string
-            self.recalc_cf_combo.setCurrentText("None")
-            
-        self.recalc_cf_combo.setToolTip(
-            "Determines how/if center frequencies are recalculated for biasing:\n"
-            "- max-dIQ [Often Optimal]: Recalculates to max IQ velocity |d(I+jQ)/df|. Finds where the IQ trajectory moves fastest.\n"
-            "- min-S21: Recalculates to min |S21|.\n"
-            "- None: No recalculation. Use original center frequency.\n"
-        )
-        param_form_layout.addRow("Bias Frequency Method:", self.recalc_cf_combo)
-        
-        # Option to rotate saved data
-        self.rotate_saved_data_checkbox = QtWidgets.QCheckBox("Rotate Saved Data")
-        self.rotate_saved_data_checkbox.setChecked(self.params.get('rotate_saved_data', False)) # Default to False for df calibration
-        self.rotate_saved_data_checkbox.setToolTip(
-            "Whether to rotate sweep data based on TOD analysis.\n"
-            "When checked and bias frequency method is not None:\n"
-            "- For min-S21: Rotates to minimize the I component of the TOD's mean.\n"
-            "- For max-dIQ: Rotates to align the principal component of the TOD with the I-axis.\n"
-            "Note: Should be unchecked when using df calibration to ensure consistency."
-        )
-        param_form_layout.addRow(self.rotate_saved_data_checkbox)
-        
         # Sweep direction selection
         self.sweep_direction_combo = QtWidgets.QComboBox()
         self.sweep_direction_combo.addItems(["Upward", "Downward", "Both"])
         
-        # Set initial value for sweep_direction
-        default_direction = self.params.get('sweep_direction', 'upward')
-        if default_direction == "upward":
-            self.sweep_direction_combo.setCurrentText("Upward")
-        elif default_direction == "downward":
-            self.sweep_direction_combo.setCurrentText("Downward")
-        elif default_direction == "both":
-            self.sweep_direction_combo.setCurrentText("Both")
-        else: # Default to Upward for any unexpected value
-            self.sweep_direction_combo.setCurrentText("Upward")
-            
+        self.sweep_direction_combo.setCurrentText(
+            self._direction_text(self.params.get('sweep_direction', 'upward')))
+
         self.sweep_direction_combo.setToolTip(
             "Direction of frequency sweep:\n"
             "- Upward: Sweep from lower to higher frequencies.\n"
@@ -327,16 +302,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             "- Both: Perform both sweep directions sequentially."
         )
         param_form_layout.addRow("Sweep Direction:", self.sweep_direction_combo)
-        
-        # Fitting options
-        self.apply_skewed_fit_checkbox = QtWidgets.QCheckBox("Apply Skewed Fit")
-        self.apply_skewed_fit_checkbox.setChecked(self.params.get('apply_skewed_fit', True)) # Default to True
-        param_form_layout.addRow(self.apply_skewed_fit_checkbox)
 
-        self.apply_nonlinear_fit_checkbox = QtWidgets.QCheckBox("Apply Nonlinear Fit")
-        self.apply_nonlinear_fit_checkbox.setChecked(self.params.get('apply_nonlinear_fit', True)) # Default to True
-        param_form_layout.addRow(self.apply_nonlinear_fit_checkbox)
-        
         layout.addWidget(param_group)
 
 
@@ -479,19 +445,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.npoints_edit.setText(str(params['npoints_per_sweep']))
             self.nsamps_edit.setText(str(params['nsamps']))
         
-            idx = self.recalc_cf_combo.findText(params['bias_frequency_method'], Qt.MatchFlag.MatchFixedString)
-            if idx >= 0:
-                self.recalc_cf_combo.setCurrentIndex(idx)
-        
-            self.rotate_saved_data_checkbox.setChecked(params['rotate_saved_data'])
-        
-            idx = self.sweep_direction_combo.findText(params['sweep_direction'].capitalize(),
-                                                      Qt.MatchFlag.MatchFixedString)
+            idx = self.sweep_direction_combo.findText(
+                self._direction_text(params['sweep_direction']),
+                Qt.MatchFlag.MatchFixedString)
             if idx >= 0:
                 self.sweep_direction_combo.setCurrentIndex(idx)
-        
-            self.apply_skewed_fit_checkbox.setChecked(params['apply_skewed_fit'])
-            self.apply_nonlinear_fit_checkbox.setChecked(params['apply_nonlinear_fit'])
         
             amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
             if amps:
@@ -590,41 +548,27 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
                     amps_list = [single_default]
     
-                # Store the full list of amplitudes (parsed or defaulted) for the MultisweepTask.
                 params_dict['amps'] = amps_list
-    
-                # Store the first amplitude under the singular 'amp' key for potential compatibility
-                # or for display purposes elsewhere. The MultisweepTask itself iterates over 'amps'.
-                # This assumes amps_list is now guaranteed to be non-empty.
-                params_dict['amp'] = amps_list[0]
+
+                # multisweep's own 'amp' argument: a number is one sweep, a
+                # schedule is one per step, and both come back in one result.
+                params_dict['amp'] = (
+                    amps_list[0] if len(amps_list) == 1
+                    else AmplitudeSchedule.explicit(amps_list))
                 
                 params_dict['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
                 params_dict['npoints_per_sweep'] = int(self.npoints_edit.text())
                 params_dict['nsamps'] = int(self.nsamps_edit.text())
                 
-                recalc_method_text = self.recalc_cf_combo.currentText()
-                if recalc_method_text == "None":
-                    params_dict['bias_frequency_method'] = None
-                elif recalc_method_text == "min-S21":
-                    params_dict['bias_frequency_method'] = "min-s21"
-                elif recalc_method_text == "max-dIQ":
-                    params_dict['bias_frequency_method'] = "max-diq"
-                else: # Should not happen with QComboBox
-                    params_dict['bias_frequency_method'] = None
-                
-                # Get rotate saved data setting
-                params_dict['rotate_saved_data'] = self.rotate_saved_data_checkbox.isChecked()
-                
                 # Get sweep direction
                 sweep_direction_text = self.sweep_direction_combo.currentText()
-                if sweep_direction_text == "Upward":
-                    params_dict['sweep_direction'] = "upward"
-                elif sweep_direction_text == "Downward":
-                    params_dict['sweep_direction'] = "downward"
-                elif sweep_direction_text == "Both":
-                    params_dict['sweep_direction'] = "both"
-                else: # Should not happen with QComboBox
-                    params_dict['sweep_direction'] = "upward"
+                # Both directions is the sequence multisweep takes, in the
+                # order it measures them, not a third direction.
+                params_dict['sweep_direction'] = {
+                    "Upward": "upward",
+                    "Downward": "downward",
+                    "Both": ("upward", "downward"),
+                }.get(sweep_direction_text, "upward")
                     
                 # Include the essential context for the multisweep
                 if self.load_multisweep:
@@ -635,10 +579,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 else:
                     params_dict['resonance_frequencies'] = self.section_center_frequencies
                 params_dict['module'] = self.current_module
-                
-                # Get fitting parameters
-                params_dict['apply_skewed_fit'] = self.apply_skewed_fit_checkbox.isChecked()
-                params_dict['apply_nonlinear_fit'] = self.apply_nonlinear_fit_checkbox.isChecked()
     
                 # Basic validation
                 if params_dict['span_hz'] <= 0:

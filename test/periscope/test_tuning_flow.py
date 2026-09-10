@@ -5,11 +5,10 @@ The tasks are the real tasks, the drivers are the real drivers, and the board is
 mocked, so a break in Periscope's calls into ``rfmux.tuning`` shows up here as a
 failure rather than as a mock that happily accepts anything.
 
-Periscope's multisweep still calls the pre-library driver, so the step that does
-is marked ``xfail(strict=True)``: it says what the port owes, it keeps the suite
-green until that is delivered, and it turns into a failure the moment a stage
-makes it pass, which is the reminder to drop the marker. Stage 2 of
-``periscope_port_roadmap.md`` clears it, and each later stage adds its step here.
+A step the port has not reached yet is marked ``xfail(strict=True)``: it says
+what is owed, it keeps the suite green until that is delivered, and it turns
+into a failure the moment a stage makes it pass, which is the reminder to drop
+the marker. Each stage of ``periscope_port_roadmap.md`` adds its step here.
 
 The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
 """
@@ -33,7 +32,7 @@ from test.qt_helpers import spin, spin_until  # noqa: E402
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
 from rfmux.core.resonators import on_grid  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
-from rfmux.tuning import store  # noqa: E402
+from rfmux.tuning import AmplitudeSchedule, store  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -217,42 +216,135 @@ def test_network_analysis_panel_holds_the_trace(board, qt_app):
     assert np.allclose(drawn_magnitude, np.abs(stored["iq_counts"]))
 
 
-@pytest.mark.xfail(strict=True, reason="stage 2: the task passes "
-                                       "bias_frequency_method and rotate_saved_data "
-                                       "to crs.multisweep (tasks.py:706)")
-def test_multisweep_task_finishes_without_error(board, qt_app):
-    """A multisweep through the real task, into a real panel, reaches
-    ``all_completed`` with nothing on the error signal."""
-    _, crs, catalog = board
-    frequencies = [catalog[name].bias.frequency_hz for name in catalog.names()]
+def _multisweep_params(catalog, **overrides):
+    """One sweep of the standard array, small enough to be quick."""
     params = {
         "module": catalog.module,
-        "amps": [catalog[catalog.names()[0]].bias.amplitude],
+        "catalog": catalog,
         "span_hz": 100e3,
         "npoints_per_sweep": 21,
         "nsamps": 10,
         "sweep_direction": "upward",
-        "resonance_frequencies": frequencies,
     }
-    # A real panel, because the task reads its frequency bookkeeping, but the
-    # panel's own slots stay unwired: handle_error opens a modal QMessageBox,
-    # which offscreen never returns. Stage 2 replaces that with a status line;
-    # test_multisweep_signals_per_task covers the panel wiring meanwhile.
+    params.update(overrides)
+    return params
+
+
+def _run_multisweep(crs, catalog, qt_app, **overrides):
+    """Drive the real task to completion; return what each signal carried."""
+    params = _multisweep_params(catalog, **overrides)
     panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
                             dac_scales={catalog.module: -0.5})
-
     signals = MultisweepSignals()
-    finished, errors = [], []
-    signals.all_completed.connect(lambda: finished.append(True))
-    signals.error.connect(lambda module, amp, message: errors.append(message))
+    panel.connect_task_signals(signals)
 
-    task = MultisweepTask(crs=crs, params=params, signals=signals, window=panel)
+    errors, completed, records, partials = [], [], [], []
+    signals.error.connect(errors.append)
+    signals.completed.connect(lambda module, container: completed.append((module, container)))
+    signals.sweep_completed.connect(records.append)
+    signals.partial_data.connect(
+        lambda module, partial, step, direction: partials.append((step, direction, partial)))
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
     task.start()
     assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
     spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel, errors, completed, records, partials
+
+
+def test_multisweep_task_finishes_without_error(board, qt_app):
+    """A multisweep through the real task reaches ``completed`` with the
+    driver's own container and nothing on the error signal."""
+    _, crs, catalog = board
+    _, errors, completed, _, _ = _run_multisweep(crs, catalog, qt_app)
 
     assert errors == []
-    assert finished == [True]
+    assert len(completed) == 1
+    module, container = completed[0]
+    assert module == catalog.module
+    assert container[crs.module[catalog.module].index()]["measurement"] == "multisweep"
+
+
+def test_the_whole_schedule_is_one_call(board, qt_app):
+    """Five amplitude steps in two directions are ten sweeps of one
+    measurement, not ten measurements: one container, one sweep record each."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 8, 5)
+    _, errors, completed, records, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=schedule,
+        sweep_direction=("upward", "downward"))
+
+    assert errors == []
+    assert len(completed) == 1
+    results = completed[0][1][crs.module[catalog.module].index()]["results"]
+    assert sorted(results) == [0, 1, 2, 3, 4]
+    assert all(sorted(step) == ["downward", "upward"] for step in results.values())
+
+    assert [(r["step"], r["direction"]) for r in records] == [
+        (step, direction)
+        for step in range(5)
+        for direction in ("upward", "downward")
+    ]
+    assert [r["completed"] for r in records] == list(range(1, 11))
+
+
+def test_live_points_say_which_sweep_they_belong_to(board, qt_app):
+    """``data_callback`` is re-emitted with its two coordinates, so a panel
+    drawing live knows which step and direction the points are from -- and
+    with entries in the block's own keys, so it can draw them."""
+    _, crs, catalog = board
+    _, errors, _, _, partials = _run_multisweep(
+        crs, catalog, qt_app, sweep_direction=("upward", "downward"))
+
+    assert errors == []
+    assert ({(step, direction) for step, direction, _ in partials}
+            == {(0, "upward"), (0, "downward")})
+    _, _, partial = partials[-1]
+    entry = partial[next(iter(partial))]
+    assert len(entry["frequencies"]) == len(entry["iq_counts"])
+
+
+def test_the_panel_holds_the_measurement_and_the_array_it_swept(board, qt_app):
+    """On completion the panel keeps the driver's block and the catalog out of
+    it -- not a restructuring of either."""
+    _, crs, catalog = board
+    panel, errors, completed, _, _ = _run_multisweep(crs, catalog, qt_app)
+
+    assert errors == []
+    assert panel.module_sweeps is completed[0][1][crs.module[catalog.module].index()]
+    assert sorted(panel.catalog.names()) == sorted(catalog.names())
+
+
+def test_a_cancelled_sweep_hands_over_nothing(board, qt_app):
+    """Stop mid-call and the panel is not given a half-measurement to hold."""
+    _, crs, catalog = board
+    params = _multisweep_params(
+        catalog, amp=AmplitudeSchedule.multiplicative(0.5, 8, 5),
+        sweep_direction=("upward", "downward"))
+    signals = MultisweepSignals()
+    completed, records = [], []
+    signals.completed.connect(lambda module, container: completed.append(container))
+    signals.sweep_completed.connect(records.append)
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
+    task.start()
+    assert spin_until(qt_app, lambda: bool(records), timeout=180), "no sweep ran"
+    task.stop()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "cancel was not answered"
+    spin(qt_app)
+
+    assert completed == []
+    assert len(records) < 10        # it stopped short of the whole schedule
+
+
+def test_the_worker_sweeps_a_copy_of_the_catalog(board, qt_app):
+    """The panel is free to adopt a different catalog while a sweep runs."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    task = MultisweepTask(crs=crs, params=params, signals=MultisweepSignals())
+
+    assert task.catalog is not catalog
+    assert task.module == catalog.module
 
 
 def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):

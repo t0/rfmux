@@ -419,15 +419,42 @@ are now strict xfails that name the stage which clears them.
 
 ### Stage 2. Multisweep as one call (large; the centre of the port)
 
-* **Task.** `MultisweepTask` takes a `catalog.copy()`, an `AmplitudeSchedule`,
-  a direction tuple and the sweep parameters, and makes one
-  `crs.multisweep` call. `sweep_callback` is re-emitted as
+* **Task (done).** `MultisweepTask` takes a `catalog.copy()`, an
+  `AmplitudeSchedule`, a direction tuple and the sweep parameters, and makes
+  one `crs.multisweep` call. `sweep_callback` is re-emitted as
   `sweep_completed(record)`; `data_callback(module, partial, step, direction)`
   as `partial_data(...)` for live curves on the overview tab;
-  `progress_callback` straight to the bar. Cancel is `requestInterruption`
-  cancelling the coroutine, as now, plus a visible Cancel button, which
-  neither branch has. `save=False` in the call; the panel saves through
-  `store` on completion so the session manager stays in charge of when.
+  `progress_callback` straight to the bar. `save=False` in the call; the panel
+  saves through `store` on completion so the session manager stays in charge of
+  when. Gone with the loop: the per-amplitude and per-direction iteration, the
+  re-centring history it read off the panel (`_get_closest_remembered_cf`,
+  `conceptual_section_frequencies`), the `window` argument that let a worker
+  read the GUI, the inline fitting on a thread pool of its own, and the
+  restructuring into `results_for_plotting`/`results_for_history` -- 354 lines
+  of `tasks.py` out against 82 in, and with them the module's `fitting`,
+  `fitting_nonlinear`, `os` and `concurrent.futures` imports.
+
+  Four things differed from the plan. The task is not told its module: a
+  catalog belongs to one, so it reads `catalog.module` and there is no second
+  place for the two to disagree. Cancel emits nothing -- the panel that pressed
+  it is the one that knows, and a cancelled sweep is a routine outcome, not an
+  error -- while a call that finishes as Cancel arrives is still handed over
+  rather than thrown away. Two arguments moved into the dialog ahead of its own
+  rewrite, because they are the library's own forms and the alternative was a
+  translation layer in between: an amplitude list becomes
+  `AmplitudeSchedule.explicit`, and "Both" becomes `("upward", "downward")`.
+  And frequencies typed into the dialog by hand, which no search named, are
+  minted into a catalog in `_start_multisweep_analysis` until the dialog's
+  Custom frequencies mode does it where it can say so.
+
+  What the sweep no longer does, until the stages that own it: fits during the
+  measurement (stage 3's button), drawing (the panel's `update_data` is off the
+  measure path, still on the load path), and the session auto-export that
+  `all_sweeps_completed` fired (this stage's Files bullet). The panel keeps `multisweep_container`,
+  `module_sweeps` and `catalog`, reads the catalog back out of
+  `call_params["catalog"]` rather than holding a second copy, and reports an
+  error on its status line -- `handle_error`'s modal, opened from a signal
+  handler, is what deadlocked a headless run.
 * **Dialog.** A view over `AmplitudeSchedule`. The amplitude group has one
   radio per constructor: at each resonator's catalog amplitude (the default,
   `AmplitudeSchedule()`), one absolute amplitude, an explicit list, a ramp
@@ -441,6 +468,16 @@ are now strict xfails that name the stage which clears them.
   mints new names, which the dialog says. Measurement name becomes the
   `label`. Checkboxes "Fit after sweep" and "Find bias after sweep" press
   the stage 3 and 4 buttons on completion. Return starts the sweep.
+
+  Four controls went with the task rewrite rather than waiting for this
+  bullet, because a control that drives nothing is worse than a missing one:
+  Bias Frequency Method and Rotate Saved Data (`multisweep` measures, and
+  nothing on this branch rotates a saved sweep), and the Apply Skewed Fit and
+  Apply Nonlinear Fit checkboxes (stage 3's button). `_direction_text` came
+  with them, so a re-run seeded from a previous call's own arguments finds
+  "Both" in the combo rather than falling back to Upward.
+  `test_multisweep_dialog_params.py` pins what the dialog emits, including
+  that it emits nothing `multisweep` would refuse.
 * **Panel state.** `self.catalog` (the array as swept) and
   `self.module_sweeps` (the block). Nothing else about the data.
 * **Tabs, ported from the section-amplitudes grid helpers and rewritten
@@ -629,14 +666,18 @@ Small, and each belongs in the library rather than in Periscope.
    `entry["fits"]`, listed in the todo as the reason the function takes an
    entry rather than two arrays. Needed for the re-run dialog's "from fitted
    fr" option and the Bias Settings radio.
-3. **Display helpers without a toolkit.** `amplitude colour normalisation`
-   (the `0.3 + 0.7 t` dark and `0.75 t` light mapping and the threshold of
-   three), `offset_khz`, batching and `panels_per_row` are duplicated across
-   the four `example_plotting_*.py` files and would be duplicated a fifth
-   time in pyqtgraph. A small pure module, importing neither matplotlib nor
-   Qt, that the notebooks and Periscope both call, keeps the two looks
-   identical. Judgement call 2 below; the doc's rule that plotting belongs
-   to callers is about plotting, and these are arithmetic.
+3. ~~**Display helpers without a toolkit.**~~ **Not doing this** (maclean,
+   2026-09-10): the GUI and the notebooks are allowed to look different.
+   `amplitude colour normalisation` (the `0.3 + 0.7 t` dark and `0.75 t`
+   light mapping and the threshold of three), `offset_khz`, batching and
+   `panels_per_row` are duplicated across the four `example_plotting_*.py`
+   files, and pyqtgraph duplicates them a fifth time. A shared module would
+   keep the two looks identical, which is the thing that is not wanted: a
+   panel the operator drives at the board and a figure in a notebook answer
+   to different constraints, and pinning them together makes every later
+   change to one a negotiation with the other. The arithmetic is a few lines
+   in each place. Revisit only if the two are found drifting in a way that
+   confuses rather than suits — a future to-do, not a prerequisite.
 4. **Nothing in `multisweep`.** `sweep_callback`, the four-argument
    `data_callback` and whole-call progress are already what the task needs.
 4b. **Editing a search by hand** (done in stage 1).
@@ -686,9 +727,10 @@ Listed so they can be overruled.
    list in the panel, a set beside it tracking which entries were added by
    hand, and a `Resonator.notes` entry to carry that distinction into the
    catalog. All three are gone; nothing is deleted from a search any more.
-2. **Shared display arithmetic goes in a pure library module.** See §5
-   item 3. Alternative: duplicate it in Periscope's `utils.py` and accept
-   drift. Recommended: the module.
+2. ~~**Shared display arithmetic goes in a pure library module.**~~
+   **Overruled (maclean, 2026-09-10): duplicate it.** See §5 item 3. The GUI
+   plots need not match the notebook plots, so the shared module's benefit —
+   one look — is not one. Periscope carries its own copy of the arithmetic.
 3. **Mock-mode df units at startup.** Today `DfCalibrationTask` steps every
    tone at startup in mock mode so df units work without tuning. Its
    replacement in catalog terms: build the catalog from the simulator's

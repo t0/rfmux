@@ -7,6 +7,7 @@ import asyncio
 from PyQt6 import sip
 import numpy as np
 from typing import Optional
+from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -1428,6 +1429,16 @@ class PeriscopeRuntime:
             target_module = params.get('module')
             if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
             
+            # A multisweep measures a catalog. One comes from Find Resonances,
+            # which names what it accepted; frequencies typed into the dialog
+            # by hand are named here instead. Stage 2's dialog does this in a
+            # Custom frequencies mode of its own, where it can say so.
+            if 'catalog' not in params:
+                params['catalog'] = ResonatorCatalog.from_frequencies(
+                    params['resonance_frequencies'],
+                    module=target_module,
+                    amplitude=params['amps'][0])
+
             # Create panel
             dac_scales_for_panel = self.dac_scales if hasattr(self, 'dac_scales') else {}
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
@@ -1451,7 +1462,7 @@ class PeriscopeRuntime:
             # Create and start the task, with signals of its own
             signals = MultisweepSignals()
             panel.connect_task_signals(signals)
-            task = MultisweepTask(crs=self.crs, params=params, signals=signals, window=panel)
+            task = MultisweepTask(crs=self.crs, params=params, signals=signals)
             task_key = f"{window_id}_module_{target_module}"
             self.multisweep_tasks[task_key] = task
             task.start()  # Start the QThread directly
@@ -1989,7 +2000,7 @@ class PeriscopeRuntime:
 
         signals = MultisweepSignals()
         window_instance.connect_task_signals(signals)
-        task = MultisweepTask(crs=self.crs, params=params, signals=signals, window=window_instance)
+        task = MultisweepTask(crs=self.crs, params=params, signals=signals)
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly
 

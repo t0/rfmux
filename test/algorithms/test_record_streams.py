@@ -7,6 +7,7 @@ subprocess.
 
 import asyncio
 import pickle
+import sys
 import time
 from types import SimpleNamespace
 
@@ -73,6 +74,8 @@ def fake_recorders(monkeypatch):
 
     monkeypatch.setattr(rs, "_start_parser", start)
     monkeypatch.setattr(rs, "_stop_parser", stop)
+    # The parser is faked, so its pygetdata requirement is too.
+    monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
     return log
 
 
@@ -144,6 +147,9 @@ while True:
 
 @pytest.fixture
 def fake_parser_child(monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("the parser is a Linux tool: an asyncio subprocess "
+                    "stopped with SIGINT, neither of which Windows has here")
     monkeypatch.setattr(rs, "PARSER_CHILD", FAKE_PARSER)
     monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
 

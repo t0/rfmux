@@ -227,6 +227,9 @@ def main():
     ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
+    ap.add_argument("--review", metavar="PULSE_H5", default=None,
+                    help="Open this pulse capture file in a review panel: offline, "
+                         "in the file's session folder, without the startup dialog.")
     args = ap.parse_args()
     
     # Initialize Qt application first for the dialog
@@ -265,37 +268,50 @@ def main():
         prefill['module'] = args.module
     
     # Show the startup dialog with pre-filled values
-    dialog = UnifiedStartupDialog(None, prefill=prefill if prefill else None)
-    
-    if not dialog.exec():
-        # User cancelled - exit
-        sys.exit(0)
-    
-    # Get configuration from dialog
-    config = dialog.get_configuration()
-    
-    # Override command-line args with dialog values
-    connection_mode = config['connection_mode']
-    
-    if connection_mode == UnifiedStartupDialog.CONN_HARDWARE:
-        args.crs_board = config.get('crs_serial', '0042')  # Use serial from dialog
-        args.module = config.get('module', 1)
-    elif connection_mode == UnifiedStartupDialog.CONN_MOCK:
-        args.crs_board = "MOCK"
-        args.module = config.get('module', 1)
-    elif connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
-        # Offline mode - disable hardware connection
-        print("[Periscope] Starting in Offline Mode")
+    if args.review is not None:
+        from pathlib import Path
+        review = Path(args.review).resolve()
         args.crs_board = "OFFLINE"
-        args.module = 1
+        session_dir = review.parent
+        session_config = {
+            'mode': (UnifiedStartupDialog.SESS_LOAD
+                     if (session_dir / "session_metadata.json").exists()
+                     else UnifiedStartupDialog.SESS_NONE),
+            'path': str(session_dir),
+            'folder_name': None,
+        }
+    else:
+        dialog = UnifiedStartupDialog(None, prefill=prefill if prefill else None)
     
-    # Store session configuration for later use
-    session_mode = config['session_mode']
-    session_config = {
-        'mode': session_mode,
-        'path': config.get('session_path'),
-        'folder_name': config.get('session_folder_name')
-    }
+        if not dialog.exec():
+            # User cancelled - exit
+            sys.exit(0)
+    
+        # Get configuration from dialog
+        config = dialog.get_configuration()
+    
+        # Override command-line args with dialog values
+        connection_mode = config['connection_mode']
+    
+        if connection_mode == UnifiedStartupDialog.CONN_HARDWARE:
+            args.crs_board = config.get('crs_serial', '0042')  # Use serial from dialog
+            args.module = config.get('module', 1)
+        elif connection_mode == UnifiedStartupDialog.CONN_MOCK:
+            args.crs_board = "MOCK"
+            args.module = config.get('module', 1)
+        elif connection_mode == UnifiedStartupDialog.CONN_OFFLINE:
+            # Offline mode - disable hardware connection
+            print("[Periscope] Starting in Offline Mode")
+            args.crs_board = "OFFLINE"
+            args.module = 1
+    
+        # Store session configuration for later use
+        session_mode = config['session_mode']
+        session_config = {
+            'mode': session_mode,
+            'path': config.get('session_path'),
+            'folder_name': config.get('session_folder_name')
+        }
 
     if args.fps <= 0:
         ap.error("FPS must be positive.")
@@ -545,6 +561,8 @@ def main():
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.
     viewer.setWindowIcon(app_icon)
     viewer.show()
+    if args.review is not None:
+        viewer._load_pulse_capture_from_session(str(review))
     # Held in a local so it outlives this call: a QTimer that goes out
     # of scope is destroyed and stops firing.
     _sigint_wake = install_sigint_handler()

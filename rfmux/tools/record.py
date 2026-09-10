@@ -15,6 +15,7 @@ session_YYYYMMDD_HHMMSS folder is made under --session-dir.
 import asyncio
 import dataclasses
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -80,9 +81,10 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
                    "fast stream (a both-mode file, as Periscope reviews it)")
-@click.option("--show/--no-show", default=True, show_default=True,
-              help="After the run, open the overlay viewer on the channel with the "
-                   "most pulses")
+@click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
+              default="periscope", show_default=True,
+              help="After the run: Periscope in review mode on the pulse file, the "
+                   "overlay viewer on the channel with the most pulses, or nothing")
 @click.option("--bias", type=click.Path(dir_okay=False, exists=True), default=None,
               help="bias_kids export for the df calibrations; default: the session's newest")
 @click.option("--threshold-sigma", type=float, default=_DEFAULTS.threshold_sigma, show_default=True)
@@ -143,25 +145,40 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
         click.echo("[record] fastrx merged into the pulse file as its fast stream")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
-    if show:
-        _show(result)
+    _show(result, show)
     if result.warnings:
         raise SystemExit(1)
 
 
-def _show(result) -> None:
-    """The overlay viewer on the channel with the most pulses, when
-    there is a display; the command to run otherwise."""
-    if result.capture is None or result.pulse_path is None \
-            or result.fastrx_path is None:
+def periscope_review_command(pulse_path) -> list:
+    """Periscope in review mode on *pulse_path*, offline, in its session."""
+    return [sys.executable, "-m", "rfmux.tools.periscope", "--review",
+            str(pulse_path)]
+
+
+def _show(result, how: str) -> None:
+    """After the run, when there is a display: Periscope in review mode
+    on the pulse file, or the overlay viewer on the channel with the
+    most pulses.  Without one, the command to run."""
+    if how == "none" or result.capture is None or result.pulse_path is None:
+        return
+    headless = sys.platform != "darwin" and not (
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+    if how == "periscope":
+        cmd = periscope_review_command(result.pulse_path)
+        if headless:
+            click.echo("[record] no display; to review: " + " ".join(cmd[1:]))
+            return
+        subprocess.Popen(cmd, start_new_session=True)
+        return
+    if result.fastrx_path is None:
         return
     counts = {ch: len(v) for ch, v in result.capture.summaries.items()}
     if not any(counts.values()):
         return
     channel = max(counts, key=lambda ch: (counts[ch], -ch))
     dirfile = result.dirfile_path
-    if sys.platform != "darwin" and not (os.environ.get("DISPLAY")
-                                         or os.environ.get("WAYLAND_DISPLAY")):
+    if headless:
         click.echo("[record] no display; to view: rfmux fastrx overlay "
                    f"{result.pulse_path} {result.fastrx_path} --channel {channel} "
                    f"--pad 5" + (f" --dirfile {dirfile}" if dirfile else ""))

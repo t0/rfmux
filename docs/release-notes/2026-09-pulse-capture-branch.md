@@ -494,9 +494,12 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `on_noise=` for that. After the run it lists the channels that
   triggered, merges the recording into the pulse file as its fast
   stream (`--no-merge-fastrx`; `rfmux fastrx merge` for an older run)
-  and opens the overlay viewer on the busiest channel (`--no-show`).
-  The merged file is a both-mode file that Periscope reviews with the
-  recording under every pulse. See the 100G and 1G overlay guide.
+  and opens Periscope in review mode on the file (`--show overlay` for
+  the overlay viewer on the busiest channel, `--show none`). The merged
+  file is a both-mode file that Periscope reviews with the recording
+  under every pulse. `periscope --review <pulse.h5>` opens any capture
+  file that way, offline, without the startup dialog. See the 100G and
+  1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

@@ -268,6 +268,14 @@ def test_pulse_summary_lines_name_the_busiest_channel_first():
         "3 pulses on 2 of 3 channels"]
 
 
+def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
+    import sys
+    from rfmux.tools.record import periscope_review_command
+    assert periscope_review_command(tmp_path / "pulse.h5") == [
+        sys.executable, "-m", "rfmux.tools.periscope", "--review",
+        str(tmp_path / "pulse.h5")]
+
+
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     session = rs.open_session(base=tmp_path)
     assert session.name.startswith("session_")

@@ -559,12 +559,11 @@ def bench(seconds: float, modules: tuple[int, ...],
     """Count packet drops as a client sees them.
 
     Per module: sequence gaps, i.e. packets missing from the stream this
-    client received, and ring drops, i.e. packets fastrxd could not hand it
-    because it had fallen behind.  A gap without a ring drop was lost
-    upstream of the client; "ss --xdp -e" shows the kernel's counters for
-    that (a FILL ring found empty means fastrxd itself fell behind), and a
-    PacketWriter recording shows exactly which packets went missing.  The
-    NIC's own rx_dropped is not a measure of this stream's loss.
+    client received.  "ss --xdp -e" shows the kernel's counters for the
+    socket (a FILL ring found empty means fastrxd or a client held on to
+    frames too long), and a PacketWriter recording shows exactly which
+    packets went missing.  The NIC's own rx_dropped is not a measure of this
+    stream's loss.
     """
     import threading
     import time
@@ -592,7 +591,7 @@ def bench(seconds: float, modules: tuple[int, ...],
                           timeout=min(grab_s, seconds - elapsed))
             gaps += d["restarts"]
             seen |= d["modules_seen"]
-        out[module] = dict(gaps=gaps, ring_drops=c.ring_drops, seen=seen,
+        out[module] = dict(gaps=gaps, seen=seen,
                            elapsed=time.monotonic() - t0)
         c.stop()
 
@@ -608,8 +607,7 @@ def bench(seconds: float, modules: tuple[int, ...],
         streaming = ", ".join(str(i + 1) for i in range(fastrx.NUM_MODULES)
                               if r["seen"] & (1 << i)) or "none"
         click.echo(f"module {m}: {r['gaps']} gaps "
-                   f"({r['gaps'] / r['elapsed']:.1f}/s), "
-                   f"{r['ring_drops']} ring drops, {r['elapsed']:.1f} s "
+                   f"({r['gaps'] / r['elapsed']:.1f}/s) in {r['elapsed']:.1f} s "
                    f"(streaming: {streaming})")
 
 

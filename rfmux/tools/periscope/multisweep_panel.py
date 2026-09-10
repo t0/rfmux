@@ -21,8 +21,13 @@ from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
 from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
+
+# A data callback arrives per sweep point; a grid of subplots takes longer to
+# draw than a point takes to measure, so live redraws are coalesced to this.
+LIVE_REDRAW_INTERVAL_MS = 100
 
 
 class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
@@ -88,7 +93,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # out of it, and the array that was swept.
         self.multisweep_container = None
         self.module_sweeps = None
-        self.catalog = None
+        self.catalog = self.initial_params.get('catalog')
+
+        # Points measured so far, {name: {(step, direction): sweep}}, held only
+        # while the call is running. Dropped when the block arrives.
+        self._live = {}
+        # {step: {name: amplitude}} for the whole call, resolved before the
+        # first point so a trace's colour does not shift as sweeps land.
+        self._step_amplitudes = {}
+        self._set_amplitude_scale(self.initial_params.get('amp'))
 
         # Data storage and state — detector-based format:
         # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
@@ -131,6 +144,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
+
+        self._live_redraw_timer = QtCore.QTimer(self)
+        self._live_redraw_timer.setSingleShot(True)
+        self._live_redraw_timer.timeout.connect(self._redraw_plots)
 
         self._setup_ui()
         
@@ -555,9 +572,26 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         queued = QtCore.Qt.ConnectionType.QueuedConnection
         signals.progress.connect(self.update_progress, queued)
+        signals.partial_data.connect(self.add_partial_sweep, queued)
         signals.sweep_completed.connect(self.handle_sweep_completed, queued)
         signals.completed.connect(self.complete_multisweep, queued)
         signals.error.connect(self.handle_error, queued)
+
+    def add_partial_sweep(self, module: int, partial: dict, step: int, direction: str):
+        """The points measured so far, for the region being swept.
+
+        The driver resends each sweep whole, from its first point, so this
+        replaces per resonator rather than appending; resonators in regions it
+        has already finished keep the last it sent. Redraws are coalesced,
+        because a callback arrives per point and a grid takes longer to draw
+        than a point takes to measure.
+        """
+        if module != self.target_module:
+            return
+        for name, sweep in partial.items():
+            self._live.setdefault(name, {})[(step, direction)] = sweep
+        if not self._live_redraw_timer.isActive():
+            self._live_redraw_timer.start(LIVE_REDRAW_INTERVAL_MS)
 
     def handle_sweep_completed(self, record: dict):
         """One sweep of the call is finished: say which, and how far in."""
@@ -577,9 +611,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             block for block in container.values() if block['module'] == module)
         self.catalog = ResonatorCatalog.from_dict(
             self.module_sweeps['call_params']['catalog'])
+        self._live_redraw_timer.stop()
+        self._live.clear()
+        self._set_amplitude_scale(
+            AmplitudeSchedule.from_dict(self.module_sweeps['call_params']['amp_schedule']))
         self.progress_bar.setValue(100)
         self.current_amp_label.setText(
             f"{len(self.catalog.names())} resonators swept")
+        self._redraw_plots()
 
     def update_progress(self, module, progress_percentage):
         """
@@ -634,13 +673,73 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._redraw_plots() # Refresh plots with the new data
 
+    def _set_amplitude_scale(self, amp):
+        """Resolve the schedule's amplitudes for the catalog being swept.
+
+        ``resolve_steps`` answers without a board, so every amplitude the call
+        will produce is known before its first point and the colour scale is
+        settled from the start.
+        """
+        if self.catalog is None:
+            self._step_amplitudes = {}
+            return
+        schedule = amp if isinstance(amp, AmplitudeSchedule) else AmplitudeSchedule(amp)
+        self._step_amplitudes = {
+            step.step: dict(step.amplitudes)
+            for step in schedule.resolve_steps(self.catalog)
+        }
+
+    def _amplitude_of(self, step: int, name: str, sweep: dict) -> float:
+        """What one sweep is driven at, in normalized DAC units.
+
+        A finished sweep records it. One still being measured does not, so the
+        answer is what the schedule resolved for that step and resonator, which
+        is the number the driver will write into it.
+        """
+        if 'sweep_amplitude' in sweep:
+            return float(sweep['sweep_amplitude'])
+        return self._step_amplitudes[step][name]
+
+    def _selected_names(self) -> list[str]:
+        """The resonators the grids draw, in the order they are drawn."""
+        return list(self.catalog.names()) if self.catalog is not None else []
+
+    def _collect_traces(self, names) -> dict:
+        """``{name: [(step, direction, amplitude, sweep), ...]}`` to draw.
+
+        One walk, over the block once the call has returned and over the live
+        buffer while it is still running. Nothing is copied: a sweep here is
+        the entry the driver wrote, read at draw time and thrown away after.
+        """
+        collected = {}
+        for name in names:
+            traces = []
+            if self.module_sweeps is not None:
+                measured = collect_amplitude_iterations_for(self.module_sweeps, name)
+                for step, by_direction in measured.items():
+                    for direction, sweep in by_direction.items():
+                        traces.append((step, direction,
+                                       self._amplitude_of(step, name, sweep), sweep))
+            else:
+                for (step, direction), sweep in self._live.get(name, {}).items():
+                    traces.append((step, direction,
+                                   self._amplitude_of(step, name, sweep), sweep))
+            if traces:
+                collected[name] = traces
+        return collected
+
+    def _amplitudes_drawn(self) -> list[float]:
+        """Every drive amplitude the call produces, for the colour scale."""
+        return sorted({a for step in self._step_amplitudes.values()
+                       for a in step.values()})
+
     def _redraw_plots(self):
         """
         Redraws plots based on the currently active tab.
         For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
         """
         # Early return if no data
-        if not self.results_by_detector:
+        if not (self.module_sweeps or self._live or self.results_by_detector):
             # Clear any existing plots
             if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
                 self.combined_mag_plot.clear()
@@ -660,49 +759,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
-        from .multisweep_grid_helpers import (
-            create_amplitude_color_map,
-            update_sweep_grid
-        )
-        
-        # Prepare detector data for grid plotting directly from results_by_detector
-        # Key by (amp_val, direction) for the grid helpers
-        detector_data = {}
-        for detector_id, iter_dict in self.results_by_detector.items():
-            detector_data[detector_id] = {}
-            for det_entry in iter_dict.values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
-                freqs = det_entry.get('frequencies', np.array([]))
-                # Use raw counts when in counts mode, otherwise voltage-converted data
-                if self.unit_mode == "counts":
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
-                else:
-                    iq_complex = det_entry.get('iq_complex', np.array([]))
-                if amp_val is not None and len(freqs) > 0 and len(iq_complex) > 0:
-                    detector_data[detector_id][(amp_val, direction)] = {
-                        'freq': freqs,
-                        'iq': iq_complex,
-                        'amplitude': amp_val,
-                        'direction': direction,
-                        'original_center_frequency': det_entry.get('original_center_frequency')
-                    }
-        
-        if not detector_data:
+        from .multisweep_grid_helpers import update_sweep_grid
+
+        traces_by_name = self._collect_traces(self._selected_names())
+        if not traces_by_name:
             return
-        
-        # Get all amplitudes for color mapping (unique amplitude values only)
-        all_amps = set()
-        for det_data in detector_data.values():
-            for (amp_val, _direction) in det_data.keys():
-                all_amps.add(amp_val)
-        
-        # Create amplitude color mapping (matches combined plot colors)
-        amplitude_to_color = create_amplitude_color_map(all_amps, self.dark_mode)
-        
+
+        amplitudes = self._amplitudes_drawn()
+        amplitude_to_color = create_amplitude_color_map(amplitudes, self.dark_mode)
+
         # Get DAC scale for label formatting
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
-        
+
         # Determine plot type, grid, cache, and colorbar based on tab
         if tab_idx == 0:
             plot_type = 'magnitude'
@@ -714,20 +782,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             grid_layout = self.iq_sweeps_grid
             widget_cache = self.iq_sweep_plots_cache
             colorbar = self.iq_colorbar
-        
-        # Count unique (amp, direction) pairs to decide legend vs colorbar
-        all_sweep_keys = set()
-        for det_data in detector_data.values():
-            all_sweep_keys.update(det_data.keys())
-        num_sweeps = len(all_sweep_keys)
-        has_downward = any(d == 'downward' for _, d in all_sweep_keys)
-        
-        # Show colorbar when the inferno colormap is active (num_amps > threshold),
+
+        has_downward = any(direction == 'downward'
+                           for traces in traces_by_name.values()
+                           for _step, direction, _amp, _sweep in traces)
+
+        # Show colorbar when the colormap is active (num_amps > threshold),
         # otherwise use per-plot legends with TABLEAU10 colors.
-        num_amps = len(all_amps)
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
-            sorted_amps = sorted(all_amps)
-            colorbar.update_range(sorted_amps[0], sorted_amps[-1],
+        if len(amplitudes) > AMPLITUDE_COLORMAP_THRESHOLD:
+            colorbar.update_range(amplitudes[0], amplitudes[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)
             colorbar.show()
@@ -735,11 +798,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             colorbar.hide()
             use_legend = True  # show per-plot legends
-        
+
         # Update the grid with widget caching
         update_sweep_grid(
             grid_layout=grid_layout,
-            data_by_detector=detector_data,
+            traces_by_name=traces_by_name,
             plot_type=plot_type,
             current_batch=self.current_batch,
             batch_size=self.batch_size,
@@ -754,7 +817,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scale=dac_scale,
             show_legend=use_legend
         )
-    
+
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
         if not self.combined_mag_plot or not self.combined_phase_plot:

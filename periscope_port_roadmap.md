@@ -511,10 +511,10 @@ are now strict xfails that name the stage which clears them.
   |---|---|
   | x, in the grids | `(sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3`, kHz either side of the sweep's own centre |
   | x, in the overview | `sweep["frequencies"]`, unshifted, so the array shares one axis |
-  | magnitude | `abs(sweep["iq_counts"])`; in Volts, `abs(sweep["iq_volts"])` — the entry carries volts, so the panel does not re-run the conversion — and in dBm, `UnitConverter.convert_amplitude(..., unit_mode="dbm")`, the same `convert_roc_to_dbm` the netanal panel uses |
+  | magnitude | `UnitConverter.convert_amplitude(abs(sweep["iq_counts"]), ...)` for all three units, the same converter the netanal panel uses; volts there are `convert_roc_to_volts`, one constant scale, so the result equals `abs(sweep["iq_volts"])` |
   | phase | `np.angle(sweep["iq_counts"])`, at draw time. A sweep has no phase key on purpose: it would be the readout chain's phase, not the resonator's |
-  | IQ circle | `sweep["iq_counts"].real` and `.imag`, or `iq_volts` |
-  | Normalize Traces | divide by `sweep["sweep_amplitude"]` before the unit conversion, which is `example_plotting_multisweep.sweep_iq` |
+  | IQ circle | `sweep["iq_counts"]`, scaled by `convert_roc_to_volts` unless the units are counts — the same numbers `iq_volts` holds, and a sweep still being measured has only counts |
+  | Normalize Traces | the panel's own meaning, kept: the first point of each trace is the reference (subtracted in dBm, divided otherwise), through `UnitConverter.convert_amplitude`, and the peak magnitude for an IQ loop. Not `example_plotting_multisweep.sweep_iq`'s divide-by-drive — see §6, judgement call 24 |
   | trace colour | `sweep["sweep_amplitude"]`, through the scale below |
   | line style | `sweep["sweep_direction"]`: solid upward, dotted downward |
   | panel title | the name the entry is keyed by, and its `original_center_frequency` |
@@ -547,8 +547,11 @@ are now strict xfails that name the stage which clears them.
   time, with finished regions not resent and unstarted ones absent. So the panel
   assigns per name rather than appending to an array or replacing the step. It
   is stored under the container's own nesting,
-  `self._live[step][direction][name] = partial[name]`, so the reader above runs
-  over it unchanged and a half-drawn sweep and a finished one are one code path.
+  `self._live[name][(step, direction)] = partial[name]`, so the reader above
+  reaches it the same way and a half-drawn sweep and a finished one are one code
+  path. A callback arrives per point and a grid takes longer to draw than a
+  point takes to measure, so redraws are coalesced on a 100 ms single-shot
+  timer.
   The one key it lacks is `sweep_amplitude`, and a live trace's colour comes
   from `resolve_steps`' amplitude for that name and step — the number the driver
   will write into the entry. `self._live` is cleared when `completed` arrives
@@ -1022,6 +1025,23 @@ Listed so they can be overruled.
     over `entry["fits"]`. The instruction covered the digest; extending it to
     the histograms is the same reasoning one panel over, and is the half to
     overrule.
+24. **Normalize Traces keeps the panel's meaning, not the notebook's**
+    (stage 2). `example_plotting_multisweep.sweep_iq` divides a sweep by the
+    drive that produced it; Periscope's checkbox references each trace to its
+    own first point, which is off resonance and where |S21| is proportional to
+    drive — so it collapses an amplitude ladder onto one another for the same
+    reason, and also removes the gain the traces have in common. It is what the
+    shipped control has always done, it lives in `UnitConverter` where the
+    netanal panel uses it too, and §5 item 3 already says the GUI and the
+    notebooks may look different. The plan said `sweep_iq`; the code is right
+    and the plan was corrected.
+25. **Every trace is coloured by its drive, including the only one**
+    (stage 2). The old grid drew a single-amplitude sweep in the foreground
+    colour and switched to the amplitude colours when a second one arrived, so
+    a live trace changed colour mid-run — which is what resolving the schedule
+    before the first point exists to prevent. Colour now always means drive; a
+    one-step sweep is drawn in TABLEAU10's first colour rather than in black or
+    white.
 
 ---
 

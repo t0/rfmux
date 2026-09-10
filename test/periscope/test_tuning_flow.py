@@ -32,7 +32,9 @@ from test.qt_helpers import spin, spin_until  # noqa: E402
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
 from rfmux.core.resonators import on_grid  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
-from rfmux.tuning import AmplitudeSchedule, store  # noqa: E402
+from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
+from rfmux.tuning import (  # noqa: E402
+    AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -345,6 +347,132 @@ def test_the_worker_sweeps_a_copy_of_the_catalog(board, qt_app):
 
     assert task.catalog is not catalog
     assert task.module == catalog.module
+
+
+def _grid_widgets(panel, tab_idx=0):
+    """The subplot widgets the grid is showing, in the order it drew them."""
+    panel.plot_tabs.setCurrentIndex(tab_idx)
+    panel._redraw_plots()
+    grid = panel.mag_sweeps_grid if tab_idx == 0 else panel.iq_sweeps_grid
+    return [grid.itemAt(i).widget() for i in range(grid.count())]
+
+
+def _grid_curves(panel, tab_idx=0):
+    """The curves on each subplot, in the order they were plotted."""
+    return [w.getPlotItem().listDataItems() for w in _grid_widgets(panel, tab_idx)]
+
+
+def test_the_grid_draws_a_curve_for_every_sweep_of_every_resonator(board, qt_app):
+    """Two amplitude steps in two directions are four traces per subplot, and
+    a subplot per resonator up to the batch size."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app,
+        amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2),
+        sweep_direction=("upward", "downward"))
+    assert errors == []
+
+    curves = _grid_curves(panel)
+    assert len(curves) == min(len(catalog.names()), panel.batch_size)
+    assert all(len(subplot) == 4 for subplot in curves)
+
+
+def test_a_curve_is_the_entry_it_was_read_from(board, qt_app):
+    """The grid draws the sweep the driver wrote: its own frequencies, offset
+    from its own centre, and the magnitude of its own IQ."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.normalize_traces = False
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    x, y = _grid_curves(panel)[0][0].getData()
+
+    assert np.allclose(
+        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(y, convert_roc_to_dbm(np.abs(sweep["iq_counts"])))
+
+
+def test_the_iq_grid_draws_the_loop_the_entry_carries(board, qt_app):
+    """IQ in volts is the entry's counts on one constant scale, which is what
+    the entry's own ``iq_volts`` holds."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.normalize_traces = False
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    i_vals, q_vals = _grid_curves(panel, tab_idx=1)[0][0].getData()
+
+    assert np.allclose(i_vals, np.real(sweep["iq_volts"]))
+    assert np.allclose(q_vals, np.imag(sweep["iq_volts"]))
+
+
+def test_a_live_sweep_draws_the_points_measured_so_far(board, qt_app):
+    """A partial sweep is drawn on the same grid, as far as it has got."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
+    _, errors, _, _, partials = _run_multisweep(crs, catalog, qt_app, amp=schedule)
+    assert errors == []
+
+    step, direction, partial = partials[0]
+    live = MultisweepPanel(target_module=catalog.module,
+                           initial_params=_multisweep_params(catalog, amp=schedule),
+                           dac_scales={catalog.module: -0.5})
+    live.add_partial_sweep(catalog.module, partial, step, direction)
+
+    name = next(n for n in live._selected_names() if n in partial)
+    x, _y = _grid_curves(live)[0][0].getData()
+    assert len(x) == len(partial[name]["frequencies"])
+
+
+def test_a_live_sweep_knows_the_drive_the_finished_one_records(board, qt_app):
+    """A sweep still being measured carries no ``sweep_amplitude``, so the
+    panel takes it from the schedule -- the number the driver will write into
+    the entry, which is what keeps a live trace's colour when it finishes."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
+    panel, errors, _, _, partials = _run_multisweep(
+        crs, catalog, qt_app, amp=schedule)
+    assert errors == []
+
+    live = MultisweepPanel(target_module=catalog.module,
+                           initial_params=_multisweep_params(catalog, amp=schedule),
+                           dac_scales={catalog.module: -0.5})
+    step, direction, partial = partials[0]
+    name = next(iter(partial))
+
+    assert "sweep_amplitude" not in partial[name]
+    finished = collect_amplitude_iterations_for(panel.module_sweeps, name)[step][direction]
+    assert live._amplitude_of(step, name, partial[name]) == finished["sweep_amplitude"]
+    # ...and both panels grade colour over the same amplitudes, so that one
+    # number lands on the same colour before and after the sweep finishes.
+    assert live._amplitudes_drawn() == panel._amplitudes_drawn()
+
+
+def test_changing_units_redraws_and_leaves_the_measurement_alone(board, qt_app):
+    """Units, normalization and batching are how the panel is looking at the
+    block, never a change to it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    block = panel.module_sweeps
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(block, name)[0]["upward"]
+    before = sweep["iq_counts"].copy()
+
+    panel.normalize_traces = False
+    in_dbm = _grid_curves(panel)[0][0].getData()[1].copy()
+    panel.unit_mode = "counts"
+    in_counts = _grid_curves(panel)[0][0].getData()[1]
+
+    assert not np.allclose(in_dbm, in_counts)
+    assert np.allclose(in_counts, np.abs(before))
+    assert panel.module_sweeps is block
+    assert np.array_equal(sweep["iq_counts"], before)
 
 
 def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):

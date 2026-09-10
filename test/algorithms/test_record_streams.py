@@ -192,6 +192,33 @@ def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
     assert "Drop Statistics" in log
 
 
+def test_a_recorder_failing_after_training_raises_its_own_error(
+        tmp_path, fake_recorders, monkeypatch):
+    """The capture is cancelled to end the run; the error raised is the
+    recorder's, not that cancellation."""
+    async def hold(*_):
+        raise RuntimeError("writer gone")
+    monkeypatch.setattr(rs, "_hold", hold)
+    session = rs.open_session(base=tmp_path)
+    with pytest.raises(RuntimeError, match="writer gone"):
+        asyncio.run(rs.record_streams(
+            _Board(), module=1, channels=[1], duration_s=DURATION_S,
+            session=session, fastrx=False, verbose=False))
+
+
+def test_a_missing_fastrxd_socket_is_refused_before_the_capture(
+        tmp_path, fake_recorders):
+    pytest.importorskip("rfmux.fastrx")
+    board = _Board()
+    session = rs.open_session(base=tmp_path)
+    with pytest.raises(RuntimeError, match="is fastrxd running"):
+        asyncio.run(rs.record_streams(
+            board, module=1, channels=[1], duration_s=DURATION_S,
+            session=session, fastrx_socket=str(tmp_path / "no-daemon"),
+            verbose=False))
+    assert board.calls == []
+
+
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     session = rs.open_session(base=tmp_path)
     assert session.name.startswith("session_")

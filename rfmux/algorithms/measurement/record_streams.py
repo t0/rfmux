@@ -232,7 +232,10 @@ async def record_streams(
             from ... import fastrx as fx
         except ImportError as e:
             raise RuntimeError(f"fastrx is not built in this rfmux: {e}") from e
-        fx.resolve_socket(fastrx_interface, fastrx_socket)
+        fastrx_socket = fx.resolve_socket(fastrx_interface, fastrx_socket)
+        if not Path(fastrx_socket).exists():
+            raise RuntimeError(f"no fastrxd socket at {fastrx_socket}: "
+                               "is fastrxd running?")
         pipes = sorted({channel_location(c)[0] for c in channels})
 
     result = RecordResult(session=session, module=module, channels=channels,
@@ -290,8 +293,7 @@ async def record_streams(
             if fastrx:
                 result.fastrx_path = name("fastrx", ".fastrx")
                 writer = fx.PacketWriter(
-                    result.fastrx_path, pipes=pipes,
-                    interface=fastrx_interface, socket=fastrx_socket)
+                    result.fastrx_path, pipes=pipes, socket=fastrx_socket)
             say(f"[record] recording for {duration_s:.1f} s")
             await _hold(duration_s, stop, writer)
         finally:
@@ -345,8 +347,11 @@ async def record_streams(
             await _stop_parser(handle, result, name("parser", ".dirfile"),
                                result.parser_log)
         _record(result, config)
+    # The one that failed first raised; the other was cancelled to end
+    # the run, and its cancellation is not the error.
     for t in tasks:
-        t.result()
+        if not t.cancelled():
+            t.result()
     say(f"[record] {result!r}")
     return result
 

@@ -349,6 +349,98 @@ def test_the_worker_sweeps_a_copy_of_the_catalog(board, qt_app):
     assert task.module == catalog.module
 
 
+def test_a_finished_sweep_puts_its_progress_report_away(board, qt_app):
+    """The progress group reports a sweep in flight; a sweep that has landed
+    is reported by the plots."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+
+    assert errors == []
+    assert panel.progress_group.isVisibleTo(panel) is False
+
+
+def test_a_finished_sweep_says_it_is_ready_to_be_saved(board, qt_app):
+    """``sweep_finished`` fires once the panel holds the block, which is what
+    the session writes the file on."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+    signals = MultisweepSignals()
+    panel.connect_task_signals(signals)
+    finished = []
+    panel.sweep_finished.connect(lambda: finished.append(panel.module_sweeps))
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
+    task.start()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+    spin(qt_app)
+
+    assert len(finished) == 1
+    assert finished[0] is panel.module_sweeps
+
+
+def test_a_saved_multisweep_is_the_measurement_a_notebook_reads(board, qt_app,
+                                                                output_directory):
+    """Save writes the container through ``store``, under store's own name, and
+    it comes back as the sweeps the driver returned."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.initial_params["label"] = "a saved sweep"
+
+    path = panel.save_multisweep()
+
+    assert path.name.startswith("multisweep_")
+    assert path.name.endswith("_a_saved_sweep.pkl")
+    reloaded = store.load(path)
+    block = reloaded[crs.module[catalog.module].index()]
+    assert block["measurement"] == "multisweep"
+    name = panel._selected_names()[0]
+    assert np.array_equal(
+        collect_amplitude_iterations_for(block, name)[0]["upward"]["iq_counts"],
+        collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]["iq_counts"])
+
+
+def test_saving_the_same_multisweep_again_writes_the_same_file(board, qt_app,
+                                                               output_directory):
+    """The container carries where it was written, so a second Save overwrites
+    rather than leaving a near-copy beside it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    first = panel.save_multisweep()
+    again = panel.save_multisweep()
+
+    assert first == again
+    assert len(list(Path(output_directory).glob("multisweep_*.pkl"))) == 1
+
+
+def test_a_finished_multisweep_lands_in_the_session_folder(board, qt_app, tmp_path):
+    """One measurement, one file, in the session folder, and the session knows
+    it is there so the browser lists it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.initial_params["label"] = "in a session"
+
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), "session_under_test")
+    registered = []
+    manager.file_exported.connect(
+        lambda path, data_type: registered.append((path, data_type)))
+    try:
+        _periscope_with(manager)._save_multisweep_to_session(panel, catalog.module)
+    finally:
+        manager.end_session()
+
+    written = list(Path(manager.session_path or tmp_path / "session_under_test").glob("*.pkl"))
+    assert len(written) == 1
+    assert written[0].name.endswith("_in_a_session.pkl")
+    assert registered == [(str(written[0]), "multisweep")]
+
+
 def _grid_widgets(panel, tab_idx=0):
     """The subplot widgets the grid is showing, in the order it drew them."""
     panel.plot_tabs.setCurrentIndex(tab_idx)
@@ -426,6 +518,22 @@ def test_a_live_sweep_draws_the_points_measured_so_far(board, qt_app):
     name = next(n for n in live._selected_names() if n in partial)
     x, _y = _grid_curves(live)[0][0].getData()
     assert len(x) == len(partial[name]["frequencies"])
+
+
+def test_a_running_sweep_is_drawn_over_the_one_before_it(board, qt_app):
+    """Re-running in a panel that already holds a measurement draws the points
+    arriving now, not the sweep it is replacing."""
+    _, crs, catalog = board
+    panel, errors, _, _, partials = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    finished_length = len(_grid_curves(panel)[0][0].getData()[0])
+
+    step, direction, partial = partials[0]
+    panel.add_partial_sweep(catalog.module, partial, step, direction)
+
+    name = next(n for n in panel._selected_names() if n in partial)
+    x, _y = _grid_curves(panel)[0][0].getData()
+    assert len(x) == len(partial[name]["frequencies"]) < finished_length
 
 
 def test_a_live_sweep_knows_the_drive_the_finished_one_records(board, qt_app):

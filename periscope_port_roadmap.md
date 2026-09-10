@@ -627,8 +627,24 @@ are now strict xfails that name the stage which clears them.
   panel's own `module_sweeps` rather than a re-opened file -- not extended to
   read both. It is one of §8's precedence chains, and the response there is
   deletion, not translation. Noted at the function.
-* **Files.** Save is `store.save(container, "multisweep", label=)` into the
-  session folder; the catalog goes beside it. Load is `store.load` and
+* **Files: saving (done).** `save_multisweep()` is
+  `store.save(container, "multisweep", label=)`, the netanal panel's
+  `save_netanal` one measurement over. The panel emits `sweep_finished` when it
+  holds the block, and `_save_multisweep_to_session` writes the file into the
+  session folder and registers it there — the panel decides *when*, `store`
+  decides *where*, and the session manager is only told. The Save button writes
+  the same file, which is `store`'s save-in-place off `file_metadata`; a re-run
+  clears the container, so the next one is a new file. Completion also hides the
+  progress group, which is what a finished sweep looks like.
+  Gone with it: the Export-As dialog and `_handle_export_file_selected`'s
+  `pickle.dump` of a `results_by_detector` payload, the update-suppression dance
+  around that dialog, and `_check_all_complete`, which asked a task for
+  `target_window` and `is_completed` — attributes `MultisweepTask` lost with its
+  amplitude loop, so nothing had hidden the progress group since. No catalog
+  file beside it: a multisweep records the catalog it swept (§4 stage 1).
+  `_prepare_export_data` survives for now because the noise and bias paths still
+  emit it; it goes with them in stage 4.
+* **Files: loading.** `store.load` and
   `ResonatorCatalog.from_dict(block["call_params"]["catalog"])`, so a loaded
   sweep always knows its array. Legacy readers are deleted.
 * **Multi-module** runs one panel, one task and one call per module (a

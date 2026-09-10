@@ -1709,6 +1709,27 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.session_manager.register_external_file(str(path), 'netanal', identifier)
         print(f"[Session] Saved network analysis: {path.name}")
 
+    def _save_multisweep_to_session(self, panel, module: int):
+        """Save a finished multisweep into the session folder.
+
+        The panel writes the container through ``store``, which puts it in the
+        session folder because the session manager is what set store's output
+        directory. The session manager is told the file exists so the browser
+        shows it; it no longer writes the file itself.
+        """
+        if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
+            return
+        try:
+            path = panel.save_multisweep()
+        except Exception as e:
+            print(f"[Session] Could not save multisweep: {e}", file=sys.stderr)
+            return
+        if path is None:
+            return
+        self.session_manager.register_external_file(str(path), 'multisweep',
+                                                    f"module{module}")
+        print(f"[Session] Saved multisweep: {path.name}")
+
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""
         QtWidgets.QMessageBox.information(self, "CRS Initialization Success", message)

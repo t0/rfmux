@@ -1,6 +1,8 @@
 """Panel for displaying multisweep analysis results (dockable)."""
 import datetime
-import pickle
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -21,7 +23,7 @@ from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for
+from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for, store
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -45,6 +47,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
+    # Emitted once the call has returned and the panel holds it, so the session
+    # can write the file where the panel, not the task, decides when.
+    sweep_finished = pyqtSignal()
     def __init__(self, parent=None, target_module=None, initial_params=None, dac_scales=None, dark_mode=False, loaded_bias=False, is_loaded_data=False):
         """
         Initializes the MultisweepWindow.
@@ -178,10 +183,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # the subplot controls each stay together.
         toolbar_layout = FlowLayout(toolbar)
 
-        # Export Data Button
+        # Save Button
         self.export_btn = QtWidgets.QPushButton("💾")
-        self.export_btn.setToolTip("Export data")
-        self.export_btn.clicked.connect(self._export_data)
+        self.export_btn.setToolTip(
+            "Save this multisweep to the session folder, or overwrite the file "
+            "it was already saved to")
+        self.export_btn.clicked.connect(self._save_multisweep_action)
         toolbar_layout.addWidget(self.export_btn)
         
         # Re-run Multisweep Button
@@ -618,7 +625,33 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.progress_bar.setValue(100)
         self.current_amp_label.setText(
             f"{len(self.catalog.names())} resonators swept")
+        self._hide_progress_bars()
         self._redraw_plots()
+        self.sweep_finished.emit()
+
+    def save_multisweep(self) -> Optional[Path]:
+        """Write the measurement through ``store``, and return where it went.
+
+        The container as the driver returned it, so it opens in a notebook with
+        ``store.load``. Saving the same panel twice overwrites the same file:
+        the container carries the path it was written to.
+        """
+        if not self.multisweep_container:
+            return None
+        return store.save(self.multisweep_container, "multisweep",
+                          label=self.initial_params.get("label"))
+
+    def _save_multisweep_action(self):
+        """The Save button: write the file, say where, and dialog only on failure."""
+        try:
+            path = self.save_multisweep()
+        except Exception as e:
+            traceback.print_exc()
+            QtWidgets.QMessageBox.critical(
+                self, "Save Error", f"Could not save this multisweep:\n{e}")
+            return
+        self.current_amp_label.setText(
+            f"Saved {path.name}" if path else "Nothing measured yet, so nothing to save.")
 
     def update_progress(self, module, progress_percentage):
         """
@@ -707,23 +740,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _collect_traces(self, names) -> dict:
         """``{name: [(step, direction, amplitude, sweep), ...]}`` to draw.
 
-        One walk, over the block once the call has returned and over the live
-        buffer while it is still running. Nothing is copied: a sweep here is
+        One walk, over the live buffer while a call is running and over the
+        block once it has returned -- the live buffer is only ever non-empty in
+        between, and completion clears it. Nothing is copied: a sweep here is
         the entry the driver wrote, read at draw time and thrown away after.
         """
         collected = {}
         for name in names:
             traces = []
-            if self.module_sweeps is not None:
+            if self._live:
+                for (step, direction), sweep in self._live.get(name, {}).items():
+                    traces.append((step, direction,
+                                   self._amplitude_of(step, name, sweep), sweep))
+            elif self.module_sweeps is not None:
                 measured = collect_amplitude_iterations_for(self.module_sweeps, name)
                 for step, by_direction in measured.items():
                     for direction, sweep in by_direction.items():
                         traces.append((step, direction,
                                        self._amplitude_of(step, name, sweep), sweep))
-            else:
-                for (step, direction), sweep in self._live.get(name, {}).items():
-                    traces.append((step, direction,
-                                   self._amplitude_of(step, name, sweep), sweep))
             if traces:
                 collected[name] = traces
         return collected
@@ -968,34 +1002,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.combined_mag_plot.autoRange()
         self.combined_phase_plot.autoRange()
         
-    def _check_all_complete(self):
-        """
-        Check if all progress is at 100% and hide the progress group when analysis is complete.
-        This mimics the behavior in NetworkAnalysisWindow for consistency.
-        """
-        # Check if we have a parent window to determine the state of our tasks
-        parent = self.parent()
-        if not parent:
-            # If no parent, just use the progress bar value as our indicator
-            if self.progress_bar.value() == 100:
-                self.progress_group.setVisible(False)
-            return
-            
-        # If we have a parent, look for multisweep tasks related to this window
-        window_has_active_tasks = False
-        
-        # If parent has multisweep_tasks, check if any are for this window
-        if hasattr(parent, 'multisweep_tasks'):
-            for task_key, task in parent.multisweep_tasks.items(): # type: ignore
-                if hasattr(task, 'target_window') and task.target_window == self:
-                    if not task.is_completed():
-                        window_has_active_tasks = True
-                        break
-                        
-        # Hide the progress group if there are no active tasks and progress is at 100%
-        if not window_has_active_tasks and self.progress_bar.value() == 100:
-            self.progress_group.setVisible(False)
-
     def handle_error(self, error_msg: str):
         """Say what went wrong where the sweep's progress is reported.
 
@@ -1005,49 +1011,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.current_amp_label.setText(error_msg)
         self.progress_bar.setValue(0)
 
-    def _export_data(self):
-        """
-        Exports the collected multisweep results to a pickle file using a non-blocking dialog.
-        """
-        # Thread marshalling - ensure we're on the main GUI thread
-        app_instance = QtWidgets.QApplication.instance()
-        if app_instance and QtCore.QThread.currentThread() != app_instance.thread():
-            QtCore.QMetaObject.invokeMethod(self, "_export_data",
-                                        QtCore.Qt.ConnectionType.QueuedConnection)
-            return
-            
-        if not self.results_by_detector:
-            QtWidgets.QMessageBox.warning(self, "No Data", "No data to export.")
-            return
-        
-        # 1. Disable updates on graphics views
-        if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
-            self.combined_mag_plot.setUpdatesEnabled(False)
-        if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
-            self.combined_phase_plot.setUpdatesEnabled(False)
-            
-        # 2. Create a non-blocking file dialog
-        dlg = QtWidgets.QFileDialog(self, "Export Multisweep Data")
-        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
-        dlg.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-        dlg.setNameFilters(["Pickle Files (*.pkl)", "All Files (*)"])
-        dlg.setDefaultSuffix("pkl")
-        
-        # 3. Connect signals for handling dialog completion
-        dlg.fileSelected.connect(self._handle_export_file_selected)
-        dlg.finished.connect(self._resume_updates_after_export_dialog)
-        
-        # 4. Show the dialog non-modally
-        dlg.open()  # Returns immediately, doesn't block
-    
-    def _resume_updates_after_export_dialog(self, result):
-        """Resume updates after export dialog closes, regardless of the result."""
-        # Re-enable updates on graphics views
-        if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
-            self.combined_mag_plot.setUpdatesEnabled(True)
-        if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
-            self.combined_phase_plot.setUpdatesEnabled(True)
-    
     def _prepare_export_data(self) -> dict:
         """
         Prepare data dictionary for export.
@@ -1072,19 +1035,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'noise_data': spectrum_data
         }
     
-    def _handle_export_file_selected(self, filename):
-        """Handle the file selection from the non-blocking dialog."""
-        if not filename:
-            return
-            
-        try:
-            export_content = self._prepare_export_data()
-            with open(filename, 'wb') as f: # Write in binary mode for pickle
-                pickle.dump(export_content, f)
-            QtWidgets.QMessageBox.information(self, "Export Complete", f"Data exported to {filename}")
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
-
     def _get_fit_frequencies(self, freqs):
         """Get fitted resonance frequencies from the first available amplitude data."""
         ref_freqs = []
@@ -1218,7 +1168,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_detector.clear()
-            
+            self.multisweep_container = None
+            self.module_sweeps = None
+            self._live.clear()
+            self.catalog = self.initial_params.get('catalog', self.catalog)
+            self._set_amplitude_scale(self.initial_params.get('amp'))
+
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
             if self.progress_group: self.progress_group.setVisible(True)

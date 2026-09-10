@@ -1458,7 +1458,10 @@ class PeriscopeRuntime:
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
-            
+
+            panel.sweep_finished.connect(
+                lambda p=panel, m=target_module: self._save_multisweep_to_session(p, m))
+
             # Create and start the task, with signals of its own
             signals = MultisweepSignals()
             panel.connect_task_signals(signals)

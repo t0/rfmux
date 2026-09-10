@@ -1083,3 +1083,86 @@ Two greps worth running at the end of each stage. `grep -rn "unittest.mock"
 rfmux/` should be empty from stage 0 onwards. `grep -rn "pickle\." rfmux/tools/`
 should be empty by stage 5, including the starter notebook that
 `notebook_panel.py` writes, which should hand the user `store.load`.
+
+---
+
+## 9. What the digest and histogram tabs showed, for when they come back
+
+Both were deleted in stage 2 (§6, judgement call 23) rather than ported, and
+both are to be designed again against the block and the catalog rather than
+reassembled from this list. So this is an inventory of *what a user could see*,
+not a specification: it is here so that rebuilding starts from the questions
+these tabs answered instead of from whatever the new plumbing makes easy. Where
+a thing was wrong, it says so — those are the parts not to bring back.
+
+The code is in git: `detector_digest_panel.py` (1208 lines) and
+`parameter_histograms_panel.py` (781) as of `8f72fc3`.
+
+### 9.1 Detector digest — one resonator, in detail
+
+A separate dockable window, opened by double-clicking a subplot, and also a tab
+of the multisweep panel.
+
+**Three plots, side by side.**
+
+1. *Sweep vs frequency* — magnitude against `f - f_bias` in Hz, every amplitude
+   step of that one resonator overplotted, legend per trace.
+2. *IQ plane* — the same sweeps as loops, aspect locked. **Check Noise**
+   over-plotted 100 live I/Q samples per detector here, so the operator could
+   see where the tone actually sits on the loop it was biased on. That is the
+   one control on the panel that measured something, and the reason it was
+   worth having: it answers "is this detector still where I left it?" without
+   leaving the panel.
+3. *Bias amplitude optimisation* — `|S21|` in dB against `f - f_bias`, over the
+   amplitude steps, optionally normalised to the first point of each trace.
+   Double-clicking a curve here **made that amplitude the active trace** in the
+   other two plots and the tables — the panel's best idea, and the one to keep:
+   it made choosing a bias amplitude a thing you did by looking at the sweeps
+   rather than by typing a number.
+
+**Two parameter tables**, Parameter / Value / Description, side by side under
+the plots in a splitter:
+
+* *Skewed Lorentzian*: Status, `fr` (MHz), `Qr`, `Qc`, `Qi`, Bifurcation.
+* *Nonlinear*: Status, `fr_nl`, `Qr_nl`, `Qc_nl`, `Qi_nl`, `a`, `φ` (deg),
+  `I0`, `Q0`, Bifurcation. The `a` row's tooltip named 4√3/9 ≈ 0.77 as where
+  the fitted resonance goes multivalued, which is `BIFURCATION_A` in
+  `rfmux.tuning.fits` — the description is right, and the constant now has one
+  home to read it from.
+
+The tables' Status row and the `'nan'`-string test behind it are replaced by
+`failed_because`, and the Bifurcation rows by the `BifurcationCheck` a
+`BiasReport` carries. Both tables denormalised a skewed fit by hand and
+re-multiplied `gain_complex` to draw the curves; `skewed_model_magnitude` and
+`nonlinear_model_iq` do that now, so a rebuilt digest calls them.
+
+**Navigation**: Previous/Next buttons and left/right arrows between resonators,
+a spinbox to jump to one by number, up/down arrows between amplitude traces, a
+"n of N" counter and a title carrying the resonance frequency in MHz.
+Resonators were addressed by *integer detector index* throughout, which is what
+`ResonatorCatalog` names replace — a rebuilt digest navigates
+`catalog.names()`, and the spinbox becomes a name box.
+
+### 9.2 Parameter histograms — the array, in aggregate
+
+A tab of the multisweep panel, over the fitted parameters of every resonator.
+
+* *Frequency scatter*: fitted `fr` against detector ID — the array's frequency
+  layout, and the plot that shows a collision or a gap at a glance.
+* *Qr, Qc, Qi histograms*: one panel each, a bin-count spinbox, and shared
+  ranges computed across amplitude steps (`_compute_global_q_ranges`) so the
+  bins do not move when you change step.
+* An amplitude selector listing each sweep as amplitude and direction, plus an
+  all-sweeps mode that stacked the histograms per step.
+
+What to keep: the shared bins across steps, and the all-steps stacked view —
+seeing `Qi` shift as drive rises is the measurement. What to drop: the detector
+ID as the scatter's x-axis (frequency against name, or against index in the
+catalog's own order), and `_extract_params_for_sweep`'s walk over
+`results_by_detector` keyed by `"amp:direction"` strings, which is
+`collect_amplitude_iterations_for` plus `entry["fits"][model]["params"]`.
+
+Both panels are per-panel cases in `test_viewbox_lifetime.py` (the digest) and
+`test_laptop_fit.py` (the histograms), removed with them; the general rules
+those tests hold keep their other cases, and the panels rejoin them when they
+return.

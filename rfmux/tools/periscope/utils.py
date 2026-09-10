@@ -453,9 +453,7 @@ class UnitConverter:
                            dac_scale: Optional[float] = None) -> str:
         """Format a normalized amplitude as a compact human-readable power string.
 
-        Consolidates the label-formatting logic previously duplicated across
-        multisweep_panel, network_analysis_panel, detector_digest_panel, and
-        parameter_histograms_panel.
+        One formatter for every panel that labels a probe amplitude.
 
         Args:
             amp_value:  Normalized amplitude (0–1 scale).
@@ -554,7 +552,7 @@ class ClickableViewBox(pg.ViewBox):
     # ── parent_window: a WEAK back-pointer.  Do not make this a plain attribute.
     #
     # Panels assign ``vb.parent_window = self`` (noise_spectrum_panel,
-    # network_analysis_panel, detector_digest_panel, multisweep_panel).  Held
+    # network_analysis_panel, multisweep_panel).  Held
     # strongly, that closes a reference cycle — ViewBox -> panel -> PlotWidget ->
     # ViewBox — so tearing a panel down goes through Python's *cyclic* collector,
     # which finalizes a graph of PyQt objects in arbitrary order and frees C++

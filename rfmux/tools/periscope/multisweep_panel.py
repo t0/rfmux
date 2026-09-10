@@ -16,10 +16,8 @@ from .utils import (
     AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
     ScreenshotMixin
 )
-from .detector_digest_panel import DetectorDigestPanel
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
-from .parameter_histograms_panel import ParameterHistogramsPanel
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
 from rfmux.core.resonators import ResonatorCatalog
@@ -65,18 +63,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.dark_mode = dark_mode                 # Store dark mode setting
         self.bias_data_avail = loaded_bias
         self.is_loaded_data = is_loaded_data       # Track if this is from loaded data
-        self.samples_taken = False
-        self.noise_data = {}
         self.spectrum_noise_data = {}
 
         self.debug_noise_data = {}
         self.debug_phase_data = []
 
         
-        # Track open detector digest and noise spectrum windows to prevent garbage collection
-        self.detector_digest_windows = []
+        # Track open noise spectrum windows to prevent garbage collection
         self.noise_spectrum_windows = []
-        self.digest_window_count = 0  # Counter for naming digest tabs
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
         # Stores the initial/base CFs for detector ID and fallback. Order is important.
@@ -137,10 +131,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
-        
-        # Histogram panel (created lazily in _setup_plot_area)
-        self.histogram_panel = None
-        self.histograms_generated = False  # Track if histograms have been generated
 
         self._setup_ui()
         
@@ -313,14 +303,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.combined_tab = self._create_combined_tab()
         self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
         
-        # Tab 3: Histograms (parameter distributions)
-        self.histogram_tab = self._create_histogram_tab()
-        self.plot_tabs.addTab(self.histogram_tab, "Histograms")
-        
-        # Tab 4: Detector Digest (single-detector detail view)
-        self.digest_tab = self._create_digest_tab()
-        self.plot_tabs.addTab(self.digest_tab, "Detector Digest")
-        
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
         
@@ -415,113 +397,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                         ax.setPen(pen_color)
                         ax.setTextPen(pen_color)
 
-        # Connect double click handlers
-        if self.combined_mag_plot:
-            view_box_mag = self.combined_mag_plot.getViewBox()
-            if isinstance(view_box_mag, ClickableViewBox):
-                view_box_mag.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
-                
-        if self.combined_phase_plot:
-            view_box_phase = self.combined_phase_plot.getViewBox()
-            if isinstance(view_box_phase, ClickableViewBox):
-                view_box_phase.doubleClickedEvent.connect(self._handle_multisweep_plot_double_click)
-        
         return tab
     
-    def _create_histogram_tab(self):
-        """Create the histograms tab containing the ParameterHistogramsPanel."""
-        tab = QtWidgets.QWidget()
-        tab_layout = QtWidgets.QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Create a placeholder - we'll create the actual panel when data is available
-        placeholder = QtWidgets.QLabel("Histogram plots will appear here when multisweep data is available.")
-        placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        placeholder.setStyleSheet("color: gray; font-style: italic;")
-        tab_layout.addWidget(placeholder)
-        
-        return tab
-    
-    def _create_digest_tab(self):
-        """Create the detector digest tab (single-detector detail view, lazily populated)."""
-        tab = QtWidgets.QWidget()
-        tab_layout = QtWidgets.QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 0, 0, 0)
-        
-        # Placeholder until data is available and a detector is selected
-        self._digest_placeholder = QtWidgets.QLabel(
-            "Detector digest will appear here when multisweep data is available.\n"
-            "Double-click a resonance in the Combined or grid plots to view its digest."
-        )
-        self._digest_placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._digest_placeholder.setStyleSheet("color: gray; font-style: italic;")
-        tab_layout.addWidget(self._digest_placeholder)
-        
-        # The actual DetectorDigestPanel (created lazily)
-        self.digest_panel = None
-        
-        return tab
-    
-    def _generate_histograms(self):
-        """
-        Generate histogram plots once when multisweep data is complete.
-        This is called from all_sweeps_completed() to create the plots when fit data is ready.
-        """
-        if not self.results_by_detector:
-            return
-        
-        # Check if we have any fit data
-        has_fit_data = False
-        for amp_dir_dict in self.results_by_detector.values():
-            for det_data in amp_dir_dict.values():
-                if 'fit_params' in det_data or 'nonlinear_fit_params' in det_data:
-                    has_fit_data = True
-                    break
-            if has_fit_data:
-                break
-        
-        if not has_fit_data:
-            print("Note: No fit data available for histogram generation")
-            return
-        
-        # Create the histogram panel if it doesn't exist
-        if self.histogram_panel is None:
-            if hasattr(self, 'histogram_tab') and self.histogram_tab:
-                # Clear placeholder
-                layout = self.histogram_tab.layout()
-                if layout:
-                    while layout.count():
-                        item = layout.takeAt(0)
-                        if item.widget():
-                            item.widget().deleteLater()
-                    
-                    # Create the actual histogram panel with data
-                    self.histogram_panel = ParameterHistogramsPanel(
-                        parent=self.histogram_tab,
-                        multisweep_panel=self,
-                        amplitude_idx=None,  # Will use last/highest amplitude by default
-                        nbins=30,
-                        dark_mode=self.dark_mode
-                    )
-                    layout.addWidget(self.histogram_panel)
-        else:
-            # Panel exists, just reload data (for re-run scenario)
-            if hasattr(self.histogram_panel, '_load_and_plot_data'):
-                self.histogram_panel._load_and_plot_data()
-    
-    def _ensure_histogram_panel(self):
-        """Ensure the histogram panel exists - no longer regenerates plots on tab open."""
-        # If histograms haven't been generated yet, just return
-        # They will be generated when all_sweeps_completed() is called
-        if not self.histograms_generated:
-            return
-        
-        # If we get here and panel doesn't exist but should, create it
-        # This handles edge cases like theme changes
-        if self.histogram_panel is None and self.results_by_detector:
-            self._generate_histograms()
-
-
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes - show/hide batch controls appropriately."""
         # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
@@ -755,22 +632,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if results_for_history:
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
-        # Invalidate digest panel so it gets recreated with fresh data
-        # (the panel takes a snapshot at creation time and doesn't track live changes)
-        if self.digest_panel is not None:
-            self.digest_panel = None
-        
-        # Invalidate histogram cache so plots reflect the latest iteration
-        if self.histogram_panel is not None:
-            self.histogram_panel.histogram_cache.clear()
-        
         self._redraw_plots() # Refresh plots with the new data
 
     def _redraw_plots(self):
         """
         Redraws plots based on the currently active tab.
         For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
-        For histogram tab (3), updates histogram panel.
         """
         # Early return if no data
         if not self.results_by_detector:
@@ -790,14 +657,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 2: Combined plots (original view)
         elif current_tab_idx == 2:
             self._redraw_combined_plots()
-        # Tab 3: Histograms (parameter distributions)
-        elif current_tab_idx == 3:
-            self._generate_histograms()  # Creates or reloads histogram panel with latest data
-            self.histograms_generated = True
-        # Tab 4: Detector Digest (recreate if invalidated by new data)
-        elif current_tab_idx == 4:
-            if self.digest_panel is None and self.results_by_detector:
-                self._open_detector_digest_for_index(1, switch_to_tab=False)
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -895,11 +754,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scale=dac_scale,
             show_legend=use_legend
         )
-        
-        # Install double-click event filter on grid plot widgets
-        # Must be AFTER update_sweep_grid so newly created widgets are included
-        for pw in widget_cache:
-            pw.installEventFilter(self)
     
     def _redraw_combined_plots(self):
         """Redraw the combined magnitude and phase plots (original view)."""
@@ -1301,8 +1155,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
             # Reset window state for the new sweep
             self.results_by_detector.clear()
-            self.digest_panel = None  # Force recreation with fresh data on completion
-            self.histograms_generated = False  # Reset histogram flag for new run
             
             self._redraw_plots() # Clear plots
             if self.progress_bar: self.progress_bar.setValue(0)
@@ -1433,42 +1285,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # The _redraw_plots method will still handle full reconstruction of lines
         # if it's called for other reasons (data update, unit change, etc.),
         # respecting the checkbox state at that time.
-
-
-    def _take_noise_samps(self):
-        """Collect a short noise sample from the CRS for diagnostic purposes.
-
-        Takes 100 samples from all channels on the target module using
-        ``crs.get_samples`` and stores them in ``self.noise_data``.
-
-        Returns:
-            The collected samples, or None if the CRS is unavailable.
-        """
-        total = 100
-        # self.take_samp_btn.setEnabled(False)
-
-        periscope = self._get_periscope_parent()
-        if not periscope or periscope.crs is None:
-            QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
-            return None
-
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        # Launch async sampler
-        samples = loop.run_until_complete(periscope.crs.get_samples(total, average=False, channel=None, module=self.target_module))
-        self.noise_data = samples
-        loop.close()
-        # self.take_samp_btn.setEnabled(True)
-        self.samples_taken = True
-
-        return self.noise_data
 
 
     def _open_noise_spectrum_dialog(self):
@@ -1703,7 +1519,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
             return
             
-        # Gather data for ALL detectors to enable navigation (similar logic to digest panel)
+        # Gather data for ALL detectors to enable navigation
         all_detectors_data = {}
         # We need conceptual frequencies for navigation
         for i, freq in enumerate(self.conceptual_section_frequencies):
@@ -1744,245 +1560,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Track panel reference
         self.noise_spectrum_windows.append(panel)
         
-        # Try to tabify with existing digest panel if available, else with multisweep panel
-        target_dock = None
-        if self.detector_digest_windows:
-            # Tabify with the most recently created digest window
-            last_digest = self.detector_digest_windows[-1]
-            target_dock = periscope.dock_manager.find_dock_for_widget(last_digest)
-        
-        if not target_dock:
-            # Fallback to multisweep panel
-            target_dock = periscope.dock_manager.find_dock_for_widget(self)
-            
+        target_dock = periscope.dock_manager.find_dock_for_widget(self)
         if target_dock:
             periscope.tabifyDockWidget(target_dock, dock)
         
         # Show and activate the dock
         dock.show()
         dock.raise_()
-
-    def eventFilter(self, obj, event):
-        """Catch double-clicks on grid subplot widgets to navigate the digest panel."""
-        if event.type() == QtCore.QEvent.Type.MouseButtonDblClick:
-            detector_id = getattr(obj, '_detector_id', None)
-            if detector_id is not None:
-                self._navigate_digest_to_detector(detector_id)
-                return True
-        return super().eventFilter(obj, event)
-    
-    def _navigate_digest_to_detector(self, detector_id: int):
-        """Navigate the embedded digest panel to the given detector, or create it."""
-        # If the digest panel already exists in the tab, just navigate it
-        if self.digest_panel is not None:
-            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
-                if detector_id in self.digest_panel.all_detectors_data:
-                    try:
-                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_id)
-                    except ValueError:
-                        pass
-                    self.digest_panel._switch_to_detector(detector_id)
-                    # Switch to the Detector Digest tab
-                    self.plot_tabs.setCurrentWidget(self.digest_tab)
-                    return
-        # No existing digest panel — create one in the tab
-        self._open_detector_digest_for_index(detector_id)
-    
-    @QtCore.pyqtSlot(object)
-    def _handle_multisweep_plot_double_click(self, ev):
-        """
-        Handles a double-click event on the multisweep magnitude plot.
-        Identifies the clicked resonance and opens detector digest for it.
-        """
-        if not self.results_by_detector:
-            return
-
-        # Get click coordinates in view space from the event's scenePos
-        if not self.combined_mag_plot:
-            return
-        view_box = self.combined_mag_plot.getViewBox()
-        if not view_box:
-            return
-
-        mouse_point = view_box.mapSceneToView(ev.scenePos())
-        x_coord = mouse_point.x()
-
-        # Find the resonance whose center/bias frequency is closest to the click
-        resonance_centers = {}  # {res_idx: center_freq}
-        
-        for res_idx, amp_dir_dict in self.results_by_detector.items():
-            # Use first available entry to get center frequency
-            for det_data in amp_dir_dict.values():
-                center_freq = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
-                if center_freq is not None:
-                    resonance_centers[res_idx] = center_freq
-                    break
-        
-        # Find the resonance with center frequency closest to the click
-        min_distance = np.inf
-        clicked_res_idx = None
-        
-        for res_idx, center_freq in resonance_centers.items():
-            distance = abs(center_freq - x_coord)
-            if distance < min_distance:
-                min_distance = distance
-                clicked_res_idx = res_idx
-
-        if clicked_res_idx is not None:
-            # Accept the event and open the detector digest
-            ev.accept()
-            self._open_detector_digest_for_index(clicked_res_idx)
-
-    def _open_detector_digest_for_index(self, detector_idx: int, switch_to_tab: bool = True):
-        """
-        Open or update the detector digest panel for a specific detector index.
-        
-        The digest panel is embedded as a sub-tab (Tab 4) within this MultisweepPanel,
-        following the same lazy-initialization pattern as the Histograms tab.
-        If the panel already exists, it navigates to the requested detector.
-        If not, it creates the panel and adds it to the digest tab.
-        
-        Args:
-            detector_idx: Detector index (1-based) to open digest for
-            switch_to_tab: If True (default), switch focus to the Detector Digest tab.
-                          If False, populate the tab without switching focus (used by auto-populate on completion).
-        """
-        if not self.results_by_detector:
-            return
-        
-        # If digest panel already exists, just navigate to the requested detector
-        if self.digest_panel is not None:
-            if hasattr(self.digest_panel, '_switch_to_detector') and hasattr(self.digest_panel, 'all_detectors_data'):
-                if detector_idx in self.digest_panel.all_detectors_data:
-                    try:
-                        self.digest_panel.current_detector_index_in_list = self.digest_panel.detector_indices.index(detector_idx)
-                    except ValueError:
-                        pass
-                    self.digest_panel._switch_to_detector(detector_idx)
-                    # Switch to the Detector Digest tab
-                    self.plot_tabs.setCurrentWidget(self.digest_tab)
-                    return
-        
-        # --- First time: create the digest panel and embed it in the tab ---
-        
-        # Get debug data from Periscope parent
-        periscope = self.parent()
-        while periscope and not hasattr(periscope, 'get_test_noise'):
-            periscope = periscope.parent()
-        
-        if periscope:
-            self.debug_noise_data = periscope.get_test_noise()
-            self.debug_phase_data = periscope.get_phase_shift()
-        else:
-            self.debug_noise_data = {}
-            self.debug_phase_data = []
-        
-        # Get noise data if available
-        noise_data = self.noise_data if self.samples_taken else None
-        
-        # Get conceptual frequency for this detector
-        if detector_idx <= len(self.conceptual_section_frequencies) and detector_idx > 0:
-            conceptual_resonance_base_freq_hz = self.conceptual_section_frequencies[detector_idx - 1]
-        else:
-            print(f"Warning: Detector index {detector_idx} exceeds conceptual frequencies list length.")
-            return
-        
-        # Gather data for this specific detector across all amplitudes and directions
-        section_data_for_digest = {}
-        
-        if detector_idx in self.results_by_detector:
-            for det_entry in self.results_by_detector[detector_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
-                actual_cf_for_this_amp = det_entry.get('bias_frequency',
-                                                       det_entry.get('original_center_frequency'))
-                combo_key = f"{amp_val}:{direction}"
-                section_data_for_digest[combo_key] = {
-                    'data': det_entry,
-                    'actual_cf_hz': actual_cf_for_this_amp,
-                    'direction': direction,
-                    'amplitude': amp_val
-                }
-        
-        if not section_data_for_digest:
-            print(f"Warning: No data for detector {detector_idx}")
-            return
-        
-        # Gather data for ALL detectors to enable navigation
-        all_detectors_data = {}
-        
-        for det_idx in sorted(self.results_by_detector.keys()):
-            if det_idx <= len(self.conceptual_section_frequencies) and det_idx > 0:
-                conceptual_freq_hz = self.conceptual_section_frequencies[det_idx - 1]
-            else:
-                conceptual_freq_hz = None
-                # Try to get frequency from first available entry
-                first_entry = next(iter(self.results_by_detector[det_idx].values()), {})
-                conceptual_freq_hz = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
-            
-            if conceptual_freq_hz is None:
-                continue
-            
-            detector_resonance_data = {}
-            for det_entry in self.results_by_detector[det_idx].values():
-                amp_val = det_entry.get('amplitude')
-                direction = det_entry.get('direction', 'upward')
-                actual_cf = det_entry.get('bias_frequency', det_entry.get('original_center_frequency'))
-                combo_key = f"{amp_val}:{direction}"
-                detector_resonance_data[combo_key] = {
-                    'data': det_entry,
-                    'actual_cf_hz': actual_cf,
-                    'direction': direction,
-                    'amplitude': amp_val
-                }
-            
-            if detector_resonance_data:
-                all_detectors_data[det_idx] = {
-                    'resonance_data': detector_resonance_data,
-                    'conceptual_freq_hz': conceptual_freq_hz
-                }
-        
-        # Create the DetectorDigestPanel
-        panel = DetectorDigestPanel(
-            parent=self,
-            resonance_data_for_digest=section_data_for_digest,
-            detector_id=detector_idx,
-            resonance_frequency_ghz=conceptual_resonance_base_freq_hz / 1e9,
-            dac_scales=self.dac_scales,
-            zoom_box_mode=self.zoom_box_mode,
-            target_module=self.target_module,
-            normalize_plot3=self.normalize_traces,
-            dark_mode=self.dark_mode,
-            all_detectors_data=all_detectors_data,
-            initial_detector_idx=detector_idx,
-            noise_data=noise_data,
-            debug_noise_data=self.debug_noise_data,
-            debug_phase_data=self.debug_phase_data,
-            debug=False
-        )
-        
-        # Store direct reference to this MultisweepPanel for noise sampling
-        panel.multisweep_panel_ref = self
-        
-        # Embed the panel into the digest tab (replacing placeholder)
-        layout = self.digest_tab.layout()
-        if layout:
-            # Remove placeholder
-            while layout.count():
-                item = layout.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            # Add the actual digest panel
-            layout.addWidget(panel)
-        
-        # Store the panel reference
-        self.digest_panel = panel
-        # Also keep backward-compatible list reference
-        self.detector_digest_windows = [panel]
-        
-        # Switch to the Detector Digest tab (unless suppressed, e.g. auto-populate on completion)
-        if switch_to_tab:
-            self.plot_tabs.setCurrentWidget(self.digest_tab)
 
     def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
         """
@@ -2077,15 +1661,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Redraw plots which will now use the updated legend text colors
         self._redraw_plots()
-            
-        # Propagate to histogram panel
-        if self.histogram_panel and hasattr(self.histogram_panel, 'apply_theme'):
-            self.histogram_panel.apply_theme(dark_mode)
-            
-        # Also propagate dark mode to any open detector digest windows
-        for digest_window in self.detector_digest_windows:
-            if hasattr(digest_window, 'apply_theme'):
-                digest_window.apply_theme(dark_mode)
         
         # Propagate to noise spectrum windows
         for noise_window in self.noise_spectrum_windows:

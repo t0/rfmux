@@ -1,10 +1,6 @@
 """Dockable panel for displaying noise spectrum results for detectors.
 
-This panel is the noise-only counterpart to DetectorDigestPanel.
 It is opened only after the user runs "Get Noise Spectrum" from the multisweep panel.
-
-The implementation is largely extracted from the former "Noise" tab that used to live
-inside DetectorDigestPanel, but adapted to be a standalone QWidget.
 """
 
 from __future__ import annotations
@@ -50,7 +46,7 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.resonance_frequency_ghz_title = resonance_frequency_ghz
         self.dark_mode = dark_mode
 
-        # Navigation support (mirrors DetectorDigestPanel pattern)
+        # Navigation support
         self.all_detectors_data = all_detectors_data or {}
         self.detector_indices = sorted(self.all_detectors_data.keys()) if self.all_detectors_data else []
         self.current_detector_index_in_list = 0

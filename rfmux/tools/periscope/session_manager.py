@@ -702,7 +702,7 @@ class SessionManager(QtCore.QObject):
         Slot to handle data_ready signals from analysis panels.
         
         This slot should be connected to the data_ready signals emitted
-        by NetworkAnalysisPanel, MultisweepPanel, and DetectorDigestPanel.
+        by NetworkAnalysisPanel and MultisweepPanel.
         
         Args:
             data_type: Type of data (netanal, multisweep, bias, noise)

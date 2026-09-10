@@ -606,27 +606,34 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             f"Sweep {record['completed']}/{record['total']}: "
             f"step {record['step']}, {record['direction']}")
 
-    def complete_multisweep(self, module: int, container: dict):
-        """The measurement, as ``multisweep`` returned it, and the array it swept.
+    def show_measurement(self, module: int, container: dict):
+        """Hold a multisweep and draw it, however it arrived.
 
-        The catalog is read back out of the measurement rather than kept beside
-        it: a sweep records the one it swept, so there is no second copy to
-        keep in step.
+        The catalog and the amplitude schedule are read back out of the
+        measurement rather than kept beside it: a sweep records both, so a file
+        opened an hour later knows the array it swept and the drives it walked
+        without being told. One sweep off the board and one off a file reach
+        the panel the same way and through here.
         """
         self.multisweep_container = container
         self.module_sweeps = next(
             block for block in container.values() if block['module'] == module)
-        self.catalog = ResonatorCatalog.from_dict(
-            self.module_sweeps['call_params']['catalog'])
+        call_params = self.module_sweeps['call_params']
+        self.catalog = ResonatorCatalog.from_dict(call_params['catalog'])
         self._live_redraw_timer.stop()
         self._live.clear()
         self._set_amplitude_scale(
-            AmplitudeSchedule.from_dict(self.module_sweeps['call_params']['amp_schedule']))
+            AmplitudeSchedule.from_dict(call_params['amp_schedule']))
+        self._redraw_plots()
+
+    def complete_multisweep(self, module: int, container: dict):
+        """The call has returned: hold it, put the progress report away, and
+        say it is ready to be saved."""
+        self.show_measurement(module, container)
         self.progress_bar.setValue(100)
         self.current_amp_label.setText(
             f"{len(self.catalog.names())} resonators swept")
         self._hide_progress_bars()
-        self._redraw_plots()
         self.sweep_finished.emit()
 
     def save_multisweep(self) -> Optional[Path]:
@@ -1035,26 +1042,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'noise_data': spectrum_data
         }
     
-    def _get_fit_frequencies(self, freqs):
-        """Get fitted resonance frequencies from the first available amplitude data."""
-        ref_freqs = []
-        for det_idx in range(1, len(freqs) + 1):
-            if det_idx not in self.results_by_detector:
-                continue
-            amp_dir_dict = self.results_by_detector[det_idx]
-            if not amp_dir_dict:
-                continue
-            first_entry = next(iter(amp_dir_dict.values()))
-            if first_entry.get('skewed_fit_success'):
-                ref_freqs.append(first_entry['fit_params']['fr'])
-            elif first_entry.get('nonlinear_fit_success'):
-                ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
-            else:
-                ref_freqs.append(first_entry.get('bias_frequency', first_entry.get('original_center_frequency')))
-        ref_freqs.sort()
-        return ref_freqs
-    
-    
     def _rerun_multisweep(self):
         """
         Allows the user to re-run the multisweep analysis, potentially with modified parameters.
@@ -1073,7 +1060,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         ##### Getting the fit values for updating in re-run ######
 
-        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
 
         
         if self.current_run_amps: # If there was a previous/current run configuration
@@ -1100,7 +1086,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             current_module=self.target_module,
             initial_params=dialog_initial_params, # Pass other existing params
             load_multisweep = False,
-            fit_frequencies = fit_freqs
+            editable_sections = True
         )
 
         if dialog.exec(): # True if user clicked OK

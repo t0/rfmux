@@ -1406,7 +1406,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                if "results_by_detector" in params.keys() or "results_by_iteration" in params.keys():
+                if dialog.use_data_from_file:
                     self._load_multisweep_analysis(params)
                 else:
                     if self.crs is None:
@@ -2845,7 +2845,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if file_type == 'netanal':
                 self._load_network_analysis(data)
             elif file_type == 'multisweep':
-                self._load_multisweep_from_session(data, file_path)
+                self._load_multisweep_analysis(data)
             elif file_type == 'bias':
                 self._load_bias_from_session(data, file_path)
             elif file_type == 'noise':
@@ -2896,21 +2896,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._dock_pulse_capture_panel(
             panel, f"Pulses: {Path(file_path).stem}", f"pulse_review_{n}")
 
-    def _load_multisweep_from_session(self, data: dict, file_path: str):
-        """Load multisweep data from session file into a new panel."""
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Multisweep Loaded",
-                f"Loaded multisweep data.\n"
-                f"File: {file_path}\n\n"
-                "(Direct panel display not yet implemented for this format)"
-            )
-            return
-        
-        # Use existing load mechanism
-        self._load_multisweep_analysis(data)
-    
     def _load_bias_from_session(self, data: dict, file_path: str):
         """
         Load bias data from session file - show dialog with options.

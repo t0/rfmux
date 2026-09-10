@@ -8,6 +8,7 @@ from PyQt6 import sip
 import numpy as np
 from typing import Optional
 from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import AmplitudeSchedule
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -1503,18 +1504,20 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "bias") -> tuple:
         """
-        Create and display a MultisweepPanel from loaded data.
-        
-        This unified helper method is used by both _load_multisweep_analysis and 
-        _set_and_plot_bias to eliminate code duplication.
-        
+        Create and display a MultisweepPanel from a legacy bias or noise payload.
+
+        The multisweep lane loads through ``_load_multisweep_analysis`` and the
+        container ``store`` writes; this reads ``_prepare_export_data``'s flat
+        payload, which only the bias and noise paths still produce. It goes
+        with them.
+
         Args:
-            load_params: Loaded data dictionary containing 'initial_parameters', 
+            load_params: Loaded data dictionary containing 'initial_parameters',
                         'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
-            
+            source_type: "bias" or "noise" - affects naming and panel behavior
+
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
@@ -1917,22 +1920,61 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
-        """
-        Load multisweep analysis data from file and display in a docked panel.
+    def _load_multisweep_analysis(self, container: dict):
+        """Show a saved multisweep in a docked panel, one panel per module.
+
+        A panel holds one module because a catalog belongs to one, so a
+        container that ran over several opens as several panels -- the same way
+        measuring them does.
 
         Args:
-            load_params (dict): Loaded data dictionary from file.
+            container (dict): what ``multisweep`` returned, as ``store.load``
+                read it back: one output block per module, keyed by module
+                identifier.
         """
-        # Use the unified helper method
-        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
-        )
-        
-        if panel is None:
-            return  # Error already displayed by helper
+        try:
+            # DAC scale is the board's to state, not the file's, so a loaded
+            # sweep shows dBm when a board is connected and counts when none is.
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
 
-        panel.plot_tabs.setCurrentIndex(0)
+            for block in container.values():
+                window_id = f"multisweep_window_{self.multisweep_window_count}"
+                self.multisweep_window_count += 1
+
+                # The snapshots the file records, resolved back into the live
+                # objects a panel is given when a sweep is configured, so a
+                # loaded panel and a measuring one hold the same kinds of thing
+                # and a re-run from a file needs no special case.
+                call_params = dict(block['call_params'])
+                call_params['catalog'] = ResonatorCatalog.from_dict(
+                    call_params['catalog'])
+                call_params['amp'] = AmplitudeSchedule.from_dict(
+                    call_params['amp_schedule'])
+
+                panel = MultisweepPanel(
+                    parent=self, target_module=block['module'],
+                    initial_params=call_params,
+                    dac_scales=dac_scales_local, dark_mode=self.dark_mode,
+                    is_loaded_data=True)
+                panel._hide_progress_bars()
+                panel.show_measurement(block['module'], container)
+
+                dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+                dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+                self.multisweep_windows[window_id] = {
+                    'window': panel, 'dock': dock, 'params': call_params}
+
+                if hasattr(self, 'session_manager'):
+                    panel.data_ready.connect(self.session_manager.handle_data_ready)
+
+                main_dock = self.dock_manager.get_dock("main_plots")
+                if main_dock:
+                    self.tabifyDockWidget(main_dock, dock)
+                dock.show()
+                dock.raise_()
+        except Exception as e:
+            print(f"Error in _load_multisweep_analysis: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """

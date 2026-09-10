@@ -6,57 +6,34 @@ from .utils import (
     MULTISWEEP_DEFAULT_NSAMPLES, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
-from rfmux.tuning import AmplitudeSchedule
+from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import AmplitudeSchedule, store
 from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
-import pickle
 import numpy as np
 from PyQt6.QtCore import Qt
 
-def load_multisweep_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
+def load_multisweep_container(parent: QtWidgets.QWidget, file_path: str):
+    """Read a saved multisweep with ``store.load``, or say why it is not one.
+
+    The same reader a notebook uses, so a file Periscope wrote opens there and
+    one written there opens here. What comes back is the container the driver
+    returned; the file says what it is through ``store``'s own metadata rather
+    than by having its shape inspected.
     """
-    Loads a multisweep payload from a pickle file.
-
-    If file_path is None, it prompts for a file using a blocking dialog (fallback).
-    Otherwise, it loads directly from file_path.
-    """
-    if file_path is None:
-        options = QtWidgets.QFileDialog.Options()
-        options |= QtWidgets.QFileDialog.Option.DontUseNativeDialog
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            parent,
-            "Load Network Analysis Parameters",
-            "",
-            "Pickle Files (*.pkl *.pickle);;All Files (*)",
-            options=options,
-        )
-
-    if not file_path:
-        return None
-
     try:
-        with open(file_path, "rb") as fh:
-            payload = pickle.load(fh)
+        container = store.load(file_path)
     except Exception as exc:
         QtWidgets.QMessageBox.critical(
-            parent,
-            "Load Failed",
-            f"Could not read '{file_path}':\n{exc}",
-        )
+            parent, "Load Failed", f"Could not read '{file_path}':\n{exc}")
         return None
 
-    if (
-        isinstance(payload, dict)
-        and isinstance(payload.get("initial_parameters"), dict)
-        and (isinstance(payload.get("results_by_detector"), dict) or isinstance(payload.get("results_by_iteration"), dict))
-    ):
-        return payload
-
-    QtWidgets.QMessageBox.warning(
-        parent,
-        "Invalid File",
-        "The selected file does not contain Multisweep parameters.",
-    )
-    return None
+    blocks = list(container.values()) if isinstance(container, dict) else []
+    if not blocks or blocks[0].get("measurement") != "multisweep":
+        QtWidgets.QMessageBox.warning(
+            parent, "Not a Multisweep",
+            f"'{file_path}' does not hold a multisweep.")
+        return None
+    return container
 
 
 class MultisweepDialog(NetworkAnalysisDialogBase):
@@ -69,7 +46,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  section_center_frequencies: list[float] | None = None, 
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
-                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None):
+                 initial_params: dict | None = None, load_multisweep = False, editable_sections = False):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -84,15 +61,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.section_center_frequencies = section_center_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
-        self.fit_frequencies = fit_frequencies
+        self.editable_sections = editable_sections
 
         self.use_data_from_file = False
-        self._load_data = {}
+        self.loaded_container = None
         self.section_count = 0
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
-        self.use_raw_frequencies = True
 
         
         # if self.load_multisweep:
@@ -202,13 +178,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.sections_info_label.setWordWrap(True)
             section_label_layout.addWidget(self.sections_info_label, stretch=1)
             
-            self.section_freq_combo = QtWidgets.QComboBox()
-            self.section_freq_combo.setEnabled(False)
-            self.section_freq_combo.addItems(["Use multisweep central frequency", "Use resonance fit frequency"])
-            self.section_freq_combo.setToolTip("Select which frequency type to use.")
-            self.section_freq_combo.currentIndexChanged.connect(self._scroll_section)
-            section_label_layout.addWidget(self.section_freq_combo)
-            
             section_info_layout.addLayout(section_label_layout)
     
             # Manual input fallback (comma-separated sweep central frequencies in MHz)
@@ -218,7 +187,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             section_info_layout.addWidget(self.sections_edit)
             layout.addWidget(section_info_group)
 
-        elif self.fit_frequencies is not None:
+        elif self.editable_sections:
             section_info_group = QtWidgets.QGroupBox("Sweep sections")
             section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
             
@@ -226,13 +195,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             self.sections_info_label = QtWidgets.QLabel("Central frequencies for re-run")
             self.sections_info_label.setWordWrap(True)
             section_label_layout.addWidget(self.sections_info_label, stretch=1)
-            
-            self.section_freq_combo = QtWidgets.QComboBox()
-            self.section_freq_combo.addItems(["Use previous multisweep central frequencies", "Use resonant frequencies from fit"])
-            self.section_freq_combo.setToolTip("Select what to use as the central frequency of this sweep")
-            self.section_freq_combo.currentIndexChanged.connect(self._scroll_rerun_section)
-            self.section_freq_combo.setCurrentIndex(0)
-            section_label_layout.addWidget(self.section_freq_combo)
             
             section_info_layout.addLayout(section_label_layout)
     
@@ -361,37 +323,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.use_data_from_file = True
         self.accept()
 
-    def _scroll_section(self):
-        """Handle section selection changes and update displayed frequencies accordingly. Choice between fit or sweep frequencies"""
-        selected = self.section_freq_combo.currentText().lower()
-        self.sections_edit.clear()
-
-        if "fit" in selected:
-            self.load_btn.setEnabled(False)
-            self.use_raw_frequencies = False
-            freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
-        else:
-            self.use_raw_frequencies = True
-            self.load_btn.setEnabled(True)
-            freqs = self._get_frequencies(self._load_data, self.use_raw_frequencies)
-
-        self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
-
-    def _scroll_rerun_section(self):
-        """Refresh section display when rerunning choice between fit or sweep frequencies."""
-        selected = self.section_freq_combo.currentText().lower()
-        self.sections_edit.clear()
-
-        if "fit" in selected:
-            freqs = self.fit_frequencies
-        else:
-            freqs = self.section_center_frequencies
-
-        self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-        self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
-        
-    
     def _import_file(self):
         """
         Trigger non-blocking async file dialog instead of blocking getOpenFileName.
@@ -420,108 +351,40 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
     @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
-        """Load selected multisweep data file, extract parameters, and populate the UI fields."""
-        payload = load_multisweep_payload(self, file_path=path)
-        if payload is None:
+        """Fill the fields in from what the file records about the sweep."""
+        container = load_multisweep_container(self, path)
+        if container is None:
             return
-    
+
+        self.loaded_container = container
         self.load_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
-        self._load_data = payload.copy()
-        self.section_freq_combo.setEnabled(True)
-        
-        try:
-            params = payload['initial_parameters']
-    
-            freqs = self._get_frequencies(payload, self.use_raw_frequencies)
-            
-            self.sections_edit.setText(",".join([f"{f/1e6:.9f}" for f in freqs]))
-            self.sections_info_label.setText(f"Loaded {len(freqs)} sections from file.")
-        
-            # Span per section (Hz -> kHz)
-            span_khz = params['span_hz'] / 1e3
-            self.span_khz_edit.setText(str(span_khz))
-        
-            self.npoints_edit.setText(str(params['npoints_per_sweep']))
-            self.nsamps_edit.setText(str(params['nsamps']))
-        
-            idx = self.sweep_direction_combo.findText(
-                self._direction_text(params['sweep_direction']),
-                Qt.MatchFlag.MatchFixedString)
-            if idx >= 0:
-                self.sweep_direction_combo.setCurrentIndex(idx)
-        
-            amps = params.get("amps") or ([params["amp"]] if "amp" in params else None)
-            if amps:
-                try:
-                    amp_text = ", ".join(f"{float(amp):g}" for amp in amps)
-                except (TypeError, ValueError):
-                    amp_text = ", ".join(str(amp) for amp in amps)
-                self.amp_edit.setText(amp_text)
-        except KeyError as e:
-            missing = e.args[0]
-            msg = (
-                f"Key '{missing}' is missing in the payload.\n"
-                "Default value will be used where possible."
-            )
-            QtWidgets.QMessageBox.warning(self, "Missing Key", msg)
-    
-    
-    def _get_frequencies(self, payload, raw_section_centers = True):
-        """Extract section center frequencies from payload, optionally using fitted or sweep data.
 
-        The fitted branch reads a legacy payload: ``fit_params['fr']`` and
-        ``nonlinear_fit_params['fr']`` off a ``results_by_detector`` or
-        ``results_by_iteration`` dict, gated on the ``apply_*_fit`` settings
-        that were recorded when the file was written. None of that is what
-        ``fit_sweeps`` produces -- parameters live at
-        ``entry["fits"][model]["params"]["fr"]``, and no file records whether
-        a fit was asked for, because a fit that ran is in the block. So when
-        stage 3 hooks fits up, this has to be rewritten against the new shape
-        rather than extended to cover both: the roadmap's "from fitted fr"
-        option in the stage 2 Re-run bullet is this control, and its source
-        becomes the panel's own ``module_sweeps``, not a re-opened file.
-        """
-        
-        params = payload['initial_parameters']
-        freqs = params['resonance_frequencies']  # Legacy key name for backward compatibility
-        
-        if raw_section_centers:
-            return freqs
+        block = next(iter(container.values()))
+        call_params = block["call_params"]
+        catalog = ResonatorCatalog.from_dict(call_params["catalog"])
 
-        else:
-            ref_freqs = []
-    
-            # Extract fit frequencies from either new or old format
-            if 'results_by_detector' in payload:
-                # New detector-based format
-                for det_idx in sorted(payload['results_by_detector'].keys()):
-                    amp_dir_dict = payload['results_by_detector'][det_idx]
-                    if not amp_dir_dict:
-                        continue
-                    entry = next(iter(amp_dir_dict.values()))
-                    if params['apply_skewed_fit'] and entry.get('skewed_fit_success') and entry.get('fit_params'):
-                        ref_freqs.append(entry['fit_params']['fr'])
-                    elif params['apply_nonlinear_fit'] and entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
-                        ref_freqs.append(entry['nonlinear_fit_params']['fr'])
-                    else:
-                        ref_freqs.append(entry.get('bias_frequency', entry.get('original_center_frequency')))
-            elif 'results_by_iteration' in payload:
-                # Old iteration-based format (backward compatibility)
-                if params['apply_skewed_fit']:
-                    for i in range(len(freqs)):
-                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['fit_params']['fr'])
-                elif params['apply_nonlinear_fit']:
-                    for i in range(len(freqs)):
-                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['nonlinear_fit_params']['fr'])
-                else:
-                    for i in range(len(freqs)):
-                        ref_freqs.append(payload['results_by_iteration'][0]['data'][i+1]['bias_frequency'])
+        centers = [catalog[name].bias.frequency_hz for name in catalog.names()]
+        self.sections_edit.setText(",".join(f"{f / 1e6:.9f}" for f in centers))
+        self.sections_info_label.setText(f"Loaded {len(centers)} sections from file.")
 
-            ref_freqs.sort()
-            return ref_freqs
-        
-    
+        self.span_khz_edit.setText(str(call_params["span_hz"] / 1e3))
+        self.npoints_edit.setText(str(call_params["npoints_per_sweep"]))
+        self.nsamps_edit.setText(str(call_params["nsamps"]))
+
+        idx = self.sweep_direction_combo.findText(
+            self._direction_text(call_params["directions"]),
+            Qt.MatchFlag.MatchFixedString)
+        if idx >= 0:
+            self.sweep_direction_combo.setCurrentIndex(idx)
+
+        # The amplitudes the call actually walked, which is what the schedule
+        # resolves to and not the base it was spelled with.
+        schedule = AmplitudeSchedule.from_dict(call_params["amp_schedule"])
+        amplitudes = sorted({a for step in schedule.resolve_steps(catalog)
+                             for a in step.amplitudes.values()})
+        self.amp_edit.setText(", ".join(f"{a:g}" for a in amplitudes))
+
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
         """Handle closure of the file dialog without file selection."""
@@ -539,7 +402,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         params_dict = {}
         try:
             if self.use_data_from_file:
-                return self._load_data
+                return self.loaded_container
             else:
                 amp_text = self.amp_edit.text().strip()
                 # Parse the text from the amplitude edit field.

@@ -51,6 +51,7 @@ from rfmux.tools.periscope.tasks import (  # noqa: E402
     NetworkAnalysisSignals,
     NetworkAnalysisTask,
 )
+from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
 from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
     NetworkAnalysisPanel,
@@ -900,6 +901,8 @@ def _periscope_with(session_manager=None):
     periscope.dark_mode = False
     periscope.netanal_window_count = 0
     periscope.netanal_windows = {}
+    periscope.multisweep_window_count = 0
+    periscope.multisweep_windows = {}
     periscope.session_manager = session_manager
     periscope.dock_manager = _StubDockManager()
     return periscope
@@ -964,6 +967,74 @@ def test_a_saved_netanal_loads_back_into_a_panel(board, qt_app, output_directory
     assert list(loaded.resonance_searches[catalog.module]
                 .resonance_frequencies_hz) == pytest.approx(
         list(search.resonance_frequencies_hz))
+
+
+def test_a_saved_multisweep_loads_back_into_a_panel(board, qt_app, output_directory):
+    """A file Periscope wrote opens as the measurement it holds: the driver's
+    block, the catalog it swept, and the amplitudes the schedule walked."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_with()
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    name = panel._selected_names()[0]
+    assert loaded.catalog.names() == panel.catalog.names()
+    assert loaded._amplitudes_drawn() == panel._amplitudes_drawn()
+    assert np.array_equal(
+        collect_amplitude_iterations_for(loaded.module_sweeps, name)[0]["upward"]["iq_counts"],
+        collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]["iq_counts"])
+
+
+def test_a_loaded_multisweep_draws_without_a_board(board, qt_app, output_directory):
+    """Loading is reading and drawing. It touches no hardware -- the panel is
+    built with no CRS at all here, which is what a review of a saved sweep is."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_with()
+    assert periscope.crs is None
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    curves = _grid_curves(loaded)
+    assert curves and all(len(subplot) == 1 for subplot in curves)
+
+
+def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
+    """Import reads the file with ``store.load`` and fills the fields in from
+    what the driver recorded about the sweep."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+    path = panel.save_multisweep()
+
+    dialog = MultisweepDialog(section_center_frequencies=[],
+                              dac_scales={catalog.module: -0.5},
+                              current_module=catalog.module,
+                              load_multisweep=True)
+    dialog._on_file_selected(str(path))
+
+    module_id = crs.module[catalog.module].index()
+    assert np.array_equal(
+        dialog.loaded_container[module_id]["results"][0]["upward"][
+            panel._selected_names()[0]]["iq_counts"],
+        collect_amplitude_iterations_for(
+            panel.module_sweeps, panel._selected_names()[0])[0]["upward"]["iq_counts"])
+    assert float(dialog.span_khz_edit.text()) == 100.0
+    assert int(dialog.npoints_edit.text()) == 21
+    assert int(dialog.nsamps_edit.text()) == 10
+    assert dialog.load_btn.isEnabled()
+    assert len(dialog.sections_edit.text().split(",")) == len(catalog.names())
 
 
 def test_the_measurement_name_becomes_the_files_label(qt_app):

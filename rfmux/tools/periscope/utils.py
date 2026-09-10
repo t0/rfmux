@@ -16,6 +16,7 @@ what turns that kind of breakage into a test failure instead of a
 crash on the user's next launch.
 """
 
+import inspect
 import os
 import threading
 import queue
@@ -35,6 +36,7 @@ import asyncio
 # Adjusted imports for new location
 from rfmux.core.session import load_session
 from rfmux.core.schema import CRS
+from rfmux.algorithms.measurement.take_netanal import take_netanal
 
 # ───────────────────────── Global Constants ─────────────────────────
 # Display settings
@@ -98,8 +100,17 @@ DEFAULT_MIN_FREQ = 1e9  # 1 GHz
 DEFAULT_MAX_FREQ = 1.5e9  # 1.5 GHz
 DEFAULT_CABLE_LENGTH = 10  # meters
 DEFAULT_AMPLITUDE = 0.005
-DEFAULT_MAX_CHANNELS = 1024
-DEFAULT_MAX_SPAN = 500e6  # 500 MHz
+# The comb's own knobs, read out of take_netanal's signature so the dialog
+# cannot offer a default the library does not have. DEFAULT_MAX_CHANNELS was
+# 1024 against the driver's 1023, which is one tone per comb iteration and a
+# different set of measured frequencies.
+_NETANAL_DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(take_netanal).parameters.items()
+    if parameter.default is not inspect.Parameter.empty
+}
+DEFAULT_MAX_CHANNELS = _NETANAL_DEFAULTS["max_chans"]
+DEFAULT_MAX_SPAN = _NETANAL_DEFAULTS["max_span"]
 DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
 

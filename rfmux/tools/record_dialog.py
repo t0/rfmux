@@ -111,6 +111,11 @@ class RecordDialog(QtWidgets.QDialog):
         self.session_path_edit = QtWidgets.QLineEdit()
         self.rb_new = QtWidgets.QRadioButton("New session under")
         self.session_dir_edit = QtWidgets.QLineEdit()
+        # Each pair is its own exclusive group; without one, Qt groups
+        # every auto-exclusive radio under the page together.
+        self.session_group = QtWidgets.QButtonGroup(self)
+        self.session_group.addButton(self.rb_existing)
+        self.session_group.addButton(self.rb_new)
         add("Session:", self._row(self.rb_existing, self.session_path_edit,
                                   self._browse(self.session_path_edit)))
         add("", self._row(self.rb_new, self.session_dir_edit,
@@ -122,6 +127,9 @@ class RecordDialog(QtWidgets.QDialog):
         self.bias_label = QtWidgets.QLabel()
         self.rb_ranges = QtWidgets.QRadioButton("Ranges")
         self.channels_edit = QtWidgets.QLineEdit()
+        self.channels_group = QtWidgets.QButtonGroup(self)
+        self.channels_group.addButton(self.rb_bias)
+        self.channels_group.addButton(self.rb_ranges)
         self.channels_edit.setPlaceholderText("1-88 or 1,5-10")
         add("Channels:", self.rb_bias)
         add("", self.bias_label)

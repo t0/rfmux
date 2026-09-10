@@ -117,6 +117,17 @@ def test_the_session_fills_in_with_the_newest_under_the_default_path(
     monkeypatch.setattr(rd, "interface_speeds", lambda: {})
     dlg = rd.RecordDialog(settings=settings)
     assert dlg.session_path_edit.text() == str(base / "session_20260910_154331")
+    assert dlg.rb_existing.isChecked() and dlg.rb_bias.isChecked()
+
+
+def test_the_session_and_channel_choices_are_separate_pairs(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.rb_existing.setChecked(True)
+    dlg.rb_ranges.setChecked(True)
+    assert dlg.rb_existing.isChecked() and not dlg.rb_new.isChecked()
+    dlg.rb_new.setChecked(True)
+    assert dlg.rb_ranges.isChecked() and not dlg.rb_bias.isChecked()
 
 
 def test_the_pulse_capture_settings_have_their_own_tab(

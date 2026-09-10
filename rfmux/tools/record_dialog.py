@@ -26,12 +26,49 @@ _KEY = "record/"
 _SHOW = ("periscope", "overlay", "none")
 
 
-def host_interfaces() -> list:
-    """The host's network interfaces, without loopback."""
+#: Mb/s at and above which an interface is a channel-stream (100G) one.
+_FAST_MBPS = 100_000
+
+
+def interface_speeds() -> dict:
+    """{interface: negotiated Mb/s} for the host's interfaces, without
+    loopback; None for one without a link or a reported speed."""
+    speeds = {}
     try:
-        return sorted(n for n in os.listdir("/sys/class/net") if n != "lo")
+        names = sorted(n for n in os.listdir("/sys/class/net") if n != "lo")
     except OSError:
-        return []
+        return speeds
+    for name in names:
+        try:
+            speed = int(Path("/sys/class/net", name, "speed").read_text())
+        except (OSError, ValueError):
+            speed = None
+        speeds[name] = speed if speed and speed > 0 else None
+    return speeds
+
+
+def _label(name: str, speed) -> str:
+    if speed is None:
+        return f"{name} (no link)"
+    return (f"{name} ({speed / 1000:g} Gb/s)" if speed >= 1000
+            else f"{name} ({speed} Mb/s)")
+
+
+def _combo_value(combo: QtWidgets.QComboBox) -> str:
+    """The interface a combo names: the chosen item's, or typed text."""
+    idx = combo.currentIndex()
+    text = combo.currentText().strip()
+    if idx >= 0 and combo.itemText(idx) == text:
+        return combo.itemData(idx)
+    return text
+
+
+def _select(combo: QtWidgets.QComboBox, value: str) -> None:
+    idx = combo.findData(value)
+    if idx >= 0:
+        combo.setCurrentIndex(idx)
+    else:
+        combo.setEditText(value)
 
 
 def _fastrx():
@@ -98,7 +135,6 @@ class RecordDialog(QtWidgets.QDialog):
         self.parser_check = QtWidgets.QCheckBox("Parser dirfile")
         self.parser_iface_combo = QtWidgets.QComboBox()
         self.parser_iface_combo.setEditable(True)
-        self.parser_iface_combo.addItems(["auto"] + host_interfaces())
         self.parser_iface_combo.setToolTip(
             "1G interface for the parser; auto finds it from the board "
             "address")
@@ -243,9 +279,34 @@ class RecordDialog(QtWidgets.QDialog):
         return (chans or None,
                 f"{bias.name}: {len(chans)} channels, {len(cals)} calibrated")
 
+    def _fill_interfaces(self, running) -> None:
+        """The parser's list: interfaces under 100 Gb/s; fastrx's: the
+        running daemons, then the 100 Gb/s interfaces, the one of them
+        filled in when nothing was chosen.  Each shows its rate."""
+        speeds = interface_speeds()
+        slow = [n for n, v in speeds.items() if v is None or v < _FAST_MBPS]
+        fast = running + [n for n, v in speeds.items()
+                          if v is not None and v >= _FAST_MBPS
+                          and n not in running]
+        for combo, names, extra in (
+                (self.parser_iface_combo, slow, [("auto", "auto")]),
+                (self.fastrx_iface_combo, fast, [])):
+            current = _combo_value(combo)
+            combo.blockSignals(True)
+            combo.clear()
+            for text, value in extra:
+                combo.addItem(text, value)
+            for n in names:
+                combo.addItem(_label(n, speeds.get(n)), n)
+            if not current and combo is self.fastrx_iface_combo \
+                    and len(fast) == 1:
+                current = fast[0]
+            _select(combo, current)
+            combo.blockSignals(False)
+
     def _start_command(self) -> str:
         fx = _fastrx()
-        iface = self.fastrx_iface_combo.currentText().strip()
+        iface = _combo_value(self.fastrx_iface_combo)
         return fx.start_command(iface) if fx and iface else ""
 
     def _refresh(self, *_) -> None:
@@ -259,18 +320,10 @@ class RecordDialog(QtWidgets.QDialog):
 
         fx = _fastrx()
         running = fx.running_interfaces() if fx else []
-        current = self.fastrx_iface_combo.currentText()
         if self.fastrx_iface_combo.count() == 0 or \
                 self.sender() is self.recheck_btn:
-            self.fastrx_iface_combo.blockSignals(True)
-            self.fastrx_iface_combo.clear()
-            items = running + [i for i in host_interfaces()
-                               if i not in running]
-            self.fastrx_iface_combo.addItems(items)
-            self.fastrx_iface_combo.setEditText(
-                current or (items[0] if items else ""))
-            self.fastrx_iface_combo.blockSignals(False)
-        iface = self.fastrx_iface_combo.currentText().strip()
+            self._fill_interfaces(running)
+        iface = _combo_value(self.fastrx_iface_combo)
         for w in (self.fastrx_iface_combo, self.fastrx_status, self.copy_btn,
                   self.recheck_btn, self.disk_label, self.merge_check):
             w.setEnabled(self.fastrx_check.isChecked())
@@ -315,7 +368,7 @@ class RecordDialog(QtWidgets.QDialog):
     def get_options(self) -> dict:
         """Keyword arguments for rfmux.tools.record._run."""
         existing = self.rb_existing.isChecked()
-        parser_iface = self.parser_iface_combo.currentText().strip()
+        parser_iface = _combo_value(self.parser_iface_combo)
         return {
             "serial": self.serial_edit.text().strip(),
             "hostname": self.hostname_edit.text().strip() or None,
@@ -331,8 +384,7 @@ class RecordDialog(QtWidgets.QDialog):
             "fastrx": self.fastrx_check.isChecked(),
             "parser_interface": (None if parser_iface in ("", "auto")
                                  else parser_iface),
-            "fastrx_interface": (self.fastrx_iface_combo.currentText().strip()
-                                 or None),
+            "fastrx_interface": _combo_value(self.fastrx_iface_combo) or None,
             "fastrx_socket": None,
             "merge_fastrx": self.merge_check.isChecked(),
             "show": _SHOW[self.show_combo.currentIndex()],
@@ -379,8 +431,8 @@ class RecordDialog(QtWidgets.QDialog):
         self.capture_check.setChecked(v("capture", "true") in (True, "true"))
         self.parser_check.setChecked(v("parser", "true") in (True, "true"))
         self.fastrx_check.setChecked(v("fastrx", "true") in (True, "true"))
-        self.parser_iface_combo.setEditText(str(v("parser_interface", "auto")))
-        self.fastrx_iface_combo.setEditText(str(v("fastrx_interface", "")))
+        _select(self.parser_iface_combo, str(v("parser_interface", "auto")))
+        _select(self.fastrx_iface_combo, str(v("fastrx_interface", "")))
         self.merge_check.setChecked(v("merge_fastrx", "true") in (True, "true"))
         show = str(v("show", "periscope"))
         self.show_combo.setCurrentIndex(

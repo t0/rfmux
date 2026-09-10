@@ -36,7 +36,10 @@ Run with no options, `rfmux record` opens a dialog with the same
 choices on one page, remembered between runs: board, session folder,
 channels, duration, the three products with their interfaces, what to
 open afterwards, and the pulse capture settings folded under their
-own heading. It checks for a running fastrxd on the 100G interface and,
+own heading. The interfaces are listed with their negotiated rates,
+those under 100 Gb/s for the parser and the 100 Gb/s ones for fastrx,
+a lone 100 Gb/s interface filled in. It checks for a running fastrxd
+on the 100G interface and,
 when there is none, shows the command that starts it and waits.
 
 It reads the board and never configures it. The session is a Periscope

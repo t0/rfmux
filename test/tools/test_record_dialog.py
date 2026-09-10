@@ -14,8 +14,9 @@ from rfmux.tools.record import _run  # noqa: E402
 
 
 def _dialog(tmp_path, monkeypatch, running=()):
-    monkeypatch.setattr(rd, "host_interfaces",
-                        lambda: ["eth0", "enp2s0f0np0"])
+    monkeypatch.setattr(rd, "interface_speeds",
+                        lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
+                                 "wlan0": None})
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
                            start_command=lambda i: f"sudo fastrxd -i {i}")
     monkeypatch.setattr(rd, "_fastrx", lambda: fake)
@@ -81,3 +82,23 @@ def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
     assert (o["serial"], o["channels"], o["duration"], o["show"]) == \
         ("0042", "5-9", 7.5, "overlay")
     assert o["config"].threshold_sigma == 6.5
+
+
+def test_interfaces_show_their_rates_and_sort_by_role(
+        qt_app, tmp_path, monkeypatch):
+    """The parser chooses among interfaces under 100 Gb/s, fastrx among
+    the 100 Gb/s ones, each labelled with its rate; the one 100 Gb/s
+    interface is filled in when nothing was chosen."""
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    parser = [dlg.parser_iface_combo.itemText(i)
+              for i in range(dlg.parser_iface_combo.count())]
+    assert parser == ["auto", "eth0 (1 Gb/s)", "wlan0 (no link)"]
+    fast = [dlg.fastrx_iface_combo.itemText(i)
+            for i in range(dlg.fastrx_iface_combo.count())]
+    assert fast == ["enp2s0f0np0 (100 Gb/s)"]
+    o = dlg.get_options()
+    assert o["fastrx_interface"] == "enp2s0f0np0"
+    assert o["parser_interface"] is None
+    dlg.parser_iface_combo.setCurrentIndex(1)
+    assert dlg.get_options()["parser_interface"] == "eth0"
+

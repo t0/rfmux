@@ -28,12 +28,36 @@ __all__ = [
     "PacketFile",
     "get_samples",
     "resolve_socket",
+    "daemon_path",
+    "running_interfaces",
+    "start_command",
     "NUM_PIPELINES",
     "MAX_SAMPLES",
     "ABI_VERSION",
     "MAX_CLIENTS",
     "SOCKET_DIR",
 ]
+
+
+def daemon_path() -> str:
+    """The fastrxd binary: a sibling of the extension, wherever this
+    install put it."""
+    from .streamer import _fastrx
+    return os.path.join(os.path.dirname(os.path.abspath(_fastrx.__file__)),
+                        "fastrxd")
+
+
+def running_interfaces() -> list[str]:
+    """The interfaces a fastrxd is serving, one socket each in SOCKET_DIR."""
+    try:
+        return sorted(os.listdir(SOCKET_DIR))
+    except OSError:
+        return []
+
+
+def start_command(interface: str) -> str:
+    """The command that starts fastrxd on *interface*."""
+    return f"sudo {daemon_path()} -i {interface}"
 
 
 def resolve_socket(interface: str | None = None,

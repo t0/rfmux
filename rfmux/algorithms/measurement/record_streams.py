@@ -237,8 +237,10 @@ async def record_streams(
             raise RuntimeError(f"fastrx is not built in this rfmux: {e}") from e
         fastrx_socket = fx.resolve_socket(fastrx_interface, fastrx_socket)
         if not Path(fastrx_socket).exists():
-            raise RuntimeError(f"no fastrxd socket at {fastrx_socket}: "
-                               "is fastrxd running?")
+            raise RuntimeError(
+                f"no fastrxd socket at {fastrx_socket}: is fastrxd running? "
+                "Start it with: "
+                + fx.start_command(Path(fastrx_socket).name))
         pipes = sorted({channel_location(c)[0] for c in channels})
 
     result = RecordResult(session=session, module=module, channels=channels,

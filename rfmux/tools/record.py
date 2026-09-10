@@ -54,14 +54,15 @@ async def _main(serial: str, hostname: str | None, **kw):
 
 
 @click.command()
-@click.option("--serial", required=True,
-              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board")
+@click.option("--serial", default=None,
+              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board; "
+                   "with no options at all, a dialog asks for everything")
 @click.option("--hostname", default=None, help="Board address when it is not <serial>.local")
 @click.option("--module", type=int, default=1, show_default=True)
 @click.option("--channels", default=None,
               help="Channel ranges, 1-88 or 1,5-10; default: the biased channels of "
                    "the session's newest bias export")
-@click.option("--duration", type=float, required=True,
+@click.option("--duration", type=float, default=None,
               help="Seconds to record, after the capture's noise training")
 @click.option("--session", type=click.Path(file_okay=False), default=None,
               help="An existing session folder to record into")
@@ -101,6 +102,32 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
         fastrx_socket, merge_fastrx, show, bias, threshold_sigma, end_sigma,
         min_pulse_ms, max_pulse_ms, noise_train_ms, trigger_basis, quiet):
     """Record the slow and channel streams of one module into a session."""
+    if serial is None:
+        from rfmux.tools.record_dialog import RecordDialog
+        options = RecordDialog.ask()
+        if options is None:
+            return
+        _run(quiet=quiet, **options)
+        return
+    if duration is None:
+        raise click.UsageError("--duration is required")
+    config = dataclasses.replace(
+        _DEFAULTS, threshold_sigma=threshold_sigma, end_sigma=end_sigma,
+        min_pulse_ms=min_pulse_ms, max_pulse_ms=max_pulse_ms,
+        noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
+    _run(serial=serial, hostname=hostname, module=module, channels=channels,
+         duration=duration, session=session, session_dir=session_dir,
+         capture=capture, parser=parser, fastrx=fastrx,
+         parser_interface=parser_interface, fastrx_interface=fastrx_interface,
+         fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, show=show,
+         bias=bias, config=config, quiet=quiet)
+
+
+def _run(*, serial, hostname, module, channels, duration, session,
+         session_dir, capture, parser, fastrx, parser_interface,
+         fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
+         quiet):
+    """One recording, from the command line's options or the dialog's."""
     folder = open_session(Path(session) if session else None, Path(session_dir))
     bias_path = Path(bias) if bias else latest_bias_export(folder, module)
     biased, calibrations = biased_channels(bias_path) if bias_path else ([], {})
@@ -111,10 +138,6 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
     else:
         raise click.UsageError(
             "no --channels, and no bias export in the session to take them from")
-    config = dataclasses.replace(
-        _DEFAULTS, threshold_sigma=threshold_sigma, end_sigma=end_sigma,
-        min_pulse_ms=min_pulse_ms, max_pulse_ms=max_pulse_ms,
-        noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
     if not quiet:
         click.echo(f"[record] session {folder}")
         if bias_path:

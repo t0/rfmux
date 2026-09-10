@@ -32,6 +32,13 @@ rfmux record --serial <NNNN> --module <module> --duration 20 \
     --session ~/data/session_20260909_153654
 ```
 
+Run with no options, `rfmux record` opens a dialog with the same
+choices on one page, remembered between runs: board, session folder,
+channels, duration, the three products with their interfaces, what to
+open afterwards, and the pulse capture settings folded under their
+own heading. It checks for a running fastrxd on the 100G interface and,
+when there is none, shows the command that starts it and waits.
+
 It reads the board and never configures it. The session is a Periscope
 session folder: the channels and their df calibrations come from the
 newest bias export in it (`--channels 1-88` and `--bias <file>`

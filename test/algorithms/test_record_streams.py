@@ -276,6 +276,21 @@ def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
         str(tmp_path / "pulse.h5")]
 
 
+def test_a_bare_record_command_asks_the_dialog(monkeypatch):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    from rfmux.tools.record_dialog import RecordDialog
+    runs = []
+    monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
+    monkeypatch.setattr(RecordDialog, "ask", classmethod(lambda cls: None))
+    assert CliRunner().invoke(record.cli, []).exit_code == 0
+    assert runs == []
+    monkeypatch.setattr(RecordDialog, "ask",
+                        classmethod(lambda cls: {"serial": "0156"}))
+    assert CliRunner().invoke(record.cli, []).exit_code == 0
+    assert runs == [{"serial": "0156", "quiet": False}]
+
+
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     session = rs.open_session(base=tmp_path)
     assert session.name.startswith("session_")

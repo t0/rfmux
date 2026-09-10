@@ -247,3 +247,14 @@ def test_rejects_overclaimed_count(tmp_path):
     path = write(tmp_path, [file_header(0b1, 10), record(0b1, 0)])
     with pytest.raises(RuntimeError, match="at most"):
         fastrx.PacketFile(path)
+
+
+def test_daemon_helpers_read_the_socket_dir_and_name_the_binary(
+        tmp_path, monkeypatch):
+    monkeypatch.setattr(fastrx, "SOCKET_DIR", str(tmp_path))
+    assert fastrx.running_interfaces() == []
+    (tmp_path / "enp2s0f0np0").touch()
+    assert fastrx.running_interfaces() == ["enp2s0f0np0"]
+    cmd = fastrx.start_command("enp2s0f0np0")
+    assert cmd.startswith("sudo ") and cmd.endswith("/fastrxd -i enp2s0f0np0")
+

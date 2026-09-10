@@ -498,8 +498,10 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording
   under every pulse. `periscope --review <pulse.h5>` opens any capture
-  file that way, offline, without the startup dialog. See the 100G and
-  1G overlay guide.
+  file that way, offline, without the startup dialog. With no options
+  the command opens a dialog with every choice on one page, remembered
+  between runs, that checks for fastrxd and shows the command to start
+  it. See the 100G and 1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

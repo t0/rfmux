@@ -54,23 +54,25 @@ struct fastrxd_desc {
 /* Single-producer/single-consumer rings shared across the process boundary.
  *
  * head and tail are free-running counters; the ring is empty when they are
- * equal and full when they differ by the ring size.  Producer writes head;
- * consumer writes tail; a misbehaving client can corrupt its own ring but not
- * fastrxd's state. */
+ * equal.  Producer writes head; consumer writes tail; a misbehaving client can
+ * corrupt its own ring but not fastrxd's state.
+ *
+ * Both rings have one entry per UMEM frame, so neither can ever fill: every
+ * entry pins at least one distinct frame, and whoever is pushing holds a frame
+ * that is not yet in the ring.  Producers therefore never read the consumer's
+ * tail, and there is no full case to handle.  For the descriptor ring this
+ * also sets how long a client may stall before anything is lost: the whole
+ * pool, about 13 ms at 5 Mpps -- and when it does stall longer, it starves
+ * the NIC for everyone.  Clients are cooperative, so that is accepted. */
 
 #define FASTRXD_CACHELINE 64
-
-/* Must be power of 2 */
-#define FASTRXD_RING_SIZE 256
 
 struct fastrxd_desc_ring {
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> head;  /* written by fastrxd */
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> tail;  /* written by the client */
-	alignas(FASTRXD_CACHELINE) struct fastrxd_desc entries[FASTRXD_RING_SIZE];
+	alignas(FASTRXD_CACHELINE) struct fastrxd_desc entries[FASTRXD_NUM_FRAMES];
 };
 
-/* One entry per UMEM frame, so clients can never fill it -- this makes
- * reclamation logic straightforward, even when a client disappears */
 struct fastrxd_return_ring {
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> head;  /* written by the client */
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> tail;  /* written by fastrxd */
@@ -90,7 +92,6 @@ struct fastrxd_client_slot {
 
 	uint32_t client_id;  /* index of this slot in clients[] */
 	uint64_t dispatched; /* packets handed to this client */
-	uint64_t ring_drops; /* packets skipped: desc ring full */
 
 	/* The client sets this once its consuming thread is actually running. */
 	std::atomic<uint32_t> ready;

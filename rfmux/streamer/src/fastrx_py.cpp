@@ -130,7 +130,6 @@ public:
 
 	uint64_t double_releases() const { return double_releases_.load(std::memory_order_relaxed); }
 	uint64_t stranded_frames() const { return stranded_frames_.load(std::memory_order_relaxed); }
-	uint64_t ring_drops() const { return slot_ ? slot_->ring_drops : 0; }
 	uint32_t client_id() const { return client_id_; }
 	const std::string& socket_path() const { return socket_path_; }
 
@@ -261,14 +260,29 @@ private:
 	}
 
 	bool desc_pop(fastrxd_desc& d) {
-		auto& head = slot_->descs.head;
 		auto& tail = slot_->descs.tail;
 		uint32_t t = tail.load(std::memory_order_relaxed);
 
-		if (head.load(std::memory_order_acquire) == t)
-			return false;
+		/* fastrxd publishes head once per ingest pass.  Re-read it only once
+		 * the last value seen is used up, so a pass's worth of pops share one
+		 * miss to the ingest core instead of taking one each. */
+		if (t == cached_head_) {
+			cached_head_ = slot_->descs.head.load(std::memory_order_acquire);
+			if (t == cached_head_)
+				return false;
+		}
 
-		d = slot_->descs.entries[t & (FASTRXD_RING_SIZE - 1)];
+		const auto* entries = slot_->descs.entries;
+		if ((uint32_t)(cached_head_ - t) > 1) {
+			/* The next entry is already published and was written on another
+			 * core; start it moving while this one is being consumed. */
+			const char* nx = reinterpret_cast<const char*>(
+					&entries[(t + 1) & (FASTRXD_NUM_FRAMES - 1)]);
+			for (size_t off = 0; off < sizeof(fastrxd_desc); off += FASTRXD_CACHELINE)
+				_mm_prefetch(nx + off, _MM_HINT_T0);
+		}
+
+		d = entries[t & (FASTRXD_NUM_FRAMES - 1)];
 		tail.store(t + 1, std::memory_order_release);
 
 		return true;
@@ -358,6 +372,9 @@ private:
 
 	std::jthread hot_;
 	bool running_ = false;
+
+	/* Hot-thread-private: the descriptor ring head as last read (see desc_pop). */
+	uint32_t cached_head_ = 0;
 
 	std::atomic<uint64_t> double_releases_{0};
 	std::atomic<uint64_t> stranded_frames_{0};
@@ -509,8 +526,12 @@ private:
 		/* Who is streaming, for the "module N is not being transmitted"
 		 * diagnostic.  Accumulated over every packet the capture window sees,
 		 * before any filtering. */
-		if (hdr.module < NUM_MODULES)
-			modules_seen_.fetch_or(1u << hdr.module, std::memory_order_relaxed);
+		if (hdr.module < NUM_MODULES) {
+			/* Set once per module: an atomic RMW per packet is not free. */
+			const uint32_t bit = 1u << hdr.module;
+			if (!(modules_seen_.load(std::memory_order_relaxed) & bit))
+				modules_seen_.fetch_or(bit, std::memory_order_relaxed);
+		}
 
 		if (hdr.module != module_)
 			return; /* another module's packet */
@@ -1374,7 +1395,6 @@ PYBIND11_MODULE(_fastrx, m) {
 		.def("stop", &PacketCapture::stop)
 		.def_property_readonly("double_releases", &PacketCapture::double_releases)
 		.def_property_readonly("stranded_frames", &PacketCapture::stranded_frames)
-		.def_property_readonly("ring_drops", &PacketCapture::ring_drops)
 		.def_property_readonly("client_id", &PacketCapture::client_id)
 		.def("__enter__", [](PacketCapture& c) -> PacketCapture& { return c; },
 			 py::return_value_policy::reference)
@@ -1435,7 +1455,6 @@ PYBIND11_MODULE(_fastrx, m) {
 		.def_property_readonly("socket_path", &PacketWriter::socket_path)
 		.def_property_readonly("double_releases", &PacketWriter::double_releases)
 		.def_property_readonly("stranded_frames", &PacketWriter::stranded_frames)
-		.def_property_readonly("ring_drops", &PacketWriter::ring_drops)
 		.def_property_readonly("client_id", &PacketWriter::client_id)
 		.def("__enter__", [](PacketWriter& w) -> PacketWriter& { return w; },
 			 py::return_value_policy::reference)

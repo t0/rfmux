@@ -27,6 +27,7 @@
 #include <grp.h>
 #include <linux/ethtool.h>
 #include <linux/if_ether.h>
+#include <linux/if_xdp.h>
 #include <linux/ip.h>
 #include <linux/udp.h>
 #include <linux/sockios.h>
@@ -237,6 +238,16 @@ static_assert(FASTRXD_FRAME_SIZE == XSK_UMEM__DEFAULT_FRAME_SIZE,
 
 constexpr uint32_t kQueueId = 0;
 
+/* RX descriptors taken per ingest pass.  Client heads and the FILL ring are
+ * updated once per pass, so this bounds how far either can lag: at 5 Mpps,
+ * 256 packets is about 50 us. */
+constexpr uint32_t kRxBatch = 256;
+
+/* Packet headers are DMA'd into UMEM and cold in every cache.  Touching the
+ * header this many descriptors ahead hides that miss behind the packets in
+ * between. */
+constexpr uint32_t kPrefetchAhead = 8;
+
 /* XDP passes Ethernet frames verbatim, so we need to know about their headers
  * (or at least the space they take up! Validity checks belong at the BPF, not
  * here.) */
@@ -307,7 +318,6 @@ public:
 			slot.returns.tail.store(0, std::memory_order_relaxed);
 			slot.ready.store(0, std::memory_order_relaxed);
 			slot.dispatched = 0;
-			slot.ring_drops = 0;
 			slot.client_id = c;
 
 			/* Publishes every store above: the client's acquire load of "active"
@@ -450,6 +460,25 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom) {
 	if ((err = xsk_umem__create(&umem, umem_area, FASTRXD_UMEM_SIZE, &fill, &comp, &umem_cfg)))
 		fail("xsk_umem__create: {}", std::strerror(-err));
 
+	/* Pre-fill the FILL ring with the whole pool, before the socket exists:
+	 * binding it hands the pool to the driver, which posts frames to the
+	 * hardware ring from here at once.  Filled afterwards instead, a live
+	 * stream finds the ring empty for every poll until then, and the kernel's
+	 * rx_fill_ring_empty_descs count starts life in the tens of thousands. */
+	uint32_t idx;
+	uint32_t reserved = xsk_ring_prod__reserve(&fill, FASTRXD_NUM_FRAMES, &idx);
+	for (uint32_t i = 0; i < reserved; i++)
+		*xsk_ring_prod__fill_addr(&fill, idx + i) = (uint64_t)i * FASTRXD_FRAME_SIZE;
+	xsk_ring_prod__submit(&fill, reserved);
+
+	if (reserved < FASTRXD_NUM_FRAMES)
+		warn("FILL ring took only %u of %u frames.\n",
+				reserved, FASTRXD_NUM_FRAMES);
+	else if (verbose)
+		std::fprintf(stderr, "fastrxd: pre-filled all %u FILL ring entries "
+			"(%.0f MiB reachable)\n", reserved,
+			(double)FASTRXD_UMEM_SIZE / (1 << 20));
+
 	/* XDP_USE_SG is required, since packets may span multiple UMEM frames. */
 	xsk_socket_config xsk_cfg = {
 		.rx_size = FASTRXD_NUM_FRAMES,
@@ -505,21 +534,6 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom) {
 	if(verbose)
 		std::fprintf(stderr, "fastrxd: joined %s on ifindex %d (NIC MAC filter programmed)\n",
 			FASTRX_MULTICAST_GROUP, ifindex);
-
-	/* Pre-fill the FILL ring with the whole pool */
-	uint32_t idx;
-	uint32_t reserved = xsk_ring_prod__reserve(&fill, FASTRXD_NUM_FRAMES, &idx);
-	for (uint32_t i = 0; i < reserved; i++)
-		*xsk_ring_prod__fill_addr(&fill, idx + i) = (uint64_t)i * FASTRXD_FRAME_SIZE;
-	xsk_ring_prod__submit(&fill, reserved);
-
-	if (reserved < FASTRXD_NUM_FRAMES)
-		warn("FILL ring took only %u of %u frames.\n",
-				reserved, FASTRXD_NUM_FRAMES);
-	else if (verbose)
-		std::fprintf(stderr, "fastrxd: pre-filled all %u FILL ring entries "
-			"(%.0f MiB reachable)\n", reserved,
-			(double)FASTRXD_UMEM_SIZE / (1 << 20));
 }
 
 /* Fragment list for one packet, accumulated as RX descriptors arrive.
@@ -544,7 +558,11 @@ using ValidatedHdr = fastrx_packet_header;
 
 class Ingest {
 public:
-	explicit Ingest(Session& s) : s_(s) {}
+	explicit Ingest(Session& s) : s_(s) {
+		/* Every frame can be owed back at most once per cycle, so a pass never
+		 * queues more than the pool. */
+		pending_returns_.reserve(FASTRXD_NUM_FRAMES);
+	}
 
 	/* Bring a slot into the ingest thread's per-pass sweeps. Called from the
 	 * accept loop once a slot has been handed to a new client. */
@@ -565,14 +583,11 @@ public:
 
 		/* Quiet by default: short-lived consumers (get_samples, the HUD) connect
 		 * and disconnect hundreds of times a second, so per-connection logging is
-		 * pure noise. Anything anomalous still reports. */
-		if (verbose || slot.ring_drops)
+		 * pure noise. */
+		if (verbose)
 			std::fprintf(stderr,
-				"fastrxd: client %d released: %llu dispatched, "
-				"%llu ring drops\n",
-				c,
-				(unsigned long long)slot.dispatched,
-				(unsigned long long)slot.ring_drops);
+				"fastrxd: client %d released: %llu dispatched\n",
+				c, (unsigned long long)slot.dispatched);
 
 		/* Order matters: 'active' stops dispatch first (from the next mask
 		 * rebuild onward), then 'draining' asks reclaim to clean up.  The slot
@@ -593,35 +608,56 @@ public:
 			ingest_thread_.join();
 	}
 
-	/* Ingest summary, printed at shutdown. */
+	/* Ingest summary, printed at shutdown, after the ingest thread has joined. */
 	void report_stats() const {
-		uint64_t rx = rx_packets_.load(std::memory_order_relaxed);
-		uint64_t ret = frames_returned_.load(std::memory_order_relaxed);
 		std::fprintf(stderr,
 			"fastrxd: %llu packets received, %llu frames returned\n",
-			(unsigned long long)rx, (unsigned long long)ret);
+			(unsigned long long)rx_packets_,
+			(unsigned long long)frames_returned_);
 
-		if (uint64_t sp = short_pkt_drops_.load(std::memory_order_relaxed))
+		if (short_pkt_drops_)
 			warn("%llu packets dropped for partial pipelines: the transmitter "
 				"sent a shape clients cannot be told about",
-				(unsigned long long)sp);
+				(unsigned long long)short_pkt_drops_);
+
+		/* The kernel's view of the socket.  A FILL ring found empty means the
+		 * NIC had nowhere to put a packet and discarded it; that is ingest (or
+		 * a client holding frames) not keeping pace with the wire. */
+		struct xdp_statistics xs = {};
+		socklen_t len = sizeof(xs);
+		if (getsockopt(s_.xsk_fd, SOL_XDP, XDP_STATISTICS, &xs, &len) == 0 &&
+				(xs.rx_fill_ring_empty_descs || xs.rx_ring_full || xs.rx_dropped))
+			warn("NIC starved: FILL ring empty %llu times, RX ring full %llu, "
+				"%llu dropped by the kernel -- ingest fell behind the wire",
+				(unsigned long long)xs.rx_fill_ring_empty_descs,
+				(unsigned long long)xs.rx_ring_full,
+				(unsigned long long)xs.rx_dropped);
 	}
 
 private:
-	/* Hand a frame straight back to the FILL ring.  Called only from the
-	 * ingest thread, which owns the FILL ring, so no synchronisation is
-	 * needed. */
+	/* Queue a frame for the FILL ring.  Frames accumulate over a pass and go
+	 * back in one reserve/submit (flush_returns): the ring's producer index
+	 * is a cache line the NAPI poller reads, so writing it per frame bounces
+	 * it between cores at packet rate.  Ingest owns the FILL ring, so no
+	 * synchronisation is needed. */
 	void return_frame(uint64_t frame) {
+		pending_returns_.push_back(frame);
+	}
+
+	void flush_returns() {
+		uint32_t n = (uint32_t)pending_returns_.size();
+		if (!n)
+			return;
+
 		uint32_t idx;
-		uint32_t got = xsk_ring_prod__reserve(&s_.fill, 1, &idx);
+		if (xsk_ring_prod__reserve(&s_.fill, n, &idx) != n)
+			die("FILL ring refused %u frames! Double release?", n);
 
-		if (got != 1)
-			die("FILL ring refused frame 0x%llx! Double release?",
-				(unsigned long long)frame);
-
-		*xsk_ring_prod__fill_addr(&s_.fill, idx) = frame;
-		xsk_ring_prod__submit(&s_.fill, 1);
-		frames_returned_.fetch_add(1, std::memory_order_relaxed);
+		for (uint32_t i = 0; i < n; i++)
+			*xsk_ring_prod__fill_addr(&s_.fill, idx + i) = pending_returns_[i];
+		xsk_ring_prod__submit(&s_.fill, n);
+		frames_returned_ += n;
+		pending_returns_.clear();
 	}
 
 	void stage_packet_returns(const PendingPkt& pkt) {
@@ -661,7 +697,7 @@ private:
 			/* Counted, unlike the rejections above: those mean traffic we do not
 			 * care about, this one means a transmitter sending a shape we cannot
 			 * describe to clients -- worth knowing about. */
-			short_pkt_drops_.fetch_add(1, std::memory_order_relaxed);
+			short_pkt_drops_++;
 			return false;
 		}
 
@@ -671,7 +707,7 @@ private:
 
 	/* Dispatch one validated packet to every active client. */
 	void dispatch_packet(const PendingPkt& pkt, const ValidatedHdr& hdr, uint32_t eligible) {
-		rx_packets_.fetch_add(1, std::memory_order_relaxed);
+		rx_packets_++;
 
 		/* Map each pipeline to an absolute UMEM offset, following the fragment
 		 * chain where the payload spans two frames.  validate() has already
@@ -732,36 +768,33 @@ private:
 		while (cand) {
 			uint32_t c = (uint32_t)__builtin_ctz(cand);
 			cand &= cand - 1;
-			auto& slot = s_.ctl->clients[c];
-			if (desc_ring_push(slot, desc)) {
-				slot.dispatched++;
-				continue;
-			}
-			/* Ring full -- drop the references we just published on this client's
-			 * behalf, across every frame, returning any we were last to hold. */
-			slot.ring_drops++;
-			for (int i = 0; i < pkt.n_frags; i++) {
-				auto& owners = s_.frame_owners_at(desc.frame_addr[i]);
-				if (owners.fetch_and(~(1u << c), std::memory_order_acq_rel) == (1u << c))
-					return_frame(desc.frame_addr[i]);
-			}
+			desc_ring_push(c, desc);
+			s_.ctl->clients[c].dispatched++;
 		}
 	}
 
-	/* Push a descriptor into a client's ring */
-	static bool desc_ring_push(fastrxd_client_slot& slot, const fastrxd_desc& d) {
-		auto& head = slot.descs.head;
-		auto& tail = slot.descs.tail;
-		uint32_t h = head.load(std::memory_order_relaxed);
-		uint32_t t = tail.load(std::memory_order_acquire);
+	/* Push a descriptor into a client's ring.
+	 *
+	 * The ring cannot be full (see fastrx.h), so the client's tail is never
+	 * consulted.  Head is advanced in a private shadow and published once per
+	 * pass (publish_heads), so the client's polls of it hit in its own cache
+	 * between passes rather than missing to this core per packet. */
+	void desc_ring_push(uint32_t c, const fastrxd_desc& d) {
+		uint32_t h = head_shadow_[c]++;
+		s_.ctl->clients[c].descs.entries[h & (FASTRXD_NUM_FRAMES - 1)] = d;
+		pushed_mask_ |= 1u << c;
+	}
 
-		if ((uint32_t)(h - t) >= FASTRXD_RING_SIZE)
-			return false;
-
-		slot.descs.entries[h & (FASTRXD_RING_SIZE - 1)] = d;
-
-		head.store(h + 1, std::memory_order_release);
-		return true;
+	/* Make this pass's pushes visible to their clients. */
+	void publish_heads() {
+		uint32_t m = pushed_mask_;
+		pushed_mask_ = 0;
+		while (m) {
+			uint32_t c = (uint32_t)__builtin_ctz(m);
+			m &= m - 1;
+			s_.ctl->clients[c].descs.head.store(head_shadow_[c],
+					std::memory_order_release);
+		}
 	}
 
 	void ingest_loop() {
@@ -792,14 +825,25 @@ private:
 			}
 
 			uint32_t idx_rx = 0;
-			uint32_t avail = xsk_ring_cons__peek(&s_.rx, FASTRXD_RING_SIZE, &idx_rx);
+			uint32_t avail = xsk_ring_cons__peek(&s_.rx, kRxBatch, &idx_rx);
 			if (!avail) {
+				flush_returns(); /* frames clients handed back this pass */
 				_mm_pause(); /* Nothing to do */
 				continue;
 			}
 
 			for (uint32_t i = 0; i < avail; i++) {
 				const xdp_desc* d = xsk_ring_cons__rx_desc(&s_.rx, idx_rx + i);
+
+				if (i + kPrefetchAhead < avail) {
+					/* The header straddles two lines at the default headroom. */
+					const xdp_desc* pf = xsk_ring_cons__rx_desc(&s_.rx,
+							idx_rx + i + kPrefetchAhead);
+					const char* p = static_cast<const char*>(s_.umem_area)
+							+ pf->addr + kNetHdrLen;
+					_mm_prefetch(p, _MM_HINT_T0);
+					_mm_prefetch(p + FASTRXD_CACHELINE, _MM_HINT_T0);
+				}
 
 				uint64_t frame_base = d->addr & ~(uint64_t)(FASTRXD_FRAME_SIZE - 1);
 				bool more = (d->options & XDP_PKT_CONTD) != 0;
@@ -836,6 +880,8 @@ private:
 			}
 
 			xsk_ring_cons__release(&s_.rx, avail);
+			publish_heads();
+			flush_returns();
 		}
 	}
 
@@ -858,10 +904,10 @@ private:
 			uint32_t t = dtail.load(std::memory_order_acquire);
 
 			uint32_t n = (uint32_t)(h - t);
-			if (n > FASTRXD_RING_SIZE) n = FASTRXD_RING_SIZE;
+			if (n > FASTRXD_NUM_FRAMES) n = FASTRXD_NUM_FRAMES;
 			for (uint32_t k = 0; k < n; k++) {
 				const fastrxd_desc& d =
-					slot.descs.entries[(t + k) & (FASTRXD_RING_SIZE - 1)];
+					slot.descs.entries[(t + k) & (FASTRXD_NUM_FRAMES - 1)];
 
 				/* Every frame the descriptor named, not just the first: a
 				 * multi-frame payload leaves the client owing one release each. */
@@ -899,7 +945,10 @@ private:
 			 * owed has had its bit cleared, so nothing can reference the slot
 			 * again.  Clear 'occupied' before 'draining': the former drops it
 			 * from the per-pass sweeps, the latter frees it for reuse, and
-			 * acquire_slot() may hand it out the instant it sees that. */
+			 * acquire_slot() may hand it out the instant it sees that.  The
+			 * next tenant's ring starts from zero, so the private copy of its
+			 * head must too. */
+			head_shadow_[c] = 0;
 
 			occupied_mask_.fetch_and(~(1u << c), std::memory_order_release);
 			draining.store(0, std::memory_order_release);
@@ -955,14 +1004,26 @@ private:
 
 	Session& s_;
 
+	/* Ingest-thread-private state.  The counters are read by the main thread
+	 * only after the ingest thread has been joined, so none of this is atomic. */
+
 	/* Frames handed back to the NIC.  Should track rx_packets_ closely: every
 	 * received frame is returned exactly once, so a growing gap means frames are
 	 * being held or lost. */
-	std::atomic<uint64_t> frames_returned_{0};
+	uint64_t frames_returned_ = 0;
+	uint64_t rx_packets_ = 0;
+
+	/* Frames to go back to the FILL ring at the end of this pass. */
+	std::vector<uint64_t> pending_returns_;
+
+	/* Per-client ring head as ingest has advanced it but not yet published.
+	 * Bit c of pushed_mask_ is set while head_shadow_[c] is ahead of the
+	 * published head. */
+	uint32_t head_shadow_[FASTRXD_MAX_CLIENTS] = {};
+	uint32_t pushed_mask_ = 0;
 
 	std::thread ingest_thread_;
 	std::atomic<bool> stop_{false};
-	std::atomic<uint64_t> rx_packets_{0};
 
 	/* Set while any client slot needs draining, so the reclaim loop can skip
 	 * probing all eight slots */
@@ -972,7 +1033,7 @@ private:
 	std::atomic<uint32_t> occupied_mask_{0};
 
 	/* Packets whose pipelines were not all full-length */
-	std::atomic<uint64_t> short_pkt_drops_{0};
+	uint64_t short_pkt_drops_ = 0;
 };
 
 /* Parse a uid or gid, rejecting anything that is not a plain positive integer. */

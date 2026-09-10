@@ -1,5 +1,12 @@
 # Changelog
 
+# r1.6.2 - 2026-07-21
+
+- get_fast_samples: fix stale first-sample bug
+
+- get_fast_samples: don't always return samples from module 1, even when other
+  module numbers are supplied
+
 # r1.6.1 - 2026-07-03
 
 - set_amplitude_limit: correct unit scaling. The previous conversion resulted

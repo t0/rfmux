@@ -48,12 +48,14 @@ stamp:
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of the
   pipes those channels are on
 
-The pulse capture spends its noise-training span (5 s by default) before
-it detects anything, so the parser and the fastrx writer start when that
-span ends and run for `--duration`; the parser process is launched at
-once so it is listening by then. `--no-capture`, `--no-parser` and
-`--no-fastrx` leave a product out; without the capture the others start
-as soon as the parser listens. `--parser-interface` names the 1G
+The parser is brought up first (its process takes a few seconds to
+import), then the capture starts. It spends its noise-training span
+(5 s by default) before it detects anything, so the fastrx writer starts
+when that span ends and runs for `--duration`: the capture and the
+recording cover the same stretch, and the dirfile that stretch plus the
+training span. `--no-capture`, `--no-parser` and `--no-fastrx` leave a
+product out; without the capture the recording starts as soon as the
+parser is up. `--parser-interface` names the 1G
 interface when the board's address does not find it; `--fastrx-interface`
 names the 100G NIC when several fastrxd run. The command exits 1 after a
 run with a warning: no channel-stream packets (the channel streamer is

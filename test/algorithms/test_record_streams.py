@@ -1,12 +1,14 @@
-"""record_streams: the coordination (side recorders start when the
-capture's noise training ends and run for the duration), the session
-folder, and the bias export lookup.  The last test drives the real thing
-against a MockCRS, with the parser as a subprocess.
+"""record_streams: the coordination (the parser is up before the capture
+starts; the recording window opens when noise training ends and lasts
+the duration), the session folder, and the bias export lookup.  The
+last test drives the real thing against a MockCRS, with the parser as a
+subprocess.
 """
 
 import asyncio
 import pickle
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,11 +34,15 @@ class _Board:
 
     async def trigger_capture(self, **kw):
         self.calls.append(kw)
+        self.t_started = time.time()
         await asyncio.sleep(TRAIN_S)
-        if self.dies:
+        if self.dies == "before training":
             raise RuntimeError("stream ended")
         kw["on_noise"]({})
         self.t_trained = time.time()
+        if self.dies == "after training":
+            await asyncio.sleep(kw["time_run"] / 4)
+            raise RuntimeError("disk full")
         await asyncio.sleep(kw["time_run"])
         return "capture-result"
 
@@ -53,9 +59,13 @@ def fake_recorders(monkeypatch):
         dirfile.mkdir()
         (dirfile / "serial_0042").mkdir()
         logfile.write_text("")
-        ready = asyncio.Event()
-        asyncio.get_running_loop().call_later(PARSER_UP_S, ready.set)
-        return rs._Parser(None, ready, None)
+        handle = rs._Parser(SimpleNamespace(returncode=None), asyncio.Event(), None)
+
+        def up():
+            handle.up = True
+            handle.ready.set()
+        asyncio.get_running_loop().call_later(PARSER_UP_S, up)
+        return handle
 
     async def stop(handle, result, dirfile, logfile):
         log["stop"] = time.time()
@@ -76,8 +86,9 @@ def test_the_window_opens_when_training_ends_and_lasts_the_duration(
         session=session, fastrx=False, verbose=False))
 
     log = fake_recorders
-    # The parser process is launched at once, so it is up in time.
+    # The parser is launched first and the capture waits until it is up.
     assert log["start"] == pytest.approx(t0, abs=0.05)
+    assert board.t_started == pytest.approx(t0 + PARSER_UP_S, abs=0.05)
     assert result.started_at == pytest.approx(board.t_trained, abs=0.05)
     assert log["stop"] - result.started_at == pytest.approx(DURATION_S, abs=0.1)
     assert log["cmd"] == ("127.0.0.1", None, 2, [1, 2, 3])
@@ -107,11 +118,78 @@ def test_without_a_capture_the_window_opens_once_the_parser_listens(
 def test_a_capture_that_never_trains_opens_no_window(tmp_path, fake_recorders):
     with pytest.raises(RuntimeError, match="stream ended"):
         asyncio.run(rs.record_streams(
-            _Board(dies=True), module=1, channels=[1], duration_s=DURATION_S,
+            _Board(dies="before training"), module=1, channels=[1],
+            duration_s=DURATION_S, session=rs.open_session(base=tmp_path),
+            fastrx=False, verbose=False))
+    # The parser was launched and is stopped again at once.
+    assert fake_recorders["stop"] - fake_recorders["start"] < (
+        PARSER_UP_S + TRAIN_S + 0.1)
+
+
+# A parser child without rfmux: up at once, a dirfile, and the real
+# parser's exit on SIGINT (its statistics, then exit).
+FAKE_PARSER = """
+import os, signal, sys, time
+print('parser up', file=sys.stderr, flush=True)
+a = sys.argv[1:]
+os.makedirs(os.path.join(a[a.index('-d') + 1], 'serial_0042'))
+def bye(*_):
+    print('=== Drop Statistics ===', file=sys.stderr, flush=True)
+    sys.exit(0)
+signal.signal(signal.SIGINT, bye)
+while True:
+    time.sleep(0.02)
+"""
+
+
+@pytest.fixture
+def fake_parser_child(monkeypatch):
+    monkeypatch.setattr(rs, "PARSER_CHILD", FAKE_PARSER)
+    monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
+
+
+def test_a_parser_that_dies_on_start_stops_the_run_before_the_capture(
+        tmp_path, fake_parser_child, monkeypatch):
+    monkeypatch.setattr(rs, "PARSER_CHILD",
+                        "import sys; sys.exit('no such interface')")
+    board = _Board()
+    with pytest.raises(RuntimeError, match="before it was up: no such interface"):
+        asyncio.run(rs.record_streams(
+            board, module=1, channels=[1], duration_s=DURATION_S,
             session=rs.open_session(base=tmp_path), fastrx=False,
             verbose=False))
-    # The parser process was launched and is stopped again at once.
-    assert fake_recorders["stop"] - fake_recorders["start"] < TRAIN_S + 0.1
+    assert board.calls == []
+
+
+def test_the_parser_subprocess_is_started_stopped_and_logged(
+        tmp_path, fake_parser_child):
+    board = _Board()
+    result = asyncio.run(rs.record_streams(
+        board, module=2, channels=[1, 2], duration_s=DURATION_S,
+        session=rs.open_session(base=tmp_path), fastrx=False, verbose=False))
+    assert result.dirfile_path.name == "serial_0042"
+    log = result.parser_log.read_text()
+    assert log.startswith("parser up") and "Drop Statistics" in log
+    assert result.started_at == pytest.approx(board.t_trained, abs=0.05)
+    assert result.warnings == []
+
+
+def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
+        tmp_path, fake_parser_child):
+    """The recording ends through its stop event, not by cancelling
+    the cleanup: the parser still gets its SIGINT and is reaped."""
+    session = rs.open_session(base=tmp_path)
+    t0 = time.time()
+    with pytest.raises(RuntimeError, match="disk full"):
+        asyncio.run(rs.record_streams(
+            _Board(dies="after training"), module=1, channels=[1],
+            duration_s=DURATION_S, session=session, fastrx=False,
+            verbose=False))
+    assert time.time() - t0 < PARSER_UP_S + TRAIN_S + DURATION_S
+    run = rs._load_metadata(session)["recordings"][0]
+    assert run["dirfile"].endswith("serial_0042")
+    log = (session / run["dirfile"]).parent.with_suffix(".log").read_text()
+    assert "Drop Statistics" in log
 
 
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
@@ -142,19 +220,24 @@ def test_an_existing_session_keeps_its_metadata(tmp_path):
     assert [e["filename"] for e in meta["exports"]] == ["x", "pulse_module2_1.h5"]
 
 
-def _bias_export(path, module, channels, calibrated=True):
+def _bias_export(path, module, channels, calibrated=True, timestamp=""):
     out = {c: {"bias_channel": c,
                "df_calibration": (complex(1e6 * c, -1e5) if calibrated else None)}
            for c in channels}
     with open(path, "wb") as f:
-        pickle.dump({"target_module": module, "bias_kids_output": out}, f)
+        pickle.dump({"target_module": module, "timestamp": timestamp,
+                     "bias_kids_output": out}, f)
 
 
 def test_newest_bias_export_for_the_module_gives_channels_and_calibrations(tmp_path):
-    _bias_export(tmp_path / "bias_module2_100000.pkl", 2, [1, 2, 3])
-    _bias_export(tmp_path / "bias_module1_110000.pkl", 1, [7])
-    time.sleep(0.01)
-    _bias_export(tmp_path / "bias_module2_120000.pkl", 2, [4, 5], calibrated=False)
+    # Written newest first: a copied folder keeps no file times, so the
+    # export's own timestamp decides.
+    _bias_export(tmp_path / "bias_module2_120000.pkl", 2, [4, 5], calibrated=False,
+                 timestamp="2026-09-09T12:00:00")
+    _bias_export(tmp_path / "bias_module1_110000.pkl", 1, [7],
+                 timestamp="2026-09-09T11:00:00")
+    _bias_export(tmp_path / "bias_module2_100000.pkl", 2, [1, 2, 3],
+                 timestamp="2026-09-09T10:00:00")
 
     newest = rs.latest_bias_export(tmp_path, 2)
     assert newest.name == "bias_module2_120000.pkl"
@@ -197,7 +280,8 @@ def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch
 def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     """The real coordination: trigger_capture on the mock's slow stream
     and the parser as a subprocess, both products in the session, the
-    dirfile starting after the capture's training span."""
+    window opening after the capture's training span and the dirfile
+    covering training and window."""
     pytest.importorskip("pygetdata")
     from rfmux.streamer import check_multicast_loopback
     if not check_multicast_loopback().ok:
@@ -232,7 +316,10 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
         rate = float(reader.metadata["sample_rate_slow"])
     assert result.dirfile_path.name == "serial_0000"
     df = gd.dirfile(str(result.dirfile_path), gd.RDONLY)
-    assert df.nframes == pytest.approx(duration * rate, rel=0.3)
+    # The parser drops the batch in flight when it is stopped, up to
+    # 256 packets.
+    assert (duration * rate <= df.nframes
+            <= (result.training_s + duration) * rate + 256)
     assert "Drop Statistics" in result.parser_log.read_text()
 
     meta = rs._load_metadata(result.session)

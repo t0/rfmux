@@ -3,11 +3,13 @@ Record one module's slow stream (a pulse capture and a parser dirfile)
 and its channel stream (a fastrx recording) together, into one session
 folder.  ``rfmux record`` is the command-line front.
 
-The board is only read: configure the streamers first.  The pulse
-capture spends its noise-training span before it detects anything, so
-the parser and the fastrx writer start when that span ends and run for
-the capture's duration; the three products then cover the same stretch.
-Without the capture they start at once.
+The board is only read: configure the streamers first.  The parser
+process is brought up first (it takes seconds to import), then the
+capture starts; it spends its noise-training span before it detects
+anything, so the fastrx writer starts when that span ends and runs for
+the capture's duration.  The capture and the recording then cover the
+same stretch, and the dirfile that stretch plus the training span.
+Without the capture the recording starts as soon as the parser is up.
 
 Products follow the Periscope session convention, one folder
 ``session_YYYYMMDD_HHMMSS/`` holding ``<type>_module<M>_HHMMSS.<ext>``
@@ -46,9 +48,9 @@ METADATA_FILE = "session_metadata.json"
 FASTRX_BYTES_PER_PIPE_S = 1.5e9
 PARSER_EXIT_S = 10.0
 #: The parser as a child: it says so on stderr once imported, which is
-#: seconds after launch, and the recording window waits for that.
+#: seconds after launch; nothing else starts before that.
 PARSER_CHILD = ("import sys; from rfmux.tools import parser; "
-                "print('listening', file=sys.stderr, flush=True); "
+                "print('parser up', file=sys.stderr, flush=True); "
                 "sys.exit(parser.main(*sys.argv[1:]))")
 
 
@@ -102,15 +104,16 @@ def register_export(session: Path, filename: str, data_type: str,
 
 
 def latest_bias_export(session: Path, module: int) -> Optional[Path]:
-    """The newest bias_kids export for *module* in the session."""
-    session = Path(session)
-    for path in sorted(session.glob("bias_*.pkl"),
-                       key=lambda p: p.stat().st_mtime, reverse=True):
+    """The newest bias_kids export for *module* in the session, by the
+    export's own timestamp (a copied folder keeps no file times)."""
+    found = []
+    for path in Path(session).glob("bias_*.pkl"):
         with open(path, "rb") as f:
             export = pickle.load(f)
         if export.get("target_module") == module:
-            return path
-    return None
+            found.append((str(export.get("timestamp", "")),
+                          path.stat().st_mtime, path))
+    return max(found)[2] if found else None
 
 
 def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, complex]]:
@@ -144,8 +147,9 @@ def channel_spec(channels: Iterable[int]) -> str:
 @dataclass
 class _Parser:
     proc: object
-    ready: asyncio.Event
+    ready: asyncio.Event          # set once up, or once exited
     pump: Optional[asyncio.Task]
+    up: bool = False
 
 
 @dataclass
@@ -155,8 +159,8 @@ class RecordResult:
     channels: List[int]
     duration_s: float
     training_s: float
-    #: When the parser and fastrx writer started: the end of noise
-    #: training, or the start of the run without a capture.
+    #: When the recording window opened: the end of noise training, or
+    #: once the parser was up without a capture.
     started_at: Optional[float] = None
     pulse_path: Optional[Path] = None
     #: The parser's subdirfile for the board, the path the viewer takes.
@@ -252,6 +256,7 @@ async def record_streams(
         return session / f"{kind}_module{module}_{stamp}{ext}"
 
     started = asyncio.Event()
+    stop = asyncio.Event()
     trained = False
 
     def on_noise(*_):
@@ -273,35 +278,22 @@ async def record_streams(
             started.set()      # a capture that dies never trains
 
     async def run_side():
-        # The parser process takes seconds to import; it comes up during
-        # noise training and the window waits for it to listen.
-        handle = None
+        await started.wait()
+        if capture and not trained:
+            result.warnings.append(
+                "the capture ended before noise training completed; "
+                "nothing was recorded")
+            return
+        result.started_at = time.time()
         writer = None
         try:
-            if parser:
-                result.parser_log = name("parser", ".log")
-                handle = await _start_parser(
-                    host, parser_interface, module, channels,
-                    name("parser", ".dirfile"), result.parser_log)
-            await started.wait()
-            if capture and not trained:
-                result.warnings.append(
-                    "the capture ended before noise training completed; "
-                    "nothing else was recorded")
-                return
-            if handle is not None:
-                await handle.ready.wait()
-            result.started_at = time.time()
             if fastrx:
                 result.fastrx_path = name("fastrx", ".fastrx")
                 writer = fx.PacketWriter(
                     result.fastrx_path, pipes=pipes,
                     interface=fastrx_interface, socket=fastrx_socket)
             say(f"[record] recording for {duration_s:.1f} s")
-            if writer is not None:
-                await asyncio.to_thread(writer.wait, duration_s)
-            else:
-                await asyncio.sleep(duration_s)
+            await _hold(duration_s, stop, writer)
         finally:
             if writer is not None:
                 await asyncio.to_thread(writer.stop)
@@ -312,25 +304,76 @@ async def record_streams(
                     result.warnings.append(
                         f"no channel-stream packets on pipe(s) {pipes}: "
                         f"is the channel streamer on for module {module}?")
-            if handle is not None:
-                await _stop_parser(handle, result, name("parser", ".dirfile"),
-                                   result.parser_log)
 
-    if not capture:
-        started.set()
-        trained = True
-    tasks = [asyncio.ensure_future(run_side())]
-    if capture:
-        tasks.insert(0, asyncio.ensure_future(run_capture()))
+    handle = None
+    tasks: List[asyncio.Task] = []
     try:
-        await asyncio.gather(*tasks)
+        if parser:
+            result.parser_log = name("parser", ".log")
+            handle = await _start_parser(
+                host, parser_interface, module, channels,
+                name("parser", ".dirfile"), result.parser_log)
+            await handle.ready.wait()
+            if not handle.up:
+                await handle.proc.wait()
+                raise RuntimeError("the parser exited before it was up: "
+                                   + _log_tail(result.parser_log))
+        if not capture:
+            started.set()
+            trained = True
+        else:
+            tasks.append(asyncio.ensure_future(run_capture()))
+        tasks.append(asyncio.ensure_future(run_side()))
+        # A failure in one ends the other: the recording through the
+        # stop event, so its cleanup runs whole; the capture by cancel,
+        # which closes its file.
+        try:
+            done, _ = await asyncio.wait(
+                tasks, return_when=asyncio.FIRST_EXCEPTION)
+            if any(t.exception() for t in done if not t.cancelled()):
+                stop.set()
+                for t in tasks[:-1]:
+                    t.cancel()
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            raise
+        finally:
+            await asyncio.gather(*tasks, return_exceptions=True)
     finally:
-        for t in tasks:
-            t.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        if handle is not None:
+            await _stop_parser(handle, result, name("parser", ".dirfile"),
+                               result.parser_log)
         _record(result, config)
+    for t in tasks:
+        t.result()
     say(f"[record] {result!r}")
     return result
+
+
+async def _hold(duration_s: float, stop: asyncio.Event, writer) -> None:
+    """The recording window: *duration_s*, or until *stop*; a writer's
+    failure surfaces within half a second."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + duration_s
+    while not stop.is_set():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return
+        if writer is not None:
+            await asyncio.to_thread(writer.wait, min(remaining, 0.5))
+        else:
+            try:
+                await asyncio.wait_for(stop.wait(), remaining)
+            except asyncio.TimeoutError:
+                return
+
+
+def _log_tail(log: Path) -> str:
+    try:
+        return " | ".join(Path(log).read_text().strip().splitlines()[-3:])
+    except OSError:
+        return ""
 
 
 async def _start_parser(host, interface, module, channels, dirfile, log) -> _Parser:
@@ -341,18 +384,20 @@ async def _start_parser(host, interface, module, channels, dirfile, log) -> _Par
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE)
-    ready = asyncio.Event()
+    handle = _Parser(proc, asyncio.Event(), None)
 
     async def pump():
         with open(log, "wb") as f:
             while line := await proc.stderr.readline():
                 f.write(line)
                 f.flush()
-                if line.startswith(b"listening"):
-                    ready.set()
-        ready.set()                 # exited, listening or not
+                if line.startswith(b"parser up"):
+                    handle.up = True
+                    handle.ready.set()
+        handle.ready.set()
 
-    return _Parser(proc, ready, asyncio.ensure_future(pump()))
+    handle.pump = asyncio.ensure_future(pump())
+    return handle
 
 
 async def _stop_parser(handle: _Parser, result, dirfile, log):
@@ -370,10 +415,9 @@ async def _stop_parser(handle: _Parser, result, dirfile, log):
     if subdirs:
         result.dirfile_path = subdirs[0]
     else:
-        tail = Path(log).read_text().strip().splitlines()[-3:]
+        tail = _log_tail(log)
         result.warnings.append(
-            "the parser wrote no dirfile" + (": " + " | ".join(tail) if tail
-                                             else ""))
+            "the parser wrote no dirfile" + (": " + tail if tail else ""))
 
 
 def _record(result: RecordResult, config: PulseCaptureConfig) -> None:

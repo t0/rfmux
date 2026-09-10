@@ -31,7 +31,7 @@ from PyQt6 import QtWidgets  # noqa: E402
 from test.qt_helpers import spin, spin_until  # noqa: E402
 
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
-from rfmux.core.resonators import ResonatorCatalog, on_grid  # noqa: E402
+from rfmux.core.resonators import on_grid  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
 from rfmux.tuning import store  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
@@ -52,7 +52,6 @@ from rfmux.tools.periscope.tasks import (  # noqa: E402
 )
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
 from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
-    HAND_ADDED,
     NetworkAnalysisPanel,
 )
 
@@ -328,8 +327,7 @@ def test_find_resonances_finds_the_array_through_the_real_task(board, qt_app):
     search = _search_on(panel, catalog.module, qt_app)
 
     assert len(search.candidates) == 7
-    assert panel.resonance_freqs[catalog.module] == pytest.approx(
-        list(search.resonance_frequencies_hz))
+    assert panel.resonance_searches[catalog.module] is search
     # One dashed line per kept resonance, on both plots.
     plot_info = panel.plots[catalog.module]
     assert len(plot_info["resonance_lines_mag"]) == 7
@@ -409,9 +407,9 @@ def test_a_search_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_dir
     assert list(output_directory.glob("*.pkl")) == []
 
 
-#: A frequency inside the swept band, far enough from the array's resonances
-#: that it reads as a mark the operator made rather than one of them.
-BY_HAND_HZ = FMAX - 1.3e6
+#: Between two of the array's resonances, so accepting here is the operator
+#: marking a place the finder had no candidate for rather than one of its hits.
+BETWEEN_RESONANCES_HZ = 1.05e9
 
 
 def _searched_panel(crs, catalog, qt_app):
@@ -421,115 +419,131 @@ def _searched_panel(crs, catalog, qt_app):
     return panel
 
 
-def test_there_is_nothing_to_hand_over_before_a_search(board, qt_app):
-    """A sweep needs an array, and a netanal on its own is not one."""
-    _, crs, catalog = board
-    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=200)
-
-    assert panel.catalog_for_module(catalog.module) is None
+def _block_search(panel, module):
+    """The search as the netanal block holds it -- what a file would carry."""
+    return ResonanceSearch.from_dict(
+        netanal_trace(panel._module_block(module))["resonance_search"])
 
 
-def test_take_multisweep_names_the_array_it_hands_over(board, qt_app):
-    """What crosses from netanal to multisweep is a ``ResonatorCatalog``: the
-    search's anonymous dips, named, channelled in frequency order and put on
-    the tone grid at the amplitude the netanal probed them at."""
+def test_removing_a_resonance_rejects_it_rather_than_deleting_it(board, qt_app):
+    """Double-clicking a resonance off the plot is the last rejection pass, and
+    it works like the automatic ones: the candidate keeps everything the finder
+    measured, gains a reason, and stays in the search as a record of the
+    decision. Nothing found is thrown away."""
     _, crs, catalog = board
     panel = _searched_panel(crs, catalog, qt_app)
     search = panel.resonance_searches[catalog.module]
+    found = len(search.candidates)
+    dropped = sorted(search.resonance_frequencies_hz)[0]
 
-    array = panel.catalog_for_module(catalog.module)
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert len(search.candidates) == found - 1
+    assert dropped not in search.resonance_frequencies_hz
+    gone, = [c for c in search.rejected if c.frequency_hz == dropped]
+    assert gone.rejected_because == ResonanceSearch.BY_HAND
+    assert f"{found - 1} resonances" in (
+        panel.plots[catalog.module]["amp_plot"].getPlotItem().titleLabel.text)
+
+
+def test_accepting_a_rejected_resonance_puts_it_back_as_found(board, qt_app):
+    """The other direction, so a double-click is undoable: a candidate that was
+    rejected -- by hand or by a threshold -- comes back with the depth, width
+    and Q the finder measured, not as a fresh guess."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    dropped = sorted(search.resonance_frequencies_hz)[0]
+    panel._remove_resonance(catalog.module, dropped)
+    rejected, = [c for c in search.rejected if c.frequency_hz == dropped]
+
+    panel._add_resonance(catalog.module, dropped)
+
+    restored, = [c for c in search.candidates if c.frequency_hz == dropped]
+    assert restored.accepted
+    assert (restored.depth_db, restored.width_hz, restored.q_estimate) == (
+        rejected.depth_db, rejected.width_hz, rejected.q_estimate)
+    assert dropped not in [c.frequency_hz for c in search.rejected]
+
+
+def test_adding_a_resonance_measures_it_off_the_searched_trace(board, qt_app):
+    """A place the finder had no candidate for becomes an accepted candidate
+    carrying the same numbers a found one does -- prominence and width read off
+    the trace the search holds -- so it plots and filters like any other, and
+    lands on the grid that was searched rather than wherever the click was."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    found = len(search.candidates)
+
+    panel._add_resonance(catalog.module, BETWEEN_RESONANCES_HZ)
+
+    assert len(search.candidates) == found + 1
+    added = min(search.candidates,
+                key=lambda c: abs(c.frequency_hz - BETWEEN_RESONANCES_HZ))
+    assert added.accepted
+    # On the grid that was searched, within a point of where it was asked for.
+    assert added.frequency_hz == search.frequencies_hz[added.index]
+    assert abs(added.frequency_hz - BETWEEN_RESONANCES_HZ) <= 2 * abs(
+        np.mean(np.diff(search.frequencies_hz)))
+
+
+def test_an_edit_by_hand_updates_the_file_the_search_is_in(board, qt_app, output_directory):
+    """A search lives in the netanal it searched, so an edit to it leaves that
+    file out of date by exactly that much: the same file is rewritten, and no
+    second file appears beside it -- least of all a catalog, which multisweep
+    records in its own output."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    path = panel.save_netanal()
+    dropped = sorted(panel.resonance_searches[catalog.module]
+                     .resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
+    stored = ResonanceSearch.from_dict(
+        netanal_trace(store.load(path)[crs.module[catalog.module].index()])
+        ["resonance_search"])
+    assert dropped not in stored.resonance_frequencies_hz
+    assert dropped in [c.frequency_hz for c in stored.rejected]
+
+
+def test_an_edit_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_directory):
+    """Saving stays the Save button's job and the session's, as it is for the
+    search itself."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    dropped = sorted(panel.resonance_searches[catalog.module]
+                     .resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert list(output_directory.glob("*.pkl")) == []
+    assert dropped in [c.frequency_hz
+                       for c in _block_search(panel, catalog.module).rejected]
+
+
+def test_take_multisweep_names_the_accepted_candidates(board, qt_app):
+    """What crosses from netanal to multisweep is a ``ResonatorCatalog`` built
+    with ``to_catalog``: the search's accepted dips, named, channelled in
+    frequency order, at the amplitude the netanal probed them at. It is not
+    written anywhere of its own -- multisweep records the catalog it swept."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    panel._remove_resonance(catalog.module,
+                            sorted(search.resonance_frequencies_hz)[0])
+
+    array = search.to_catalog(module=catalog.module, amplitude=0.001)
 
     assert array.module == catalog.module
     assert len(array) == len(search.candidates)
     names = array.names()
     assert [array[n].bias.frequency_hz for n in names] == pytest.approx(
-        sorted(on_grid(f) for f in search.resonance_frequencies_hz))
+        [on_grid(f) for f in sorted(search.resonance_frequencies_hz)])
     assert {array[n].bias.amplitude for n in names} == {0.001}
     assert [array[n].channel for n in names] == list(range(1, len(names) + 1))
-
-
-def test_the_catalog_is_kept_until_the_seed_list_changes(board, qt_app):
-    """A name keys every result dict a sweep produces, and drawing fresh names
-    is what ``from_frequencies`` does, so a cancelled dialog and a second press
-    must get the array as it was -- and an edited list must not."""
-    _, crs, catalog = board
-    panel = _searched_panel(crs, catalog, qt_app)
-
-    first = panel.catalog_for_module(catalog.module)
-    assert panel.catalog_for_module(catalog.module) is first
-
-    panel._add_resonance(catalog.module, BY_HAND_HZ)
-    second = panel.catalog_for_module(catalog.module)
-
-    assert second is not first
-    assert len(second) == len(first) + 1
-
-
-def test_a_hand_added_resonance_says_so_in_the_catalog(board, qt_app):
-    """A dip the operator marked is the same thing as a found one to the sweep
-    that measures it, and a different thing to whoever reads the file later."""
-    _, crs, catalog = board
-    panel = _searched_panel(crs, catalog, qt_app)
-
-    panel._add_resonance(catalog.module, BY_HAND_HZ)
-    array = panel.catalog_for_module(catalog.module)
-
-    marked = [n for n in array.names()
-              if array[n].notes.get("origin") == HAND_ADDED]
-    assert len(marked) == 1
-    assert array[marked[0]].bias.frequency_hz == on_grid(BY_HAND_HZ)
-
-
-def test_a_removed_resonance_leaves_the_catalog(board, qt_app):
-    """Double-clicking a line off the plot is an edit to the array that will be
-    swept, not to the search that found it."""
-    _, crs, catalog = board
-    panel = _searched_panel(crs, catalog, qt_app)
-    search = panel.resonance_searches[catalog.module]
-    dropped = sorted(search.resonance_frequencies_hz)[0]
-
-    panel._remove_resonance(catalog.module, dropped)
-    array = panel.catalog_for_module(catalog.module)
-
-    assert len(array) == len(search.candidates) - 1
-    assert on_grid(dropped) not in [array[n].bias.frequency_hz
-                                   for n in array.names()]
-
-
-def test_a_catalog_lands_in_the_session_folder(board, qt_app, tmp_path):
-    """The array a sweep was asked for is a record of its own, beside the
-    netanal it came from: it carries the names the sweep's results are keyed by
-    and the hand-added resonances the netanal's search does not have."""
-    _, crs, catalog = board
-    panel = _searched_panel(crs, catalog, qt_app)
-    panel.current_params["label"] = "an array"
-    panel._add_resonance(catalog.module, BY_HAND_HZ)
-
-    manager = SessionManager()
-    manager.start_session(str(tmp_path), "session_under_test")
-    periscope = _periscope_with(manager)
-    panel.catalog_minted.connect(
-        lambda module: periscope._save_catalog_to_session(panel, module))
-    registered = []
-    manager.file_exported.connect(
-        lambda path, data_type: registered.append((path, data_type)))
-    try:
-        array = panel.catalog_for_module(catalog.module)
-    finally:
-        session_path = Path(manager.session_path or tmp_path / "session_under_test")
-        manager.end_session()
-
-    written = list(session_path.glob("catalog_*.pkl"))
-    assert len(written) == 1
-    assert written[0].name.endswith(f"_an_array_module{catalog.module}.pkl")
-    assert registered == [(str(written[0]), "catalog")]
-
-    reloaded = ResonatorCatalog.from_dict(store.load(written[0]))
-    assert reloaded.names() == array.names()
-    assert [reloaded[n].bias.frequency_hz for n in reloaded.names()] == pytest.approx(
-        [array[n].bias.frequency_hz for n in array.names()])
-    assert [reloaded[n].notes for n in reloaded.names()] == [
-        array[n].notes for n in array.names()]
 
 
 def _periscope_with(session_manager=None):
@@ -604,7 +618,8 @@ def test_a_saved_netanal_loads_back_into_a_panel(board, qt_app, output_directory
     assert np.array_equal(drawn_freqs, measured["frequencies"])
     assert np.array_equal(
         loaded.netanal_traces[catalog.module]["iq_counts"], measured["iq_counts"])
-    assert loaded.resonance_freqs[catalog.module] == pytest.approx(
+    assert list(loaded.resonance_searches[catalog.module]
+                .resonance_frequencies_hz) == pytest.approx(
         list(search.resonance_frequencies_hz))
 
 

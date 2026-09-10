@@ -6,6 +6,8 @@ dips come back, close pairs are only merged when asked for, and anything the
 finder discards is reported rather than silently dropped.
 """
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -16,6 +18,7 @@ from rfmux.tuning import (
     find_resonances_in_netanal,
     find_sweeps_with_nearby_resonances,
     netanal_trace,
+    record_search,
 )
 from rfmux.tuning.sweep_results import pack_netanal
 
@@ -652,6 +655,148 @@ def test_searching_again_replaces_the_search_that_was_there():
 
 def test_an_unsearched_netanal_simply_has_no_search_in_it():
     assert "resonance_search" not in netanal_trace(a_module_netanal())
+
+
+# ─── editing a search by hand ─────────────────────────────────────────────────
+#
+# The operator is the last rejection pass: what they drop is rejected with a
+# reason rather than deleted, so the search stays the whole record of what was
+# found and either edit undoes the other.
+
+
+def test_rejecting_by_hand_keeps_the_candidate_and_its_reason():
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+    doomed = found.candidates[1]
+
+    rejected = found.reject(doomed.frequency_hz)
+
+    assert len(found.candidates) == len(TRUTH) - 1
+    assert found.rejected == [rejected]
+    assert rejected.rejected_because == ResonanceSearch.BY_HAND
+    # Everything the finder measured about it, unchanged.
+    assert replace(rejected, rejected_because=None) == doomed
+
+
+def test_rejecting_takes_the_nearest_accepted_candidate():
+    """A click lands near a resonance, not on its exact sample."""
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+
+    rejected = found.reject(TRUTH[2] + 3e3)
+
+    assert rejected.frequency_hz == pytest.approx(TRUTH[2], abs=1e3)
+
+
+def test_rejecting_with_nothing_accepted_says_so():
+    found = find_resonances(*a_sweep(resonances=()), min_Q=1e4, max_Q=1e6,
+                            label="module 2")
+
+    with pytest.raises(ValueError, match="module 2 has no accepted candidates"):
+        found.reject(1.05e9)
+
+
+def test_accepting_restores_a_rejected_candidate_as_found():
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+    doomed = found.candidates[1]
+    found.reject(doomed.frequency_hz)
+
+    restored = found.accept(doomed.frequency_hz)
+
+    assert restored == doomed
+    assert found.rejected == []
+    assert len(found.candidates) == len(TRUTH)
+
+
+def test_accepting_a_threshold_rejection_is_the_same_move():
+    """Nothing marks a by-hand rejection as the only reversible kind: a
+    candidate the collision cut threw out comes back the same way."""
+    frequencies, magnitude = a_close_pair()
+    found = find_resonances(frequencies, magnitude, min_separation_hz=400e3)
+    assert len(found.candidates) == 0 and len(found.rejected) == 2
+    cut = found.rejected[0]
+
+    restored = found.accept(cut.frequency_hz)
+
+    assert restored == replace(cut, rejected_because=None)
+    assert len(found.rejected) == 1
+
+
+def test_accepting_somewhere_new_measures_the_trace_there():
+    """A resonance the finder had no candidate for carries the numbers a found
+    one does, read off the same trace with the same scipy calls."""
+    shallow_at = 1.05e9
+    frequencies, magnitude = a_sweep(
+        resonances=TRUTH + (shallow_at,),
+        qs=(2e4, 3e4, 2.5e4, 4e4, 3e4),
+        depths=[0.7] * 4 + [0.02],
+    )
+    found = find_resonances(frequencies, magnitude, min_Q=1e4, max_Q=1e6)
+    assert len(found.candidates) == len(TRUTH)   # the shallow one is under the floor
+
+    added = found.accept(shallow_at)
+
+    assert added.accepted
+    assert added.frequency_hz == pytest.approx(shallow_at, abs=2e3)
+    assert added.depth_db == pytest.approx(0.18, abs=0.05)
+    assert added.q_estimate == pytest.approx(3e4, rel=0.2)
+
+
+def test_an_accepted_candidate_lands_on_the_searched_grid():
+    """Not wherever the click was: a candidate indexes the trace, so its
+    frequency has to be a point of it."""
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+
+    added = found.accept(1.05e9 + 137.0)
+
+    assert added.frequency_hz == found.frequencies_hz[added.index]
+
+
+def test_accepted_candidates_stay_in_frequency_order():
+    """``candidates`` is documented as ordered, and ``to_catalog`` numbers
+    channels off it."""
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+
+    found.accept(1.01e9)
+    found.accept(1.07e9)
+
+    frequencies = [c.frequency_hz for c in found.candidates]
+    assert frequencies == sorted(frequencies)
+
+
+def test_accepting_where_one_is_already_accepted_says_so():
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+    already = found.candidates[0].frequency_hz
+
+    with pytest.raises(ValueError, match="already an accepted resonance"):
+        found.accept(already)
+
+
+def test_a_hand_edited_search_round_trips_through_builtins():
+    """The edits are candidates like any other, so the file needs no new keys
+    and reads back with the reason the operator's rejection carries."""
+    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
+    found.reject(TRUTH[0])
+    found.accept(1.05e9)
+
+    restored = ResonanceSearch.from_dict(found.to_dict())
+
+    assert restored.candidates == found.candidates
+    assert restored.rejected == found.rejected
+    assert restored.rejected[0].rejected_because == ResonanceSearch.BY_HAND
+
+
+def test_a_hand_edit_is_recorded_in_the_netanal_it_searched():
+    """``record_search`` is how an edit reaches the measurement, the same way
+    the search itself got there."""
+    module_netanal = a_module_netanal()
+    found = find_resonances_in_netanal(module_netanal, save=False)
+    found.reject(found.candidates[0].frequency_hz)
+
+    record_search(module_netanal, found, save=False)
+
+    stored = ResonanceSearch.from_dict(
+        netanal_trace(module_netanal)["resonance_search"])
+    assert stored.candidates == found.candidates
+    assert stored.rejected == found.rejected
 
 
 # ─── handing the result onward ────────────────────────────────────────────────

@@ -32,9 +32,7 @@ class NetworkAnalysisExportMixin:
     - netanal_traces: module -> the trace take_netanal measured
     - netanal_container: the modules' outputs, keyed by module identifier
     - current_params: Dictionary of current analysis parameters
-    - resonance_freqs: Dictionary of resonance frequencies per module
-    - resonance_catalogs: module -> the ResonatorCatalog those were named into
-    - catalog_for_module: mints that catalog, or None if there is nothing to name
+    - resonance_searches: module -> the ResonanceSearch that names its resonances
     - plots: Dictionary of plot information per module
     - module_cable_lengths: Dictionary of cable lengths per module
     - cable_length_spin: QDoubleSpinBox for cable length adjustment
@@ -59,19 +57,6 @@ class NetworkAnalysisExportMixin:
             return None
         return store.save(self.netanal_container, "netanal",
                           label=self.current_params.get("label"))
-
-    def save_catalog(self, module: int) -> Optional[Path]:
-        """Write a module's catalog beside its netanal, and return where it went.
-
-        The module goes in the label because one panel can hold several, and
-        their catalogs are otherwise two files a second apart with the same name.
-        """
-        catalog = self.resonance_catalogs.get(module)
-        if catalog is None:
-            return None
-        name = self.current_params.get("label")
-        label = f"{name}_module{module}" if name else f"module{module}"
-        return store.save(catalog.to_dict(), "catalog", label=label)
 
     def _save_netanal_action(self) -> None:
         """The Save button: write the file, say where, and dialog only on failure."""
@@ -290,9 +275,8 @@ class NetworkAnalysisExportMixin:
                 self.take_multisweep_btn.setEnabled(False)
                 return
         
-        # Enable button if module has resonances
-        has_resonances = bool(self.resonance_freqs.get(module_id))
-        self.take_multisweep_btn.setEnabled(has_resonances)
+        search = self.resonance_searches.get(module_id)
+        self.take_multisweep_btn.setEnabled(bool(search and search.candidates))
 
     #
     # 4. Multisweep Dialog Management
@@ -312,14 +296,18 @@ class NetworkAnalysisExportMixin:
         if active_module is None:
             return
             
-        # The array to sweep, named. A multisweep is a measurement on a
-        # catalog, so this is what crosses the boundary; the frequency list the
-        # dialog shows is read back off it.
-        catalog = self.catalog_for_module(active_module)
-        if catalog is None:
+        # A multisweep measures a ResonatorCatalog, so the search's accepted
+        # candidates are named here, at the amplitude the netanal probed them
+        # at. The catalog is not a file of its own: multisweep records the one
+        # it swept in its own output, and the netanal holds the search it came
+        # from. The frequency list the dialog shows is read back off it.
+        search = self.resonance_searches.get(active_module)
+        amplitude = self.netanal_traces.get(active_module, {}).get('sweep_amplitude')
+        if not (search and search.candidates) or amplitude is None:
             self._show_status(
                 f"Module {active_module}: run Find Resonances first.", ok=False)
             return
+        catalog = search.to_catalog(module=active_module, amplitude=float(amplitude))
         resonances = [r.bias.frequency_hz for r in catalog]
         
         # Walk up parent hierarchy to find Periscope instance

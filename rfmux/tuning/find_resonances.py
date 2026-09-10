@@ -78,6 +78,7 @@ __all__ = [
     "ResonanceSearch",
     "find_resonances",
     "find_resonances_in_netanal",
+    "record_search",
     "find_sweeps_with_nearby_resonances",
     "netanal_trace",
     "magnitude_db",
@@ -174,6 +175,120 @@ class ResonanceSearch:
         """
         return ResonatorCatalog.from_frequencies(
             self.resonance_frequencies_hz, module=module, amplitude=amplitude, **kwargs
+        )
+
+    # -- editing by hand ------------------------------------------------------
+    #
+    # An operator looking at the trace is the last pass, and it works the way
+    # the automatic ones do: a resonance is dropped by being rejected with a
+    # reason, never by being deleted. So the search stays the whole record of
+    # what was found and what was decided about it, `rejected` still explains
+    # every dip that is not being swept, and either edit can be undone by the
+    # other.
+
+    #: Why a candidate the finder accepted is not being swept.
+    BY_HAND = "removed by hand"
+
+    def reject(self, frequency_hz: float, *,
+               reason: str = BY_HAND) -> ResonanceCandidate:
+        """Reject the accepted candidate nearest *frequency_hz*, and return it.
+
+        It keeps everything the finder measured about it and gains a reason;
+        :meth:`accept` at the same frequency puts it back.
+
+        Raises:
+            ValueError: if nothing is accepted to reject.
+        """
+        if not self.candidates:
+            raise ValueError(
+                f"{self.label or 'This search'} has no accepted candidates."
+            )
+        nearest = min(self.candidates,
+                      key=lambda c: abs(c.frequency_hz - frequency_hz))
+        self.candidates.remove(nearest)
+        rejected = replace(nearest, rejected_because=reason)
+        self.rejected.append(rejected)
+        return rejected
+
+    def accept(self, frequency_hz: float) -> ResonanceCandidate:
+        """Accept a resonance at *frequency_hz*, and return the candidate.
+
+        A candidate the finder rejected -- by a threshold or by hand -- comes
+        back exactly as it was found. Anywhere else a new candidate is measured
+        off the trace this search holds, at its nearest point, with the same
+        scipy prominence and width the finder read: a resonance added by hand
+        carries the same numbers as a found one rather than blanks, and one
+        added where there is no dip says so in a ``depth_db`` near zero.
+
+        The frequency lands on the searched grid and nowhere else, within one
+        point of where it was asked for -- see :meth:`_nearest_point` for the
+        nudge and why it is one point and not a search for the nearest dip.
+
+        Raises:
+            ValueError: if a candidate is already accepted at that point.
+        """
+        index = self._nearest_point(frequency_hz)
+        for candidate in self.rejected:
+            if candidate.index == index:
+                self.rejected.remove(candidate)
+                return self._insert(replace(candidate, rejected_because=None))
+        if any(c.index == index for c in self.candidates):
+            raise ValueError(
+                f"{self.frequencies_hz[index] / 1e6:.6f} MHz is already an "
+                f"accepted resonance."
+            )
+        return self._insert(self._measured_at(index))
+
+    def _insert(self, candidate: ResonanceCandidate) -> ResonanceCandidate:
+        """Put a candidate back among the accepted, in frequency order."""
+        self.candidates.append(candidate)
+        self.candidates.sort(key=lambda c: c.frequency_hz)
+        return candidate
+
+    def _nearest_point(self, frequency_hz: float) -> int:
+        """Index of the searched grid point to accept a resonance at.
+
+        The point nearest *frequency_hz*, nudged by at most one to the bottom
+        of the dip it sits on. A dip's minimum generally falls *between* two
+        samples, so the nearest point to it is routinely not a local minimum of
+        the trace -- and scipy reads a prominence of zero anywhere but a local
+        minimum, which would leave a resonance accepted right on a dip
+        recording no depth and no width. One point is the whole allowance:
+        looking further for a dip means crossing smooth trace to reach a
+        resonance that was not being pointed at.
+        """
+        trace_db = np.asarray(self.magnitude_db)
+        index = int(np.argmin(
+            np.abs(np.asarray(self.frequencies_hz) - frequency_hz)))
+        # Ordered with the clicked point first, so it wins when it is a dip too.
+        nearby = [i for i in (index, index - 1, index + 1)
+                  if 0 < i < trace_db.size - 1]
+        dips = [i for i in nearby
+                if trace_db[i] < trace_db[i - 1] and trace_db[i] < trace_db[i + 1]]
+        return dips[0] if dips else index
+
+    def _measured_at(self, index: int) -> ResonanceCandidate:
+        """One candidate, measured at *index* the way :func:`find_resonances` does."""
+        trace_db = np.asarray(self.magnitude_db)
+        frequencies = np.asarray(self.frequencies_hz)
+        peaks = np.array([index])
+        with warnings.catch_warnings():
+            # A point that is not a local minimum has no prominence and no
+            # width. Zero is the right record for a resonance accepted where
+            # the trace shows no dip, so scipy saying so is not news here.
+            warnings.filterwarnings("ignore", message="some peaks have a")
+            prominence_data = signal.peak_prominences(-trace_db, peaks)
+            widths = signal.peak_widths(-trace_db, peaks,
+                                        prominence_data=prominence_data)
+        point_spacing_hz = float(np.mean(np.diff(frequencies)))
+        width_hz = float(widths[0][0]) * point_spacing_hz
+        frequency_hz = float(frequencies[index])
+        return ResonanceCandidate(
+            frequency_hz=frequency_hz,
+            index=index,
+            depth_db=float(prominence_data[0][0]),
+            width_hz=width_hz,
+            q_estimate=frequency_hz / width_hz if width_hz > 0 else np.inf,
         )
 
     # -- persistence ----------------------------------------------------------
@@ -727,6 +842,22 @@ def find_resonances_in_netanal(
         label=label or (f"module {module}" if module is not None else None),
         **kwargs,
     )
+    # label, not the derived one: a module number belongs in a warning, not in
+    # the name of a file that may hold seven other modules.
+    record_search(module_netanal, search, save=save, label=label)
+    return search
+
+
+def record_search(module_netanal, search: ResonanceSearch, *,
+                  save=None, label: str | None = None) -> None:
+    """Write *search* into one module's netanal output, and save the netanal.
+
+    What :func:`find_resonances_in_netanal` does with the search it just ran,
+    and what an edit by hand — :meth:`ResonanceSearch.accept`,
+    :meth:`ResonanceSearch.reject` — has to do afterwards: a search lives in
+    the netanal it searched, so one that has changed leaves the file holding it
+    out of date. ``save`` and ``label`` are as they are there.
+    """
     # In place, before the save: the netanal is what gets written, and the
     # search is now part of it.
     #
@@ -740,12 +871,9 @@ def find_resonances_in_netanal(
     # carries a second frequency array. Cheap enough either way not to trade for
     # a block that only means something to a reader who knows to put the arrays
     # back.
-    trace["resonance_search"] = search.to_dict()
-    # label, not the derived one: a module number belongs in a warning, not in
-    # the name of a file that may hold seven other modules. No module= either —
-    # a netanal's output records the module it measured.
+    netanal_trace(module_netanal)["resonance_search"] = search.to_dict()
+    # No module= — a netanal's output records the module it measured.
     store.maybe_save(module_netanal, "netanal", save=save, label=label)
-    return search
 
 
 # ─── Collided resonances inside a multisweep section ──────────────────────────

@@ -406,6 +406,36 @@ The separation cut only rejects pairs that the survey resolves as distinct dips.
 Detailed multisweeps can reveal closer neighbours. See
 `rfmux.tuning.find_sweeps_with_nearby_resonances` for checking those sweeps.
 
+### Edit the result by hand
+
+Looking at the trace is the last rejection pass. `reject()` moves the accepted
+candidate nearest a frequency into `rejected`, with a reason, rather than
+deleting it; `accept()` brings one back exactly as the finder measured it, or
+measures a new candidate off the searched trace where the finder had none. So
+the search stays the whole record of what is there and what was decided about
+it, and either edit undoes the other.
+
+An edit changes the object, not the file. `record_search()` writes it back into
+the netanal it searched, the same place the finder put it.
+
+```python
+from rfmux.tuning import record_search
+
+dropped = resonance_search.reject(resonance_search.candidates[0].frequency_hz)
+print(f"rejected {dropped.frequency_hz / 1e6:.6f} MHz: {dropped.rejected_because}")
+print(f"{len(resonance_search)} accepted, {len(resonance_search.rejected)} rejected")
+
+restored = resonance_search.accept(dropped.frequency_hz)
+print(f"back as the finder measured it: {restored.depth_db == dropped.depth_db}")
+
+record_search(module_netanal_outputs, resonance_search)
+```
+
+A resonance accepted where the finder had no candidate is measured at the
+nearest point of the searched grid, so it carries the same `depth_db`,
+`width_hz` and `q_estimate` a found one does. One that lands where there is no
+dip records zeros, which is the honest answer for it.
+
 ## 4. Build a resonator catalog
 
 `ResonanceSearch.to_catalog()` assigns each candidate a name, a channel, and an
@@ -439,5 +469,6 @@ shown here, rather than documenting the current internal implementation.
 | **Find Resonances** | `find_resonances_in_netanal(...)` |
 | Expected count, minimum depth, and Q limits | `expected_resonances`, `min_dip_depth_db`, `min_Q`, `max_Q` |
 | Resonance markers | `ResonanceSearch.candidates` |
+| Edit a search by hand | `ResonanceSearch.reject(...)` / `.accept(...)`, then `record_search(...)` |
 | Catalog for multisweep | `ResonanceSearch.to_catalog(...)` |
 

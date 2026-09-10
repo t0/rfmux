@@ -468,7 +468,20 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
     
     def _get_frequencies(self, payload, raw_section_centers = True):
-        """Extract section center frequencies from payload, optionally using fitted or sweep data."""
+        """Extract section center frequencies from payload, optionally using fitted or sweep data.
+
+        The fitted branch reads a legacy payload: ``fit_params['fr']`` and
+        ``nonlinear_fit_params['fr']`` off a ``results_by_detector`` or
+        ``results_by_iteration`` dict, gated on the ``apply_*_fit`` settings
+        that were recorded when the file was written. None of that is what
+        ``fit_sweeps`` produces -- parameters live at
+        ``entry["fits"][model]["params"]["fr"]``, and no file records whether
+        a fit was asked for, because a fit that ran is in the block. So when
+        stage 3 hooks fits up, this has to be rewritten against the new shape
+        rather than extended to cover both: the roadmap's "from fitted fr"
+        option in the stage 2 Re-run bullet is this control, and its source
+        becomes the panel's own ``module_sweeps``, not a re-opened file.
+        """
         
         params = payload['initial_parameters']
         freqs = params['resonance_frequencies']  # Legacy key name for backward compatibility

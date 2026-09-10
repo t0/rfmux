@@ -496,6 +496,19 @@ are now strict xfails that name the stage which clears them.
   `report.catalog`, so the re-run centres on the found bias frequencies at
   the found amplitudes without any history bookkeeping. A "from fitted fr"
   option follows the library item in §5.
+
+  **The control for it already exists and reads the old shape.** The dialog's
+  "Use resonance fit frequency" entry calls `_get_frequencies(payload,
+  raw_section_centers=False)`, which pulls `fit_params['fr']` and
+  `nonlinear_fit_params['fr']` out of a `results_by_detector` or
+  `results_by_iteration` payload, choosing between them by the `apply_*_fit`
+  settings recorded in the file. Every part of that is gone: `fit_sweeps`
+  writes `entry["fits"][model]["params"]["fr"]`, and a block does not record
+  whether a fit was *asked* for because a fit that ran is in it. When stage 3
+  hooks fits up, this is rewritten against the new shape and against the
+  panel's own `module_sweeps` rather than a re-opened file -- not extended to
+  read both. It is one of §8's precedence chains, and the response there is
+  deletion, not translation. Noted at the function.
 * **Files.** Save is `store.save(container, "multisweep", label=)` into the
   session folder; the catalog goes beside it. Load is `store.load` and
   `ResonatorCatalog.from_dict(block["call_params"]["catalog"])`, so a loaded

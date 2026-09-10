@@ -108,8 +108,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._step_amplitudes = {}
         self._set_amplitude_scale(self.initial_params.get('amp'))
 
-        # Data storage and state — detector-based format:
-        # {detector_id: {iteration_index: {all_detector_data_fields + amplitude, direction, iteration metadata}}}
+        # The legacy bias and noise lane's shape, filled only by update_data on
+        # the legacy load path and read only by that lane. Nothing draws it.
         self.results_by_detector = {}
         self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
         self.current_iteration_being_processed = None # Tracks the current iteration
@@ -117,27 +117,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
         
-        # Intermediate update data storage
-        self._current_intermediate_data = {}  # Stores intermediate data during sweep
-        self._intermediate_curves_mag = {}   # Stores {cf: PlotDataItem} for intermediate magnitude curves
-        self._intermediate_curves_phase = {} # Stores {cf: PlotDataItem} for intermediate phase curves
-
-        # Plot objects and related attributes
-        self.combined_mag_plot = None
-        self.combined_phase_plot = None
-        self.mag_legend = None
-        self.phase_legend = None
-        self.curves_mag = {}  # Stores {amplitude: {cf: PlotDataItem_mag}}
-        self.curves_phase = {} # Stores {amplitude: {cf: PlotDataItem_phase}}
-        
         # Module context for DAC scale lookup (can be different from target_module if needed)
         self.active_module_for_dac = self.target_module
 
-        # Center frequency line display
-        self.show_cf_lines_cb = None # Checkbox for toggling CF lines
-        self.cf_lines_mag = {}  # Stores {amplitude: [InfiniteLine_mag]}
-        self.cf_lines_phase = {} # Stores {amplitude: [InfiniteLine_phase]}
-        
         # Bias KIDs output storage
         self.bias_kids_output = None  # Stores the output from bias_kids algorithm
         self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
@@ -254,10 +236,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.normalize_checkbox)
 
         # Show Center Frequencies Checkbox
-        self.show_cf_lines_cb = QtWidgets.QCheckBox("Show Center Frequencies")
-        self.show_cf_lines_cb.setChecked(False) # Default to off
-        self.show_cf_lines_cb.toggled.connect(self._toggle_cf_lines_visibility)
-        toolbar_layout.addWidget(self.show_cf_lines_cb)
 
         self._setup_unit_controls(toolbar_layout)
         self._setup_zoom_box_control(toolbar_layout)
@@ -310,7 +288,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         toolbar_layout.addWidget(self.zoom_box_cb)
 
     def _setup_plot_area(self, layout):
-        """Sets up the tabbed plot area with aggregate and combined views."""
+        """Sets up the tabbed plot area: one grid per view."""
         # Create tab widget
         self.plot_tabs = QtWidgets.QTabWidget()
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
@@ -322,10 +300,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 1: IQ Circles (per-detector grid)
         self.iq_sweeps_tab, self.iq_sweeps_grid, self.iq_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
-        
-        # Tab 2: Combined Plots (original combined view)
-        self.combined_tab = self._create_combined_tab()
-        self.plot_tabs.addTab(self.combined_tab, "Combined Plots")
         
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
@@ -356,84 +330,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         return tab, grid, colorbar
         
-    def _create_combined_tab(self):
-        """Create the combined plots tab (original magnitude + phase plots)."""
-        tab = QtWidgets.QWidget()
-        plot_layout = QtWidgets.QVBoxLayout(tab)
-        plot_layout.setContentsMargins(5, 5, 5, 5)
-
-        # Amplitude colorbar (shown for >5 sweeps)
-        self.combined_colorbar = AmplitudeColorBar(tab)
-        plot_layout.addWidget(self.combined_colorbar)
-
-        # Magnitude Plot
-        vb_mag = ClickableViewBox()
-        vb_mag.parent_window = self
-        self.combined_mag_plot = pg.PlotWidget(viewBox=vb_mag)
-        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        plot_item_mag = self.combined_mag_plot.getPlotItem()
-        if plot_item_mag:
-            plot_item_mag.setTitle("Combined S21 Magnitude (All Resonances)", color=pen_color)
-            plot_item_mag.setLabel('bottom', 'Frequency', units='Hz')
-            plot_item_mag.showGrid(x=True, y=True, alpha=0.3)
-            legend_color = '#CCCCCC' if self.dark_mode else '#333333'
-            self.mag_legend = plot_item_mag.addLegend(offset=(10,-50),labelTextColor=legend_color)
-        self._update_mag_plot_label()
-        plot_layout.addWidget(self.combined_mag_plot)
-
-        # Phase Plot
-        vb_phase = ClickableViewBox()
-        vb_phase.parent_window = self
-        self.combined_phase_plot = pg.PlotWidget(viewBox=vb_phase)
-        plot_item_phase = self.combined_phase_plot.getPlotItem()
-        if plot_item_phase:
-            plot_item_phase.setTitle("Combined S21 Phase (All Resonances)", color=pen_color)
-            plot_item_phase.setLabel('bottom', 'Frequency', units='Hz')
-            plot_item_phase.setLabel('left', 'Phase', units='deg')
-            plot_item_phase.showGrid(x=True, y=True, alpha=0.3)
-            legend_color = '#CCCCCC' if self.dark_mode else '#333333'
-            self.phase_legend = plot_item_phase.addLegend(offset=(10,-50),labelTextColor=legend_color)
-        plot_layout.addWidget(self.combined_phase_plot)
-        
-        # Link X-axes for synchronized zooming/panning
-        if self.combined_phase_plot and self.combined_mag_plot:
-            self.combined_phase_plot.setXLink(self.combined_mag_plot)
-        self._apply_zoom_box_mode()
-        
-        # Apply theme
-        if self.combined_mag_plot:
-            self.combined_mag_plot.setBackground(bg_color)
-            plot_item_mag_for_axes = self.combined_mag_plot.getPlotItem()
-            if plot_item_mag_for_axes:
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item_mag_for_axes.getAxis(axis_name)
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-                    
-        if self.combined_phase_plot:
-            self.combined_phase_plot.setBackground(bg_color)
-            plot_item_phase_for_axes = self.combined_phase_plot.getPlotItem()
-            if plot_item_phase_for_axes:
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item_phase_for_axes.getAxis(axis_name)
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-
-        return tab
-    
     def _on_plot_tab_changed(self, index):
-        """Handle plot tab changes - show/hide batch controls appropriately."""
-        # Batch controls visible for sweep tabs (0, 1), hidden for combined tab (2)
-        is_sweep_tab = index in (0, 1)
-        
-        self.batch_nav.setVisible(is_sweep_tab)
-        self.subplot_controls.setVisible(is_sweep_tab)
-        
-        # Redraw the active tab's plots if we have data
-        if self.results_by_detector:
-            self._redraw_plots()
+        """Handle plot tab changes."""
+        self._redraw_plots()
     
     def _apply_batch_size(self):
         """Apply the batch size from the spin box and regenerate plots."""
@@ -451,17 +350,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     def _next_batch(self):
         """Show next batch."""
-        # Get current tab to determine which data to use
-        current_tab_idx = self.plot_tabs.currentIndex()
-        if current_tab_idx not in (0, 1):  # Only sweep tabs have batches
-            return
-            
-        if not self.results_by_detector:
-            return
-        
-        num_detectors = len(self.results_by_detector)
-        total_batches = max(1, (num_detectors + self.batch_size - 1) // self.batch_size)
-        
+        names = self._selected_names()
+        total_batches = max(1, (len(names) + self.batch_size - 1) // self.batch_size)
         if self.current_batch < total_batches - 1:
             self.current_batch += 1
             self._redraw_plots()
@@ -472,7 +362,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         Updates normalization state for both magnitude and phase, and redraws plots.
         """
         self.normalize_traces = checked
-        self._update_mag_plot_label() # Y-axis label might change
         self._redraw_plots()
 
     def _update_unit_mode(self, mode):
@@ -482,28 +371,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         if self.unit_mode != mode:
             self.unit_mode = mode
-            self._update_mag_plot_label() # Y-axis label will change
             self._redraw_plots()
             
-    def _update_mag_plot_label(self):
-        """Updates the Y-axis label of the magnitude plot based on current unit and normalization settings."""
-        if not self.combined_mag_plot: return
-
-        if self.normalize_traces:
-            label = "Normalized Magnitude" # Label for magnitude part of the trace
-            # Normalized dBm is still in dB, other normalized units are unitless or relative.
-            units = "dB" if self.unit_mode == "dbm" else "" 
-        else:
-            if self.unit_mode == "counts":
-                label, units = "Magnitude", "Counts"
-            elif self.unit_mode == "dbm":
-                label, units = "Power", "dBm"
-            elif self.unit_mode == "volts":
-                label, units = "Magnitude", "V"
-            else: # Fallback, should not ideally be reached if UI is constrained
-                label, units = "Magnitude", ""
-        self.combined_mag_plot.setLabel('left', label, units=units)
-
     def _toggle_zoom_box_mode(self, enable):
         """
         Slot for the 'Zoom Box Mode' checkbox.
@@ -513,11 +382,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._apply_zoom_box_mode()
 
     def _apply_zoom_box_mode(self):
-        """Applies the current zoom_box_mode state to both magnitude and phase plot viewboxes."""
-        if self.combined_mag_plot and isinstance(self.combined_mag_plot.getViewBox(), ClickableViewBox):
-            self.combined_mag_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
-        if self.combined_phase_plot and isinstance(self.combined_phase_plot.getViewBox(), ClickableViewBox):
-            self.combined_phase_plot.getViewBox().enableZoomBoxMode(self.zoom_box_mode)
+        """Applies the current zoom_box_mode state to the grid subplots."""
+        for widget in self.mag_sweep_plots_cache + self.iq_sweep_plots_cache:
+            view_box = widget.getViewBox()
+            if isinstance(view_box, ClickableViewBox):
+                view_box.enableZoomBoxMode(self.zoom_box_mode)
 
     def _setup_progress_bar(self, layout):
         """Set up progress bar in a separate group, similar to NetworkAnalysisWindow."""
@@ -775,28 +644,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                        for a in step.values()})
 
     def _redraw_plots(self):
-        """
-        Redraws plots based on the currently active tab.
-        For sweep tabs (0, 1), uses grid plotting. For combined tab (2), uses original logic.
-        """
-        # Early return if no data
-        if not (self.module_sweeps or self._live or self.results_by_detector):
-            # Clear any existing plots
-            if hasattr(self, 'combined_mag_plot') and self.combined_mag_plot:
-                self.combined_mag_plot.clear()
-            if hasattr(self, 'combined_phase_plot') and self.combined_phase_plot:
-                self.combined_phase_plot.clear()
+        """Redraw the grid on the active tab: magnitude (0) or IQ (1)."""
+        if self.module_sweeps is None and not self._live:
             return
-        
-        # Get current tab
-        current_tab_idx = self.plot_tabs.currentIndex()
-        
-        # Tabs 0 and 1: Grid sweep plots (magnitude and IQ)
-        if current_tab_idx in (0, 1):
-            self._redraw_sweep_grid(current_tab_idx)
-        # Tab 2: Combined plots (original view)
-        elif current_tab_idx == 2:
-            self._redraw_combined_plots()
+        self._redraw_sweep_grid(self.plot_tabs.currentIndex())
     
     def _redraw_sweep_grid(self, tab_idx):
         """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
@@ -859,156 +710,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             show_legend=use_legend
         )
 
-    def _redraw_combined_plots(self):
-        """Redraw the combined magnitude and phase plots (original view)."""
-        if not self.combined_mag_plot or not self.combined_phase_plot:
-            # Plots haven't been initialized yet
-            return
-
-        # Clear existing plot items and legends
-        if self.mag_legend: self.mag_legend.clear()
-        if self.phase_legend: self.phase_legend.clear()
-
-        # Remove all existing data curves from plots
-        for item in self.combined_mag_plot.listDataItems(): self.combined_mag_plot.removeItem(item)
-        for item in self.combined_phase_plot.listDataItems(): self.combined_phase_plot.removeItem(item)
-        
-        self.curves_mag.clear() # Clear stored references to magnitude curves
-        self.curves_phase.clear() # Clear stored references to phase curves
-
-        # Remove existing center frequency (CF) lines
-        for amp_val_lines in self.cf_lines_mag.values():
-            for line in amp_val_lines: self.combined_mag_plot.removeItem(line)
-        self.cf_lines_mag.clear()
-        for amp_val_lines in self.cf_lines_phase.values():
-            for line in amp_val_lines: self.combined_phase_plot.removeItem(line)
-        self.cf_lines_phase.clear()
-
-        if not self.results_by_detector:
-            self.combined_mag_plot.autoRange(); self.combined_phase_plot.autoRange()
-            return
-        
-        # Collect unique (amplitude, direction) pairs and amplitude values from entries
-        amplitude_values = set()
-        amp_dir_pairs = set()
-        for iter_dict in self.results_by_detector.values():
-            for entry in iter_dict.values():
-                amp = entry.get('amplitude')
-                direction = entry.get('direction', 'upward')
-                if amp is not None:
-                    amplitude_values.add(amp)
-                    amp_dir_pairs.add((amp, direction))
-        num_amps = len(amplitude_values)
-            
-        # Create a mapping for unique amplitude values to colors
-        sorted_amplitudes = sorted(amplitude_values)
-        amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
-        
-        # Colorbar vs legend: show colorbar only when inferno colormap is active
-        has_downward = any(d == 'downward' for _, d in amp_dir_pairs)
-        dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-        
-        if num_amps > AMPLITUDE_COLORMAP_THRESHOLD:
-            self.combined_colorbar.update_range(
-                sorted_amplitudes[0], sorted_amplitudes[-1],
-                dac_scale_for_module, self.unit_mode,
-                self.dark_mode, has_downward)
-            self.combined_colorbar.show()
-            show_combined_legend = False
-        else:
-            self.combined_colorbar.hide()
-            show_combined_legend = True
-        
-        legend_items_mag = {} # To avoid duplicate legend entries for the same amplitude/direction combination
-        legend_items_phase = {}
-        
-        # Iterate through each (amplitude, direction) pair across all detectors
-        for (amp_val, direction) in sorted(amp_dir_pairs):
-            # Get color for this amplitude
-            color = amplitude_to_color[amp_val]
-            
-            # Set line style based on direction using constants from utils.py
-            line_style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-            pen = pg.mkPen(color, width=LINE_WIDTH, style=line_style)
-            
-            # --- Prepare Legend Entry for this Amplitude (only if legends active) ---
-            if show_combined_legend:
-                legend_name_amp = UnitConverter.format_probe_label(amp_val, self.unit_mode, dac_scale_for_module)
-                direction_suffix = " (Down)" if direction == "downward" else " (Up)"
-                full_legend_name = legend_name_amp + direction_suffix
-                
-                legend_key = (amp_val, direction)
-                
-                if legend_key not in legend_items_mag and self.mag_legend:
-                    dummy_mag_curve_for_legend = pg.PlotDataItem(pen=pen) 
-                    self.mag_legend.addItem(dummy_mag_curve_for_legend, full_legend_name)
-                    legend_items_mag[legend_key] = dummy_mag_curve_for_legend
-                if legend_key not in legend_items_phase and self.phase_legend:
-                    dummy_phase_curve_for_legend = pg.PlotDataItem(pen=pen)
-                    self.phase_legend.addItem(dummy_phase_curve_for_legend, full_legend_name)
-                    legend_items_phase[legend_key] = dummy_phase_curve_for_legend
-
-            # --- Plot data for each detector at this (amplitude, direction) ---
-            for res_idx, iter_dict in self.results_by_detector.items():
-                # Find the entry matching this amplitude and direction
-                data = None
-                for entry in iter_dict.values():
-                    if entry.get('amplitude') == amp_val and entry.get('direction', 'upward') == direction:
-                        data = entry
-                        break
-                if data is None:
-                    continue
-
-                freqs_hz = data.get('frequencies', np.array([]))
-                iq_complex = data.get('iq_complex', np.array([]))
-
-                if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0 or len(iq_complex) == 0:
-                    continue
-                
-                # Calculate magnitude and phase
-                s21_mag_raw = np.abs(iq_complex)
-                s21_mag_processed = UnitConverter.convert_amplitude(
-                    s21_mag_raw, iq_complex, self.unit_mode, 
-                    normalize=self.normalize_traces
-                )
-                # Use pre-calculated phase if available, otherwise calculate from IQ
-                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
-                
-                if self.normalize_traces and len(phase_deg) > 0:
-                    first_phase_val = phase_deg[0]
-                    if np.isfinite(first_phase_val):
-                        phase_deg = phase_deg - first_phase_val
-                
-                # Plot magnitude curve
-                mag_curve = self.combined_mag_plot.plot(pen=pen)
-                mag_curve.setData(freqs_hz, s21_mag_processed)
-                if amp_val not in self.curves_mag: self.curves_mag[amp_val] = {}
-                self.curves_mag[amp_val][res_idx] = mag_curve
-
-                # Plot phase curve
-                phase_curve = self.combined_phase_plot.plot(pen=pen)
-                phase_curve.setData(freqs_hz, phase_deg)
-                if amp_val not in self.curves_phase: self.curves_phase[amp_val] = {}
-                self.curves_phase[amp_val][res_idx] = phase_curve
-
-                # Add center frequency (CF) lines if enabled
-                if self.show_cf_lines_cb and self.show_cf_lines_cb.isChecked():
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is not None:
-                        cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-                        
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag.setdefault(amp_val, []).append(mag_cf_line)
-
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase.setdefault(amp_val, []).append(phase_cf_line)
-        
-        # Adjust plot ranges to fit all data
-        self.combined_mag_plot.autoRange()
-        self.combined_phase_plot.autoRange()
-        
     def handle_error(self, error_msg: str):
         """Say what went wrong where the sweep's progress is reported.
 
@@ -1201,95 +902,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if parent_widget and hasattr(parent_widget, 'stop_multisweep_task_for_window'):
             parent_widget.stop_multisweep_task_for_window(self) # type: ignore
         super().closeEvent(event) # Proceed with the standard close event handling
-
-    def _toggle_cf_lines_visibility(self, checked):
-        """
-        Slot for the 'Show Center Frequencies' checkbox.
-        Shows or hides CF lines without a full redraw.
-        Creates lines if they don't exist when showing.
-
-        Args:
-            checked (bool): The new state of the checkbox.
-        """
-        if not self.combined_mag_plot or not self.combined_phase_plot:
-            return # Plots not ready
-
-        if checked:
-            # Show lines. Create them if they don't exist.
-            # Get unique amplitudes from iterations
-            amplitude_values = set()
-            for iter_dict in self.results_by_detector.values():
-                for entry in iter_dict.values():
-                    amp = entry.get('amplitude')
-                    if amp is not None:
-                        amplitude_values.add(amp)
-            num_amps = len(amplitude_values)
-            
-            if num_amps == 0:
-                return
-
-            # Use the canonical color mapping function
-            amplitude_to_color = create_amplitude_color_map(amplitude_values, self.dark_mode)
-            sorted_amplitudes = sorted(amplitude_values)
-
-            for amp_val in sorted_amplitudes:
-                color = amplitude_to_color[amp_val]
-                cf_line_pen = pg.mkPen(color, style=QtCore.Qt.PenStyle.DashLine, width=LINE_WIDTH/2)
-
-                # Ensure lists for this amplitude exist in cf_lines_mag/phase
-                self.cf_lines_mag.setdefault(amp_val, [])
-                self.cf_lines_phase.setdefault(amp_val, [])
-
-                # Create dictionaries for quick lookup of existing lines by their X-position (CF)
-                # This avoids iterating through the list of lines repeatedly for each CF.
-                existing_mag_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_mag[amp_val]}
-                existing_phase_lines_for_amp = {line.pos().x(): line for line in self.cf_lines_phase[amp_val]}
-
-                for res_idx, iter_dict in self.results_by_detector.items():
-                    # Get detector data for this amplitude (any direction)
-                    data = None
-                    for entry in iter_dict.values():
-                        if entry.get('amplitude') == amp_val:
-                            data = entry
-                            break
-                    if data is None:
-                        continue
-                    # Get the actual bias frequency for CF line
-                    bias_freq = data.get('bias_frequency', data.get('original_center_frequency'))
-                    if bias_freq is None:
-                        continue
-                        
-                    # Magnitude plot CF line
-                    if bias_freq in existing_mag_lines_for_amp:
-                        existing_mag_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        mag_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_mag_plot.addItem(mag_cf_line)
-                        self.cf_lines_mag[amp_val].append(mag_cf_line)
-                        # mag_cf_line.setVisible(True) # Already visible by default when added
-
-                    # Phase plot CF line
-                    if bias_freq in existing_phase_lines_for_amp:
-                        existing_phase_lines_for_amp[bias_freq].setVisible(True)
-                    else:
-                        phase_cf_line = pg.InfiniteLine(pos=bias_freq, angle=90, pen=cf_line_pen, movable=False)
-                        self.combined_phase_plot.addItem(phase_cf_line)
-                        self.cf_lines_phase[amp_val].append(phase_cf_line)
-                        # phase_cf_line.setVisible(True) # Already visible by default when added
-        else:
-            # Hide all existing CF lines
-            for amp_lines_list in self.cf_lines_mag.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-            for amp_lines_list in self.cf_lines_phase.values():
-                for line in amp_lines_list:
-                    line.setVisible(False)
-        
-        # Note: No call to self._redraw_plots() here, to preserve zoom.
-        # The _redraw_plots method will still handle full reconstruction of lines
-        # if it's called for other reasons (data update, unit change, etc.),
-        # respecting the checkbox state at that time.
-
 
     def _open_noise_spectrum_dialog(self):
         num_res = len(self.conceptual_section_frequencies)
@@ -1624,44 +1236,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.dark_mode = dark_mode
         
         bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
-        
-        # Apply to magnitude plot
-        if self.combined_mag_plot:
-            self.combined_mag_plot.setBackground(bg_color)
-            plot_item_mag = self.combined_mag_plot.getPlotItem()
-            if plot_item_mag:
-                title_text_mag = plot_item_mag.titleLabel.text if plot_item_mag.titleLabel else "Combined S21 Magnitude (All Resonances)"
-                plot_item_mag.setTitle(title_text_mag, color=pen_color)
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item_mag.getAxis(axis_name)
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-            if self.mag_legend:
-                try:
-                    legend_color = '#CCCCCC' if dark_mode else '#333333'
-                    self.mag_legend.setLabelTextColor(legend_color)
-                except Exception as e:
-                    print(f"Error updating magnitude legend text color: {e}")
-
-        # Apply to phase plot
-        if self.combined_phase_plot:
-            self.combined_phase_plot.setBackground(bg_color)
-            plot_item_phase = self.combined_phase_plot.getPlotItem()
-            if plot_item_phase:
-                title_text_phase = plot_item_phase.titleLabel.text if plot_item_phase.titleLabel else "Combined S21 Phase (All Resonances)"
-                plot_item_phase.setTitle(title_text_phase, color=pen_color)
-                for axis_name in ("left", "bottom", "right", "top"):
-                    ax = plot_item_phase.getAxis(axis_name)
-                    if ax:
-                        ax.setPen(pen_color)
-                        ax.setTextPen(pen_color)
-            if self.phase_legend:
-                try:
-                    legend_color = '#CCCCCC' if dark_mode else '#333333'
-                    self.phase_legend.setLabelTextColor(legend_color)
-                except Exception as e:
-                    print(f"Error updating phase legend text color: {e}")
         
         # Redraw plots which will now use the updated legend text colors
         self._redraw_plots()

@@ -211,6 +211,7 @@ and from the merge decisions of 2026-09-08.
 | `multisweep_panel.py` | `results_by_detector`, `update_data`'s injection of `amplitude/direction/iteration`, the three restructurings, `_get_closest_remembered_cf`, `last_output_cfs_by_amp_and_conceptual_idx`, `_get_fit_frequencies`, `_fits_present`, dead `_intermediate_*` | catalog plus module block, `sweep_results` readers |
 | `multisweep_dialog.py` | Bias Frequency Method combo, Rotate Saved Data checkbox, `_get_frequencies` precedence chain, legacy `results_by_iteration` reader, `resonance_frequencies` legacy key | `AmplitudeSchedule` view; catalog in, catalog out |
 | `multisweep_panel.py` | `handle_error`'s modal `QMessageBox.critical` (`:1163`), which blocks the GUI thread until dismissed and deadlocks a headless run | a transient status label, per AGENTS.md's rule on dialogs |
+| `multisweep_panel.py` | the Combined Plots tab and everything only it used: `_create_combined_tab`, `_redraw_combined_plots`, `_toggle_cf_lines_visibility` and the Show Center Frequencies checkbox, `_update_mag_plot_label`, the combined plot/legend/curve/CF-line attributes and colorbar, and the tab-index branches in `_redraw_plots`, `_on_plot_tab_changed` and `_next_batch` (stage 2) | nothing for now; §9.3 records what it showed |
 | `detector_digest_panel.py` | the whole module, its `ui.py` export, the Digest tab, `_open_detector_digest_for_index`, `detector_digest_windows`, `_navigate_digest_to_detector`, the digest `eventFilter` and double-click handler, the auto-open on the noise load path, and the Check Noise button with `_take_noise_samps`, its only caller (stage 2) | nothing in stage 2; rebuilt from scratch against the block and the catalog once fits and bias points exist (§6, judgement call 23) |
 | `parameter_histograms_panel.py` | the Histograms tab, `_generate_histograms`, `_ensure_histogram_panel` and the cache invalidation (stage 2) | a tab built in stage 3 over `entry["fits"]`, when there is something to bin |
 | `app.py` | `apply_bias_output`, `_set_bias` NCO midpoint, mock-mode `_start_df_calibration`, `handle_bias_kids` payload plumbing | `crs.apply_bias(catalog)`; see §6 for mock-mode df |
@@ -558,8 +559,9 @@ are now strict xfails that name the stage which clears them.
   and `module_sweeps` becomes the only source. It is a cursor, not a second copy
   of the measurement: it holds the callback payload verbatim, it is never saved,
   and it does not outlive the sweep.
-* **The three tabs, from that reader.** Mag vs Freq grid, IQ Circles grid,
-  Mag/Phase overview. Ported from the section-amplitudes grid helpers as
+* **The two tabs, from that reader.** Mag vs Freq grid and IQ Circles grid.
+  The Mag/Phase overview is deleted, not ported (§6, judgement call 28).
+  Ported from the section-amplitudes grid helpers as
   *rendering*: the grid rule `ncols = max(min(4, n), ceil(sqrt(n)))`, widget
   caching, titles `NAME (f_central = ... MHz)`, square IQ axes, zoom box, batch
   navigation with a subplots-per-page spinbox, sort by frequency or name.
@@ -1092,6 +1094,12 @@ Listed so they can be overruled.
     which is what it is for. `DEFAULT_NPOINTS` stays the GUI's own (50000
     against the driver's 5000): that one is a dialog default the operator sets
     every time, not a knob the GUI silently disagrees on.
+28. **The Mag/Phase overview is deleted, not ported** (maclean, 2026-09-10).
+    It was the last reader of `results_by_detector`, so it had to move or go
+    with the load path; going was the call. Two tabs remain, both grids. §9.3
+    records what it showed, since the question it answered — where the array
+    sits across the band — is not one a grid of per-resonator panels can
+    answer, and something will want to answer it again.
 
 ---
 
@@ -1236,3 +1244,26 @@ Both panels are per-panel cases in `test_viewbox_lifetime.py` (the digest) and
 `test_laptop_fit.py` (the histograms), removed with them; the general rules
 those tests hold keep their other cases, and the panels rejoin them when they
 return.
+
+### 9.3 Combined Plots — the array, on one axis
+
+A tab of the multisweep panel, deleted in stage 2 (§6, judgement call 28) and
+in git at `697d688`.
+
+Two stacked plots, magnitude above phase, x-linked so they zoomed together,
+against **absolute frequency in Hz**. Every resonator's sweep went on the same
+axes, so the whole module's band was one picture with the resonators sitting
+where they actually are — which is the question a grid of per-resonator panels
+cannot answer, each panel having its own centred axis. Colour was drive
+amplitude and line style direction, as in the grids, but the legend carried one
+entry per (amplitude, direction) rather than one per resonator, since a legend
+of four hundred names is not a legend. A "Show Center Frequencies" checkbox
+dropped a dashed vertical line at each sweep's centre.
+
+What it answered: where is my array, is anything colliding, did a whole region
+come out wrong. Worth having again in some form; what is not worth bringing
+back is how it got its data — a walk over `results_by_detector` matching
+entries by `entry['amplitude'] == amp_val` float equality, a stored
+`phase_degrees` key, and CF lines off `bias_frequency`. Against the block that
+is `_collect_traces`, `sweep["frequencies"]` unshifted, `np.angle` at draw
+time, and the catalog's bias frequencies.

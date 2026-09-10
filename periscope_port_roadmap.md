@@ -478,19 +478,104 @@ are now strict xfails that name the stage which clears them.
   "Both" in the combo rather than falling back to Upward.
   `test_multisweep_dialog_params.py` pins what the dialog emits, including
   that it emits nothing `multisweep` would refuse.
-* **Panel state.** `self.catalog` (the array as swept) and
-  `self.module_sweeps` (the block). Nothing else about the data.
-* **Tabs, ported from the section-amplitudes grid helpers and rewritten
-  against the block:** Mag vs Freq grid, IQ Circles grid, Mag/Phase
-  overview. The grid rule, widget caching, kHz offset axes, titles
-  `NAME (f_central = ... MHz)`, TABLEAU10-then-inferno with the threshold
-  of three, the shared colorbar with dBm and normalised labels, line style
-  for direction, stable colours from `schedule.resolve_steps()` known before the
-  first sweep, square IQ axes, zoom box, batch navigation with a
-  subplots-per-page spinbox, sort by frequency or name, Normalize Traces,
-  units radios, double-click to digest. The digest and histograms tabs come
-  back in stage 3 when there is something to show in them beyond the
-  traces; until then the digest shows the sweep plots only.
+* **Panel state.** Three attributes about the data, all of them the library's:
+  `self.multisweep_container` (what the call returned), `self.module_sweeps`
+  (this module's block out of it) and `self.catalog` (read back from
+  `module_sweeps["call_params"]["catalog"]`). Beside them, view state that
+  describes what is on screen and never the measurement — unit mode, the
+  Normalize flag, sort order, batch index, the names and steps and directions
+  currently selected, the pyqtgraph widget cache. `self._live` is a fourth data
+  attribute that exists only while a sweep runs; see below. Deleted with the
+  rewrite: `results_by_detector`,
+  `last_output_cfs_by_amp_and_conceptual_idx`,
+  `current_amplitude_being_processed`, `current_iteration_being_processed`, and
+  the six-argument `update_data` that filled them.
+* **Every plot reads the block, on every redraw.** Nothing is copied out of it,
+  nothing is precomputed into a per-trace structure, and no panel hands another
+  panel anything but the block and the catalog. A redraw walks the results and
+  throws away what it built, and the walk is the library's own:
+
+  ```python
+  for name in self._selected_names():        # catalog order, or sorted by frequency
+      measured = collect_amplitude_iterations_for(self.module_sweeps, name)
+      for step, by_direction in measured.items():
+          for direction, sweep in by_direction.items():
+              ...                            # sweep is the seven-key entry
+  ```
+
+  Everything a trace needs is on `sweep`:
+
+  | What the plot needs | What it reads |
+  |---|---|
+  | x, in the grids | `(sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3`, kHz either side of the sweep's own centre |
+  | x, in the overview | `sweep["frequencies"]`, unshifted, so the array shares one axis |
+  | magnitude | `abs(sweep["iq_counts"])`; in Volts, `abs(sweep["iq_volts"])` — the entry carries volts, so the panel does not re-run the conversion — and in dBm, `UnitConverter.convert_amplitude(..., unit_mode="dbm")`, the same `convert_roc_to_dbm` the netanal panel uses |
+  | phase | `np.angle(sweep["iq_counts"])`, at draw time. A sweep has no phase key on purpose: it would be the readout chain's phase, not the resonator's |
+  | IQ circle | `sweep["iq_counts"].real` and `.imag`, or `iq_volts` |
+  | Normalize Traces | divide by `sweep["sweep_amplitude"]` before the unit conversion, which is `example_plotting_multisweep.sweep_iq` |
+  | trace colour | `sweep["sweep_amplitude"]`, through the scale below |
+  | line style | `sweep["sweep_direction"]`: solid upward, dotted downward |
+  | panel title | the name the entry is keyed by, and its `original_center_frequency` |
+
+  That is the whole reader, and it is what the `example_plotting_*.py` files do
+  in matplotlib three lines at a time. §5 item 3 lets the two *look* different;
+  it does not let them compute different things.
+
+  Two selections above the walk, and they are the only place a step number is
+  used as an index: which steps and directions to draw (checkboxes, all by
+  default), and which names, which is a slice of `catalog.names()` for the
+  current batch. `find_iteration_matching_amplitude` answers "the step this
+  resonator is biased at" when stages 3 and 4 need one, so the panel never
+  matches an amplitude by hand.
+* **The colour scale exists before the first point arrives.** Colour means
+  drive amplitude, so it is graded over every amplitude the call will produce,
+  and `schedule.resolve_steps(catalog)` gives all of them at the press of Start
+  without touching a board — one `AmplitudeStep` per step, `amplitudes` keyed
+  by name. So a trace's colour does not shift as later sweeps land, and a
+  resonator under a multiplicative schedule is coloured by what *it* is driven
+  at rather than by which step it is on: those are different numbers, which is
+  why `sweep_amplitude` is per-entry and not per-step. Log-normalised;
+  TABLEAU10 up to `AMPLITUDE_COLORMAP_THRESHOLD` steps and a colormap above it;
+  one shared colourbar per grid, labelled in normalized units and, when a DAC
+  scale is known, in dBm through `UnitConverter.normalize_to_dbm`.
+* **A live trace is the same read, one key short.** `partial_data(module,
+  partial, step, direction)` carries `{name: {"frequencies", "iq_counts",
+  "original_center_frequency"}}` for the resonators in the NCO region currently
+  being swept — each from its first point up to the latest, resent in full every
+  time, with finished regions not resent and unstarted ones absent. So the panel
+  assigns per name rather than appending to an array or replacing the step. It
+  is stored under the container's own nesting,
+  `self._live[step][direction][name] = partial[name]`, so the reader above runs
+  over it unchanged and a half-drawn sweep and a finished one are one code path.
+  The one key it lacks is `sweep_amplitude`, and a live trace's colour comes
+  from `resolve_steps`' amplitude for that name and step — the number the driver
+  will write into the entry. `self._live` is cleared when `completed` arrives
+  and `module_sweeps` becomes the only source. It is a cursor, not a second copy
+  of the measurement: it holds the callback payload verbatim, it is never saved,
+  and it does not outlive the sweep.
+* **The three tabs, from that reader.** Mag vs Freq grid, IQ Circles grid,
+  Mag/Phase overview. Ported from the section-amplitudes grid helpers as
+  *rendering*: the grid rule `ncols = max(min(4, n), ceil(sqrt(n)))`, widget
+  caching, titles `NAME (f_central = ... MHz)`, square IQ axes, zoom box, batch
+  navigation with a subplots-per-page spinbox, sort by frequency or name,
+  double-click to digest. Nothing on these tabs is derived from a fit, a bias
+  point or a bifurcation test: a sweep is a measurement, and the overlays that
+  read those arrive with the buttons that produce them in stages 3 and 4. The
+  digest shows the sweep plots only until stage 3; histograms come back with
+  fits, since there is nothing to bin before them.
+* **What this deletes.** Every read of `results_by_detector` in
+  `multisweep_panel.py` (44 today), and with them `_redraw_sweep_grid`'s
+  detector-index dictionaries, `_prepare_export_data`'s payload,
+  `_get_fit_frequencies`, `_get_closest_remembered_cf` and
+  `_toggle_cf_lines_visibility`'s history lines. `detector_digest_panel.py` (29)
+  and `parameter_histograms_panel.py` (7) read the same shape and are rewritten
+  against the block in the same commit rather than left reading a structure
+  nothing produces — see §6, judgement call 23.
+* Test: a redraw on a block measured by the real task puts one curve per
+  (name, step, direction) on the axes, with the entry's own frequencies and
+  `abs(iq_counts)` on it; a live `partial_data` for a step draws a shorter curve
+  in the same colour the finished sweep gets; and switching units, Normalize and
+  batch changes what is drawn without touching `module_sweeps`.
 * **Re-run** reopens the dialog seeded with the panel's current catalog.
   That is the iterative multisweep: after stage 4 the current catalog is
   `report.catalog`, so the re-run centres on the found bias frequencies at
@@ -886,6 +971,16 @@ Listed so they can be overruled.
     catalog crosses the boundary now because the press is the handover;
     `MultisweepTask` still runs off the frequency list the dialog produces,
     and picks the catalog up in stage 2 when that list goes.
+23. **The digest and histogram panels are rewritten in the panel's own
+    commit** (stage 2), not in stages 3 and 4 where their content arrives.
+    They read `results_by_detector` — 29 references and 7 — and it is deleted
+    when the grids stop producing it, so the alternative is a stage in which
+    two shipped panels read a shape nothing writes. That is exactly the state
+    §1.2 describes and stage 0 was about ending. The commit is larger for it,
+    and what those two panels *show* is still staged: in stage 2 the digest
+    draws the sweeps of one resonator and its parameter tables are empty, and
+    the histograms tab is hidden because there is nothing to bin until fits
+    exist.
 
 ---
 
@@ -895,7 +990,7 @@ Listed so they can be overruled.
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
 | 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
-| 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
+| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |
 | 5 | deletions; tier counts in `AGENTS.md` and `test/README.md` | root |

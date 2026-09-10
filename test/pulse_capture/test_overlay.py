@@ -357,3 +357,16 @@ def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
     with PulseHDF5Reader(out) as r:
         assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
 
+
+def test_a_pulse_the_recording_misses_gets_no_fast_window(tmp_path):
+    """The pair is written for the slow pulse; without a window the
+    recording covers there is no fast_tod, and Periscope reads the pair
+    as slow-only with the fast side unavailable."""
+    path = _capture(tmp_path)
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(0.5, 0.6))
+    merge_fastrx(path, fx)
+    with PulseHDF5Reader(path) as r:
+        pair = r.get_match(CHANNEL, 1)
+        assert pair["slow_idx"] == 1
+        assert "fast_tod" not in pair
+

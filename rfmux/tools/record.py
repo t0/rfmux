@@ -14,6 +14,8 @@ session_YYYYMMDD_HHMMSS folder is made under --session-dir.
 
 import asyncio
 import dataclasses
+import os
+import sys
 from pathlib import Path
 
 import click
@@ -22,6 +24,7 @@ from rfmux.algorithms.measurement.record_streams import (
     biased_channels,
     latest_bias_export,
     open_session,
+    pulse_summary_lines,
     record_streams,
 )
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
@@ -74,6 +77,12 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("--fastrx-interface", default=None,
               help="100G interface fastrxd runs on; needed when several run")
 @click.option("--fastrx-socket", default=None, help="fastrxd socket path, if not derivable")
+@click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
+              help="After the run, add the fastrx recording to the pulse file as its "
+                   "fast stream (a both-mode file, as Periscope reviews it)")
+@click.option("--show/--no-show", default=True, show_default=True,
+              help="After the run, open the overlay viewer on the channel with the "
+                   "most pulses")
 @click.option("--bias", type=click.Path(dir_okay=False, exists=True), default=None,
               help="bias_kids export for the df calibrations; default: the session's newest")
 @click.option("--threshold-sigma", type=float, default=_DEFAULTS.threshold_sigma, show_default=True)
@@ -87,8 +96,8 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("-q", "--quiet", is_flag=True)
 def cli(serial, hostname, module, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
-        fastrx_socket, bias, threshold_sigma, end_sigma, min_pulse_ms,
-        max_pulse_ms, noise_train_ms, trigger_basis, quiet):
+        fastrx_socket, merge_fastrx, show, bias, threshold_sigma, end_sigma,
+        min_pulse_ms, max_pulse_ms, noise_train_ms, trigger_basis, quiet):
     """Record the slow and channel streams of one module into a session."""
     folder = open_session(Path(session) if session else None, Path(session_dir))
     bias_path = Path(bias) if bias else latest_bias_export(folder, module)
@@ -120,17 +129,46 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
             df_calibrations=calibrations or None,
             parser_interface=parser_interface,
             fastrx_interface=fastrx_interface, fastrx_socket=fastrx_socket,
-            verbose=not quiet))
+            merge_fastrx=merge_fastrx, verbose=not quiet))
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
+    if not quiet and result.capture is not None:
+        for line in pulse_summary_lines(result.capture):
+            click.echo(f"[record] {line}")
     for name in ("pulse_path", "dirfile_path", "fastrx_path"):
         path = getattr(result, name)
         if path is not None:
             click.echo(f"[record] {name.split('_')[0]:7s} {path}")
+    if result.merged_fastrx:
+        click.echo("[record] fastrx merged into the pulse file as its fast stream")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
+    if show:
+        _show(result)
     if result.warnings:
         raise SystemExit(1)
+
+
+def _show(result) -> None:
+    """The overlay viewer on the channel with the most pulses, when
+    there is a display; the command to run otherwise."""
+    if result.capture is None or result.pulse_path is None \
+            or result.fastrx_path is None:
+        return
+    counts = {ch: len(v) for ch, v in result.capture.summaries.items()}
+    if not any(counts.values()):
+        return
+    channel = max(counts, key=lambda ch: (counts[ch], -ch))
+    dirfile = result.dirfile_path
+    if sys.platform != "darwin" and not (os.environ.get("DISPLAY")
+                                         or os.environ.get("WAYLAND_DISPLAY")):
+        click.echo("[record] no display; to view: rfmux fastrx overlay "
+                   f"{result.pulse_path} {result.fastrx_path} --channel {channel} "
+                   f"--pad 5" + (f" --dirfile {dirfile}" if dirfile else ""))
+        return
+    from rfmux.tools.fastrx import show_overlay
+    show_overlay(result.pulse_path, result.fastrx_path, channel=channel,
+                 pad_ms=5.0, dirfile=dirfile)
 
 
 if __name__ == "__main__":

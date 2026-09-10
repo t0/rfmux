@@ -491,7 +491,12 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   the fastrx writer starts when the capture's noise training ends; the
   channels and df calibrations come from the session's newest bias
   export. `trigger_capture` gained
-  `on_noise=` for that. See the 100G and 1G overlay guide.
+  `on_noise=` for that. After the run it lists the channels that
+  triggered, merges the recording into the pulse file as its fast
+  stream (`--no-merge-fastrx`; `rfmux fastrx merge` for an older run)
+  and opens the overlay viewer on the busiest channel (`--no-show`).
+  The merged file is a both-mode file that Periscope reviews with the
+  recording under every pulse. See the 100G and 1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

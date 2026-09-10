@@ -224,6 +224,38 @@ def _build_capture_file(tmp_path, n_pulses=3):
     return path
 
 
+def test_review_of_a_merged_file_shows_the_recording_under_each_pulse(
+        qt_app, tmp_path):
+    """A slow capture with a fastrx recording merged in reviews as a
+    both-mode file: one slow-triggered pair per pulse, its fast trace
+    from the recording."""
+    pytest.importorskip("rfmux.fastrx")
+    from rfmux.pulse_capture.overlay import merge_fastrx
+    from test.test_fastrx_file import file_header, record, seconds_ts, write
+    path = _build_capture_file(tmp_path)
+    # The capture's stamps run from 0; a recording of channel 1 (pipe 1,
+    # column 0) over the same seconds, its spacing coarse because the
+    # index reads stamps, not a rate.
+    recs = []
+    for i, t in enumerate(np.arange(0.0, 3000 * DT, 1e-3)):
+        block = np.zeros((128, 2), dtype=np.int16)
+        block[0, 0] = 7
+        recs.append(record(0b1, i, ts=seconds_ts(float(t)), recent=True,
+                           sample_trunc=0, iq={1: block}))
+    fx = write(tmp_path, [file_header(0b1, len(recs))] + recs)
+    merge_fastrx(path, fx)
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    assert panel._both_mode
+    ch_item = panel._channel_items[1]
+    assert ch_item.childCount() == 3
+    row = ch_item.child(0)
+    assert row.text(0) == "\u25c6 slow only"
+    assert row.text(2) == "+fast data"
+    assert "fast shown from ring" in panel.pulse_info.text()
+
+
 def test_review_mode(qt_app, tmp_path):
     path = _build_capture_file(tmp_path)
     panel = PulseCapturePanel(dark_mode=False)

@@ -219,6 +219,55 @@ def test_a_missing_fastrxd_socket_is_refused_before_the_capture(
     assert board.calls == []
 
 
+def _result(tmp_path, **kw):
+    return rs.RecordResult(session=tmp_path, module=1, channels=[1],
+                           duration_s=1.0, training_s=0.0, **kw)
+
+
+def test_the_recording_is_merged_into_the_pulse_file(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(rs, "_merge", lambda p, f: calls.append((p, f)))
+    pulse, fx = tmp_path / "pulse.h5", tmp_path / "run.fastrx"
+    pulse.touch(); fx.touch()
+    result = _result(tmp_path, pulse_path=pulse, fastrx_path=fx)
+    rs._merge_recording(result)
+    assert calls == [(pulse, fx)] and result.merged_fastrx
+    assert result.warnings == []
+
+
+def test_a_merge_that_fails_is_a_warning(tmp_path, monkeypatch):
+    def boom(p, f):
+        raise ValueError("no disciplined timestamp")
+    monkeypatch.setattr(rs, "_merge", boom)
+    pulse, fx = tmp_path / "pulse.h5", tmp_path / "run.fastrx"
+    pulse.touch(); fx.touch()
+    result = _result(tmp_path, pulse_path=pulse, fastrx_path=fx)
+    rs._merge_recording(result)
+    assert not result.merged_fastrx
+    assert result.warnings == [
+        "fastrx not merged into pulse.h5: no disciplined timestamp"]
+
+
+def test_nothing_is_merged_without_both_products(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(rs, "_merge", lambda p, f: calls.append((p, f)))
+    pulse = tmp_path / "pulse.h5"
+    pulse.touch()
+    rs._merge_recording(_result(tmp_path, pulse_path=pulse))
+    assert calls == []
+
+
+def test_pulse_summary_lines_name_the_busiest_channel_first():
+    capture = SimpleNamespace(primary=SimpleNamespace(summaries={
+        1: {1: {"snr": 6.0}},
+        2: {1: {"snr": 8.0}, 2: {"snr": 5.5}},
+        3: {}}))
+    assert rs.pulse_summary_lines(capture) == [
+        "channel 2: 2 pulses, best 8.0\u03c3",
+        "channel 1: 1 pulse, best 6.0\u03c3",
+        "3 pulses on 2 of 3 channels"]
+
+
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     session = rs.open_session(base=tmp_path)
     assert session.name.startswith("session_")

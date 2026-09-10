@@ -168,6 +168,8 @@ class RecordResult:
     parser_log: Optional[Path] = None
     fastrx_path: Optional[Path] = None
     fastrx_stats: Dict[str, int] = field(default_factory=dict)
+    #: The recording was merged into the pulse file as its fast stream.
+    merged_fastrx: bool = False
     capture: object = None
     warnings: List[str] = field(default_factory=list)
 
@@ -194,6 +196,7 @@ async def record_streams(
     parser_interface: Optional[str] = None,
     fastrx_interface: Optional[str] = None,
     fastrx_socket: Optional[str] = None,
+    merge_fastrx: bool = True,
     verbose: bool = True,
 ) -> RecordResult:
     """Record the selected products of *module* for *duration_s* into
@@ -346,6 +349,10 @@ async def record_streams(
         if handle is not None:
             await _stop_parser(handle, result, name("parser", ".dirfile"),
                                result.parser_log)
+        if merge_fastrx and tasks and all(
+                t.done() and not t.cancelled() and t.exception() is None
+                for t in tasks):
+            await asyncio.to_thread(_merge_recording, result)
         _record(result, config)
     # The one that failed first raised; the other was cancelled to end
     # the run, and its cancellation is not the error.
@@ -425,6 +432,41 @@ async def _stop_parser(handle: _Parser, result, dirfile, log):
             "the parser wrote no dirfile" + (": " + tail if tail else ""))
 
 
+def _merge(pulse_path: Path, fastrx_path: Path) -> None:
+    from ...pulse_capture.overlay import merge_fastrx
+    merge_fastrx(pulse_path, fastrx_path)
+
+
+def _merge_recording(result: RecordResult) -> None:
+    """The fastrx recording into the pulse file as its fast stream; a
+    merge that fails is a warning, the run itself having succeeded."""
+    if not (result.pulse_path and result.pulse_path.exists()
+            and result.fastrx_path and result.fastrx_path.exists()):
+        return
+    try:
+        _merge(result.pulse_path, result.fastrx_path)
+        result.merged_fastrx = True
+    except Exception as e:
+        result.warnings.append(
+            f"fastrx not merged into {result.pulse_path.name}: {e}")
+
+
+def pulse_summary_lines(capture) -> List[str]:
+    """One line per channel that triggered, most pulses first, then the
+    total; from a trigger_capture result."""
+    stream = getattr(capture, "primary", None)
+    if stream is None:
+        return []
+    rows = [(ch, len(by_idx), max(s.get("snr", 0.0) for s in by_idx.values()))
+            for ch, by_idx in stream.summaries.items() if by_idx]
+    rows.sort(key=lambda r: (-r[1], r[0]))
+    lines = [f"channel {ch}: {n} pulse{'s' if n != 1 else ''}, "
+             f"best {snr:.1f}\u03c3" for ch, n, snr in rows]
+    lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
+                 f"{len(stream.summaries)} channels")
+    return lines
+
+
 def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
     """The products into the session's exports, and the run into its
     recordings."""
@@ -447,6 +489,7 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
                     if result.dirfile_path else None),
         "fastrx": result.fastrx_path.name if result.fastrx_path else None,
         "fastrx_stats": result.fastrx_stats,
+        "merged_fastrx": result.merged_fastrx,
         "capture_config": dataclasses.asdict(config),
         "warnings": result.warnings,
     })

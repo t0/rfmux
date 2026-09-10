@@ -17,6 +17,7 @@ opened from a path, so this module loads where it does not build.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 import numpy as np
@@ -380,3 +381,96 @@ def dirfile_window(path, module: int, channel: int, t0: float,
     i1 = i0 + len(z)
     return {"times": tb[i0:i1], "I": z.real, "Q": z.imag,
             "shift_s": shift, "start": i0, "stop": i1}
+
+
+# ── Merging a recording into a capture file ───────────────────────
+
+def merge_fastrx(pulse_path, fastrx_path, out=None,
+                 noise_span_s: float = 0.2) -> Path:
+    """Add a fastrx recording to a slow-stream capture file as its fast
+    stream, making it a dual ("both") file: every slow pulse becomes a
+    slow-triggered pair carrying the recording over the pulse's union
+    window, in the file's stored units, and the fast side's noise is
+    estimated from the recording's first *noise_span_s* seconds.  The
+    slow side is copied unchanged.  In place unless *out* is given;
+    returns the path written."""
+    import os
+    from .capture_session import DualPulseCaptureSession
+    from .detection import estimate_noise_stats
+    from .hdf5 import DualPulseHDF5Writer
+
+    pulse_path = Path(pulse_path)
+    out = Path(out) if out is not None else pulse_path
+    rec = Recording(fastrx_path)
+    if rec.t_first is None:
+        raise ValueError(
+            f"{fastrx_path}: no disciplined timestamp to index by")
+    tmp = out.with_name(out.name + ".merging")
+    with PulseHDF5Reader(pulse_path) as reader:
+        if reader.dual:
+            raise ValueError(f"{pulse_path}: already a dual file")
+        channels = [int(c) for c in reader.channels]
+        mask = int(rec.file.pipe_mask)
+        fast_channels = [c for c in channels
+                         if mask & (1 << (channel_location(c)[0] - 1))]
+        slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
+        params = {**reader.metadata, "streamer_mode": "both",
+                  "sample_rate_fast": PFB_SAMPLING_FREQ,
+                  "fast_channels": fast_channels}
+        cals = {c: reader.df_calibration(c) for c in channels
+                if reader.df_calibration(c) is not None}
+        units = {c: reader.stored_units(c) for c in channels}
+        writer = DualPulseHDF5Writer(tmp, channels, params,
+                                     df_calibrations=cals or None,
+                                     stored_units=units)
+        try:
+            meta = writer.f["metadata"]
+            for key in ("capture_start", "time_origin_epoch",
+                        "time_origin_utc"):
+                if key in reader.metadata:
+                    meta.attrs[key] = reader.metadata[key]
+            for c in channels:
+                key = f"channel_{c}"
+                del writer.f["slow"][key]
+                reader.f.copy(reader.f[key], writer.f["slow"], name=key)
+            writer.update_histograms("slow", reader.get_histograms())
+            writer.update_templates("slow", reader.get_templates())
+
+            shift = slow_shift_s(reader)
+            period = 1.0 / slow_rate if slow_rate else 0.0
+            n_noise = int(noise_span_s * PFB_SAMPLING_FREQ)
+            noise = {}
+            for c in channels:
+                recorded = c in fast_channels
+                factor = counts_to_stored(reader, c)
+                if recorded:
+                    z = rec.channel(c, 0, n_noise).astype(np.complex128)
+                    noise[c] = estimate_noise_stats(
+                        {c: z * factor}, [c])[0][c]
+                for idx in range(1, reader.pulse_count(c) + 1):
+                    pulse = reader.get_pulse(c, idx)
+                    pair = {"pair_idx": idx, "channel": c, "slow_idx": idx,
+                            "fast_idx": None, "time_offset": None}
+                    t = np.asarray(pulse["Time"], dtype=np.float64) + shift
+                    t = t[np.isfinite(t)]
+                    if t.size:
+                        window = DualPulseCaptureSession._union_window(
+                            {"slow_summary": {
+                                "start_time": float(t[0]),
+                                "saved_end_time": float(t[-1])}},
+                            period)
+                        pair["window"] = window
+                        if recorded:
+                            w = rec.window(window[0], window[1], c)
+                            ok = np.isfinite(w.times)
+                            tod = _in_units(w.times[ok], w.samples[ok],
+                                            factor)
+                            pair["fast_tod"] = {"Time": tod["times"],
+                                                "Amp_I": tod["I"],
+                                                "Amp_Q": tod["Q"]}
+                    writer.append_match(c, pair)
+            writer.set_noise_stats("fast", noise)
+        finally:
+            writer.finalize()
+    os.replace(tmp, out)
+    return out

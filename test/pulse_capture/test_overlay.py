@@ -22,8 +22,8 @@ from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig, PulseCaptureSession)
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader, PulseHDF5Writer
 from rfmux.pulse_capture.overlay import (
-    Recording, correlation_lag_s, counts_to_stored, pulse_overlay,
-    slow_shift_s)
+    Recording, correlation_lag_s, counts_to_stored, merge_fastrx,
+    pulse_overlay, slow_shift_s)
 from test.test_fastrx_file import file_header, record, seconds_ts, write
 
 FS = decimation_to_sampling(6)                    # 596 Hz slow stream
@@ -39,7 +39,7 @@ def _shape(t):
     return np.where(t >= T, AMP * np.exp(-(t - T) / TAU), 0.0)
 
 
-def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
+def _recording_file(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     """The event as the channel stream would carry it, stamped on time,
     on CHANNEL (pipe 2, column 71) with the other columns quiet."""
     t = T + np.arange(span[0], span[1], spacing)
@@ -49,8 +49,11 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
         block[71, 0] = int(round(float(_shape(ti))))
         recs.append(record(0b11, i, ts=seconds_ts(ti), recent=True, sample_trunc=0,
                            iq={2: block}))
-    return Recording(write(tmp_path, [file_header(0b11, len(recs))]
-                             + recs))
+    return write(tmp_path, [file_header(0b11, len(recs))] + recs)
+
+
+def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
+    return Recording(_recording_file(tmp_path, spacing, span))
 
 
 def _capture(tmp_path):
@@ -305,3 +308,52 @@ def test_a_dual_file_brings_the_fast_pulse_and_its_lag(tmp_path):
         # The fast pulse itself overlays the recording the same way.
         ovf = pulse_overlay(r, rec, CHANNEL, 1, stream="fast")
         assert ovf.fast is None and abs(ovf.lag_s) < 2.0 / fs_fast
+
+
+def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
+        tmp_path):
+    """The slow side is kept as it was; every slow pulse becomes a pair
+    with no fast trigger and the recording over its window, in the
+    file's units, so Periscope reviews it as a both-mode capture."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture(tmp_path)
+    with PulseHDF5Reader(path) as r:
+        before = r.get_pulse(CHANNEL, 1)
+        n = r.pulse_count(CHANNEL)
+    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+                         span=(-0.002, 0.035))
+
+    assert merge_fastrx(path, fx) == __import__("pathlib").Path(path)
+
+    with PulseHDF5Reader(path) as r:
+        assert r.dual
+        assert r.metadata["streamer_mode"] == "both"
+        assert r.metadata["sample_rate_fast"] == PFB_SAMPLING_FREQ
+        assert list(r.metadata["fast_channels"]) == [CHANNEL]
+        assert r.pulse_count(CHANNEL, "slow") == n
+        assert r.pulse_count(CHANNEL, "fast") == 0
+        after = r.get_pulse(CHANNEL, 1, "slow")
+        np.testing.assert_array_equal(after["Amp_I"], before["Amp_I"])
+        np.testing.assert_array_equal(after["Time"], before["Time"])
+        assert r.pair_count(CHANNEL) == n
+        pair = r.get_match(CHANNEL, 1)
+        assert pair["slow_idx"] == 1 and pair["fast_idx"] is None
+        t = pair["fast_tod"]["Time"]
+        assert np.all(np.isfinite(t))
+        assert pair["window"][0] <= t[0] and t[-1] <= pair["window"][1]
+        factor = counts_to_stored(r, CHANNEL, "slow")
+        assert pair["fast_tod"]["Amp_I"].max() == \
+            pytest.approx(AMP * factor.real, rel=0.02)
+        assert "noise_std_I" in r.f[f"fast/channel_{CHANNEL}"].attrs
+
+
+def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
+    path = _capture(tmp_path)
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    out = tmp_path / "both.h5"
+    assert merge_fastrx(path, fx, out) == out
+    with PulseHDF5Reader(path) as r:
+        assert not r.dual
+    with PulseHDF5Reader(out) as r:
+        assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
+

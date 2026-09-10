@@ -48,6 +48,15 @@ stamp:
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of the
   pipes those channels are on
 
+After the run the command lists the channels that triggered with their
+pulse counts, merges the recording into the pulse file as its fast
+stream (`--no-merge-fastrx` leaves the file slow-only) and opens the
+viewer of section 3 on the channel with the most pulses
+(`--no-show`). The merged file is a both-mode file: Periscope's pulse
+capture panel reviews it from the session browser with the recording's
+samples under every pulse, and `rfmux fastrx merge <pulse.h5>
+<run.fastrx>` does the same for a run recorded without it.
+
 The parser is brought up first (its process takes a few seconds to
 import), then the capture starts. It spends its noise-training span
 (5 s by default) before it detects anything, so the fastrx writer starts

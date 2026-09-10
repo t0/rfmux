@@ -5,8 +5,8 @@ Three plots, in the order you would want them::
 
     import example_plotting_netanal as naplots
 
-    netanal = await crs.take_netanal(amp=0.001, fmin=0.6e9, fmax=1.05e9,
-                                     npoints=20_000, module=1)
+    netanal = await crs.take_netanal(amp=0.001, fmin=0.6e9, fmax=0.610e9,
+                                     npoints=2_000, module=1)
     naplots.plot_netanal(netanal)                 # what was measured
 
     found = find_resonances_in_netanal(netanal[crs.module[1].index()])

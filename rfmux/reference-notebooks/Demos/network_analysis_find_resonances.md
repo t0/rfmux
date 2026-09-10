@@ -90,8 +90,9 @@ from rfmux.mock.helpers import create_mock_crs
 
 MOCK_CONFIG = {
     "num_resonances": 10,
-    "freq_start": 0.6e9,          # inside the 0.6–1.05 GHz sweep band
-    "freq_end": 1.0e9,
+    "freq_start": 0.601e9,        # inside the 600–610 MHz sweep band
+    "freq_end": 0.608e9,
+    "C_variation": 0.0001,  # keep frequency scatter within the narrow band
     "resonator_random_seed": 42,  # same array every run
     "auto_bias_kids": False,      # start without bias tones
     "pulse_mode": "none",
@@ -106,15 +107,15 @@ crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
 ## 2. Run the network analysis
 
 `crs.take_netanal()` measures complex S21 across a band. Choose enough points
-to sample the resonance dips. Here, 40,000 points across 450 MHz give about
-11.25 kHz spacing.
+to sample the resonance dips. Here, 2,000 points across 10 MHz give about
+5 kHz spacing. The compact mock array keeps the measurement short.
 
 ```python
 netanal = await crs.take_netanal(
     amp=0.001,
     fmin=0.6e9,
-    fmax=1.05e9,
-    npoints=40_000,
+    fmax=0.610e9,
+    npoints=2_000,
     nsamps=10,          # averages per point
     max_chans=1023,     # frequencies measured simultaneously
     module=MODULE,
@@ -338,8 +339,8 @@ samples, a finer sweep can help.
 
 ### Compare sweep resolution
 
-Measure the same band with 5,000 points instead of 40,000: about 90 kHz spacing
-instead of 11.25 kHz. Keep the search thresholds unchanged so we can compare the
+Measure the same band with 125 points instead of 2,000: about 81 kHz spacing
+instead of 5 kHz. Keep the search thresholds unchanged so we can compare the
 effect of sampling alone.
 
 The first panel compares detection counts. The close-ups show the samples around
@@ -351,8 +352,8 @@ from rfmux.tuning import find_resonances
 coarse_netanal = await crs.take_netanal(
     amp=0.001,
     fmin=0.6e9,
-    fmax=1.05e9,
-    npoints=5_000,
+    fmax=0.610e9,
+    npoints=125,
     nsamps=10,
     max_chans=1023,
     module=MODULE,

@@ -132,11 +132,11 @@ first_resonator, second_resonator, third_resonator, *_ = catalog.names()
 catalog[second_resonator].update_bias_point(amplitude=0.002)
 catalog[third_resonator].update_bias_point(amplitude=0.0005)
 
-# A broad span covers frequency shifts with drive. 401 points give 500 Hz spacing.
+# The 70 kHz span covers shifts with drive; 101 points give 700 Hz spacing.
 multi_amplitude_ms = await crs.multisweep(
     catalog,
     span_hz=70e3,
-    npoints_per_sweep=401,
+    npoints_per_sweep=101,
     nsamps=10,
     amp=AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
     sweep_direction=("upward", "downward"),

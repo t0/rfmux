@@ -102,3 +102,27 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     dlg.parser_iface_combo.setCurrentIndex(1)
     assert dlg.get_options()["parser_interface"] == "eth0"
 
+
+def test_the_session_fills_in_with_the_newest_under_the_default_path(
+        qt_app, tmp_path, monkeypatch):
+    base = tmp_path / "outputs"
+    for name in ("session_20260901_090000", "session_20260910_154331",
+                 "session_20260905_120000"):
+        (base / name).mkdir(parents=True)
+        (base / name / "session_metadata.json").write_text("{}")
+    (base / "session_20260911_000000").mkdir()      # no metadata: not one
+    settings = QtCore.QSettings(str(tmp_path / "record.ini"),
+                                QtCore.QSettings.Format.IniFormat)
+    settings.setValue("record/session_dir", str(base))
+    monkeypatch.setattr(rd, "interface_speeds", lambda: {})
+    dlg = rd.RecordDialog(settings=settings)
+    assert dlg.session_path_edit.text() == str(base / "session_20260910_154331")
+
+
+def test_the_pulse_capture_settings_have_their_own_tab(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())] == \
+        ["Run", "Pulse capture"]
+    assert dlg.tabs.widget(1).isAncestorOf(dlg.capture_form)
+

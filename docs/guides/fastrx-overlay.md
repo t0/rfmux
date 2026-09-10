@@ -33,10 +33,11 @@ rfmux record --serial <NNNN> --module <module> --duration 20 \
 ```
 
 Run with no options, `rfmux record` opens a dialog with the same
-choices on one page, remembered between runs: board, session folder,
-channels, duration, the three products with their interfaces, what to
-open afterwards, and the pulse capture settings folded under their
-own heading. The interfaces are listed with their negotiated rates,
+choices, remembered between runs: on its Run tab the board, session
+folder (the newest session under the default path is filled in),
+channels, duration, the three products with their interfaces and what
+to open afterwards; on its Pulse capture tab the capture settings.
+The interfaces are listed with their negotiated rates,
 those under 100 Gb/s for the parser and the 100 Gb/s ones for fastrx,
 a lone 100 Gb/s interface filled in. It checks for a running fastrxd
 on the 100G interface and,

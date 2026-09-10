@@ -87,8 +87,13 @@ class RecordDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("rfmux record")
         self.settings = settings or QtCore.QSettings(ORGANIZATION, APPLICATION)
-        form = QtWidgets.QFormLayout(self)
+        outer = QtWidgets.QVBoxLayout(self)
+        self.tabs = QtWidgets.QTabWidget()
+        outer.addWidget(self.tabs)
+        run_page = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(run_page)
         add = form.addRow
+        self.tabs.addTab(run_page, "Run")
 
         # ── Board ────────────────────────────────────────────────
         self.serial_edit = QtWidgets.QLineEdit()
@@ -166,36 +171,31 @@ class RecordDialog(QtWidgets.QDialog):
         add("", self.merge_check)
         add("After the run:", self.show_combo)
 
-        # ── Pulse capture settings, folded ───────────────────────
-        self.capture_box = QtWidgets.QGroupBox("Pulse capture settings")
-        self.capture_box.setCheckable(True)
-        self.capture_box.setChecked(False)
-        box = QtWidgets.QVBoxLayout(self.capture_box)
+        # ── Pulse capture settings, on their own tab ─────────────
+        capture_page = QtWidgets.QWidget()
+        box = QtWidgets.QVBoxLayout(capture_page)
         self.capture_form = PulseCaptureSettingsForm(
-            self.capture_box, config=self._saved_config(),
+            capture_page, config=self._saved_config(),
             sample_rate=decimation_to_sampling(6), mode="slow")
-        self.capture_form.setVisible(False)
         box.addWidget(self.capture_form)
         stage_note = QtWidgets.QLabel(
             "Sample counts and time scales above are for decimation "
             "stage 6; the run derives them from the board's stage.")
         stage_note.setWordWrap(True)
         box.addWidget(stage_note)
-        stage_note.setVisible(False)
-        self.capture_box.toggled.connect(self.capture_form.setVisible)
-        self.capture_box.toggled.connect(stage_note.setVisible)
-        add(self.capture_box)
+        box.addStretch(1)
+        self.tabs.addTab(capture_page, "Pulse capture")
 
         self.status_label = QtWidgets.QLabel()
         self.status_label.setWordWrap(True)
-        add(self.status_label)
+        outer.addWidget(self.status_label)
         self.buttons = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Cancel)
         self.record_btn = self.buttons.addButton(
             "Record", QtWidgets.QDialogButtonBox.ButtonRole.AcceptRole)
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
-        add(self.buttons)
+        outer.addWidget(self.buttons)
 
         self._load()
         for w in (self.serial_edit, self.session_path_edit,
@@ -406,6 +406,14 @@ class RecordDialog(QtWidgets.QDialog):
 
     # ── Persistence ──────────────────────────────────────────────
 
+    @staticmethod
+    def newest_session(base: Path) -> Optional[Path]:
+        """The newest session folder under *base*, by the stamp in its
+        name, or None."""
+        found = sorted(p for p in Path(base).expanduser().glob("session_*")
+                       if p.is_dir() and (p / "session_metadata.json").exists())
+        return found[-1] if found else None
+
     def _saved_config(self) -> PulseCaptureConfig:
         raw = self.settings.value(_KEY + "capture_config", "")
         try:
@@ -422,8 +430,13 @@ class RecordDialog(QtWidgets.QDialog):
         self.module_spin.setValue(int(v("module", 1)))
         (self.rb_existing if v("session_mode", "existing") == "existing"
          else self.rb_new).setChecked(True)
-        self.session_path_edit.setText(str(v("session_path", "")))
         self.session_dir_edit.setText(str(v("session_dir", str(Path.cwd()))))
+        saved = str(v("session_path", ""))
+        if not (saved and Path(saved).expanduser().is_dir()):
+            # The newest session under the default path, when there is one.
+            newest = self.newest_session(Path(self.session_dir_edit.text()))
+            saved = str(newest) if newest else ""
+        self.session_path_edit.setText(saved)
         (self.rb_bias if v("channels_mode", "bias") == "bias"
          else self.rb_ranges).setChecked(True)
         self.channels_edit.setText(str(v("channels", "")))

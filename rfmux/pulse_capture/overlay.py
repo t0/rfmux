@@ -22,7 +22,7 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from ..core.transferfunctions import (PFB_SAMPLING_FREQ,
+from ..core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       sampling_to_decimation)
 from ..streamer import SS_PER_SECOND
@@ -415,7 +415,9 @@ def merge_fastrx(pulse_path, fastrx_path, out=None,
 
 def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                 noise_span_s: float) -> None:
-    from .capture_session import DualPulseCaptureSession
+    from .accumulators import PulseHistogramSet, PulseTemplateSet
+    from .analysis import storage_transform
+    from .capture_session import DualPulseCaptureSession, PulseCaptureConfig
     from .detection import estimate_noise_stats
     from .hdf5 import DualPulseHDF5Writer
 
@@ -451,14 +453,42 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
         shift = slow_shift_s(reader)
         period = 1.0 / slow_rate if slow_rate else 0.0
         n_noise = int(noise_span_s * PFB_SAMPLING_FREQ)
+        factors = {c: counts_to_stored(reader, c) for c in channels}
         noise = {}
+        for c in fast_channels:
+            z = rec.channel(c, 0, n_noise).astype(np.complex128)
+            noise[c] = estimate_noise_stats({c: z * factors[c]}, [c])[0][c]
+
+        # The fast side's histograms and templates, from the same
+        # accumulators a live session feeds, over each pair's window;
+        # sized as the session sizes them for this rate and its noise.
+        meta = reader.metadata
+        thr = float(meta.get("threshold_sigma", 0.0)) or None
+        vpc = reader.volts_per_count() or VOLTS_PER_ROC
+        to_raw = {}
+        for c in fast_channels:
+            co, _ = storage_transform(reader.df_calibration(c),
+                                      reader.trigger_basis())
+            to_raw[c] = (co / vpc if reader.stored_units(c) == "Hz"
+                         else None)
+        hists = PulseHistogramSet(threshold_sigma=thr)
+        hists.size_amplitude_to_noise(
+            max((max(s.std_I, s.std_Q) for s in noise.values()),
+                default=0.0),
+            raw_sigma=max((max(s.std_I, s.std_Q) / abs(to_raw[c])
+                           for c, s in noise.items() if to_raw[c]),
+                          default=None))
+        config = PulseCaptureConfig(
+            max_pulse_ms=float(meta.get("max_pulse_ms",
+                                        PulseCaptureConfig().max_pulse_ms)))
+        post = max(64, min(config.buf_size(PFB_SAMPLING_FREQ) // 2, 20000))
+        templates = PulseTemplateSet(
+            pre_samples=max(8, post // 10), post_samples=post,
+            threshold_sigma=thr, sample_rate=PFB_SAMPLING_FREQ)
+
         for c in channels:
             recorded = c in fast_channels
-            factor = counts_to_stored(reader, c)
-            if recorded:
-                z = rec.channel(c, 0, n_noise).astype(np.complex128)
-                noise[c] = estimate_noise_stats(
-                    {c: z * factor}, [c])[0][c]
+            factor = factors[c]
             for idx in range(1, reader.pulse_count(c) + 1):
                 pulse = reader.get_pulse(c, idx)
                 pair = {"pair_idx": idx, "channel": c, "slow_idx": idx,
@@ -483,7 +513,16 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                             pair["fast_tod"] = {"Time": tod["times"],
                                                 "Amp_I": tod["I"],
                                                 "Amp_Q": tod["Q"]}
+                            hists.add_pulse(c, pair["fast_tod"], noise[c],
+                                            to_raw=to_raw[c])
+                            templates.add_pulse(c, pair["fast_tod"],
+                                                noise[c])
                 writer.append_match(c, pair)
         writer.set_noise_stats("fast", noise)
+        if hists.total_pulses():
+            writer.update_histograms("fast", hists.get_histogram_data())
+            tmpl = templates.get_template_data()
+            if tmpl:
+                writer.update_templates("fast", tmpl)
     finally:
         writer.finalize()

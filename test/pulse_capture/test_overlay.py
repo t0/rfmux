@@ -370,3 +370,21 @@ def test_a_pulse_the_recording_misses_gets_no_fast_window(tmp_path):
         assert pair["slow_idx"] == 1
         assert "fast_tod" not in pair
 
+
+def test_the_merged_file_carries_fast_histograms_and_templates(tmp_path):
+    """The fast side's histograms and templates are built from the
+    recording over each pair's window, one entry per pair."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture(tmp_path)
+    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+                         span=(-0.002, 0.035))
+    merge_fastrx(path, fx)
+    with PulseHDF5Reader(path) as r:
+        n = r.pair_count(CHANNEL)
+        hist = r.get_histograms("fast")
+        assert hist, "no fast histograms"
+        assert int(hist[f"snr_counts_ch{CHANNEL}"].sum()) == n
+        assert set(r.get_histograms("slow")) == set(hist)
+        tmpl = r.get_templates("fast")
+        assert tmpl and f"template_I_ch{CHANNEL}" in tmpl
+

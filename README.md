@@ -80,7 +80,7 @@ samples = await crs.get_samples(1000, channel=1, module=1)
 - **[Networking Guide](docs/guides/networking.md)** - UDP tuning, multicast configuration, troubleshooting
 - **[Firmware Guide](docs/guides/firmware.md)** - Fetching, managing, and flashing firmware
 - **[Pulse Capture Guide](docs/guides/pulse-capture.md)** - Detecting and recording detector pulses, in Periscope and from a script
-- **[100G and 1G Overlay Guide](docs/guides/fastrx-overlay.md)** - Recording the channel stream with fastrx and drawing it over pulse captures and parser dirfiles
+- **[100G and 1G Overlay Guide](docs/guides/fastrx-overlay.md)** - Recording the channel stream, a pulse capture and a parser dirfile together with `rfmux record`, and drawing them over each other
 - **[Release Notes](docs/release-notes/)** - What changed in each release
 
 ## Executable Jupytex Notebooks

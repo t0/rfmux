@@ -484,6 +484,13 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   the dual session) to opt out. The parser's dirfile `timebase` applies
   the same shift per packet from its `dec_stage`; the raw stamp fields
   are unchanged.
+- `rfmux record --serial <NNNN> --module <M> --duration <s> --session <folder>`
+  takes a slow-stream pulse capture, a parser dirfile and a fastrx
+  recording of one module for the same stretch into one session folder,
+  reading the board only. The parser and the fastrx writer start when the
+  capture's noise training ends; the channels and df calibrations come
+  from the session's newest bias export. `trigger_capture` gained
+  `on_noise=` for that. See the 100G and 1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

@@ -6,7 +6,8 @@ pulse capture) and at most four PFB channels. All three are stamped by the
 board's IRIG clock, so a pulse recorded on the slow stream can be looked up
 in a fastrx recording and drawn over it. This guide runs one such
 comparison end to end: a parser dirfile, a pulse capture and a fastrx
-recording of the same stretch, then the viewer.
+recording of the same stretch, with one command or by hand, then the
+viewer.
 
 The board stamps the decimated stream late by its CIC group delay (5 ms at
 stage 6, 117 µs at stage 1). Pulse-capture files and parser dirfiles are
@@ -19,7 +20,48 @@ liburing at install time), a 100G NIC on the channel-stream network, and
 pygetdata for the parser dirfile (`uv pip install -e .[dirfile]`, with
 libgetdata on the system).
 
-## 1. The 1G side
+## 1. One command
+
+With the streamers configured (the slow stream at its decimation stage,
+the channel streamer on for the module) and fastrxd running, one command
+records all three products of a module for the same stretch, into one
+session folder:
+
+```bash
+rfmux record --serial <NNNN> --module <module> --duration 20 \
+    --session ~/data/session_20260909_153654
+```
+
+It reads the board and never configures it. The session is a Periscope
+session folder: the channels and their df calibrations come from the
+newest bias export in it (`--channels 1-88` and `--bias <file>`
+override), and the products are listed in its metadata so the session
+browser shows them. Without `--session` a new `session_YYYYMMDD_HHMMSS`
+folder is made under `--session-dir`. The products, sharing one time
+stamp:
+
+- `pulse_module<M>_HHMMSS.h5`, a slow-stream pulse capture
+  (`--threshold-sigma`, `--end-sigma`, `--min-pulse-ms`, `--max-pulse-ms`,
+  `--noise-train-ms`, `--trigger-basis` are the capture's settings)
+- `parser_module<M>_HHMMSS.dirfile/serial_<NNNN>`, the parser's dirfile
+  of the same channels, and a `.log` with its drop statistics
+- `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of the
+  pipes those channels are on
+
+The pulse capture spends its noise-training span (5 s by default) before
+it detects anything, so the parser and the fastrx writer start when that
+span ends and run for `--duration`; the parser process is launched at
+once so it is listening by then. `--no-capture`, `--no-parser` and
+`--no-fastrx` leave a product out; without the capture the others start
+as soon as the parser listens. `--parser-interface` names the 1G
+interface when the board's address does not find it; `--fastrx-interface`
+names the 100G NIC when several fastrxd run. The command exits 1 after a
+run with a warning: no channel-stream packets (the channel streamer is
+off), a disk too small for the recording, or a parser that wrote nothing.
+
+## 2. By hand
+
+### The 1G side
 
 Configure the streamer as usual (decimation stage, short or long packets)
 and start a slow-stream pulse capture in Periscope or with
@@ -38,7 +80,7 @@ which is the path the viewer takes. Its `m<MM>_timebase` is the packet
 stamp in seconds of day on the PFB clock, and `m<MM>_dec_stage` records the
 decimation stage per frame.
 
-## 2. The 100G side
+### The 100G side
 
 Run the receiver daemon on the 100G NIC and leave it running. Started
 without privilege it prints the command to use:
@@ -115,8 +157,10 @@ rfmux fastrx overlay-dirfile ~/data/run.dirfile/serial_<NNNN> /data/run.fastrx \
 pulse attribute `trigger_time`, or any value of the dirfile's timebase, is
 on that axis.
 
-From Python the same pieces are `Recording`, `pulse_overlay` and
-`dirfile_window` in `rfmux.pulse_capture.overlay`:
+From Python the recording is `record_streams` in
+`rfmux.algorithms.measurement.record_streams`, and the viewer's pieces
+are `Recording`, `pulse_overlay` and `dirfile_window` in
+`rfmux.pulse_capture.overlay`:
 
 ```python
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader

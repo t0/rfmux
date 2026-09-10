@@ -35,6 +35,7 @@ KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
+KEY_FIND_RESONANCES = "find_resonances/parameters"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -419,3 +420,34 @@ def get_material_properties(name: str) -> dict:
         return mat
     
     raise ValueError(f"Material '{name}' not found in built-in or custom materials")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Find Resonances Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_find_resonances_parameters() -> dict:
+    """The saved keyword arguments for the resonance finder.
+
+    JSON rather than one key per argument, so ``None`` -- which several of
+    them use to mean "no limit" -- survives the round trip, and so adding an
+    argument needs no new key here.
+
+    Returns:
+        dict: the arguments last saved, empty if none ever were. Only the
+        arguments present are returned; the panel fills the rest from the
+        library's own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIND_RESONANCES, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_find_resonances_parameters(parameters: dict) -> None:
+    """Remember the resonance finder's keyword arguments."""
+    import json
+    _get_settings().setValue(KEY_FIND_RESONANCES, json.dumps(parameters))

@@ -2,11 +2,14 @@
 
 # Imports from within the 'periscope' subpackage
 from .utils import *
-from .layouts import FlowLayout, labelled
+from .layouts import FlowLayout, grouped, labelled
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
-from .dialogs import NetworkAnalysisParamsDialog, FindResonancesDialog
+from .dialogs import NetworkAnalysisParamsDialog
+from .find_resonances_settings_panel import FindResonancesSettingsPanel
+from .tasks import FindResonancesSignals, FindResonancesTask
+from ...tuning import store
 from .network_analysis_export import NetworkAnalysisExportMixin
 
 class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, ScreenshotMixin):
@@ -40,18 +43,30 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.original_params = {}  # Initial parameters
         self.current_params = {}   # Most recently used parameters
         self.dac_scales = dac_scales or {}  # Store DAC scales
-        self.resonance_lines_mag = {} # Store resonance lines for magnitude plots {module: [line_item, ...]}
-        self.resonance_lines_phase = {} # Store resonance lines for phase plots {module: [line_item, ...]}
-        self.resonance_freqs = {}  # Store resonance frequencies per module
+        # module -> the frequencies that seed a multisweep. The search's
+        # candidates to begin with, then whatever double-click editing leaves.
+        self.resonance_freqs = {}
+        # module -> the ResonanceSearch behind them, kept for the rejected
+        # candidates it carries and for the catalog it can seed.
+        self.resonance_searches = {}
         self.add_subtract_mode = False
         self.module_cable_lengths = {} # For Requirement 2
-        self.faux_resonance_legend_items_mag = {} # For Req 3
-        self.faux_resonance_legend_items_phase = {} # For Req 3
         self.dark_mode = dark_mode  # Store dark mode setting
         self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
 
+        # The finder's thresholds, set once and kept: one window per panel,
+        # non-modal, so a search is a button press and not a form to fill in.
+        self.find_resonances_settings = FindResonancesSettingsPanel(self)
+        self._find_res_task = None
+
         # Setup the UI components
         self._setup_ui()
+        self._status_timer = QtCore.QTimer(self)
+        self._status_timer.setSingleShot(True)
+        # The label's own slot, not a lambda over self: Qt drops a connection
+        # to a destroyed receiver, where a closure would keep this panel's
+        # Python wrapper alive and fire into a deleted widget.
+        self._status_timer.timeout.connect(self.status_label.clear)
         # Set initial size only on creation
         self.resize(1000, 800)
 
@@ -145,11 +160,17 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
         toolbar_module_layout.addWidget(unwrap_button)
 
-        # Find Resonances button
-        find_res_btn = QtWidgets.QPushButton("Find Resonances")
-        find_res_btn.setToolTip("Identify resonance frequencies from the current sweep data for the active module.")
-        find_res_btn.clicked.connect(self._show_find_resonances_dialog)
-        toolbar_module_layout.addWidget(find_res_btn)
+        # Find Resonances, and the settings it runs with
+        self.find_res_btn = QtWidgets.QPushButton("Find Resonances")
+        self.find_res_btn.setToolTip("Search the active module's trace for resonance dips.")
+        self.find_res_btn.clicked.connect(self._find_resonances_action)
+        find_res_settings_btn = QtWidgets.QPushButton("⚙")
+        find_res_settings_btn.setToolTip(
+            "Thresholds for Find Resonances. They stay set between searches "
+            "and across sessions.")
+        find_res_settings_btn.clicked.connect(self._show_find_resonances_settings)
+        toolbar_module_layout.addWidget(
+            grouped(self.find_res_btn, find_res_settings_btn))
 
         # Take Multisweep button
         self.take_multisweep_btn = QtWidgets.QPushButton("Take Multisweep")
@@ -157,7 +178,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
         self.take_multisweep_btn.setEnabled(False) # Initially disabled
         toolbar_module_layout.addWidget(self.take_multisweep_btn)
-        
+
+        # Where routine outcomes go. A dialog is for a failure needing action.
+        self.status_label = QtWidgets.QLabel("")
+        toolbar_module_layout.addWidget(self.status_label)
+
         layout.addWidget(toolbar_module)
 
     def _setup_unit_controls(self, toolbar_layout):
@@ -288,6 +313,14 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             amp_curve = plot_item_amp.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[1], width=LINE_WIDTH)) if plot_item_amp else None
             phase_curve = plot_item_phase.plot([], [], pen=pg.mkPen(TABLEAU10_COLORS[0], width=LINE_WIDTH)) if plot_item_phase else None
 
+            # The dips a search threw out, hoverable for the reason why.
+            rejected_markers = pg.ScatterPlotItem(
+                symbol='x', size=9, pen=pg.mkPen(RESONANCE_LINE_COLOR),
+                brush=None, hoverable=True,
+                tip=lambda x, y, data: str(data))
+            if plot_item_amp:
+                plot_item_amp.addItem(rejected_markers)
+
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
             self.tabs.addTab(tab, f"Module {module}")
@@ -300,7 +333,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 'amp_legend': amp_legend,
                 'phase_legend': phase_legend,
                 'resonance_lines_mag': [], # For storing magnitude resonance lines
-                'resonance_lines_phase': [] # For storing phase resonance lines
+                'resonance_lines_phase': [], # For storing phase resonance lines
+                'rejected_markers': rejected_markers,
             }
             last_amp_plot = amp_plot
             last_phase_plot = phase_plot
@@ -345,8 +379,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
             plot_info['amp_curve'].setData([], [])
             plot_info['phase_curve'].setData([], [])
+            plot_info['rejected_markers'].setData([], [])
 
-            self._remove_faux_resonance_legend_entry(module_id_iter)
             self._update_multisweep_button_state(module_id_iter) 
 
 
@@ -372,58 +406,66 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                     viewbox.enableZoomBoxMode(self.zoom_box_mode)
 
     def _toggle_resonances_visible(self, checked: bool):
-        """Show or hide all resonance indicator lines."""
-        for module_id in self.plots.keys():
-            for line in self.plots[module_id]['resonance_lines_mag']:
+        """Show or hide every resonance marker, kept and rejected alike."""
+        for plot_info in self.plots.values():
+            for line in plot_info['resonance_lines_mag']:
                 line.setVisible(checked)
-            for line in self.plots[module_id]['resonance_lines_phase']:
+            for line in plot_info['resonance_lines_phase']:
                 line.setVisible(checked)
-            self._update_resonance_legend_entry(module_id)
+            plot_info['rejected_markers'].setVisible(checked)
 
     def _toggle_resonance_edit_mode(self, checked: bool):
         """Enable or disable double-click add/subtract mode."""
         self.add_subtract_mode = checked
 
-    def _update_resonance_checkbox_text(self, module: int):
-        """Update the show-resonances checkbox label (count removed)."""
-        self.show_resonances_cb.setText("Show Resonances")
+    def _clear_resonance_lines(self, module: int) -> None:
+        """Take every kept-resonance line off one module's plots."""
+        plot_info = self.plots[module]
+        for lines, plot in (('resonance_lines_mag', 'amp_plot'),
+                            ('resonance_lines_phase', 'phase_plot')):
+            item = plot_info[plot].getPlotItem()
+            for line in plot_info[lines]:
+                item.removeItem(line)
+            plot_info[lines] = []
+
+    def _add_resonance_line(self, module: int, freq_hz: float,
+                            tooltip: str = "") -> None:
+        """One kept resonance, marked on both of a module's plots."""
+        plot_info = self.plots[module]
+        pen = pg.mkPen(RESONANCE_LINE_COLOR, style=QtCore.Qt.PenStyle.DashLine)
+        for lines, plot in (('resonance_lines_mag', 'amp_plot'),
+                            ('resonance_lines_phase', 'phase_plot')):
+            line = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=pen)
+            if tooltip:
+                line.setToolTip(tooltip)
+            plot_info[plot].addItem(line)
+            plot_info[lines].append(line)
 
     def _add_resonance(self, module: int, freq_hz: float):
-        """Add a resonance line at the given frequency."""
+        """Add a resonance by hand. Edits the seed list, not the search."""
         if module not in self.plots:
             return
-        plot_info = self.plots[module]
-        line_pen = pg.mkPen(RESONANCE_LINE_COLOR, style=QtCore.Qt.PenStyle.DashLine)
-        line_mag = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
-        line_phase = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
-        plot_info['amp_plot'].addItem(line_mag)
-        plot_info['phase_plot'].addItem(line_phase)
-        plot_info['resonance_lines_mag'].append(line_mag)
-        plot_info['resonance_lines_phase'].append(line_phase)
+        self._add_resonance_line(module, freq_hz, tooltip="added by hand")
         self.resonance_freqs.setdefault(module, []).append(freq_hz)
-        self._update_resonance_checkbox_text(module) 
-        self._update_resonance_legend_entry(module) 
+        self._update_resonance_title(module)
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
         self._update_multisweep_button_state(module)
 
-
     def _remove_resonance(self, module: int, freq_hz: float):
-        """Remove the nearest resonance line."""
+        """Remove the nearest resonance by hand."""
         if module not in self.plots or module not in self.resonance_freqs:
             return
         freqs = self.resonance_freqs[module]
         if not freqs:
-            self._update_multisweep_button_state(module) 
+            self._update_multisweep_button_state(module)
             return
-        freqs_arr = np.array(freqs)
-        idx = int(np.argmin(np.abs(freqs_arr - freq_hz)))
-        line_mag = self.plots[module]['resonance_lines_mag'].pop(idx)
-        line_phase = self.plots[module]['resonance_lines_phase'].pop(idx)
-        self.plots[module]['amp_plot'].removeItem(line_mag)
-        self.plots[module]['phase_plot'].removeItem(line_phase)
+        idx = int(np.argmin(np.abs(np.array(freqs) - freq_hz)))
+        plot_info = self.plots[module]
+        for lines, plot in (('resonance_lines_mag', 'amp_plot'),
+                            ('resonance_lines_phase', 'phase_plot')):
+            plot_info[plot].removeItem(plot_info[lines].pop(idx))
         freqs.pop(idx)
-        self._update_resonance_checkbox_text(module) 
-        self._update_resonance_legend_entry(module) 
+        self._update_resonance_title(module)
         self._update_multisweep_button_state(module)
 
     def _update_unit_mode(self, mode):
@@ -483,173 +525,143 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self._redraw_magnitudes(module_id)
         self._update_legends_for_unit_mode()
 
-    def _show_find_resonances_dialog(self):
-        """Show the dialog to configure and run find_resonances."""
-        current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0:
-            QtWidgets.QMessageBox.warning(self, "No Module Selected", "Please select a module tab to analyze.")
+    def _show_find_resonances_settings(self):
+        """Raise the finder's settings window; it outlives any one search."""
+        self.find_resonances_settings.show()
+        self.find_resonances_settings.raise_()
+        self.find_resonances_settings.activateWindow()
+
+    def _find_resonances_action(self):
+        """Search the active module's trace, off the GUI thread."""
+        module = self._active_module()
+        if module is None:
+            self._show_status("Select a module tab to search.", ok=False)
             return
-        active_module_text = self.tabs.tabText(current_tab_index)
+        block = self._module_block(module)
+        if block is None:
+            self._show_status(f"Module {module} has not been swept yet.", ok=False)
+            return
+
+        self.find_res_btn.setEnabled(False)
+        self._show_status(f"Searching module {module}...")
+        signals = FindResonancesSignals()
+        signals.completed.connect(self._on_search_completed)
+        signals.error.connect(self._on_search_error)
+        # Held so the thread is not collected while it runs.
+        self._find_res_task = FindResonancesTask(
+            module, block, self.find_resonances_settings.get_parameters(), signals)
+        self._find_res_task.start()
+
+    def _on_search_completed(self, module: int, search):
+        self.find_res_btn.setEnabled(True)
+        self.draw_search(module, search)
+
+        found, rejected = len(search.candidates), len(search.rejected)
+        message = f"Module {module}: {found} resonances"
+        if rejected:
+            message += f", {rejected} rejected"
+        # The search went into the netanal block, so a file that exists is now
+        # out of date by exactly this. Re-saving overwrites it; a panel that
+        # has never been saved is left to the Save button.
+        if store.saved_path(self.netanal_container):
+            try:
+                message += f" -- saved to {self.save_netanal().name}"
+            except Exception as e:                      # noqa: BLE001 - reported
+                traceback.print_exc()
+                self._show_status(f"{message}, but the save failed: {e}", ok=False)
+                return
+        self._show_status(message, ok=bool(found))
+
+    def _on_search_error(self, module: int, message: str):
+        self.find_res_btn.setEnabled(True)
+        self._show_status(f"Module {module}: {message}", ok=False)
+
+    def draw_search(self, module: int, search) -> None:
+        """Show what one search found: dips kept, and dips thrown out.
+
+        Also the entry point for a netanal loaded from a file, whose search
+        came back out of the trace it was saved in.
+        """
+        if module not in self.plots:
+            return
+        self.resonance_searches[module] = search
+        self.resonance_freqs[module] = [
+            c.frequency_hz for c in search.candidates]
+
+        self._clear_resonance_lines(module)
+        for candidate in search.candidates:
+            self._add_resonance_line(
+                module, candidate.frequency_hz,
+                tooltip=(f"{candidate.frequency_hz / 1e6:.6f} MHz\n"
+                         f"{candidate.depth_db:.2f} dB deep\n"
+                         f"Q ~ {candidate.q_estimate:.0f}"))
+        self._place_rejected(module)
+        self._update_resonance_title(module)
+        self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
+        self._update_multisweep_button_state(module)
+
+    def _place_rejected(self, module: int) -> None:
+        """Mark the dips the search threw out, on the magnitude curve.
+
+        Crosses rather than the full-height lines the kept ones get: a search
+        can reject many more candidates than it keeps, and the reason each one
+        went is in its tooltip.
+
+        The y positions are read off the trace in the panel's current units, so
+        a units change re-places them.
+        """
+        plot_info = self.plots[module]
+        markers = plot_info['rejected_markers']
+        search = self.resonance_searches.get(module)
+        trace = self.netanal_traces.get(module)
+        if search is None or trace is None or not search.rejected:
+            markers.setData([], [])
+            return
+
+        # Ascending, so np.interp works on a downward netanal too.
+        order = np.argsort(trace['frequencies'])
+        freqs = np.asarray(trace['frequencies'])[order]
+        magnitudes = self._magnitude(np.asarray(trace['iq_counts']))[order]
+
+        x = np.array([c.frequency_hz for c in search.rejected])
+        markers.setData(
+            x, np.interp(x, freqs, magnitudes),
+            data=[c.rejected_because for c in search.rejected])
+
+    def _update_resonance_title(self, module: int) -> None:
+        """Put the count of kept resonances in the magnitude plot's title."""
+        if module not in self.plots:
+            return
+        count = len(self.resonance_freqs.get(module, []))
+        title = f"Module {module} - Magnitude"
+        if count:
+            title += f" - {count} resonances"
+        _, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
+        self.plots[module]['amp_plot'].getPlotItem().setTitle(title, color=pen_color)
+
+    def _active_module(self) -> Optional[int]:
+        """The module whose tab is showing, or None if none is."""
+        index = self.tabs.currentIndex()
+        if index < 0:
+            return None
         try:
-            active_module = int(active_module_text.split(" ")[1])
+            return int(self.tabs.tabText(index).split(" ")[1])
         except (IndexError, ValueError):
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not determine active module from tab: {active_module_text}")
-            raise
-        if not self.netanal_traces.get(active_module):
-            QtWidgets.QMessageBox.information(self, "No Data", f"No sweep data available for Module {active_module} to find resonances.")
-            return
+            return None
 
-        dialog = FindResonancesDialog(self)
-        if dialog.exec():
-            params = dialog.get_parameters()
-            if params:
-                self._run_and_plot_resonances(active_module, params)
+    def _module_block(self, module: int) -> Optional[dict]:
+        """One module's output out of the container, as the finder wants it."""
+        for block in self.netanal_container.values():
+            if isinstance(block, dict) and block.get('module') == module:
+                return block
+        return None
 
-    def _run_and_plot_resonances(self, active_module: int, find_resonances_params: dict):
-        """Run find_resonances and plot the results on the active module's plots."""
-        trace = self.netanal_traces.get(active_module)
-        if trace is None:
-            QtWidgets.QMessageBox.warning(self, "No Data", f"No data found for module {active_module}.")
-            self._update_multisweep_button_state(active_module)
-            return
-
-        frequencies, iq_complex = trace['frequencies'], trace['iq_counts']
-        if len(frequencies) == 0:
-            QtWidgets.QMessageBox.information(self, "No Data", "Selected sweep has no frequency or IQ data.")
-            self._update_multisweep_button_state(active_module)
-            return
-
-        try:
-            resonance_results = fitting.find_resonances(
-                frequencies=frequencies,
-                iq_complex=iq_complex,
-                module_identifier=f"Module {active_module}",
-                **find_resonances_params
-            )
-        except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Resonance Finding Error", f"Error calling find_resonances: {str(e)}")
-            traceback.print_exc()
-            self._update_multisweep_button_state(active_module) 
-            return
-
-        if active_module in self.plots:
-            plot_info = self.plots[active_module]
-            amp_plot_item = plot_info['amp_plot'].getPlotItem()
-            phase_plot_item = plot_info['phase_plot'].getPlotItem()
-
-            for line in plot_info.get('resonance_lines_mag', []):
-                amp_plot_item.removeItem(line)
-            plot_info['resonance_lines_mag'] = []
-
-            for line in plot_info.get('resonance_lines_phase', []):
-                phase_plot_item.removeItem(line)
-            plot_info['resonance_lines_phase'] = []
-
-            self.resonance_freqs[active_module] = []
-            
-            res_freqs_hz = resonance_results.get('resonance_frequencies', [])
-
-            if not res_freqs_hz:
-                QtWidgets.QMessageBox.information(self, "No Resonances Found", 
-                                                  f"No resonances were identified for Module {active_module} with the given parameters.")
-                self._update_multisweep_button_state(active_module) 
-                return 
-
-            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            for res_freq_hz in res_freqs_hz:
-                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                amp_plot_item.addItem(line_mag)
-                plot_info['resonance_lines_mag'].append(line_mag)
-
-                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                phase_plot_item.addItem(line_phase)
-                plot_info['resonance_lines_phase'].append(line_phase)
-
-            self.resonance_freqs[active_module] = res_freqs_hz
-            self._update_resonance_checkbox_text(active_module) 
-            self._update_resonance_legend_entry(active_module) 
-            self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
-        self._update_multisweep_button_state(active_module)
-
-    def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
-        if active_module in self.plots:
-            plot_info = self.plots[active_module]
-            amp_plot_item = plot_info['amp_plot'].getPlotItem()
-            phase_plot_item = plot_info['phase_plot'].getPlotItem()
-
-            for line in plot_info.get('resonance_lines_mag', []):
-                amp_plot_item.removeItem(line)
-            plot_info['resonance_lines_mag'] = []
-
-            for line in plot_info.get('resonance_lines_phase', []):
-                phase_plot_item.removeItem(line)
-            plot_info['resonance_lines_phase'] = []
-
-            self.resonance_freqs[active_module] = []
-            
-            res_freqs_hz = load_resonance_freqs
-
-            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            for res_freq_hz in res_freqs_hz:
-                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                amp_plot_item.addItem(line_mag)
-                plot_info['resonance_lines_mag'].append(line_mag)
-
-                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                phase_plot_item.addItem(line_phase)
-                plot_info['resonance_lines_phase'].append(line_phase)
-
-            self.resonance_freqs[active_module] = res_freqs_hz
-            self._update_resonance_checkbox_text(active_module) 
-            self._update_resonance_legend_entry(active_module) 
-            self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
-        self._update_multisweep_button_state(active_module)
-        
-    def _remove_faux_resonance_legend_entry(self, module_id: int):
-        """Removes the faux resonance legend entry for a module."""
-        if module_id in self.plots:
-            plot_info = self.plots[module_id]
-            amp_legend = plot_info['amp_legend']
-            phase_legend = plot_info['phase_legend']
-
-            if module_id in self.faux_resonance_legend_items_mag:
-                try:
-                    amp_legend.removeItem(self.faux_resonance_legend_items_mag[module_id])
-                except Exception: 
-                    pass 
-                del self.faux_resonance_legend_items_mag[module_id]
-            
-            if module_id in self.faux_resonance_legend_items_phase:
-                try:
-                    phase_legend.removeItem(self.faux_resonance_legend_items_phase[module_id])
-                except Exception:
-                    pass
-                del self.faux_resonance_legend_items_phase[module_id]
-
-    def _update_resonance_legend_entry(self, module_id: int):
-        """Adds or updates the faux legend entry for resonance count."""
-        if module_id not in self.plots:
-            return
-
-        self._remove_faux_resonance_legend_entry(module_id) 
-
-        plot_info = self.plots[module_id]
-        amp_legend = plot_info['amp_legend']
-        phase_legend = plot_info['phase_legend']
-        
-        count = len(self.resonance_freqs.get(module_id, []))
-
-        if self.show_resonances_cb.isChecked() and count > 0:
-            dummy_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            
-            legend_sample_item_mag = pg.PlotDataItem(pen=dummy_pen)
-            amp_legend.addItem(legend_sample_item_mag, f"{count} resonances")
-            self.faux_resonance_legend_items_mag[module_id] = legend_sample_item_mag 
-
-            legend_sample_item_phase = pg.PlotDataItem(pen=dummy_pen)
-            phase_legend.addItem(legend_sample_item_phase, f"{count} resonances")
-            self.faux_resonance_legend_items_phase[module_id] = legend_sample_item_phase
-
+    def _show_status(self, message: str, *, ok: bool = True) -> None:
+        """Say what happened in the toolbar, and stop saying it after a while."""
+        self.status_label.setText(message)
+        colour = TABLEAU10_COLORS[2] if ok else TABLEAU10_COLORS[3]
+        self.status_label.setStyleSheet(f"color: {colour};")
+        self._status_timer.start(STATUS_MESSAGE_MS)
 
     def _get_periscope_parent(self):
         """
@@ -777,6 +789,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if trace is not None:
             plot_info['amp_curve'].setData(
                 trace['frequencies'], self._magnitude(trace['iq_counts']))
+            self._place_rejected(module_id)
         plot_info['amp_plot'].autoRange()
 
     def update_progress(self, module: int, progress: float):
@@ -865,6 +878,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             
             # Redraw plots to ensure all legend items are updated correctly
             self._redraw_all_plots()
-            
-            # Update resonance legend entry to apply new theme colors
-            self._update_resonance_legend_entry(module)
+
+            # The count in the magnitude title is drawn in the text colour
+            self._update_resonance_title(module)

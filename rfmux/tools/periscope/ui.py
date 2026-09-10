@@ -9,7 +9,6 @@ from .dialogs import ( # Assuming periscope_dialogs.py becomes dialogs.py
     NetworkAnalysisDialog,
     NetworkAnalysisParamsDialog,
     InitializeCRSDialog,
-    FindResonancesDialog,
     MultisweepDialog,
 )
 from .network_analysis_panel import NetworkAnalysisPanel
@@ -22,7 +21,6 @@ __all__ = [
     "NetworkAnalysisDialog",
     "NetworkAnalysisParamsDialog",
     "InitializeCRSDialog",
-    "FindResonancesDialog",
     "MultisweepDialog",
     
     # From panel files

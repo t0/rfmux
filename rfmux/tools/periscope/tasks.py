@@ -15,6 +15,7 @@ from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alia
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
+from rfmux.tuning.find_resonances import find_resonances_in_netanal
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -549,6 +550,44 @@ class NetworkAnalysisTask(QtCore.QThread):
                 print(f"Error in _process_network_analysis: {e}", file=sys.stderr)
                 raise
         return None
+
+class FindResonancesSignals(QObject):
+    # module, ResonanceSearch. The search also went into the module's netanal
+    # output, where the finder puts it, so the panel's container carries it and
+    # a save writes it out with the trace it was found in.
+    completed = pyqtSignal(int, object)
+    error = pyqtSignal(int, str)
+
+
+class FindResonancesTask(QtCore.QThread):
+    """Runs the resonance finder off the GUI thread.
+
+    Milliseconds on a netanal-sized trace -- 25 ms over 20,000 points of the
+    simulator -- so this is not about speed. It is so a search reports through
+    the same signals as every other measurement, and so a threshold that finds
+    far more candidates than the operator meant cannot hold the window.
+    """
+
+    def __init__(self, module: int, module_netanal: dict, params: dict,
+                 signals: FindResonancesSignals):
+        super().__init__()
+        self.module = module
+        self.module_netanal = module_netanal
+        self.params = params
+        self.signals = signals
+
+    def run(self):
+        try:
+            # save=False: the panel writes through store when it is ready to,
+            # so the driver's autosave cannot put a second copy elsewhere.
+            search = find_resonances_in_netanal(
+                self.module_netanal, save=False, **self.params)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(self.module, f"{type(e).__name__}: {e}")
+            return
+        self.signals.completed.emit(self.module, search)
+
 
 class CRSInitializeTask(QRunnable):
     def __init__(self, crs: "CRS", module: int, irig_source: Any, clear_channels: bool, signals: CRSInitializeSignals):

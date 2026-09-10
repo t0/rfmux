@@ -35,6 +35,7 @@ from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
 from rfmux.tuning import store  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
+    ResonanceSearch,
     find_resonances_in_netanal,
     netanal_trace,
 )
@@ -302,6 +303,109 @@ def test_saving_the_same_netanal_again_writes_the_same_file(board, qt_app, outpu
 
     assert again == first
     assert sorted(p.name for p in output_directory.glob("*.pkl")) == [first.name]
+
+
+def _search_on(panel, module, qt_app):
+    """Press Find Resonances and wait for the real task to come back."""
+    panel._find_resonances_action()
+    assert spin_until(qt_app, lambda: panel._find_res_task.isFinished(),
+                      timeout=60), "the search never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.resonance_searches.get(module)
+
+
+def test_find_resonances_finds_the_array_through_the_real_task(board, qt_app):
+    """The button runs ``find_resonances_in_netanal`` on the module's own
+    netanal output, off the GUI thread, and the panel marks what came back.
+
+    Seven of the standard array's eight, because the eighth sits above the
+    band this netanal sweeps.
+    """
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert len(search.candidates) == 7
+    assert panel.resonance_freqs[catalog.module] == pytest.approx(
+        list(search.resonance_frequencies_hz))
+    # One dashed line per kept resonance, on both plots.
+    plot_info = panel.plots[catalog.module]
+    assert len(plot_info["resonance_lines_mag"]) == 7
+    assert len(plot_info["resonance_lines_phase"]) == 7
+    assert "7 resonances" in plot_info["amp_plot"].getPlotItem().titleLabel.text
+
+
+#: A collision cut wider than the array's own 6-20 MHz spacing, so the finder
+#: treats every resonator as colliding with its neighbour and rejects it. The
+#: point is the rejections, which are the only thing a display test can show.
+EVERYTHING_COLLIDES_KHZ = 20_000.0
+
+
+def test_the_settings_panel_is_what_the_search_runs_with(board, qt_app):
+    """The thresholds are the settings panel's, not a dialog's: change one
+    between searches and the next search obeys it, with nothing to fill in."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    panel.find_resonances_settings.min_separation_spin.setValue(
+        EVERYTHING_COLLIDES_KHZ)
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert len(search.candidates) == 1
+    assert len(search.rejected) == 6
+    assert all("collided" in c.rejected_because for c in search.rejected)
+
+
+def test_rejected_candidates_are_drawn_with_their_reason(board, qt_app):
+    """A finder that returns fewer resonances than the array has is hard to
+    debug; the panel draws what was thrown out, and the reason is on it."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    panel.find_resonances_settings.min_separation_spin.setValue(
+        EVERYTHING_COLLIDES_KHZ)
+    search = _search_on(panel, catalog.module, qt_app)
+
+    markers = panel.plots[catalog.module]["rejected_markers"]
+    x, _ = markers.getData()
+    assert len(x) == len(search.rejected)
+    assert sorted(x) == pytest.approx(
+        sorted(c.frequency_hz for c in search.rejected))
+    assert [point.data() for point in markers.points()] == [
+        c.rejected_because for c in search.rejected]
+
+    # And the tooltip pyqtgraph builds on hover is that reason, unadorned.
+    reason = search.rejected[0].rejected_because
+    assert markers.opts["tip"](x=0.0, y=0.0, data=reason) == reason
+
+
+def test_a_search_updates_the_file_the_netanal_is_in(board, qt_app, output_directory):
+    """The search goes into the netanal block, so the file that holds the
+    measurement now holds the search too -- the same file, not a second one
+    beside it, and a notebook reads it back with ``ResonanceSearch``."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+    path = panel.save_netanal()
+
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
+    trace = netanal_trace(store.load(path)[crs.module[catalog.module].index()])
+    assert ResonanceSearch.from_dict(
+        trace["resonance_search"]).resonance_frequencies_hz == pytest.approx(
+            list(search.resonance_frequencies_hz))
+
+
+def test_a_search_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_directory):
+    """Saving stays the Save button's job and the session's: a search on a
+    panel that has never been saved leaves the folder alone."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    _search_on(panel, catalog.module, qt_app)
+
+    assert list(output_directory.glob("*.pkl")) == []
 
 
 def _periscope_with(session_manager=None):

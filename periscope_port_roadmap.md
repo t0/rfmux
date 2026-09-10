@@ -220,7 +220,9 @@ and from the merge decisions of 2026-09-08.
 | `network_analysis_panel.py`, `app.py` | `_last_export_filename` and `export_data(filename_override=)` for netanal (stage 1) | `store`'s re-save in place, off `file_metadata` |
 | `network_analysis_dialog.py`, `app.py` | `dac_scales_used` in the file, and the `"modules" in params` test that told a loaded payload from a new measurement (stage 1) | the board's DAC scale; `dialog.loaded_container` |
 | `session_manager.py` | the netanal `pickle.dump` path, `pickle.load` in `load_file`, and the `'parameters' and 'modules'` file typing (stage 1) | `store.load` and `file_metadata`'s `measurement_type` |
-| `find_resonances_dialog.py`, `utils.py` | Data Exponent field, `DEFAULT_DATA_EXPONENT`, `min_resonance_separation_hz` | `find_resonances` kwargs |
+| `find_resonances_dialog.py`, `utils.py` | the whole modal dialog, the Data Exponent field, and every `DEFAULT_*` finder constant (stage 1) | `FindResonancesSettingsPanel`, over `find_resonances`' own kwargs and defaults |
+| `network_analysis_panel.py` | `_run_and_plot_resonances`' GUI-thread `fitting.find_resonances` call and its four `QMessageBox`es, `_use_loaded_resonances`, the faux resonance legend entry and `_update_resonance_checkbox_text` (stage 1) | `FindResonancesTask`, one `draw_search`, the count in the plot title, a status label |
+| `extract_params.py` | `ParamKeyExtractor`, 102 lines of AST parsing to find the keys a dialog's `get_parameters` builds (stage 1) | calling `get_parameters()` and looking at the dict |
 | `network_analysis_dialog.py` | Cable Length field, "Clear all channels first" checkbox (stage 1) | nothing; neither is `take_netanal`'s to do |
 | `network_analysis_export.py` | the board write at the end of the cable-delay unwrap (stage 1) | nothing; the unwrap adjusts the display only |
 | `utils.py` | `NETANAL_UPDATE_INTERVAL` (stage 1), a throttle whose interval was recomputed and then ignored | nothing |
@@ -354,25 +356,38 @@ are now strict xfails that name the stage which clears them.
   helper. §6 judgement calls 13-16 cover the choices. Since the DAC scale is
   no longer carried in the file, the modal dialog that refused to start a
   sweep without one is gone too: it is a legend, not a measurement.
-* Find Resonances runs `find_resonances_in_netanal` in a small task, not on
-  the GUI thread. Markers come from `search.candidates`; rejected candidates
-  are drawn differently with `rejected_because` in the tooltip; the count
-  goes in the plot title. The search is already persisted into the netanal
-  block, so the re-export-in-place the panel does today is a `store.save` of
-  the same block. Until it lands, a netanal is saved once, when it finishes:
-  the re-save after a search went with `build_export_dict`, because the
-  legacy shim's frequency list has nowhere in the container to live.
-* The Find Resonances settings become the persistent settings panel from
-  the section-amplitudes branch, as a view over the finder's arguments:
-  delete Data Exponent; relabel Min Separation as the collision cut it now
-  is, with blank meaning 0 Hz, next to the `require_isolation` checkbox;
-  halve the default dip depth to reproduce what the GUI used to find (the
-  migration note in `tuning_revamp_todo.md`, "Retire the legacy resonance
-  finder"); keep the amplitude-iteration selector, which now selects which
-  netanal block to search. Min Q and Max Q stay, with the todo's caveat that
-  they rarely bite at netanal resolution.
+* **Find Resonances on the container (done).** `FindResonancesTask` runs
+  `find_resonances_in_netanal` on the module's own netanal output, off the
+  GUI thread, and the panel draws `search.candidates` as the dashed lines it
+  always drew, now with the depth and Q estimate in a tooltip. Rejected
+  candidates are crosses on the magnitude curve, hoverable for
+  `rejected_because`; they are crosses and not lines because a search can
+  reject far more than it keeps. The count is in the magnitude plot's title,
+  which retired the faux legend entry that carried it. The search goes into
+  the block, so a netanal that has been saved is re-saved in place; one that
+  has not been is left to the Save button. The four `QMessageBox` calls on
+  the path -- no module selected, no data, finder raised, nothing found --
+  are one transient status label in the toolbar. Gone with the old path:
+  `fitting.find_resonances` as Periscope's last caller, the legacy shim's
+  `resonance_frequencies` dict, `_use_loaded_resonances` (loading now calls
+  the same `draw_search`), and `extract_params.py`, whose only caller was
+  the deleted dialog test. §6 judgement calls 17-19 cover the choices.
+* **The settings are a persistent panel (done).** `FindResonancesSettingsPanel`
+  is a non-modal, always-on-top window over the finder's keyword arguments,
+  behind a `⚙` beside the button, persisted as JSON through `settings.py` with
+  Reset to Defaults. Data Exponent is gone with `DEFAULT_DATA_EXPONENT`; Min
+  Separation is now "Collision cut", in kHz, beside the `require_isolation`
+  checkbox, with "Off" for 0 Hz; Min Q and Max Q stay, with the todo's caveat
+  in the Max Q tooltip. The defaults are read out of `find_resonances`'
+  signature at import, so they cannot drift from the library -- which is also
+  what halves the dip depth the old dialog shipped (2.0 dB, whose effective
+  floor was 1.0, to the library's 1.0). The other `DEFAULT_*` finder
+  constants in `utils.py` went with it. Dropped from the plan: the
+  amplitude-iteration selector, per judgement call 17.
 * Add/Subtract Resonances by double-click stays. It edits the frequency list
-  that seeds the catalog, not the search (§6, judgement call 1).
+  that seeds the catalog, not the search (§6, judgement call 1); a
+  hand-added line says so in its tooltip, and the `Resonator.notes` half of
+  that judgement call belongs to the step that builds the catalog.
 * **Take Multisweep hands over a `ResonatorCatalog`**, built with
   `search.to_catalog(module, amplitude=<probe amplitude>)`, or from the
   edited list with `ResonatorCatalog.from_frequencies`. The netanal panel
@@ -729,6 +744,26 @@ Listed so they can be overruled.
     legacy shim's frequency list is a panel attribute with nowhere in the
     container to live, and inventing a key for it is the re-packaging this port
     is for deleting.
+17. **No amplitude-iteration selector on the Find Resonances settings**
+    (stage 1). The plan kept it, "which now selects which netanal block to
+    search". One netanal is one probe amplitude and one panel tab is one
+    module, so the tab already picks the block and a selector beside it would
+    be a second, disagreeing way to say the same thing. Alternative: keep it
+    as a module selector, so a search can run on a tab that is not showing.
+    Overrule this if searching several modules from one place turns out to be
+    what the operator wants.
+18. **A search re-saves only a netanal that has a file** (stage 1). The block
+    changed, so the file that holds it is out of date; overwriting it is the
+    `file_metadata` mechanism working as intended. A panel that has never been
+    saved is left alone rather than given a file by a search, because a file
+    appearing from an analysis button is a surprise. A measured netanal is
+    saved when it finishes, so in practice the search updates it.
+19. **Rejected candidates are crosses, not lines** (stage 1). The plan said
+    "drawn differently". A search rejects by collision and by count, and a
+    collision cut a little too wide rejects most of an array, so full-height
+    lines would bury the trace; one hoverable scatter item per module carries
+    every reason. Alternative: lines in a lighter pen behind a checkbox of
+    their own.
 
 ---
 
@@ -737,7 +772,7 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (data path and files done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Still to come: the Find Resonances task and settings panel, the catalog handover, the remaining QoL | `test/periscope/test_tuning_flow.py` |
+| 1 (all but the catalog handover done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Still to come: the catalog handover, the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
 | 2 | flow step 3 through the task; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |

@@ -161,35 +161,24 @@ existed. Anything that changes what a macro returns needs
 
 `algorithms/measurement/fitting.py:394` `find_resonances` is now a deprecating
 shim that forwards to `rfmux/tuning/find_resonances.py` and rebuilds the old
-`{'resonance_frequencies', 'resonances_details'}` dict. Two callers still go
-through it. Once both move, the shim and everything below it goes.
+`{'resonance_frequencies', 'resonances_details'}` dict. One caller still goes
+through it. Once it moves, the shim and everything below it goes.
 
-1. **Periscope netanal panel** — `_run_and_plot_resonances` in
-   `tools/periscope/network_analysis_panel.py`. It only reads
-   `resonance_frequencies`, so it maps onto
-   `ResonanceSearch.resonance_frequencies_hz` directly. It now hands the finder
-   `frequencies`/`iq_counts` from the trace, but still calls the shim, and
-   still on the GUI thread.
-2. **`FindResonancesDialog`** — `tools/periscope/find_resonances_dialog.py`.
-   The **Data Exponent** field now controls nothing: the parameter was removed
-   from the finder (it was a multiplier in dB, so it scaled dips and noise
-   together and could not change a candidate), and the shim accepts it only to
-   keep the old call signature working. Delete the field and
-   `DEFAULT_DATA_EXPONENT` in `utils.py:124`. Note the migration is not quite
-   neutral for a GUI user: the old code did *not* scale the prominence threshold
-   by the exponent, so at the default of 2.0 the effective dip-depth floor was
-   half what the box said. Halving `DEFAULT_MIN_DIP_DEPTH_DB` (`utils.py:120`,
-   currently 2.0) reproduces what the GUI used to find.
-   Parameter names changed too (`min_resonance_separation_hz` → `min_separation_hz`),
-   and the *meaning* changed: it is now a collision cut that removes every
-   member of a too-close group, where it used to keep the tallest. The dialog
-   always sends `DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4` (`utils.py:123`), so
-   under the new rule a GUI user silently gets both members of any pair inside
-   10 kHz discarded. Relabel the field so it says what it does now ("Collision
-   cut", not "Min Separation"), let blank mean the 0 Hz default, and revisit
-   whether 10 kHz is the right number to ship — that is a physics call about the
-   readout, not a UI default.
-3. **`simplified_tuning_flow`** — `reference-notebooks/Demos/`, the `.py` at
+Periscope's two — the netanal panel's `_run_and_plot_resonances` and
+`FindResonancesDialog` — are done, in the stage 1 commit that put
+`FindResonancesTask` and `FindResonancesSettingsPanel` in their place. The
+migration notes recorded here are settled with them: the settings panel reads
+its defaults out of `find_resonances`' signature, which drops Data Exponent
+and halves the dip-depth floor to the library's 1.0 dB (the old dialog said
+2.0 and the old code did not scale the threshold by the exponent, so its
+effective floor was 1.0); and the separation is now labelled "Collision cut",
+defaulting to the library's 0 Hz rather than the dialog's 10 kHz, which under
+the new every-member rule would have silently discarded both halves of any
+pair inside 10 kHz. Whether a non-zero collision cut is worth shipping is
+still a physics call about the readout, now made in the panel by whoever is
+looking at the array.
+
+1. **`simplified_tuning_flow`** — `reference-notebooks/Demos/`, the `.py` at
    line 267 and the `.md` companion at lines 33, 79, 375, 401 and 777. This is
    the one that reads `resonances_details`, so it becomes `.candidates`, whose
    fields are `frequency_hz` / `depth_db` / `width_hz` / `q_estimate`. Its
@@ -197,7 +186,7 @@ through it. Once both move, the shim and everything below it goes.
    describes the finder as working on `-|S21|**data_exponent` — both stale. Per the
    design doc's step 5 this demo is due to be rewritten against
    `tune_resonators` anyway — worth doing in one pass rather than two.
-4. Then: delete the shim, and the four mocked
+2. Then: delete the shim, and the four mocked
    `{'resonance_frequencies': …, 'resonances_details': …}` dicts in
    `test/algorithms/test_measurement_flow.py` (lines 71, 124, 250, 320).
 

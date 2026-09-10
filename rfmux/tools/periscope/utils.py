@@ -114,17 +114,8 @@ MULTISWEEP_DEFAULT_SPAN_HZ = 200000.0  # 200 kHz span per resonance
 MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
 MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
-# Find Resonances defaults
-DEFAULT_EXPECTED_RESONANCES = None  # Optional
-DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
-DEFAULT_MIN_Q = 1e4
-DEFAULT_MAX_Q = 1e7
-DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
-# Off thins crowded peaks to the most prominent; on drops every member
-# of a crowded group, so nothing returned has a neighbour within the
-# separation.
-DEFAULT_REQUIRE_ISOLATION = False
-DEFAULT_DATA_EXPONENT = 2.0
+# How long a transient status message stays in a panel's toolbar.
+STATUS_MESSAGE_MS = 8000
 
 # Sampling settings
 BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0

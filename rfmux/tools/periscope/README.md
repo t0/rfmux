@@ -95,9 +95,11 @@ The network analysis functionality allows for detailed characterization of reson
 1. Click "Network Analyzer" to configure and run a frequency sweep
 2. Set frequency range, sweep points, and amplitude parameters
 3. View amplitude and phase response for each module
-4. Use "Find Resonances" to automatically identify resonance frequencies
-5. Use "Unwrap Cable Delay" to compensate for cable length effects
-6. Export data in various formats for further analysis
+4. Use "Find Resonances" to identify resonance dips; the ⚙ beside it sets the
+   thresholds, and they stay set between searches and across sessions
+5. Rejected candidates are marked with a cross -- hover one for why it went
+6. Use "Unwrap Cable Delay" to compensate for cable length effects
+7. Save writes the measurement, and any search in it, to the session folder
 
 ### Multisweep Analysis
 

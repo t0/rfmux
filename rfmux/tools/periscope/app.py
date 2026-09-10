@@ -1221,9 +1221,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 trace = block['results']
                 panel.update_data(block['module'], trace)
                 if 'resonance_search' in trace:
-                    search = ResonanceSearch.from_dict(trace['resonance_search'])
-                    panel._use_loaded_resonances(
-                        block['module'], list(search.resonance_frequencies_hz))
+                    panel.draw_search(
+                        block['module'],
+                        ResonanceSearch.from_dict(trace['resonance_search']))
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")

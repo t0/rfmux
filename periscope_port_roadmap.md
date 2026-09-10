@@ -211,7 +211,8 @@ and from the merge decisions of 2026-09-08.
 | `multisweep_panel.py` | `results_by_detector`, `update_data`'s injection of `amplitude/direction/iteration`, the three restructurings, `_get_closest_remembered_cf`, `last_output_cfs_by_amp_and_conceptual_idx`, `_get_fit_frequencies`, `_fits_present`, dead `_intermediate_*` | catalog plus module block, `sweep_results` readers |
 | `multisweep_dialog.py` | Bias Frequency Method combo, Rotate Saved Data checkbox, `_get_frequencies` precedence chain, legacy `results_by_iteration` reader, `resonance_frequencies` legacy key | `AmplitudeSchedule` view; catalog in, catalog out |
 | `multisweep_panel.py` | `handle_error`'s modal `QMessageBox.critical` (`:1163`), which blocks the GUI thread until dismissed and deadlocks a headless run | a transient status label, per AGENTS.md's rule on dialogs |
-| `detector_digest_panel.py` | skewed-fit denormalisation guess, `gain_complex` re-multiplication, `rotation_tod` plot, `is_bifurcated` rows, `float(key.split(":")[0])` | `skewed_model_magnitude`, `nonlinear_model_iq`, `BiasFinding` |
+| `detector_digest_panel.py` | the whole module, its `ui.py` export, the Digest tab, `_open_detector_digest_for_index`, `detector_digest_windows`, `_navigate_digest_to_detector`, the digest `eventFilter` and double-click handler, the auto-open on the noise load path, and the Check Noise button with `_take_noise_samps`, its only caller (stage 2) | nothing in stage 2; rebuilt from scratch against the block and the catalog once fits and bias points exist (§6, judgement call 23) |
+| `parameter_histograms_panel.py` | the Histograms tab, `_generate_histograms`, `_ensure_histogram_panel` and the cache invalidation (stage 2) | a tab built in stage 3 over `entry["fits"]`, when there is something to bin |
 | `app.py` | `apply_bias_output`, `_set_bias` NCO midpoint, mock-mode `_start_df_calibration`, `handle_bias_kids` payload plumbing | `crs.apply_bias(catalog)`; see §6 for mock-mode df |
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
 | `network_analysis_export.py`, `network_analysis_panel.py` | the private `parameters/modules` export payload, `raw_data` tuples, `iq = amps * exp(j phase)` reconstruction, GUI-thread `find_resonances` | the netanal container; `find_resonances_in_netanal` in a task |
@@ -252,7 +253,8 @@ The re-exported model functions `s21_skewed`, `nonlinear_iq`,
 `session_manager.py`'s session folder, browser, screenshot registry and
 `data_ready` fan-out (it just stops writing pickles itself). `dock_manager`,
 `layouts.FlowLayout`, `ScreenshotMixin`, `UnitConverter` (display units are
-the GUI's business), theming, the noise spectrum panel (it reads a
+the GUI's business), theming, the noise spectrum panel and the multisweep
+toolbar's Get Noise Spectrum button that opens it (it reads a
 channel-to-frequency map, which the catalog provides), the netanal dialog's
 amplitude group and DAC-scale fetch, the pulse capture panel and task
 (untouched; out of scope).
@@ -557,25 +559,53 @@ are now strict xfails that name the stage which clears them.
   Mag/Phase overview. Ported from the section-amplitudes grid helpers as
   *rendering*: the grid rule `ncols = max(min(4, n), ceil(sqrt(n)))`, widget
   caching, titles `NAME (f_central = ... MHz)`, square IQ axes, zoom box, batch
-  navigation with a subplots-per-page spinbox, sort by frequency or name,
-  double-click to digest. Nothing on these tabs is derived from a fit, a bias
-  point or a bifurcation test: a sweep is a measurement, and the overlays that
-  read those arrive with the buttons that produce them in stages 3 and 4. The
-  digest shows the sweep plots only until stage 3; histograms come back with
-  fits, since there is nothing to bin before them.
+  navigation with a subplots-per-page spinbox, sort by frequency or name.
+  Nothing on these tabs is derived from a fit, a bias point or a bifurcation
+  test: a sweep is a measurement, and the overlays that read those arrive with
+  the buttons that produce them in stages 3 and 4.
+* **The detector digest is not wired up at all** (maclean, 2026-09-10). It is
+  not shown, nothing is computed for it, and no code path reaches it; it is
+  rebuilt from scratch once fits and bias points exist, against the block and
+  the catalog, rather than ported. So stage 2 removes the Digest tab and its
+  placeholder, `_open_detector_digest_for_index`, `detector_digest_windows`,
+  `_navigate_digest_to_detector`, the `eventFilter` that gave it keyboard
+  navigation, the double-click handler that opened it, the digest invalidation
+  in the old `update_data`, the theme loop over its windows, the auto-open on
+  the noise load path (`app.py:2929`), and `detector_digest_panel.py` itself
+  with its export from `ui.py`. Two consequences worth naming rather than
+  discovering: the **Check Noise** button lives *inside* the digest and goes
+  with it, taking `MultisweepPanel._take_noise_samps`, its only caller, along —
+  while **Get Noise Spectrum** is a toolbar button of the multisweep panel
+  reaching `NoiseSpectrumPanel` directly, and is untouched. Double-click on a
+  subplot therefore does nothing in stage 2; it is reconnected when there is a
+  digest to open.
+* **Histograms are unwired on the same terms.** There is nothing to bin until
+  fits exist, `parameter_histograms_panel.py` reads `results_by_detector` for
+  what it bins, and stage 3 is where the tab earns its place — so stage 2
+  removes the tab, `_generate_histograms`, `_ensure_histogram_panel` and the
+  cache invalidation, and stage 3 builds it against `entry["fits"]`. Recorded
+  as §6 judgement call 23; the digest's treatment was instructed, this one is
+  the same reasoning applied one panel over, and is the piece to overrule if
+  you would rather keep a histogram tab through the port.
 * **What this deletes.** Every read of `results_by_detector` in
   `multisweep_panel.py` (44 today), and with them `_redraw_sweep_grid`'s
   detector-index dictionaries, `_prepare_export_data`'s payload,
   `_get_fit_frequencies`, `_get_closest_remembered_cf` and
-  `_toggle_cf_lines_visibility`'s history lines. `detector_digest_panel.py` (29)
-  and `parameter_histograms_panel.py` (7) read the same shape and are rewritten
-  against the block in the same commit rather than left reading a structure
-  nothing produces — see §6, judgement call 23.
+  `_toggle_cf_lines_visibility`'s history lines — plus the two panels above and
+  their 29 and 7 reads of the same shape. After it, `grep -rn
+  "results_by_detector\|results_by_iteration" rfmux/tools/periscope/` should
+  reach the dialogs' loaders and `app.py`'s load path and nothing else, which
+  is the Files bullet's work.
 * Test: a redraw on a block measured by the real task puts one curve per
   (name, step, direction) on the axes, with the entry's own frequencies and
   `abs(iq_counts)` on it; a live `partial_data` for a step draws a shorter curve
   in the same colour the finished sweep gets; and switching units, Normalize and
-  batch changes what is drawn without touching `module_sweeps`.
+  batch changes what is drawn without touching `module_sweeps`. Two existing
+  cases go with the deletions above, since they construct the panels:
+  `test_viewbox_lifetime.py`'s `DetectorDigestPanel` entry and
+  `test_laptop_fit.py`'s `ParameterHistogramsPanel` one. Both are per-panel
+  checks of a general rule, so the rule keeps its other cases; they come back
+  with the panels.
 * **Re-run** reopens the dialog seeded with the panel's current catalog.
   That is the iterative multisweep: after stage 4 the current catalog is
   `report.catalog`, so the re-run centres on the found bias frequencies at
@@ -642,18 +672,28 @@ are now strict xfails that name the stage which clears them.
   from `skewed_model_magnitude` and `nonlinear_model_iq` on a finer grid,
   `fr` lines, three-line legends with `a`; an amplitude selector populated
   from iterations that have a fit; failed fits shown with `failed_because`.
-* Detector Digest: the three plots and two parameter tables, reading
-  `entry["fits"][model]["params"]` and `errors`; keyboard navigation;
-  Check Noise stays (it is a `get_samples` call, not analysis). The
-  bifurcation column reads `a` against `BIFURCATION_A` until stage 4 gives
-  it the report.
-* Histograms: fr scatter, Qr/Qc/Qi on shared log bins, coloured by
-  amplitude with the same colorbar, an amplitude selector, and a
-  `BIFURCATION_A` reference where `a` is shown.
+* Histograms, built new against the block: fr scatter, Qr/Qc/Qi on shared log
+  bins, coloured by amplitude with the same colorbar as the grids, a step
+  selector, and a `BIFURCATION_A` reference where `a` is shown. Read through
+  `entry["fits"][model]["params"]` and `errors`, skipping entries whose fit
+  carries `failed_because`.
+* **Detector Digest, written from scratch** — stage 2 deleted it rather than
+  porting it (§6, judgement call 23), and it is designed once the pieces it
+  shows exist rather than reassembled from the old one. A resonator's sweeps
+  at every step, its fitted parameters and errors, keyboard navigation between
+  resonators and steps, and Check Noise back with it (a `get_samples` call, not
+  analysis, so it needs `_take_noise_samps` again). The bifurcation reading is
+  `a` against `BIFURCATION_A` until stage 4 hands it the report's own checks.
+  Scope this when stage 3 starts, not now; if the fit tabs turn out to say
+  enough on their own, the honest outcome is that it does not come back.
 * Mutual locking of Run Fit and Find Bias while one runs; transient
   "Fits complete" label.
 * Test: flow test step 4 fits the schedule and checks the panel reads the
-  same params `fit_sweeps` wrote; `test_histogram_display.py` updated.
+  same params `fit_sweeps` wrote, and that a fit that failed is shown as
+  failed rather than skipped silently; the histogram tab bins what
+  `entry["fits"]` holds. Not `test_histogram_display.py` — that one covers the
+  main window's live amplitude histogram and its df units, and has nothing to
+  do with this tab.
 
 ### Stage 4. Find Bias and Apply Bias (medium)
 
@@ -971,16 +1011,17 @@ Listed so they can be overruled.
     catalog crosses the boundary now because the press is the handover;
     `MultisweepTask` still runs off the frequency list the dialog produces,
     and picks the catalog up in stage 2 when that list goes.
-23. **The digest and histogram panels are rewritten in the panel's own
-    commit** (stage 2), not in stages 3 and 4 where their content arrives.
-    They read `results_by_detector` — 29 references and 7 — and it is deleted
-    when the grids stop producing it, so the alternative is a stage in which
-    two shipped panels read a shape nothing writes. That is exactly the state
-    §1.2 describes and stage 0 was about ending. The commit is larger for it,
-    and what those two panels *show* is still staged: in stage 2 the digest
-    draws the sweeps of one resonator and its parameter tables are empty, and
-    the histograms tab is hidden because there is nothing to bin until fits
-    exist.
+23. **The digest and histogram tabs are unwired in stage 2 rather than
+    ported** (maclean, 2026-09-10, for the digest). Both read
+    `results_by_detector`, which the grids stop producing, and both show
+    quantities that do not exist until stage 3 — so translating them buys a
+    tab that displays nothing, and leaving them buys two shipped panels
+    reading a shape nothing writes, which is the §1.2 state stage 0 existed to
+    end. They come back built against the block and the catalog: the digest
+    from scratch when fits and bias points exist, the histograms in stage 3
+    over `entry["fits"]`. The instruction covered the digest; extending it to
+    the histograms is the same reasoning one panel over, and is the half to
+    overrule.
 
 ---
 
@@ -990,8 +1031,8 @@ Listed so they can be overruled.
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
 | 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
-| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring) | `test/periscope/` |
-| 3 | flow step 4; fit panel reads what `fit_sweeps` wrote; histograms | `test/periscope/` |
+| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring); the digest and histogram cases removed from `test_viewbox_lifetime.py` and `test_laptop_fit.py` with the panels | `test/periscope/` |
+| 3 | flow step 4; fit panel reads what `fit_sweeps` wrote, and a failed fit reads as failed; a histogram tab built new over `entry["fits"]` | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |
 | 5 | deletions; tier counts in `AGENTS.md` and `test/README.md` | root |
 

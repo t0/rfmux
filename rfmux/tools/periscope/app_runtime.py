@@ -1611,11 +1611,6 @@ class PeriscopeRuntime:
                     data = iteration_params[i]['data']
                     panel.update_data(target_module, i, amplitude, direction, data, None)
             
-            # Generate histograms now that data is loaded
-            if panel.results_by_detector:
-                panel._generate_histograms()
-                panel.histograms_generated = True
-            
             # Extract and load df_calibrations if bias_kids_output exists
             if has_bias_data:
                 bias_output = load_params['bias_kids_output']
@@ -1936,40 +1931,8 @@ class PeriscopeRuntime:
         
         if panel is None:
             return  # Error already displayed by helper
-        
-        # Auto-launch detector digest panel - find a frequency to click on
-        click_freq = None
-        if panel.results_by_detector:
-            first_det_id = sorted(panel.results_by_detector.keys())[0]
-            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
-            click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
-        if click_freq is not None:
-            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                # Create a fake event at the detector's frequency
-                class FakeEvent:
-                    def __init__(self, x, y):
-                        self._scene_pos = QtCore.QPointF(x, y)
-                    def scenePos(self):
-                        return self._scene_pos
-                    def accept(self):
-                        pass
-                
-                # Map the frequency to view coordinates (x position)
-                view_box = panel.combined_mag_plot.getViewBox()
-                if view_box:
-                    view_point = QtCore.QPointF(click_freq, 0)
-                    scene_point = view_box.mapViewToScene(view_point)
-                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                    panel._handle_multisweep_plot_double_click(fake_event)
-                    
-                    # Re-raise the multisweep dock to keep focus on it
-                    multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
-                    if multisweep_dock:
-                        multisweep_dock.raise_()
-        
-        # Ensure the Magnitude Sweeps tab is shown (not the Detector Digest tab)
-        if hasattr(panel, 'plot_tabs'):
-            panel.plot_tabs.setCurrentIndex(0)
+
+        panel.plot_tabs.setCurrentIndex(0)
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """

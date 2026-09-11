@@ -1776,7 +1776,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         pileup = bool(summary.get("pileup", False))
         truncated = bool(summary.get("truncated", False))
-        label = "\u2298" if truncated else "\u26a0" if pileup else "\u25c6"
+        label = ("\u2298" if truncated else "\u26a0" if pileup else "\u25c6") \
+            + f" #{pulse_idx:06d}"
         item = QtWidgets.QTreeWidgetItem(
             [label, self._clock(summary), str(summary.get("n_samples", "")),
              f"{summary.get('snr', 0):.1f}\u03c3"])

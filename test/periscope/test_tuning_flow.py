@@ -14,6 +14,7 @@ The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
 """
 
 import asyncio
+import copy
 import inspect
 import threading
 from pathlib import Path
@@ -1500,6 +1501,37 @@ def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
 
 
 # ── finding a bias point ─────────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def swept_container(board, qt_app):
+    """One both-directions multisweep of the standard array, measured once.
+
+    A test about what the panel does with a measurement needs *a*
+    measurement, not its own: sweeping the simulator is five seconds and
+    analysing what came back is milliseconds. The tests that exercise the
+    sweep itself still run it.
+    """
+    _, crs, catalog = board
+    _panel, errors, completed, _records, _partials = _both_directions(
+        catalog, qt_app, crs)
+    assert errors == []
+    return completed[0]
+
+
+def _panel_showing(swept_container, board):
+    """A fresh panel holding its own copy of the shared measurement.
+
+    A copy because the panel writes into the block it holds -- fits and a
+    bias report both go in there -- and one test's run must not be another's
+    starting point.
+    """
+    _loop, _crs, catalog = board
+    module, container = swept_container
+    panel = MultisweepPanel(target_module=catalog.module,
+                            initial_params=_multisweep_params(catalog),
+                            dac_scales={catalog.module: -0.5})
+    panel.show_measurement(module, copy.deepcopy(container))
+    return panel
+
 
 
 #: Wide enough and fine enough that every resonator of the standard array
@@ -1507,7 +1539,7 @@ def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
 #: The cheap schedule below brackets nothing, which is a flagged report -- fine
 #: for everything except the tests about a clean one.
 BIFURCATING = {"amp": AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
-               "npoints_per_sweep": 101}
+               "npoints_per_sweep": 41}
 
 
 def _both_directions(catalog, qt_app, crs, **overrides):
@@ -1529,11 +1561,10 @@ def _find_bias(panel, qt_app, **settings):
     return panel.bias_status_label.text()
 
 
-def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app):
+def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app, swept_container):
     """One call over the whole schedule, and a bias point per resonator."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     assert panel.bias_report is None
 
     status = _find_bias(panel, qt_app)
@@ -1543,12 +1574,10 @@ def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app):
     assert "biased" in status
 
 
-def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app):
+def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app, swept_container):
     """The report's catalog is the array now, so what is applied and what a
     re-run sweeps are one thing."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     before = panel.catalog
 
     _find_bias(panel, qt_app)
@@ -1559,12 +1588,10 @@ def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app):
 
 
 def test_the_bias_point_is_a_step_of_the_schedule_at_a_measured_frequency(
-        board, qt_app):
+        board, qt_app, swept_container):
     """Both halves of the choice come off the sweeps: the amplitude is one the
     schedule walked, and the frequency is inside the sweep it was read from."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     _find_bias(panel, qt_app)
 
@@ -1576,12 +1603,10 @@ def test_the_bias_point_is_a_step_of_the_schedule_at_a_measured_frequency(
                 <= measured["frequencies"].max())
 
 
-def test_the_report_goes_into_the_measurement_the_panel_holds(board, qt_app):
+def test_the_report_goes_into_the_measurement_the_panel_holds(board, qt_app, swept_container):
     """As the fits do: the block carries it, so a save needs nothing else and
     a notebook reads it back with ``BiasReport.from_dict``."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     assert "bias_report" not in panel.module_sweeps
 
     _find_bias(panel, qt_app)
@@ -1591,12 +1616,10 @@ def test_the_report_goes_into_the_measurement_the_panel_holds(board, qt_app):
         [f.name for f in panel.bias_report.findings]
 
 
-def test_the_settings_window_is_what_the_search_runs_with(board, qt_app):
+def test_the_settings_window_is_what_the_search_runs_with(board, qt_app, swept_container):
     """The window is the arguments, so a changed threshold is the one the call
     is made with and not a default underneath it."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     _find_bias(panel, qt_app, amplitude_method="derivative",
                frequency_method="minimum")
@@ -1607,26 +1630,23 @@ def test_the_settings_window_is_what_the_search_runs_with(board, qt_app):
 
 
 def test_a_fractional_distance_guard_is_resolved_against_the_span_swept(
-        board, qt_app):
+        board, qt_app, swept_container):
     """The window holds a fraction; what reaches the library is hertz, and the
     span it is a fraction of is the one this measurement recorded."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, span_hz=80e3)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
+    span_hz = panel.module_sweeps["call_params"]["span_hz"]
 
     panel.bias_settings._distance_radios["fraction"].setChecked(True)
     panel.bias_settings.fraction_spin.setValue(0.25)
     _find_bias(panel, qt_app)
 
-    assert panel.bias_report.settings["max_distance_hz"] == 20e3
+    assert panel.bias_report.settings["max_distance_hz"] == 0.25 * span_hz
 
 
-def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, output_directory):
+def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, swept_container, output_directory):
     """The report went into the block, so the file is out of date by exactly
     that much until it is rewritten."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     path = panel.save_multisweep()
 
     status = _find_bias(panel, qt_app)
@@ -1637,24 +1657,20 @@ def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, output_direc
     assert "bias_report" in block
 
 
-def test_a_run_on_an_unsaved_multisweep_writes_no_file(board, qt_app, output_directory):
+def test_a_run_on_an_unsaved_multisweep_writes_no_file(board, qt_app, swept_container, output_directory):
     """Nothing is written behind the operator's back: a panel that was never
     saved still has a Save button to press."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     _find_bias(panel, qt_app)
 
     assert list(Path(output_directory).glob("*multisweep*")) == []
 
 
-def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app):
+def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app, swept_container):
     """Both walk every sweep the panel holds, so one at a time, and the
     buttons say so."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     panel._find_bias()
     assert not panel.find_bias_btn.isEnabled()
@@ -1694,12 +1710,10 @@ def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app):
     assert panel.bias_status_label.text() == ""
 
 
-def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app):
+def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app, swept_container):
     """A flag is the thing to read before applying anything, so it is said in
     words rather than left in the report for someone to go looking for."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     # A guard of a few hertz disbelieves every answer, which is the flag this
     # test needs and the only one a healthy schedule can be made to produce.
@@ -1730,17 +1744,15 @@ def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
     assert len(panel.bias_report) == len(catalog.names())
 
 
-def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app):
+def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app, swept_container):
     """A report describes the sweeps it was made from, so it does not outlive
     them into the next measurement."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     assert panel.bias_report is not None
 
-    _, _, completed, _, _ = _both_directions(catalog, qt_app, crs)
-    panel.show_measurement(*completed[0])
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
 
     assert panel.bias_report is None
 
@@ -1765,12 +1777,10 @@ def _trace_widths(panel, name, tab_idx=0):
             for (step, direction, _amp, _sweep), curve in zip(traces, curves)}
 
 
-def test_the_sweep_the_resonator_is_biased_at_is_drawn_thick(board, qt_app):
+def test_the_sweep_the_resonator_is_biased_at_is_drawn_thick(board, qt_app, swept_container):
     """Colour already means drive and line style already means direction, so
     width is what is left to say which step was chosen."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     name = panel._selected_names()[0]
     assert len(set(_trace_widths(panel, name).values())) == 1
 
@@ -1784,12 +1794,10 @@ def test_the_sweep_the_resonator_is_biased_at_is_drawn_thick(board, qt_app):
     assert max(widths.values()) > min(widths.values())
 
 
-def test_a_line_stands_where_the_tone_will_go(board, qt_app):
+def test_a_line_stands_where_the_tone_will_go(board, qt_app, swept_container):
     """On the magnitude grid the bias frequency is a frequency, so it is a
     vertical line, at the offset from centre the plot is drawn in."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     assert _infinite_lines(panel)[0] == []
 
     _find_bias(panel, qt_app)
@@ -1805,12 +1813,10 @@ def test_a_line_stands_where_the_tone_will_go(board, qt_app):
     assert lines[0].value() == pytest.approx(expected)
 
 
-def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app):
+def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app, swept_container):
     """Same colour as the thickened trace, so the two marks read as one
     statement about one sweep."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     _find_bias(panel, qt_app)
 
@@ -1828,12 +1834,10 @@ def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app):
     assert line.pen.color().name() == chosen_curve.opts["pen"].color().name()
 
 
-def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app):
+def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_container):
     """A loop's axis is I, not frequency, so the operating point is a point of
     the loop rather than a line across it."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     panel.normalize_traces = False
     panel.plot_tabs.setCurrentIndex(1)
     panel._redraw_plots()
@@ -1860,12 +1864,10 @@ def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app):
     assert marked == pytest.approx(expected)
 
 
-def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app):
+def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app, swept_container):
     """The counts, the flags and the reasons are the status line's. A
     measurement plot stays a measurement plot: two marks, no text."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     titles = [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)]
 
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
@@ -1879,12 +1881,10 @@ def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app)
                     if isinstance(item, pg.TextItem)]
 
 
-def test_a_flagged_finding_is_marked_like_any_other(board, qt_app):
+def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_container):
     """Its bias point is a real point -- the sweep centre it fell back to --
     so it is drawn, and why it is a fallback is said in words elsewhere."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)
@@ -1899,20 +1899,19 @@ def test_a_flagged_finding_is_marked_like_any_other(board, qt_app):
 BIAS_TAB = 3
 
 
-def _on_bias_tab(qt_app, crs, catalog, **overrides):
-    """A both-directions schedule with the diagnostics tab showing."""
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, **overrides)
-    assert errors == []
+def _on_bias_tab(swept_container, board):
+    """The shared measurement with the diagnostics tab showing."""
+    panel = _panel_showing(swept_container, board)
     panel.plot_tabs.setCurrentIndex(BIAS_TAB)
     panel._redraw_plots()
     return panel
 
 
-def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_app):
+def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_app, swept_container):
     """The change in normalized arc speed, divided by the bar that trace
     faced -- so every step is on one scale and the bar is one line."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
 
     name = panel._selected_names()[0]
     traces = panel._collect_traces([name])[name]
@@ -1933,21 +1932,21 @@ def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_a
     assert np.allclose(y, np.diff(speed) / max(prominence, noise))
 
 
-def test_the_bar_is_one_pair_of_lines_for_every_step(board, qt_app):
+def test_the_bar_is_one_pair_of_lines_for_every_step(board, qt_app, swept_container):
     """Dividing each trace by its own bar is what puts them all on it."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
 
     heights = sorted(line.value() for line in _infinite_lines(panel, BIAS_TAB)[0])
     assert heights == pytest.approx([-1.0, 1.0])
 
 
-def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app):
+def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app, swept_container):
     """Below the solid bar it was the noise gate that decided; at it the two
     coincide. That is the question the detector otherwise answers by being run
     again with one of the two switched off."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
     assert len(_infinite_lines(panel, BIAS_TAB)[0]) == 2
 
     _find_bias(panel, qt_app)
@@ -1962,11 +1961,11 @@ def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app):
     assert all(abs(line.value()) <= 1.0 + 1e-9 for line in lines)
 
 
-def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app):
+def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app, swept_container):
     """The same statement the sweep grids make, on the plot the choice was
     read off."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
     name = panel._selected_names()[0]
     assert len(set(_trace_widths(panel, name, BIAS_TAB).values())) == 1
 
@@ -1978,21 +1977,21 @@ def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app):
     assert thick == {panel.bias_report[name].iteration}
 
 
-def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app):
+def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app, swept_container):
     """It is a view of the measurement under the current settings, so it is
     what you look at to choose them -- not a view of a report."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
 
     assert panel.bias_report is None
     assert all(len(subplot) > 0 for subplot in _grid_curves(panel, BIAS_TAB))
 
 
-def test_the_bars_follow_the_settings(board, qt_app):
+def test_the_bars_follow_the_settings(board, qt_app, swept_container):
     """The bar a trace is divided by is the one the current settings would
     apply, so turning the gate off moves every trace."""
     _, crs, catalog = board
-    panel = _on_bias_tab(qt_app, crs, catalog)
+    panel = _on_bias_tab(swept_container, board)
     before = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
 
     panel.bias_settings.noise_gate_spin.setValue(0.0)
@@ -2026,12 +2025,11 @@ def _apply_bias(panel, qt_app):
     return panel.bias_status_label.text()
 
 
-def test_apply_bias_puts_every_tone_where_the_panels_catalog_says(board, qt_app):
+def test_apply_bias_puts_every_tone_where_the_panels_catalog_says(board, qt_app, swept_container):
     """The catalog is the whole instruction, and what lands on the board is
     what it carries -- on the tone grid, which is ``apply_bias``'s doing."""
     loop, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
 
@@ -2047,12 +2045,11 @@ def test_apply_bias_puts_every_tone_where_the_panels_catalog_says(board, qt_app)
             pytest.approx(resonator.bias.amplitude)
 
 
-def test_the_button_is_dead_while_the_bias_is_applied(board, qt_app):
+def test_the_button_is_dead_while_the_bias_is_applied(board, qt_app, swept_container):
     """It programs the board, so it cannot be pressed twice, and it says what
     it is doing while it is not pressable."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
 
@@ -2065,12 +2062,11 @@ def test_the_button_is_dead_while_the_bias_is_applied(board, qt_app):
     assert panel.apply_bias_btn.isEnabled()
 
 
-def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app):
+def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app, swept_container):
     """A routine outcome on the status line, and not left on screen once it
     has been read."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
 
@@ -2082,12 +2078,11 @@ def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app):
     assert panel.bias_status_label.text() == ""
 
 
-def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app):
+def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app, swept_container):
     """df units come off the bias point's own calibration, by channel -- which
     is what the main window stores and the streams are displayed through."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
     published = []
@@ -2102,11 +2097,10 @@ def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app):
                             for r in panel.catalog}
 
 
-def test_a_noise_spectrum_needs_a_bias_first(board, qt_app):
+def test_a_noise_spectrum_needs_a_bias_first(board, qt_app, swept_container):
     """The button that reads a biased array is dead until one is."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
     assert not panel.noise_spectrum_btn.isEnabled()
@@ -2116,12 +2110,11 @@ def test_a_noise_spectrum_needs_a_bias_first(board, qt_app):
     assert panel.noise_spectrum_btn.isEnabled()
 
 
-def test_a_file_from_another_module_cannot_program_this_one(board, qt_app):
+def test_a_file_from_another_module_cannot_program_this_one(board, qt_app, swept_container):
     """It opens and draws; what goes away is every control that would touch
     the board."""
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
 
     panel.mark_foreign_module(catalog.module + 1)
 
@@ -2129,12 +2122,10 @@ def test_a_file_from_another_module_cannot_program_this_one(board, qt_app):
     assert not panel.rerun_btn.isEnabled()
 
 
-def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app):
+def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app, swept_container):
     """An offline panel is a viewer. Nothing is programmed and nothing pops
     up; the status line says why."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
-    assert errors == []
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
 
     panel._apply_bias()      # no Periscope parent, so no board

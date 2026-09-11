@@ -17,6 +17,7 @@ from ... import streamer as _streamer
 from ...pulse_capture.sources import (
     columns_for_width,
 )
+from . import settings
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1320,6 +1321,7 @@ class PeriscopeRuntime:
 
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
+        settings.set_window_geometry(self.saveGeometry())
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
         # Stop any active network analysis tasks (QThread needs proper termination)
         for task_key in list(self.netanal_tasks.keys()):

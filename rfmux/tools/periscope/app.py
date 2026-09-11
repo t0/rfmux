@@ -291,13 +291,24 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Start the timer for periodic GUI updates (QtCore from .utils).
         self._start_timer()
         
-        # Set initial window size (wider and taller for better visibility)
-        self.resize(900, 600)
+        # Where the window was left last time, else a wide default
+        if not self.restoreGeometry(settings.get_window_geometry()
+                                    or QtCore.QByteArray()):
+            self._resize_to_default(2700, 600)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
         if not skip_startup_dialog:
             QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
+
+    def _resize_to_default(self, width: int, height: int) -> None:
+        """Resize to the requested size, shrunk to fit the available screen."""
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width())
+            height = min(height, available.height())
+        self.resize(width, height)
 
     def _init_workers(self):
         """

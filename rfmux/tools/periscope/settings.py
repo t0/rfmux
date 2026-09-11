@@ -17,7 +17,7 @@ Usage:
     settings.set_session_root("/path/to/sessions")
 """
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QByteArray, QSettings
 from pathlib import Path
 from typing import Optional
 
@@ -39,6 +39,7 @@ KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_FIND_RESONANCES = "find_resonances/parameters"
 KEY_FIT_SWEEPS = "fit_sweeps/parameters"
 KEY_FIND_BIAS = "find_bias/parameters"
+KEY_WINDOW_GEOMETRY = "view/window_geometry"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -517,3 +518,27 @@ def set_bias_parameters(parameters: dict) -> None:
     """Remember the bias-finding settings."""
     import json
     _get_settings().setValue(KEY_FIND_BIAS, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main Window Geometry
+# ─────────────────────────────────────────────────────────────────
+
+def get_window_geometry():
+    """The main window's saved position and size.
+
+    Qt's own opaque ``saveGeometry()`` blob, so the window comes back on the
+    screen it was closed on. A geometry that no longer fits -- the laptop
+    alone after a session on the big monitor -- is shrunk onto the available
+    screen by ``restoreGeometry`` rather than rejected.
+
+    Returns:
+        QByteArray or None if the window has never been closed.
+    """
+    value = _get_settings().value(KEY_WINDOW_GEOMETRY)
+    return value if isinstance(value, QByteArray) and not value.isEmpty() else None
+
+
+def set_window_geometry(data) -> None:
+    """Remember the main window's position and size."""
+    _get_settings().setValue(KEY_WINDOW_GEOMETRY, data)

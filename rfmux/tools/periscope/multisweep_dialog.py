@@ -21,6 +21,7 @@ from rfmux.tuning import AmplitudeSchedule, store
 
 from .network_analysis_base import NetworkAnalysisDialogBase
 from .utils import DEFAULT_AMPLITUDE
+from .field_memory import remember_fields
 
 # What the driver does when you say nothing. Read once, at import, so the
 # dialog cannot offer a default the library does not have.
@@ -96,6 +97,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         if self.crs_for_dac_scales() is not None and not self.dac_scales:
             self._fetch_dac_scales_for_dialog(self.crs_for_dac_scales())
         self._update_dac_scale_info()
+        remember_fields(self, restore=not self.params)
         self._refresh()
 
     # ── the board, for the DAC scale only ────────────────────────────────────

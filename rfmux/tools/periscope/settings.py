@@ -40,6 +40,7 @@ KEY_FIND_RESONANCES = "find_resonances/parameters"
 KEY_FIT_SWEEPS = "fit_sweeps/parameters"
 KEY_FIND_BIAS = "find_bias/parameters"
 KEY_WINDOW_GEOMETRY = "view/window_geometry"
+KEY_DIALOG_FIELDS = "dialogs/%s"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -542,3 +543,33 @@ def get_window_geometry():
 def set_window_geometry(data) -> None:
     """Remember the main window's position and size."""
     _get_settings().setValue(KEY_WINDOW_GEOMETRY, data)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Dialog Fields
+# ─────────────────────────────────────────────────────────────────
+
+def get_dialog_fields(name: str) -> dict:
+    """What the user last entered in the dialog called ``name``.
+
+    JSON, as for the parameter stores above, so ``None`` survives the round
+    trip and a dialog growing a field needs no new key here.
+
+    Returns:
+        dict: attribute name -> value, empty if the dialog has never been
+        accepted. Only the fields present are returned; the dialog keeps its
+        own default for the rest.
+    """
+    import json
+    json_str = _get_settings().value(KEY_DIALOG_FIELDS % name, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_dialog_fields(name: str, fields: dict) -> None:
+    """Remember what the user entered in the dialog called ``name``."""
+    import json
+    _get_settings().setValue(KEY_DIALOG_FIELDS % name, json.dumps(fields))

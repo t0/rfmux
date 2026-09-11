@@ -16,6 +16,7 @@ from typing import Awaitable, List, Optional, Tuple
 from PyQt6 import QtCore, QtWidgets
 
 from .utils import apply_issue_banner
+from .field_memory import remember_fields
 from PyQt6.QtCore import pyqtSignal
 
 from ...algorithms.measurement.channel_selection import parse_channel_spec
@@ -72,6 +73,8 @@ class StreamerConfigDialog(QtWidgets.QDialog):
 
         self._setup_ui(current_dec, current_short, module)
         self._connect_signals()
+        remember_fields(self, skip=("dec_spin", "short_check",
+                                    "modules_edit", "pfb_module_spin"))
         self._update_dependent_values()
 
         if crs is not None:

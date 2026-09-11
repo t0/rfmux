@@ -9,6 +9,7 @@ from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
 from ...tuning import store
 from ...tuning.find_resonances import netanal_trace
+from .field_memory import remember_fields
 
 
 def load_network_analysis_container(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -71,6 +72,7 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self._setup_ui()
         self.load_data_available = False
         self.loaded_container = {}
+        remember_fields(self)
         
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""

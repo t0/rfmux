@@ -109,16 +109,23 @@ For high-resolution analysis around identified resonance frequencies:
 2. Click "Take Multisweep" to configure a detailed sweep around resonances
 3. Click "Run Fit". Progress is beside the button, and what it did is said
    there in green when it finishes. The ⚙ holds the settings, which persist
-   between sessions: which models to fit (skewed, nonlinear, or both), which
+   between sessions: which models to fit (skewed, nonlinear, or both) and which
    sweeps -- all of them, each resonator at the amplitude it is biased at, or
-   one amplitude step -- and which model the Fit Results tab draws
+   one amplitude step
 4. The Fit Results tab draws each resonator's measurement with one model over
-   it, whichever "Which model to draw" names of the models the sweeps carry
-   fits for. The measurement keeps the colour it has on the other tabs -- its drive
-   -- and the model is the black or white line over it; line style is the sweep
-   direction, as elsewhere. The axis is normalized to each trace's last point,
-   which is the fits' own convention, so the toolbar's "Normalize Traces" does
-   not apply here
+   it. Its own toolbar says which: "Fit" offers the models the sweeps carry
+   fits for, and "Amplitude" which sweeps are drawn -- all of them, one
+   amplitude step, or, once Find Bias has chosen one, each resonator at the
+   step it is biased at. Both are remembered between sessions. The measurement
+   keeps the line it has on the other tabs -- coloured by its drive, styled by
+   its direction -- and the model is a thinner black or white line over it.
+   Its legend always names the two lines; with few enough drives on screen to
+   label -- one step of a schedule, say -- it names each by its drive and puts
+   the model's headline numbers (fr, Qr, Qi, and the nonlinear fit's a) on the
+   line they came from. With more, the colorbar carries the drives and the
+   legend says "Measured" and "<model> fit" once. The axis is normalized to
+   each trace's last point, which is the fits' own convention, so the
+   toolbar's "Normalize Traces" does not apply here
 5. Fits are written into the sweeps themselves, so a file saved afterwards
    carries them and reopens with them; a measurement already saved is re-saved
    where it was

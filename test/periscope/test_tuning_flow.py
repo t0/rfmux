@@ -49,8 +49,10 @@ from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
     NetworkAnalysisDialog,
 )
+from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
 from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
     MODEL_OVERSAMPLE,
+    create_amplitude_color_map,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import TABLEAU10_COLORS  # noqa: E402
@@ -1372,10 +1374,27 @@ def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
 
 def _show_fit_model(panel, model):
     """Pick the model the Fit Results tab draws."""
-    combo = panel.fit_settings.display_combo
+    combo = panel.fit_display.model_combo
     index = combo.findData(model)
     assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
     combo.setCurrentIndex(index)
+
+
+def _show_fit_amplitude(panel, choice):
+    """Pick the sweeps the Fit Results tab draws: a step, or 'at bias'."""
+    combo = panel.fit_display.amplitude_combo
+    index = combo.findData(choice)
+    assert index >= 0, f"{choice!r} is not on offer"
+    combo.setCurrentIndex(index)
+
+
+def _measured_curves(panel, tab_idx=2):
+    """Per subplot, the curves that are measurement rather than model: the
+    model is the foreground colour, the measurement its drive's."""
+    foreground = "#ffffff" if panel.dark_mode else "#000000"
+    return [[curve for curve in subplot
+             if curve.opts["pen"].color().name() != foreground]
+            for subplot in _grid_curves(panel, tab_idx)]
 
 
 def test_only_the_chosen_model_is_drawn(board, qt_app):
@@ -1386,7 +1405,7 @@ def test_only_the_chosen_model_is_drawn(board, qt_app):
     assert errors == []
     _run_fits(panel, qt_app)
 
-    combo = panel.fit_settings.display_combo
+    combo = panel.fit_display.model_combo
     assert [combo.itemData(i)
             for i in range(combo.count())] == ["skewed", "nonlinear"]
     for model in ("skewed", "nonlinear"):
@@ -1405,9 +1424,10 @@ def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
     assert panel._models_fitted() == ["skewed"]
 
 
-def test_the_fit_is_drawn_in_the_foreground_colour(board, qt_app):
-    """The data keeps the colour it has on the other tabs -- its drive -- and
-    the model is the black or white line over it."""
+def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app):
+    """The data keeps the line it has on the other tabs -- coloured by its
+    drive -- and the model is a thinner black or white line over it, so the
+    measurement is still visible where the two agree."""
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
     assert errors == []
@@ -1415,10 +1435,11 @@ def test_the_fit_is_drawn_in_the_foreground_colour(board, qt_app):
 
     measured, fit = _grid_curves(panel, tab_idx=2)[0]
     assert fit.opts["pen"].color().name() == "#000000"      # light mode
-    assert measured.opts["symbolBrush"] != "k"
+    assert measured.opts["pen"].color().name() == TABLEAU10_COLORS[0]
+    assert fit.opts["pen"].width() < measured.opts["pen"].width()
 
     panel.dark_mode = True
-    measured, fit = _grid_curves(panel, tab_idx=2)[0]
+    _measured, fit = _grid_curves(panel, tab_idx=2)[0]
     assert fit.opts["pen"].color().name() == "#ffffff"
 
 
@@ -1436,6 +1457,119 @@ def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
 
     # One step of two was fitted, so one measured trace and its one model.
     assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
+
+
+def test_the_fit_tab_draws_the_amplitude_step_it_is_asked_for(board, qt_app,
+                                                             swept_container):
+    """The tab's toolbar is a filter over what was fitted: one step of the
+    schedule, in the directions it was swept, rather than all of them at once."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    steps = sorted(panel._step_amplitudes)
+    assert len(steps) > 1, "a filter over one step is not a filter"
+
+    assert all(len(subplot) == 2 * len(steps) for subplot in _measured_curves(panel))
+
+    _show_fit_amplitude(panel, steps[1])
+
+    assert all(len(subplot) == 2 for subplot in _measured_curves(panel))
+
+
+def test_the_colorbar_follows_what_is_on_screen_not_what_was_measured(board, qt_app):
+    """The bar is the scale for a schedule with more amplitudes than can be
+    labelled; it is no way to read the one step the Fit Results tab is showing,
+    so what is drawn decides whether it is up."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    _grid_widgets(panel, tab_idx=2)
+    assert not panel.fit_colorbar.isHidden()
+
+    _show_fit_amplitude(panel, 2)
+    _grid_widgets(panel, tab_idx=2)
+
+    assert panel.fit_colorbar.isHidden()
+
+
+def _legend_texts(panel, tab_idx=2):
+    """Per subplot, what its legend says, in the order it says it."""
+    return [[label.text for _sample, label in (w.getPlotItem().legend.items
+                                               if w.getPlotItem().legend else [])]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def test_the_fit_legend_says_which_line_is_the_model_even_under_the_colorbar(
+        board, qt_app):
+    """Which line is the measurement and which the model is what this tab is
+    for, and the colorbar cannot say it. With a schedule too long to label, the
+    legend says it once for the pair."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    assert all(texts == ["Measured", "Skewed fit"]
+               for texts in _legend_texts(panel))
+
+
+def test_the_fit_legend_carries_what_the_model_fitted(board, qt_app):
+    """With one step on screen the legend is the label of record: the drive on
+    the measurement, and the headline numbers on the model."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_fit_amplitude(panel, 2)
+
+    name = panel._selected_names()[0]
+    fit = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[2]["upward"]["fits"]["skewed"]["params"]
+    measured, model = _legend_texts(panel)[0]
+
+    assert "dBm" in measured, "the measurement is labelled by its drive"
+    assert model.startswith("Skewed: ")
+    assert f"fr {fit['fr'] / 1e6:.4f} MHz" in model
+    assert f"Qr {fit['Qr'] / 1e3:.3g}k" in model
+    assert f"Qi {fit['Qi'] / 1e3:.3g}k" in model
+
+
+def test_the_fit_tab_can_draw_each_resonator_at_the_step_it_is_biased_at(
+        board, qt_app, swept_container):
+    """'At bias amplitude' is a different step for different resonators, and it
+    is on offer only once something has chosen one."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) == -1
+
+    _find_bias(panel, qt_app)
+    _show_fit_amplitude(panel, BIAS_AMPLITUDE)
+
+    colours = create_amplitude_color_map(panel._amplitudes_drawn(), panel.dark_mode)
+    for name, subplot in zip(panel._selected_names(), _measured_curves(panel)):
+        finding = panel._bias_by_name()[name]
+        assert len(subplot) == 2, "that resonator's bias step, both directions"
+        assert all(curve.opts["pen"].color().name()
+                   == pg.mkColor(colours[finding.amplitude]).name()
+                   for curve in subplot)
+
+
+def test_a_new_measurement_takes_the_bias_amplitude_off_the_fit_tab(
+        board, qt_app, swept_container):
+    """A bias belongs to the sweeps it was chosen from, so the next measurement
+    cannot be drawn at the last one's step."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) >= 0
+
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
+
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) == -1
 
 
 def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):

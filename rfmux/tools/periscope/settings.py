@@ -38,6 +38,7 @@ KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_FIND_RESONANCES = "find_resonances/parameters"
 KEY_FIT_SWEEPS = "fit_sweeps/parameters"
+KEY_FIT_DISPLAY = "fit_sweeps/display"
 KEY_FIND_BIAS = "find_bias/parameters"
 KEY_WINDOW_GEOMETRY = "view/window_geometry"
 KEY_DIALOG_FIELDS = "dialogs/%s"
@@ -490,6 +491,29 @@ def set_fit_parameters(parameters: dict) -> None:
     """Remember the fit settings."""
     import json
     _get_settings().setValue(KEY_FIT_SWEEPS, json.dumps(parameters))
+
+
+def get_fit_display() -> dict:
+    """What the Fit Results tab was last showing: which model, which amplitude.
+
+    JSON, as for the fit settings, so ``None`` -- which the amplitude choice
+    uses to mean "all of them" -- survives the round trip.
+
+    Returns:
+        dict: what was last saved, empty if nothing ever was.
+    """
+    import json
+    try:
+        saved = json.loads(_get_settings().value(KEY_FIT_DISPLAY, "{}"))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_fit_display(display: dict) -> None:
+    """Remember what the Fit Results tab is showing."""
+    import json
+    _get_settings().setValue(KEY_FIT_DISPLAY, json.dumps(display))
 
 
 # ─────────────────────────────────────────────────────────────────

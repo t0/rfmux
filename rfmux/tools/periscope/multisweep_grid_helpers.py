@@ -341,6 +341,51 @@ FIT_READERS = {
     'nonlinear': (nonlinear_model_iq, lambda counts: 1.0 / np.abs(counts[-1])),
 }
 
+#: How wide the model is drawn. Thinner than the measurement it lies on, so
+#: that where the two agree the coloured line is still visible under it.
+MODEL_LINE_WIDTH = 1
+
+
+def _si(value: float) -> str:
+    """A Q, short enough for a legend: ``29.6k``, ``1.24M``."""
+    if abs(value) >= 1e6:
+        return f"{value / 1e6:.3g}M"
+    if abs(value) >= 1e3:
+        return f"{value / 1e3:.3g}k"
+    return f"{value:.3g}"
+
+
+#: What a model's legend entry says it fitted, in the order it says it. The
+#: headline numbers only: everything a fit learned is in the entry, and a
+#: legend that listed it all would cover the plot it labels.
+FIT_LEGEND_PARAMS = (
+    ("fr", lambda value: f"fr {value / 1e6:.4f} MHz"),
+    ("Qr", lambda value: f"Qr {_si(value)}"),
+    ("Qi", lambda value: f"Qi {_si(value)}"),
+    ("a", lambda value: f"a {value:.2f}"),
+)
+
+
+def fit_legend_label(sweep, fit_model) -> str:
+    """What one model's line is labelled: its name, and what it fitted.
+
+    A fit that has no parameters -- it did not converge -- is named and left
+    at that; there is no curve of it on the plot to label anyway.
+    """
+    params = ((sweep.get('fits') or {}).get(fit_model) or {}).get('params') or {}
+    said = [say(params[name]) for name, say in FIT_LEGEND_PARAMS
+            if params.get(name) is not None]
+    name = fit_model.capitalize()
+    return f"{name}: {', '.join(said)}" if said else name
+
+
+def _once(label: str, said: set):
+    """*label* the first time it is asked for, and None after that."""
+    if label in said:
+        return None
+    said.add(label)
+    return label
+
 
 def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
               legend_labels=None):
@@ -350,30 +395,40 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
     convention: the model comes back in those units, so the measurement is put
     into them rather than the model taken out of them.
 
-    The measurement keeps the colour it has on the other tabs -- its drive --
-    and the fit is drawn in the foreground colour, so that at a glance the
-    black or white line is the model and the coloured points are the data. One
-    model at a time, which leaves line style free to mean direction here as it
-    does everywhere else.
+    The measurement keeps the line it has on the other tabs -- coloured by its
+    drive, styled by its direction -- and the fit is a thinner line in the
+    foreground colour over it, so that at a glance the black or white line is
+    the model and the coloured one is the data. One model at a time, which
+    leaves line style free to mean direction here as it does everywhere else.
 
     A sweep with no fit of this model draws its measurement alone, and one that
     did not converge is simply absent: the count of what failed is on the
     toolbar.
+
+    The legend is always drawn here, because on this tab it says which line is
+    the measurement and which the model -- a distinction the colorbar cannot
+    make. With *legend_labels* it says that per trace, with the drive on the
+    measurement and the fitted numbers on the model; without them, which is
+    when the colorbar is carrying the drives and there are more traces than
+    rows to spare, it says it once for the pair.
     """
-    if legend_labels:
+    if traces:
         _add_legend(plot_item, pen_color)
 
     reader, scale_of = FIT_READERS[fit_model]
+    # Which of the pair the one-entry-each legend has already named. The first
+    # *drawn* line of each kind takes the entry, not the first trace: a fit
+    # that did not converge draws nothing to hang it on.
+    said = set()
     for step, direction, amplitude, sweep in traces:
         counts = np.asarray(sweep['iq_counts'])
         if len(counts) == 0 or counts[-1] == 0:
             continue
-        color = amplitude_to_color.get(amplitude, pen_color)
-        name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
         plot_item.plot(
             offset_khz(sweep), np.abs(counts / counts[-1]),
-            pen=None, symbol='x' if direction == 'downward' else 'o',
-            symbolSize=4, symbolPen=color, symbolBrush=color, name=name)
+            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color),
+            name=(legend_labels.get((step, direction, amplitude)) if legend_labels
+                  else _once("Measured", said)))
 
         try:
             offsets, model = _model_on_a_finer_grid(reader, sweep)
@@ -382,7 +437,9 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
         style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
         plot_item.plot(
             offsets, np.abs(model) * scale_of(counts),
-            pen=pg.mkPen(color=pen_color, width=LINE_WIDTH, style=style))
+            pen=pg.mkPen(color=pen_color, width=MODEL_LINE_WIDTH, style=style),
+            name=(fit_legend_label(sweep, fit_model) if legend_labels
+                  else _once(f"{fit_model.capitalize()} fit", said)))
 
 
 #: How faint the bar that did not bind is drawn, against the one that did.

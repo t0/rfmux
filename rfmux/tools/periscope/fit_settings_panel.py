@@ -2,10 +2,11 @@
 
 A non-modal window over what :func:`rfmux.tuning.fits.fit_sweeps` is asked
 for -- which models to run, and which of a schedule's amplitudes to run them
-on -- and over which of the results the Fit Results tab draws. Open it from
-the multisweep panel's ``⚙`` button, set it once, press Run Fit as many times
-as you like. Values persist across Periscope sessions through
-:mod:`~rfmux.tools.periscope.settings`.
+on. Open it from the multisweep panel's ``⚙`` button, set it once, press Run
+Fit as many times as you like. Values persist across Periscope sessions
+through :mod:`~rfmux.tools.periscope.settings`. Which of the results are drawn
+is the Fit Results tab's own toolbar, in
+:mod:`~rfmux.tools.periscope.fit_display_toolbar`.
 
 Everything else the fitters take -- ``approx_Qr``, ``normalize``,
 ``fr_limit_hz``, ``n_extrema_points``, ``max_residual`` -- stays at the
@@ -16,13 +17,13 @@ fitters' own. Expose one here when something asks for it.
 from __future__ import annotations
 
 from PyQt6 import QtWidgets
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt
 
 from . import settings as periscope_settings
 
-#: The models this panel offers, in the order it lists them. The circle fit is
-#: not among them: it fits the IQ loop, so it draws nothing on a magnitude
-#: plot, and nothing here reads it yet.
+#: The models the fitters are offered, in the order they are listed. The circle
+#: fit is not among them: it fits the IQ loop, so it draws nothing on a
+#: magnitude plot, and nothing here reads it yet.
 MODELS = ("skewed", "nonlinear")
 
 #: What the amplitude choice means, for the choices that are not a step number.
@@ -36,12 +37,9 @@ class FitSettingsPanel(QtWidgets.QWidget):
     :meth:`get_parameters` returns ``{"models": (...), "amplitude_choice": ...}``
     — the models as :func:`~rfmux.tuning.fits.fit_sweeps` takes them, and the
     amplitude choice as :class:`~rfmux.tools.periscope.tasks.RunFitsTask` does.
+    Nothing here changes what is on screen: it is all what the next fit is
+    asked for.
     """
-
-    #: Emitted when the model to draw changes, so the tab can redraw. Nothing
-    #: else here changes what is on screen: the rest is what the next fit is
-    #: asked for.
-    display_model_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -51,15 +49,11 @@ class FitSettingsPanel(QtWidgets.QWidget):
             | Qt.WindowType.WindowCloseButtonHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
-        # What a past session drew, held until a measurement says which models
-        # it has fits for: the combo is empty until then, so it cannot hold it.
-        self._wanted_display_model = None
         self._setup_ui()
         self.set_parameters(periscope_settings.get_fit_parameters())
         for box in self._model_checks.values():
             box.toggled.connect(self._save)
         self.amplitude_combo.currentIndexChanged.connect(self._save)
-        self.display_combo.currentIndexChanged.connect(self._display_changed)
 
     # ── what the fitters are asked for ───────────────────────────────────────
 
@@ -81,34 +75,6 @@ class FitSettingsPanel(QtWidgets.QWidget):
                 box.blockSignals(False)
         if "amplitude_choice" in parameters:
             self.set_amplitude_choice(parameters["amplitude_choice"])
-        if parameters.get("display_model"):
-            self._wanted_display_model = parameters["display_model"]
-            self._select(self.display_combo, self._wanted_display_model)
-
-    # ── which model is drawn ─────────────────────────────────────────────────
-
-    def get_display_model(self):
-        """The model the Fit Results tab should draw, or None if none is fitted."""
-        return self.display_combo.currentData()
-
-    def set_models_fitted(self, models) -> None:
-        """Offer *models*, which are the ones the sweeps carry fits for.
-
-        What was fitted, not what the checkboxes ask for: a measurement loaded
-        from a file was fitted by whatever fitted it, and one not yet fitted
-        has nothing to draw.
-        """
-        previous = self.display_combo.currentData() or self._wanted_display_model
-        self.display_combo.blockSignals(True)
-        self.display_combo.clear()
-        for model in models:
-            self.display_combo.addItem(model.capitalize(), model)
-        self.display_combo.setCurrentIndex(
-            max(0, self.display_combo.findData(previous)))
-        self.display_combo.blockSignals(False)
-        self.display_group.setEnabled(bool(models))
-        if self.display_combo.currentData() != previous:
-            self.display_model_changed.emit()
 
     # ── the amplitudes on offer ──────────────────────────────────────────────
 
@@ -169,23 +135,7 @@ class FitSettingsPanel(QtWidgets.QWidget):
         amplitude_layout.addWidget(self.amplitude_combo)
         layout.addWidget(amplitude_group)
 
-        self.display_group = QtWidgets.QGroupBox("Which model to draw")
-        display_layout = QtWidgets.QVBoxLayout(self.display_group)
-        self.display_combo = QtWidgets.QComboBox()
-        self.display_combo.setToolTip(
-            "Which fitted model the Fit Results tab draws over the measurement. "
-            "One at a time, so a subplot carries one line over its points")
-        self.display_group.setEnabled(False)
-        display_layout.addWidget(self.display_combo)
-        layout.addWidget(self.display_group)
-
         layout.addStretch()
 
-    def _display_changed(self):
-        self._wanted_display_model = self.get_display_model()
-        self._save()
-        self.display_model_changed.emit()
-
     def _save(self):
-        periscope_settings.set_fit_parameters(
-            {**self.get_parameters(), "display_model": self.get_display_model()})
+        periscope_settings.set_fit_parameters(self.get_parameters())

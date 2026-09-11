@@ -169,8 +169,9 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   dead while it runs and the label counts sweeps, because fitting is 80 ms a
   sweep for all three models -- minutes over a real array, not the milliseconds
   Find Resonances costs. The fits go into the sweep entries the panel already
-  draws from, so the Fit Results tab needs no state of its own, and a
-  measurement already on disk is re-saved where it was.
+  draws from, so the Fit Results tab holds no data of its own -- only which
+  model and which amplitude it is showing -- and a measurement already on disk
+  is re-saved where it was.
 
 * **Bias.** Find Bias makes one `find_bias_points` call over the sweeps on
   screen, off the GUI thread, with a settings window grouped by the test each
@@ -797,11 +798,15 @@ are now strict xfails that name the stage which clears them.
   the block in place through `store`.
 * ~~Fit Results tab~~ **done (2026-09-11)**: one subplot per resonator, the
   measured magnitude and *one* model over it, on a grid 25 times finer than the
-  one measured -- one at a time, chosen in the settings window from the models
-  the sweeps carry fits for, so a subplot holds one line over its points rather
-  than one per model. The measurement keeps its drive colour, the model is
-  drawn in the foreground colour (white on black, black on white), and line
-  style is left to mean direction as it does on the other tabs. It reuses `update_sweep_grid` as a third
+  one measured -- one at a time, chosen in the tab's own toolbar from the
+  models the sweeps carry fits for, so a subplot holds one line over its points
+  rather than one per model. That toolbar also filters which sweeps are drawn:
+  all of them, one amplitude step, or each resonator at the step it is biased
+  at once Find Bias has chosen one. The measurement keeps its drive colour, the
+  model is a thinner line in the foreground colour (white on black, black on
+  white), and line style is left to mean direction as it does on the other
+  tabs. The legend names both lines and, where there are few enough traces to
+  label one by one, carries each fit's fr, Qr, Qi and a. It reuses `update_sweep_grid` as a third
   plot type, so batching, the widget cache, the colorbar and the amplitude
   colours are the grids' own. A sweep with no fits is not drawn there, so an
   empty subplot reads as "not fitted" rather than as a fit that failed; a

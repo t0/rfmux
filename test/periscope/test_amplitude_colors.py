@@ -1,8 +1,9 @@
 """A drive's colour is one colour, whatever the schedule's length.
 
 Above ``AMPLITUDE_COLORMAP_THRESHOLD`` the colours come off a colormap. An
-RGBA array reads to pyqtgraph's scatter plots as one pen per point, so the fit
-tab raised on every sweep of four or more amplitudes.
+RGBA array reads to pyqtgraph's scatter plots as one pen per point, so a
+drive's colour has to be one colour for the bias marker to take it as a
+symbol pen.
 """
 
 import pytest

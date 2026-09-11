@@ -22,6 +22,7 @@ from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
+from .fit_display_toolbar import FitDisplayToolbar
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
 from .bias_settings_panel import BiasSettingsPanel
@@ -127,7 +128,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # The fitters' settings outlive any one fit, and are shared by nothing
         # else: one window per panel, as the measurement is one panel's.
         self.fit_settings = FitSettingsPanel(self)
-        self.fit_settings.display_model_changed.connect(self._redraw_plots)
+
+        # What the Fit Results tab is showing, which is its own toolbar's:
+        # one model, over one step of the schedule or all of them.
+        self.fit_display = FitDisplayToolbar(self)
+        self.fit_display.display_changed.connect(self._redraw_plots)
 
         # Bias finding's settings, the same way, and what the last run
         # concluded. The report's catalog becomes this panel's, so what is
@@ -207,8 +212,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.run_fit_btn, fit_settings_btn, self.fit_status_label)
         toolbar_layout.addWidget(self.fit_controls)
 
-        self._populate_fit_models()
         self._populate_fit_amplitudes()
+        self._populate_fit_display()
 
         # Bias finding: the button, its settings, and what it is doing --
         # shaped like the fit controls beside it, because it is the same
@@ -355,7 +360,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
         
         # Tab 2: Fit Results (per-detector grid, models over the measurement)
-        self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = self._create_sweep_tab()
+        self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = \
+            self._create_sweep_tab(toolbar=self.fit_display)
         self.plot_tabs.addTab(self.fit_sweeps_tab, "Fit Results")
 
         # Tab 3: what the derivative bifurcation test looks at
@@ -372,11 +378,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         layout.addWidget(self.plot_tabs)
         
-    def _create_sweep_tab(self):
-        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout, colorbar)."""
+    def _create_sweep_tab(self, toolbar=None):
+        """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout, colorbar).
+
+        *toolbar* is an optional widget above the plots, for a tab with
+        controls of its own.
+        """
         tab = QtWidgets.QWidget()
         tab_layout = QtWidgets.QVBoxLayout(tab)
         tab_layout.setContentsMargins(5, 5, 5, 5)
+
+        if toolbar is not None:
+            tab_layout.addWidget(toolbar)
         
         # Amplitude colorbar (shown for >5 sweeps, hidden otherwise)
         colorbar = AmplitudeColorBar(tab)
@@ -536,10 +549,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._live.clear()
         self._set_amplitude_scale(
             AmplitudeSchedule.from_dict(call_params['amp_schedule']))
-        self._populate_fit_amplitudes()
-        self._populate_fit_models()
-        self.bias_settings.set_directions_swept(call_params.get('directions'))
+        # Before the choices are rebuilt: a new measurement has no bias, so
+        # the Fit Results tab cannot be offered the step of the last one's.
         self.bias_report = None
+        self._populate_fit_amplitudes()
+        self._populate_fit_display()
+        self.bias_settings.set_directions_swept(call_params.get('directions'))
         self._redraw_plots()
 
     def complete_multisweep(self, module: int, container: dict):
@@ -676,9 +691,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         names = self._selected_names()
         traces_by_name = self._collect_traces(names)
         if tab_idx == 2:
-            traces_by_name = {
-                name: [t for t in traces_by_name.get(name, []) if t[3].get('fits')]
-                for name in names}
+            traces_by_name = {name: self._fit_traces(name, traces_by_name.get(name, []))
+                              for name in names}
         if not traces_by_name:
             return
 
@@ -714,9 +728,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                            for traces in traces_by_name.values()
                            for _step, direction, _amp, _sweep in traces)
 
-        # Show colorbar when the colormap is active (num_amps > threshold),
-        # otherwise use per-plot legends with TABLEAU10 colors.
-        if len(amplitudes) > AMPLITUDE_COLORMAP_THRESHOLD:
+        # A legend or a colorbar, on how many amplitudes are on screen rather
+        # than how many the measurement holds: the Fit Results tab draws one
+        # step of a schedule too many to label, and a bar is no way to read one
+        # line. The scale itself stays the whole measurement's, so a step keeps
+        # its colour whichever of them are drawn.
+        drawn = {amplitude for traces in traces_by_name.values()
+                 for _step, _direction, amplitude, _sweep in traces}
+        if len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
             colorbar.update_range(amplitudes[0], amplitudes[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)
@@ -743,10 +762,29 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             widget_cache=widget_cache,
             dac_scale=dac_scale,
             show_legend=use_legend,
-            fit_model=self.fit_settings.get_display_model() or 'skewed',
+            fit_model=self.fit_display.get_model() or 'skewed',
             bias_by_name=self._bias_by_name(),
             bias_settings=self.bias_settings.get_parameters(),
         )
+
+    def _fit_traces(self, name: str, traces: list) -> list:
+        """One resonator's traces for the Fit Results tab.
+
+        Those that were fitted, at the amplitude the tab's toolbar is showing.
+        A step is a step of this measurement's schedule; "at bias" is the step
+        this resonator was biased at, which is a different step for different
+        resonators, and nothing at all until a bias has been found.
+        """
+        fitted = [trace for trace in traces if trace[3].get('fits')]
+        choice = self.fit_display.get_amplitude()
+        if choice is ALL_AMPLITUDES:
+            return fitted
+        if choice == BIAS_AMPLITUDE:
+            bias = self._bias_by_name().get(name)
+            if bias is None:
+                return []
+            choice = bias.iteration
+        return [trace for trace in fitted if trace[0] == choice]
 
     def _bias_by_name(self) -> dict:
         """``{name: BiasFinding}`` for the grids to mark, empty until a
@@ -769,21 +807,30 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         Rebuilt whenever a measurement arrives, because a schedule's steps are
         the choice: "step 3" means nothing until something has been swept.
         """
-        dac_scale = self.dac_scales.get(self.active_module_for_dac)
         self.fit_settings.set_amplitude_choices(
             [("All amplitudes", ALL_AMPLITUDES),
-             ("At bias amplitude", BIAS_AMPLITUDE)]
-            + [(f"Step {step}: {self._step_label(step, dac_scale)}", step)
-               for step in sorted(self._step_amplitudes)])
+             ("At bias amplitude", BIAS_AMPLITUDE)] + self._step_choices())
 
-    def _populate_fit_models(self):
-        """Offer the models this measurement has fits for, keeping the choice.
+    def _populate_fit_display(self):
+        """Offer the Fit Results tab what this measurement has to draw.
 
-        What was fitted, not what the settings ask for: a block loaded from a
-        file was fitted by whatever fitted it, and one whose fits are still
-        being run has none of them yet.
+        The models it carries fits for -- what was fitted, not what the
+        settings ask for: a block loaded from a file was fitted by whatever
+        fitted it, and one whose fits are still being run has none of them yet
+        -- and the steps it walked, with the bias step among them once
+        something has chosen one.
         """
-        self.fit_settings.set_models_fitted(self._models_fitted())
+        self.fit_display.set_models_fitted(self._models_fitted())
+        self.fit_display.set_amplitude_choices(
+            [("All amplitudes", ALL_AMPLITUDES)]
+            + ([("At bias amplitude", BIAS_AMPLITUDE)] if self.bias_report else [])
+            + self._step_choices())
+
+    def _step_choices(self) -> list:
+        """``[(label, step), ...]`` for the steps this measurement walked."""
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+        return [(f"Step {step}: {self._step_label(step, dac_scale)}", step)
+                for step in sorted(self._step_amplitudes)]
 
     def _models_fitted(self) -> list:
         """The models the sweeps carry fits for, in the order the tab lists them."""
@@ -879,7 +926,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _fits_done(self):
         self._set_analysis_enabled(True)
-        self._populate_fit_models()
+        self._populate_fit_display()
 
     # ── bias finding ─────────────────────────────────────────────────────────
 
@@ -924,6 +971,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_analysis_enabled(True)
         self.bias_report = report
         self.catalog = report.catalog
+        # The bias step is now a thing the Fit Results tab can be asked for.
+        self._populate_fit_display()
 
         # The report's own words: every resonator gets a bias point, and a flag
         # says that one is a fallback rather than a measurement.

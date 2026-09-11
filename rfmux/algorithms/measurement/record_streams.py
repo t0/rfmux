@@ -42,6 +42,7 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
+from ...pulse_capture.channel_keys import describe
 
 SESSION_FOLDER_FORMAT = "session_%Y%m%d_%H%M%S"
 METADATA_FILE = "session_metadata.json"
@@ -531,18 +532,11 @@ def pulse_summary_lines(capture) -> List[str]:
     rows = [(ch, len(by_idx), max(s.get("snr", 0.0) for s in by_idx.values()))
             for ch, by_idx in stream.summaries.items() if by_idx]
     rows.sort(key=lambda r: (-r[1], r[0]))
-    lines = [f"{_where(ch)}: {n} pulse{'s' if n != 1 else ''}, "
+    lines = [f"{describe(ch)}: {n} pulse{'s' if n != 1 else ''}, "
              f"best {snr:.1f}\u03c3" for ch, n, snr in rows]
     lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
                  f"{len(stream.summaries)} channels")
     return lines
-
-
-def _where(key) -> str:
-    """``channel 5`` or ``module 2 channel 5``."""
-    if isinstance(key, tuple):
-        return f"module {key[0]} channel {key[1]}"
-    return f"channel {key}"
 
 
 def _record(result: RecordResult, config: PulseCaptureConfig) -> None:

@@ -29,6 +29,36 @@ def channel_group(key: ChannelKey) -> str:
     return f"channel_{key}"
 
 
+def describe(key: ChannelKey) -> str:
+    """``channel 5`` or ``module 2 channel 5``."""
+    if isinstance(key, tuple):
+        return f"module {key[0]} channel {key[1]}"
+    return f"channel {key}"
+
+
+def channel_arg(key: ChannelKey) -> str:
+    """``5`` or ``2:5``: a key as a command line spells it."""
+    if isinstance(key, tuple):
+        return f"{key[0]}:{key[1]}"
+    return str(key)
+
+
+def parse_key(text: str) -> ChannelKey:
+    """The key ``5`` or ``2:5`` spells."""
+    module, colon, channel = str(text).partition(":")
+    if colon:
+        return (int(module), int(channel))
+    return int(module)
+
+
+def split_key(key: ChannelKey, module=None):
+    """``(module, channel number)`` of a key; a plain channel takes
+    *module* (the capture's), which may be None."""
+    if isinstance(key, tuple):
+        return key[0], key[1]
+    return (None if module is None else int(module)), int(key)
+
+
 def check_keys(keys: Iterable) -> List[ChannelKey]:
     """*keys* as ints or (module, channel) tuples, never a mix."""
     out: List[ChannelKey] = []

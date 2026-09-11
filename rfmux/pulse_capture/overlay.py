@@ -26,7 +26,7 @@ from ..core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       sampling_to_decimation)
 from ..streamer import SS_PER_SECOND
-from .channel_keys import channel_group
+from .channel_keys import channel_group, split_key
 from .hdf5 import PulseHDF5Reader
 
 # ── The recording ─────────────────────────────────────────────────
@@ -66,10 +66,12 @@ class Window:
     where a record's stamp is not disciplined; ``samples`` are complex
     ADC counts.  ``seq_gaps`` counts sequence discontinuities inside the
     window and ``dropouts`` the records whose pipe the transmitter was
-    not sending (zero-filled by the writer)."""
+    not sending (zero-filled by the writer).  With a ``module`` only
+    its records of ``start:stop`` are kept."""
     channel: int
     start: int
     stop: int
+    module: Optional[int]
     times: np.ndarray
     samples: np.ndarray
     seq_gaps: int
@@ -89,6 +91,11 @@ class Recording:
     dirfiles use.  A recording that crosses midnight is unwrapped: any
     stamp more than half a day before the first one is taken as the next
     day, and queries are read the same way.
+
+    The writer records every module the channel stream carries, one
+    record per module per sample, interleaved; a query with a module
+    keeps that module's records, and its sequence counter is read on
+    its own.
     """
 
     def __init__(self, source):
@@ -172,28 +179,41 @@ class Recording:
 
     # ── samples ───────────────────────────────────────────────────
 
+    def _keep(self, start: int, stop: int | None, module: Optional[int]):
+        """Index of the records of ``start:stop`` that are *module*'s
+        (1-indexed; the wire counts from 0), or a slice of all of them
+        for None."""
+        if module is None:
+            return slice(None)
+        hdr = self.file.headers()[start:stop]
+        return np.flatnonzero(hdr["module"] == module - 1)
+
     def channel(self, channel: int, start: int = 0,
-                stop: int | None = None) -> np.ndarray:
+                stop: int | None = None,
+                module: Optional[int] = None) -> np.ndarray:
         """One channel's samples over records ``start:stop`` as complex
-        ADC counts."""
+        ADC counts; *module*'s records only when given."""
         if not 1 <= channel <= self.channels:
             raise ValueError(f"channel {channel} is not in the recording, "
                              f"which holds 1..{self.channels}")
-        iq = self.file.iq()[start:stop, channel - 1, :]
+        iq = self.file.iq()[start:stop, channel - 1, :][self._keep(start, stop, module)]
         z = iq[:, 0].astype(np.float32) + 1j * iq[:, 1].astype(np.float32)
         return z * np.float32(self.counts_per_lsb)
 
-    def window(self, t0: float, t1: float, channel: int) -> Window:
-        """*channel* over seconds-of-day ``[t0, t1]``."""
+    def window(self, t0: float, t1: float, channel: int,
+               module: Optional[int] = None) -> Window:
+        """*channel* over seconds-of-day ``[t0, t1]``; *module*'s
+        records only when given."""
         start = self.index_at(t0)
         stop = self.index_at(t1, side="right")
+        keep = self._keep(start, stop, module)
         pipe = (channel - 1) // CHANNELS_PER_PIPE
-        seq = self._seq[start:stop].astype(np.int64)
-        snap = self.file.headers()[start:stop]["pipe_snapshot"]
+        seq = self._seq[start:stop].astype(np.int64)[keep]
+        snap = self.file.headers()[start:stop]["pipe_snapshot"][keep]
         return Window(
-            channel=channel, start=start, stop=stop,
-            times=self.seconds(start, stop),
-            samples=self.channel(channel, start, stop),
+            channel=channel, start=start, stop=stop, module=module,
+            times=self.seconds(start, stop)[keep],
+            samples=self.channel(channel, start, stop)[keep],
             seq_gaps=int(np.count_nonzero(np.diff(seq) != 1)) if seq.size else 0,
             dropouts=int(np.count_nonzero((snap & (1 << pipe)) == 0)),
         )
@@ -298,50 +318,53 @@ def correlation_lag_s(a: Dict[str, np.ndarray], b: Dict[str, np.ndarray],
 
 
 def pulse_overlay(reader: PulseHDF5Reader, recording: Recording,
-                  channel: int, pulse_idx: int, stream: str = "slow",
+                  channel, pulse_idx: int, stream: str = "slow",
                   pad_s: float = 0.0, dirfile=None,
                   module: Optional[int] = None) -> Overlay:
-    """Pulse *pulse_idx* of *channel* with the recording's samples over
-    its window (plus *pad_s* either side), converted to the file's
-    stored units.  For a slow pulse of a dual file the paired fast pulse
-    comes too, with the correlation lag between it and the fastrx
-    trace.  With *dirfile* (a board's parser subdirfile) its slow trace
-    over the window comes too, in the same units; *module* defaults to
-    the capture's."""
+    """Pulse *pulse_idx* of *channel* (a channel number, or a (module,
+    channel) key of a capture across modules) with the recording's
+    samples over its window (plus *pad_s* either side), converted to
+    the file's stored units.  For a slow pulse of a dual file the
+    paired fast pulse comes too, with the correlation lag between it
+    and the fastrx trace.  With *dirfile* (a board's parser subdirfile)
+    its slow trace over the window comes too, in the same units;
+    *module* defaults to the key's, else the capture's."""
     stream_key = stream if reader.dual else None
-    pulse = reader.get_pulse(channel, pulse_idx, stream_key)
+    key = channel
+    rec_module, channel = split_key(key, reader.metadata.get("module"))
+    pulse = reader.get_pulse(key, pulse_idx, stream_key)
     if pulse is None:
-        raise KeyError(f"no pulse {pulse_idx} on channel {channel} ({stream})")
+        raise KeyError(f"no pulse {pulse_idx} on channel {key} ({stream})")
     shift = slow_shift_s(reader) if stream == "slow" else 0.0
     tod = _tod(pulse, shift)
     t = tod["times"][np.isfinite(tod["times"])]
     if t.size == 0:
         raise ValueError("pulse has no usable timestamps")
     t0, t1 = float(t[0]) - pad_s, float(t[-1]) + pad_s
-    factor = counts_to_stored(reader, channel, stream_key)
-    w = recording.window(t0, t1, channel)
+    factor = counts_to_stored(reader, key, stream_key)
+    w = recording.window(t0, t1, channel, module=rec_module)
     fastrx = _in_units(w.times, w.samples, factor)
 
     parsed = None
     if dirfile is not None:
         if module is None:
-            module = int(reader.metadata.get("module", 1))
+            module = rec_module if rec_module is not None else 1
         d = dirfile_window(dirfile, module, channel, t0, t1)
         parsed = _in_units(d["times"], d["I"] + 1j * d["Q"], factor)
 
     fast = None
     if reader.dual and stream == "slow":
-        for pair in reader.iter_matches(channel):
+        for pair in reader.iter_matches(key):
             if pair["slow_idx"] == pulse_idx and pair["fast_idx"] is not None:
-                fp = reader.get_pulse(channel, pair["fast_idx"], "fast")
+                fp = reader.get_pulse(key, pair["fast_idx"], "fast")
                 if fp is not None:
                     fast = _tod(fp)
                 break
     ref = fast if fast is not None else (tod if stream == "fast" else None)
     lag = correlation_lag_s(ref, fastrx) if ref is not None else None
 
-    return Overlay(channel=channel, pulse_idx=pulse_idx, stream=stream,
-                   units=reader.stored_units(channel, stream_key),
+    return Overlay(channel=key, pulse_idx=pulse_idx, stream=stream,
+                   units=reader.stored_units(key, stream_key),
                    shift_s=shift, pulse=tod, fastrx=fastrx, fast=fast,
                    dirfile=parsed, lag_s=lag, seq_gaps=w.seq_gaps,
                    dropouts=w.dropouts)
@@ -422,7 +445,10 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     if reader.dual:
         raise ValueError(f"{reader.path}: already a dual file")
     channels = list(reader.channels)
-    fast_channels = [c for c in channels if c <= rec.channels]
+    # A key's module in the recording: its own, or the capture's; a
+    # recording carries every module that streamed.
+    where = {c: split_key(c, reader.metadata.get("module")) for c in channels}
+    fast_channels = [c for c in channels if where[c][1] <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
     params = {**reader.metadata, "streamer_mode": "both",
               "sample_rate_fast": PFB_SAMPLING_FREQ,
@@ -448,11 +474,12 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
 
         shift = slow_shift_s(reader)
         period = 1.0 / slow_rate if slow_rate else 0.0
-        n_noise = int(noise_span_s * PFB_SAMPLING_FREQ)
+        noise_stop = rec.index_at(rec.t_first + noise_span_s)
         factors = {c: counts_to_stored(reader, c) for c in channels}
         noise = {}
         for c in fast_channels:
-            z = rec.channel(c, 0, n_noise).astype(np.complex128)
+            module, number = where[c]
+            z = rec.channel(number, 0, noise_stop, module).astype(np.complex128)
             noise[c] = estimate_noise_stats({c: z * factors[c]}, [c])[0][c]
 
         # The fast side's histograms and templates, from the same
@@ -499,7 +526,8 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                         period)
                     pair["window"] = window
                     if recorded:
-                        w = rec.window(window[0], window[1], c)
+                        w = rec.window(window[0], window[1], where[c][1],
+                                       module=where[c][0])
                         ok = np.isfinite(w.times)
                         # A window the recording does not cover
                         # stays absent: the pair reads "fast n/a".

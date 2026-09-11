@@ -54,7 +54,7 @@ def seconds_ts(seconds: float, *, y=26, d=245):
 
 
 def record(channels: int, seq: int, *, snapshot=None, serial=42, ts=None,
-           recent=False, sample_trunc=2, module=2, iq=None) -> bytes:
+           recent=False, sample_trunc=2, module=1, iq=None) -> bytes:
     """One record: wire header plus the module's first `channels` I/Q pairs.
 
     Pipe p's samples are filled with a value derived from (seq, p), so a

@@ -40,16 +40,21 @@ def _shape(t):
     return np.where(t >= T, AMP * np.exp(-(t - T) / TAU), 0.0)
 
 
-def _recording_file(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
+def _recording_file(tmp_path, spacing=20e-6, span=(-0.01, 0.04),
+                    modules=(1,)):
     """The event as the channel stream would carry it, stamped on time,
-    on CHANNEL with the other channels quiet."""
+    on CHANNEL of the first of *modules* with the other channels and
+    modules quiet; one record per module per stamp, interleaved, as
+    the writer keeps them."""
     t = T + np.arange(span[0], span[1], spacing)
     recs = []
     for i, ti in enumerate(t):
-        block = np.zeros((128, 2), dtype=np.int16)
-        block[71, 0] = int(round(float(_shape(ti))))
-        recs.append(record(CHANNELS, i, ts=seconds_ts(ti), recent=True,
-                           sample_trunc=0, iq={2: block}))
+        for m in modules:
+            block = np.zeros((128, 2), dtype=np.int16)
+            if m == modules[0]:
+                block[71, 0] = int(round(float(_shape(ti))))
+            recs.append(record(CHANNELS, i, ts=seconds_ts(ti), recent=True,
+                               sample_trunc=0, iq={2: block}, module=m))
     return write(tmp_path, [file_header(CHANNELS, len(recs))] + recs)
 
 
@@ -57,23 +62,26 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     return Recording(_recording_file(tmp_path, spacing, span))
 
 
-def _capture(tmp_path):
-    """A slow-only capture of the event, stamps fed late as the board
-    stamps them."""
+def _capture(tmp_path, channels=(CHANNEL,), module=1):
+    """A slow-only capture of the event on the first of *channels*
+    (keys), stamps fed late as the board stamps them; the others see
+    noise."""
     path = str(tmp_path / "slow.h5")
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
                              max_pulse_ms=30.0, noise_train_ms=300.0)
     got = []
-    s = PulseCaptureSession(channels=[CHANNEL], sample_rate=FS,
-                            hdf5_path=path,
+    s = PulseCaptureSession(channels=list(channels), module=module,
+                            sample_rate=FS, hdf5_path=path,
                             on_pulse=lambda ch, idx, summ, data: got.append(idx),
                             **cfg.session_kwargs(FS))
     s.start()
     rng = np.random.default_rng(5)
     n = int(2.5 * FS)
     t = T0 + np.arange(n) / FS
-    s.feed_block(CHANNEL, _shape(t) + rng.normal(0, 1, n),
-                 rng.normal(0, 1, n), t + LATE)
+    for k, key in enumerate(channels):
+        signal = _shape(t) if k == 0 else 0.0
+        s.feed_block(key, signal + rng.normal(0, 1, n),
+                     rng.normal(0, 1, n), t + LATE)
     s.stop()
     assert got, "the event did not trigger"
     return path
@@ -388,4 +396,67 @@ def test_the_merged_file_carries_fast_histograms_and_templates(tmp_path):
         assert set(r.get_histograms("slow")) == set(hist)
         tmpl = r.get_templates("fast")
         assert tmpl and f"template_I_ch{CHANNEL}" in tmpl
+
+
+def test_a_window_keeps_one_module_of_an_interleaved_recording(tmp_path):
+    """The writer interleaves every streaming module; a query with a
+    module keeps its records, and reads its sequence counter alone."""
+    rec = Recording(_recording_file(tmp_path, spacing=1e-4,
+                                    span=(-0.002, 0.02), modules=(2, 3)))
+    w2 = rec.window(T - 0.001, T + 0.01, CHANNEL, module=2)
+    w3 = rec.window(T - 0.001, T + 0.01, CHANNEL, module=3)
+    both = rec.window(T - 0.001, T + 0.01, CHANNEL)
+    assert len(both.times) == len(w2.times) + len(w3.times)
+    assert len(w2.times) == len(w3.times) > 50
+    assert w2.samples.real.max() == pytest.approx(AMP, rel=1e-3)
+    assert not w3.samples.any()
+    assert w2.seq_gaps == 0 and w3.seq_gaps == 0
+    assert both.seq_gaps > 0            # two counters read as one
+    assert w2.module == 2 and both.module is None
+    assert rec.channel(CHANNEL, 0, 10, module=3).shape == (5,)
+
+
+def test_a_capture_across_modules_merges_each_key_from_its_module(tmp_path):
+    """Pair keys take the recording of their own module; the file's
+    fast side is keyed like the slow side."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    keys = [(2, CHANNEL), (3, CHANNEL)]
+    path = _capture(tmp_path, channels=keys, module=None)
+    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+                         span=(-0.002, 0.035), modules=(3, 2))   # pulse on 3
+    merge_fastrx(path, fx)
+    with PulseHDF5Reader(path) as r:
+        assert r.dual and r.channels == keys and r.multi_module
+        assert [tuple(c) for c in r.metadata["fast_channels"]] == keys
+        assert r.pair_count((2, CHANNEL)) == r.pulse_count((2, CHANNEL), "slow") >= 1
+        pair = r.get_match((2, CHANNEL), 1)
+        tod = pair["fast_tod"]
+        # Module 2's records are quiet in the recording: the pulse the
+        # slow side saw is not in its fast trace, and module 3's pulse
+        # does not leak in.
+        assert np.abs(tod["Amp_I"]).max() < 1e-6
+        assert "noise_std_I" in r.f["fast/module_3/channel_200"].attrs
+        assert "snr_counts_m2ch200" in r.get_histograms("fast")
+
+
+def test_a_one_module_capture_takes_its_module_of_the_recording(tmp_path):
+    """A capture of module 2 merged with a recording that carries
+    modules 2 and 3 reads module 2's records alone."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture(tmp_path, module=2)
+    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+                         span=(-0.002, 0.035), modules=(2, 3))
+    merge_fastrx(path, fx)
+    rec = Recording(fx)
+    with PulseHDF5Reader(path) as r:
+        pair = r.get_match(CHANNEL, 1)
+        t = pair["fast_tod"]["Time"]
+        assert len(t) == len(rec.window(pair["window"][0], pair["window"][1],
+                                        CHANNEL, module=2).times)
+        assert np.all(np.diff(t) > 0)
+        factor = counts_to_stored(r, CHANNEL, "slow")
+        assert pair["fast_tod"]["Amp_I"].max() == \
+            pytest.approx(AMP * factor.real, rel=0.02)
+        ov = pulse_overlay(r, rec, CHANNEL, 1)
+        assert ov.seq_gaps == 0 and len(ov.fastrx["times"]) == len(t)
 

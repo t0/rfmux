@@ -584,17 +584,24 @@ def show_overlay(capture, recording, *, channel=None, pulse_idx=1,
     from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
     from rfmux.pulse_capture.overlay import pulse_overlay
 
+    from rfmux.pulse_capture.channel_keys import describe, parse_key
+
     rec = _open_recording(recording)
     reader = PulseHDF5Reader(capture)
     if channel is None:
         if not reader.channels:
             raise click.ClickException(f"{capture}: no channels")
-        channel = int(reader.channels[0])
+        channel = reader.channels[0]
+    elif not isinstance(channel, tuple):
+        channel = parse_key(channel)
+    if reader.multi_module and not isinstance(channel, tuple):
+        raise click.ClickException(
+            f"{capture} spans modules: name the channel as MODULE:CHANNEL")
     stream_key = stream if reader.dual else None
     count = reader.pulse_count(channel, stream_key)
     if count == 0:
         raise click.ClickException(
-            f"{capture}: no {stream} pulses on channel {channel}")
+            f"{capture}: no {stream} pulses on {describe(channel)}")
 
     fig, axes = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
     state = {"idx": max(1, min(pulse_idx, count))}
@@ -612,7 +619,7 @@ def show_overlay(capture, recording, *, channel=None, pulse_idx=1,
         if ov.dirfile is not None:
             traces.insert(1, ("slow stream (parser)", "x", ov.dirfile))
         _plot_traces(axes, traces, t_ref)
-        title = (f"channel {channel}  pulse {state['idx']}/{count}  "
+        title = (f"{describe(channel)}  pulse {state['idx']}/{count}  "
                  f"[{ov.units}]")
         if ov.shift_s:
             title += f"  slow shifted {ov.shift_s * 1e3:+.3f} ms"
@@ -644,8 +651,9 @@ def show_overlay(capture, recording, *, channel=None, pulse_idx=1,
 @cli.command(name="overlay")
 @click.argument("capture", type=click.Path(exists=True, dir_okay=False))
 @click.argument("recording", type=click.Path(exists=True, dir_okay=False))
-@click.option("--channel", type=int, default=None,
-              help="channel (1-indexed); default: the capture's first")
+@click.option("--channel", type=str, default=None,
+              help="channel (1-indexed), or MODULE:CHANNEL of a capture "
+                   "across modules; default: the capture's first")
 @click.option("--pulse", "pulse_idx", type=int, default=1, show_default=True,
               help="pulse index to start at")
 @click.option("--stream", type=click.Choice(["slow", "fast"]), default="slow",

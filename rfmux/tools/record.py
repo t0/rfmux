@@ -30,6 +30,7 @@ from rfmux.algorithms.measurement.record_streams import (
 )
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
 from rfmux.core.channels import parse_channel_spec, parse_module_channels
+from rfmux.pulse_capture.channel_keys import channel_arg
 
 _DEFAULTS = PulseCaptureConfig()
 
@@ -231,12 +232,13 @@ def _show(result, how: str) -> None:
     counts = {ch: len(v) for ch, v in result.capture.summaries.items()}
     if not any(counts.values()):
         return
-    channel = max(counts, key=lambda ch: (counts[ch], -ch))
+    channel = sorted(counts, key=lambda ch: (-counts[ch], ch))[0]
     dirfile = result.dirfile_path
     if headless:
         click.echo("[record] no display; to view: rfmux fastrx overlay "
-                   f"{result.pulse_path} {result.fastrx_path} --channel {channel} "
-                   f"--pad 5" + (f" --dirfile {dirfile}" if dirfile else ""))
+                   f"{result.pulse_path} {result.fastrx_path} --channel "
+                   f"{channel_arg(channel)} --pad 5"
+                   + (f" --dirfile {dirfile}" if dirfile else ""))
         return
     from rfmux.tools.fastrx import show_overlay
     show_overlay(result.pulse_path, result.fastrx_path, channel=channel,

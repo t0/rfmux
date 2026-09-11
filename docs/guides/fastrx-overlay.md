@@ -177,7 +177,10 @@ rfmux fastrx overlay pulse_module2_143012.h5 /data/run.fastrx \
     --channel 5 --pulse 1 --dirfile ~/data/run.dirfile/serial_<NNNN> --pad 5
 ```
 
-Press n and p to step through pulses. `--pad` shows that many milliseconds
+Press n and p to step through pulses. `--channel 2:5` names module 2's
+channel 5 of a capture across modules, whose recording holds every
+module's records; the viewer and the merge read the channel's module
+alone. `--pad` shows that many milliseconds
 of recording either side of the pulse window; `--save fig.png` writes the
 figure instead of opening a window. The title reports gaps or dropouts in
 the recording window and, for a both-mode capture, the lag at which the

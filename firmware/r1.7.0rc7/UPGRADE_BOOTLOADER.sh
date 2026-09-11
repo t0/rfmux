@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-cd ~/rfmux/firmware/r1.7.0rc5
+cd ~/rfmux/firmware/r1.7.0
 source /opt/xilinx/2025.2/Vitis/settings64.sh
 
 read -p "Remove the MicroSD card from the CRS and turn it on. Press Enter to continue."

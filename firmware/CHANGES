@@ -1,6 +1,6 @@
 # Changelog
 
-# r1.7.0rc5 - 2026-08-07
+# r1.7.0rc7 - 2026-09-11
 
 This is a major update, and REQUIRES an accompanying bootloader upgrade as well.
 You will need one of the following:
@@ -9,7 +9,7 @@ You will need one of the following:
 - A "Flat Mark" / "Flat Stanley" machine with the above pre-installed, which t0
   can ship to you.
 
-See firmware/r1.7.0rc5/README for details.
+See firmware/r1.7.0/README for details.
 
 New features:
 
@@ -28,6 +28,22 @@ New features:
   (on only one module!) at 2.44 Gsps, allowing real-time high-bandwidth,
   high-channel-count streaming modes. We anticipate the software side of this
   work (Linux-only) will also land in rfmux in the near future.
+
+New since -rc5:
+
+- Fixed an accidental complex inversion (sign negation) in
+
+  >>> set_phase(x, DEMOD, ...)
+
+  This occurred because the LO is used for both upconversion and downconversion;
+  to negate the LO frequency for downconversion we use a complex conjugation,
+  but included the phase component in this. Fixed now.
+
+- Fixed an incorrect accounting of the 1G streamer bandwidth limits, which counted
+  module 1's settings 4 times rather than each module once.
+
+- Fixed a Nyquist 3/4 error in DAC settings resulting in incorrect pulse shaping
+  and a corresponding loss of synthesizer power.
 
 New since -rc4:
 

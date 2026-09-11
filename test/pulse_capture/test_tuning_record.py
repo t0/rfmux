@@ -76,6 +76,33 @@ def test_a_field_that_cannot_be_stored_is_skipped_not_fatal(tmp_path):
         assert r.tuning(1) == {"df_calibration": 1.0e6}
 
 
+@pytest.mark.asyncio
+async def test_a_bias_kids_entry_stores_whole(tmp_path):
+    """The row bias_kids actually produces, every field of it, with no
+    field skipped: a skip only warns, so a capture would silently lack
+    the field."""
+    import warnings
+    from rfmux.algorithms.measurement import bias_kids as bk
+    from test.algorithms.test_bias_kids_fits import _Board, _entry
+
+    out = await bk.bias_kids(_Board(), {1: _entry()}, module=1)
+    rows = tuning_rows(out, 1.0e9)
+    assert set(rows) == {1}
+    path = tmp_path / "real.h5"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        PulseHDF5Writer(path, [1], {}, {"streamer_mode": "slow"},
+                        tuning=rows).finalize()
+    with PulseHDF5Reader(path) as r:
+        back = r.tuning(1)
+        assert r.df_calibration(1) == rows[1]["df_calibration"]
+    assert set(back) == {k for k, v in rows[1].items() if v is not None}
+    assert back["bias_frequency"] == rows[1]["bias_frequency"]
+    assert back["nco_frequency_hz"] == 1.0e9
+    assert back["nonlinear_fit_params"] == rows[1]["nonlinear_fit_params"]
+    np.testing.assert_array_equal(back["iq_complex"], rows[1]["iq_complex"])
+
+
 def test_tuning_rows_key_bias_kids_output_by_channel():
     out = {0: {"bias_channel": 3, "df_calibration": 1 + 1j},
            1: {"bias_channel": None},

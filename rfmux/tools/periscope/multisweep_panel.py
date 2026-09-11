@@ -2245,8 +2245,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.nco_frequency_hz = nco_frequency_hz
         
         tuning = tuning_rows(biased_results, nco_frequency_hz)
-        df_calibrations = {ch: r for ch, r in tuning.items()
-                           if r.get("df_calibration") is not None}
         if tuning:
             self.tuning_ready.emit(module, tuning)
         
@@ -2264,7 +2262,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         if num_biased > 0:
             msg += "The detectors have been programmed at their optimal operating points."
-            if df_calibrations:
+            if any(r.get("df_calibration") is not None for r in tuning.values()):
                 msg += "\n\nFrequency shift calibration data has been loaded into the main window."
         else:
             msg += "No detectors met the criteria for biasing."

@@ -280,3 +280,36 @@ def test_no_leftover_servers():
 @pytest.mark.skipif(sys.platform != "linux", reason="uses /proc to check orphans")
 def test_busy_server_exits_when_parent_is_killed(tmp_path):
     test_server_exits_when_parent_exits(tmp_path, "fork", "killed_busy")
+
+
+#: A board with no flavour line, so the hook can be run against it by hand.
+PLAIN_SESSION = """
+!HardwareMap
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
+"""
+
+
+def test_the_board_talks_to_the_port_its_hostname_names():
+    """The rewritten hostname reaches the tuber client, not just the column.
+
+    ``yaml_hook`` binds an ephemeral port and writes it into ``crs.hostname``,
+    but the tuber URI is derived when the object is built. A board still
+    holding the URI from before the rewrite addresses the bare hostname --
+    port 80 -- and every call against it is refused.
+
+    The boards are held across the hook because that is the case that breaks:
+    when they are collected instead, the ORM rebuilds them from the row and
+    the URI is derived again from the rewritten hostname. Which of the two
+    happens is down to garbage collection, which is why an unfixed suite fails
+    this intermittently rather than never.
+    """
+    hwm = rfmux.load_session(PLAIN_SESSION)
+    try:
+        boards = list(hwm.query(rfmux.CRS))
+        assert boards
+        server.yaml_hook(hwm)
+        for crs in boards:
+            assert ":" in crs.hostname, "the hook did not bind a port"
+            assert crs._tuber_host == crs.hostname
+    finally:
+        hwm.close()

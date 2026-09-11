@@ -110,6 +110,10 @@ def yaml_hook(hwm):
             (hostname, port) = s.getsockname()
 
             crs.hostname = f"{hostname}:{port}"
+            # The tuber URI is baked from the hostname when the object is
+            # built, so rewriting the column alone leaves this CRS talking to
+            # the bare hostname on port 80. Re-derive it.
+            crs.reconstruct()
             # Store configuration for MockCRS instantiation in subprocess
             model_configs[port] = {
                 'serial': crs.serial if crs.serial else ("%05d" % port),

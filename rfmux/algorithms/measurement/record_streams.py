@@ -231,6 +231,8 @@ async def record_streams(
     fastrx_interface: Optional[str] = None,
     fastrx_socket: Optional[str] = None,
     merge_fastrx: bool = True,
+    channel_streamer: bool = False,
+    sample_trunc: str = "LOW",
     verbose: bool = True,
 ) -> RecordResult:
     """Record the selected products of *channels* on *module*, or of
@@ -287,6 +289,9 @@ async def record_streams(
                 "Start it with: "
                 + fx.start_command(Path(fastrx_socket).name))
         fastrx_channels = max(c for chs in wanted.values() for c in chs)
+        if channel_streamer:
+            await _enable_channel_streamer(crs, modules, fastrx_channels,
+                                           sample_trunc, say)
         silent = await asyncio.to_thread(
             _fastrx_silent_modules, fx, fastrx_socket, modules)
         if silent:
@@ -491,7 +496,25 @@ async def _stop_parser(handle: _Parser, result, dirfile, log):
 
 
 #: Seconds a fastrx probe waits for the channel stream before a run.
+#: Seconds for a freshly enabled channel streamer to flow before the
+#: stream is probed.
+CHANNEL_STREAMER_SETTLE_S = 1.0
 FASTRX_PROBE_S = 1.0
+
+
+async def _enable_channel_streamer(crs, modules: List[int], channels: int,
+                                   sample_trunc: str, say) -> None:
+    """Turn the channel streamer on for *modules*, channels 1 to
+    *channels* as the recording keeps them, and let it flow before the
+    stream is probed."""
+    if not hasattr(crs, "set_channel_streamer"):
+        raise RuntimeError("this board has no channel streamer to turn on")
+    for m in modules:
+        say(f"[record] channel streamer on for module {m}: channels "
+            f"1-{channels}, {sample_trunc} bits")
+        await crs.set_channel_streamer(channels=channels, module=m,
+                                       sample_trunc=sample_trunc)
+    await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
 
 
 def _fastrx_silent_modules(fx, socket: str, modules: List[int],

@@ -336,6 +336,52 @@ def test_the_parser_gets_one_range_per_module(tmp_path, monkeypatch):
         str(tmp_path / "p.dirfile"), "-c", "2:5", "-c", "3:1-2", "--drop-stats"]
 
 
+def test_the_channel_streamer_is_turned_on_first_when_asked(
+        tmp_path, fake_recorders, monkeypatch):
+    fastrx = pytest.importorskip("rfmux.fastrx")
+
+    class Capture:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def capture(self, n, channels, module, timeout):
+            return {"modules_seen": 0b0001}      # module 1 only
+
+    monkeypatch.setattr(fastrx, "PacketCapture", Capture)
+    monkeypatch.setattr(rs, "CHANNEL_STREAMER_SETTLE_S", 0.0)
+    socket = tmp_path / "enp2s0f0np0"
+    socket.touch()
+    board = _Board()
+    board.streamer = []
+
+    async def set_channel_streamer(**kw):
+        board.streamer.append(kw)
+    board.set_channel_streamer = set_channel_streamer
+    # Every recorded module, channels 1 to the highest of any of them,
+    # before the probe: module 2's stream still missing is still refused.
+    with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
+        asyncio.run(rs.record_streams(
+            board, module=None, channels={1: [1, 9], 2: [3]}, duration_s=0.1,
+            session=rs.open_session(base=tmp_path), sample_trunc="MID",
+            channel_streamer=True, fastrx_socket=str(socket), verbose=False))
+    assert board.streamer == [
+        {"channels": 9, "module": 1, "sample_trunc": "MID"},
+        {"channels": 9, "module": 2, "sample_trunc": "MID"}]
+    assert board.calls == []
+    # A board without the call says so rather than failing inside it.
+    with pytest.raises(RuntimeError, match="no channel streamer"):
+        asyncio.run(rs.record_streams(
+            _Board(), module=1, channels=[1], duration_s=0.1,
+            session=rs.open_session(base=tmp_path), channel_streamer=True,
+            fastrx_socket=str(socket), verbose=False))
+
+
 def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(
         tmp_path, fake_recorders, monkeypatch):
     fastrx = pytest.importorskip("rfmux.fastrx")
@@ -399,6 +445,10 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     record._run(modules=[2], channels=None, **common)
     assert seen["module"] == 2 and seen["channels"] == [1, 2]
     assert set(seen["tuning"]) == {1, 2}
+    assert (seen["channel_streamer"], seen["sample_trunc"]) == (False, "LOW")
+    record._run(modules=[2], channels=None, channel_streamer=True,
+                sample_trunc="HIGH", **common)
+    assert (seen["channel_streamer"], seen["sample_trunc"]) == (True, "HIGH")
     with pytest.raises(click.UsageError, match="no bias export for module 4"):
         record._run(modules=[2, 4], channels=None, **common)
 

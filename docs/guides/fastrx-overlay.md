@@ -35,15 +35,22 @@ rfmux record --serial <NNNN> --module <module> --duration 20 \
 Run with no options, `rfmux record` opens a dialog with the same
 choices, remembered between runs: on its Run tab the board, session
 folder (the newest session under the default path is filled in),
-channels, duration, the three products with their interfaces and what
-to open afterwards; on its Pulse capture tab the capture settings.
+channels, duration, the three products with their interfaces, whether
+to turn the channel streamer on for the modules and with which sample
+bits, and what to open afterwards; on its Pulse capture tab the capture
+settings.
 The interfaces are listed with their negotiated rates,
 those under 100 Gb/s for the parser and the 100 Gb/s ones for fastrx,
 a lone 100 Gb/s interface filled in. It checks for a running fastrxd
 on the 100G interface and,
 when there is none, shows the command that starts it and waits.
 
-It reads the board and never configures it. The session is a Periscope
+It reads the board and, unless asked to, never configures it:
+`--channel-streamer` turns the channel streamer on for the modules
+recorded, channels 1 to the highest, before the run, with
+`--sample-trunc LOW|MID|HIGH` choosing the bits (below); without it a
+module whose channel stream is off is refused before anything is
+written. The session is a Periscope
 session folder: the channels and their tuning rows (bias frequency,
 amplitude, fit, df calibration) come from the newest bias export in it
 and are stored with the capture (`--channels 1-88` and `--bias <file>`

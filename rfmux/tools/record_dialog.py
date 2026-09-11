@@ -13,6 +13,7 @@ from typing import List, Optional
 
 from PyQt6 import QtCore, QtWidgets
 
+from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
     biased_channels, calibrated, fastrx_bytes_per_s, latest_bias_export)
 from ..core.transferfunctions import decimation_to_sampling
@@ -163,6 +164,16 @@ class RecordDialog(QtWidgets.QDialog):
         self.copy_btn = QtWidgets.QPushButton("Copy command")
         self.recheck_btn = QtWidgets.QPushButton("Check again")
         self.disk_label = QtWidgets.QLabel()
+        self.streamer_check = QtWidgets.QCheckBox(
+            "Turn the channel streamer on for these modules")
+        self.streamer_check.setToolTip(
+            "Before the run, set_channel_streamer for every module recorded, "
+            "channels 1 to the highest; otherwise the board is only read, "
+            "and a module whose channel stream is off is refused")
+        self.trunc_combo = QtWidgets.QComboBox()
+        for choice in ("LOW", "MID", "HIGH"):
+            self.trunc_combo.addItem(choice, choice)
+        self.trunc_combo.setToolTip(TRUNC_HELP)
         self.merge_check = QtWidgets.QCheckBox(
             "Merge the recording into the pulse file after the run")
         self.show_combo = QtWidgets.QComboBox()
@@ -177,6 +188,8 @@ class RecordDialog(QtWidgets.QDialog):
         add("", self.fastrx_status)
         add("", self._row(self.copy_btn, self.recheck_btn))
         add("", self.disk_label)
+        add("", self._row(self.streamer_check, QtWidgets.QLabel("sample bits"),
+                          self.trunc_combo))
         add("", self.merge_check)
         add("After the run:", self.show_combo)
 
@@ -360,7 +373,8 @@ class RecordDialog(QtWidgets.QDialog):
             self._fill_interfaces(running)
         iface = _combo_value(self.fastrx_iface_combo)
         for w in (self.fastrx_iface_combo, self.fastrx_status, self.copy_btn,
-                  self.recheck_btn, self.disk_label, self.merge_check):
+                  self.recheck_btn, self.disk_label, self.merge_check,
+                  self.streamer_check, self.trunc_combo):
             w.setEnabled(self.fastrx_check.isChecked())
         self.parser_iface_combo.setEnabled(self.parser_check.isChecked())
         if self.fastrx_check.isChecked():
@@ -421,6 +435,8 @@ class RecordDialog(QtWidgets.QDialog):
             "fastrx_interface": _combo_value(self.fastrx_iface_combo) or None,
             "fastrx_socket": None,
             "merge_fastrx": self.merge_check.isChecked(),
+            "channel_streamer": self.streamer_check.isChecked(),
+            "sample_trunc": self.trunc_combo.currentData(),
             "show": _SHOW[self.show_combo.currentIndex()],
             "bias": None,
             "config": self.capture_form.get_config(),
@@ -481,6 +497,9 @@ class RecordDialog(QtWidgets.QDialog):
         _select(self.parser_iface_combo, str(v("parser_interface", "auto")))
         _select(self.fastrx_iface_combo, str(v("fastrx_interface", "")))
         self.merge_check.setChecked(v("merge_fastrx", "true") in (True, "true"))
+        self.streamer_check.setChecked(
+            v("channel_streamer", "false") in (True, "true"))
+        _select(self.trunc_combo, str(v("sample_trunc", "LOW")))
         show = str(v("show", "periscope"))
         self.show_combo.setCurrentIndex(
             _SHOW.index(show) if show in _SHOW else 0)
@@ -505,6 +524,8 @@ class RecordDialog(QtWidgets.QDialog):
                 ("parser_interface", o["parser_interface"] or "auto"),
                 ("fastrx_interface", o["fastrx_interface"] or ""),
                 ("merge_fastrx", "true" if o["merge_fastrx"] else "false"),
+                ("channel_streamer", "true" if o["channel_streamer"] else "false"),
+                ("sample_trunc", o["sample_trunc"]),
                 ("show", o["show"]),
                 ("capture_config",
                  json.dumps(dataclasses.asdict(o["config"])))):

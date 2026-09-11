@@ -69,6 +69,23 @@ def test_record_waits_for_fastrxd_and_shows_the_start_command(
     assert dlg.record_btn.isEnabled(), dlg.status_label.text()
 
 
+def test_the_channel_streamer_is_off_unless_asked_and_remembered(
+        qt_app, tmp_path, monkeypatch):
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    o = dlg.get_options()
+    assert (o["channel_streamer"], o["sample_trunc"]) == (False, "LOW")
+    assert "±32767" in dlg.trunc_combo.toolTip()
+    dlg.streamer_check.setChecked(True)
+    dlg.trunc_combo.setCurrentIndex(2)
+    dlg._save()
+    o = rd.RecordDialog(settings=settings).get_options()
+    assert (o["channel_streamer"], o["sample_trunc"]) == (True, "HIGH")
+    # The choice belongs to the fastrx product.
+    dlg.fastrx_check.setChecked(False)
+    dlg._refresh()
+    assert not dlg.streamer_check.isEnabled()
+
+
 def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     dlg.serial_edit.setText("0042")

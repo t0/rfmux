@@ -56,6 +56,10 @@ async def _main(serial: str, hostname: str | None, **kw):
     return await record_streams(crs, **kw)
 
 
+#: What the sample truncation choices mean, for the option and the dialog.
+TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts.")
+
+
 @click.command()
 @click.option("--serial", default=None,
               help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board; "
@@ -85,6 +89,13 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("--fastrx-interface", default=None,
               help="100G interface fastrxd runs on; needed when several run")
 @click.option("--fastrx-socket", default=None, help="fastrxd socket path, if not derivable")
+@click.option("--channel-streamer/--no-channel-streamer", default=False,
+              show_default=True,
+              help="Turn the channel streamer on for the recorded modules, "
+                   "channels 1 to the highest, before the run")
+@click.option("--sample-trunc", type=click.Choice(["LOW", "MID", "HIGH"]),
+              default="LOW", show_default=True,
+              help="With --channel-streamer: " + TRUNC_HELP)
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
                    "fast stream (a both-mode file, as Periscope reviews it)")
@@ -105,8 +116,9 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("-q", "--quiet", is_flag=True)
 def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
-        fastrx_socket, merge_fastrx, show, bias, threshold_sigma, end_sigma,
-        min_pulse_ms, max_pulse_ms, noise_train_ms, trigger_basis, quiet):
+        fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, show,
+        bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
+        noise_train_ms, trigger_basis, quiet):
     """Record the slow and channel streams of a module, or of several
     feeding one RF line, into a session."""
     if serial is None:
@@ -134,13 +146,14 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
          capture=capture, parser=parser, fastrx=fastrx,
          parser_interface=parser_interface, fastrx_interface=fastrx_interface,
          fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, show=show,
-         bias=bias, config=config, quiet=quiet)
+         bias=bias, config=config, channel_streamer=channel_streamer,
+         sample_trunc=sample_trunc, quiet=quiet)
 
 
 def _run(*, serial, hostname, modules, channels, duration, session,
          session_dir, capture, parser, fastrx, parser_interface,
          fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
-         quiet):
+         quiet, channel_streamer=False, sample_trunc="LOW"):
     """One recording, from the command line's options or the dialog's.
     *channels* is a range spec for every module of *modules*, a
     per-module spec (which names the modules itself), or None for each
@@ -189,7 +202,8 @@ def _run(*, serial, hostname, modules, channels, duration, session,
             tuning=tuning or None,
             parser_interface=parser_interface,
             fastrx_interface=fastrx_interface, fastrx_socket=fastrx_socket,
-            merge_fastrx=merge_fastrx, verbose=not quiet))
+            merge_fastrx=merge_fastrx, channel_streamer=channel_streamer,
+            sample_trunc=sample_trunc, verbose=not quiet))
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
     if not quiet and result.capture is not None:

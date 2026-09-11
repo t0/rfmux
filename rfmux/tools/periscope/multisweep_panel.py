@@ -134,6 +134,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         self.fit_sweep_plots_cache = []  # List of plot widgets for the fit tab
+        self.bias_sweep_plots_cache = []  # List of plot widgets for the bias tab
 
         # The fitters' settings outlive any one fit, and are shared by nothing
         # else: one window per panel, as the measurement is one panel's.
@@ -368,6 +369,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 2: Fit Results (per-detector grid, models over the measurement)
         self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.fit_sweeps_tab, "Fit Results")
+
+        # Tab 3: what the derivative bifurcation test looks at
+        self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
+        self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias Diagnostics")
+        self.plot_tabs.setTabToolTip(
+            3, "The point-to-point change in each sweep's normalized arc "
+               "speed, in units of the bar the derivative test applied to it. "
+               "A spike past \u00b11 with one the other way beside it is what "
+               "that test calls a bifurcation.")
 
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
@@ -705,13 +715,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                        for a in step.values()})
 
     def _redraw_plots(self):
-        """Redraw the grid on the active tab: magnitude (0) or IQ (1)."""
+        """Redraw the grid on the active tab."""
         if self.module_sweeps is None and not self._live:
             return
         self._redraw_sweep_grid(self.plot_tabs.currentIndex())
     
     def _redraw_sweep_grid(self, tab_idx):
-        """Redraw the sweep grid plots for magnitude (tab 0) or IQ (tab 1)."""
+        """Redraw one tab's grid: magnitude (0), IQ (1), fits (2), bias (3)."""
         from .multisweep_grid_helpers import update_sweep_grid
 
         names = self._selected_names()
@@ -740,6 +750,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             grid_layout = self.fit_sweeps_grid
             widget_cache = self.fit_sweep_plots_cache
             colorbar = self.fit_colorbar
+        elif tab_idx == 3:
+            plot_type = 'bias'
+            grid_layout = self.bias_sweeps_grid
+            widget_cache = self.bias_sweep_plots_cache
+            colorbar = self.bias_colorbar
         else:  # tab_idx == 1
             plot_type = 'iq'
             grid_layout = self.iq_sweeps_grid
@@ -780,7 +795,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dac_scale=dac_scale,
             show_legend=use_legend,
             fit_model=self.fit_settings.get_display_model() or 'skewed',
+            bias_by_name=self._bias_by_name(),
+            bias_settings=self.bias_settings.get_parameters(),
         )
+
+    def _bias_by_name(self) -> dict:
+        """``{name: BiasFinding}`` for the grids to mark, empty until a
+        report exists."""
+        if self.bias_report is None:
+            return {}
+        return {f.name: f for f in self.bias_report.findings}
 
     # ── fitting ──────────────────────────────────────────────────────────────
 
@@ -952,7 +976,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_report = report
         self.catalog = report.catalog
 
-        message = f"{len(report.good)}/{len(report)} biased"
+        # The report's own words: every resonator gets a bias point, and a flag
+        # says that one is a fallback rather than a measurement.
+        message = f"{len(report)} biased"
         if report.flagged:
             names = ", ".join(f.name for f in report.flagged[:3])
             if len(report.flagged) > 3:
@@ -969,7 +995,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"{message}, but the save failed: {e}", ok=False)
                 self._redraw_plots()
                 return
-        self._show_bias_status(message, ok=not report.flagged)
+        # A flag is the thing to read before applying anything, so it stays on
+        # screen; a clean run says so and gets out of the way.
+        self._show_bias_status(message, ok=not report.flagged,
+                               transient=not report.flagged)
         self._redraw_plots()
 
     def _bias_error(self, message: str):

@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
 from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.tuning.bias import bifurcated_by_derivative, normalized_arc_speed
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
@@ -38,7 +39,8 @@ def sweep_iq(sweep, unit_mode):
 def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
-                      dac_scale=None, show_legend=True, fit_model='skewed'):
+                      dac_scale=None, show_legend=True, fit_model='skewed',
+                      bias_by_name=None, bias_settings=None):
     """
     Update a grid layout with one subplot per resonator.
 
@@ -46,7 +48,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         grid_layout: QGridLayout to populate with plots
         traces_by_name: ``{name: [(step, direction, amplitude, sweep), ...]}``,
             in the order to draw them; *sweep* is one of multisweep's entries
-        plot_type: 'magnitude' or 'iq'
+        plot_type: 'magnitude', 'iq', 'fit' or 'bias'
         current_batch: Current batch index (0-based)
         batch_size: Number of resonators per batch
         amplitude_to_color: Dict mapping drive amplitude to colour
@@ -60,6 +62,10 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         dac_scale: Optional DAC scale (dBm) for formatting legend labels
         show_legend: Draw per-subplot legends (off when a colorbar is shown)
         fit_model: which model the ``fit`` plot type draws over the measurement
+        bias_by_name: Optional ``{name: BiasFinding}``, marking each
+            resonator's operating point on the sweeps it was chosen from
+        bias_settings: Optional ``find_bias_points`` arguments, for the bars
+            the 'bias' plot type draws
     """
     if not traces_by_name:
         return
@@ -160,9 +166,11 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             # Plot data with legend labels (suppressed when colorbar is active)
             labels = legend_labels if (show_legend and legend_labels) else None
 
+            bias = (bias_by_name or {}).get(name)
+
             if plot_type == 'magnitude':
                 _plot_magnitude(plot_item, traces, amplitude_to_color,
-                                pen_color, unit_mode, normalize, labels)
+                                pen_color, unit_mode, normalize, labels, bias)
                 # Y-axis label
                 if normalize:
                     units = 'dB' if unit_mode == "dbm" else ''
@@ -175,6 +183,11 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                     elif unit_mode == "volts":
                         plot_item.setLabel('left', 'Magnitude', units='V')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+            elif plot_type == 'bias':
+                _plot_bifurcation(plot_item, traces, amplitude_to_color,
+                                  pen_color, bias, bias_settings or {}, labels)
+                plot_item.setLabel('left', 'Change in arc speed / bar')
+                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
                 _plot_fit(plot_item, traces, amplitude_to_color, pen_color,
                           fit_model, labels)
@@ -182,7 +195,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
                 _plot_iq(plot_item, traces, amplitude_to_color,
-                         pen_color, unit_mode, normalize, labels)
+                         pen_color, unit_mode, normalize, labels, bias)
                 iq_units = 'Counts' if unit_mode == 'counts' else 'V'
                 plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
                 plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
@@ -212,20 +225,63 @@ def _add_legend(plot_item, pen_color):
     plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
 
 
-def _trace_pen(amplitude, direction, amplitude_to_color, pen_color):
+#: How much wider the sweep a resonator is biased at is drawn than the rest.
+CHOSEN_TRACE_WIDTH = 2.5
+
+
+def _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
+               chosen=False):
     """Colour says drive amplitude, line style says direction.
 
     Every trace is coloured by its drive, including the only one of a
     single-amplitude sweep, so a colour does not change meaning as the later
-    steps of a schedule arrive.
+    steps of a schedule arrive. Width is free, so it says which step this
+    resonator is biased at once something has chosen one.
     """
     color = amplitude_to_color.get(amplitude, pen_color)
     style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-    return pg.mkPen(color=color, width=LINE_WIDTH, style=style)
+    width = LINE_WIDTH * CHOSEN_TRACE_WIDTH if chosen else LINE_WIDTH
+    return pg.mkPen(color=color, width=width, style=style)
+
+
+def _biased_at(bias, step) -> bool:
+    """Is *step* the amplitude step this resonator is biased at?"""
+    return bias is not None and step == bias.iteration
+
+
+def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
+    """A vertical line where the tone goes, in the chosen drive's own colour.
+
+    The line and the thickened trace are the whole of what a bias report puts
+    on these plots. Everything it has to say in words -- how many were biased,
+    which were flagged and why -- is on the status line, so a measurement plot
+    stays a measurement plot.
+    """
+    offset = (bias.frequency_hz - sweep['original_center_frequency']) / 1e3
+    color = amplitude_to_color.get(bias.amplitude, pen_color)
+    plot_item.addLine(x=offset, pen=pg.mkPen(color=color, width=LINE_WIDTH))
+
+
+def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
+                       amplitude_to_color, pen_color):
+    """Where on this loop the tone will sit, read off the drawn trace.
+
+    Interpolated on the trace as displayed -- normalized or not, counts or
+    volts -- so the marker is on the line rather than beside it.
+    """
+    frequencies = np.asarray(sweep['frequencies'])
+    order = np.argsort(frequencies)
+    color = amplitude_to_color.get(bias.amplitude, pen_color)
+    plot_item.plot(
+        [np.interp(bias.frequency_hz, frequencies[order], np.asarray(i_vals)[order])],
+        [np.interp(bias.frequency_hz, frequencies[order], np.asarray(q_vals)[order])],
+        pen=None, symbol='o', symbolSize=9,
+        symbolPen=pg.mkPen(color=color, width=2), symbolBrush=None)
 
 
 def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
-                    unit_mode='dbm', normalize=False, legend_labels=None):
+                    unit_mode='dbm', normalize=False, legend_labels=None,
+                    bias=None):
     """Plot |S21| against frequency offset for one resonator.
 
     Args:
@@ -236,19 +292,29 @@ def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         unit_mode: 'counts', 'dbm', or 'volts'
         normalize: Whether to normalize traces
         legend_labels: Optional {(step, direction, amplitude): label}
+        bias: Optional BiasFinding; its step is drawn thick and its frequency
+            gets a line
     """
     if legend_labels:
         _add_legend(plot_item, pen_color)
 
+    drawn = None
     for step, direction, amplitude, sweep in traces:
         counts = sweep['iq_counts']
         if len(counts) == 0:
             continue
         magnitude = UnitConverter.convert_amplitude(
             np.abs(counts), counts, unit_mode, normalize=normalize)
-        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color)
+        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
+                         chosen=_biased_at(bias, step))
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
         plot_item.plot(offset_khz(sweep), magnitude, pen=pen, name=name)
+        drawn = sweep
+
+    # Any drawn sweep will do: they are all centred on the same frequency, and
+    # the line is a frequency.
+    if bias is not None and drawn is not None:
+        _bias_frequency_line(plot_item, bias, drawn, amplitude_to_color, pen_color)
 
 
 #: Points per measured point when drawing a model curve. A fit evaluated on the
@@ -319,8 +385,82 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
             pen=pg.mkPen(color=pen_color, width=LINE_WIDTH, style=style))
 
 
+#: How faint the bar that did not bind is drawn, against the one that did.
+UNBINDING_BAR_ALPHA = 110
+
+
+def _derivative_bars(entry, settings) -> tuple[float, float]:
+    """``(prominence bar, noise bar)`` for one trace, from the library itself.
+
+    The two are prominences in the same units and the detector applies the
+    higher, so it reports only that one. Switching each off in turn is how the
+    detector is asked for them separately -- the same trick the docstring
+    recommends for finding out which bar was binding, and the reason nothing is
+    recomputed here.
+    """
+    prominence = bifurcated_by_derivative(
+        {"one": entry},
+        spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
+        noise_gate_factor=0.0).threshold
+    noise = bifurcated_by_derivative(
+        {"one": entry}, spike_prominence_factor=0.0,
+        noise_gate_factor=settings.get("noise_gate_factor", 50.0)).threshold
+    return prominence, noise
+
+
+def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
+                      bias, settings, legend_labels=None):
+    """What the derivative test looks at, in units of the bar it applied.
+
+    The quantity is the point-to-point change in the normalized arc speed, and
+    a spike in it above the bar -- with a spike the other way beside it -- is
+    what the test calls a bifurcation. Every trace is divided by its own
+    threshold, so a step driven a thousandth as hard is still visible beside
+    the loud one and the bar is the same line for all of them: ``±1``.
+
+    For the step a resonator is biased at, the bar that did *not* bind is drawn
+    too, faintly. Below ±1 it is the noise gate that decided; at ±1 the two
+    coincide. That is the question the detector otherwise answers by being run
+    again with one of the two switched off.
+    """
+    if legend_labels:
+        _add_legend(plot_item, pen_color)
+
+    plot_item.addLine(y=1.0, pen=pg.mkPen(color=pen_color, width=1))
+    plot_item.addLine(y=-1.0, pen=pg.mkPen(color=pen_color, width=1))
+
+    for step, direction, amplitude, sweep in traces:
+        try:
+            frequencies, speed = normalized_arc_speed(sweep)
+            prominence_bar, noise_bar = _derivative_bars(sweep, settings)
+        except (ValueError, KeyError):
+            continue        # too short or too flat to difference
+        bar = max(prominence_bar, noise_bar)
+        if bar <= 0:
+            continue
+
+        # A difference belongs between the two samples it was taken from.
+        midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
+        offsets = (midpoints - sweep['original_center_frequency']) / 1e3
+        chosen = _biased_at(bias, step)
+        name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
+        plot_item.plot(
+            offsets, np.diff(speed) / bar,
+            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color,
+                           chosen=chosen),
+            name=name)
+
+        if chosen:
+            other = min(prominence_bar, noise_bar) / bar
+            colour = pg.mkColor(pen_color)
+            colour.setAlpha(UNBINDING_BAR_ALPHA)
+            faint = pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE)
+            for sign in (1.0, -1.0):
+                plot_item.addLine(y=sign * other, pen=faint)
+
+
 def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,
-             unit_mode='dbm', normalize=False, legend_labels=None):
+             unit_mode='dbm', normalize=False, legend_labels=None, bias=None):
     """Plot the IQ loops of one resonator.
 
     Args:
@@ -331,6 +471,12 @@ def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,
         unit_mode: 'counts' draws raw IQ, anything else the entry's volts
         normalize: Whether to normalize IQ by max magnitude
         legend_labels: Optional {(step, direction, amplitude): label}
+        bias: Optional BiasFinding; its step is drawn thick and the point the
+            tone sits at is marked on it
+
+    A loop's axis is I, not frequency, so the bias frequency cannot be a
+    vertical line here as it is on the magnitude plot. It is the point of the
+    loop the tone will sit on, which is what the marker is.
     """
     if legend_labels:
         _add_legend(plot_item, pen_color)
@@ -346,9 +492,15 @@ def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,
             if peak > 0:
                 i_vals, q_vals = i_vals / peak, q_vals / peak
 
-        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color)
+        chosen = _biased_at(bias, step)
+        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
+                         chosen=chosen)
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
         plot_item.plot(i_vals, q_vals, pen=pen, name=name)
+
+        if chosen:
+            _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
+                               amplitude_to_color, pen_color)
 
 
 def create_amplitude_color_map(amplitude_values, dark_mode):

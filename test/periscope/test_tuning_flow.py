@@ -25,6 +25,7 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+import pyqtgraph as pg  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from test.qt_helpers import spin, spin_until  # noqa: E402
@@ -36,7 +37,8 @@ from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.fits import FitReport, SweepFit  # noqa: E402
-from rfmux.tuning.bias import BiasReport  # noqa: E402
+from rfmux.tuning.bias import (  # noqa: E402
+    BiasReport, bifurcated_by_derivative, normalized_arc_speed)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -453,7 +455,7 @@ def _grid_widgets(panel, tab_idx=0):
     panel.plot_tabs.setCurrentIndex(tab_idx)
     panel._redraw_plots()
     grid = {0: panel.mag_sweeps_grid, 1: panel.iq_sweeps_grid,
-            2: panel.fit_sweeps_grid}[tab_idx]
+            2: panel.fit_sweeps_grid, 3: panel.bias_sweeps_grid}[tab_idx]
     return [grid.itemAt(i).widget() for i in range(grid.count())]
 
 
@@ -1500,12 +1502,20 @@ def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
 # ── finding a bias point ─────────────────────────────────────────────────────
 
 
+#: Wide enough and fine enough that every resonator of the standard array
+#: bifurcates inside it, as ``test/tuning/test_flow_on_standard_array`` pins.
+#: The cheap schedule below brackets nothing, which is a flagged report -- fine
+#: for everything except the tests about a clean one.
+BIFURCATING = {"amp": AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
+               "npoints_per_sweep": 101}
+
+
 def _both_directions(catalog, qt_app, crs, **overrides):
     """A schedule swept both ways, which is what the default test compares."""
-    return _run_multisweep(
-        crs, catalog, qt_app,
-        amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
-        sweep_direction=("upward", "downward"), **overrides)
+    params = {"amp": AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
+              "sweep_direction": ("upward", "downward")}
+    params.update(overrides)
+    return _run_multisweep(crs, catalog, qt_app, **params)
 
 
 def _find_bias(panel, qt_app, **settings):
@@ -1657,16 +1667,28 @@ def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app):
     assert panel.run_fit_btn.isEnabled()
 
 
-def test_a_finished_run_says_so_and_then_stops_saying_it(board, qt_app):
+def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app):
     """A routine outcome on the status line, not a dialog, and not left on
-    screen once it has been read."""
+    screen once it has been read.
+
+    Several resonators of the standard array bifurcate at the quietest step of
+    any schedule short enough to sweep here, so a clean report is made by
+    keeping the findings that came back good -- every one of them the library's
+    own, off these sweeps.
+    """
     _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, **BIFURCATING)
     assert errors == []
+    _find_bias(panel, qt_app)
+    good = panel.bias_report.good
+    assert good, "the schedule bracketed nothing, so there is no clean case here"
 
-    status = _find_bias(panel, qt_app)
+    panel._bias_found(BiasReport(catalog=panel.bias_report.catalog,
+                                 findings=good,
+                                 settings=panel.bias_report.settings))
 
-    assert "biased" in status
+    assert panel.bias_status_label.text() == f"{len(good)} biased"
+    assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
     assert panel._bias_status_timer.isActive()
     panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
     assert panel.bias_status_label.text() == ""
@@ -1688,6 +1710,8 @@ def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app):
     assert panel.bias_report.flagged
     assert "flagged" in status
     assert panel.bias_report.flagged[0].name in status
+    # It is the thing to read before applying anything, so it does not fade.
+    assert not panel._bias_status_timer.isActive()
 
 
 def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
@@ -1719,3 +1743,261 @@ def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app)
     panel.show_measurement(*completed[0])
 
     assert panel.bias_report is None
+
+
+# ── what the report puts on the sweep grids ──────────────────────────────────
+
+
+def _infinite_lines(panel, tab_idx=0):
+    """The vertical lines on each subplot -- ``addLine`` items, which are not
+    data items and so do not show up in ``listDataItems``."""
+    return [[item for item in w.getPlotItem().items
+             if isinstance(item, pg.InfiniteLine)]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def _trace_widths(panel, name, tab_idx=0):
+    """``{(step, direction): pen width}`` for one resonator's subplot."""
+    index = panel._selected_names().index(name)
+    traces = panel._collect_traces([name])[name]
+    curves = _grid_curves(panel, tab_idx)[index]
+    return {(step, direction): curve.opts["pen"].width()
+            for (step, direction, _amp, _sweep), curve in zip(traces, curves)}
+
+
+def test_the_sweep_the_resonator_is_biased_at_is_drawn_thick(board, qt_app):
+    """Colour already means drive and line style already means direction, so
+    width is what is left to say which step was chosen."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    name = panel._selected_names()[0]
+    assert len(set(_trace_widths(panel, name).values())) == 1
+
+    _find_bias(panel, qt_app)
+
+    chosen = panel.bias_report[name].iteration
+    widths = _trace_widths(panel, name)
+    thick = {step for (step, _direction), width in widths.items()
+             if width == max(widths.values())}
+    assert thick == {chosen}
+    assert max(widths.values()) > min(widths.values())
+
+
+def test_a_line_stands_where_the_tone_will_go(board, qt_app):
+    """On the magnitude grid the bias frequency is a frequency, so it is a
+    vertical line, at the offset from centre the plot is drawn in."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    assert _infinite_lines(panel)[0] == []
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[
+        finding.iteration]["upward"]
+    expected = (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3
+
+    lines = _infinite_lines(panel)[0]
+    assert len(lines) == 1
+    assert lines[0].value() == pytest.approx(expected)
+
+
+def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app):
+    """Same colour as the thickened trace, so the two marks read as one
+    statement about one sweep."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    widths = _trace_widths(panel, name)
+    index = panel._selected_names().index(name)
+    traces = panel._collect_traces([name])[name]
+    curves = _grid_curves(panel)[index]
+    chosen_curve = next(
+        curve for (step, _d, _a, _s), curve in zip(traces, curves)
+        if step == finding.iteration)
+
+    line = _infinite_lines(panel)[0][0]
+    assert line.pen.color().name() == chosen_curve.opts["pen"].color().name()
+
+
+def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app):
+    """A loop's axis is I, not frequency, so the operating point is a point of
+    the loop rather than a line across it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    panel.normalize_traces = False
+    panel.plot_tabs.setCurrentIndex(1)
+    panel._redraw_plots()
+    before = len(_grid_curves(panel, tab_idx=1)[0])
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    curves = _grid_curves(panel, tab_idx=1)[0]
+    markers = [c for c in curves if len(c.getData()[0]) == 1]
+    # One per direction of the chosen step, each on its own trace.
+    directions = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]
+    assert len(markers) == len(directions)
+    assert len(curves) == before + len(markers)
+
+    marked = sorted(float(c.getData()[0][0]) for c in markers)
+    expected = sorted(
+        float(np.interp(finding.frequency_hz,
+                        sweep["frequencies"][np.argsort(sweep["frequencies"])],
+                        np.real(sweep["iq_volts"])[np.argsort(sweep["frequencies"])]))
+        for sweep in directions.values())
+    assert marked == pytest.approx(expected)
+
+
+def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app):
+    """The counts, the flags and the reasons are the status line's. A
+    measurement plot stays a measurement plot: two marks, no text."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    titles = [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)]
+
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)     # flags everything
+    _find_bias(panel, qt_app)
+    assert panel.bias_report.flagged
+
+    assert [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)] == titles
+    for widget in _grid_widgets(panel):
+        assert not [item for item in widget.getPlotItem().items
+                    if isinstance(item, pg.TextItem)]
+
+
+def test_a_flagged_finding_is_marked_like_any_other(board, qt_app):
+    """Its bias point is a real point -- the sweep centre it fell back to --
+    so it is drawn, and why it is a fallback is said in words elsewhere."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    _find_bias(panel, qt_app)
+
+    assert len(_infinite_lines(panel)[0]) == 1
+    assert _infinite_lines(panel)[0][0].value() == pytest.approx(0.0, abs=1e-6)
+
+
+# ── the bias diagnostics tab ─────────────────────────────────────────────────
+
+BIAS_TAB = 3
+
+
+def _on_bias_tab(qt_app, crs, catalog, **overrides):
+    """A both-directions schedule with the diagnostics tab showing."""
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, **overrides)
+    assert errors == []
+    panel.plot_tabs.setCurrentIndex(BIAS_TAB)
+    panel._redraw_plots()
+    return panel
+
+
+def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_app):
+    """The change in normalized arc speed, divided by the bar that trace
+    faced -- so every step is on one scale and the bar is one line."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+
+    name = panel._selected_names()[0]
+    traces = panel._collect_traces([name])[name]
+    curves = _grid_curves(panel, BIAS_TAB)[0]
+    assert len(curves) == len(traces)
+
+    (step, direction, _amp, sweep) = traces[0]
+    frequencies, speed = normalized_arc_speed(sweep)
+    prominence = bifurcated_by_derivative(
+        {"one": sweep}, noise_gate_factor=0.0).threshold
+    noise = bifurcated_by_derivative(
+        {"one": sweep}, spike_prominence_factor=0.0).threshold
+
+    x, y = curves[0].getData()
+    midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
+    assert np.allclose(
+        x, (midpoints - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(y, np.diff(speed) / max(prominence, noise))
+
+
+def test_the_bar_is_one_pair_of_lines_for_every_step(board, qt_app):
+    """Dividing each trace by its own bar is what puts them all on it."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+
+    heights = sorted(line.value() for line in _infinite_lines(panel, BIAS_TAB)[0])
+    assert heights == pytest.approx([-1.0, 1.0])
+
+
+def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app):
+    """Below the solid bar it was the noise gate that decided; at it the two
+    coincide. That is the question the detector otherwise answers by being run
+    again with one of the two switched off."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+    assert len(_infinite_lines(panel, BIAS_TAB)[0]) == 2
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    directions = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]
+    lines = _infinite_lines(panel, BIAS_TAB)[0]
+    # The bar, plus the one that did not bind for each direction of that step.
+    assert len(lines) == 2 + 2 * len(directions)
+    assert all(abs(line.value()) <= 1.0 + 1e-9 for line in lines)
+
+
+def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app):
+    """The same statement the sweep grids make, on the plot the choice was
+    read off."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+    name = panel._selected_names()[0]
+    assert len(set(_trace_widths(panel, name, BIAS_TAB).values())) == 1
+
+    _find_bias(panel, qt_app)
+
+    widths = _trace_widths(panel, name, BIAS_TAB)
+    thick = {step for (step, _direction), width in widths.items()
+             if width == max(widths.values())}
+    assert thick == {panel.bias_report[name].iteration}
+
+
+def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app):
+    """It is a view of the measurement under the current settings, so it is
+    what you look at to choose them -- not a view of a report."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+
+    assert panel.bias_report is None
+    assert all(len(subplot) > 0 for subplot in _grid_curves(panel, BIAS_TAB))
+
+
+def test_the_bars_follow_the_settings(board, qt_app):
+    """The bar a trace is divided by is the one the current settings would
+    apply, so turning the gate off moves every trace."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(qt_app, crs, catalog)
+    before = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
+
+    panel.bias_settings.noise_gate_spin.setValue(0.0)
+    panel._redraw_plots()
+
+    after = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
+    assert not np.allclose(before, after)
+

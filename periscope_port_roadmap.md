@@ -783,11 +783,13 @@ are now strict xfails that name the stage which clears them.
   it draws nothing on a magnitude plot, and nothing reads it yet -- stage 4's
   IQ work is where it earns a checkbox. `RunFitsTask` makes the one call with
   `progress_callback(completed, total)`; the button greys out and the label
-  counts percent. Fits re-save the block in place through `store`.
+  counts percent, then says what it did in green and stops saying it after
+  `STATUS_MESSAGE_MS`, as the netanal panel's status line does. Fits re-save
+  the block in place through `store`.
 * ~~Fit Results tab~~ **done (2026-09-11)**: one subplot per resonator, the
   measured magnitude and *one* model over it, on a grid 25 times finer than the
-  one measured -- one at a time, chosen on the toolbar from the models the
-  sweeps carry fits for, so a subplot holds one line over its points rather
+  one measured -- one at a time, chosen in the settings window from the models
+  the sweeps carry fits for, so a subplot holds one line over its points rather
   than one per model. The measurement keeps its drive colour, the model is
   drawn in the foreground colour (white on black, black on white), and line
   style is left to mean direction as it does on the other tabs. It reuses `update_sweep_grid` as a third

@@ -107,13 +107,14 @@ For high-resolution analysis around identified resonance frequencies:
 
 1. First identify resonances using the Network Analysis feature
 2. Click "Take Multisweep" to configure a detailed sweep around resonances
-3. Click "Run Fit". The ⚙ beside it holds the settings, which persist between
-   sessions: which models to fit (skewed, nonlinear, or both) and which sweeps
-   -- all of them, each resonator at the amplitude it is biased at, or one
-   amplitude step
+3. Click "Run Fit". Progress is beside the button, and what it did is said
+   there in green when it finishes. The ⚙ holds the settings, which persist
+   between sessions: which models to fit (skewed, nonlinear, or both), which
+   sweeps -- all of them, each resonator at the amplitude it is biased at, or
+   one amplitude step -- and which model the Fit Results tab draws
 4. The Fit Results tab draws each resonator's measurement with one model over
-   it, chosen with "Show fit", which offers the models the sweeps carry fits
-   for. The measurement keeps the colour it has on the other tabs -- its drive
+   it, whichever "Which model to draw" names of the models the sweeps carry
+   fits for. The measurement keeps the colour it has on the other tabs -- its drive
    -- and the model is the black or white line over it; line style is the sweep
    direction, as elsewhere. The axis is normalized to each trace's last point,
    which is the fits' own convention, so the toolbar's "Normalize Traces" does

@@ -64,3 +64,55 @@ def test_a_step_the_next_measurement_lacks_falls_back(panel):
     window.set_amplitude_choices([("All amplitudes", ALL_AMPLITUDES), ("Step 0", 0)])
 
     assert window.get_parameters()["amplitude_choice"] is ALL_AMPLITUDES
+
+
+def test_the_model_to_draw_is_one_the_sweeps_have_fits_for(panel):
+    """Nothing fitted is nothing to draw, and the group says so by being dead."""
+    window, _ = panel
+    assert window.get_display_model() is None
+    assert not window.display_group.isEnabled()
+
+    window.set_models_fitted(["skewed", "nonlinear"])
+
+    assert window.get_display_model() == "skewed"
+    assert window.display_group.isEnabled()
+
+
+def test_the_model_to_draw_survives_a_refit(panel):
+    """Re-running the fits does not move the tab off what it was showing."""
+    window, _ = panel
+    window.set_models_fitted(["skewed", "nonlinear"])
+    window.display_combo.setCurrentIndex(window.display_combo.findData("nonlinear"))
+
+    window.set_models_fitted(["skewed", "nonlinear"])
+
+    assert window.get_display_model() == "nonlinear"
+
+
+def test_choosing_a_model_to_draw_asks_for_a_redraw(panel):
+    """The only setting here that changes what is on screen says so."""
+    window, _ = panel
+    window.set_models_fitted(["skewed", "nonlinear"])
+    redraws = []
+    window.display_model_changed.connect(lambda: redraws.append(True))
+
+    window.display_combo.setCurrentIndex(window.display_combo.findData("nonlinear"))
+    assert redraws == [True]
+
+    window._model_checks["skewed"].setChecked(False)
+    assert redraws == [True], "the fit settings do not change what is drawn"
+
+
+def test_the_model_drawn_last_session_is_picked_up(panel, monkeypatch):
+    """The combo is empty until a measurement arrives, so the choice has to
+    outlive that."""
+    window, saved = panel
+    window.set_models_fitted(["skewed", "nonlinear"])
+    window.display_combo.setCurrentIndex(window.display_combo.findData("nonlinear"))
+    assert saved["display_model"] == "nonlinear"
+
+    monkeypatch.setattr(periscope_settings, "get_fit_parameters", lambda: dict(saved))
+    next_session = FitSettingsPanel()
+    next_session.set_models_fitted(["skewed", "nonlinear"])
+
+    assert next_session.get_display_model() == "nonlinear"

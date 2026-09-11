@@ -49,6 +49,7 @@ from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
     MODEL_OVERSAMPLE,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
+from rfmux.tools.periscope.utils import TABLEAU10_COLORS  # noqa: E402
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     MultisweepSignals,
     MultisweepTask,
@@ -1367,9 +1368,10 @@ def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
 
 def _show_fit_model(panel, model):
     """Pick the model the Fit Results tab draws."""
-    index = panel.fit_model_combo.findData(model)
+    combo = panel.fit_settings.display_combo
+    index = combo.findData(model)
     assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
-    panel.fit_model_combo.setCurrentIndex(index)
+    combo.setCurrentIndex(index)
 
 
 def test_only_the_chosen_model_is_drawn(board, qt_app):
@@ -1380,8 +1382,9 @@ def test_only_the_chosen_model_is_drawn(board, qt_app):
     assert errors == []
     _run_fits(panel, qt_app)
 
-    assert [panel.fit_model_combo.itemData(i)
-            for i in range(panel.fit_model_combo.count())] == ["skewed", "nonlinear"]
+    combo = panel.fit_settings.display_combo
+    assert [combo.itemData(i)
+            for i in range(combo.count())] == ["skewed", "nonlinear"]
     for model in ("skewed", "nonlinear"):
         _show_fit_model(panel, model)
         assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
@@ -1461,3 +1464,33 @@ def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
     assert panel.fit_status_label.text() == "No models to fit"
     assert panel.run_fit_btn.isEnabled()
     assert _fitted_sweeps(panel) == {}
+
+
+def test_a_finished_fit_says_so_in_green_and_then_stops_saying_it(board, qt_app):
+    """A routine outcome on the status line, not a dialog, and not left on
+    screen once it has been read."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    status = _run_fits(panel, qt_app, models=("skewed",))
+
+    assert "fitted" in status
+    assert TABLEAU10_COLORS[2] in panel.fit_status_label.styleSheet()
+    assert panel._fit_status_timer.isActive()
+
+    panel._fit_status_timer.timeout.emit()      # as it does after STATUS_MESSAGE_MS
+    assert panel.fit_status_label.text() == ""
+
+
+def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
+    """A timer that fired mid-fit would leave a dead button with nothing beside
+    it, which reads as a hang."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    panel._fits_progress(3, 8)
+
+    assert panel.fit_status_label.text() == "Fitting... 37%"
+    assert not panel._fit_status_timer.isActive()

@@ -16,7 +16,7 @@ from .layouts import FlowLayout, grouped
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    ScreenshotMixin
+    STATUS_MESSAGE_MS, TABLEAU10_COLORS, ScreenshotMixin
 )
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
@@ -135,6 +135,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # The fitters' settings outlive any one fit, and are shared by nothing
         # else: one window per panel, as the measurement is one panel's.
         self.fit_settings = FitSettingsPanel(self)
+        self.fit_settings.display_model_changed.connect(self._redraw_plots)
+
+        self._fit_status_timer = QtCore.QTimer(self)
+        self._fit_status_timer.setSingleShot(True)
 
         self._live_redraw_timer = QtCore.QTimer(self)
         self._live_redraw_timer.setSingleShot(True)
@@ -199,19 +203,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         fit_settings_btn.clicked.connect(self._show_fit_settings)
         self.fit_status_label = QtWidgets.QLabel("")
         self.fit_status_label.setMinimumWidth(110)
+        # The label's own slot, not a lambda over self: Qt drops a connection
+        # to a destroyed receiver, where a closure would keep this panel's
+        # Python wrapper alive and fire into a deleted widget.
+        self._fit_status_timer.timeout.connect(self.fit_status_label.clear)
         # The fit controls wrap as one item, so the button keeps its settings.
         self.fit_controls = grouped(
             self.run_fit_btn, fit_settings_btn, self.fit_status_label)
         toolbar_layout.addWidget(self.fit_controls)
 
-        # Which model the Fit Results tab draws: one at a time, so a subplot
-        # carries one line over its points rather than one per model.
-        self.fit_model_combo = QtWidgets.QComboBox()
-        self.fit_model_combo.setToolTip("Which fitted model the Fit Results tab draws")
-        self.fit_model_combo.currentIndexChanged.connect(self._redraw_plots)
-        self.fit_model_controls = grouped(
-            QtWidgets.QLabel("Show fit:"), self.fit_model_combo)
-        toolbar_layout.addWidget(self.fit_model_controls)
         self._populate_fit_models()
         self._populate_fit_amplitudes()
 
@@ -744,7 +744,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             widget_cache=widget_cache,
             dac_scale=dac_scale,
             show_legend=use_legend,
-            fit_model=self.fit_model_combo.currentData() or 'skewed',
+            fit_model=self.fit_settings.get_display_model() or 'skewed',
         )
 
     # ── fitting ──────────────────────────────────────────────────────────────
@@ -775,16 +775,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         file was fitted by whatever fitted it, and one whose fits are still
         being run has none of them yet.
         """
-        combo = self.fit_model_combo
-        previous = combo.currentData()
-        combo.blockSignals(True)
-        combo.clear()
-        for model in self._models_fitted():
-            combo.addItem(model.capitalize(), model)
-        index = combo.findData(previous)
-        combo.setCurrentIndex(max(0, index))
-        combo.blockSignals(False)
-        self.fit_model_controls.setVisible(combo.count() > 0)
+        self.fit_settings.set_models_fitted(self._models_fitted())
 
     def _models_fitted(self) -> list:
         """The models the sweeps carry fits for, in the order the tab lists them."""
@@ -815,16 +806,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _run_fits(self):
         """Fit the chosen sweeps, off the GUI thread."""
         if self.module_sweeps is None:
-            self.fit_status_label.setText("Nothing swept yet")
+            self._show_fit_status("Nothing swept yet", ok=False)
             return
 
         parameters = self.fit_settings.get_parameters()
         if not parameters["models"]:
-            self.fit_status_label.setText("No models to fit")
+            self._show_fit_status("No models to fit", ok=False)
             return
 
         self.run_fit_btn.setEnabled(False)
-        self.fit_status_label.setText("Fitting...")
+        self._show_fit_status("Fitting...", transient=False)
 
         signals = RunFitsSignals()
         signals.progress.connect(self._fits_progress)
@@ -836,8 +827,24 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             parameters["amplitude_choice"], signals)
         self._run_fits_task.start()
 
+    def _show_fit_status(self, message: str, *, ok: bool = True,
+                         transient: bool = True) -> None:
+        """Say what the fits are doing, and stop saying it after a while.
+
+        Green for done, red for a failure, as the netanal panel's status line
+        reads. Progress is not transient: a timer that cleared it mid-fit would
+        leave a dead button with nothing next to it.
+        """
+        self.fit_status_label.setText(message)
+        colour = TABLEAU10_COLORS[2] if ok else TABLEAU10_COLORS[3]
+        self.fit_status_label.setStyleSheet(f"color: {colour};")
+        self._fit_status_timer.stop()
+        if transient:
+            self._fit_status_timer.start(STATUS_MESSAGE_MS)
+
     def _fits_progress(self, completed: int, total: int):
-        self.fit_status_label.setText(f"Fitting... {100 * completed // max(1, total)}%")
+        self._show_fit_status(
+            f"Fitting... {100 * completed // max(1, total)}%", transient=False)
 
     def _fits_completed(self, report):
         """The fits are in the sweeps the panel holds: draw them, and re-save."""
@@ -852,15 +859,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 message += f" -- saved to {self.save_multisweep().name}"
             except Exception as e:                      # noqa: BLE001 - reported
                 traceback.print_exc()
-                self.fit_status_label.setText(f"{message}, but the save failed: {e}")
+                self._show_fit_status(f"{message}, but the save failed: {e}", ok=False)
                 self._redraw_plots()
                 return
-        self.fit_status_label.setText(message)
+        self._show_fit_status(message)
         self._redraw_plots()
 
     def _fits_error(self, message: str):
         self._fits_done()
-        self.fit_status_label.setText(message)
+        self._show_fit_status(message, ok=False)
 
     def _fits_done(self):
         self.run_fit_btn.setEnabled(True)

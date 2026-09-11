@@ -64,7 +64,9 @@ from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
-from .session_startup_dialog import UnifiedStartupDialog
+from .session_startup_dialog import (
+    UnifiedStartupDialog, choose_session_root, session_root,
+    SESSION_ROOT_ACTION)
 from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
@@ -74,6 +76,7 @@ from rfmux.core.hardware_map import warm_for_threads
 import asyncio
 import datetime
 import time
+from pathlib import Path
 
 
 
@@ -2224,6 +2227,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         load_action.triggered.connect(self._load_session)
         session_menu.addAction(load_action)
         
+        # Change where new session folders are created
+        location_action = QtGui.QAction(SESSION_ROOT_ACTION, self)
+        location_action.setToolTip(
+            "Choose the folder new session folders are created in")
+        location_action.triggered.connect(self._change_session_root)
+        session_menu.addAction(location_action)
+        
         session_menu.addSeparator()
         
         # Auto-Export Toggle
@@ -2384,34 +2394,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # ---- Start expanded (not collapsed) ----
         # Session browser is visible by default to help users see their session files
     
+    def _change_session_root(self):
+        """Choose the folder new session folders are created in."""
+        root = choose_session_root(self, settings.get_session_root())
+        if not root:
+            return
+        settings.set_session_root(root)
+        self.statusBar().showMessage(f"New sessions will be created in {root}",
+                                     5000)
+
     def _start_new_session(self):
         """
-        Start a new session with folder selection dialog.
+        Start a new session.
         
-        Shows a folder selection dialog, then lets the user customize
-        the session folder name before creating it.
+        Asks for the session folder name; the location comes from the
+        remembered session root, and is only asked for if there is none.
         """
-        # Show folder selection dialog
-        # Use Qt dialog (not native) to prevent hanging on some systems
-        #
-        # Start where the user last put a session.  An empty string here does
-        # NOT mean "the current directory" in practice: Qt falls back to its
-        # own process-global last-visited directory, so the dialog silently
-        # followed whatever other file dialog was opened most recently in this
-        # run of Periscope.
-        base_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select Session Location",
-            settings.get_last_session_directory(),
-            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
-        )
-
+        base_path = session_root(self)
         if not base_path:
             return
-
-        # Remember it, so the next session starts here rather than wherever
-        # the file dialog happened to drift to.
-        settings.set_last_session_directory(base_path)
         
         # Generate default folder name with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2421,7 +2422,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         folder_name, ok = QtWidgets.QInputDialog.getText(
             self, 
             "Session Name",
-            "Enter session folder name:",
+            f"Enter session folder name (created in {base_path}):",
             QtWidgets.QLineEdit.EchoMode.Normal,
             default_name
         )
@@ -2447,12 +2448,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Shows a folder selection dialog to choose an existing session folder.
         """
         # Use Qt dialog (not native) to prevent hanging on some systems.
-        # Start from the last session directory for the same reason as
-        # _start_new_session — see the note there about the empty string.
+        #
+        # Start beside the session loaded last, or where new ones are
+        # created.  An empty string here does NOT mean "the current
+        # directory" in practice: Qt falls back to its own process-global
+        # last-visited directory, so the dialog silently follows whatever
+        # other file dialog was opened most recently in this run.
+        last_path = settings.get_last_session_path()
+        start_dir = (str(Path(last_path).parent)
+                     if last_path and Path(last_path).exists()
+                     else settings.get_session_root())
         session_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Folder",
-            settings.get_last_session_directory(),
+            start_dir,
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
 
@@ -2460,11 +2469,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             success = self.session_manager.load_session(session_path)
 
             if success:
-                # A loaded session names a session folder, so the base
-                # directory to remember is its parent.
-                from pathlib import Path
-                settings.set_last_session_directory(
-                    str(Path(session_path).parent))
+                # Only the path, not the session root: loading a session
+                # from an archive elsewhere must not move where new ones
+                # are created.
                 settings.set_last_session_path(session_path)
 
                 # Restore mock config if present and in mock mode

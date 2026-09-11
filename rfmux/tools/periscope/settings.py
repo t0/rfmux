@@ -12,9 +12,9 @@ Uses Qt's QSettings which persists settings to:
 Usage:
     from . import settings
     
-    # Get/set last session directory
-    last_dir = settings.get_last_session_directory()
-    settings.set_last_session_directory("/path/to/sessions")
+    # Get/set the folder new sessions are created in
+    root = settings.get_session_root()
+    settings.set_session_root("/path/to/sessions")
 """
 
 from PyQt6.QtCore import QSettings
@@ -29,6 +29,7 @@ APPLICATION = "periscope"
 KEY_CONNECTION_MODE = "connection/last_mode"
 KEY_CRS_SERIAL = "connection/last_crs_serial"
 KEY_MODULE = "connection/last_module"
+KEY_SESSION_ROOT = "session/root_directory"
 KEY_SESSION_DIRECTORY = "session/last_base_directory"
 KEY_SESSION_MODE = "session/last_mode"
 KEY_LAST_SESSION_PATH = "session/last_loaded_path"
@@ -161,26 +162,31 @@ def set_font_scale(scale: float) -> None:
 # Session Settings
 # ─────────────────────────────────────────────────────────────────
 
-def get_last_session_directory() -> str:
+def get_session_root() -> str:
     """
-    Get the last directory used for session creation/loading.
-    
+    Get the folder new session folders are created in.
+
+    Empty until the user has chosen one, which is what makes Periscope ask
+    on first start.  An install predating this setting falls back to the
+    directory its session dialogs last visited, so it is not asked again.
+
     Returns:
         str: Directory path or empty string
     """
     settings = _get_settings()
-    return settings.value(KEY_SESSION_DIRECTORY, "")
+    return (settings.value(KEY_SESSION_ROOT, "")
+            or settings.value(KEY_SESSION_DIRECTORY, ""))
 
 
-def set_last_session_directory(path: str) -> None:
+def set_session_root(path: str) -> None:
     """
-    Save the session directory.
-    
+    Save the folder new session folders are created in.
+
     Args:
         path: Directory path
     """
     settings = _get_settings()
-    settings.setValue(KEY_SESSION_DIRECTORY, str(path))
+    settings.setValue(KEY_SESSION_ROOT, str(path))
 
 
 def get_last_session_mode() -> str:

@@ -172,11 +172,20 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   draws from, so the Fit Results tab needs no state of its own, and a
   measurement already on disk is re-saved where it was.
 
-What is deliberately *not* there yet: the fit histograms, bias finding and
-applying a bias (the rest of stages 3 and 4), and with them the digest and
-histogram tabs, which were deleted rather than ported (§9). The legacy bias and noise lane still runs on
-`_prepare_export_data`'s payload and is untouched until stage 4; the deprecated
-library modules go in stage 5.
+* **Bias.** Find Bias makes one `find_bias_points` call over the sweeps on
+  screen, off the GUI thread, with a settings window grouped by the test each
+  setting belongs to and a Reset to Defaults that reads the finder's signature.
+  The report's catalog becomes the panel's; the block carries `bias_report`;
+  the sweep grids thicken the chosen step and put a line at the bias frequency,
+  and a Bias Diagnostics tab draws what the derivative test looks at, in units
+  of the bar it applied. Apply Bias runs `crs.apply_bias(catalog)` and
+  publishes each channel's `df_calibration`. The legacy bias lane is gone.
+
+What is deliberately *not* there yet: the fit histograms, and with them the
+digest and histogram tabs, which were deleted rather than ported (§9). The
+noise lane still runs on `_prepare_export_data`'s payload and is untouched
+until it is rebuilt on the catalog; the deprecated library modules go in
+stage 5.
 
 Four drifts between the GUI's defaults and the library's were found on the way,
 two of them by the both-ways test: `max_chans` 1024 against 1023, and
@@ -828,7 +837,7 @@ are now strict xfails that name the stage which clears them.
   main window's live amplitude histogram and its df units, and has nothing to
   do with this tab.
 
-### Stage 4. Find Bias and Apply Bias (medium)
+### Stage 4. Find Bias and Apply Bias (medium) — done (2026-09-11)
 
 Bias finding is one `find_bias_points` call, the way `bias_finding.md` makes
 it: the notebook's sections 2, 3 and 4 are all inside that call, so the button
@@ -926,6 +935,22 @@ from.
   judgement call 6), with "fit after sweep", when the tune-everything front
   door arrives in stage 6.
 * **Detector Digest** -- still not scoped, per §6 judgement call 23.
+* **The verdict map** was scoped but not built: rows are amplitude steps,
+  columns a sweep of `spike_prominence_factor`, a cell black where
+  `bifurcated_by_derivative` says bifurcated, with bands where the noise gate
+  is the higher bar. Measured at 70 ms a resonator calling the detector
+  directly (5 steps, 2 directions, 80 factors), so 0.84 s for a batch of
+  twelve: affordable on demand, on a thread. The diagnostics tab answers the
+  same question for one setting at a time, which is why this waited.
+* **Pulse capture's tooltips name a button that no longer exists** --
+  `pulse_capture_panel.py` and `pulse_capture_settings_dialog.py` tell the
+  operator to "run a multisweep and click Bias KIDs" for a df calibration.
+  The gesture is now Find Bias then Apply Bias. Not edited here: pulse capture
+  is out of scope for this work without being asked.
+* **The Periscope `README.md` beyond the bias sections.** Its Detector Digest,
+  Take Noise and Combined Plots entries describe panels stage 2 deleted, and
+  its multisweep import section describes a dialog that no longer imports
+  fitted frequencies. Stage 5's documentation pass.
 
 ### Stage 5. Delete the legacy path (small, one commit)
 

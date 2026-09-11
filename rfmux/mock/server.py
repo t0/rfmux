@@ -8,6 +8,7 @@ import os
 import socket
 import time
 import multiprocessing
+import threading
 from aiohttp import web
 import atexit
 import signal
@@ -23,28 +24,21 @@ from ..core.schema import CRS as BaseCRS
 
 mp_ctx = multiprocessing.get_context()
 
-# Every mock session started in this interpreter, shut down together by one
-# atexit handler.  atexit runs handlers sequentially, so one join per server
-# would stack up to N x timeout while the interpreter still holds its streamer
-# sockets, and with SO_REUSEPORT on those sockets the next run would join the
-# same multicast group instead of failing to bind.  Terminating every server
-# first and then waiting against one deadline keeps the exit to one timeout.
-_server_processes: "list" = []
-_shutdown_done = False
+# Interpreter exit is a fallback for sessions that were not explicitly closed.
+# Stop the fleet concurrently so shutdown time does not grow with its size.
+_server_processes: list["ServerProcess"] = []
 
 # Grace period for the whole fleet to exit before SIGKILL; one deadline, not
 # one per process.
 _SHUTDOWN_GRACE_S = 2.0
 
 
-def _shutdown_all_servers():
-    """Terminate every mock server process, then wait against one deadline."""
-    global _shutdown_done
-    if _shutdown_done:
-        return
-    _shutdown_done = True
-
-    alive = [p for p in _server_processes if p.is_alive()]
+def _shutdown_servers(processes: list) -> None:
+    """Stop the selected servers against a shared deadline."""
+    alive = [p for p in processes if p.is_alive()]
+    for p in processes:
+        if p in _server_processes and not p.is_alive():
+            _server_processes.remove(p)
     if not alive:
         return
 
@@ -82,64 +76,73 @@ def _shutdown_all_servers():
             except Exception:
                 pass
 
+    for p in alive:
+        if not p.is_alive() and p in _server_processes:
+            _server_processes.remove(p)
+    if any(p.is_alive() for p in alive):
+        raise RuntimeError("Mock CRS server did not exit after kill")
     print("[MockCRS] Server shutdown complete")
+
+
+def _shutdown_all_servers() -> None:
+    _shutdown_servers(list(_server_processes))
 
 
 atexit.register(_shutdown_all_servers)
 
 
 def yaml_hook(hwm):
-    """Patch up the HWM using mock Dfmuxes instead of real ones.
-
-    To do so, we alter the hostname associated with the Dfmux objects
-    in the HWM and redirect HTTP requests to a local server. Each Dfmux
-    gets a distinct port, which is used to route requests to a distinct
-    model class.
-    """
-
-    # Store model configurations indexed by port number.
-    # We'll instantiate MockCRS instances in the subprocess to avoid
-    # pickling the unpicklable _config_lock (threading.RLock) on Windows.
+    """Start one mock server and attach its cleanup to the hardware map."""
+    # Build the models in the child: their locks cannot be pickled for spawn.
     model_configs = {}
 
     # Find all CRS objects in the database and patch up their hostnames to
     # something local.
     sockets = []
-    for crs in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
+    p = None
+    try:
+        for crs in hwm.query(BaseCRS):
 
-        # Create a socket to be shared with the server process.
-        s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-        s.bind(("localhost", 0))
-        (hostname, port) = s.getsockname()
+            # Create a socket to be shared with the server process.
+            s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+            sockets.append(s)
+            s.bind(("localhost", 0))
+            (hostname, port) = s.getsockname()
 
-        sockets.append(s)
-        crs.hostname = f"{hostname}:{port}"
-        # Store configuration for MockCRS instantiation in subprocess
-        model_configs[port] = {
-            'serial': crs.serial if crs.serial else ("%05d" % port),
-            'slot': crs.slot if crs.crate else None,
-            'crate': crs.crate.serial if crs.crate else None,
-        }
+            crs.hostname = f"{hostname}:{port}"
+            # Store configuration for MockCRS instantiation in subprocess
+            model_configs[port] = {
+                'serial': crs.serial if crs.serial else ("%05d" % port),
+                'slot': crs.slot if crs.crate else None,
+                'crate': crs.crate.serial if crs.crate else None,
+            }
 
-    hwm.commit()
+        hwm.commit()
 
-    l = mp_ctx.Semaphore(0)
+        if not sockets:
+            return
+        ready = mp_ctx.Semaphore(0)
+        p = ServerProcess(sockets=sockets, model_configs=model_configs,
+                          lock=ready)
+        p.start()
+        _server_processes.append(p)
+        hwm().on_close(lambda: _shutdown_servers([p]))
+        while not ready.acquire(timeout=0.1):
+            if not p.is_alive():
+                raise RuntimeError(
+                    f"Mock CRS server failed to start (exit code {p.exitcode})")
+    except BaseException:
+        if p is not None and p.pid is not None:
+            _shutdown_servers([p])
+        raise
+    finally:
+        for s in sockets:
+            s.close()
 
-    p = ServerProcess(sockets=sockets, model_configs=model_configs, lock=l)
-    p.start()
-    l.acquire()
 
-    # Shut down by _shutdown_all_servers(), registered at import.
-    _server_processes.append(p)
-
-    # In the client process, we do not need the sockets -- in fact, we don't
-    # want a reference hanging around.
-    for s in sockets:
-        s.close()
-
-
-# Start up a web server. This is a distinct process, so COW semantics.
 class ServerProcess(mp_ctx.Process):
+    """Local RPC server owned by the process that loaded the hardware map."""
+
     daemon = True
 
     def __init__(self, sockets, model_configs, lock):
@@ -165,75 +168,60 @@ class ServerProcess(mp_ctx.Process):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
-        # Instantiate MockCRS instances in the subprocess to avoid pickling
-        # the unpicklable _config_lock (threading.RLock) on Windows
-        self.models = {}
-        for port, config in self.model_configs.items():
-            self.models[port] = ServerMockCRS(**config)
-
-        # Set up signal handlers for graceful shutdown
         shutdown_event = asyncio.Event()
+        finished = threading.Event()
+        parent = multiprocessing.parent_process()
 
-        def signal_handler():
-            shutdown_event.set()
+        def watch_parent() -> None:
+            # getppid also detects death when forked siblings inherited a
+            # copy of multiprocessing's parent-sentinel pipe.
+            while not finished.wait(0.2):
+                if (not parent.is_alive()
+                        or (os.name == "posix" and os.getppid() != parent.pid)):
+                    loop.call_soon_threadsafe(shutdown_event.set)
+                    if not finished.wait(2 * _SHUTDOWN_GRACE_S):
+                        os._exit(1)  # a blocked RPC must not orphan this server
+                    return
 
-        # Register signal handlers
-        try:
-            loop.add_signal_handler(signal.SIGTERM, signal_handler)
-            loop.add_signal_handler(signal.SIGINT, signal_handler)
-        except (ValueError, NotImplementedError):
-            # Signal handling may not be available in all contexts
-            pass
-
-        # Do NOT load algorithms on server side - they should only run on client
-
-        app = web.Application()
-        app.add_routes([web.post("/tuber", self.post_handler)])
-
+        threading.Thread(target=watch_parent, daemon=True,
+                         name="mock-parent-watch").start()
+        self.models = {}
         runners = []
-        sites = []
-
-        for s in self.sockets:
-            runner = web.AppRunner(app)
-            loop.run_until_complete(runner.setup())
-            runners.append(runner)
-            site = web.SockSite(runner, s)
-            loop.run_until_complete(site.start())
-            sites.append(site)
-
-        self.lock.release()
-
-        # Wait for shutdown signal instead of running forever
         try:
-            loop.run_until_complete(shutdown_event.wait())
-        except KeyboardInterrupt:
-            print("[MockCRS Server] Received KeyboardInterrupt")
-
-        # Clean shutdown
-        print("[MockCRS Server] Shutting down...")
-
-        # Stop UDP streaming for all models
-        for model in self.models.values():
-            if hasattr(model, 'udp_manager') and model.udp_manager:
+            for sig in (signal.SIGTERM, signal.SIGINT):
                 try:
-                    loop.run_until_complete(model.udp_manager.stop_udp_streaming())
-                except Exception as e:
-                    print(f"[MockCRS Server] Error stopping UDP streaming: {e}")
+                    loop.add_signal_handler(sig, shutdown_event.set)
+                except (ValueError, NotImplementedError):
+                    pass
 
-        # Clean up web sites and runners
-        for site in sites:
+            for port, config in self.model_configs.items():
+                self.models[port] = ServerMockCRS(**config)
+
+            app = web.Application()
+            app.add_routes([web.post("/tuber", self.post_handler)])
+            runner = web.AppRunner(app, shutdown_timeout=_SHUTDOWN_GRACE_S)
+            runners.append(runner)
+            loop.run_until_complete(runner.setup())
+            for s in self.sockets:
+                site = web.SockSite(runner, s)
+                loop.run_until_complete(site.start())
+
+            self.lock.release()
+            loop.run_until_complete(shutdown_event.wait())
+        finally:
             try:
-                loop.run_until_complete(site.stop())
-            except Exception as e:
-                print(f"[MockCRS Server] Error stopping site: {e}")
-
-        for runner in runners:
-            try:
-                loop.run_until_complete(runner.cleanup())
-            except Exception as e:
-                print(f"[MockCRS Server] Error cleaning up runner: {e}")
-
-        loop.close()
+                for model in self.models.values():
+                    try:
+                        loop.run_until_complete(model.stop_udp_streaming())
+                    except Exception as exc:
+                        print(f"[MockCRS Server] Error stopping stream: {exc}")
+                for runner in runners:
+                    loop.run_until_complete(runner.cleanup())
+            finally:
+                finished.set()
+                for s in self.sockets:
+                    s.close()
+                loop.close()
 
     async def post_handler(self, request):
         port = request.url.port

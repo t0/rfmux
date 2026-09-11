@@ -22,6 +22,8 @@ import os
 import time
 import asyncio
 import functools
+from contextlib import ExitStack
+from typing import Callable
 
 import sqlalchemy
 import sqlalchemy.orm
@@ -420,10 +422,18 @@ class Boolean(sqlalchemy.types.TypeDecorator):
 
 
 class Session(sqlalchemy.orm.Session):
-    """Subclass SQLAlchemy's 'Session' object.
+    """Hardware map session with cleanup for owned external resources."""
 
-    This subclass is not used here, but it provides a way for experiment code
-    (dfmux.py) to extend it."""
+    def on_close(self, callback: Callable[[], None]) -> None:
+        self.info.setdefault("_close_stack", ExitStack()).callback(callback)
+
+    def close(self) -> None:
+        try:
+            cleanup = self.info.pop("_close_stack", None)
+            if cleanup is not None:
+                cleanup.close()
+        finally:
+            super().close()
 
 
 def HardwareMap(uri="sqlite:///:memory:", echo=False, data=None, *args, **kwargs):

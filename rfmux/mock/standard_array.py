@@ -86,19 +86,23 @@ async def standard_array(
     cfg = _config.apply_overrides(cfg)
 
     session = load_session(SESSION)
-    crs = session.query(CRS).one()
-    await crs.resolve()
-    await crs.generate_resonators(cfg)
+    try:
+        crs = session.query(CRS).one()
+        await crs.resolve()
+        await crs.generate_resonators(cfg)
 
-    nco = await crs.get_nco_frequency(module=module)
-    tones = [
-        nco + await crs.get_frequency(channel=channel, module=module)
-        for channel in range(1, cfg["num_resonances"] + 1)
-    ]
-    # Named from the frequencies, so the same resonator has the same name in
-    # every run and a test can say catalog["..."] and mean one of them.
-    catalog = _resonators.ResonatorCatalog.from_frequencies(
-        tones, module=module, amplitude=float(cfg["bias_amplitude"]),
-        names=syllabic_names_from_frequency,
-    )
-    return crs, catalog
+        nco = await crs.get_nco_frequency(module=module)
+        tones = [
+            nco + await crs.get_frequency(channel=channel, module=module)
+            for channel in range(1, cfg["num_resonances"] + 1)
+        ]
+        # Named from the frequencies, so the same resonator has the same name in
+        # every run and a test can say catalog["..."] and mean one of them.
+        catalog = _resonators.ResonatorCatalog.from_frequencies(
+            tones, module=module, amplitude=float(cfg["bias_amplitude"]),
+            names=syllabic_names_from_frequency,
+        )
+        return crs, catalog
+    except BaseException:
+        session.close()
+        raise

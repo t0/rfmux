@@ -2,6 +2,31 @@
 
 This package emulates the CRS and its KIDs for testing and development without hardware.
 
+## Closing a mock session
+
+Close the hardware-map session when finished. It owns one server process for
+all of its mock boards; closing it stops streaming and reaps that process.
+
+```python
+session = rfmux.load_session(mock_yaml)
+try:
+    crs = session.query(rfmux.CRS).one()
+    # Resolve and use the board.
+finally:
+    session.close()
+```
+
+For `create_mock_crs()` or `standard_array()`, save `session = crs.hwm` after
+creation and close it in `finally`. Both builders close their session if
+setup fails or is cancelled. `await crs.stop_udp_streaming()` stops only the
+stream; the board remains available for further RPC calls.
+
+The test suite reaps mock servers at the end of each test module, including
+when a fixture fails to set up. Normal interpreter exit also cleans up any
+remaining servers. A server watches its parent and exits if the parent dies,
+with a forced exit after four seconds if graceful shutdown stalls. Streamer
+objects leave the application's SIGINT and SIGTERM handlers unchanged.
+
 ## File Structure
 
 ```
@@ -40,7 +65,7 @@ The main `MockCRS` class that emulates CRS hardware. Provides:
 
 ### `server.py`
 Handles the HTTP server for Tuber protocol communication:
-- `yaml_hook()`: Sets up mock servers for each CRS in the hardware map
+- `yaml_hook()`: Sets up one server process for the hardware map's mock boards
 - `ServerProcess`: Runs the aiohttp server in a separate process
 - Request routing and response serialization
 

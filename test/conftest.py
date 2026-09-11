@@ -2,6 +2,7 @@ import pytest
 import rfmux
 import os
 import socket
+import sys
 import pytest_asyncio
 
 # Fixtures that can only be satisfied by a real board. Requesting one — directly
@@ -10,6 +11,20 @@ import pytest_asyncio
 # "serial" is test_mock_vs_real.py's own gate; it compares a mock CRS against a
 # live one, so even its crs_mock fixture needs a board behind it.
 HARDWARE_FIXTURES = frozenset({"live_session", "crs", "serial"})
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _close_module_mock_servers():
+    """Reap each module's servers even when a board fixture fails to set up."""
+    server = sys.modules.get("rfmux.mock.server")
+    existing = set(server._server_processes) if server else set()
+    try:
+        yield
+    finally:
+        server = sys.modules.get("rfmux.mock.server")
+        if server is not None:
+            server._shutdown_servers([
+                p for p in server._server_processes if p not in existing])
 
 # What _isolate_store redirects, and puts back afterwards.
 _STORE_VARS = ("RFMUX_AUTOSAVE", "RFMUX_DATA_DIR", "RFMUX_CONFIG")

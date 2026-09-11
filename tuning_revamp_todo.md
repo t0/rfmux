@@ -49,7 +49,14 @@ mock streamer die with the kernel that made it (a parent-death watch, or a
 heartbeat the server times out on), and/or surface the conflict as a pytest
 `skip`/`error` with the real message rather than an opaque notebook assertion.
 
-## Periscope's multisweep `data_callback` is two arguments too narrow
+## ~~Periscope's multisweep `data_callback` is two arguments too narrow~~ Done
+
+Closed by stage 2 of `periscope_port_roadmap.md`. `MultisweepTask` makes one
+`crs.multisweep` call and re-emits all three callbacks as signals:
+`data_callback(module, partial, step, direction)` becomes `partial_data`, which
+is what the live grid keys its traces by; `sweep_callback(record)` drives the
+progress label; `progress_callback` goes straight to the bar across the whole
+call. The loop it was waiting on is gone. What follows is the original entry.
 
 `multisweep` calls `data_callback(module, partial_results, step, direction)`.
 The last pair is not decoration: a consumer plotting partial data inside a
@@ -127,11 +134,13 @@ None of these is a regression from this change alone — all of them predate it
 and are already on the list to be rewired — but they now fail sooner and more
 loudly, so check them off when their rewrite lands:
 
-* **Periscope's `MultisweepTask`** (`tools/periscope/tasks.py:669`) passes
-  `bias_frequency_method` and `rotate_saved_data` straight into
-  `crs.multisweep`; `app_runtime.py:2365` builds the same pair. Both are now a
-  `TypeError`. `multisweep_dialog.py` has the checkbox and combo that produce
-  them, and `multisweep_panel.py` plots `iq_complex`. Part of step 5.
+* ~~**Periscope's `MultisweepTask`**~~ Done, in stage 2 of
+  `periscope_port_roadmap.md`. The task makes one `crs.multisweep` call with
+  the driver's own arguments; the checkbox and combo that produced
+  `bias_frequency_method` and `rotate_saved_data` are gone, and a test now
+  pins that every key the dialog emits is one `multisweep` accepts. The panel
+  draws from the block's `iq_counts`. What is left of `iq_complex` in
+  Periscope is the legacy bias and noise lane, which goes in stage 4.
 * **The legacy analysis stack** — `fitting.fit_skewed_multisweep` and
   `fitting_nonlinear.fit_nonlinear_iq_multisweep` have been replaced by
   `rfmux/tuning/fits.py` and now carry a `DeprecationWarning`; they still read
@@ -358,7 +367,18 @@ Two smaller follow-ups it should pick up:
   `wheel.exclude` would close it properly — it needs >=0.5.0, and
   `pyproject.toml` currently floors at 0.3.3.
 
-## Rewire Periscope onto the netanal container shape
+## ~~Rewire Periscope onto the netanal container shape~~ Done, except two deferrals
+
+Closed by stage 1 of `periscope_port_roadmap.md`, and the multisweep half by
+stage 2. Still open, and moved to the roadmap: `simplified_tuning_flow` (out of
+scope, rewritten against a `tune_resonators` front door in stage 6) and
+`take_netanal`'s `rotate_phase_to_0` (still the one rotation a measurement
+applies to its own data).
+
+One correction to the record below: the signal settled as
+`data_update(module, trace)`, and `netanal_traces` is keyed by **module**, not
+by probe amplitude — a netanal is one amplitude, so there is no amplitude axis
+to key by. What follows is the original entry.
 
 `take_netanal` now returns `{module_id: {schema_version, measurement, module,
 call_params, results}}` like every other driver, with the trace *at* `results`

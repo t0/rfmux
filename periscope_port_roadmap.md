@@ -40,11 +40,14 @@ that builds in under a second with no UDP, and
 matplotlib, what every product looks like when plotted from the library
 alone. They are the reference for what the pyqtgraph panels should show.
 
-### 1.2 Periscope on this branch does not run the flow
+### 1.2 Where the port started (2026-09-09)
 
-This branch's Periscope is main's Periscope (11 lines differ), and main's
-Periscope predates the library. It imports nothing from `rfmux.tuning`. Every
-module imports cleanly; the breaks are at runtime:
+Kept as the record of what was wrong, because it is why each stage did what it
+did. For the current state see §1.5.
+
+This branch's Periscope was main's Periscope (11 lines differed), and main's
+Periscope predated the library. It imported nothing from `rfmux.tuning`. Every
+module imported cleanly; the breaks were at runtime:
 
 * `MultisweepTask` passes `bias_frequency_method` and `rotate_saved_data` to
   `crs.multisweep` (`tasks.py:706`). `TypeError` before a sweep starts.
@@ -136,6 +139,40 @@ go. The grid helpers, colorbar, digest, histograms and settings panels port
 well because they are mostly rendering; the panel and task rewrite is where
 the deletion happens.
 
+### 1.5 Where it stands now (2026-09-11)
+
+Stages 0, 1 and 2 are done: **Periscope measures, draws, saves and reloads the
+tuning flow through `rfmux.tuning`, up to the point where analyses begin.**
+
+* **Netanal.** One module at one probe amplitude, through `take_netanal`. The
+  panel holds the driver's trace and derives magnitude and phase at draw time.
+  Find Resonances runs `find_resonances_in_netanal` off the GUI thread, its
+  settings read their defaults from the finder's signature, and accepting or
+  rejecting a candidate by double-click edits the `ResonanceSearch` the netanal
+  block carries.
+* **Multisweep.** One `crs.multisweep` call for the whole schedule. The dialog
+  is a view over `AmplitudeSchedule` and the driver's own arguments; the task
+  re-emits the three callbacks as signals; the panel holds the container, the
+  block and the catalog, and draws both grids by reading the block on every
+  redraw. Live points draw as they arrive.
+* **Files.** `store` writes and reads both measurements, into the session
+  folder, under its own names. A file Periscope writes opens in a notebook and
+  one a notebook writes opens here — tested by taking the same measurement both
+  ways and comparing the two files (`test_same_measurement_both_ways.py`).
+* **One module.** A Periscope session controls the module named at startup;
+  a file from another module opens read-only (§6, judgement call 31).
+
+What is deliberately *not* there yet: fits, bias finding and applying a bias
+(stages 3 and 4), and with them the digest and histogram tabs, which were
+deleted rather than ported (§9). The legacy bias and noise lane still runs on
+`_prepare_export_data`'s payload and is untouched until stage 4; the deprecated
+library modules go in stage 5.
+
+Four drifts between the GUI's defaults and the library's were found on the way,
+two of them by the both-ways test: `max_chans` 1024 against 1023, and
+`span_hz` 200 kHz against 100 kHz. Both classes of constant are now read out of
+the drivers' signatures (§6, judgement calls 27 and 30).
+
 ---
 
 ## 2. Rules for the port
@@ -210,6 +247,12 @@ and from the merge decisions of 2026-09-08.
 | `tasks.py` | `BiasKidsTask`, `DfCalibrationTask` | `FindBiasTask`, `ApplyBiasTask` |
 | `multisweep_panel.py` | `results_by_detector`, `update_data`'s injection of `amplitude/direction/iteration`, the three restructurings, `_get_closest_remembered_cf`, `last_output_cfs_by_amp_and_conceptual_idx`, `_get_fit_frequencies`, `_fits_present`, dead `_intermediate_*` | catalog plus module block, `sweep_results` readers |
 | `multisweep_dialog.py` | Bias Frequency Method combo, Rotate Saved Data checkbox, `_get_frequencies` precedence chain, legacy `results_by_iteration` reader, `resonance_frequencies` legacy key | `AmplitudeSchedule` view; catalog in, catalog out |
+| `multisweep_panel.py` | `_rerun_multisweep`'s 120 lines of picking sweep centres out of a history of previous sweeps, `_get_closest_remembered_cf`, `last_output_cfs_by_amp_and_conceptual_idx`, `current_run_amps`, `probe_amplitudes`, `total_iterations`, and `conceptual_section_frequencies` as a stored list (stage 2) | the catalog, which already says where each resonator is and what it is driven at; the noise path reads frequencies off it through a property |
+| `network_analysis_base.py` | the Power (dBm) field and everything that kept it in step: `_update_dbm_from_normalized`, `_update_normalized_from_dbm`, `_validate_dbm_values`, `_parse_dbm_values`, the Fill (dBm) button (§6, judgement call 29) | nothing; the drivers take normalized units, and `describe(dac_scale_dbm=)` reports the power range |
+| `network_analysis_base.py`, `network_analysis_dialog.py` | `modules` and `_get_selected_modules` in all three dialogs, and the netanal dialog's free-text `Modules:` field with its `"All"` and `1-4` range parsing (§6, judgement call 31) | `module`, which the session fixes at startup |
+| `network_analysis_panel.py`, `network_analysis_export.py` | the per-module tab bar, `_on_active_module_changed`, `_all_modules_complete`, and `_get_active_module`'s recovery of the module by splitting a tab's label text (stage 2) | one module per panel; `_active_module()` returns it |
+| `app.py`, `app_runtime.py` | the module fan-out in `_start_network_analysis`, and the load path's silent rewrite of a file's module to the active one | one task on the session's module; a foreign file opens read-only |
+| `utils.py` | `MULTISWEEP_DEFAULT_SPAN_HZ`, `_NPOINTS`, `_NSAMPLES`, `_AMPLITUDE`, and the hardcoded `DEFAULT_MAX_CHANNELS`/`DEFAULT_MAX_SPAN` (§6, judgement calls 27 and 30) | the drivers' own signatures, read at import |
 | `multisweep_panel.py` | `handle_error`'s modal `QMessageBox.critical` (`:1163`), which blocks the GUI thread until dismissed and deadlocks a headless run | a transient status label, per AGENTS.md's rule on dialogs |
 | `multisweep_panel.py` | the Combined Plots tab and everything only it used: `_create_combined_tab`, `_redraw_combined_plots`, `_toggle_cf_lines_visibility` and the Show Center Frequencies checkbox, `_update_mag_plot_label`, the combined plot/legend/curve/CF-line attributes and colorbar, and the tab-index branches in `_redraw_plots`, `_on_plot_tab_changed` and `_next_batch` (stage 2) | nothing for now; §9.3 records what it showed |
 | `detector_digest_panel.py` | the whole module, its `ui.py` export, the Digest tab, `_open_detector_digest_for_index`, `detector_digest_windows`, `_navigate_digest_to_detector`, the digest `eventFilter` and double-click handler, the auto-open on the noise load path, and the Check Noise button with `_take_noise_samps`, its only caller (stage 2) | nothing in stage 2; rebuilt from scratch against the block and the catalog once fits and bias points exist (§6, judgement call 23) |
@@ -420,7 +463,7 @@ are now strict xfails that name the stage which clears them.
 * Test: flow test steps 1 and 2; `test_find_resonances_dialog.py` updated
   for the new fields; a display test on a saved netanal block.
 
-### Stage 2. Multisweep as one call (large; the centre of the port)
+### Stage 2. Multisweep as one call (large; the centre of the port) — done
 
 * **Task (done).** `MultisweepTask` takes a `catalog.copy()`, an
   `AmplitudeSchedule`, a direction tuple and the sweep parameters, and makes
@@ -500,7 +543,7 @@ are now strict xfails that name the stage which clears them.
   "Both" in the combo rather than falling back to Upward.
   `test_multisweep_dialog_params.py` pins what the dialog emits, including
   that it emits nothing `multisweep` would refuse.
-* **Panel state.** Three attributes about the data, all of them the library's:
+* **Panel state (done).** Three attributes about the data, all of them the library's:
   `self.multisweep_container` (what the call returned), `self.module_sweeps`
   (this module's block out of it) and `self.catalog` (read back from
   `module_sweeps["call_params"]["catalog"]`). Beside them, view state that
@@ -512,7 +555,7 @@ are now strict xfails that name the stage which clears them.
   `last_output_cfs_by_amp_and_conceptual_idx`,
   `current_amplitude_being_processed`, `current_iteration_being_processed`, and
   the six-argument `update_data` that filled them.
-* **Every plot reads the block, on every redraw.** Nothing is copied out of it,
+* **Every plot reads the block, on every redraw (done).** Nothing is copied out of it,
   nothing is precomputed into a per-trace structure, and no panel hands another
   panel anything but the block and the catalog. A redraw walks the results and
   throws away what it built, and the walk is the library's own:
@@ -549,7 +592,7 @@ are now strict xfails that name the stage which clears them.
   current batch. `find_iteration_matching_amplitude` answers "the step this
   resonator is biased at" when stages 3 and 4 need one, so the panel never
   matches an amplitude by hand.
-* **The colour scale exists before the first point arrives.** Colour means
+* **The colour scale exists before the first point arrives (done).** Colour means
   drive amplitude, so it is graded over every amplitude the call will produce,
   and `schedule.resolve_steps(catalog)` gives all of them at the press of Start
   without touching a board — one `AmplitudeStep` per step, `amplitudes` keyed
@@ -560,7 +603,7 @@ are now strict xfails that name the stage which clears them.
   TABLEAU10 up to `AMPLITUDE_COLORMAP_THRESHOLD` steps and a colormap above it;
   one shared colourbar per grid, labelled in normalized units and, when a DAC
   scale is known, in dBm through `UnitConverter.normalize_to_dbm`.
-* **A live trace is the same read, one key short.** `partial_data(module,
+* **A live trace is the same read, one key short (done).** `partial_data(module,
   partial, step, direction)` carries `{name: {"frequencies", "iq_counts",
   "original_center_frequency"}}` for the resonators in the NCO region currently
   being swept — each from its first point up to the latest, resent in full every
@@ -578,7 +621,7 @@ are now strict xfails that name the stage which clears them.
   and `module_sweeps` becomes the only source. It is a cursor, not a second copy
   of the measurement: it holds the callback payload verbatim, it is never saved,
   and it does not outlive the sweep.
-* **The two tabs, from that reader.** Mag vs Freq grid and IQ Circles grid.
+* **The two tabs, from that reader (done).** Mag vs Freq grid and IQ Circles grid.
   The Mag/Phase overview is deleted, not ported (§6, judgement call 28).
   Ported from the section-amplitudes grid helpers as
   *rendering*: the grid rule `ncols = max(min(4, n), ceil(sqrt(n)))`, widget
@@ -611,7 +654,7 @@ are now strict xfails that name the stage which clears them.
   as §6 judgement call 23; the digest's treatment was instructed, this one is
   the same reasoning applied one panel over, and is the piece to overrule if
   you would rather keep a histogram tab through the port.
-* **What this deletes.** Every read of `results_by_detector` in
+* **What this deletes (done).** Every read of `results_by_detector` in
   `multisweep_panel.py` (44 today), and with them `_redraw_sweep_grid`'s
   detector-index dictionaries, `_prepare_export_data`'s payload,
   `_get_fit_frequencies`, `_get_closest_remembered_cf` and
@@ -630,7 +673,7 @@ are now strict xfails that name the stage which clears them.
   `test_laptop_fit.py`'s `ParameterHistogramsPanel` one. Both are per-panel
   checks of a general rule, so the rule keeps its other cases; they come back
   with the panels.
-* **Re-run** reopens the dialog seeded with the panel's current catalog.
+* **Re-run (done)** reopens the dialog seeded with the panel's current catalog.
   That is the iterative multisweep: after stage 4 the current catalog is
   `report.catalog`, so the re-run centres on the found bias frequencies at
   the found amplitudes without any history bookkeeping. A "from fitted fr"
@@ -686,11 +729,11 @@ are now strict xfails that name the stage which clears them.
   they fed (judgement call 26). `_create_multisweep_panel_from_loaded_data`
   survives serving only the bias and noise loaders, and is labelled as reading
   the legacy payload; it goes with them in stage 4.
-* **Multi-module** runs one panel, one task and one call per module (a
-  catalog is one module).
+* **Multi-module: superseded.** A Periscope session controls one module, so
+  there is one panel, one task and one call — see §6, judgement call 31.
 * Test: flow test step 3 runs the schedule `multiplicative(0.5, 8, 5)` in both
   directions through the task and checks the panel's block is the driver's.
-* **Test: the same measurement, run both ways, writes the same file.** Sweep
+* **Test: the same measurement, run both ways, writes the same file (done).** Sweep
   the same seeded mock array twice — once through Periscope in mock mode,
   once headlessly the way a notebook does — and compare the two pickles
   `store` wrote. That is one test covering three things a rendering test does
@@ -799,9 +842,12 @@ are now strict xfails that name the stage which clears them.
 
 * Remove the four deprecated modules, `_legacy.py`, and their tests (§3).
 * Mock-mode startup df calibration: replaced per §6, judgement call 3.
-* Rewrite the "Results Data Structure" section of `AGENTS.md` to describe
-  the container shape and the catalog (merge survey §4.1), and update the
-  Periscope `README.md` flow section and tooltips. Update tier counts.
+* ~~Rewrite the "Results Data Structure" section of `AGENTS.md`~~ done early
+  (2026-09-11): it taught `results_by_detector`, which nothing produces, so
+  leaving it until last meant leaving wrong instructions in the file everyone
+  reads. It now describes the container, the seven-key sweep, the accessors and
+  the catalog in `call_params`. Still for this stage: the Periscope
+  `README.md` flow section and tooltips, and the tier counts.
 * Move the todo entries this port closes out of `tuning_revamp_todo.md`.
 
 ### Stage 6. Afterwards, as separate pieces of work
@@ -1165,8 +1211,8 @@ Listed so they can be overruled.
 | Stage | Adds | Where |
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
-| 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
-| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` the digest and histogram cases removed from `test_viewbox_lifetime.py` and `test_laptop_fit.py` with the panels; a saved sweep loading back into a panel, drawing with no board, and filling the dialog in; the dialog as a view over `AmplitudeSchedule` — each radio builds the constructor it names, the summary carries `describe`'s numbers, `validate`'s complaints disable Start, and every key emitted is one `multisweep` accepts | `test/periscope/`, `test_multisweep_dialog_params.py`, `test_same_measurement_both_ways.py`; one module per session — the session's module is what gets swept whatever the parameters say, a file from another module opens with its re-run controls disabled and rewrites nothing, and one from this module keeps them | `test/periscope/` |
+| 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL (the filename in the plot title, a custom suffix on the measurement name) | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
+| 2 (done) | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` the digest and histogram cases removed from `test_viewbox_lifetime.py` and `test_laptop_fit.py` with the panels; a saved sweep loading back into a panel, drawing with no board, and filling the dialog in; the dialog as a view over `AmplitudeSchedule` — each radio builds the constructor it names, the summary carries `describe`'s numbers, `validate`'s complaints disable Start, and every key emitted is one `multisweep` accepts | `test/periscope/`, `test_multisweep_dialog_params.py`, `test_same_measurement_both_ways.py`; one module per session — the session's module is what gets swept whatever the parameters say, a file from another module opens with its re-run controls disabled and rewrites nothing, and one from this module keeps them | `test/periscope/` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote, and a failed fit reads as failed; a histogram tab built new over `entry["fits"]` | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |
 | 5 | deletions; tier counts in `AGENTS.md` and `test/README.md` | root |

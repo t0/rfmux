@@ -143,13 +143,37 @@ Without `register=True` the function is not attached to `CRS`: import it
 and call `await my_algorithm(crs, module=1, channels=[1,2])`.
 
 ### Results Data Structure
-`results_by_detector`: `{detector_id: {iteration_index: {data + amplitude, direction}}}`
+Every driver returns the same container: `{module_id: block}`, one block per
+module, keyed by the board-and-module identifier `crs.module[m].index()`
+returns. A block carries `schema_version`, `measurement`, `module`,
+`call_params` and `results`.
 
-**Critical**: Dictionary keys are indices, not frequencies. Extract actual values:
+A multisweep's `results` is `{step: {direction: {name: sweep}}}` — amplitude
+step, sweep direction, resonator name. A sweep is a measurement and nothing
+else:
+
 ```python
-# WRONG: freq = list(results.keys())[0]  # This is an index!
-# CORRECT: freq = results[idx]['bias_frequency']
+{'channel', 'frequencies', 'iq_counts', 'iq_volts',
+ 'original_center_frequency', 'sweep_direction', 'sweep_amplitude'}
 ```
+
+No phase (it is `np.angle(iq_counts)` where it is wanted), no fit, no bias
+frequency. Read it through the accessors rather than walking the nesting:
+
+```python
+from rfmux.tuning import collect_amplitude_iterations_for, find_iteration_matching_amplitude
+
+sweeps = collect_amplitude_iterations_for(block, "BOTA")   # {step: {direction: sweep}}
+at_bias, step = find_iteration_matching_amplitude(block, "BOTA")
+```
+
+Resonators are named, and the array a sweep was taken from is in the file:
+`ResonatorCatalog.from_dict(block["call_params"]["catalog"])`. The amplitudes
+it walked are `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
+
+`results_by_detector` — `{detector_id: {iteration_index: entry}}`, keyed by an
+integer index — was the old GUI's own shape. Nothing produces it; the legacy
+bias and noise paths are its last readers.
 
 ### Unit Conversion (UnitConverter class)
 - Raw ADC counts ↔ Volts ↔ dBm

@@ -145,9 +145,10 @@ def test_a_silent_module_is_an_error_not_a_stall(monkeypatch):
         finally:
             stop.set()
             th.join()
-    # Long before the 5 s duration: 0.3 s of stream time is 180 packets
-    # at 5 ms each.
-    assert time.monotonic() - t < 3.0
+    # Well short of the duration: 5 s of stream time is 3000 packets, 15 s
+    # at 5 ms each; the error comes after 0.3 s of stream time, though
+    # on macOS the sender's sleeps stretch that severalfold.
+    assert time.monotonic() - t < 10.0
     assert (1, 1) in sink.fed
 
 

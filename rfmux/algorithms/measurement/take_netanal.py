@@ -1,6 +1,13 @@
 """
 take_netanal: A measurement algorithm that handles the book-keeping of assigning NCO, frequency, and channel
 pairings in order to measure the complex S21 across a large bandwidth. Often used for finding resonances.
+
+It returns the container ``multisweep`` returns — keyed by module, each module's
+output recording how the measurement was called alongside what it measured —
+because a netanal and a sweep being two shapes was costing three separate pieces
+of book-keeping and telling nobody anything. What differs is ``results``: a
+netanal measured one wideband trace, so the trace is what is there, where a
+sweep has an amplitude iteration per step of its schedule.
 """
 
 import warnings
@@ -8,7 +15,9 @@ import asyncio
 import numpy as np
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import CREST_FACTOR
+from ...core.transferfunctions import CREST_FACTOR, convert_roc_to_volts
+from ...tuning import store
+from ...tuning.sweep_results import merge_modules, pack_netanal, resolve_direction
 
 
 @macro(CRS, register=True)
@@ -23,19 +32,27 @@ async def take_netanal(
     max_span: float = 500e6,
     rotate_phase_to_0: bool = True,
     *,
+    sweep_direction: str = "upward",
     module,
     progress_callback=None,
     data_callback=None,
+    save=None,
+    label=None,
 ):
     """
     Perform a network analysis over the frequency range [fmin, fmax].
-    Returns the frequencies and complex amplitude and phase at each frequencies.
+    Returns the frequencies measured and the complex S21 at each of them.
     The sweep is divided into sub-ranges (chunks) whenever the span exceeds `max_span`.
     Each chunk is associated with a single NCO setting (midpoint of the chunk).
 
-    Exactly one frequency overlaps between consecutive chunks, which is used to
-    compute a phase rotation so that the entire measurement is aligned across
-    multiple NCO settings.
+    The chunks partition the frequency grid: every frequency is measured once,
+    by exactly one of them. No phase stitching is performed between chunks, so
+    the phase of the trace is not continuous across an NCO change.
+
+    One direction per call, and the band is measured once in it. Both
+    directions is two calls whose results you keep side by side — unlike
+    ``multisweep``, which takes a sequence and returns a key per direction,
+    because it walks a resonance point by point and a netanal does not.
 
     Parameters
     ----------
@@ -57,9 +74,16 @@ async def take_netanal(
     max_span : float, optional
         Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
     rotate_phase_to_0 : bool, optional
-        If True, applies an arbitrary global phase rotation to make the first point
-        have zero phase. This makes it easier to compare phase responses across
-        different measurements, by default True.
+        If True, applies an arbitrary global phase rotation to make the first
+        point *measured* have zero phase — the lowest frequency of an upward
+        netanal, the highest of a downward one. This makes it easier to compare
+        phase responses across different measurements, by default True.
+    sweep_direction : {'upward', 'downward'}, optional
+        Which way through the band, by default 'upward'. The chunks are visited
+        in that order and the tones within each are programmed in it, and the
+        trace comes back in the order it was measured — so a downward netanal
+        has descending ``frequencies``, the way a downward ``multisweep`` sweep
+        does. One direction per call; a sequence is refused.
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
@@ -68,17 +92,78 @@ async def take_netanal(
     progress_callback : callable, optional
         Callback function that receives (module, progress_percentage) updates.
     data_callback : callable, optional
-        Callback function that receives (module, freqs, amps, phases) updates.
+        ``(module, partial)`` during acquisition, where *partial* carries the
+        same keys as the finished block -- ``frequencies`` and ``iq_counts``,
+        in acquisition order -- growing as points arrive. A live consumer and a
+        consumer of the return value therefore read the same thing. Magnitude
+        and phase are the reader's to take; see the note on ``phase_degrees``
+        under Returns.
+    save : bool, optional
+        Write the result to the output folder when the measurement finishes.
+        Defaults to whatever ``rfmux.tuning.store.autosave_enabled()`` says,
+        which is on unless your config file or ``$RFMUX_AUTOSAVE`` turns it off.
+        A list of modules produces one file covering all of them.
+    label : str, optional
+        Your name for this measurement, appended to the filename. Ignored when
+        nothing is being saved.
 
     Returns
     -------
     dict
-        A dictionary containing the measurement results.
-        Keys:
-        - 'frequencies': numpy.ndarray - Sorted frequency points (Hz).
-        - 'iq_complex': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
-        - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
+        Keyed by module identifier — ``crs.module[m].index()``, e.g.
+        ``crs0042_rmod2`` — with one entry per module measured::
+
+            {
+                "crs0042_rmod2": {
+                    "schema_version": 7,
+                    "measurement": "netanal",
+                    "module": 2,           # resolved, never None
+                    "call_params": {...},  # verbatim, as this macro was called
+                    "results": {           # the trace itself
+                        'frequencies': np.ndarray (Hz),
+                        'iq_counts': np.ndarray (complex),  # readout counts
+                        'iq_volts': np.ndarray (complex),   # the same, in volts
+                                                            # at the board input
+                        'sweep_amplitude': float,  # normalized, per tone
+                        'sweep_direction': 'upward',
+                    },
+                },
+            }
+
+        Always keyed by module, including for the one module that is the usual
+        case, so a caller who writes ``for module_id, netanal in
+        result.items():`` has written the same code for one module and for
+        four. A list of modules measures them concurrently and merges the
+        results into one dict of this shape, each module's output recording
+        its own module in ``call_params["module"]``.
+
+        ``frequencies`` is in the order it was measured: ascending for an
+        upward netanal, descending for a downward one. Not acquisition order —
+        the tones within a chunk are measured interleaved, which is a stride
+        pattern every reader would have to undo — but monotonic in the
+        direction that was swept.
+        :func:`rfmux.tuning.netanal_trace` is the accessor, and
+        :func:`rfmux.tuning.find_resonances_in_netanal` searches either
+        direction.
+
+        A sweep result has ``{iteration: {direction: {name: section}}}`` under
+        ``results`` instead, because it has an amplitude schedule and a section
+        per resonator; that is where the two shapes part company, and why the
+        output says which it is. The readers in
+        :mod:`rfmux.tuning.sweep_results` and the fitters in
+        :mod:`rfmux.tuning.fits` want sections and say so rather than walking a
+        netanal into nonsense.
+
+        No ``phase_degrees``: it is ``np.angle(iq_counts)`` wherever it is
+        wanted, and naming it phase in here invites reading it as the
+        resonators' rather than the readout chain's.
     """
+    sweep_direction = resolve_direction(sweep_direction)
+
+    # What call_params records: the argument as passed. The fan-out below calls
+    # this macro again with a single module, so each module's output ends up
+    # recording the module it really is rather than the list that produced it.
+    requested_module = module
 
     # If user passed modules as a list, run in parallel across those modules
     if isinstance(module, list) and len(module) > 0:
@@ -107,12 +192,20 @@ async def take_netanal(
                 max_chans=max_chans,
                 max_span=max_span,
                 rotate_phase_to_0=rotate_phase_to_0,
+                sweep_direction=sweep_direction,
                 module=m,
                 progress_callback=progress_callback,
                 data_callback=data_callback,
+                # The per-module calls do not save. One call is one file, so
+                # the fan-out saves once, below, over everything it gathered.
+                save=False,
             ))
-        results = await asyncio.gather(*tasks)
-        return results
+        # Each of those returns a container of its own, keyed by module, so the
+        # several modules merge into one rather than stacking into a list whose
+        # order was the only thing saying which element was which.
+        merged = merge_modules(await asyncio.gather(*tasks))
+        store.maybe_save(merged, "netanal", save=save, label=label)
+        return merged
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -142,6 +235,12 @@ async def take_netanal(
         raise ValueError(error_msg)
 
     # Identify NCO chunk boundaries by stepping up to max_span each time.
+    #
+    # Chunks partition the frequency list: each starts one point past where the
+    # last ended. They used to share a boundary frequency, measured twice so
+    # that the phase of one chunk could be rotated onto the previous one's at
+    # the point they had in common. That stitch is gone, and with it the reason
+    # to measure any frequency twice.
     chunks = []
     i_start = 0
     while i_start < npoints:
@@ -162,12 +261,17 @@ async def take_netanal(
         if i_end >= npoints - 1:
             break
 
-        # Next chunk reuses the boundary freq at i_end as its first freq.
-        i_start = i_end
+        i_start = i_end + 1
+
+    # Downward measures the same chunks in the opposite order. A chunk is a band
+    # of the grid and an NCO setting, neither of which the direction changes;
+    # what it changes is which end the measurement starts at, and the order the
+    # tones inside a chunk are programmed in.
+    if sweep_direction == "downward":
+        chunks.reverse()
 
     # Prepare arrays for final data across all chunks.
     fs_all, iq_all = [], []
-    prev_boundary_iq = None  # To store I/Q of the overlap freq from previous chunk.
     first_point_rotation = None  # Store rotation to set first point phase to 0
     first_data_point = None  # Store the very first data point for rotation reference
 
@@ -176,6 +280,8 @@ async def take_netanal(
     
     for i, (start_idx, end_idx) in enumerate(chunks):
         freqs_chunk = freqs_global[start_idx:end_idx + 1]
+        if sweep_direction == "downward":
+            freqs_chunk = freqs_chunk[::-1]
         if not len(freqs_chunk):
             continue
 
@@ -184,10 +290,10 @@ async def take_netanal(
         await crs.set_nco_frequency(nco_freq, module=module)
 
         # Track data at the chunk level
-        chunk_fs_full, chunk_iq_full = [], []        
+        chunk_fs_full, chunk_iq_full = [], []
 
-        # Arrays to collect data from this chunk before optional rotation.
-        chunk_fs, chunk_iq = [], []
+        # The frequencies of one comb, collected while they are programmed.
+        chunk_fs = []
         n_chunk_points = len(freqs_chunk)
         niter = int(np.ceil(n_chunk_points / max_chans))
 
@@ -252,49 +358,33 @@ async def take_netanal(
             chunk_fs_full.extend(chunk_fs)
             # Add the (potentially rotated) IQ points
             chunk_iq_full.extend(new_iq_points)
-            
-            # Clear the temporary arrays for the next iteration
+
+            # Clear the temporary array for the next comb
             chunk_fs = []
-            chunk_iq = []
-            
+
+
             if data_callback and chunk_fs_full:
-                fs_array = np.array(fs_all + chunk_fs_full)
-                iq_array = np.array(iq_all + chunk_iq_full)
-                amp_array = np.abs(iq_array)
-                phase_array = np.degrees(np.angle(iq_array))
-                data_callback(module, fs_array, amp_array, phase_array)
+                data_callback(module, {
+                    'frequencies': np.array(fs_all + chunk_fs_full),
+                    'iq_counts': np.array(iq_all + chunk_iq_full,
+                                          dtype=np.complex128),
+                })
 
             # Report progress
             if progress_callback:
                 progress = ((i * niter + it + 1) / (total_chunks * niter)) * 100
                 progress_callback(module, progress)
 
-        # Rotate new NCO chunk so the overlap freq aligns with previous NCO phase.
-        if i > 0 and prev_boundary_iq is not None:
-            boundary_new = chunk_iq_full[0]
-            if abs(boundary_new) > 1e-15:
-                rot = prev_boundary_iq / boundary_new
-                # Apply rotation to all but the first point (overlap point)
-                rotated_iq = [chunk_iq_full[0]] + [iq_val * rot for iq_val in chunk_iq_full[1:]]
-                # Now remove the overlap point
-                chunk_iq_full = rotated_iq[1:]
-                chunk_fs_full = chunk_fs_full[1:]
-
-        # Update the boundary freq's I/Q for use in the next chunk.
-        if chunk_iq_full:
-            prev_boundary_iq = chunk_iq_full[-1]
-
         # Accumulate into global arrays.
         fs_all.extend(chunk_fs_full)
         iq_all.extend(chunk_iq_full)
-        
-        # Report final data update after rotation
+
+        # Report the data this chunk added.
         if data_callback:
-            fs_array = np.array(fs_all)
-            iq_array = np.array(iq_all)
-            amp_array = np.abs(iq_array)
-            phase_array = np.degrees(np.angle(iq_array))
-            data_callback(module, fs_array, amp_array, phase_array)
+            data_callback(module, {
+                'frequencies': np.array(fs_all),
+                'iq_counts': np.array(iq_all, dtype=np.complex128),
+            })
 
     # Clean up before exiting
     async with crs.tuber_context() as ctx:
@@ -303,28 +393,47 @@ async def take_netanal(
         await ctx()
 
     fs_all_np = np.array(fs_all)
-    iq_all_np = np.array(iq_all)
+    iq_all_np = np.array(iq_all, dtype=np.complex128)
 
-    if len(fs_all_np) == 0: # Handle empty data
-        # Return arrays in the expected dictionary structure
-        return {
-            'frequencies': np.array([]),
-            'iq_complex': np.array([]),
-            'phase_degrees': np.array([])
-        }
-
+    # Sorted in the direction that was swept, not by the order the comb happened
+    # to take the tones in: within a chunk they are measured interleaved, so
+    # acquisition order is a stride pattern every reader would have to undo. A
+    # downward netanal therefore comes back descending, which is what a downward
+    # multisweep sweep does and what 'sweep_direction' beside the arrays says.
     sort_indices = np.argsort(fs_all_np)
+    if sweep_direction == "downward":
+        sort_indices = sort_indices[::-1]
     fs_sorted = fs_all_np[sort_indices]
     iq_sorted = iq_all_np[sort_indices]
-    phase_sorted = np.degrees(np.angle(iq_sorted))
 
-    result_dict = {
-        'frequencies': fs_sorted,
-        'iq_complex': iq_sorted,
-        'phase_degrees': phase_sorted
-    }
-            
-    return result_dict
+    # An empty measurement is still a well-formed result, with empty arrays in
+    # it. A bare {} would be indistinguishable from a caller's own empty dict,
+    # and the provenance of a netanal that measured nothing is worth as much as
+    # any other's.
+    netanal = pack_netanal(
+        {
+            'frequencies': fs_sorted,
+            'iq_counts': iq_sorted,
+            'iq_volts': convert_roc_to_volts(iq_sorted),
+            'sweep_amplitude': amp,
+            'sweep_direction': sweep_direction,
+        },
+        module_id=crs.module[module].index(),
+        module=module,
+        amp=amp,
+        fmin=fmin,
+        fmax=fmax,
+        npoints=npoints,
+        nsamps=nsamps,
+        max_chans=max_chans,
+        max_span=max_span,
+        rotate_phase_to_0=rotate_phase_to_0,
+        sweep_direction=sweep_direction,
+        requested_module=requested_module,
+    )
+
+    store.maybe_save(netanal, "netanal", save=save, label=label)
+    return netanal
 
 def _safe_concatenate_frequencies(comb, nco_freq):
     """

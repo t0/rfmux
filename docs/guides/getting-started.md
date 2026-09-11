@@ -64,7 +64,7 @@ Crate                    # Physical crate containing CRS boards
         └── ReadoutChannel  # Individual channel (1-1024 per module)
 
 Wafer                    # Detector wafer
-└── Resonator            # Individual KID resonator
+└── HWMResonator         # Individual KID resonator (hardware-map row)
     └── ChannelMapping   # Maps resonators to readout channels
 ```
 
@@ -96,10 +96,15 @@ Most measurement algorithms are registered on the CRS object, so you call them
 as methods rather than importing them. `module` is keyword-only:
 
 ```python
-# Sweep 600 MHz - 1.1 GHz and return frequencies, iq_complex, phase_degrees
-result = await crs.take_netanal(
+# Sweep 600 MHz - 1.1 GHz
+netanal = await crs.take_netanal(
     amp=0.001, fmin=0.6e9, fmax=1.1e9, npoints=50000, module=1
 )
+
+# Keyed by module, one entry per module swept, the way every measurement
+# algorithm returns its results. Under each module's output is what it measured.
+trace = netanal[crs.module[1].index()]["results"]
+frequencies, iq_counts = trace["frequencies"], trace["iq_counts"]
 ```
 
 ### Acquiring Samples
@@ -159,7 +164,7 @@ Custom YAML tags define hardware:
 
 - !Wafer
   name: "test_wafer"
-  resonators: !Resonators
+  hwm_resonators: !HWMResonators
     csv_file: "resonators.csv"
 
 - !ChannelMappings
@@ -170,8 +175,7 @@ Common tags:
 - `!HardwareMap` - Top-level hardware configuration
 - `!CRS` - CRS board definition
 - `!Wafer` - Detector wafer
-- `!Resonator` - Individual resonator
-- `!Resonators` - Bulk import from CSV
+- `!HWMResonators` - Bulk import of resonators from CSV
 - `!ChannelMappings` - Channel-to-resonator mappings from CSV
 - `!flavour "rfmux.mock"` - Enable mock mode
 

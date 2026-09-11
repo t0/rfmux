@@ -1,0 +1,1063 @@
+"""Invariants of the typed resonator model.
+
+The point of these types is that certain states are unrepresentable, so this
+asserts the invariants rather than the arithmetic.
+"""
+
+from array import array
+from functools import partial
+
+import pytest
+
+from rfmux.core.transferfunctions import BASE_FREQUENCY
+from rfmux.core.resonators import (
+    BiasPoint,
+    Resonator,
+    ResonatorCatalog,
+)
+from rfmux.resonator_names import (
+    DEFAULT_LENGTH,
+    numbered_names,
+    syllabic_names_from_frequency,
+)
+
+pytestmark = pytest.mark.portable
+
+
+def a_catalog(freqs=(1.01e9, 1.03e9, 1.05e9), amplitude=0.01, **kwargs) -> ResonatorCatalog:
+    """A seeded catalog: every resonator carries a BiasPoint, as all do.
+
+    Numbered rather than named, because these tests assert on catalog mechanics
+    and want to say ``catalog["R0001"]`` rather than fish a drawn name out. The
+    default namer gets its own section below.
+    """
+    kwargs.setdefault("names", numbered_names)
+    return ResonatorCatalog.from_frequencies(freqs, module=2, amplitude=amplitude, **kwargs)
+
+
+def a_resonator(name="R0001", channel=1, frequency_hz=1.01e9, amplitude=0.01) -> Resonator:
+    return Resonator(name, channel=channel, bias=BiasPoint(frequency_hz, amplitude))
+
+
+def a_sweep(npoints=4, **kwargs):
+    """A stored bias sweep, as ``find_bias_points`` puts one on a bias point.
+
+    Lists rather than arrays, deliberately: the model stores whatever the
+    measurement handed it and asserts nothing about the type, so a test of the
+    model needs no numpy either. The real ones arrive as ndarrays — see
+    ``test/tuning/test_bias.py``.
+    """
+    return {
+        "frequencies": [1.01e9 + i for i in range(npoints)],
+        "iq_volts": [complex(i, -i) for i in range(npoints)],
+        "original_center_frequency": 1.01e9,
+        "sweep_amplitude": 0.01,
+        "sweep_direction": "upward",
+        **kwargs,
+    }
+
+
+# ─── the data model imports clean ─────────────────────────────────────────────
+
+
+@pytest.mark.xfail(
+    reason="rfmux/__init__.py eagerly does `from . import ... tools`, which pulls "
+    "PyQt6 and pyqtgraph, so no core module can currently be imported without "
+    "the GUI stack. Flips to XPASS when that import becomes lazy.",
+)
+def test_data_model_imports_without_the_gui():
+    """A script author importing the data model should not get Qt with it.
+
+    Checked in a fresh interpreter: by the time this test runs, conftest has
+    already imported the GUI, so in-process sys.modules proves nothing.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import sys; import rfmux.core.resonators; "
+        "sys.exit(1 if any(m.startswith(('PyQt6', 'pyqtgraph')) "
+        "for m in sys.modules) else 0)"
+    )
+    assert subprocess.run([sys.executable, "-c", code]).returncode == 0
+
+
+# ─── BiasPoint ────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("amplitude", [0.0, -0.5, 1.5])
+def test_amplitude_must_be_normalized_dac_units(amplitude):
+    with pytest.raises(ValueError, match="normalized DAC units"):
+        BiasPoint(frequency_hz=1e9, amplitude=amplitude)
+
+
+def test_negative_amplitude_hints_at_dbm():
+    """The common mistake is passing dBm; the error should say so."""
+    with pytest.raises(ValueError, match="dbm"):
+        BiasPoint(frequency_hz=1e9, amplitude=-40.0)
+
+
+def test_frequency_must_be_positive():
+    with pytest.raises(ValueError, match="must be positive"):
+        BiasPoint(frequency_hz=0.0, amplitude=0.01)
+
+
+def test_bias_point_is_frozen():
+    b = BiasPoint(frequency_hz=1e9, amplitude=0.01)
+    with pytest.raises(Exception):
+        b.frequency_hz = 2e9
+
+
+def test_df_calibration_is_derived():
+    b = BiasPoint(frequency_hz=1e9, amplitude=0.01, dI_df=1e-9, dQ_df=-2e-9)
+    assert b.df_calibration == 1.0 / complex(1e-9, -2e-9)
+
+
+def test_df_calibration_is_none_without_both_slopes():
+    assert BiasPoint(frequency_hz=1e9, amplitude=0.01).df_calibration is None
+    assert BiasPoint(frequency_hz=1e9, amplitude=0.01, dI_df=1e-9).df_calibration is None
+
+
+def test_df_calibration_survives_zero_slope():
+    """A degenerate fit should give None, not raise ZeroDivisionError."""
+    b = BiasPoint(frequency_hz=1e9, amplitude=0.01, dI_df=0.0, dQ_df=0.0)
+    assert b.df_calibration is None
+
+
+def test_power_dbm():
+    b = BiasPoint(frequency_hz=1e9, amplitude=0.1)
+    assert b.power_dbm(dac_scale_dbm=0.0) == pytest.approx(-20.0)
+
+
+# ─── quantization ─────────────────────────────────────────────────────────────
+
+
+def on_the_grid(frequency_hz: float) -> bool:
+    return frequency_hz / BASE_FREQUENCY == pytest.approx(
+        round(frequency_hz / BASE_FREQUENCY)
+    )
+
+
+def test_a_bias_point_lands_on_the_grid_without_being_asked():
+    """The whole point: what is recorded is what the hardware can play."""
+    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01)
+    assert on_the_grid(b.frequency_hz)
+
+
+def test_quantizing_moves_less_than_half_a_grid_step():
+    for offset in (0.0, 17.0, 149.0, 1234.5):
+        requested = 1e9 + offset
+        b = BiasPoint(frequency_hz=requested, amplitude=0.01)
+        assert abs(b.frequency_hz - requested) <= BASE_FREQUENCY / 2
+
+
+def test_opting_out_records_exactly_what_was_asked_for():
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456, amplitude=0.01, bias_frequency_quantized=False
+    )
+    assert b.frequency_hz == 1_010_000_123.456
+
+
+def test_quantize_is_the_one_shot_for_an_opted_out_point():
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456, amplitude=0.01, bias_frequency_quantized=False
+    )
+    q = b.quantize()
+    assert on_the_grid(q.frequency_hz)
+    # Policy is not silently switched on underneath the caller.
+    assert q.bias_frequency_quantized is False
+
+
+def test_quantize_keeps_calibration():
+    """The shift is far smaller than a resonator width, so calibration holds."""
+    b = BiasPoint(
+        frequency_hz=1_010_000_123.456,
+        amplitude=0.01,
+        bias_frequency_quantized=False,
+        dI_df=1e-9,
+        dQ_df=2e-9,
+    )
+    q = b.quantize()
+    assert q.df_calibration == b.df_calibration
+    assert q.amplitude == b.amplitude
+
+
+def test_quantize_is_idempotent():
+    b = BiasPoint(frequency_hz=1_010_000_123.456, amplitude=0.01)
+    assert b.quantize().frequency_hz == pytest.approx(b.frequency_hz)
+
+
+def test_a_frequency_below_half_a_step_is_refused_not_zeroed():
+    """Quantizing must never turn a positive tone into no tone at all."""
+    with pytest.raises(ValueError, match="quantizes to 0 Hz"):
+        BiasPoint(frequency_hz=BASE_FREQUENCY / 4, amplitude=0.01)
+
+
+def test_update_bias_point_quantizes_the_new_frequency():
+    """Retuning goes through the same door as construction."""
+    r = a_resonator()
+    r.update_bias_point(frequency_hz=1_010_000_123.456)
+    assert on_the_grid(r.bias.frequency_hz)
+
+
+def test_the_grid_is_base_frequency_and_nothing_finer():
+    """One definition of the grid, and it is transferfunctions.BASE_FREQUENCY.
+
+    A half-step offset is the shape of the bug this guards: it sits exactly on
+    the finer grid that used to be hardcoded around the tree, so it must still
+    be moved. Anything reintroducing a private grid constant fails here.
+    """
+    n = round(1e9 / BASE_FREQUENCY)
+    requested = (n + 0.5) * BASE_FREQUENCY
+    b = BiasPoint(frequency_hz=requested, amplitude=0.01)
+    assert abs(b.frequency_hz - requested) == pytest.approx(BASE_FREQUENCY / 2, abs=1e-3)
+
+
+# ─── a Resonator always has a bias ────────────────────────────────────────────
+
+
+def test_resonator_cannot_exist_without_a_bias():
+    with pytest.raises(TypeError):
+        Resonator("R0001", channel=1)
+
+
+# ─── update_bias_point: stale calibration must be unrepresentable ─────────────────────
+
+
+def test_update_bias_point_moves_the_tone():
+    r = a_resonator()
+    r.update_bias_point(frequency_hz=1.0100003e9, amplitude=0.012)
+    assert r.bias.frequency_hz == pytest.approx(1.0100003e9, abs=BASE_FREQUENCY / 2)
+    assert r.bias.amplitude == 0.012
+
+
+def test_moving_the_frequency_drops_calibration():
+    r = a_resonator()
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9, bifurcated_at=0.02)
+    r.update_bias_point(frequency_hz=1.0100009e9)
+    assert r.bias.df_calibration is None
+    assert r.bias.dI_df is None and r.bias.bifurcated_at is None
+
+
+def test_moving_the_amplitude_drops_calibration():
+    r = a_resonator()
+    parked_at = r.bias.frequency_hz
+    r.update_bias_point(iq_rotation_deg=12.0)
+    r.update_bias_point(amplitude=0.02)
+    assert r.bias.iq_rotation_deg is None
+    assert r.bias.frequency_hz == parked_at
+
+
+def test_moving_the_tone_keeps_calibration_passed_explicitly():
+    r = a_resonator()
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9)
+    r.update_bias_point(frequency_hz=1.02e9, dI_df=3e-9, dQ_df=4e-9)
+    assert r.bias.df_calibration == 1.0 / complex(3e-9, 4e-9)
+
+
+def test_amending_only_calibration_leaves_the_tone_alone():
+    r = a_resonator()
+    parked_at = r.bias.frequency_hz
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9)
+    assert r.bias.frequency_hz == parked_at
+    assert r.bias.amplitude == 0.01
+    assert r.bias.df_calibration is not None
+
+
+def test_moving_the_tone_drops_the_stored_sweep_with_the_rest():
+    """A trace taken at the old amplitude is not the working behind a
+    calibration measured at the new one, so it goes when they go."""
+    r = a_resonator()
+    r.update_bias_point(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
+    r.update_bias_point(amplitude=0.02)
+    assert r.bias.bias_sweep is None
+
+
+# ─── a stored bias sweep ──────────────────────────────────────────────────────
+
+
+def test_a_bias_point_carries_no_sweep_until_one_is_measured():
+    assert a_resonator().bias.bias_sweep is None
+
+
+def test_a_sweep_without_the_traces_a_calibration_needs_is_refused():
+    sweep = a_sweep()
+    del sweep["iq_volts"]
+    with pytest.raises(ValueError, match="missing iq_volts"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=sweep)
+
+
+def test_a_sweep_whose_traces_disagree_in_length_is_refused():
+    """Caught here rather than in whichever reader interpolated it later."""
+    sweep = a_sweep()
+    sweep["frequencies"] = sweep["frequencies"][:-1]
+    with pytest.raises(ValueError, match="describe different measurements"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=sweep)
+
+
+def test_a_sweep_that_is_not_a_mapping_at_all_is_refused():
+    with pytest.raises(ValueError, match="expected a dict"):
+        BiasPoint(1.01e9, 0.01, bias_sweep=[1, 2, 3])
+
+
+def test_the_stored_sweep_is_whatever_the_measurement_put_there():
+    """The model does not curate it — the keys it keeps are chosen by
+    ``rfmux.tuning.bias``, and extra ones ride along rather than being
+    stripped by a second opinion here."""
+    bias = BiasPoint(1.01e9, 0.01, bias_sweep=a_sweep(fitted="anything"))
+    assert bias.bias_sweep["fitted"] == "anything"
+    assert bias.bias_sweep["sweep_direction"] == "upward"
+
+
+# ─── ResonatorCatalog invariants ──────────────────────────────────────────────
+
+
+def test_from_frequencies_sorts_and_assigns_channels():
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01, names=numbered_names
+    )
+    assert [r.name for r in m] == ["R0001", "R0002", "R0003"]
+    assert [r.channel for r in m] == [1, 2, 3]
+    assert [r.bias.frequency_hz for r in m] == pytest.approx(
+        [1.01e9, 1.03e9, 1.05e9], abs=BASE_FREQUENCY / 2
+    )
+
+
+def test_from_frequencies_seeds_a_bias_with_no_calibration():
+    """The seed is an operating point, not a measurement."""
+    r = a_catalog(amplitude=0.02)["R0001"]
+    assert r.bias.amplitude == 0.02
+    assert r.bias.df_calibration is None
+    assert r.bias.iq_rotation_deg is None and r.bias.bifurcated_at is None
+
+
+# ─── the catalog's own name ───────────────────────────────────────────────────
+
+
+def test_a_catalog_names_itself_after_its_module_by_default():
+    assert a_catalog().name == "module 2"
+
+
+def test_a_catalog_takes_the_name_it_is_given():
+    assert a_catalog(name="wafer B, cooldown 7").name == "wafer B, cooldown 7"
+
+
+@pytest.mark.parametrize("name", ["", "   ", 7])
+def test_a_name_that_is_not_free_form_text_is_refused(name):
+    """A blank name is worse than the default it displaced."""
+    with pytest.raises(ValueError, match="free-form text"):
+        a_catalog(name=name)
+
+
+# ─── how a catalog gets its names ─────────────────────────────────────────────
+
+
+def test_the_default_namer_draws_rather_than_numbers():
+    """Names carry no ordering, so nothing about them can go stale."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
+    )
+    assert len(set(m.names())) == 3
+    assert not any(name.startswith("R0") for name in m.names())
+    assert all(len(name) == DEFAULT_LENGTH for name in m.names())
+
+
+def test_the_ordering_lives_on_the_channel_not_the_name():
+    """What R0001… used to assert is still recorded, just not in the name."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
+    )
+    assert [r.channel for r in m] == [1, 2, 3]
+    assert m.names("frequency") == m.names("channel")
+
+
+def test_a_namer_sees_the_sorted_frequencies():
+    seen = []
+
+    def namer(frequencies_hz):
+        seen.append(list(frequencies_hz))
+        return [f"F{i}" for i in range(len(frequencies_hz))]
+
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01, names=namer
+    )
+    assert seen == [[1.01e9, 1.03e9, 1.05e9]]
+    assert m.names() == ["F0", "F1", "F2"]
+
+
+def test_a_namer_returning_the_wrong_count_is_caught():
+    with pytest.raises(ValueError, match="returned 2 names for 3 frequencies"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9, 3e9], module=2, amplitude=0.01, names=lambda f: ["a", "b"]
+        )
+
+
+def test_a_partial_namer_is_named_in_the_error_not_crashed_on():
+    """partial() has no __name__, and it is what a custom prefix looks like."""
+    with pytest.raises(ValueError, match="returned 1 names for 3 frequencies"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9, 3e9],
+            module=2,
+            amplitude=0.01,
+            names=partial(lambda f, n: ["a"] * n, n=1),
+        )
+
+
+def test_a_partial_namer_works():
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9, 3e9],
+        module=2,
+        amplitude=0.01,
+        names=partial(numbered_names, prefix="kid"),
+    )
+    assert m.names() == ["kid0001", "kid0002", "kid0003"]
+
+
+def test_a_supplied_list_still_pairs_before_sorting():
+    """Parallel lists stay associated however they arrive."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.05e9, 1.01e9, 1.03e9],
+        module=2,
+        amplitude=0.01,
+        names=["high", "low", "mid"],
+    )
+    assert m.names() == ["low", "mid", "high"]
+
+
+def test_a_frequency_derived_namer_gives_a_catalog_stable_names():
+    """What a demo notebook needs: the same array, the same names."""
+    freqs = [1.01e9, 1.03e9, 1.05e9]
+    first = ResonatorCatalog.from_frequencies(
+        freqs, module=2, amplitude=0.01, names=syllabic_names_from_frequency
+    )
+    second = ResonatorCatalog.from_frequencies(
+        freqs, module=2, amplitude=0.01, names=syllabic_names_from_frequency
+    )
+    assert first.names() == second.names()
+
+
+def test_channels_are_one_based():
+    with pytest.raises(ValueError, match="1-based"):
+        ResonatorCatalog([a_resonator("R1", channel=0)], module=1)
+
+
+def test_duplicate_names_rejected():
+    with pytest.raises(ValueError, match="Duplicate resonator name"):
+        ResonatorCatalog(
+            [
+                a_resonator("R1", channel=1, frequency_hz=1e9),
+                a_resonator("R1", channel=2, frequency_hz=2e9),
+            ],
+            module=1,
+        )
+
+
+def test_duplicate_channels_rejected():
+    with pytest.raises(ValueError, match="Duplicate channel"):
+        ResonatorCatalog(
+            [
+                a_resonator("R1", channel=1, frequency_hz=1e9),
+                a_resonator("R2", channel=1, frequency_hz=2e9),
+            ],
+            module=1,
+        )
+
+
+def test_identical_frequencies_pass_by_default():
+    """No separation rule unless one is asked for."""
+    m = ResonatorCatalog.from_frequencies([1e9, 1e9], module=1, amplitude=0.01)
+    assert len(m) == 2
+
+
+def test_identical_frequencies_rejected():
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=0.0
+        )
+
+
+def test_sub_grid_duplicates_are_caught_by_a_zero_hz_rule():
+    """Quantizing does what a 0.0 Hz rule could not on its own.
+
+    Two peaks a microhertz apart are the realistic symptom of
+    ``find_resonances`` splitting one resonator. They would slip past a
+    float-equality check as distinct numbers; instead they land on one grid
+    point, which is the truth of it — the hardware cannot tell them apart
+    either.
+    """
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9 + 1e-6], module=1, amplitude=0.01, min_separation_hz=0.0
+        )
+
+
+def test_duplicates_within_a_grid_step_still_pass_a_zero_hz_rule():
+    """0.0 Hz remains a weak check, just less so: a step apart is distinct."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9 + BASE_FREQUENCY], module=1, amplitude=0.01, min_separation_hz=0.0
+    )
+    assert len(m) == 2
+
+
+def test_min_separation_hz_catches_split_resonances():
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9 + 500.0], module=1, amplitude=0.01, min_separation_hz=1e3
+        )
+
+
+def test_min_separation_hz_is_inclusive():
+    """A pair exactly min_separation_hz apart collides, as in find_resonances."""
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 1e9 + 1e3], module=1, amplitude=0.01, min_separation_hz=1e3
+        )
+
+
+def test_min_separation_hz_none_allows_identical_frequencies():
+    """The deliberate case: two channels parked on one frequency."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
+    )
+    assert [r.bias.frequency_hz for r in m] == pytest.approx(
+        [1e9, 1e9], abs=BASE_FREQUENCY / 2
+    )
+    assert [r.channel for r in m] == [1, 2]
+
+
+def test_min_separation_hz_rejects_negative():
+    with pytest.raises(ValueError, match="min_separation_hz"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=-1.0
+        )
+
+
+def test_names_must_match_frequency_count():
+    with pytest.raises(ValueError, match="2 names for 3 frequencies"):
+        ResonatorCatalog.from_frequencies(
+            [1e9, 2e9, 3e9], module=1, amplitude=0.01, names=["a", "b"]
+        )
+
+
+def test_names_pair_with_their_own_frequency_regardless_of_order():
+    """Parallel lists must stay associated even though channels go by frequency."""
+    m = ResonatorCatalog.from_frequencies(
+        [1.03e9, 1.01e9], module=1, amplitude=0.01, names=["upper", "lower"]
+    )
+    assert m["upper"].bias.frequency_hz == pytest.approx(1.03e9, abs=BASE_FREQUENCY / 2)
+    assert m["lower"].bias.frequency_hz == pytest.approx(1.01e9, abs=BASE_FREQUENCY / 2)
+    # channels still follow ascending frequency
+    assert m["lower"].channel == 1
+    assert m["upper"].channel == 2
+
+
+# ─── lookup and ordering ──────────────────────────────────────────────────────
+
+
+def test_iteration_is_in_channel_order():
+    m = ResonatorCatalog(
+        [
+            a_resonator("c", channel=3, frequency_hz=3e9),
+            a_resonator("a", channel=1, frequency_hz=1e9),
+            a_resonator("b", channel=2, frequency_hz=2e9),
+        ],
+        module=1,
+    )
+    assert [r.name for r in m] == ["a", "b", "c"]
+
+
+def test_by_channel_round_trips():
+    m = a_catalog()
+    for r in m:
+        assert m.by_channel(r.channel) is r
+
+
+def test_by_channel_raises_for_unknown():
+    with pytest.raises(KeyError, match="No resonator on channel 99"):
+        a_catalog().by_channel(99)
+
+
+def a_shuffled_catalog() -> ResonatorCatalog:
+    """Channel order and frequency order deliberately disagree."""
+    return ResonatorCatalog(
+        [
+            a_resonator("low", channel=3, frequency_hz=1e9),
+            a_resonator("high", channel=1, frequency_hz=3e9),
+            a_resonator("mid", channel=2, frequency_hz=2e9),
+        ],
+        module=1,
+    )
+
+
+def test_names_are_in_frequency_order_by_default():
+    assert a_shuffled_catalog().names() == ["low", "mid", "high"]
+
+
+def test_iteration_matches_names():
+    m = a_shuffled_catalog()
+    assert [r.name for r in m] == m.names() == ["low", "mid", "high"]
+
+
+def test_names_by_channel():
+    assert a_shuffled_catalog().names(order="channel") == ["high", "mid", "low"]
+
+
+def test_resonators_extracts_members_in_the_order_asked_for():
+    m = a_shuffled_catalog()
+    assert [r.channel for r in m.resonators()] == [3, 2, 1]
+    assert [r.channel for r in m.resonators(order="channel")] == [1, 2, 3]
+
+
+def test_names_orders_agree_for_a_freshly_seeded_catalog():
+    m = a_catalog()
+    assert m.names() == m.names(order="channel") == ["R0001", "R0002", "R0003"]
+
+
+def test_names_rejects_an_unknown_order():
+    with pytest.raises(ValueError, match="expected 'frequency' or 'channel'"):
+        a_catalog().names(order="amplitude")
+
+
+def test_resonators_rejects_an_unknown_order():
+    with pytest.raises(ValueError, match="expected 'frequency' or 'channel'"):
+        a_catalog().resonators(order="amplitude")
+
+
+def test_dict_like_access():
+    m = a_catalog()
+    assert "R0001" in m
+    assert "nope" not in m
+    assert len(m) == 3
+    assert m["R0002"].channel == 2
+
+
+# ─── removal leaves a hole ────────────────────────────────────────────────────
+
+
+def test_remove_returns_the_resonator():
+    m = a_catalog()
+    gone = m.remove("R0002")
+    assert gone.name == "R0002"
+    assert "R0002" not in m
+    assert len(m) == 2
+
+
+def test_remove_leaves_the_other_channels_where_they_were():
+    m = a_catalog()
+    m.remove("R0002")
+    assert [r.channel for r in m] == [1, 3]
+
+
+def test_a_freed_channel_can_be_reused():
+    m = a_catalog()
+    m.remove("R0002")
+    m._add(a_resonator("new", channel=2, frequency_hz=1.07e9))
+    assert m.by_channel(2).name == "new"
+
+
+def test_by_channel_raises_for_a_removed_channel():
+    m = a_catalog()
+    m.remove("R0002")
+    with pytest.raises(KeyError, match="No resonator on channel 2"):
+        m.by_channel(2)
+
+
+def test_a_removed_frequency_stops_colliding():
+    m = a_catalog()
+    gone = m.remove("R0002")
+    m._add(a_resonator("reuse", channel=9, frequency_hz=1.03e9))
+    assert m["reuse"].bias.frequency_hz == gone.bias.frequency_hz
+
+
+def test_del_removes_the_same_way():
+    m = a_catalog()
+    del m["R0002"]
+    assert "R0002" not in m
+    assert [r.channel for r in m] == [1, 3]
+
+
+def test_del_raises_for_unknown():
+    m = a_catalog()
+    with pytest.raises(KeyError, match="No resonator named 'nope'"):
+        del m["nope"]
+
+
+def test_remove_raises_for_unknown_and_names_what_is_there():
+    with pytest.raises(KeyError, match="R0001, R0002, R0003"):
+        a_catalog().remove("nope")
+
+
+def test_remove_bounds_the_names_it_lists():
+    m = ResonatorCatalog.from_frequencies(
+        [1e9 + i * 1e6 for i in range(20)], module=1, amplitude=0.01
+    )
+    with pytest.raises(KeyError, match=r"and 15 more"):
+        m.remove("nope")
+
+
+def test_a_holey_catalog_round_trips_through_a_dict():
+    m = a_catalog()
+    m.remove("R0002")
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back.names() == ["R0001", "R0003"]
+    assert [r.channel for r in back] == [1, 3]
+
+
+def test_remove_does_not_touch_a_copy():
+    m = a_catalog()
+    twin = m.copy()
+    m.remove("R0002")
+    assert "R0002" in twin and len(twin) == 3
+
+
+# ─── copy: the threading rule ─────────────────────────────────────────────────
+
+
+def test_copy_is_independent():
+    m = a_catalog()
+    c = m.copy()
+    c["R0001"].update_bias_point(amplitude=0.02)
+    c["R0002"].notes["worker"] = True
+    assert m["R0001"].bias.amplitude == 0.01
+    assert m["R0002"].notes == {}
+
+
+def test_copy_preserves_catalog_metadata():
+    m = ResonatorCatalog.from_frequencies(
+        [1e9], module=3, amplitude=0.01, min_separation_hz=1e3
+    )
+    c = m.copy()
+    assert c.module == 3
+    assert c.min_separation_hz == 1e3
+    assert c.name == m.name
+
+
+# ─── persistence ──────────────────────────────────────────────────────────────
+
+
+def test_to_dict_keys_resonators_by_name():
+    """A catalog is looked up by name; so is its dict."""
+    d = a_catalog().to_dict()
+    assert list(d["resonators"]) == a_catalog().names()
+    assert d["resonators"]["R0002"]["channel"] == 2
+    # The name is the key, not a field repeated inside the entry.
+    assert "name" not in d["resonators"]["R0002"]
+
+
+def test_dict_round_trip():
+    m = a_catalog()
+    m["R0001"].update_bias_point(
+        frequency_hz=1.0100003e9,
+        amplitude=0.012,
+        dI_df=1e-9,
+        dQ_df=-2e-9,
+        iq_rotation_deg=12.5,
+        bifurcated_at=0.02,
+    )
+    m["R0003"].notes["flagged"] = "noisy"
+    back = ResonatorCatalog.from_dict(m.to_dict())
+
+    assert [r.name for r in back] == [r.name for r in m]
+    assert [r.channel for r in back] == [r.channel for r in m]
+    assert back["R0001"].bias == m["R0001"].bias
+    assert back["R0001"].bias.df_calibration == m["R0001"].bias.df_calibration
+    assert back["R0003"].notes == {"flagged": "noisy"}
+
+
+def test_dict_round_trip_preserves_an_opted_out_frequency():
+    """Reloading must not quantize a frequency the writer chose to keep exact."""
+    exact = 1_010_000_123.456
+    m = ResonatorCatalog(
+        [
+            Resonator(
+                "R0001",
+                channel=1,
+                bias=BiasPoint(exact, 0.01, bias_frequency_quantized=False),
+            )
+        ],
+        module=2,
+    )
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back["R0001"].bias.bias_frequency_quantized is False
+    assert back["R0001"].bias.frequency_hz == exact
+
+
+def test_from_dict_quantizes_files_written_before_the_flag_existed():
+    d = a_catalog().to_dict()
+    for rd in d["resonators"].values():
+        del rd["bias"]["bias_frequency_quantized"]
+    assert ResonatorCatalog.from_dict(d)["R0001"].bias.bias_frequency_quantized is True
+
+
+def test_dict_round_trip_carries_the_stored_sweep():
+    m = a_catalog()
+    sweep = a_sweep()
+    m["R0001"].update_bias_point(dI_df=1e-9, dQ_df=-2e-9, bias_sweep=sweep)
+
+    back = ResonatorCatalog.from_dict(m.to_dict())
+
+    assert back["R0001"].bias.bias_sweep == sweep
+    assert back["R0002"].bias.bias_sweep is None
+
+
+def test_to_dict_copies_the_sweep_dict_but_not_the_traces():
+    """One level, and for two different reasons. The record must be its own
+    dict, or writing into it would reach back into the catalog; the traces are
+    measurement data nothing mutates, and copying them on every to_dict — a
+    multisweep does one to snapshot its catalog — would be paid for nothing."""
+    m = a_catalog()
+    sweep = a_sweep()
+    m["R0001"].update_bias_point(bias_sweep=sweep)
+
+    d = m.to_dict()
+    d["resonators"]["R0001"]["bias"]["bias_sweep"]["injected"] = True
+
+    assert "injected" not in m["R0001"].bias.bias_sweep
+    assert (
+        d["resonators"]["R0001"]["bias"]["bias_sweep"]["frequencies"]
+        is sweep["frequencies"]
+    )
+
+
+def test_to_dict_holds_only_builtins_and_the_stored_traces():
+    """Traces are the one exception, and only inside a ``bias_sweep``.
+
+    They come off a measurement as arrays and stay arrays — ``store`` pickles
+    builtins and ndarrays both. Everywhere else a non-builtin would mean a file
+    that needs this module back to be read, which is what the rule is for.
+    ``array.array`` stands in for the ndarray a real sweep carries, since
+    nothing in the model cares which it is.
+    """
+    m = a_catalog()
+    m["R0001"].update_bias_point(
+        dI_df=1e-9,
+        bias_sweep=a_sweep(
+            npoints=2, frequencies=array("d", [1.01e9, 1.01e9 + 1])
+        ),
+    )
+    allowed = (str, int, float, bool, complex, type(None), dict, list)
+    d = m.to_dict()
+
+    def walk(o, path="root", in_sweep=False):
+        if in_sweep and isinstance(o, array):
+            return
+        assert isinstance(o, allowed), f"{path}: {type(o).__name__} is not a builtin"
+        if isinstance(o, dict):
+            for k, v in o.items():
+                walk(v, f"{path}.{k}", in_sweep or k == "bias_sweep")
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                walk(v, f"{path}[{i}]", in_sweep)
+
+    walk(d)
+
+
+def test_to_dict_notes_are_copied_not_aliased():
+    m = a_catalog()
+    d = m.to_dict()
+    d["resonators"]["R0001"]["notes"]["injected"] = True
+    assert m["R0001"].notes == {}
+
+
+def test_from_dict_reads_a_file_written_before_sweeps_were_stored():
+    """Schema 2 and 3 differ by one field with a default, so a file from before
+    it existed reads back as the bias points it holds: calibrated, with no
+    trace behind them, which is exactly what it was."""
+    d = a_catalog().to_dict()
+    d["schema_version"] = 2
+    for rd in d["resonators"].values():
+        del rd["bias"]["bias_sweep"]
+
+    back = ResonatorCatalog.from_dict(d)
+
+    assert back["R0001"].bias.bias_sweep is None
+    assert back.names() == a_catalog().names()
+
+
+def test_from_dict_rejects_unknown_schema_version():
+    d = a_catalog().to_dict()
+    d["schema_version"] = 999
+    with pytest.raises(ValueError, match="Unsupported schema_version"):
+        ResonatorCatalog.from_dict(d)
+
+
+def test_from_dict_reads_a_schema_version_1_file():
+    """Version 1 listed the resonators, with the name inside each entry."""
+    m = a_catalog()
+    m["R0002"].notes["flagged"] = "noisy"
+    d = m.to_dict()
+    d["schema_version"] = 1
+    d["resonators"] = [
+        {"name": name, **entry} for name, entry in d["resonators"].items()
+    ]
+
+    back = ResonatorCatalog.from_dict(d)
+    assert back.names() == m.names()
+    assert back["R0002"].bias == m["R0002"].bias
+    assert back["R0002"].notes == {"flagged": "noisy"}
+
+
+def test_a_dict_round_trip_brings_the_catalog_name_back():
+    m = a_catalog(name="wafer B, cooldown 7")
+    assert ResonatorCatalog.from_dict(m.to_dict()).name == "wafer B, cooldown 7"
+
+
+def test_from_dict_renames_the_catalog_when_asked():
+    m = a_catalog(name="wafer B, cooldown 7")
+    back = ResonatorCatalog.from_dict(m.to_dict(), name="wafer B, cooldown 8")
+    assert back.name == "wafer B, cooldown 8"
+
+
+def test_a_file_written_before_catalogs_had_names_reads_under_the_default():
+    d = a_catalog().to_dict()
+    del d["name"]
+    d["schema_version"] = 3
+
+    assert ResonatorCatalog.from_dict(d).name == "module 2"
+
+
+def test_dict_round_trip_preserves_module():
+    m = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01)
+    back = ResonatorCatalog.from_dict(m.to_dict())
+    assert back.module == 4
+
+
+def test_a_file_carrying_the_retired_nco_field_still_loads():
+    """The catalog used to record an NCO frequency. Dropping it was not a
+    schema change, because a file written with the key reads back fine without
+    it — which is the whole reason SCHEMA_VERSION did not have to move."""
+    d = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01).to_dict()
+    d["nco_frequency_hz"] = 1.1e9
+
+    back = ResonatorCatalog.from_dict(d)
+    assert back.module == 4
+    assert not hasattr(back, "nco_frequency_hz")
+
+
+def test_a_dict_round_trip_brings_the_separation_rule_back():
+    """The dict holds everything the object does, so reading one back is a
+    restoration and not a decision about what to make of the file."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
+    )
+    d = m.to_dict()
+    assert d["min_separation_hz"] == 1e3
+
+    back = ResonatorCatalog.from_dict(d)
+    assert back.min_separation_hz == 1e3
+    assert [r.bias.frequency_hz for r in back] == [r.bias.frequency_hz for r in m]
+
+
+def test_a_dict_round_trip_re_checks_the_rule_it_brings_back():
+    """Which is the one thing the round trip can discover: update_bias_point is not
+    policed, so a catalog whose tones were walked together after it was built
+    fails on the way back in rather than claiming a spacing it does not have."""
+    m = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
+    )
+    walked = m.names(order="frequency")[1]
+    m[walked].update_bias_point(frequency_hz=1e9 + 500.0)
+
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_dict(m.to_dict())
+
+
+def test_a_file_with_no_separation_rule_in_it_reads_under_none():
+    """Files written before the rule was persisted have no key at all, and come
+    back the same as any other catalog with no rule."""
+    d = a_catalog().to_dict()
+    del d["min_separation_hz"]
+    assert ResonatorCatalog.from_dict(d).min_separation_hz is None
+
+
+def test_from_dict_takes_a_separation_rule_of_its_own():
+    """A rule passed in wins over the file's, like every other constructor."""
+    d = ResonatorCatalog.from_frequencies([1e9, 2e9], module=1, amplitude=0.01).to_dict()
+    assert ResonatorCatalog.from_dict(d, min_separation_hz=1e3).min_separation_hz == 1e3
+
+    stricter = ResonatorCatalog.from_frequencies(
+        [1e9, 2e9], module=1, amplitude=0.01, min_separation_hz=1e3
+    ).to_dict()
+    assert ResonatorCatalog.from_dict(stricter, min_separation_hz=None).min_separation_hz is None
+
+
+def test_from_dict_applies_the_separation_rule_it_is_given():
+    d = ResonatorCatalog.from_frequencies(
+        [1e9, 1e9 + 500.0], module=1, amplitude=0.01
+    ).to_dict()
+    with pytest.raises(ValueError, match="collides"):
+        ResonatorCatalog.from_dict(d, min_separation_hz=1e3)
+
+
+# ─── CSV ──────────────────────────────────────────────────────────────────────
+
+
+def test_csv_round_trip_carries_the_operating_point():
+    m = a_catalog()
+    m["R0001"].update_bias_point(frequency_hz=1.0100003e9, amplitude=0.012)
+    back = ResonatorCatalog.from_csv(m.to_csv(), module=2)
+    assert [r.name for r in back] == ["R0001", "R0002", "R0003"]
+    assert back["R0001"].bias.frequency_hz == pytest.approx(1.0100003e9)
+    assert back["R0001"].bias.amplitude == pytest.approx(0.012)
+
+
+def test_csv_columns_may_be_reordered():
+    """It is a spreadsheet-editable file, so column order must not matter."""
+    text = "channel,bias_amplitude,name,bias_frequency_hz\n1,0.012,R0001,1010000900.0\n"
+    m = ResonatorCatalog.from_csv(text, module=2)
+    assert m["R0001"].channel == 1
+    assert m["R0001"].bias.amplitude == pytest.approx(0.012)
+
+
+def test_csv_handles_a_name_containing_a_comma():
+    m = ResonatorCatalog([a_resonator("A,B", channel=1)], module=1)
+    back = ResonatorCatalog.from_csv(m.to_csv(), module=1)
+    assert [r.name for r in back] == ["A,B"]
+
+
+def test_csv_missing_column_is_named():
+    with pytest.raises(ValueError, match="missing required column"):
+        ResonatorCatalog.from_csv("name,channel\nR1,1\n", module=1)
+
+
+def test_csv_blank_bias_is_rejected():
+    """There is no unbiased resonator, so there is no blank bias cell."""
+    text = "name,channel,bias_frequency_hz,bias_amplitude\nR0001,1,1010000900.0,\n"
+    with pytest.raises(ValueError, match="are both required"):
+        ResonatorCatalog.from_csv(text, module=1)
+
+
+def test_csv_bad_number_reports_the_line():
+    text = "name,channel,bias_frequency_hz,bias_amplitude\nR0001,1,not_a_number,0.01\n"
+    with pytest.raises(ValueError, match="line 2"):
+        ResonatorCatalog.from_csv(text, module=1)
+
+
+def test_csv_is_lossy_by_design():
+    """Calibration and notes do not survive; to_dict is the faithful path."""
+    m = a_catalog()
+    m["R0001"].update_bias_point(dI_df=1e-9, dQ_df=2e-9, bias_sweep=a_sweep())
+    m["R0001"].notes["x"] = 1
+    back = ResonatorCatalog.from_csv(m.to_csv(), module=2)
+    assert back["R0001"].bias.df_calibration is None
+    assert back["R0001"].bias.bias_sweep is None
+    assert back["R0001"].notes == {}
+
+
+def test_a_csv_read_back_is_named_by_the_caller():
+    """The table has no row for the catalog's own name, so from_csv takes it
+    the way it takes the module."""
+    text = a_catalog(name="wafer B").to_csv()
+    assert "wafer B" not in text
+    assert ResonatorCatalog.from_csv(text, module=2, name="wafer B").name == "wafer B"
+
+
+# ─── repr ─────────────────────────────────────────────────────────────────────
+
+
+def test_repr_shows_counts_and_rows():
+    text = repr(a_catalog(name="wafer B"))
+    assert "'wafer B'" in text
+    assert "module=2" in text
+    assert "3 resonators" in text
+    assert "R0001" in text and "R0003" in text

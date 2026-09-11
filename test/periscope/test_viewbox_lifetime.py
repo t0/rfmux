@@ -101,7 +101,6 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
     sys.path.insert(0, "__ROOT__")
     from PyQt6 import QtWidgets
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
-    from rfmux.tools.periscope.detector_digest_panel import DetectorDigestPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
     from test.periscope.test_noise_panel_fast_tod_units import _spectrum_data
 
@@ -118,7 +117,6 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
                                   all_detectors_data=detectors,
                                   initial_detector_idx=1,
                                   spectrum_data=_spectrum_data("absolute"))),
-        (DetectorDigestPanel, dict(detector_id=1)),
         (MultisweepPanel, dict(target_module=1)),
     ]
     for cls, kwargs in cases:

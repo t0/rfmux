@@ -1,4 +1,8 @@
 """
+**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
+ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
+here warns on call and names its replacement (see ``_legacy.py``).
+
 The df calibration and bias point of a resonance, from the fit its sweep
 carries.
 
@@ -29,6 +33,7 @@ from ...core.schema import CRS
 from ...core.transferfunctions import convert_iq_to_df, convert_roc_to_volts
 from .fitting import identify_bifurcation, s21_skewed
 from .fitting_nonlinear import nonlinear_iq
+from ._legacy import deprecated
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
            "df_calibration_for_entry", "bias_frequency_from_fit",
@@ -116,6 +121,7 @@ def _slope(model, f, h) -> complex:
     return complex((z[1] - z[0]) / (2 * h))
 
 
+@deprecated("rfmux.tuning.find_bias_frequency", note="Reading the bias frequency off the fitted curve is a planned option there (survey §9.1).")
 def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     """The bias frequency the multisweep's *method* picks, read off the
     resonance *fit* ("nonlinear" or "skewed") the entry carries.
@@ -143,6 +149,7 @@ def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     return float(grid[np.argmax(np.abs(np.gradient(z, grid)))])
 
 
+@deprecated("entry['fits']['nonlinear']['params'] (fr / Qr) after rfmux.tuning.fit_sweeps")
 def fitted_linewidth(entry, prefer="nonlinear"):
     """fr / Qr from the fit the entry carries (the *prefer*red one
     first), in hertz, or None without a fit."""
@@ -150,6 +157,7 @@ def fitted_linewidth(entry, prefer="nonlinear"):
     return None if found is None else found[1]
 
 
+@deprecated("nothing yet", note="Belongs with a stepped-tone calibration, which is noted for later (survey §9.2).")
 def step_slope_correction(entry, f_bias, step_hz, prefer="nonlinear"):
     """What a central difference over +-*step_hz* at *f_bias* reads,
     relative to the true slope there, on the fitted resonance: the
@@ -169,6 +177,7 @@ def step_slope_correction(entry, f_bias, step_hz, prefer="nonlinear"):
     return complex(stepped / true)
 
 
+@deprecated("rfmux.tuning.iq_derivatives_at; the calibration lives on BiasPoint.dI_df / dQ_df", note="Taking it from the fitted slope is a planned option there (survey §9.1).")
 def df_calibration_for_entry(entry, *, prefer="nonlinear"):
     """The calibration for one multisweep result at its bias frequency,
     from the fit it carries: the *prefer*red one ("nonlinear" or
@@ -186,6 +195,7 @@ def df_calibration_for_entry(entry, *, prefer="nonlinear"):
     return complex(1.0 / convert_roc_to_volts(_slope(model, f_bias, 1e-4 * lw)))
 
 
+@deprecated("rfmux.tuning.fits.FitReport / entry['fits'] after rfmux.tuning.fit_sweeps")
 def fits_present(entries) -> set:
     """Which resonance fits the *entries* carry: a subset of
     {"nonlinear", "skewed"}."""
@@ -219,6 +229,7 @@ def _record_fit(entry, fit) -> None:
             entry["skewed_model_mag"] = s21_skewed(f, p["fr"], p["Qr"], p["Qcre"], p["Qcim"], p["A"])
 
 
+@deprecated("rfmux.tuning.fit_sweeps, which writes each model under entry['fits']")
 def ensure_fits(entries, fit="nonlinear") -> int:
     """Run the resonance *fit* ("nonlinear" or "skewed") on every entry
     in *entries* (an iterable of multisweep result dicts) the fitter
@@ -259,6 +270,7 @@ def ensure_fits(entries, fit="nonlinear") -> int:
     return len(todo)
 
 
+@deprecated("rfmux.tuning.iq_derivatives_at on a sweep entry")
 def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None) -> complex:
     """The calibration from one sweep in counts: the inverse of the
     nonlinear resonator model's slope at *f_bias*, the model fitted by
@@ -285,6 +297,7 @@ def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None) -> co
 
 
 @macro(CRS, register=True)
+@deprecated("rfmux.tuning.find_bias_points, whose BiasPoints carry dI_df/dQ_df read off the bias sweep", note="A standalone re-measurement of the calibration is noted for later (survey §9.2).")
 async def measure_df_calibrations(
     crs: CRS,
     channels: Optional[List[int]] = None,

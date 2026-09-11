@@ -27,6 +27,7 @@ from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
 from .custom_material_dialog import ManageCustomMaterialsDialog
+from .field_memory import remember_fields
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):
@@ -62,6 +63,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Connect signals for interactions
         self._connect_signals()
+
+        # A config the caller already holds wins; the launcher, which has
+        # none, gets back the array that was last configured.
+        remember_fields(self, restore=not self.current_config)
 
         # Trigger initial derived parameter update
         self._update_all_derived()

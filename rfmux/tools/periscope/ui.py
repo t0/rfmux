@@ -9,12 +9,10 @@ from .dialogs import ( # Assuming periscope_dialogs.py becomes dialogs.py
     NetworkAnalysisDialog,
     NetworkAnalysisParamsDialog,
     InitializeCRSDialog,
-    FindResonancesDialog,
     MultisweepDialog,
 )
 from .network_analysis_panel import NetworkAnalysisPanel
 from .multisweep_panel import MultisweepPanel
-from .detector_digest_panel import DetectorDigestPanel
 
 __all__ = [
     # From dialogs.py
@@ -22,13 +20,11 @@ __all__ = [
     "NetworkAnalysisDialog",
     "NetworkAnalysisParamsDialog",
     "InitializeCRSDialog",
-    "FindResonancesDialog",
     "MultisweepDialog",
     
     # From panel files
     "NetworkAnalysisPanel",
     "MultisweepPanel",
-    "DetectorDigestPanel",
 
     # Potentially re-exporting things from .utils or .tasks if they are considered part of the UI's public API
     # For example, if UI elements directly use constants from .utils:

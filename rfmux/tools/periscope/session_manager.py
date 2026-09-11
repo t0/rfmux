@@ -27,6 +27,8 @@ from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
 
+from ...tuning import store
+
 
 class SessionManager(QtCore.QObject):
     """
@@ -59,7 +61,6 @@ class SessionManager(QtCore.QObject):
     DATA_TYPES = {
         'netanal': 'Network Analysis',
         'multisweep': 'Multisweep Analysis',
-        'bias': 'Bias KIDs',
         'noise': 'Noise Spectrum',
         'channel_noise':'Channel Noise',
         'screenshot': 'Screenshot' ,
@@ -166,6 +167,8 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        # The library writes into the session folder, flat, as the notebooks do.
+        store.set_output_directory(session_path)
         
         # Save the full session path so it's pre-selected next time
         from . import settings
@@ -228,6 +231,7 @@ class SessionManager(QtCore.QObject):
         
         # Set the session path
         self._session_path = path
+        store.set_output_directory(path)
         self._session_start_time = datetime.datetime.now()
         
         # Try to load existing metadata
@@ -269,6 +273,7 @@ class SessionManager(QtCore.QObject):
         session_name = self.session_name
         
         # Clear state
+        store.set_output_directory(None)
         self._session_path = None
         self._export_count = 0
         self._session_start_time = None
@@ -534,16 +539,18 @@ class SessionManager(QtCore.QObject):
     def load_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Load data from a pickle file.
-        
+
+        Through ``store``, so a file that was moved is told where it now is and
+        an analysis re-saves it in place rather than beside itself.
+
         Args:
             file_path: Path to the pickle file to load
-        
+
         Returns:
             Dictionary of loaded data, or None if load fails
         """
         try:
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
+            return store.load(file_path)
         except Exception as e:
             print(f"[Session] Error loading file {file_path}: {e}")
             return None
@@ -556,8 +563,9 @@ class SessionManager(QtCore.QObject):
         or data structures. This makes it robust against filename changes.
         
         Detection priority:
-        1. Check '_session_export' metadata (for files exported by session manager)
-        2. Inspect data structure (for older files or external files)
+        1. Check store's file_metadata (for files written through store)
+        2. Check '_session_export' metadata (for files exported by session manager)
+        3. Inspect data structure (for older files or external files)
         
         Args:
             file_path: Path to the pickle file
@@ -581,33 +589,26 @@ class SessionManager(QtCore.QObject):
         if data is None or not isinstance(data, dict):
             return None
         
-        # 1. Check for session export metadata (most reliable)
+        # 1. A file written through store says what it is, whoever wrote it:
+        # a container carries file_metadata in each module's block, and a
+        # to_dict payload carries it at the top.
+        for block in [data, *data.values()]:
+            if isinstance(block, dict) and store.METADATA_KEY in block:
+                measurement_type = block[store.METADATA_KEY].get('measurement_type')
+                if measurement_type:
+                    return measurement_type
+
+        # 2. Files the session manager wrote itself, before store
         if '_session_export' in data:
             metadata = data['_session_export']
             if isinstance(metadata, dict) and 'data_type' in metadata:
                 return metadata['data_type']
         
-        # 2. Fall back to structure-based detection for older files
-        # Priority order matters: bias and noise are subsets of multisweep
-        
-        # Check for multisweep data (either old or new format)
-        has_multisweep = 'results_by_detector' in data or 'results_by_iteration' in data
+        # 3. Fall back to structure-based detection for files with neither
 
-        # Bias files: have both bias_kids_output AND multisweep data
-        if 'bias_kids_output' in data and has_multisweep:
-            return 'bias'
-
-        # Noise files: have noise_data AND multisweep data
-        if 'noise_data' in data and data['noise_data'] is not None and has_multisweep:
+        # Noise files: a spectrum beside the settings it was taken under.
+        if 'noise_data' in data and data['noise_data'] is not None:
             return 'noise'
-
-        # Multisweep files: have multisweep data (but not bias or noise)
-        if has_multisweep:
-            return 'multisweep'
-        
-        # Network analysis files: have 'parameters' and 'modules' keys
-        if 'parameters' in data and 'modules' in data:
-            return 'netanal'
 
         if 'channel_noise_data' in data and data['channel_noise_data'] is not None:
             return 'channel_noise'
@@ -688,7 +689,7 @@ class SessionManager(QtCore.QObject):
         Slot to handle data_ready signals from analysis panels.
         
         This slot should be connected to the data_ready signals emitted
-        by NetworkAnalysisPanel, MultisweepPanel, and DetectorDigestPanel.
+        by NetworkAnalysisPanel and MultisweepPanel.
         
         Args:
             data_type: Type of data (netanal, multisweep, bias, noise)

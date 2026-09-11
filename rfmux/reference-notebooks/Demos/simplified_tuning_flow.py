@@ -1,448 +1,267 @@
 #!/usr/bin/env python3
-"""
-Detector tuning as a plain script: bias a set of KIDs and measure their noise.
-
-Executes the complete measurement sequence:
-1. Initialize
-2. Network analysis
-3. Unwrap cable delay
-4. Find resonances
-5. Take multisweep
-6. Do fitting
-7. Bias the kids
-8. Get slow samples
-9. Get PFB samples
-
-For what any of these steps mean, what the parameters do and what the
-data looks like at each stage, open simplified_tuning_flow.md in this
-folder as a notebook (double-click it in the Jupyter panel Periscope
-launches; in your own JupyterLab, right-click -> Open With -> Notebook).
-It is the documentation; this is the runner.
+"""Tune an array, apply its bias catalog, and acquire slow and PFB noise.
 
 Usage:
-    python simplified_tuning_flow.py MOCK         # Run with mock CRS
-    python simplified_tuning_flow.py 0042         # Run with real CRS serial 0042
+    python simplified_tuning_flow.py                       # fresh mock array
+    python simplified_tuning_flow.py MOCK --output /tmp/tuning
+    python simplified_tuning_flow.py 0042 --module 1        # real board
+    python simplified_tuning_flow.py 0042 --hostname crs0042.local
+    python simplified_tuning_flow.py ATTACHED              # Periscope's CRS
+
+Edit the measurement settings below for your real array and RF attenuation.
+Hardware needs a configured clock/timestamp source and a UDP readout stream
+that reaches this computer. Only a mock created here is started and stopped.
+The mock PFB RPC capture returns uniform synthetic noise, not detector noise.
+
+See simplified_tuning_flow.md for the same workflow with plots and explanations.
 """
 
+from __future__ import annotations
+
+import argparse
 import asyncio
-import numpy as np
-from datetime import datetime
+import json
+import os
+from pathlib import Path
 import sys
+import tempfile
+import time
 
-# Import required modules
+import numpy as np
+from tuber.codecs import TuberResult
+
 import rfmux
-from rfmux.core.crs import CRS
-from rfmux.core.transferfunctions import fit_cable_delay, calculate_new_cable_length
-from rfmux.algorithms.measurement.fitting import find_resonances, fit_skewed_multisweep
-from rfmux.algorithms.measurement.fitting_nonlinear import fit_nonlinear_iq_multisweep
-from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.core.resonators import ResonatorCatalog
+from rfmux.core.transferfunctions import (
+    PFB_SAMPLING_FREQ, decimation_to_sampling,
+)
 from rfmux.streamer import find_streamer_conflict
+from rfmux.tuning import (
+    AmplitudeSchedule, BiasReport, find_bias_points,
+    find_resonances_in_netanal, store,
+)
 
-# Import mock mode support
-from rfmux.mock.helpers import create_mock_crs
+# Match the notebook's compact, unbiased array and measurement settings.
+MOCK_CONFIG = {
+    "num_resonances": 10,
+    "freq_start": 601e6,
+    "freq_end": 608e6,
+    "C_variation": 0.0001,
+    "resonator_random_seed": 42,
+    "auto_bias_kids": False,
+    "pulse_mode": "none",
+    "tls_noise_enabled": False,
+    "nqp_noise_std_factor": 0.001,
+    "T": 0.23,
+}
+NETANAL_PARAMS = dict(
+    fmin=600e6, fmax=610e6, npoints=2_000, amp=0.001,
+    nsamps=10, max_chans=1023,
+)
+FIND_RES_PARAMS = dict(
+    min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,
+    min_separation_hz=100e3,
+)
+MULTISWEEP_PARAMS = dict(span_hz=100e3, npoints_per_sweep=201, nsamps=10)
+SCHEDULE = AmplitudeSchedule.ramp(0.002, 0.032, 5)
+BIAS_SETTINGS = dict(
+    frequency_method="iq_derivative", direction="upward",
+    spike_prominence_factor=0.5, noise_gate_factor=50.0,
+    max_discrepancy=0.1, compare="magnitude",
+)
+SLOW_NOISE_PARAMS = dict(
+    num_samples=1_000, channel=None, return_spectrum=True,
+    scaling="psd", reference="absolute", nsegments=5, spectrum_cutoff=0.9,
+)
+PFB_NOISE_PARAMS = dict(
+    nsamps=20_000, binlim=1e6, trim=False, nsegments=5,
+    reference="absolute", reset_NCO=False,
+)
 
 
-async def main(serial="MOCK"):
-    """Main execution flow replicating periscope algorithm.
-    
-    Args:
-        serial: CRS serial number (e.g., "0042") or "MOCK" for mock mode
-    """
-    
-    # Configuration parameters
-    MODULE = 1  # Use Module 1
-    
-    # Network analysis parameters
-    NETANAL_PARAMS = {
-        'amp': 0.001,
-        'fmin': 0.6e9,      # 600 MHz
-        'fmax': 1.1e9,     # 1100 MHz  
-        'nsamps': 10,
-        'npoints': 50000,
-        'max_chans': 1023,
-        'max_span': 500e6,  # 500 MHz
-        'module': MODULE
+async def _connect(
+    serial: str, hostname: str | None = None,
+) -> tuple[rfmux.CRS, bool]:
+    created_mock = serial.upper() == "MOCK"
+    if created_mock:
+        session = rfmux.load_session('''
+!HardwareMap
+- !flavour "rfmux.mock"
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
+''')
+    else:
+        if serial.upper() == "ATTACHED":
+            hostname = hostname or os.environ.get("RFMUX_CRS_HOSTNAME")
+            if not hostname:
+                raise ValueError(
+                    "ATTACHED needs RFMUX_CRS_HOSTNAME or --hostname.")
+            serial = os.environ.get("RFMUX_CRS_SERIAL", "0000")
+        address = f", hostname: {json.dumps(hostname)}" if hostname else ""
+        session = rfmux.load_session(
+            f'!HardwareMap [ !CRS {{ serial: {json.dumps(serial)}{address} }} ]')
+    crs = session.query(rfmux.CRS).one()
+    await crs.resolve()
+    if created_mock:
+        from rfmux.mock.config import apply_overrides
+
+        count, _ = await crs.generate_resonators(apply_overrides(MOCK_CONFIG))
+        print(f"Generated {count} unbiased mock resonators")
+    return crs, created_mock
+
+
+def _noise_record(
+    data: TuberResult, channel_index: int | None = None,
+) -> dict:
+    def values(value: list) -> np.ndarray:
+        return np.asarray(value if channel_index is None else value[channel_index])
+
+    return {
+        "i": values(data.i), "q": values(data.q),
+        "freq_iq": np.asarray(data.spectrum.freq_iq),
+        "freq_dsb": np.asarray(data.spectrum.freq_dsb),
+        "psd_i": values(data.spectrum.psd_i),
+        "psd_q": values(data.spectrum.psd_q),
+        "psd_dual_sideband": values(data.spectrum.psd_dual_sideband),
     }
-    
-    # Find resonances parameters
-    FIND_RES_PARAMS = {
-        'min_dip_depth_db': 1.0,
-        'min_Q': 1e4,
-        'max_Q': 1e7,
-        'min_resonance_separation_hz': 100e3,
-        'data_exponent': 2.0
-    }
-    
-    # Multisweep parameters
-    MULTISWEEP_PARAMS = {
-        'span_hz': 200e3,             # the multisweep defaults: 200 kHz span,
-        'npoints_per_sweep': 101,     # 2 kHz per point across a 10 kHz linewidth
-        'amp': 0.001,
-        'nsamps': 10,
-        'module': MODULE,
-        'bias_frequency_method': 'max-diq',  # Method to find optimal bias frequency
-        'rotate_saved_data': False,          # Don't rotate data for df calibration consistency
-        'sweep_direction': 'upward'
-    }
-    
-    # Fitting parameters
-    FIT_PARAMS = {
-        'apply_skewed_fit': True,
-        'apply_nonlinear_fit': True,  # Optional
-        'approx_Q_for_fit': 1e4,
-        'fit_resonances': True,
-        'center_iq_circle': True,
-        'normalize_fit': True
-    }
 
-    SAMPLE_PARAMS = {
-        'num_samples': 1000,
-        'return_spectrum': True,
-        'scaling': 'psd',
-        'reference': 'absolute',
-        'nsegments': 5,
-        'spectrum_cutoff': 0.9,
-        'channel': None,
-        'module': MODULE
+
+async def _acquire_noise(
+    crs: rfmux.CRS, catalog: ResonatorCatalog, *, created_mock: bool,
+) -> dict:
+    module = catalog.module
+    slow_params = dict(SLOW_NOISE_PARAMS, module=module)
+    pfb_params = dict(PFB_NOISE_PARAMS, module=module)
+    noise = {
+        "module_id": crs.module[module].index(), "module": module,
+        "catalog": catalog.to_dict(),
+        "slow_params": slow_params, "pfb_params": pfb_params,
+        "resonators": {},
     }
-
-    # Simulated detectors, used only when serial is "MOCK".  Placed in the
-    # network-analysis band above so the sweep can actually find them.
-    MOCK_CONFIG = {
-        'num_resonances': 10,
-        'freq_start': 0.6e9,  # 600 MHz - within network analysis range
-        'freq_end': 1.0e9,    # 1 GHz - within network analysis range
-        'resonator_random_seed': 42,  # same resonators every run
-    }
-
-    is_mock = serial.upper() == "MOCK"
-    
-    print("="*60)
-    print("Simple Periscope Algorithm Flow")
-    print(f"Mode: {'MOCK' if is_mock else 'REAL HARDWARE'}")
-    print(f"Serial: {serial}")
-    print(f"Started at: {datetime.now()}")
-    print("="*60)
-
-    crs = None
+    started_mock_stream = False
+    started = time.perf_counter()
     try:
-        # Step 1: Initialize CRS connection
-        print("\n1. Initializing CRS...")
-        
-        if is_mock:
-            # Refuse to be the second simulation on the port. Mock streamers
-            # all send to 127.0.0.1:9876, so a reader gets both interleaved
-            # and every number below is quietly wrong.
+        if created_mock:
             conflict = find_streamer_conflict()
             if conflict:
                 raise RuntimeError(
-                    f"refusing to start a simulation — {conflict}. "
-                    "Stop whatever is streaming (a Periscope in mock mode, "
-                    "another run of this script, a mock server left behind "
-                    "by a crashed process) and try again.")
+                    f"Cannot start a second mock stream: {conflict}. "
+                    "Stop the other sender/receiver or use ATTACHED "
+                    "to measure the existing session.")
+            started_mock_stream = await crs.start_udp_streaming()
+            print("Mock PFB RPC capture is synthetic uniform noise.")
 
-            # Use mock CRS with simulated resonators.  Only keys that exist
-            # in rfmux.mock.config.MOCK_DEFAULTS do anything — apply_overrides
-            # accepts unknown ones silently, so a typo or a parameter that
-            # was never implemented reads as configuration and is not.
-            crs = await create_mock_crs(
-                module=MODULE,
-                config=MOCK_CONFIG,
-                verbose=True
-            )
+        slow_rate = decimation_to_sampling(await crs.get_decimation())
+        noise["slow_sample_rate_hz"] = slow_rate
+        noise["pfb_sample_rate_hz"] = PFB_SAMPLING_FREQ
+        slow_data = await crs.py_get_samples(**slow_params)
+        for resonator in catalog:
+            noise["resonators"][resonator.name] = {
+                "channel": resonator.channel,
+                "slow": _noise_record(slow_data, resonator.channel - 1),
+            }
+        del slow_data
 
-            # For mock mode, we don't need to set timestamp port
-            await crs.clear_channels(module=MODULE)
-            print("   ✓ Mock CRS initialized with simulated resonators")
-
-            # Run the algorithm flow with mock CRS.  The resonator count is
-            # known here, so the run can check its own findings.
-            await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
-                                   expected_resonances=MOCK_CONFIG['num_resonances'],
-                                   collect_pfb=True, pfb_samples=20_000,
-                                   is_mock=True)
-
-        else:
-            # Use real hardware - load session with serial number
-            session = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
-            crs = session.query(CRS).one()
-            
-            # Resolve the connection
-            await crs.resolve()
-            print(f"   ✓ Connected to CRS serial: {serial}")
-            
-            # Set timestamp port
-            if hasattr(crs, 'TIMESTAMP_PORT'):
-                await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
-                print("   ✓ Timestamp port set to TEST")
-            
-            # Clear channels
-            await crs.clear_channels(module=MODULE)
-            print("   ✓ Channels cleared")
-
-            # Run the algorithm flow.  No expected_resonances: how many a
-            # real array has is what the sweep is there to find out.
-            await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                                   MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
-                                   collect_pfb=True)
-            
-    except Exception as e:
-        print(f"\n❌ Error occurred: {type(e).__name__}: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return 1
+        for resonator in catalog:
+            pfb_data = await crs.py_get_pfb_samples(
+                channel=resonator.channel, **pfb_params)
+            noise["resonators"][resonator.name]["pfb"] = _noise_record(pfb_data)
+            print(f"Noise acquired: {resonator.name}, channel {resonator.channel}")
     finally:
-        # Stop the simulation this script started. Irrelevant when it is run
-        # as a script — the process exits and takes the streamer with it —
-        # but main() is also awaited in-process by the test suite, and a mock
-        # left streaming to 127.0.0.1:9876 then interleaves with whatever
-        # simulation the next test creates. Both send valid packets to the
-        # same port, so the reader mixes two detectors with nothing raised.
-        if is_mock and crs is not None:
-            try:
-                await crs.stop_udp_streaming()
-            except Exception:
-                pass
+        if started_mock_stream:
+            await crs.stop_udp_streaming()
+            print("Script's mock UDP streamer stopped")
 
+    print(f"Slow capture: {slow_params['num_samples'] / slow_rate:.3f} s, "
+          f"{slow_rate:.1f} samples/s")
+    print(f"PFB capture per resonator: "
+          f"{pfb_params['nsamps'] / PFB_SAMPLING_FREQ * 1e3:.2f} ms")
+    print(f"Noise acquisition completed in {time.perf_counter() - started:.1f} s")
+    return noise
+
+
+async def run_algorithm_flow(
+    crs: rfmux.CRS, module: int = 1, *, created_mock: bool = False,
+) -> BiasReport:
+    """Tune, apply and measure noise; return the report and save measurements."""
+    module_id = crs.module[module].index()
+    await crs.clear_channels(module=module)
+
+    print(f"1. Network analysis on {module_id}", flush=True)
+    netanal = await crs.take_netanal(
+        module=module, **NETANAL_PARAMS, save=True, label="tuning_netanal")
+    module_netanal = netanal[module_id]
+    search = find_resonances_in_netanal(
+        module_netanal, **FIND_RES_PARAMS, save=True)
+    print(f"Saved network analysis: {store.saved_path(module_netanal)}")
+    if not len(search):
+        raise RuntimeError("No resonances found: inspect the band and search cuts.")
+    catalog = search.to_catalog(module=module, amplitude=NETANAL_PARAMS["amp"])
+    print(f"Found {len(catalog)} resonators")
+
+    print("2. Initial multisweep at the probe amplitude", flush=True)
+    initial = await crs.multisweep(
+        catalog, **MULTISWEEP_PARAMS, sweep_direction="upward",
+        save=True, label="tuning_probe")
+    print(f"Saved initial multisweep: {store.saved_path(initial[module_id])}")
+
+    print(f"3. Amplitude scan: {SCHEDULE.nsteps} levels, both directions", flush=True)
+    sweeps = await crs.multisweep(
+        catalog, **MULTISWEEP_PARAMS, amp=SCHEDULE,
+        sweep_direction=("upward", "downward"),
+        save=True, label="tuning_amplitudes")
+    module_sweeps = sweeps[module_id]
+    report = find_bias_points(
+        module_sweeps, **BIAS_SETTINGS,
+        amplitude_method="derivative" if created_mock else "both", save=True)
+    print(f"Saved amplitude scan and bias report: {store.saved_path(module_sweeps)}")
+    print(f"Bias report: {len(report.findings)} points, {len(report.flagged)} flagged")
+    for finding in report.findings:
+        print(f"  {finding.name}: amplitude {finding.amplitude:g}, "
+              f"{finding.frequency_hz / 1e6:.6f} MHz; "
+              f"{finding.flagged_because or 'bracketed operating point'}")
+
+    # Like the notebook, apply the full catalog, including reported fallbacks.
+    print("4. Applying bias catalog", flush=True)
+    await crs.apply_bias(report.catalog)
+
+    print("5. Acquiring slow-stream and PFB noise", flush=True)
+    noise = await _acquire_noise(crs, report.catalog, created_mock=created_mock)
+    noise_path = store.save(noise, "noise", label="tuning_noise")
+    print(f"Saved noise: {noise_path}")
+    return report
+
+
+async def main(
+    serial: str = "MOCK", *, hostname: str | None = None,
+    module: int = 1, output: Path | None = None,
+) -> int:
+    started = time.perf_counter()
+    try:
+        if output is None:
+            output = Path(os.environ.get(
+                "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_tuning_flow"))
+        store.set_output_directory(output)
+        print(f"Target: {serial}, module {module}; results: {output}", flush=True)
+        crs, created_mock = await _connect(serial, hostname)
+        await run_algorithm_flow(crs, module, created_mock=created_mock)
+    except Exception as exc:
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(f"Workflow completed in {time.perf_counter() - started:.1f} s")
     return 0
 
 
-async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
-                           MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True,
-                           *, expected_resonances=None, collect_pfb=False,
-                           pfb_samples=100_000, is_mock=False):
-    """Run the complete algorithm flow with the given CRS instance.
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("serial", nargs="?", default="MOCK",
+                        help="MOCK (default), board serial, or ATTACHED")
+    parser.add_argument("--hostname", help="explicit CRS hostname/address")
+    parser.add_argument("--module", type=int, default=1, help="module number (default: 1)")
+    parser.add_argument("--output", type=Path,
+                        help="output directory (default: RFMUX_DEMO_OUTPUT or temporary folder)")
+    return parser.parse_args(argv)
 
-    expected_resonances : int, optional
-        Number of resonances the array is known to have — only true of a
-        simulation, where it is the whole point of checking. Left None on
-        real hardware, where the count is the measurement, not a given.
-    collect_pfb : bool
-        Run step 9. Off by default so partial flows (and tests driving
-        this with mocks) stop after the slow-stream noise.
-    is_mock : bool
-        Label the PFB numbers as synthetic. MockCRS.get_pfb_samples
-        returns uniform noise rather than simulated detector output, so
-        the step exercises the call and nothing more.
-    """
-    
-    # Step 2: Network Analysis
-    print("\n2. Performing network analysis...")
-    print(f"   Sweeping {NETANAL_PARAMS['fmin']/1e6:.1f} - {NETANAL_PARAMS['fmax']/1e6:.1f} MHz")
-    
-    # Progress callback for network analysis
-    def netanal_progress_callback(module, percentage):
-        print(f"   Network analysis progress: {percentage:.1f}%", end='\r')
-    
-    NETANAL_PARAMS['progress_callback'] = netanal_progress_callback
-    
-    netanal_result = await crs.take_netanal(**NETANAL_PARAMS)
-    
-    frequencies = netanal_result['frequencies']
-    iq_complex = netanal_result['iq_complex']
-    phase_degrees = netanal_result['phase_degrees']
-    
-    print(f"   ✓ Network analysis complete: {len(frequencies)} points")
-    
-    # Step 3: Unwrap cable delay
-    print("\n3. Unwrapping cable delay...")
-    
-    # Fit cable delay from phase data
-    tau_additional = fit_cable_delay(frequencies, phase_degrees)
-    
-    # Calculate new cable length (assume current is 0m for simplicity)
-    current_cable_length = await crs.get_cable_length(module=MODULE)
-    new_cable_length = calculate_new_cable_length(current_cable_length, tau_additional)
-    
-    # Set the cable length on the CRS
-    await crs.set_cable_length(length=new_cable_length, module=MODULE)
-    
-    print(f"   ✓ Cable delay unwrapped: delay={tau_additional*1e9:.2f} ns")
-    print(f"   ✓ Cable length set to: {new_cable_length:.2f} m")
-    
-    # Step 4: Find resonances
-    print("\n4. Finding resonances...")
-    
-    resonance_result = find_resonances(
-        frequencies=frequencies,
-        iq_complex=iq_complex,
-        **FIND_RES_PARAMS,
-        module_identifier=f"Module {MODULE}"
-    )
-    
-    resonance_frequencies = resonance_result['resonance_frequencies']
-    resonance_details = resonance_result['resonances_details']
-
-    if full_run and expected_resonances is not None:
-        assert len(resonance_frequencies) == expected_resonances, (
-            f"found {len(resonance_frequencies)} resonances, expected "
-            f"{expected_resonances} — the sweep or the detection "
-            f"parameters have drifted")
-
-    print(f"   ✓ Found {len(resonance_frequencies)} resonances:")
-    for i, (freq, details) in enumerate(zip(resonance_frequencies, resonance_details)):
-        print(f"     {i+1}: {freq/1e6:.3f} MHz, Q≈{details['q_estimated']:.0f}, depth={details['prominence_db']:.1f} dB")
-    
-    if not resonance_frequencies:
-        print("   ! No resonances found. Adjust parameters and try again.")
-        return
-    
-    # Step 5: Take multisweep
-    print("\n5. Performing multisweep measurements...")
-    print(f"   Sweeping around {len(resonance_frequencies)} resonances")
-    
-    # Set center frequencies for multisweep
-    MULTISWEEP_PARAMS['center_frequencies'] = resonance_frequencies
-    
-    # Progress callback (optional)
-    def progress_callback(module, percentage):
-        print(f"   Progress: {percentage:.1f}%", end='\r')
-    
-    MULTISWEEP_PARAMS['progress_callback'] = progress_callback
-    
-    multisweep_results = await crs.multisweep(**MULTISWEEP_PARAMS)
-    
-    print(f"\n   ✓ Multisweep complete for {len(multisweep_results)} resonances")
-    
-    # Step 6: Do fitting
-    print("\n6. Performing resonance fitting...")
-    
-    # Apply skewed Lorentzian fitting
-    if FIT_PARAMS['apply_skewed_fit']:
-        print("   Applying skewed Lorentzian fits...")
-        multisweep_results = fit_skewed_multisweep(
-            multisweep_results,
-            approx_Q_for_fit=FIT_PARAMS['approx_Q_for_fit'],
-            fit_resonances=FIT_PARAMS['fit_resonances'],
-            center_iq_circle=FIT_PARAMS['center_iq_circle'],
-            normalize_fit=FIT_PARAMS['normalize_fit']
-        )
-        
-        # Count successful fits
-        successful_fits = sum(1 for res_data in multisweep_results.values() 
-                            if res_data.get('fit_params', {}).get('fr') != 'nan')
-        print(f"   ✓ Skewed fitting complete: {successful_fits}/{len(multisweep_results)} successful")
-    
-    # Apply nonlinear fitting (optional)
-    if FIT_PARAMS['apply_nonlinear_fit']:
-        print("   Applying nonlinear fits...")
-        multisweep_results = fit_nonlinear_iq_multisweep(
-            multisweep_results,
-            fit_nonlinearity=True,
-            n_extrema_points=5,
-            verbose=False
-        )
-        
-        # Count successful nonlinear fits
-        nl_successful = sum(1 for res_data in multisweep_results.values() 
-                          if res_data.get('nonlinear_fit_success', False))
-        print(f"   ✓ Nonlinear fitting complete: {nl_successful}/{len(multisweep_results)} successful")
-    
-    # Display fit results
-    print("\n   Fit results summary:")
-    for idx, res_data in multisweep_results.items():
-        if isinstance(idx, (int, np.integer)):
-            fit_params = res_data.get('fit_params', {})
-            if fit_params.get('fr') != 'nan':
-                print(f"     Resonance {idx}: fr={fit_params['fr']/1e6:.3f} MHz, "
-                      f"Qr={fit_params['Qr']:.0f}, Qc={fit_params['Qc']:.0f}")
-    
-    # Step 7: Bias the KIDs
-    print("\n7. Biasing the KIDs...")
-    
-    # Progress callback for bias_kids
-    def bias_progress_callback(module, percentage):
-        print(f"   Bias progress: {percentage:.1f}%", end='\r')
-    
-    # Pass multisweep results directly to bias_kids
-    # Since we're doing a single amplitude sweep, we can pass the results directly
-    bias_results = await bias_kids(
-        crs=crs,
-        multisweep_results=multisweep_results,
-        module=MODULE,
-        progress_callback=bias_progress_callback
-    )
-    
-    print(f"\n   ✓ Bias complete for {len(bias_results)} detectors")
-    
-    # Display bias results
-    print("\n   Bias results summary:")
-    for det_idx, det_data in bias_results.items():
-        if 'bias_frequency' in det_data:
-            print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
-            if 'df_calibration' in det_data:
-                print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V")
-    
-    
-    ### Step 8. Slow Noise spectrum 
-    print("\n8. Collecting 1000 slow noise samples...")
-
-    slow_data = await crs.py_get_samples(**SAMPLE_PARAMS)
-
-    num_res = len(bias_results)
-
-    print(f"\nSlow Noise data collected for the {num_res} biased channels")
-
-    print("\n  Noise results summary:")
-
-    for i in range(num_res):
-        psd_i = slow_data.spectrum.psd_i[i]
-        psd_q = slow_data.spectrum.psd_q[i]
-        freq_iq = slow_data.spectrum.freq_iq
-        freq_dsb = slow_data.spectrum.freq_dsb
-
-        mean_psd_i = np.mean(psd_i[2:]) ### removing DC
-        mean_psd_q = np.mean(psd_q[2:])
-
-        print(f"   Channel {i+1}: Frequency Bandwidth = {max(freq_iq):.3f} Hz, Min dsb frequency = {min(freq_dsb):.3f} Hz, Max dsb frequency = {max(freq_dsb):.3f} Hz")
-        print(f"                  Mean I spectrum power = {mean_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_psd_q:.3f} dBm/Hz\n")
-
-    #### Step 9. PFB noise spectrum
-    if not collect_pfb:
-        print("\nSkipping PFB noise samples (collect_pfb=False)")
-    else:
-        print(f"\n9. Collecting {pfb_samples} PFB noise samples....")
-        if is_mock:
-            print("   ! Simulated PFB samples are uniform noise, not detector"
-                  " output — the spectra below measure nothing physical.")
-
-        for i in range(num_res):
-            pfb_data = await crs.py_get_pfb_samples(pfb_samples,
-                                                    channel = i + 1,
-                                                    module = MODULE,
-                                                    binlim = 1e6,
-                                                    trim = False,
-                                                    nsegments = 5,
-                                                    reference = "absolute",
-                                                    reset_NCO = False)
-            
-            # print(f"Pfb data collected for channel {i+1}")
-            
-            pfb_psd_i = pfb_data.spectrum.psd_i
-            pfb_psd_q = pfb_data.spectrum.psd_q
-            pfb_freq_iq = pfb_data.spectrum.freq_iq
-            pfb_freq_dsb = pfb_data.spectrum.freq_dsb
-
-            mean_pfb_psd_i = np.mean(pfb_psd_i[2:]) ### Removing dc bin
-            mean_pfb_psd_q = np.mean(pfb_psd_q[2:])
-
-            print(f"   Channel {i+1}: Frequency Bandwidth = {max(pfb_freq_iq):.3f} Hz, Min dsb frequency = {min(pfb_freq_dsb):.3f} Hz, Max dsb frequency = {max(pfb_freq_dsb):.3f} Hz")
-            print(f"                  Mean I spectrum power = {mean_pfb_psd_i:.3f} dBm/Hz, Mean Q spectrum power = {mean_pfb_psd_q:.3f} dBm/Hz\n")
-            
-    print("\n" + "="*60)
-    print("Algorithm flow complete!")
-    print(f"Finished at: {datetime.now()}")
-    print("="*60)
 
 if __name__ == "__main__":
-    # Get serial number from command line or default to MOCK
-    if len(sys.argv) > 1:
-        serial = sys.argv[1]
-    else:
-        serial = "MOCK"
-        print("No serial number provided, using MOCK mode")
-    
-    # Run the async main function
-    exit_code = asyncio.run(main(serial=serial))
-    exit(exit_code)
+    sys.exit(asyncio.run(main(**vars(_parse_args()))))

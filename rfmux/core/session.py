@@ -252,12 +252,9 @@ def hwm_lookup_constructor(loader, node):
 
 class YAMLLoader(yaml.SafeLoader):
 
-    # We allow some hooks to be queued when the document
-    # is finished loading.
-    __finalize_hooks = []
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.__finalize_hooks = []
 
         # Plumbing
         self.add_constructor("!include", yaml_include_constructor)
@@ -265,7 +262,8 @@ class YAMLLoader(yaml.SafeLoader):
         self.add_constructor("!HWMLookup", hwm_lookup_constructor)
 
     def register_finalization_hook(self, hook):
-        self.__finalize_hooks.append(hook)
+        if hook not in self.__finalize_hooks:
+            self.__finalize_hooks.append(hook)
 
     def construct_document(self, *args, **kwargs):
         """

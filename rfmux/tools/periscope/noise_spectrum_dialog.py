@@ -9,6 +9,7 @@ updates others automatically.
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from rfmux.core.transferfunctions import decimation_to_sampling
+from .field_memory import remember_fields
 
 
 class NoiseSpectrumDialog(QtWidgets.QDialog):
@@ -40,6 +41,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
         self._setup_ui()
         self._connect_signals()
+        remember_fields(self)
         self._update_dependent_values()
 
 

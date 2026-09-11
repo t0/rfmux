@@ -16,6 +16,7 @@ what turns that kind of breakage into a test failure instead of a
 crash on the user's next launch.
 """
 
+import inspect
 import os
 import threading
 import queue
@@ -35,6 +36,7 @@ import asyncio
 # Adjusted imports for new location
 from rfmux.core.session import load_session
 from rfmux.core.schema import CRS
+from rfmux.algorithms.measurement.take_netanal import take_netanal
 
 # ───────────────────────── Global Constants ─────────────────────────
 # Display settings
@@ -98,8 +100,17 @@ DEFAULT_MIN_FREQ = 1e9  # 1 GHz
 DEFAULT_MAX_FREQ = 1.5e9  # 1.5 GHz
 DEFAULT_CABLE_LENGTH = 10  # meters
 DEFAULT_AMPLITUDE = 0.005
-DEFAULT_MAX_CHANNELS = 1024
-DEFAULT_MAX_SPAN = 500e6  # 500 MHz
+# The comb's own knobs, read out of take_netanal's signature so the dialog
+# cannot offer a default the library does not have. DEFAULT_MAX_CHANNELS was
+# 1024 against the driver's 1023, which is one tone per comb iteration and a
+# different set of measured frequencies.
+_NETANAL_DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(take_netanal).parameters.items()
+    if parameter.default is not inspect.Parameter.empty
+}
+DEFAULT_MAX_CHANNELS = _NETANAL_DEFAULTS["max_chans"]
+DEFAULT_MAX_SPAN = _NETANAL_DEFAULTS["max_span"]
 DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
 
@@ -109,22 +120,9 @@ DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
 DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
 
 # Multisweep defaults
-MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default
-MULTISWEEP_DEFAULT_SPAN_HZ = 200000.0  # 200 kHz span per resonance
-MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
-MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
-# Find Resonances defaults
-DEFAULT_EXPECTED_RESONANCES = None  # Optional
-DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
-DEFAULT_MIN_Q = 1e4
-DEFAULT_MAX_Q = 1e7
-DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
-# Off thins crowded peaks to the most prominent; on drops every member
-# of a crowded group, so nothing returned has a neighbour within the
-# separation.
-DEFAULT_REQUIRE_ISOLATION = False
-DEFAULT_DATA_EXPONENT = 2.0
+# How long a transient status message stays in a panel's toolbar.
+STATUS_MESSAGE_MS = 8000
 
 # Sampling settings
 BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
@@ -132,7 +130,7 @@ DEFAULT_BUFFER_SIZE = 5_000
 DEFAULT_REFRESH_MS = 33
 
 # GUI update intervals
-NETANAL_UPDATE_INTERVAL = 0.1  # seconds
+
 
 # ICON_PATH needs to be relative to this file's new location
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons', 'periscope-icon.svg')
@@ -462,9 +460,7 @@ class UnitConverter:
                            dac_scale: Optional[float] = None) -> str:
         """Format a normalized amplitude as a compact human-readable power string.
 
-        Consolidates the label-formatting logic previously duplicated across
-        multisweep_panel, network_analysis_panel, detector_digest_panel, and
-        parameter_histograms_panel.
+        One formatter for every panel that labels a probe amplitude.
 
         Args:
             amp_value:  Normalized amplitude (0–1 scale).
@@ -563,7 +559,7 @@ class ClickableViewBox(pg.ViewBox):
     # ── parent_window: a WEAK back-pointer.  Do not make this a plain attribute.
     #
     # Panels assign ``vb.parent_window = self`` (noise_spectrum_panel,
-    # network_analysis_panel, detector_digest_panel, multisweep_panel).  Held
+    # network_analysis_panel, multisweep_panel).  Held
     # strongly, that closes a reference cycle — ViewBox -> panel -> PlotWidget ->
     # ViewBox — so tearing a panel down goes through Python's *cyclic* collector,
     # which finalizes a graph of PyQt objects in arbitrary order and frees C++

@@ -1,0 +1,1363 @@
+"""Behaviour of the bias-finding layer.
+
+Pure — no board, no driver. Synthetic amplitude steps in, a new catalog out.
+
+The emphasis is on the contract: the search stops one amplitude below
+bifurcation, nothing that was handed in comes back modified, a resonator that
+could not be placed keeps the operating point it arrived with and says why, and
+the calibration on a bias point belongs to the frequency printed beside it.
+
+The two bifurcation tests get their arithmetic checked as well, because a
+detector that never fires — or always does — is worth catching here rather than
+on a cryostat. The nonlinear model supplies the jumped traces: it leans a
+resonance over exactly the way drive does, so a large ``a`` gives a sweep with a
+real discontinuity in it rather than a spike pasted in by hand.
+"""
+
+import numpy as np
+import pytest
+from scipy.signal import find_peaks
+
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.core.transferfunctions import BASE_FREQUENCY
+from rfmux.tuning.bias import (
+    BiasReport,
+    bifurcated_by_derivative,
+    bifurcated_by_either,
+    bifurcated_by_hysteresis,
+    find_bias_amplitude,
+    find_bias_frequency,
+    find_bias_points,
+    iq_arc_speed,
+    iq_derivatives_at,
+    normalized_arc_speed,
+    # The pieces of the derivative test that have their own behaviour to pin
+    # down — the noise floor's robustness and the pairing rule's monotonicity
+    # are properties of these two rather than of any one verdict.
+    _noise_floor,
+    _paired,
+    _spikes,
+)
+from rfmux.tuning.fits import nonlinear_iq
+from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
+from rfmux.tuning.sweep_results import pack_multisweep
+
+pytestmark = pytest.mark.portable
+
+FR = 1.0e9
+QR = 1e4
+SPAN = 6 * FR / QR  # 600 kHz — the span the resonator models like
+
+#: ``a`` well past bifurcation (4·sqrt(3)/9 ≈ 0.77). High enough that the
+#: model's branch solution actually jumps, which is what the detectors look for.
+JUMPED = 2.0
+
+MODULE_ID = "crs0030_rmod2"
+VOLTS_PER_COUNT = 1e-6
+
+
+def a_trace(a=0.0, npoints=201, fr=FR, direction="upward"):
+    """A synthetic sweep across one resonator: frequencies and complex IQ.
+
+    ``a=0`` is a linear resonator; :data:`JUMPED` leans it far enough over to
+    bifurcate. A downward sweep visits the same frequencies in reverse, which
+    is what the macro does.
+    """
+    frequencies = np.linspace(fr - SPAN / 2, fr + SPAN / 2, npoints)
+    if direction == "downward":
+        frequencies = frequencies[::-1]
+    return frequencies, nonlinear_iq(frequencies, fr, QR, 0.5, 0.1, a, 1.2e5, 0.4e5)
+
+
+def a_sweep(amplitude=1e-3, a=0.0, fr=FR, direction="upward", **kwargs):
+    """One sweep entry, shaped the way multisweep returns them."""
+    frequencies, iq = a_trace(a=a, fr=fr, direction=direction, **kwargs)
+    return {
+        "channel": 1,
+        "frequencies": frequencies,
+        "iq_counts": iq,
+        "iq_volts": iq * VOLTS_PER_COUNT,
+        "original_center_frequency": fr,
+        "sweep_direction": direction,
+        "sweep_amplitude": amplitude,
+    }
+
+
+def a_catalog(amplitude=1e-3, min_separation_hz=None):
+    """Two resonators a megahertz apart."""
+    return ResonatorCatalog(
+        [
+            Resonator(name="R0001", channel=1,
+                      bias=BiasPoint(frequency_hz=FR, amplitude=amplitude)),
+            Resonator(name="R0002", channel=2,
+                      bias=BiasPoint(frequency_hz=FR + 1e6, amplitude=amplitude)),
+        ],
+        module=2,
+        min_separation_hz=min_separation_hz,
+    )
+
+
+def a_step(a=0.0, amplitude=1e-3, directions=("upward",), **kwargs):
+    """One resonator at one amplitude step, as ``{direction: entry}``."""
+    return {
+        direction: a_sweep(amplitude=amplitude, a=a, direction=direction, **kwargs)
+        for direction in directions
+    }
+
+
+def amplitude_iterations(
+    nonlinearities=(0.0, 0.0, JUMPED),
+    amplitudes=None,
+    directions=("upward", "downward"),
+    **kwargs,
+):
+    """One resonator's ``{iteration: {direction: entry}}``, a step per ``a``.
+
+    Both directions by default, which is what the default bifurcation method
+    needs — so a test of the *search* gets the search a caller actually gets.
+    The two passes are drawn from the same model and so are identical, which
+    leaves the hysteresis half of that method with nothing to find: what fires
+    on these schedules is the jump, exactly as under ``"derivative"`` alone.
+    """
+    if amplitudes is None:
+        amplitudes = [1e-3 * 2**i for i in range(len(nonlinearities))]
+    return {
+        i: a_step(a=a, amplitude=amp, directions=directions, **kwargs)
+        for i, (a, amp) in enumerate(zip(nonlinearities, amplitudes))
+    }
+
+
+def a_schedule(
+    nonlinearities=(0.0, 0.0, JUMPED),
+    directions=("upward", "downward"),
+    catalog=None,
+    names=("R0001", "R0002"),
+):
+    """One module's worth of a packed multisweep return, over a schedule
+    of amplitude steps.
+
+    Through the real packer, so these tests cannot drift from the shape the
+    macro actually produces. Both resonators get the same series of ``a``.
+    """
+    catalog = a_catalog() if catalog is None else catalog
+    schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, len(nonlinearities))
+    steps = schedule.resolve_steps(catalog)
+    sweeps = {
+        step.step: {
+            direction: {
+                name: a_sweep(
+                    amplitude=step.amplitudes[name],
+                    a=nonlinearities[step.step],
+                    fr=FR if name == "R0001" else FR + 1e6,
+                    direction=direction,
+                )
+                for name in names
+            }
+            for direction in directions
+        }
+        for step in steps
+    }
+    return pack_multisweep(
+        sweeps,
+        module_id=MODULE_ID,
+        module=2,
+        amp_schedule=schedule,
+        directions=directions,
+        span_hz=SPAN,
+        npoints_per_sweep=201,
+        nsamps=10,
+        catalog=catalog,
+    )[MODULE_ID]
+
+
+# ─── choosing the amplitude ───────────────────────────────────────────────────
+
+
+def test_the_amplitude_below_the_first_bifurcated_one_is_chosen():
+    iterations = amplitude_iterations((0.0, 0.0, JUMPED, JUMPED))
+
+    choice = find_bias_amplitude(iterations)
+
+    assert choice.iteration == 1
+    assert choice.amplitude == pytest.approx(2e-3)
+    assert choice.bifurcated_at == pytest.approx(4e-3)
+    assert not choice.is_bifurcated_at_bias
+
+
+def test_a_sweep_that_never_bifurcates_is_biased_at_its_loudest_step():
+    """The schedule did not reach the limit, so the most drive measured is the
+    most drive known to be safe."""
+    iterations = amplitude_iterations((0.0, 0.0, 0.0))
+
+    choice = find_bias_amplitude(iterations)
+
+    assert choice.iteration == 2
+    assert choice.amplitude == pytest.approx(4e-3)
+    assert choice.bifurcated_at is None
+    assert not choice.is_bifurcated_at_bias
+
+
+def test_bifurcation_at_the_quietest_step_says_so_rather_than_going_below():
+    iterations = amplitude_iterations((JUMPED, JUMPED))
+
+    choice = find_bias_amplitude(iterations)
+
+    assert choice.iteration == 0
+    assert choice.bifurcated_at == pytest.approx(choice.amplitude)
+    assert choice.is_bifurcated_at_bias
+
+
+def test_a_single_multisweep_is_one_amplitude_step():
+    choice = find_bias_amplitude(amplitude_iterations((0.0,)))
+
+    assert choice.iteration == 0
+    assert choice.bifurcated_at is None
+
+
+def test_steps_are_examined_in_amplitude_order_not_the_order_measured():
+    """An explicit schedule is free to run high, low, middle. 'One step below'
+    is a statement about drive, not about when the sweep happened."""
+    iterations = amplitude_iterations(
+        (JUMPED, 0.0, 0.0), amplitudes=[4e-3, 1e-3, 2e-3]
+    )
+
+    choice = find_bias_amplitude(iterations)
+
+    assert choice.iteration == 2
+    assert choice.amplitude == pytest.approx(2e-3)
+
+
+def test_only_the_steps_actually_examined_get_a_verdict():
+    """The search stops at the first bifurcated step, so the ones above it were
+    never looked at and have nothing to report."""
+    iterations = amplitude_iterations((0.0, JUMPED, JUMPED, JUMPED))
+
+    choice = find_bias_amplitude(iterations)
+
+    assert set(choice.checks) == {0, 1}
+    assert not choice.checks[0].bifurcated
+    assert choice.checks[1].bifurcated
+
+
+def test_no_sweeps_at_all_says_so():
+    with pytest.raises(ValueError, match="no amplitude to choose"):
+        find_bias_amplitude({})
+
+
+def test_the_choice_unpacks_like_the_tuple_it_is():
+    iteration, amplitude, bifurcated_at, checks = find_bias_amplitude(
+        amplitude_iterations((0.0, 0.0, JUMPED))
+    )
+
+    assert (iteration, amplitude) == (1, pytest.approx(2e-3))
+    assert bifurcated_at == pytest.approx(4e-3)
+    assert set(checks) == {0, 1, 2}
+
+
+def test_an_unknown_amplitude_method_is_refused_by_name():
+    with pytest.raises(ValueError, match="hysteresis"):
+        find_bias_amplitude(amplitude_iterations(), method="jumpiness")
+
+
+# ─── bifurcation by derivative ────────────────────────────────────────────────
+
+
+def test_a_linear_resonator_is_not_bifurcated():
+    check = bifurcated_by_derivative(a_step(a=0.0))
+
+    assert not check.bifurcated
+    assert check.method == "derivative"
+
+
+def test_a_jumped_trace_is_bifurcated():
+    check = bifurcated_by_derivative(a_step(a=JUMPED))
+
+    assert check.bifurcated
+    assert check.metric["positive_spike_prominence"] > check.threshold
+    assert check.metric["negative_spike_prominence"] > check.threshold
+    assert check.metric["adjacency"]
+
+
+def test_the_reported_numbers_are_the_three_conditions_the_verdict_is_made_of():
+    """The verdict is the conjunction of exactly what ``metric`` reports, so a
+    caller can see which condition decided it rather than guessing from one
+    number that stood in for all three."""
+    check = bifurcated_by_derivative(a_step(a=JUMPED))
+
+    assert set(check.metric) == {
+        "positive_spike_prominence",
+        "negative_spike_prominence",
+        "adjacency",
+    }
+    assert check.bifurcated == (
+        check.metric["positive_spike_prominence"] >= check.threshold
+        and check.metric["negative_spike_prominence"] >= check.threshold
+        and check.metric["adjacency"]
+    )
+
+
+def test_a_spike_that_missed_the_bar_still_reports_its_prominence():
+    """The near-miss is the case a factor gets turned by, so the number has to
+    survive the verdict going against it — asking find_peaks for only the
+    spikes that cleared would report nothing exactly when it matters."""
+    step = a_step(a=JUMPED)
+    # 3.0 rather than something just over 1: the spikes either side of this
+    # jump reach nearly twice the span, because each is measured down to the
+    # other, so a bar of 1.5 is one several of them still clear.
+    demanding = bifurcated_by_derivative(step, spike_prominence_factor=3.0)
+
+    assert not demanding.bifurcated
+    assert demanding.metric["positive_spike_prominence"] > 0.0
+    assert demanding.metric["negative_spike_prominence"] > 0.0
+
+
+def test_a_trace_with_no_spike_at_all_reports_zero_rather_than_failing():
+    """A spike needs a point on either side of it, so a sweep short enough that
+    the differenced trace has no interior point has nowhere for one to be. That
+    is a number — nothing stood out — rather than a missing answer, and it must
+    not come back as ``.max()`` of an empty array."""
+    check = bifurcated_by_derivative({"upward": a_sweep(npoints=4)})
+
+    assert not check.bifurcated
+    assert check.metric["positive_spike_prominence"] == 0.0
+    assert check.metric["negative_spike_prominence"] == 0.0
+
+
+def test_the_direction_reported_is_one_that_fired():
+    """Every direction is tested, but only one direction's numbers come back.
+    A metric describing the quiet sweep beside ``bifurcated=True`` would be
+    explaining the wrong thing."""
+    mixed = {
+        "upward": a_sweep(a=0.0, direction="upward"),
+        "downward": a_sweep(a=JUMPED, direction="downward"),
+    }
+
+    check = bifurcated_by_derivative(mixed)
+
+    assert check.bifurcated
+    assert check.metric["adjacency"]
+
+
+def test_the_noise_gate_throws_out_a_sweep_that_is_only_noise():
+    """The span of a sweep with no resonance in it is set by its own scatter, so
+    a bar that is a fraction of the span is one that noise clears by
+    construction. The gate is the second opinion that does not have that
+    problem, and this is the case it exists for."""
+    rng = np.random.default_rng(0)
+    entry = a_sweep(a=0.0)
+    # Nothing but noise: no dip, no jump, just scatter of one arbitrary size.
+    entry["iq_counts"] = (
+        rng.normal(size=len(entry["frequencies"]))
+        + 1j * rng.normal(size=len(entry["frequencies"]))
+    )
+    noise = {"upward": entry}
+
+    assert bifurcated_by_derivative(noise, noise_gate_factor=0.0).bifurcated
+    assert not bifurcated_by_derivative(noise).bifurcated
+
+
+def test_the_noise_gate_leaves_a_real_jump_alone():
+    """It has to reject noise without rejecting the thing it is protecting: a
+    jump stands orders of magnitude above the floor it sits on, which is the
+    whole reason a gate in noise units can separate them at all."""
+    step = a_step(a=JUMPED)
+
+    assert bifurcated_by_derivative(step).bifurcated
+    assert bifurcated_by_derivative(step, noise_gate_factor=0.0).bifurcated
+
+
+def test_the_noise_floor_is_robust_to_the_jump_it_is_measuring():
+    """A standard deviation is lifted by the jump itself, which is what would
+    make a gate in those units useless. The median absolute deviation is not, so
+    adding a jump to a trace must barely move the floor it reports."""
+    quiet = np.tile([1.0, -1.0], 50)  # scatter of a known size, no jump
+    jumped = quiet.copy()
+    jumped[50] = 500.0  # one enormous sample
+
+    assert _noise_floor(jumped) == pytest.approx(_noise_floor(quiet), rel=0.05)
+    assert np.std(jumped) > 5 * np.std(quiet)
+
+
+def test_a_jump_that_straddles_two_samples_is_still_a_jump():
+    """Where the frequency grid fell relative to the discontinuity decides
+    whether the arc-speed peak is one sample wide or two. That is not a property
+    of the resonator, so both have to count."""
+    speed = np.zeros(40)
+    speed[20] = 1.0  # crossed in one sample
+    straddled = np.zeros(40)
+    straddled[20:22] = [0.5, 1.0]  # a sample landed partway across
+
+    for trace in (speed, straddled):
+        jumps = np.diff(trace)
+        up, up_prominence = _spikes(jumps)
+        down, down_prominence = _spikes(-jumps)
+        bar = 0.4
+        assert _paired(up[up_prominence >= bar], down[down_prominence >= bar])
+
+
+def test_lowering_the_bar_cannot_take_a_detection_away():
+    """Matching any cleared pair rather than the first of each list is what
+    makes the verdict monotone in the bar. Without it, admitting one more spike
+    at a lower index displaces ``cleared_up[0]`` and a matching pair stops
+    matching, so turning the knob down could turn a detection off."""
+    step = a_step(a=JUMPED)
+    factors = np.linspace(0.02, 2.0, 60)
+    verdicts = [
+        bifurcated_by_derivative(step, spike_prominence_factor=float(f)).bifurcated
+        for f in factors
+    ]
+
+    # Monotone: once it stops firing as the bar rises, it never starts again.
+    assert verdicts == sorted(verdicts, reverse=True)
+
+
+def test_a_bigger_prominence_factor_is_what_makes_the_test_less_sensitive():
+    """The factor multiplies the span of the arc speed to get the bar, so it
+    reads the way it behaves: ask for enough and the jump stops clearing it."""
+    step = a_step(a=JUMPED)
+    demanding = bifurcated_by_derivative(step, spike_prominence_factor=1e6)
+
+    assert bifurcated_by_derivative(step).bifurcated
+    assert not demanding.bifurcated
+    assert demanding.threshold > bifurcated_by_derivative(step).threshold
+
+
+def test_the_derivative_test_reads_the_shape_and_not_the_scale():
+    """I and Q are normalized by their own range, so a resonator ten times
+    deeper is not ten times more suspicious."""
+    step = a_step(a=JUMPED)
+    louder = {"upward": dict(step["upward"])}
+    louder["upward"]["iq_counts"] = step["upward"]["iq_counts"] * 10
+
+    assert bifurcated_by_derivative(louder).metric == pytest.approx(
+        bifurcated_by_derivative(step).metric
+    )
+
+
+def test_one_bifurcated_direction_is_enough_to_call_the_step_bifurcated():
+    """A bifurcated resonator jumps whichever way the sweep runs; needing both
+    to agree would only lose the one that happened to catch it."""
+    mixed = {
+        "upward": a_sweep(a=JUMPED, direction="upward"),
+        "downward": a_sweep(a=0.0, direction="downward"),
+    }
+
+    assert bifurcated_by_derivative(mixed).bifurcated
+
+
+def test_a_downward_sweep_is_read_the_same_way_as_an_upward_one():
+    """Entries arrive high-to-low; every difference taken here wants them the
+    other way round."""
+    up = bifurcated_by_derivative({"upward": a_sweep(a=JUMPED)})
+    down = bifurcated_by_derivative({"downward": a_sweep(a=JUMPED, direction="downward")})
+
+    assert down.bifurcated == up.bifurcated
+    assert down.metric == pytest.approx(up.metric)
+
+
+# ─── bifurcation by hysteresis ────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_two_directions_that_agree_are_not_bifurcated(compare):
+    check = bifurcated_by_hysteresis(
+        a_step(a=0.0, directions=("upward", "downward")), compare=compare
+    )
+
+    assert not check.bifurcated
+    assert check.metric["max_separation"] == pytest.approx(0.0, abs=1e-9)
+    assert check.method == "hysteresis"
+
+
+def test_the_discrepancy_is_measured_in_loop_radii():
+    """The separation between the traces is imposed here rather than simulated:
+    what is under test is that a known separation comes back as a number in
+    units of the loop, so the threshold means the same thing on every
+    resonator."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    up = step["upward"]["iq_counts"]
+    radius = np.max(np.abs(up - up.mean()))
+    apart = np.zeros_like(up)
+    apart[100:110] = 0.4 * radius
+    step["downward"]["iq_counts"] = step["downward"]["iq_counts"] + apart[::-1]
+
+    check = bifurcated_by_hysteresis(step, compare="iq")
+
+    assert check.metric["max_separation"] == pytest.approx(0.4, rel=1e-6)
+    assert check.bifurcated
+    assert not bifurcated_by_hysteresis(
+        step, compare="iq", max_discrepancy=0.5
+    ).bifurcated
+
+
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_the_discrepancy_does_not_care_how_large_the_trace_is(compare):
+    """Whichever plane it is measured in, the separation is normalized by the
+    scale of that plane — so turning up the readout gain does not move it."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = a_trace(a=0.5, direction="downward")[1]
+    louder = {
+        d: {**e, "iq_counts": e["iq_counts"] * 10} for d, e in step.items()
+    }
+
+    assert bifurcated_by_hysteresis(louder, compare=compare).metric == pytest.approx(
+        bifurcated_by_hysteresis(step, compare=compare).metric
+    )
+
+
+def test_the_magnitude_comparison_is_measured_in_dip_depths():
+    """The same imposed-separation check as above, one plane over: a known
+    difference in |S21| comes back in units of the upward sweep's own depth."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    depth = np.ptp(np.abs(step["upward"]["iq_counts"]))
+    down = step["downward"]["iq_counts"]
+    apart = np.zeros(len(down))
+    apart[100:110] = 0.4 * depth
+    # Straight along the trace's own direction, so |S21| moves by exactly this
+    # much and the phase does not move at all.
+    step["downward"]["iq_counts"] = down * (1 + apart[::-1] / np.abs(down))
+
+    check = bifurcated_by_hysteresis(step, compare="magnitude")
+
+    assert check.metric["max_separation"] == pytest.approx(0.4, rel=1e-6)
+    assert check.bifurcated
+    assert not bifurcated_by_hysteresis(
+        step, compare="magnitude", max_discrepancy=0.5
+    ).bifurcated
+
+
+def test_the_magnitude_comparison_is_blind_to_a_phase_difference():
+    """Which is the point of it: a delay or rotation drift between the two
+    passes moves the traces a long way apart on the IQ plane and leaves their
+    |S21| curves exactly on top of each other."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = step["downward"]["iq_counts"] * np.exp(0.3j)
+
+    in_iq = bifurcated_by_hysteresis(step, compare="iq")
+    in_magnitude = bifurcated_by_hysteresis(step, compare="magnitude")
+
+    assert in_iq.metric["max_separation"] > 0.25
+    assert in_magnitude.metric["max_separation"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_hysteresis_default_is_the_magnitude_comparison():
+    """Which of the two is the default is a decision rather than an accident,
+    so it is pinned here. The phase-rotated step above is the one case where
+    the two comparisons disagree loudly, which makes it the one that can tell
+    which was run."""
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = step["downward"]["iq_counts"] * np.exp(0.3j)
+
+    assert bifurcated_by_hysteresis(step).metric == pytest.approx(
+        bifurcated_by_hysteresis(step, compare="magnitude").metric
+    )
+
+
+def test_an_unknown_hysteresis_comparison_is_refused():
+    with pytest.raises(ValueError, match="Unknown compare"):
+        bifurcated_by_hysteresis(
+            a_step(directions=("upward", "downward")), compare="phase"
+        )
+
+
+def test_hysteresis_needs_both_directions_and_says_which_is_missing():
+    with pytest.raises(ValueError, match="no downward sweep"):
+        bifurcated_by_hysteresis(a_step(directions=("upward",)))
+
+
+def test_a_hysteresis_search_stops_where_the_directions_part():
+    """The steps are identical up and down until the third, where the downward
+    trace is displaced — so the second step is the operating point."""
+    iterations = amplitude_iterations((0.0, 0.0, 0.0), directions=("upward", "downward"))
+    top = iterations[2]
+    up = top["upward"]["iq_counts"]
+    top["downward"]["iq_counts"] = top["downward"]["iq_counts"] + 0.5 * np.max(
+        np.abs(up - up.mean())
+    )
+
+    choice = find_bias_amplitude(iterations, method="hysteresis")
+
+    assert choice.iteration == 1
+    assert choice.bifurcated_at == pytest.approx(4e-3)
+
+
+# ─── bifurcation by both ──────────────────────────────────────────────────────
+
+
+def a_step_the_directions_part_on():
+    """A step with no discontinuity in either direction and the two of them a
+    long way apart: the downward pass leans further over than the upward one.
+
+    Only the hysteresis test sees this. Its mirror image — a jump both
+    directions agree on, which only the derivative test sees — is any step at
+    :data:`JUMPED`, since both passes are drawn from the same model.
+    """
+    step = a_step(a=0.0, directions=("upward", "downward"))
+    step["downward"]["iq_counts"] = a_trace(a=0.5, direction="downward")[1]
+    return step
+
+
+@pytest.mark.parametrize(
+    "step, seen_by",
+    [
+        (a_step(a=JUMPED, directions=("upward", "downward")), "derivative"),
+        (a_step_the_directions_part_on(), "hysteresis"),
+    ],
+)
+def test_a_step_either_test_flags_is_flagged_by_both(step, seen_by):
+    """Which is the whole point: the two tests miss different resonators, and
+    the combination misses only what neither of them caught."""
+    verdicts = {
+        "derivative": bifurcated_by_derivative(step).bifurcated,
+        "hysteresis": bifurcated_by_hysteresis(step).bifurcated,
+    }
+
+    assert verdicts[seen_by]
+    assert not any(v for method, v in verdicts.items() if method != seen_by)
+    assert bifurcated_by_either(step).bifurcated
+
+
+def test_a_step_neither_test_flags_is_not_bifurcated():
+    step = a_step(a=0.0, directions=("upward", "downward"))
+
+    check = bifurcated_by_either(step)
+
+    assert not check.bifurcated
+    assert not any(part.bifurcated for part in check.parts.values())
+    assert check.method == "both"
+
+
+def test_a_combined_check_reports_each_test_in_multiples_of_its_own_bar():
+    """Prominences, dip depths and one flag do not belong on one axis; how far
+    each of them got towards its own threshold does."""
+    step = a_step(a=JUMPED, directions=("upward", "downward"))
+
+    check = bifurcated_by_either(step, spike_prominence_factor=0.4,
+                                 max_discrepancy=0.2)
+
+    assert check.threshold == 1.0
+    assert set(check.parts) == {"derivative", "hysteresis"}
+    assert check.metric == pytest.approx({
+        "derivative_positive_spike_prominence": (
+            check.parts["derivative"].metric["positive_spike_prominence"]
+            / check.parts["derivative"].threshold
+        ),
+        "derivative_negative_spike_prominence": (
+            check.parts["derivative"].metric["negative_spike_prominence"]
+            / check.parts["derivative"].threshold
+        ),
+        # A condition rather than a measurement, so it is carried across as it
+        # stands — there is no bar to be a multiple of.
+        "derivative_adjacency": True,
+        "hysteresis_max_separation": (
+            check.parts["hysteresis"].metric["max_separation"] / 0.2
+        ),
+    })
+    # And the raw numbers are still there, each beside the bar it was actually
+    # held to, which is where a threshold gets picked from.
+    assert check.parts["hysteresis"].threshold == 0.2
+    assert check.parts["derivative"].threshold == pytest.approx(
+        bifurcated_by_derivative(step, spike_prominence_factor=0.4).threshold
+    )
+
+
+def test_a_bar_of_zero_has_no_multiples():
+    """Asking for a prominence of zero makes the arithmetic degenerate rather
+    than the answer wrong: anything at all stands further out than nothing."""
+    step = a_step(a=JUMPED, directions=("upward", "downward"))
+
+    # Both of the derivative test's bars, because its threshold is the higher
+    # of the two and only zeroing one of them leaves the other standing.
+    check = bifurcated_by_either(
+        step, spike_prominence_factor=0.0, noise_gate_factor=0.0
+    )
+
+    assert check.metric["derivative_positive_spike_prominence"] == float("inf")
+    assert check.bifurcated
+
+
+@pytest.mark.parametrize(
+    "nonlinearities, parted_at, fires_first",
+    [
+        ((0.0, 0.0, JUMPED), 1, "hysteresis"),  # the directions part first
+        ((0.0, JUMPED, 0.0), 2, "derivative"),  # the jump comes first
+    ],
+)
+def test_a_combined_search_stops_wherever_the_first_test_fires(
+    nonlinearities, parted_at, fires_first
+):
+    """One step is caught only by hysteresis and another only by the
+    derivative test, so the combination stops at whichever comes first — one
+    step below where the more sensitive of the two would have stopped."""
+    iterations = amplitude_iterations(nonlinearities, directions=("upward", "downward"))
+    iterations[parted_at]["downward"]["iq_counts"] = a_trace(
+        a=0.5, direction="downward"
+    )[1]
+    later = "derivative" if fires_first == "hysteresis" else "hysteresis"
+
+    combined = find_bias_amplitude(iterations, method="both")
+
+    assert combined.iteration == 0
+    assert combined.bifurcated_at == pytest.approx(
+        find_bias_amplitude(iterations, method=fires_first).bifurcated_at
+    )
+    # The other test, on its own, would have let this resonator go a step
+    # louder — which is the step the combination just refused.
+    assert find_bias_amplitude(iterations, method=later).iteration == 1
+
+
+def test_both_needs_both_directions_and_says_which_is_missing():
+    """It runs the hysteresis test, so it asks for what that test asks for."""
+    with pytest.raises(ValueError, match="no downward sweep"):
+        bifurcated_by_either(a_step(directions=("upward",)))
+
+
+def test_an_unknown_comparison_is_refused_by_the_combination_too():
+    with pytest.raises(ValueError, match="Unknown compare"):
+        bifurcated_by_either(
+            a_step(directions=("upward", "downward")), compare="phase"
+        )
+
+
+# ─── where in the sweep the tone goes ─────────────────────────────────────────
+
+
+def test_the_iq_derivative_method_lands_on_the_resonance():
+    entry = a_sweep(a=0.0)
+
+    frequency_hz = find_bias_frequency(entry)
+
+    assert frequency_hz == pytest.approx(FR, abs=SPAN / 200)
+
+
+def test_the_minimum_method_lands_at_the_bottom_of_the_dip():
+    entry = a_sweep(a=0.0)
+
+    frequency_hz = find_bias_frequency(entry, method="minimum")
+
+    assert frequency_hz == pytest.approx(
+        entry["frequencies"][np.argmin(np.abs(entry["iq_counts"]))]
+    )
+
+
+def test_both_methods_answer_with_a_frequency_that_was_measured():
+    entry = a_sweep(a=JUMPED)
+
+    for method in ("iq_derivative", "minimum"):
+        assert find_bias_frequency(entry, method=method) in set(entry["frequencies"])
+
+
+def test_the_frequency_method_does_not_judge_its_own_answer():
+    """Plausibility needs the sweep centre and a tolerance, so it belongs to
+    find_bias_points — which flags rather than refuses, because the answer is
+    still the best point on the trace. The stored energy pulls the resonance
+    down (Swenson et al. 2013 eq. 13), so a jumped sweep's answer is well below
+    the centre it was swept about."""
+    assert find_bias_frequency(a_sweep(a=JUMPED)) < FR
+
+
+def test_an_unknown_frequency_method_is_refused_by_name():
+    with pytest.raises(ValueError, match="iq_derivative"):
+        find_bias_frequency(a_sweep(), method="fitted")
+
+
+# ─── reading back what a method looked at ─────────────────────────────────────
+
+
+def test_the_arc_speed_reader_peaks_where_the_frequency_method_puts_the_tone():
+    entry = a_sweep(a=0.0)
+
+    frequencies, speed = iq_arc_speed(entry)
+
+    assert frequencies[np.argmax(speed)] == pytest.approx(find_bias_frequency(entry))
+
+
+def test_the_normalized_speed_reader_is_what_the_detector_differentiates():
+    """One step shorter than the sweep, on the midpoints — which is where a
+    difference between two points belongs."""
+    entry = a_sweep(a=JUMPED)
+
+    frequencies, speed = normalized_arc_speed(entry)
+
+    assert len(speed) == len(entry["frequencies"]) - 1
+    assert len(frequencies) == len(speed)
+
+    # The detector differences this and reads the prominence of the tallest
+    # spike, so reproducing that from the exported reader has to land on the
+    # number it reported — otherwise this is not what it looked at.
+    _, prominences = find_peaks(np.diff(speed), prominence=0)
+    assert prominences["prominences"].max() == pytest.approx(
+        bifurcated_by_derivative({"upward": entry}).metric[
+            "positive_spike_prominence"
+        ]
+    )
+
+
+def test_both_readers_come_back_in_ascending_frequency_order():
+    downward = a_sweep(direction="downward")
+
+    for reader in (iq_arc_speed, normalized_arc_speed):
+        frequencies, _ = reader(downward)
+        assert np.all(np.diff(frequencies) > 0)
+
+
+def test_a_trace_too_short_to_differentiate_says_so_rather_than_returning_empty():
+    stub = {"frequencies": np.array([1.0, 2.0]), "iq_counts": np.array([1 + 1j, 2 + 2j])}
+
+    with pytest.raises(ValueError):
+        iq_arc_speed(stub)
+
+
+# ─── the calibration at that frequency ────────────────────────────────────────
+
+
+def test_the_derivatives_are_read_off_the_volts_and_are_per_hertz():
+    entry = a_sweep(a=0.0)
+
+    dI_df, dQ_df = iq_derivatives_at(entry, FR)
+    entry["iq_volts"] = entry["iq_volts"] * 2
+
+    assert iq_derivatives_at(entry, FR)[0] == pytest.approx(2 * dI_df)
+    assert iq_derivatives_at(entry, FR)[1] == pytest.approx(2 * dQ_df)
+
+
+def test_a_sweep_with_no_volts_cannot_be_calibrated():
+    entry = a_sweep()
+    entry["iq_volts"] = None
+
+    with pytest.raises(ValueError, match="iq_volts"):
+        iq_derivatives_at(entry, FR)
+
+
+# ─── the whole thing ──────────────────────────────────────────────────────────
+
+
+def test_a_new_catalog_comes_back_and_the_one_swept_is_untouched():
+    catalog = a_catalog()
+    sweeps = a_schedule(catalog=catalog)
+    before = catalog.to_dict()
+
+    report = find_bias_points(sweeps, save=False)
+
+    assert isinstance(report, BiasReport)
+    assert report.catalog is not catalog
+    # Neither the object the sweep was taken from nor the snapshot recorded in
+    # it: the report's catalog is a third thing, built from that snapshot.
+    assert catalog.to_dict() == before
+    assert sweeps["call_params"]["catalog"] == before
+    assert report.catalog.to_dict() != before
+
+
+def test_the_catalog_name_survives_the_measurement():
+    """Which array this is has to come out the far end, through the snapshot in
+    the sweeps, or naming the catalog was not bookkeeping."""
+    named = ResonatorCatalog.from_dict(a_catalog().to_dict(), name="wafer B")
+
+    report = find_bias_points(a_schedule(catalog=named), save=False)
+
+    assert report.catalog.name == "wafer B"
+
+
+def test_the_sweep_entries_come_back_as_they_went_in():
+    """The diagnostics of an analysis do not belong written onto the sweeps the
+    analysis was handed. The report itself does, and goes on the output."""
+    sweeps = a_schedule()
+    entry = sweeps["results"][0]["upward"]["R0001"]
+    keys = set(entry)
+    output_keys = set(sweeps)
+
+    find_bias_points(sweeps, save=False)
+
+    assert set(entry) == keys
+    assert set(sweeps) - output_keys == {"bias_report"}
+
+
+def test_the_bias_point_carries_the_calibration_measured_at_it():
+    report = find_bias_points(a_schedule())
+    bias = report.catalog["R0001"].bias
+    finding = report["R0001"]
+
+    assert bias.dI_df == finding.dI_df
+    assert bias.dQ_df == finding.dQ_df
+    assert bias.df_calibration == pytest.approx(
+        1 / complex(finding.dI_df, finding.dQ_df)
+    )
+    assert bias.bifurcated_at == pytest.approx(finding.bifurcated_at)
+
+
+def test_the_calibration_belongs_to_the_tone_that_will_be_played():
+    """Quantized first, then differentiated: the derivatives are the ones at
+    the frequency the hardware will actually put the tone on."""
+    report = find_bias_points(a_schedule())
+    bias = report.catalog["R0001"].bias
+    entry = report_entry(a_schedule(), report["R0001"])
+
+    assert bias.frequency_hz == pytest.approx(
+        round(bias.frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
+    )
+    assert (bias.dI_df, bias.dQ_df) == pytest.approx(
+        iq_derivatives_at(entry, bias.frequency_hz)
+    )
+
+
+def report_entry(sweeps, finding, direction="upward"):
+    """The sweep a finding was measured on."""
+    return sweeps["results"][finding.iteration][direction][finding.name]
+
+
+# ─── the sweep the calibration was read off ───────────────────────────────────
+
+
+def test_the_bias_point_carries_the_sweep_its_calibration_came_off():
+    sweeps = a_schedule()
+    report = find_bias_points(sweeps, save=False)
+    bias = report.catalog["R0001"].bias
+    entry = report_entry(sweeps, report["R0001"])
+
+    assert bias.bias_sweep["frequencies"] is entry["frequencies"]
+    assert bias.bias_sweep["iq_volts"] is entry["iq_volts"]
+    assert bias.bias_sweep["sweep_direction"] == entry["sweep_direction"]
+    assert bias.bias_sweep["original_center_frequency"] == pytest.approx(
+        entry["original_center_frequency"]
+    )
+
+
+def test_the_calibration_can_be_re_derived_from_the_catalog_alone():
+    """The point of storing it: the same call as on the sweeps, on a catalog
+    that has been carried away from the file they live in."""
+    report = find_bias_points(a_schedule(), save=False)
+    bias = report.catalog["R0001"].bias
+
+    assert (bias.dI_df, bias.dQ_df) == pytest.approx(
+        iq_derivatives_at(bias.bias_sweep, bias.frequency_hz)
+    )
+
+
+def test_the_stored_sweep_is_the_step_that_was_chosen():
+    """One trace at one amplitude, not the schedule it was picked out of."""
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)), save=False)
+
+    for finding in report.findings:
+        stored = report.catalog[finding.name].bias.bias_sweep
+        assert stored["sweep_amplitude"] == pytest.approx(finding.amplitude)
+
+
+def test_the_stored_sweep_leaves_behind_what_is_recoverable_or_known():
+    """``iq_counts`` is iq_volts over a constant, and ``channel`` is the
+    resonator's own — a second copy is a second thing to keep in agreement."""
+    report = find_bias_points(a_schedule(), save=False)
+    stored = report.catalog["R0001"].bias.bias_sweep
+
+    assert set(stored) == set(BiasPoint.BIAS_SWEEP_KEYS)
+    assert "iq_counts" not in stored
+    assert "channel" not in stored
+
+
+def test_the_stored_sweep_survives_the_report_round_trip():
+    report = find_bias_points(a_schedule(), save=False)
+
+    back = BiasReport.from_dict(report.to_dict())
+    stored = back.catalog["R0001"].bias.bias_sweep
+
+    assert stored["frequencies"] == pytest.approx(
+        report.catalog["R0001"].bias.bias_sweep["frequencies"]
+    )
+    assert (back.catalog["R0001"].bias.dI_df, back.catalog["R0001"].bias.dQ_df) == (
+        pytest.approx(iq_derivatives_at(stored, back.catalog["R0001"].bias.frequency_hz))
+    )
+
+
+def test_retuning_a_biased_resonator_drops_the_sweep_with_the_calibration():
+    report = find_bias_points(a_schedule(), save=False)
+    resonator = report.catalog["R0001"]
+    assert resonator.bias.bias_sweep is not None
+
+    resonator.update_bias_point(amplitude=resonator.bias.amplitude * 2)
+
+    assert resonator.bias.bias_sweep is None
+    assert resonator.bias.df_calibration is None
+
+
+def test_iq_rotation_is_left_alone_because_it_is_not_measured_from_a_sweep():
+    report = find_bias_points(a_schedule())
+
+    assert report.catalog["R0001"].bias.iq_rotation_deg is None
+
+
+def test_identity_and_channels_survive_the_new_catalog():
+    catalog = a_catalog()
+
+    report = find_bias_points(a_schedule(catalog=catalog))
+
+    assert [r.name for r in report.catalog] == [r.name for r in catalog]
+    assert [r.channel for r in report.catalog] == [r.channel for r in catalog]
+    assert report.catalog.module == catalog.module
+
+
+def test_the_separation_rule_survives_the_new_catalog_too():
+    """It rides in the snapshot like everything else, so the array comes back
+    under the rule it was built under rather than under no rule at all."""
+    catalog = a_catalog(min_separation_hz=1e3)
+
+    report = find_bias_points(a_schedule(catalog=catalog))
+
+    assert report.catalog.min_separation_hz == 1e3
+
+
+def test_the_amplitude_that_was_chosen_is_the_amplitude_on_the_bias_point():
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)))
+
+    for finding in report.findings:
+        assert report.catalog[finding.name].bias.amplitude == pytest.approx(
+            finding.amplitude
+        )
+
+
+def test_the_catalog_biased_is_the_one_the_sweep_recorded():
+    report = find_bias_points(a_schedule())
+
+    assert len(report.catalog) == 2
+    assert all(f.good for f in report.findings)
+
+
+def test_a_sweep_with_no_catalog_recorded_in_it_has_nothing_to_bias():
+    """Every multisweep records a catalog since schema_version 6, a bare
+    center_frequencies call included, so nothing writes this any more. An older
+    file still can, and it is the one input this function cannot work from."""
+    sweeps = a_schedule()
+    sweeps["call_params"]["catalog"] = None
+
+    with pytest.raises(ValueError, match="No catalog in these sweeps"):
+        find_bias_points(sweeps, save=False)
+
+
+def test_a_catalog_resonator_these_sweeps_do_not_cover_says_so():
+    """The catalog and the sweeps come out of one file, so a resonator with no
+    data means a result that disagrees with itself — not a detector that could
+    not be biased."""
+    sweeps = a_schedule()
+    sweeps["call_params"]["catalog"] = ResonatorCatalog(
+        [*a_catalog(),
+         Resonator(name="R0003", channel=3,
+                   bias=BiasPoint(frequency_hz=FR + 2e6, amplitude=1e-3))],
+        module=2,
+    ).to_dict()
+
+    with pytest.raises(KeyError, match="R0003"):
+        find_bias_points(sweeps, save=False)
+
+
+def test_a_sweep_with_no_volts_to_calibrate_off_is_the_callers_mistake_too():
+    sweeps = a_schedule()
+    for by_direction in sweeps["results"].values():
+        for sections in by_direction.values():
+            sections["R0001"]["iq_volts"] = None
+
+    with pytest.raises(ValueError, match="iq_volts"):
+        find_bias_points(sweeps)
+
+
+def test_the_recorded_catalog_is_what_the_findings_are_counted_from():
+    """Which side drives the iteration, pinned. multisweep cannot produce a
+    sweep holding a section its catalog does not name — the sections come from
+    the catalog — so this is a doctored file, and the point of it is that the
+    catalog is what is walked and the sections are what get looked up."""
+    sweeps = a_schedule()
+    sweeps["call_params"]["catalog"] = a_catalog_of_one().to_dict()
+
+    report = find_bias_points(sweeps, save=False)
+
+    assert [f.name for f in report.findings] == ["R0001"]
+    with pytest.raises(KeyError):
+        report["R0002"]
+
+
+def a_catalog_of_one():
+    return ResonatorCatalog(
+        [Resonator(name="R0001", channel=1,
+                   bias=BiasPoint(frequency_hz=FR, amplitude=1e-3))],
+        module=2,
+    )
+
+
+# ─── a bias point that is a default rather than a measurement ─────────────────
+
+
+def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
+    catalog = a_catalog()
+
+    report = find_bias_points(a_schedule(catalog=catalog))
+
+    assert len(report.findings) == len(catalog)
+    for resonator in report.catalog:
+        assert resonator.bias.dI_df is not None
+        assert resonator.bias.df_calibration is not None
+
+
+def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
+    report = find_bias_points(a_schedule((JUMPED, JUMPED, JUMPED)))
+    finding = report["R0001"]
+
+    assert report.catalog["R0001"].bias.amplitude == pytest.approx(finding.amplitude)
+    assert not finding.good
+    assert "quietest amplitude" in finding.flagged_because
+    assert [f.name for f in report.flagged] == ["R0001", "R0002"]
+
+
+def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
+    report = find_bias_points(a_schedule((0.0, 0.0, 0.0)))
+    finding = report["R0001"]
+
+    assert finding.bifurcated_at is None
+    assert not finding.good
+    assert "loudest amplitude measured" in finding.flagged_because
+
+
+def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
+    report = find_bias_points(a_schedule((0.0, 0.0, JUMPED)))
+
+    assert report.flagged == []
+    assert [f.name for f in report.good] == ["R0001", "R0002"]
+    assert report["R0001"].flagged_because is None
+
+
+def with_the_sweep_centre_moved(sweeps, name, by_hz):
+    """Rewrite one resonator's recorded sweep centre.
+
+    The synthetic resonances sit exactly at the middle of their own sweeps, so
+    the measured peak is always the sweep centre and no distance test can ever
+    fire. Moving the recorded centre is the same arithmetic as a resonance that
+    was pulled away from where the sweep was aimed.
+    """
+    for by_direction in sweeps["results"].values():
+        for sections in by_direction.values():
+            sections[name]["original_center_frequency"] += by_hz
+    return sweeps
+
+
+def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
+    """A peak that far off centre is usually a neighbour in the span, or noise
+    in a trace the resonance has left. Moving the tone onto it would be worse
+    than not moving it at all — so the sweep centre is kept, and flagged."""
+    sweeps = with_the_sweep_centre_moved(
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
+    )
+
+    report = find_bias_points(sweeps, max_distance_hz=5e3)
+    finding = report["R0001"]
+
+    assert finding.frequency_hz == pytest.approx(FR - 20e3, abs=BASE_FREQUENCY / 2)
+    assert finding.frequency_hz == report.catalog["R0001"].bias.frequency_hz
+    assert not finding.good
+    assert "left where the sweep was centred" in finding.flagged_because
+
+    # Its neighbour was not moved, so it is measured and not flagged.
+    assert [f.name for f in report.flagged] == ["R0001"]
+    assert report["R0002"].frequency_hz == pytest.approx(
+        FR + 1e6, abs=BASE_FREQUENCY / 2
+    )
+
+
+def test_the_calibration_is_measured_where_the_tone_ended_up():
+    """Falling back moves the frequency, so the derivatives have to be read
+    there rather than at the peak that was rejected."""
+    sweeps = with_the_sweep_centre_moved(
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
+    )
+
+    finding = find_bias_points(sweeps, max_distance_hz=5e3)["R0001"]
+    entry = sweeps["results"][finding.iteration]["upward"]["R0001"]
+
+    assert (finding.dI_df, finding.dQ_df) == pytest.approx(
+        iq_derivatives_at(entry, finding.frequency_hz)
+    )
+    # Not the peak it rejected, which is 20 kHz away and much steeper.
+    assert (finding.dI_df, finding.dQ_df) != pytest.approx(
+        iq_derivatives_at(entry, find_bias_frequency(entry))
+    )
+
+
+def test_a_believable_distance_leaves_the_measured_peak_alone():
+    sweeps = with_the_sweep_centre_moved(
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
+    )
+
+    report = find_bias_points(sweeps, max_distance_hz=50e3)
+
+    assert report["R0001"].frequency_hz == pytest.approx(FR, abs=BASE_FREQUENCY / 2)
+    assert report.flagged == []
+
+
+def test_only_the_first_concern_is_reported():
+    """A resonator whose sweeps never bifurcated has a bigger problem than one
+    whose tone landed off centre, and hearing about both at once helps nobody."""
+    sweeps = with_the_sweep_centre_moved(
+        a_schedule((0.0, 0.0, 0.0)), "R0001", -20e3
+    )
+
+    report = find_bias_points(sweeps, max_distance_hz=5e3)
+
+    assert "loudest amplitude measured" in report["R0001"].flagged_because
+
+
+@pytest.mark.parametrize("amplitude_method", ["hysteresis", "both"])
+def test_comparing_directions_on_a_one_direction_sweep_is_refused_once_not_per_resonator(
+    amplitude_method,
+):
+    with pytest.raises(ValueError, match=f"The {amplitude_method!r} method"):
+        find_bias_points(
+            a_schedule(directions=("upward",)),
+            amplitude_method=amplitude_method,
+        )
+
+
+def test_a_direction_that_was_not_swept_is_refused():
+    with pytest.raises(ValueError, match="was not swept"):
+        find_bias_points(a_schedule(directions=("upward",)),
+                         amplitude_method="derivative", direction="downward")
+
+
+def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
+    sweeps = a_schedule()
+
+    with pytest.raises(TypeError, match="keyed by module"):
+        find_bias_points({MODULE_ID: sweeps})
+
+
+def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
+    report = find_bias_points(a_schedule(), max_discrepancy=0.4)
+
+    assert report.settings["amplitude_method"] == "both"
+    assert report.settings["frequency_method"] == "iq_derivative"
+    assert report.settings["max_discrepancy"] == 0.4
+    assert report.settings["max_distance_hz"] is None
+    assert report.settings["module"] == 2
+
+
+def test_the_report_reads_like_what_happened():
+    report = find_bias_points(a_schedule((0.0, 0.0, 0.0)))
+
+    assert len(report) == 2
+    assert "2 biased, 2 flagged" in repr(report)
+    assert "loudest amplitude measured" in repr(report)
+    with pytest.raises(KeyError):
+        report["R9999"]
+
+
+# ─── Persistence ──────────────────────────────────────────────────────────────
+
+
+def test_a_report_survives_a_round_trip_through_builtins():
+    report = find_bias_points(a_schedule(), save=False)
+    restored = BiasReport.from_dict(report.to_dict())
+
+    assert restored.findings == report.findings
+    assert restored.settings == report.settings
+    assert [r.name for r in restored.catalog] == [r.name for r in report.catalog]
+    assert [r.bias for r in restored.catalog] == [r.bias for r in report.catalog]
+
+
+def test_a_reports_dict_holds_no_rfmux_classes():
+    """Files have to open on a machine that has never heard of rfmux."""
+    d = find_bias_points(a_schedule(), save=False).to_dict()
+
+    assert d["schema_version"] == BiasReport.SCHEMA_VERSION
+    assert type(d["catalog"]).__name__ == "dict"
+    assert all(type(f).__name__ == "dict" for f in d["findings"])
+    # The per-step verdicts nest two deep and are the easiest thing to leave
+    # as NamedTuples by accident.
+    assert all(
+        type(c).__name__ == "dict"
+        for f in d["findings"]
+        for c in f["checks"].values()
+    )
+
+
+def test_a_combined_checks_parts_survive_the_round_trip_as_builtins():
+    """A combined check nests one level deeper than any other, so it is the
+    one that would take a NamedTuple into a file if to_dict stopped early."""
+    report = find_bias_points(
+        a_schedule(), amplitude_method="both", save=False
+    )
+    d = report.to_dict()
+
+    parts = [
+        c["parts"] for f in d["findings"] for c in f["checks"].values()
+    ]
+    assert parts and all(set(p) == {"derivative", "hysteresis"} for p in parts)
+    assert all(type(v).__name__ == "dict" for p in parts for v in p.values())
+    assert BiasReport.from_dict(d).findings == report.findings
+
+
+def test_a_single_test_check_carries_no_parts():
+    report = find_bias_points(
+        a_schedule(), amplitude_method="derivative", save=False
+    )
+
+    assert all(
+        check.parts == {}
+        for finding in report.findings
+        for check in finding.checks.values()
+    )
+
+
+def test_check_keys_stay_the_amplitude_steps_they_name():
+    d = find_bias_points(a_schedule(), save=False).to_dict()
+    assert all(
+        isinstance(k, int) for f in d["findings"] for k in f["checks"]
+    )
+
+
+def test_a_report_from_another_version_is_refused():
+    d = find_bias_points(a_schedule(), save=False).to_dict()
+    d["schema_version"] = BiasReport.SCHEMA_VERSION + 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        BiasReport.from_dict(d)
+
+
+def test_the_report_goes_into_the_sweeps_it_was_found_from():
+    sweeps = a_schedule()
+
+    report = find_bias_points(sweeps, save=False)
+
+    restored = BiasReport.from_dict(sweeps["bias_report"])
+    assert restored.findings == report.findings
+    assert [r.bias for r in restored.catalog] == [r.bias for r in report.catalog]
+
+
+def test_a_second_analysis_replaces_the_stored_one():
+    sweeps = a_schedule()
+
+    find_bias_points(sweeps, save=False)
+    report = find_bias_points(sweeps, save=False, frequency_method="minimum")
+
+    stored = BiasReport.from_dict(sweeps["bias_report"])
+    assert stored.settings["frequency_method"] == "minimum"
+    assert stored.findings == report.findings
+
+
+def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
+    """The report is part of the sweep now, so the sweep's file is what changes."""
+    from rfmux.tuning import store
+
+    store.set_output_directory(tmp_path)
+    try:
+        sweeps = a_schedule()
+        report = find_bias_points(sweeps, save=True, label="cooldown3")
+
+        path = next(store.session_directory().glob("multisweep_*.pkl"))
+        assert path.stem.endswith("_cooldown3")
+
+        restored = BiasReport.from_dict(store.load(path)["bias_report"])
+        assert len(restored) == len(report)
+        assert restored.catalog.module == report.catalog.module
+
+        # And a second analysis updates that file rather than leaving a near
+        # copy of a schedule beside it.
+        find_bias_points(sweeps, save=True, frequency_method="minimum")
+        assert [p.name for p in store.session_directory().glob("*.pkl")] == [
+            path.name
+        ]
+    finally:
+        store.set_output_directory(None)

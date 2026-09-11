@@ -1,0 +1,537 @@
+"""Behaviour of the pure half of the multi-amplitude multisweep.
+
+Two ends of one contract: AmplitudeSchedule deciding what each iteration probes
+at, and the packing and readers deciding what comes back. Pure — no board, no
+driver. The emphasis is on what the driver and a Periscope dialog rely on: a
+step is one amplitude, amplitudes come back keyed by name, everything that would
+fail on the hardware fails here instead, and nothing has to be stored twice to
+be readable.
+"""
+
+import math
+import pickle
+
+import numpy as np
+import pytest
+
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.tuning.multisweep_amplitudes import (
+    AmplitudeSchedule,
+    AmplitudeStep,
+)
+pytestmark = pytest.mark.portable
+
+
+def a_catalog(amplitudes=(0.001, 0.002, 0.004)):
+    """Three resonators, deliberately at different bias amplitudes."""
+    return ResonatorCatalog(
+        [
+            Resonator(
+                name=f"R{i + 1:04d}",
+                channel=i + 1,
+                bias=BiasPoint(frequency_hz=1.0e9 + i * 1e6, amplitude=a),
+            )
+            for i, a in enumerate(amplitudes)
+        ],
+        module=2,
+    )
+
+
+def amplitudes_of(schedule, target):
+    """The per-step amplitude dicts, which is what most assertions are about."""
+    return [step.amplitudes for step in schedule.resolve_steps(target)]
+
+
+# ─── a step is one amplitude ──────────────────────────────────────────────────
+
+
+def test_the_default_schedule_sweeps_the_catalog_once_as_it_stands():
+    catalog = a_catalog()
+    steps = AmplitudeSchedule().resolve_steps(catalog)
+
+    assert len(steps) == 1
+    assert steps[0].amplitudes == {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}
+
+
+def test_steps_are_numbered_from_zero_in_measurement_order():
+    schedule = AmplitudeSchedule.explicit([0.004, 0.001, 0.002])
+    steps = schedule.resolve_steps(a_catalog())
+
+    assert [s.step for s in steps] == [0, 1, 2]
+    # Explicit means explicit: the order given is the order measured, not sorted.
+    assert [s.amplitudes["R0001"] for s in steps] == [0.004, 0.001, 0.002]
+
+
+def test_nsteps_counts_amplitudes_and_needs_no_catalog():
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 6)
+
+    assert schedule.nsteps == 6
+    assert len(schedule) == 6
+
+
+def test_a_step_carries_its_step_and_an_absolute_step_carries_none():
+    catalog = a_catalog()
+
+    multiplicative = AmplitudeSchedule.multiplicative(0.5, 2.0, 3).resolve_steps(catalog)
+    assert [s.factor for s in multiplicative] == pytest.approx([0.5, 1.0, 2.0])
+
+    absolute = AmplitudeSchedule.ramp(1e-3, 4e-3, 3).resolve_steps(catalog)
+    assert [s.factor for s in absolute] == [None, None, None]
+
+
+# ─── the base ─────────────────────────────────────────────────────────────────
+
+
+def test_no_base_means_each_resonators_own_bias_amplitude():
+    catalog = a_catalog()
+    assert amplitudes_of(AmplitudeSchedule(), catalog) == [
+        {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}
+    ]
+
+
+# ─── the non-iterating forms are just the constructor ─────────────────────────
+
+
+@pytest.mark.parametrize(
+    "base, expected",
+    [
+        (None, {"R0001": 0.001, "R0002": 0.002, "R0003": 0.004}),
+        (0.005, {"R0001": 0.005, "R0002": 0.005, "R0003": 0.005}),
+        (
+            {"R0001": 0.004, "R0002": 0.006, "R0003": 0.008},
+            {"R0001": 0.004, "R0002": 0.006, "R0003": 0.008},
+        ),
+    ],
+)
+def test_base_is_the_first_argument_so_one_pass_needs_no_classmethod(base, expected):
+    """AmplitudeSchedule(0.005) is the documented way to say "one pass, this
+    amplitude" — base is the only field a caller sets by hand with any
+    regularity, so it comes first."""
+    schedule = AmplitudeSchedule() if base is None else AmplitudeSchedule(base)
+
+    assert schedule.nsteps == 1
+    assert amplitudes_of(schedule, a_catalog()) == [expected]
+
+
+def test_a_schedule_that_does_not_iterate_reports_no_spacing():
+    """Nothing generated its single step, so 'log'/'linear'/'explicit' would all
+    be claims about a rule that never ran."""
+    assert AmplitudeSchedule().spacing == "none"
+    assert AmplitudeSchedule(0.005).spacing == "none"
+    assert AmplitudeSchedule().describe(a_catalog())["spacing"] == "none"
+
+
+def test_a_number_is_the_base_for_every_resonator():
+    assert amplitudes_of(AmplitudeSchedule(0.005), a_catalog()) == [
+        {"R0001": 0.005, "R0002": 0.005, "R0003": 0.005}
+    ]
+
+
+def test_a_mapping_is_the_base_per_resonator():
+    base = {"R0001": 0.004, "R0002": 0.006, "R0003": 0.008}
+    assert amplitudes_of(AmplitudeSchedule(base), a_catalog()) == [base]
+
+
+def test_a_partial_base_mapping_is_an_error_not_a_fallback():
+    schedule = AmplitudeSchedule({"R0001": 0.004})
+    with pytest.raises(ValueError, match="missing an amplitude"):
+        schedule.resolve_steps(a_catalog())
+
+
+def test_an_unknown_name_in_the_base_is_an_error():
+    schedule = AmplitudeSchedule(
+        {"R0001": 0.004, "R0002": 0.006, "R0003": 0.008, "R0009": 0.01}
+    )
+    with pytest.raises(ValueError, match="not being swept"):
+        schedule.resolve_steps(a_catalog())
+
+
+@pytest.mark.parametrize("sequence", [[0.004, 0.006, 0.008], (0.004, 0.006, 0.008)])
+def test_a_positional_base_is_refused_alongside_a_catalog(sequence):
+    schedule = AmplitudeSchedule(sequence)
+    with pytest.raises(TypeError, match="positional sequence"):
+        schedule.resolve_steps(a_catalog())
+
+
+# ─── the schedule: relative multiplies the base ─────────────────────────────────
+
+
+def test_a_relative_schedule_scales_every_resonator_by_its_own_base():
+    catalog = a_catalog(amplitudes=(0.001, 0.002))
+    steps = amplitudes_of(AmplitudeSchedule.multiplicative(0.5, 2.0, 3), catalog)
+
+    assert steps[0] == pytest.approx({"R0001": 0.0005, "R0002": 0.001})
+    assert steps[1] == pytest.approx({"R0001": 0.001, "R0002": 0.002})
+    assert steps[2] == pytest.approx({"R0001": 0.002, "R0002": 0.004})
+
+
+def test_a_relative_schedule_can_scale_a_base_of_your_own_choosing():
+    """The gap in the dialog this replaces: per-resonator base *and* a schedule."""
+    catalog = a_catalog(amplitudes=(0.001, 0.002))
+    schedule = AmplitudeSchedule.multiplicative(
+        1.0, 2.0, 2, base={"R0001": 0.01, "R0002": 0.02}
+    )
+
+    assert amplitudes_of(schedule, catalog) == pytest.approx(
+        [{"R0001": 0.01, "R0002": 0.02}, {"R0001": 0.02, "R0002": 0.04}]
+    )
+
+
+def test_an_absolute_schedule_ignores_the_catalogs_amplitudes_entirely():
+    catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
+    steps = amplitudes_of(AmplitudeSchedule.ramp(1e-3, 1e-2, 2), catalog)
+
+    assert steps[0] == pytest.approx({"R0001": 1e-3, "R0002": 1e-3, "R0003": 1e-3})
+    assert steps[1] == pytest.approx({"R0001": 1e-2, "R0002": 1e-2, "R0003": 1e-2})
+
+
+def test_an_absolute_schedule_takes_no_base():
+    """Its steps *are* the amplitudes, so a base would have nothing to do."""
+    with pytest.raises(ValueError, match="absolute schedule takes no base"):
+        AmplitudeSchedule(steps=(1e-3, 1e-2), relative=False, base=0.004)
+
+
+# ─── spacing ──────────────────────────────────────────────────────────────────
+
+
+def test_log_is_the_default_spacing_so_steps_are_equal_in_db():
+    steps = AmplitudeSchedule.ramp(1e-3, 1e-1, 3).steps
+
+    assert steps == pytest.approx([1e-3, 1e-2, 1e-1])
+    ratios = [b / a for a, b in zip(steps, steps[1:])]
+    assert ratios == pytest.approx([ratios[0]] * len(ratios))
+
+
+@pytest.mark.parametrize(
+    "constructor, kwargs",
+    [(AmplitudeSchedule.ramp, {}), (AmplitudeSchedule.multiplicative, {})],
+)
+def test_linear_spacing_is_still_available(constructor, kwargs):
+    steps = constructor(0.2, 0.6, 3, spacing="linear", **kwargs).steps
+    assert steps == pytest.approx([0.2, 0.4, 0.6])
+
+
+def test_an_unknown_spacing_is_an_error():
+    with pytest.raises(ValueError, match="spacing="):
+        AmplitudeSchedule.ramp(1e-3, 1e-2, 3, spacing="geometric")
+
+
+def test_log_spacing_needs_positive_endpoints():
+    with pytest.raises(ValueError, match="positive endpoints"):
+        AmplitudeSchedule.multiplicative(0.0, 2.0, 3)
+
+
+# ─── nsteps ───────────────────────────────────────────────────────────────────
+
+
+def test_one_step_between_two_different_endpoints_is_an_error():
+    """The dialog this replaces silently kept the start and dropped the stop."""
+    with pytest.raises(ValueError, match="which of the two did you mean"):
+        AmplitudeSchedule.ramp(1e-3, 1e-2, 1)
+
+
+def test_one_step_is_fine_when_the_endpoints_agree():
+    assert AmplitudeSchedule.ramp(1e-3, 1e-3, 1).steps == (1e-3,)
+
+
+@pytest.mark.parametrize("nsteps", [0, -1])
+def test_a_schedule_needs_at_least_one_step(nsteps):
+    with pytest.raises(ValueError, match="at least one step"):
+        AmplitudeSchedule.ramp(1e-3, 1e-2, nsteps)
+
+
+def test_an_empty_schedule_is_an_error():
+    with pytest.raises(ValueError, match="measures nothing"):
+        AmplitudeSchedule(steps=())
+
+
+# ─── the (0, 1] domain, caught before the first sweep ─────────────────────────
+
+
+def test_a_schedule_that_overshoots_full_scale_is_caught_with_the_step_and_name():
+    catalog = a_catalog(amplitudes=(0.001, 0.5))
+    schedule = AmplitudeSchedule.multiplicative(1.0, 4.0, 3, spacing="linear")
+
+    with pytest.raises(ValueError) as excinfo:
+        schedule.resolve_steps(catalog)
+
+    message = str(excinfo.value)
+    assert "Step 2" in message  # 0.5 × 4 = 2.0
+    assert "R0002" in message
+    assert "R0001" not in message  # 0.001 × 4 is fine, and is not blamed
+
+
+def test_an_absolute_step_above_full_scale_is_caught_at_construction():
+    with pytest.raises(ValueError, match=r"outside \(0, 1\]"):
+        AmplitudeSchedule.explicit([0.5, 1.5])
+
+
+def test_a_negative_amplitude_says_it_might_be_dbm():
+    with pytest.raises(ValueError, match="dBm"):
+        AmplitudeSchedule.explicit([-60.0])
+
+
+def test_a_relative_step_of_zero_is_an_error():
+    with pytest.raises(ValueError, match="not positive"):
+        AmplitudeSchedule.multiplicative(0.0, 1.0, 3, spacing="linear")
+
+
+def test_a_zero_base_is_caught_when_it_meets_the_schedule():
+    """A base of zero survives construction — nothing knows it yet — and is
+    refused once a step is resolved from it."""
+    schedule = AmplitudeSchedule(
+        {"R0001": 0.0, "R0002": 0.002, "R0003": 0.004}
+    )
+    with pytest.raises(ValueError, match="at or below zero"):
+        schedule.resolve_steps(a_catalog())
+
+
+def test_full_scale_itself_is_allowed():
+    assert AmplitudeSchedule.explicit([1.0]).resolve_steps(a_catalog())[0].amplitudes == {
+        "R0001": 1.0,
+        "R0002": 1.0,
+        "R0003": 1.0,
+    }
+
+
+# ─── scheduling by name, for a bare frequency list ────────────────────────────
+
+
+def test_names_stand_in_for_a_catalog():
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
+    steps = schedule.resolve_steps(["S0001", "S0002"])
+
+    assert steps[0].amplitudes == pytest.approx({"S0001": 1e-3, "S0002": 1e-3})
+    assert steps[1].amplitudes == pytest.approx({"S0001": 1e-2, "S0002": 1e-2})
+
+
+def test_names_have_no_amplitude_to_fall_back_to():
+    with pytest.raises(ValueError, match="required when scheduling by name"):
+        AmplitudeSchedule().resolve_steps(["S0001", "S0002"])
+
+
+def test_a_positional_base_is_accepted_alongside_names():
+    """Where the ordering is the caller's own, as multisweep's amp= allows."""
+    schedule = AmplitudeSchedule.multiplicative(1.0, 2.0, 2, base=[0.001, 0.002])
+    assert amplitudes_of(schedule, ["low", "high"]) == pytest.approx(
+        [{"low": 0.001, "high": 0.002}, {"low": 0.002, "high": 0.004}]
+    )
+
+
+def test_a_mismatched_positional_base_is_an_error():
+    schedule = AmplitudeSchedule([0.001, 0.002, 0.003])
+    with pytest.raises(ValueError, match="3 amplitudes for 2 sections"):
+        schedule.resolve_steps(["low", "high"])
+
+
+def test_a_bare_string_target_is_refused_rather_than_split_into_letters():
+    with pytest.raises(TypeError, match="single characters"):
+        AmplitudeSchedule(0.001).resolve_steps("S0001")
+
+
+def test_a_mapping_target_points_at_base():
+    with pytest.raises(TypeError, match="pass it as base="):
+        AmplitudeSchedule().resolve_steps({"S0001": 0.001})
+
+
+def test_duplicate_names_are_an_error():
+    with pytest.raises(ValueError, match="Duplicate sweep names"):
+        AmplitudeSchedule(0.001).resolve_steps(["S0001", "S0001"])
+
+
+def test_an_empty_target_is_an_error():
+    with pytest.raises(ValueError, match="nothing to sweep"):
+        AmplitudeSchedule(0.001).resolve_steps([])
+
+
+def test_names_must_be_strings():
+    with pytest.raises(TypeError, match="must be strings"):
+        AmplitudeSchedule(0.001).resolve_steps([1, 2])
+
+
+# ─── describe ─────────────────────────────────────────────────────────────────
+
+
+def test_describe_reports_the_sweep_count_across_both_axes():
+    schedule = AmplitudeSchedule.ramp(1e-3, 1e-2, 4)
+    described = schedule.describe(a_catalog(), n_directions=2)
+
+    assert described["nsteps"] == 4
+    assert described["n_directions"] == 2
+    assert described["n_sweeps"] == 8
+    assert described["n_sections"] == 3
+
+
+def test_describe_gives_each_resonators_own_amplitude_range():
+    catalog = a_catalog(amplitudes=(0.001, 0.002))
+    described = AmplitudeSchedule.multiplicative(1.0, 2.0, 2).describe(catalog)
+
+    assert described["amplitude_range_by_name"] == pytest.approx(
+        {"R0001": (0.001, 0.002), "R0002": (0.002, 0.004)}
+    )
+    assert described["amplitude_min"] == pytest.approx(0.001)
+    assert described["amplitude_max"] == pytest.approx(0.004)
+
+
+def test_describe_reports_spacing_it_did_not_compute_with():
+    assert AmplitudeSchedule.ramp(1e-3, 1e-2, 3).describe(a_catalog())["spacing"] == "log"
+    assert AmplitudeSchedule.explicit([1e-3]).describe(a_catalog())["spacing"] == "explicit"
+    assert AmplitudeSchedule().describe(a_catalog())["spacing"] == "none"
+
+
+def test_describe_converts_to_dbm_when_told_the_dac_scale():
+    described = AmplitudeSchedule.explicit([0.1]).describe(
+        a_catalog(), dac_scale_dbm=-10.0
+    )
+    assert described["power_dbm_max"] == pytest.approx(-30.0)
+
+
+# ─── validate ─────────────────────────────────────────────────────────────────
+
+
+def severities(issues):
+    return [severity for severity, _ in issues]
+
+
+def test_a_sound_schedule_validates_with_only_an_info_line():
+    issues = AmplitudeSchedule.ramp(1e-3, 1e-2, 4).validate(a_catalog(), n_directions=2)
+
+    assert severities(issues) == ["info"]
+    assert "8 sweeps" in issues[0][1]
+
+
+def test_validate_reports_an_overshoot_it_would_otherwise_raise_on():
+    catalog = a_catalog(amplitudes=(0.001, 0.5))
+    schedule = AmplitudeSchedule.multiplicative(1.0, 4.0, 3, spacing="linear")
+
+    issues = schedule.validate(catalog)
+
+    assert "error" in severities(issues)
+    assert any("R0002" in message for _, message in issues)
+
+
+def test_validate_never_raises_on_a_structurally_bad_input():
+    """A dialog rendering a half-entered form wants text, not a traceback."""
+    issues = AmplitudeSchedule({"R0001": 0.004}).validate(a_catalog())
+
+    assert severities(issues) == ["error"]
+    assert "missing an amplitude" in issues[0][1]
+
+
+def test_validate_warns_about_a_repeated_step():
+    issues = AmplitudeSchedule.explicit([1e-3, 1e-3, 1e-2]).validate(a_catalog())
+
+    assert "warning" in severities(issues)
+    assert any("twice" in message for _, message in issues)
+
+
+def test_validate_does_not_complain_about_a_descending_schedule():
+    issues = AmplitudeSchedule.explicit([1e-2, 3e-3, 1e-3]).validate(a_catalog())
+    assert severities(issues) == ["info"]
+
+
+# ─── persistence and identity ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        AmplitudeSchedule(),
+        AmplitudeSchedule(0.005),
+        AmplitudeSchedule({"R0001": 0.004}),
+        AmplitudeSchedule.multiplicative(0.5, 2.0, 5),
+        AmplitudeSchedule.multiplicative(0.5, 2.0, 5, spacing="linear", base=[0.001, 0.002]),
+        AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
+        AmplitudeSchedule.explicit([1e-3, 3e-3, 1e-2]),
+    ],
+)
+def test_a_schedule_round_trips_through_its_dict(schedule):
+    current = schedule.to_dict()
+    legacy = {**current, "schema_version": 1, "ladder": current["steps"]}
+    del legacy["steps"]
+
+    for stored in (current, legacy):
+        restored = AmplitudeSchedule.from_dict(stored)
+        assert restored == schedule
+        assert restored.spacing == schedule.spacing
+        assert restored.steps == pytest.approx(schedule.steps)
+        assert restored.to_dict() == current
+
+
+def test_to_dict_is_plain_builtins_so_it_pickles_with_the_rest_of_a_result():
+    d = AmplitudeSchedule.multiplicative(0.5, 2.0, 3, base={"R0001": 0.004}).to_dict()
+
+    assert d["schema_version"] == 2
+    assert "ladder" not in d
+    assert pickle.loads(pickle.dumps(d)) == d
+    assert all(isinstance(v, float) for v in d["steps"])
+    assert isinstance(d["base"], dict)
+
+
+def test_a_dict_from_another_version_is_refused():
+    d = AmplitudeSchedule.ramp(1e-3, 1e-2, 3).to_dict()
+    d["schema_version"] = AmplitudeSchedule.SCHEMA_VERSION + 1
+
+    with pytest.raises(ValueError, match="schema_version"):
+        AmplitudeSchedule.from_dict(d)
+
+
+def test_two_schedules_that_measure_the_same_thing_are_equal():
+    """Spacing is provenance, not behaviour: it does not split identity."""
+    generated = AmplitudeSchedule.ramp(1e-3, 1e-2, 2)
+    spelled_out = AmplitudeSchedule.explicit([1e-3, 1e-2])
+
+    assert generated == spelled_out
+    assert generated.spacing != spelled_out.spacing
+
+
+def test_the_repr_says_what_the_schedule_will_do():
+    assert "6 steps" in repr(AmplitudeSchedule.ramp(1e-3, 1e-2, 6))
+    assert "absolute" in repr(AmplitudeSchedule.ramp(1e-3, 1e-2, 6))
+    assert "catalog's own" in repr(AmplitudeSchedule.multiplicative(0.5, 2.0, 3))
+    assert "1 step," in repr(AmplitudeSchedule())
+
+
+def test_a_step_repr_counts_sections_not_sweeps():
+    """One step is one sweep of the whole array; the 3 is how many sections that
+    sweep contains. "3 sweeps" would read as three passes at this amplitude."""
+    step = AmplitudeSchedule.multiplicative(2.0, 2.0, 1).resolve_steps(a_catalog())[0]
+    assert "3 sweep sections" in repr(step)
+    assert "×2" in repr(step)
+
+
+def test_a_step_converts_to_a_plain_dict():
+    step = AmplitudeSchedule.ramp(1e-3, 1e-3, 1).resolve_steps(["S0001"])[0]
+    assert step.to_dict() == {
+        "step": 0,
+        "amplitudes": {"S0001": 1e-3},
+        "factor": None,
+    }
+
+
+# ─── the amplitudes go straight into a sweep ──────────────────────────────────
+
+
+def test_a_step_is_keyed_by_the_names_the_sweep_comes_back_under():
+    """The contract that lets multisweep's loop be a loop and nothing more: a
+    step is handed to the measurement as-is, so its keys have to be the section
+    names already, not something needing a second resolution."""
+    catalog = a_catalog()
+    step = AmplitudeSchedule.multiplicative(2.0, 2.0, 1).resolve_steps(catalog)[0]
+
+    assert set(step.amplitudes) == {r.name for r in catalog}
+    assert step.amplitudes == pytest.approx(
+        {"R0001": 0.002, "R0002": 0.004, "R0003": 0.008}
+    )
+
+
+def test_multisweep_takes_a_schedule_wherever_it_takes_an_amplitude():
+    """The other half of the same contract: there is one amplitude argument,
+    and a schedule is one of the things it accepts."""
+    import inspect
+
+    from rfmux.algorithms.measurement.multisweep import multisweep
+
+    parameters = inspect.signature(multisweep.__wrapped__).parameters
+    assert "AmplitudeSchedule" in str(parameters["amp"].annotation)
+    assert "amp_schedule" not in parameters

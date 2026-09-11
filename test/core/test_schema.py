@@ -34,6 +34,92 @@ def test_hardware_map_with_single_board():
 
 
 @pytest.mark.portable
+def test_readout_module_index():
+    s = rfmux.load_session(
+        """
+        !HardwareMap
+        - !CRS { serial: "0024" }
+        """
+    )
+    d = s.query(rfmux.CRS).one()
+
+    assert d.index() == "crs0024"
+    assert d.module[1].index() == "crs0024_rmod1"
+    assert d.module[4].index() == "crs0024_rmod4"
+
+
+@pytest.mark.portable
+def test_index_prefers_serial_over_hostname():
+    """The serial is the board's identity; the hostname is only a route to it.
+
+    This is the opposite precedence to `tuber_hostname`, deliberately — an
+    explicit hostname overriding a serial for *connecting* does not make the
+    board a different board. The standard mock map carries both, and should
+    name itself after the serial sitting right there.
+    """
+    s = rfmux.load_session(
+        """
+        !HardwareMap
+        - !CRS { serial: "0000", hostname: "127.0.0.1" }
+        """
+    )
+    d = s.query(rfmux.CRS).one()
+
+    assert d.index() == "crs0000"
+
+
+@pytest.mark.portable
+@pytest.mark.parametrize(
+    "hostname, expected",
+    [
+        ("rfmux0042.local", "hostrfmux0042-local"),
+        ("192.168.2.100", "host192-168-2-100"),
+    ],
+)
+def test_index_falls_back_to_hostname(hostname, expected):
+    """A board with no serial still names itself, rather than saying "None".
+
+    Reachable in practice: Periscope's "just type an IP or hostname" path
+    builds exactly this (`tools/periscope/__main__.py`). Punctuation is
+    flattened to dashes so the result stays usable as a dict key and as a
+    filename component.
+
+    Built without a session on purpose. `rfmux.mock`'s flavour rewrites every
+    CRS hostname in the HWM to `localhost:<ephemeral port>` and stays applied
+    for the rest of the process, so a session-based version of this test would
+    pass or fail depending on whether a mock test ran first.
+    """
+    d = rfmux.CRS(hostname=hostname)
+
+    assert d.index() == expected
+    assert "None" not in d.index()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="A CRS in a crate slot cannot be constructed at all — the same "
+           "tuber-client limitation the crate tests below are marked for. So "
+           "index()'s crate/slot fallback, which mirrors tuber_hostname's, is "
+           "unreachable for now. strict=True so that fixing the crate "
+           "limitation fails here and prompts someone to check this form "
+           "too, rather than becoming an XPASS nobody notices.")
+@pytest.mark.portable
+def test_index_falls_back_to_crate_and_slot():
+    s = rfmux.load_session(
+        """
+        !HardwareMap
+        - !Crate
+          serial: "001"
+          slots:
+            3: !CRS { hostname: "10.0.0.7" }
+        """
+    )
+    d = s.query(rfmux.CRS).one()
+
+    assert d.index() == "crate001_slot3"
+
+
+@pytest.mark.portable
 def test_hardware_map_with_single_crate():
     s = rfmux.load_session(
         """
@@ -141,12 +227,12 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
         !HardwareMap
         - !Wafer
           name: some_wafer
-          resonators: !Resonators "{csvfile.as_posix()}"
+          hwm_resonators: !HWMResonators "{csvfile.as_posix()}"
         """
     )
 
     # Query the resonators, sorted by bias amplitude.
-    r1, r2 = s.query(rfmux.Resonator).order_by(rfmux.Resonator.bias_amplitude).all()
+    r1, r2 = s.query(rfmux.HWMResonator).order_by(rfmux.HWMResonator.bias_amplitude).all()
 
     # Ensure we picked them up with the correct values. Note that type
     # conversion happens implicitly here - the CSV is just a bunch of strings.
@@ -179,7 +265,7 @@ def test_hardware_map_with_channel_mappings(tmp_path):
     mapping.write_text(
         textwrap.dedent(
             f"""
-                resonator\treadout_channel
+                hwm_resonator\treadout_channel
                 some_wafer/steve\t0024/1/1
                 some_wafer/nancy\t0025/1/1
                 some_wafer/george\t003/1/1/2
@@ -214,7 +300,7 @@ def test_hardware_map_with_channel_mappings(tmp_path):
 
         - !Wafer
           name: some_wafer
-          resonators: !Resonators "{resonators.as_posix()}"
+          hwm_resonators: !HWMResonators "{resonators.as_posix()}"
 
         - !ChannelMappings "{str(mapping)}"
         """
@@ -222,7 +308,7 @@ def test_hardware_map_with_channel_mappings(tmp_path):
 
     # Query the resonators, sorted by bias amplitude.
     r1, r2, r3, r4 = (
-        s.query(rfmux.Resonator).order_by(rfmux.Resonator.bias_amplitude).all()
+        s.query(rfmux.HWMResonator).order_by(rfmux.HWMResonator.bias_amplitude).all()
     )
 
     assert r1.name == "steve"

@@ -13,6 +13,13 @@ from scipy import interpolate
 
 
 # TODO: Empirical value (should probably be a hybrid)
+#
+# Being one constant is load-bearing for more than arithmetic.
+# `resonators.BiasPoint.bias_sweep` stores a sweep in volts and drops the counts
+# it was measured in, on the grounds that counts are recoverable by dividing by
+# this. The day this stops being a single number — per board, per module, per
+# frequency, or anything fitted — that stops being true for a catalog already
+# written, and what a bias sweep stores has to be reconsidered.
 VOLTS_PER_ROC = (
     (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
 )
@@ -46,6 +53,17 @@ FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
 
 # TODO: verify still appropriate
 BASE_FREQUENCY = COMB_SAMPLING_FREQ / 256 / 2**12
+
+# How far apart the tones in one NCO region are allowed to sit: every tone
+# within +/- ALLOWED_NCO_BANDWIDTH_HZ / 2 of the NCO frequency.
+#
+# This is a policy, not a hardware limit. The band a module can actually
+# convert is a separate, wider number; this is the span across which we are
+# willing to place tones and still call the result trustworthy. It lives here,
+# in one place, so that a catalog which fits the sweep also fits the bias
+# applier -- two algorithms disagreeing about how wide a region may be is a
+# catalog that can be measured and then not played back.
+ALLOWED_NCO_BANDWIDTH_HZ = 500e6
 
 # ────────────────── Cable Delay Compensation Functions ───────────────────
 SPEED_OF_LIGHT_VACUUM = c  # m/s

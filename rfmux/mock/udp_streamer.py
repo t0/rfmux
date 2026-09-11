@@ -28,7 +28,6 @@ import asyncio
 import socket
 import time
 import threading
-import signal
 import atexit
 import traceback
 from datetime import datetime, timedelta
@@ -68,11 +67,6 @@ def _register_global_cleanup():
     global _cleanup_registered
     if not _cleanup_registered:
         atexit.register(_emergency_cleanup)
-        for sig in (signal.SIGTERM, signal.SIGINT):
-            try:
-                signal.signal(sig, lambda *_: _emergency_cleanup())
-            except (ValueError, OSError):
-                pass
         _cleanup_registered = True
 
 
@@ -639,7 +633,8 @@ class MockUDPManager:
         not. Pass a host explicitly to override, or
         ``use_multicast=False`` to skip the check entirely.
         """
-        if self._streaming_active:
+        if self._streaming_active or (self._streamer is not None
+                                      and self._streamer.is_alive()):
             print("[Manager] Streaming already active")
             return False
 
@@ -663,7 +658,7 @@ class MockUDPManager:
 
     async def stop_udp_streaming(self):
         """Stop the unified streamer thread entirely."""
-        if not self._streaming_active or not self._streamer:
+        if not self._streamer:
             return False
 
         try:
@@ -671,7 +666,8 @@ class MockUDPManager:
             self._streamer.stop()
 
             try:
-                await asyncio.to_thread(self._streamer.join, timeout=2.0)
+                if self._streamer.ident is not None:
+                    await asyncio.to_thread(self._streamer.join, timeout=2.0)
             except Exception as e:
                 print(f"[Manager] Error during thread join: {e}")
 
@@ -679,6 +675,10 @@ class MockUDPManager:
                 print("[Manager] Warning: streamer did not stop in time, "
                       "forcing emergency stop")
                 self._streamer.emergency_stop()
+                await asyncio.to_thread(self._streamer.join, timeout=2.0)
+
+            if self._streamer.is_alive():
+                return False
 
             self._streamer = None
             print("[Manager] Streaming stopped.")
@@ -687,7 +687,8 @@ class MockUDPManager:
             print(f"[Manager] Error stopping streaming: {e}")
             if self._streamer:
                 self._streamer.emergency_stop()
-                self._streamer = None
+                if not self._streamer.is_alive():
+                    self._streamer = None
             return False
 
     def get_udp_streaming_status(self):

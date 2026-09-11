@@ -12,12 +12,12 @@ Uses Qt's QSettings which persists settings to:
 Usage:
     from . import settings
     
-    # Get/set last session directory
-    last_dir = settings.get_last_session_directory()
-    settings.set_last_session_directory("/path/to/sessions")
+    # Get/set the folder new sessions are created in
+    root = settings.get_session_root()
+    settings.set_session_root("/path/to/sessions")
 """
 
-from PyQt6.QtCore import QSettings
+from PyQt6.QtCore import QByteArray, QSettings
 from pathlib import Path
 from typing import Optional
 
@@ -29,12 +29,18 @@ APPLICATION = "periscope"
 KEY_CONNECTION_MODE = "connection/last_mode"
 KEY_CRS_SERIAL = "connection/last_crs_serial"
 KEY_MODULE = "connection/last_module"
+KEY_SESSION_ROOT = "session/root_directory"
 KEY_SESSION_DIRECTORY = "session/last_base_directory"
 KEY_SESSION_MODE = "session/last_mode"
 KEY_LAST_SESSION_PATH = "session/last_loaded_path"
 KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
+KEY_FIND_RESONANCES = "find_resonances/parameters"
+KEY_FIT_SWEEPS = "fit_sweeps/parameters"
+KEY_FIND_BIAS = "find_bias/parameters"
+KEY_WINDOW_GEOMETRY = "view/window_geometry"
+KEY_DIALOG_FIELDS = "dialogs/%s"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -158,26 +164,31 @@ def set_font_scale(scale: float) -> None:
 # Session Settings
 # ─────────────────────────────────────────────────────────────────
 
-def get_last_session_directory() -> str:
+def get_session_root() -> str:
     """
-    Get the last directory used for session creation/loading.
-    
+    Get the folder new session folders are created in.
+
+    Empty until the user has chosen one, which is what makes Periscope ask
+    on first start.  An install predating this setting falls back to the
+    directory its session dialogs last visited, so it is not asked again.
+
     Returns:
         str: Directory path or empty string
     """
     settings = _get_settings()
-    return settings.value(KEY_SESSION_DIRECTORY, "")
+    return (settings.value(KEY_SESSION_ROOT, "")
+            or settings.value(KEY_SESSION_DIRECTORY, ""))
 
 
-def set_last_session_directory(path: str) -> None:
+def set_session_root(path: str) -> None:
     """
-    Save the session directory.
-    
+    Save the folder new session folders are created in.
+
     Args:
         path: Directory path
     """
     settings = _get_settings()
-    settings.setValue(KEY_SESSION_DIRECTORY, str(path))
+    settings.setValue(KEY_SESSION_ROOT, str(path))
 
 
 def get_last_session_mode() -> str:
@@ -419,3 +430,146 @@ def get_material_properties(name: str) -> dict:
         return mat
     
     raise ValueError(f"Material '{name}' not found in built-in or custom materials")
+
+
+# ─────────────────────────────────────────────────────────────────
+# Find Resonances Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_find_resonances_parameters() -> dict:
+    """The saved keyword arguments for the resonance finder.
+
+    JSON rather than one key per argument, so ``None`` -- which several of
+    them use to mean "no limit" -- survives the round trip, and so adding an
+    argument needs no new key here.
+
+    Returns:
+        dict: the arguments last saved, empty if none ever were. Only the
+        arguments present are returned; the panel fills the rest from the
+        library's own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIND_RESONANCES, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_find_resonances_parameters(parameters: dict) -> None:
+    """Remember the resonance finder's keyword arguments."""
+    import json
+    _get_settings().setValue(KEY_FIND_RESONANCES, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Fit Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_fit_parameters() -> dict:
+    """The saved fit settings: which models, and which amplitudes.
+
+    JSON, as for the resonance finder, so ``None`` -- which the amplitude
+    choice uses to mean "all of them" -- survives the round trip.
+
+    Returns:
+        dict: what was last saved, empty if nothing ever was. The panel fills
+        anything absent from the fitters' own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIT_SWEEPS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_fit_parameters(parameters: dict) -> None:
+    """Remember the fit settings."""
+    import json
+    _get_settings().setValue(KEY_FIT_SWEEPS, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Bias Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_bias_parameters() -> dict:
+    """The saved bias-finding settings.
+
+    JSON, as for the resonance finder, so ``None`` -- which the direction and
+    the distance guard both use -- survives the round trip.
+
+    Returns:
+        dict: what was last saved, empty if nothing ever was. The panel fills
+        anything absent from ``find_bias_points``' own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIND_BIAS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_bias_parameters(parameters: dict) -> None:
+    """Remember the bias-finding settings."""
+    import json
+    _get_settings().setValue(KEY_FIND_BIAS, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Main Window Geometry
+# ─────────────────────────────────────────────────────────────────
+
+def get_window_geometry():
+    """The main window's saved position and size.
+
+    Qt's own opaque ``saveGeometry()`` blob, so the window comes back on the
+    screen it was closed on. A geometry that no longer fits -- the laptop
+    alone after a session on the big monitor -- is shrunk onto the available
+    screen by ``restoreGeometry`` rather than rejected.
+
+    Returns:
+        QByteArray or None if the window has never been closed.
+    """
+    value = _get_settings().value(KEY_WINDOW_GEOMETRY)
+    return value if isinstance(value, QByteArray) and not value.isEmpty() else None
+
+
+def set_window_geometry(data) -> None:
+    """Remember the main window's position and size."""
+    _get_settings().setValue(KEY_WINDOW_GEOMETRY, data)
+
+
+# ─────────────────────────────────────────────────────────────────
+# Dialog Fields
+# ─────────────────────────────────────────────────────────────────
+
+def get_dialog_fields(name: str) -> dict:
+    """What the user last entered in the dialog called ``name``.
+
+    JSON, as for the parameter stores above, so ``None`` survives the round
+    trip and a dialog growing a field needs no new key here.
+
+    Returns:
+        dict: attribute name -> value, empty if the dialog has never been
+        accepted. Only the fields present are returned; the dialog keeps its
+        own default for the rest.
+    """
+    import json
+    json_str = _get_settings().value(KEY_DIALOG_FIELDS % name, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_dialog_fields(name: str, fields: dict) -> None:
+    """Remember what the user entered in the dialog called ``name``."""
+    import json
+    _get_settings().setValue(KEY_DIALOG_FIELDS % name, json.dumps(fields))

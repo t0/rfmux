@@ -1,4 +1,8 @@
 """
+**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
+ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
+here warns on call and names its replacement (see ``_legacy.py``).
+
 bias_kids: A measurement algorithm for biasing KIDs at their optimal operating points
 based on multisweep characterization data.
 """
@@ -8,18 +12,14 @@ import asyncio
 import warnings
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
-from ...core.transferfunctions import convert_roc_to_volts, decimation_to_sampling
+from ...core.transferfunctions import BASE_FREQUENCY, convert_roc_to_volts
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
                              ensure_fits, fitted_linewidth, step_slope_correction)
-
-#: Tones are placed on multiples of half the slow stream's frame rate at
-#: decimation 6 (its Nyquist frequency), 625 MHz / 2^21, so that
-#: intermodulation products of the tones land on that grid too and stay
-#: out of the measurements.  Not a limit of the board, whose frequency
-#: resolution is far finer.
-TONE_GRID_HZ = decimation_to_sampling(6) / 2
+from ._legacy import deprecated
 
 
+
+@deprecated("scipy.signal.butter/filtfilt directly", note="Only the phase optimiser used it, and phase changes are not part of the current flow.")
 def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, order: int = 4) -> np.ndarray:
     """
     Apply a bandpass filter to the data.
@@ -39,6 +39,7 @@ def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, 
     return filtfilt(b, a, data)
 
 
+@deprecated("nothing yet", note="Setting the ADC phase is deliberately not part of the current tuning flow (see main_merge_conflict_survey.md §9.2).")
 async def find_optimal_phases_parallel(
     crs,
     bias_configs: Dict[int, Dict],
@@ -161,6 +162,7 @@ def _extract_data_from_gui_format(gui_results: Dict) -> Tuple[Optional[Dict[int,
     return results_by_detector, metadata
 
 
+@deprecated("rfmux.tuning.iq_derivatives_at, read off the bias sweep and carried on the BiasPoint", note="A stepped-tone calibration is noted for later, not implemented (survey §9.2).")
 async def measure_calibrations_by_step(crs, bias_configs: Dict[int, Dict], module: int,
                                        steps: Dict[int, float], num_samples: int = 100
                                        ) -> Dict[int, complex]:
@@ -232,6 +234,7 @@ def _bias_point_from_fit(entry: Dict, fit_method: str) -> None:
         entry['bias_frequency_source'] = fit_method
 
 
+@deprecated("rfmux.tuning.find_bias_points on a multisweep over an AmplitudeSchedule, then crs.apply_bias(report.catalog)")
 async def bias_kids(
     crs,
     multisweep_results: Union[Dict, List[Dict]],
@@ -318,7 +321,7 @@ async def bias_kids(
           from along their principal axis (bandpassed when the filter is on)
         - 'bias_frequency': The chosen bias point, from the fit when
           'bias_frequency_source' names one, else the multisweep's own choice;
-          the tone is programmed at the nearest multiple of TONE_GRID_HZ
+          the tone is programmed at the nearest multiple of BASE_FREQUENCY
         - 'df_calibration': Hz per volt at the bias point: measured, or from the fit
         - 'df_calibration_source': "measured" or "fit"
         - 'df_calibration_fit': the fit's calibration, when both exist
@@ -433,7 +436,7 @@ async def bias_kids(
             channel = det_idx
             
             # Quantize the absolute bias frequency to nearest multiple of base frequency
-            quantized_bias_freq = round(bias_freq / TONE_GRID_HZ) * TONE_GRID_HZ
+            quantized_bias_freq = round(bias_freq / BASE_FREQUENCY) * BASE_FREQUENCY
             
             # Calculate channel frequency relative to NCO
             channel_freq = quantized_bias_freq - nco_freq
@@ -516,8 +519,8 @@ async def bias_kids(
         steps = {}
         for det_idx, config in bias_configs.items():
             lw = fitted_linewidth(multisweep_results[det_idx], fit_method)
-            grid_steps = max(1, round(calibration_step * lw / TONE_GRID_HZ)) if lw else 1
-            steps[det_idx] = grid_steps * TONE_GRID_HZ
+            grid_steps = max(1, round(calibration_step * lw / BASE_FREQUENCY)) if lw else 1
+            steps[det_idx] = grid_steps * BASE_FREQUENCY
         try:
             measured = await measure_calibrations_by_step(crs, bias_configs, module, steps)
             for det_idx in list(measured):
@@ -596,6 +599,7 @@ async def bias_kids(
     return successfully_biased
 
 
+@deprecated("rfmux.tuning.find_bias_points, which reads the amplitude schedule a multisweep returns")
 def analyze_multiamp_data(
     results_by_detector: Dict[int, Dict],
     nonlinear_threshold: float = 0.77,

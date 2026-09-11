@@ -4,13 +4,11 @@ from .utils import *
 from .tasks import *
 from .ui import *
 import asyncio
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch, AsyncMock
-from contextlib import contextmanager
-from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
 import numpy as np
 from typing import Optional
+from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import AmplitudeSchedule
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -19,6 +17,7 @@ from ... import streamer as _streamer
 from ...pulse_capture.sources import (
     columns_for_width,
 )
+from . import settings
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1322,6 +1321,7 @@ class PeriscopeRuntime:
 
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
+        settings.set_window_geometry(self.saveGeometry())
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
         # Stop any active network analysis tasks (QThread needs proper termination)
         for task_key in list(self.netanal_tasks.keys()):
@@ -1429,9 +1429,10 @@ class PeriscopeRuntime:
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
             window_id = f"multisweep_{self.multisweep_window_count}"; self.multisweep_window_count += 1
-            target_module = params.get('module')
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
-            
+            # A multisweep measures a catalog, and a catalog belongs to one
+            # module, so that is where the module comes from.
+            target_module = params['catalog'].module
+
             # Create panel
             dac_scales_for_panel = self.dac_scales if hasattr(self, 'dac_scales') else {}
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
@@ -1449,38 +1450,16 @@ class PeriscopeRuntime:
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
             # Connect data_ready signal for session auto-export
-            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+            if getattr(self, 'session_manager', None) is not None:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
-            
-            # Disconnect any previous signal connections to avoid multiple calls
-            try:
-                self.multisweep_signals.progress.disconnect()
-                self.multisweep_signals.data_update.disconnect()
-                self.multisweep_signals.completed_iteration.disconnect()
-                self.multisweep_signals.all_completed.disconnect()
-                self.multisweep_signals.error.disconnect()
-            except TypeError: 
-                pass # Raised if signals were not previously connected
 
-            # Connect signals from the MultisweepTask to the new panel's slots
-            self.multisweep_signals.progress.connect(panel.update_progress,
-                                                   QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.starting_iteration.connect(panel.handle_starting_iteration,
-                                                             QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.data_update.connect(panel.update_data,
-                                                      QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.completed_iteration.connect(
-                lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.all_completed.connect(panel.all_sweeps_completed,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.error.connect(panel.handle_error,
-                                                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.fitting_progress.connect(panel.handle_fitting_progress,
-                                                            QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Create and start the task
-            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=panel)
+            panel.sweep_finished.connect(
+                lambda p=panel, m=target_module: self._save_multisweep_to_session(p, m))
+
+            # Create and start the task, with signals of its own
+            signals = MultisweepSignals()
+            panel.connect_task_signals(signals)
+            task = MultisweepTask(crs=self.crs, params=params, signals=signals)
             task_key = f"{window_id}_module_{target_module}"
             self.multisweep_tasks[task_key] = task
             task.start()  # Start the QThread directly
@@ -1518,18 +1497,18 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict) -> tuple:
         """
-        Create and display a MultisweepPanel from loaded data.
-        
-        This unified helper method is used by both _load_multisweep_analysis and 
-        _set_and_plot_bias to eliminate code duplication.
-        
+        Create and display a MultisweepPanel from a noise payload.
+
+        The multisweep lane loads through ``_load_multisweep_analysis`` and the
+        container ``store`` writes; this reads ``_prepare_export_data``'s flat
+        payload, which only the noise path still produces. It goes with it.
+
         Args:
-            load_params: Loaded data dictionary containing 'initial_parameters', 
-                        'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
-            
+            load_params: Loaded data dictionary containing 'initial_parameters',
+                        'dac_scales_used' and 'noise_data'.
+
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
         """
@@ -1563,15 +1542,11 @@ class PeriscopeRuntime:
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
-            
-            # For bias source type, also check for bias_kids_output
-            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
-            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
-                
+
             # Create panel
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
                                    dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode, 
-                                   loaded_bias=loaded_bias_flag, is_loaded_data=True)
+                                   loaded_bias=has_noise_data, is_loaded_data=True)
             
             # Load noise spectrum data if it exists
             if has_noise_data:
@@ -1579,7 +1554,6 @@ class PeriscopeRuntime:
                 panel.noise_spectrum_btn.setEnabled(True)
             
             # MultisweepPanel dock is always named "Multisweep" regardless of source type
-            # The source_type affects panel behavior, not the dock title
             dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
             
             # Wrap in dock
@@ -1592,7 +1566,7 @@ class PeriscopeRuntime:
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
             # Connect data_ready signal for session auto-export
-            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+            if getattr(self, 'session_manager', None) is not None:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
@@ -1610,40 +1584,6 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load data into panel - handle both old (iteration) and new (detector) formats
-            if 'results_by_detector' in load_params:
-                # New format: load directly into panel
-                panel.results_by_detector = load_params['results_by_detector']
-                panel._redraw_plots()
-            elif 'results_by_iteration' in load_params:
-                # Old format: convert via migration helper, then feed through update_data
-                iteration_params = load_params.get('results_by_iteration', [])
-                if isinstance(iteration_params, dict):
-                    iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
-                for i in range(len(iteration_params)):
-                    amplitude = iteration_params[i]['amplitude']
-                    direction = iteration_params[i]['direction']
-                    data = iteration_params[i]['data']
-                    panel.update_data(target_module, i, amplitude, direction, data, None)
-            
-            # Generate histograms now that data is loaded
-            if panel.results_by_detector:
-                panel._generate_histograms()
-                panel.histograms_generated = True
-            
-            # Extract and load df_calibrations if bias_kids_output exists
-            if has_bias_data:
-                bias_output = load_params['bias_kids_output']
-                df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Load calibrations into main window
-                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
-                    self._handle_df_calibration_ready(target_module, df_calibrations)
-                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
-            
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1937,54 +1877,65 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
-        """
-        Load multisweep analysis data from file and display in a docked panel.
+    def _load_multisweep_analysis(self, container: dict):
+        """Show a saved multisweep in a docked panel, one panel per module.
+
+        A panel holds one module because a catalog belongs to one, so a
+        container that ran over several opens as several panels -- the same way
+        measuring them does.
 
         Args:
-            load_params (dict): Loaded data dictionary from file.
+            container (dict): what ``multisweep`` returned, as ``store.load``
+                read it back: one output block per module, keyed by module
+                identifier.
         """
-        # Use the unified helper method
-        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
-        )
-        
-        if panel is None:
-            return  # Error already displayed by helper
-        
-        # Auto-launch detector digest panel - find a frequency to click on
-        click_freq = None
-        if panel.results_by_detector:
-            first_det_id = sorted(panel.results_by_detector.keys())[0]
-            first_entry = next(iter(panel.results_by_detector[first_det_id].values()), {})
-            click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
-        if click_freq is not None:
-            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                # Create a fake event at the detector's frequency
-                class FakeEvent:
-                    def __init__(self, x, y):
-                        self._scene_pos = QtCore.QPointF(x, y)
-                    def scenePos(self):
-                        return self._scene_pos
-                    def accept(self):
-                        pass
-                
-                # Map the frequency to view coordinates (x position)
-                view_box = panel.combined_mag_plot.getViewBox()
-                if view_box:
-                    view_point = QtCore.QPointF(click_freq, 0)
-                    scene_point = view_box.mapViewToScene(view_point)
-                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                    panel._handle_multisweep_plot_double_click(fake_event)
-                    
-                    # Re-raise the multisweep dock to keep focus on it
-                    multisweep_dock = self.dock_manager.find_dock_for_widget(panel)
-                    if multisweep_dock:
-                        multisweep_dock.raise_()
-        
-        # Ensure the Magnitude Sweeps tab is shown (not the Detector Digest tab)
-        if hasattr(panel, 'plot_tabs'):
-            panel.plot_tabs.setCurrentIndex(0)
+        try:
+            # DAC scale is the board's to state, not the file's, so a loaded
+            # sweep shows dBm when a board is connected and counts when none is.
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
+
+            for block in container.values():
+                window_id = f"multisweep_window_{self.multisweep_window_count}"
+                self.multisweep_window_count += 1
+
+                # The snapshots the file records, resolved back into the live
+                # objects a panel is given when a sweep is configured, so a
+                # loaded panel and a measuring one hold the same kinds of thing
+                # and a re-run from a file needs no special case.
+                call_params = dict(block['call_params'])
+                call_params['catalog'] = ResonatorCatalog.from_dict(
+                    call_params['catalog'])
+                call_params['amp'] = AmplitudeSchedule.from_dict(
+                    call_params['amp_schedule'])
+
+                panel = MultisweepPanel(
+                    parent=self, target_module=block['module'],
+                    initial_params=call_params,
+                    dac_scales=dac_scales_local, dark_mode=self.dark_mode,
+                    is_loaded_data=True)
+                panel._hide_progress_bars()
+                panel.show_measurement(block['module'], container)
+                # Shown as it is; nothing rewritten, and no offer to sweep from
+                # settings taken on another module.
+                if block['module'] != self.module:
+                    panel.mark_foreign_module(block['module'])
+
+                dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+                dock = self.dock_manager.create_dock(panel, dock_title, window_id)
+                self.multisweep_windows[window_id] = {
+                    'window': panel, 'dock': dock, 'params': call_params}
+
+                if getattr(self, 'session_manager', None) is not None:
+                    panel.data_ready.connect(self.session_manager.handle_data_ready)
+
+                main_dock = self.dock_manager.get_dock("main_plots")
+                if main_dock:
+                    self.tabifyDockWidget(main_dock, dock)
+                dock.show()
+                dock.raise_()
+        except Exception as e:
+            print(f"Error in _load_multisweep_analysis: {e}", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """
@@ -2001,49 +1952,23 @@ class PeriscopeRuntime:
         for w_id, data in self.multisweep_windows.items():
             if data['window'] == window_instance: window_id = w_id; break
         if not window_id: QtWidgets.QMessageBox.critical(window_instance, "Error", "Could not find associated window to re-run multisweep."); return
-        
-        target_module = params.get('module')
-        if target_module is None: QtWidgets.QMessageBox.critical(window_instance, "Error", "Target module not specified for multisweep re-run."); return
-        
-        old_task_key = f"{window_id}_module_{target_module}"
+
+        # A catalog belongs to one module, so that is where the module comes
+        # from -- the same place _start_multisweep_analysis reads it.
+        old_task_key = f"{window_id}_module_{params['catalog'].module}"
         if old_task_key in self.multisweep_tasks: # Stop and remove old task if it exists
             old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
         # Pass the window_instance to the task (now starts automatically since it's a QThread)
         
-        ### This reconnects to signal ####
-        try:
-            self.multisweep_signals.progress.disconnect()
-            self.multisweep_signals.data_update.disconnect()
-            self.multisweep_signals.completed_iteration.disconnect()
-            self.multisweep_signals.all_completed.disconnect()
-            self.multisweep_signals.error.disconnect()
-        except TypeError: 
-            pass # Raised if signals were not previously connected
-
-        # Connect signals from the MultisweepTask to the new window's slots
-        self.multisweep_signals.progress.connect(window_instance.update_progress,
-                                               QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.starting_iteration.connect(window_instance.handle_starting_iteration,
-                                                         QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.data_update.connect(window_instance.update_data,
-                                                  QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.completed_iteration.connect(
-            lambda module, iteration, amplitude, direction: window_instance.completed_amplitude_sweep(module, amplitude),
-            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.all_completed.connect(window_instance.all_sweeps_completed,
-                                                    QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.error.connect(window_instance.handle_error,
-                                            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-
         # Connect data_ready signal for session auto-export
-        if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+        if getattr(self, 'session_manager', None) is not None:
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
-        
-        task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
+
+        signals = MultisweepSignals()
+        window_instance.connect_task_signals(signals)
+        task = MultisweepTask(crs=self.crs, params=params, signals=signals)
         self.multisweep_tasks[old_task_key] = task
         task.start()  # Start the QThread directly
 
@@ -2058,8 +1983,10 @@ class PeriscopeRuntime:
         window_id = None; target_module = None
         for w_id, data in list(self.multisweep_windows.items()): # Iterate over a copy for safe removal
             if data['window'] == window_instance:
-                window_id = w_id; target_module = data['params'].get('module'); break
-        
+                window_id = w_id
+                target_module = getattr(data['params'].get('catalog'), 'module', None)
+                break
+
         if window_id and target_module:
             task_key = f"{window_id}_module_{target_module}"
             if task_key in self.multisweep_tasks:
@@ -2115,7 +2042,7 @@ class PeriscopeRuntime:
         
         # Determine notebook directory - requires an active session
         if notebook_dir is None:
-            if hasattr(self, 'session_manager') and self.session_manager.is_active:
+            if getattr(self, 'session_manager', None) is not None and self.session_manager.is_active:
                 notebook_dir = str(self.session_manager.session_path)
             else:
                 # No active session - prompt user to start one
@@ -2280,535 +2207,3 @@ class PeriscopeRuntime:
 
         # sim_speed = delta_sim_time / delta_real_time
         return sim_elapsed / wall_clock_elapsed
-
-
-    def test_dialog_params(self):
-        """
-        Validate all dialog parameter dictionaries used by the UI mock context.
-        """
-        def _assert_param_keys(expected_dict: dict, module_path: str, class_name: str):
-            extractor = ParamKeyExtractor(module_path, class_name)
-            actual_keys = extractor.extract()
-            expected_keys = set(expected_dict.keys())
-    
-            if actual_keys != expected_keys:
-                missing = expected_keys - actual_keys
-                unexpected = actual_keys - expected_keys
-                raise AssertionError(
-                    f"Mock parameter keys for {class_name} do not match test dialog. "
-                    f"Missing from actual: {sorted(missing)} Actual Key is: {sorted(unexpected)}"
-                )
-        
-        self.netanal_params = {
-            "amps": [DEFAULT_AMPLITUDE],
-            "module": None,
-            "fmin": DEFAULT_MIN_FREQ,
-            "fmax": DEFAULT_MAX_FREQ,
-            "cable_length": DEFAULT_CABLE_LENGTH,
-            "npoints": DEFAULT_NPOINTS,
-            "nsamps": DEFAULT_NSAMPLES,
-            "max_chans": DEFAULT_MAX_CHANNELS,
-            "max_span": DEFAULT_MAX_SPAN,
-            "clear_channels": True,
-        }
-        _assert_param_keys(
-            self.netanal_params,
-            "rfmux.tools.periscope.network_analysis_dialog",
-            "NetworkAnalysisDialog",
-        )
-    
-        self.find_params = {
-            "expected_resonances": DEFAULT_EXPECTED_RESONANCES,
-            "min_dip_depth_db": DEFAULT_MIN_DIP_DEPTH_DB,
-            "min_Q": DEFAULT_MIN_Q,
-            "max_Q": DEFAULT_MAX_Q,
-            "min_resonance_separation_hz": DEFAULT_MIN_RESONANCE_SEPARATION_HZ,
-            "require_isolation": DEFAULT_REQUIRE_ISOLATION,
-            "data_exponent": DEFAULT_DATA_EXPONENT,
-        }
-        _assert_param_keys(
-            self.find_params,
-            "rfmux.tools.periscope.find_resonances_dialog",
-            "FindResonancesDialog",
-        )
-    
-        self.multisweep_params = {
-            "amps": [MULTISWEEP_DEFAULT_AMPLITUDE],
-            "amp": MULTISWEEP_DEFAULT_AMPLITUDE,
-            "span_hz": MULTISWEEP_DEFAULT_SPAN_HZ,
-            "npoints_per_sweep": MULTISWEEP_DEFAULT_NPOINTS,
-            "nsamps": MULTISWEEP_DEFAULT_NSAMPLES,
-            "bias_frequency_method": "max-diq",
-            "rotate_saved_data": False,
-            "sweep_direction": "upward",
-            "resonance_frequencies": {self.module: [90e6, 91e6]},
-            "module": self.module,
-            "apply_skewed_fit": False,
-            "apply_nonlinear_fit": False,
-        }
-        _assert_param_keys(
-            self.multisweep_params,
-            "rfmux.tools.periscope.multisweep_dialog",
-            "MultisweepDialog",
-        )
-    
-        self.bias_params = {
-            "fit_method": "nonlinear",
-            "nonlinear_threshold": 0.77,
-            "fallback_to_lowest": True,
-            "optimize_phase": True,
-            "num_phase_samples": 300,
-            "bandpass_params": {
-                "apply_bandpass": True,
-                "lowcut": 5.0,
-                "highcut": 20.0,
-                "fs": 597.0,
-            },
-            "apply_bandpass": True,
-            "lowcut": 5.0,
-            "highcut": 20.0,
-            "fs": 597.0,
-            "measure_calibration": True,
-            "calibration_step": 0.05,
-        }
-        _assert_param_keys(
-            self.bias_params,
-            "rfmux.tools.periscope.bias_kids_dialog",
-            "BiasKidsDialog",
-        )
-    
-        self.noise_params = {
-            "num_samples": 10000,
-            "channel_noise": 1,
-            "spectrum_limit": 0.9,
-            "num_segments": 10,
-            "decimation": 6,
-            "reference": "relative",
-            "effective_highest_freq": 10.0,
-            "time_taken": 1.0,
-            "freq_resolution": 0.1,
-            "pfb_enabled": False,
-            "overlap": 2,
-            "pfb_samples": 210000,
-            "pfb_time": 0.41
-        }
-        _assert_param_keys(
-            self.noise_params,
-            "rfmux.tools.periscope.noise_spectrum_dialog",
-            "NoiseSpectrumDialog",
-        )
-
-        
-    @contextmanager
-    def _ui_mock_context(self):
-        """
-        Mock all dialogs, windows, tasks, and signals used by Periscope UI helpers.
-
-        This context manager replaces Qt dialogs, background tasks, and signal
-        classes with lightweight :class:`unittest.mock.MagicMock` instances so UI
-        entry points can be invoked without spinning up threads or opening
-        windows. It is intended for quick smoke-testing of control flow.
-        """
-
-        self.test_dialog_params()
-        
-        from importlib import import_module
-
-        periscope_app = import_module("rfmux.tools.periscope.app")
-        utils_mod = import_module("rfmux.tools.periscope.utils")
-
-        default_resonances = [90e6, 91e6]
-    
-        if len(default_resonances) < 2:
-            default_resonances = list(default_resonances) + [default_resonances[0] + 1e6]
-    
-        init_params = {
-            "irig_source": getattr(self.crs.TIMESTAMP_PORT, "TEST", "TEST"),
-            "clear_channels": True,
-        }
-
-        fake_init_dialog = MagicMock()
-        fake_init_dialog.exec.return_value = True
-        fake_init_dialog.get_parameters.return_value = init_params
-        fake_init_dialog.get_selected_irig_source.return_value = init_params["irig_source"]
-        fake_init_dialog.get_clear_channels_state.return_value = init_params["clear_channels"]
-        fake_init_dialog.module_entry = MagicMock()
-        fake_init_dialog.module_entry.setText = MagicMock()
-        fake_init_dialog.dac_scales = {}
-
-        fake_netanal_dialog = MagicMock()
-        fake_netanal_dialog.exec.return_value = True
-        fake_netanal_dialog.get_parameters.return_value = self.netanal_params
-        fake_netanal_dialog.module_entry = MagicMock()
-        fake_netanal_dialog.module_entry.setText = MagicMock()
-        fake_netanal_dialog.dac_scales = {}
-
-        fake_find_dialog = MagicMock()
-        fake_find_dialog.exec.return_value = True
-        fake_find_dialog.get_parameters.return_value = self.find_params
-
-        fake_bias_dialog = MagicMock()
-        fake_bias_dialog.exec.return_value = True
-        fake_bias_dialog.get_parameters.return_value = self.bias_params
-
-        fake_noise_dialog = MagicMock()
-        fake_noise_dialog.exec.return_value = True
-        fake_noise_dialog.get_parameters.return_value = self.noise_params
-
-        fake_mock_config_dialog = MagicMock()
-        fake_mock_config_dialog.exec.return_value = True
-        fake_mock_config_dialog.get_configuration.return_value = {"mock": True}
-
-        fake_signals = MagicMock()
-        fake_signals.receivers.return_value = 0
-        for sig_name in (
-            "progress",
-            "data_update",
-            "data_update_with_amp",
-            "completed",
-            "error",
-        ):
-            signal = MagicMock()
-            signal.connect = MagicMock()
-            setattr(fake_signals, sig_name, signal)
-
-        fake_bias_signals = MagicMock()
-        fake_bias_signals.progress.connect = MagicMock()
-        fake_bias_signals.error.connect = MagicMock()
-
-        fetcher_signal = MagicMock()
-        fetcher_signal.connect = MagicMock()
-        fake_fetcher = MagicMock()
-        fake_fetcher.start = MagicMock()
-        fake_fetcher.dac_scales_ready = fetcher_signal
-
-        # Dock and panel scaffolding
-        def _mock_create_dock(_self, widget, title, dock_id=None):
-            dock = MagicMock()
-            dock.widget.return_value = widget
-            dock.windowTitle.return_value = title
-            return dock
-
-        MockDockCreate = MagicMock(side_effect=_mock_create_dock)
-        MockDockGet = MagicMock(return_value=None)
-
-        ### Use panel classes for mocked flows ###
-        from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
-        MockNAWindow = NetworkAnalysisPanel
-
-        from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
-        MockMultiWindow = MultisweepPanel
-        
-        MockInitCRS = MagicMock(return_value=fake_init_dialog)
-        MockNetAnal = MagicMock(return_value=fake_netanal_dialog)
-        MockFindRes = MagicMock(return_value=fake_find_dialog)
-        MockMulti = MagicMock(return_value=MagicMock(exec=MagicMock(return_value=True), get_parameters=MagicMock(return_value=self.multisweep_params)))
-        MockBiasDialog = MagicMock(return_value=fake_bias_dialog)
-        MockNoiseDialog = MagicMock(return_value=fake_noise_dialog)
-        MockConfigDialog = MagicMock(return_value=fake_mock_config_dialog)
-        MockCRSInitTask = MagicMock(return_value=MagicMock(start=MagicMock()))
-        MockFetcher = MagicMock(return_value=fake_fetcher)
-        MockNASignals = MagicMock(return_value=fake_signals)
-        MockNATask = MagicMock(return_value=MagicMock(start=MagicMock()))
-        MockMultiTask = MagicMock(return_value=MagicMock(start=MagicMock()))
-        MockBiasTask = MagicMock(return_value=MagicMock(start=MagicMock()))
-        MockBiasSignals = MagicMock(return_value=fake_bias_signals)
-
-        qt_suppression_patchers = [
-            patch.object(
-                utils_mod.QtWidgets.QDialog,
-                "exec",
-                MagicMock(return_value=utils_mod.QtWidgets.QDialog.Accepted),
-                create=True,
-            ),
-            patch.object(utils_mod.QtWidgets.QDialog, "show", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QWidget, "show", MagicMock(), create=True),
-            patch.object(
-                utils_mod.QtWidgets.QMainWindow, "show", MagicMock(), create=True
-            ),
-            patch.object(utils_mod.QtWidgets.QMessageBox, "information", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QMessageBox, "warning", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QMessageBox, "critical", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QMessageBox, "question", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QMainWindow, "tabifyDockWidget", MagicMock(), create=True),
-            patch.object(utils_mod.QtWidgets.QMainWindow, "addDockWidget", MagicMock(), create=True),
-        ]
-
-        module_patchers = [
-            patch(
-                "rfmux.tools.periscope.initialize_crs_dialog.InitializeCRSDialog",
-                MockInitCRS,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.network_analysis_dialog.NetworkAnalysisDialog",
-                MockNetAnal,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.find_resonances_dialog.FindResonancesDialog",
-                MockFindRes,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.multisweep_dialog.MultisweepDialog",
-                MockMulti,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.bias_kids_dialog.BiasKidsDialog",
-                MockBiasDialog,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.noise_spectrum_dialog.NoiseSpectrumDialog",
-                MockNoiseDialog,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.mock_configuration_dialog.MockConfigurationDialog",
-                MockConfigDialog,
-                create=True,
-            ),
-            patch("rfmux.tools.periscope.tasks.CRSInitializeTask", MockCRSInitTask, create=True),
-            patch("rfmux.tools.periscope.tasks.DACScaleFetcher", MockFetcher, create=True),
-            patch(
-                "rfmux.tools.periscope.tasks.NetworkAnalysisSignals",
-                MockNASignals,
-                create=True,
-            ),
-            patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
-            patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
-            patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
-            patch(
-                "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.create_dock",
-                MockDockCreate,
-                create=True,
-            ),
-            patch(
-                "rfmux.tools.periscope.dock_manager.PeriscopeDockManager.get_dock",
-                MockDockGet,
-                create=True,
-            ),
-        ]
-
-
-        app_patchers = [
-            patch.object(periscope_app, "InitializeCRSDialog", MockInitCRS, create=True),
-            patch.object(periscope_app, "NetworkAnalysisDialog", MockNetAnal, create=True),
-            patch.object(periscope_app, "FindResonancesDialog", MockFindRes, create=True),
-            patch.object(periscope_app, "MultisweepDialog", MockMulti, create=True),
-            patch.object(periscope_app, "BiasKidsDialog", MockBiasDialog, create=True),
-            patch.object(periscope_app, "NoiseSpectrumDialog", MockNoiseDialog, create=True),
-            patch.object(periscope_app, "MockConfigurationDialog", MockConfigDialog, create=True),
-            patch.object(periscope_app.Periscope, "_apply_mock_configuration", MagicMock()),
-            patch.object(periscope_app, "CRSInitializeTask", MockCRSInitTask, create=True),
-            patch.object(periscope_app, "DACScaleFetcher", MockFetcher, create=True),
-            patch.object(periscope_app, "NetworkAnalysisSignals", MockNASignals, create=True),
-            patch.object(periscope_app, "NetworkAnalysisTask", MockNATask, create=True),
-            patch.object(periscope_app, "MultisweepTask", MockMultiTask, create=True),
-            patch.object(periscope_app, "BiasKidsTask", MockBiasTask, create=True),
-            patch.object(periscope_app, "BiasKidsSignals", MockBiasSignals, create=True),
-            patch.object(periscope_app, "NetworkAnalysisPanel", MockNAWindow, create=True),
-            patch.object(periscope_app, "MultisweepPanel", MockMultiWindow, create=True),
-            patch.object(periscope_app, "PeriscopeDockManager", MagicMock(), create=True),
-        ]
-
-        from rfmux.tools.periscope.detector_digest_panel import DetectorDigestPanel
-        
-        patchers_for_digest = [
-            patch.object(DetectorDigestPanel, "_setup_ui", MagicMock()),
-            patch.object(DetectorDigestPanel, "_update_plots", MagicMock()),
-            patch.object(DetectorDigestPanel, "apply_theme", MagicMock()),
-            patch.object(DetectorDigestPanel, "resize", MagicMock()),
-            patch.object(DetectorDigestPanel, "show", MagicMock()),
-        ]
-
-        from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
-
-        patchers_for_noise_spectrum = [
-            patch.object(NoiseSpectrumPanel, "_setup_ui", MagicMock()),
-            patch.object(NoiseSpectrumPanel, "_update_noise_plots", MagicMock()),
-            patch.object(NoiseSpectrumPanel, "apply_theme", MagicMock()),
-            patch.object(NoiseSpectrumPanel, "resize", MagicMock()),
-            patch.object(NoiseSpectrumPanel, "show", MagicMock()),
-        ]
-
-        patchers = qt_suppression_patchers + module_patchers  + app_patchers  + patchers_for_digest + patchers_for_noise_spectrum
-        try:
-            for patcher in patchers:
-                patcher.start()
-            yield
-        finally:
-            for patcher in reversed(patchers):
-                patcher.stop()
-
-    
-    def run_ui_mock_smoke_test(self):
-        """
-        Execute key UI flows with all dialogs and tasks mocked out.
-
-        This helper initializes required attributes with safe defaults and then
-        exercises the dialog- and window-opening methods within
-        :meth:`_ui_mock_context` so no real Qt widgets or threads are spawned.
-        """
-
-        self.crs = getattr(self, "crs", None) or MagicMock()
-        self.crs.generate_resonators = AsyncMock(return_value=None)
-        self.crs.set_pulse_mode = AsyncMock(return_value=None)
-        if not hasattr(self.crs, "TIMESTAMP_PORT"):
-            self.crs.TIMESTAMP_PORT = SimpleNamespace(
-                BACKPLANE="BACKPLANE", TEST="TEST", SMA="SMA"
-            )
-
-        self.pool = getattr(self, "pool", None) or MagicMock()
-        if not hasattr(self.pool, "start"):
-            self.pool.start = MagicMock()
-
-            
-        self.module = getattr(self, "module", 1)
-        self.netanal_window_count = getattr(self, "netanal_window_count", 0)
-        self.netanal_windows = getattr(self, "netanal_windows", {})
-        self.netanal_tasks = getattr(self, "netanal_tasks", {})
-        self.multisweep_window_count = getattr(self, "multisweep_window_count", 0)
-        self.multisweep_windows = getattr(self, "multisweep_windows", {})
-        self.multisweep_tasks = getattr(self, "multisweep_tasks", {})
-        self.raw_data = getattr(self, "raw_data", {self.module: {"default": MagicMock()}})
-        self.resonance_freqs = getattr(
-            self, "resonance_freqs", {self.module: [90e6, 91e6]}
-        )
-        self.dac_scales = getattr(self, "dac_scales", {self.module: -0.5})
-        self.dark_mode = getattr(self, "dark_mode", False)
-        self.channel_list = getattr(self, "channel_list", [[self.module]])
-        self.tabs = getattr(self, "tabs", MagicMock())
-        self.tabs.currentIndex.return_value = 0
-        self.tabs.tabText.return_value = f"Module {self.module}"
-        self.is_mock_mode = getattr(self, "is_mock_mode", True)
-        self.mock_config = getattr(self, "mock_config", {"mock": True})
-        self.qp_pulse_mode = getattr(self, "qp_pulse_mode", "none")
-        # Mock data in detector-based format for smoke tests
-        self.results_by_detector = {
-            1: {
-                (0.1, "up"): {
-                    "bias_frequency": 90e6,
-                    "original_center_frequency": 90e6,
-                    "amplitude": 0.1,
-                    "direction": "up",
-                    "iteration": 0,
-                    "sweep_amplitudes": [0.1, 0.2],
-                    "some_data": [1, 2, 3]
-                }
-            }
-        }
-
-        if not hasattr(self, "crs_init_signals"):
-            self.crs_init_signals = MagicMock()
-        for sig_name in ("success", "error"):
-            if not hasattr(self.crs_init_signals, sig_name):
-                signal = MagicMock()
-                signal.connect = MagicMock()
-                setattr(self.crs_init_signals, sig_name, signal)
-
-        if not hasattr(self, "multisweep_signals"):
-            self.multisweep_signals = MagicMock()
-        for sig_name in (
-            "progress",
-            "starting_iteration",
-            "data_update",
-            "completed_iteration",
-            "all_completed",
-            "error",
-            "fitting_progress",
-        ):
-            if not hasattr(self.multisweep_signals, sig_name):
-                setattr(self.multisweep_signals, sig_name, MagicMock())
-
-        with self._ui_mock_context():
-            print(">>> Testing Mock Configuration Dialog")
-            if hasattr(self, "_show_mock_config_dialog"):
-                self._show_mock_config_dialog()
-
-            print(">>> Testing Initialize CRS Dialog")
-            self._show_initialize_crs_dialog()
-
-            print(">>> Testing Network Analysis Dialog")
-            self._show_netanal_dialog()
-
-            print(">>> Testing Network Analysis Window Logic")
-            self._start_network_analysis(self.netanal_params)
-
-            netanal_window = None
-            if getattr(self, "netanal_windows", None):
-                netanal_window = next(iter(self.netanal_windows.values())).get("window")
-                netanal_window._run_and_plot_resonances = MagicMock()
-
-            if netanal_window:
-                netanal_window.raw_data = self.raw_data
-                
-                print(">>> Testing Find Resonances Dialog")
-                reso_diag = netanal_window._show_find_resonances_dialog()
-
-                netanal_window.resonance_freqs = self.resonance_freqs
-                print(">>> Testing Multisweep Dialog")
-                netanal_window._show_multisweep_dialog()
-
-            print(">>> Testing Multisweep Window")
-            self._start_multisweep_analysis(self.multisweep_params)
-
-            multisweep_window = None
-            if getattr(self, "multisweep_windows", None):
-                multisweep_window = next(iter(self.multisweep_windows.values())).get("window")
-                multisweep_window.results_by_detector = self.results_by_detector
-                multisweep_window._get_spectrum = MagicMock()
-
-            if multisweep_window:
-                print(">>> Testing Bias KIDs Dialog")
-                multisweep_window._bias_kids()
-
-                print(">>> Testing Noise Spectrum Dialog")
-                multisweep_window._open_noise_spectrum_dialog()
-
-                print(">>> Testing Detector Digest Window from double click")
-
-                # Create a fake event with scenePos() attribute
-                class FakeClickEvent:
-                    def __init__(self, x):
-                        self._x = x
-                    def scenePos(self):
-                        return QtCore.QPointF(self._x, 0)
-                    def accept(self):
-                        pass
-    
-                fake_event = FakeClickEvent(90e6)
-
-    
-                multisweep_window._handle_multisweep_plot_double_click(fake_event)
-
-                print(">>> Testing Detector Digest Panel (embedded sub-tab)")
-
-                multisweep_window._open_detector_digest_for_index(1)
-
-                # Digest panel is now embedded as a sub-tab within MultisweepPanel
-                assert multisweep_window.digest_panel is not None
-                assert isinstance(multisweep_window.digest_panel, rfmux.tools.periscope.detector_digest_panel.DetectorDigestPanel)
-                assert multisweep_window.digest_panel.detector_id == 1
-                # Backward-compatible list should also be populated
-                assert len(multisweep_window.detector_digest_windows) == 1
-                
-                print(">>> Testing Noise Spectrum Panel")
-                
-                # --- Noise Spectrum Panel ---
-                multisweep_window.spectrum_noise_data = MagicMock()
-                before = len(multisweep_window.noise_spectrum_windows)
-                
-                multisweep_window._open_noise_spectrum_panel(1)
-                
-                after = len(multisweep_window.noise_spectrum_windows)
-                assert after == before + 1
-                
-                noise_panel = multisweep_window.noise_spectrum_windows[-1]
-                assert isinstance(noise_panel, rfmux.tools.periscope.noise_spectrum_panel.NoiseSpectrumPanel)
-                assert noise_panel.detector_id == 1
-
-        print("\n✓ ALL dialog / window functions executed successfully (mocked)\n")

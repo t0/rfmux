@@ -180,4 +180,10 @@ def test_several_modules_take_an_export_each_or_per_module_ranges(
     assert dlg._channels()[0] == {2: [1, 2, 3, 4], 3: [1, 2]}
     dlg.channels_edit.setText("1-4")
     assert dlg._channels()[0] == {2: [1, 2, 3, 4], 4: [1, 2, 3, 4]}
+    # Modules run 1-4, the bound the parser and the wire have.
+    dlg.modules_edit.setText("5")
+    assert "name the modules" in dlg.status_label.text()
+    dlg.modules_edit.setText("2")
+    dlg.channels_edit.setText("5:1-4")
+    assert "Modules run 1-4" in dlg.status_label.text()
 

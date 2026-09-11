@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
 rfmux record - a pulse capture, a parser dirfile and a fastrx recording
-of one module, for the same stretch, into one session folder.
+of a module, or of several feeding one RF line, for the same stretch,
+into one session folder.
 
     rfmux record --serial 0156 --module 2 --duration 20 \\
         --session ~/data/session_20260909_153654
 
-The board is only read; configure the streamers first.  With --session
-the run joins an existing folder and takes its channels and df
-calibrations from the newest bias export there; otherwise a new
-session_YYYYMMDD_HHMMSS folder is made under --session-dir.
+The board is read; --channel-streamer turns its channel streamer on for
+the modules, nothing else is configured.  With --session the run joins
+an existing folder and takes its channels and tuning from the newest
+bias export there; otherwise a new session_YYYYMMDD_HHMMSS folder is
+made under --session-dir.
 """
 
 import asyncio
@@ -22,15 +24,12 @@ from pathlib import Path
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
-    biased_channels,
-    calibrated,
-    latest_bias_export,
+    resolve_channels,
     open_session,
     pulse_summary_lines,
     record_streams,
 )
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
-from rfmux.core.channels import parse_channel_spec, parse_module_channels
 from rfmux.pulse_capture.channel_keys import channel_arg
 
 _DEFAULTS = PulseCaptureConfig()
@@ -159,36 +158,18 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     per-module spec (which names the modules itself), or None for each
     module's newest bias export."""
     folder = open_session(Path(session) if session else None, Path(session_dir))
-    wanted = {}
-    ranges = None
-    if channels and ":" in channels:
-        wanted = parse_module_channels(channels, max_channel=1024)
-        modules = list(wanted)
-    elif channels:
-        ranges = parse_channel_spec(channels, max_value=1024, wildcard=False)
-    if bias and len(modules) > 1:
-        raise click.UsageError("--bias names one module's export; several "
-                               "modules take the session's newest export each")
+    try:
+        wanted, tuning, notes = resolve_channels(
+            list(modules), channels, folder, Path(bias) if bias else None)
+    except ValueError as e:
+        raise click.UsageError(str(e))
+    modules = list(wanted)
     multi = len(modules) > 1
-    tuning = {}
     if not quiet:
         click.echo(f"[record] session {folder}")
-    for module in modules:
-        bias_path = Path(bias) if bias else latest_bias_export(folder, module)
-        biased, rows = biased_channels(bias_path) if bias_path else ([], {})
-        chosen = wanted.get(module) or ranges or biased
-        if not chosen:
-            raise click.UsageError(
-                f"no --channels, and no bias export for module {module} in "
-                "the session to take them from")
-        wanted[module] = chosen
-        tuning.update({(module, c) if multi else c: row
-                       for c, row in rows.items()})
-        if not quiet:
-            if bias_path:
-                click.echo(f"[record] bias export {bias_path.name}: "
-                           f"{len(biased)} channels, {calibrated(rows)} "
-                           f"calibrated")
+        for note in notes:
+            click.echo(f"[record] bias export {note}")
+        for module, chosen in wanted.items():
             click.echo(f"[record] module {module}, channels "
                        f"{chosen[0]}-{chosen[-1]} ({len(chosen)}), "
                        f"{duration:.1f} s")

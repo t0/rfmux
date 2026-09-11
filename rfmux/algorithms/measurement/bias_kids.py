@@ -239,8 +239,14 @@ DAC_SCALE_LABEL_OFFSET_DB = 1.5
 
 async def dac_scale_dbm(crs, module: int) -> Optional[float]:
     """The module's DAC scale in dBm as amplitudes are labelled against
-    it, or None when the board reports none."""
-    scale = await crs.get_dac_scale('DBM', module=module)
+    it, or None when the board reports none: a module the analog
+    banking does not expose has none."""
+    try:
+        scale = await crs.get_dac_scale('DBM', module=module)
+    except Exception as e:
+        if "Can't access module" in str(e) and "analog banking" in str(e):
+            return None
+        raise
     return None if scale is None else float(scale) - DAC_SCALE_LABEL_OFFSET_DB
 
 

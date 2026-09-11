@@ -8,6 +8,9 @@ from typing import Dict, List, Optional, Union
 
 #: Spellings of the "every biased channel" wildcard.
 ALL_CHANNELS_TOKENS = ("all", "*")
+#: Readout modules a board has, numbered 1-4 everywhere in Python
+#: (0-3 on the wire: NUM_MODULES in the streamer's packet.h).
+MAX_MODULE = 4
 
 
 def parse_channel_spec(text: str, *, name: str = "channel",

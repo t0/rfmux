@@ -2,6 +2,7 @@
 sweeps that lack it, moves the bias frequency onto the fitted curve,
 chooses the amplitude by the fitted nonlinearity, and calibrates there."""
 import contextlib
+import warnings
 
 import numpy as np
 import pytest
@@ -133,16 +134,29 @@ async def test_the_entry_carries_the_dac_scale_as_labelled():
 
 
 @pytest.mark.asyncio
-async def test_a_board_without_a_dac_scale_still_biases():
+async def test_a_module_the_banking_hides_has_no_dac_scale_quietly():
     board = _Board()
 
     async def refuse(units="DBM", module=None):
         raise RuntimeError("Can't access module 1: analog banking")
     board.get_dac_scale = refuse
-    with pytest.warns(UserWarning, match="DAC scale not read"):
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
         out = await bk.bias_kids(board, {1: _entry()}, module=1)
     assert out[1]["dac_scale_dbm"] is None
     assert np.isfinite(out[1]["df_calibration"])
+
+
+@pytest.mark.asyncio
+async def test_any_other_dac_scale_failure_warns_and_biases():
+    board = _Board()
+
+    async def broken(units="DBM", module=None):
+        raise RuntimeError("tuber timeout")
+    board.get_dac_scale = broken
+    with pytest.warns(UserWarning, match="DAC scale not read"):
+        out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] is None
 
 
 @pytest.mark.asyncio

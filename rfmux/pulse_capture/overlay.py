@@ -92,11 +92,10 @@ class Recording:
     stamp more than half a day before the first one is taken as the next
     day, and queries are read the same way.
 
-    The writer records every module the channel stream carries, one
-    record per module per sample, interleaved, and the modules' records
-    of one sample share its sequence number; a query with a module
-    keeps that module's records, so that consecutive numbers mean no
-    gap.
+    The writer records every module the channel stream carries,
+    interleaved, and each module counts its own packets; a query with a
+    module keeps that module's records, so that consecutive sequence
+    numbers mean no gap.
     """
 
     def __init__(self, source):

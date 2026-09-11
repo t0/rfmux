@@ -1,6 +1,6 @@
-"""The dialog behind a bare ``rfmux record``: every option of the
-command on one page, remembered per user, with the fastrxd check and
-its start command in view."""
+"""The dialog behind a bare ``rfmux record``: the command's choices
+on a Run tab and a Pulse capture tab, remembered per user, with the
+fastrxd check and its start command in view."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from PyQt6 import QtCore, QtWidgets
 
 from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
-    biased_channels, calibrated, fastrx_bytes_per_s, latest_bias_export)
+    fastrx_bytes_per_s, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
-from ..core.channels import parse_channel_spec, parse_module_channels
+from ..core.channels import MAX_MODULE, parse_channel_spec
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -271,7 +271,7 @@ class RecordDialog(QtWidgets.QDialog):
     def _modules(self) -> Optional[List[int]]:
         try:
             return parse_channel_spec(self.modules_edit.text(), name="module",
-                                      max_value=8, wildcard=False)
+                                      max_value=MAX_MODULE, wildcard=False)
         except ValueError:
             return None
 
@@ -291,40 +291,22 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _resolve_channels(self):
         modules = self._modules()
-        if self.rb_ranges.isChecked():
-            text = self.channels_edit.text()
-            try:
-                if ":" in text:
-                    wanted = parse_module_channels(text, max_module=8,
-                                                   max_channel=1024)
-                else:
-                    if modules is None:
-                        return None, "name the modules, like 1 or 2,3"
-                    chans = parse_channel_spec(text, max_value=1024,
-                                               wildcard=False)
-                    wanted = {m: chans for m in modules}
-            except ValueError as e:
-                return None, str(e)
+        ranges = self.rb_ranges.isChecked()
+        text = self.channels_edit.text()
+        if modules is None and not (ranges and ":" in text):
+            return None, "name the modules, like 1 or 2,3"
+        folder = self._session_folder()
+        if not ranges and folder is None:
+            return None, "an existing session folder is needed"
+        try:
+            wanted, _, notes = resolve_channels(modules or [], text if ranges
+                                                else None, folder)
+        except ValueError as e:
+            return None, str(e)
+        if ranges:
             n = sum(len(c) for c in wanted.values())
             return wanted, (f"{n} channels on module(s) "
                             f"{', '.join(str(m) for m in wanted)}")
-        if modules is None:
-            return None, "name the modules, like 1 or 2,3"
-        folder = self._session_folder()
-        if folder is None:
-            return None, "an existing session folder is needed"
-        wanted, notes = {}, []
-        for module in modules:
-            bias = latest_bias_export(folder, module)
-            if bias is None:
-                return None, (f"no bias export for module {module} in the "
-                              "session folder")
-            chans, rows = biased_channels(bias)
-            if not chans:
-                return None, f"{bias.name} biased no channels"
-            wanted[module] = chans
-            notes.append(f"{bias.name}: {len(chans)} channels, "
-                         f"{calibrated(rows)} calibrated")
         return wanted, "\n".join(notes)
 
     def _fill_interfaces(self, running) -> None:

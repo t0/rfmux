@@ -45,7 +45,7 @@ from rfmux.core import channels as channel_spec
 DEC_STAGE_MASK = 0x7
 
 TOTAL_CHANNELS = 1024
-TOTAL_MODULES = 4
+TOTAL_MODULES = channel_spec.MAX_MODULE
 
 
 def resolve_interface(interface_name: str) -> str:

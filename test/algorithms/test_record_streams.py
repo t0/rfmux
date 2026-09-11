@@ -452,6 +452,11 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     assert (seen["channel_streamer"], seen["sample_trunc"]) == (True, "HIGH")
     with pytest.raises(click.UsageError, match="no bias export for module 4"):
         record._run(modules=[2, 4], channels=None, **common)
+    # Modules run 1-4, the same bound the parser and the wire have.
+    with pytest.raises(click.UsageError, match="modules run 1-4"):
+        record._run(modules=[5], channels="1-4", **common)
+    with pytest.raises(click.UsageError, match="Modules run 1-4"):
+        record._run(modules=[1], channels="5:1-4", **common)
 
 
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):

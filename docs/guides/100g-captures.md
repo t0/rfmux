@@ -158,8 +158,9 @@ pulse counts, merges the recording into the pulse file as its fast stream
 (`--no-merge-fastrx` leaves the file slow-only; `rfmux fastrx merge
 <pulse.h5> <run.fastrx>` does it later) and opens Periscope in review
 mode on the pulse file, in its session folder. The command exits 1 after
-a run with a warning: no channel-stream packets, a disk too small for the
-recording, or a parser that wrote nothing.
+a run that warned: a capture that ended before its noise training was
+done, no channel-stream packets, a disk too small for the recording, a
+parser that wrote nothing, or a recording that could not be merged.
 
 ## 5. Reviewing in Periscope
 

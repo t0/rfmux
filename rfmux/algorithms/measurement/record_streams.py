@@ -1,9 +1,12 @@
 """
-Record one module's slow stream (a pulse capture and a parser dirfile)
-and its channel stream (a fastrx recording) together, into one session
-folder.  ``rfmux record`` is the command-line front.
+Record the slow stream (a pulse capture and a parser dirfile) and the
+channel stream (a fastrx recording) of a module, or of several feeding
+one RF line, together into one session folder.  ``rfmux record`` is the
+command-line front.
 
-The board is only read: configure the streamers first.  The parser
+The board is read, and its channel streamer turned on for the modules
+only when asked (``channel_streamer=True``); configure the slow
+streamer first.  The parser
 process is brought up first (it takes seconds to import), then the
 capture starts; it spends its noise-training span before it detects
 anything, so the fastrx writer starts when that span ends and runs for
@@ -42,6 +45,8 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
+from ...core.channels import (MAX_MODULE, parse_channel_spec,
+                              parse_module_channels)
 from ...pulse_capture.channel_keys import describe
 from .df_calibration import tuning_rows
 
@@ -134,6 +139,56 @@ def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
     rows = tuning_rows(export.get("bias_kids_output"),
                        export.get("nco_frequency_hz"))
     return sorted(rows), rows
+
+
+def resolve_channels(modules: List[int], spec: Optional[str],
+                     folder: Optional[Path], bias: Optional[Path] = None,
+                     ) -> Tuple[Dict[int, List[int]], Dict[Any, dict], List[str]]:
+    """What a run records, from the command line's or the dialog's
+    choices: ``(wanted, tuning, notes)``, *wanted* the ``{module:
+    channels}``, *tuning* the rows from each module's bias export keyed
+    by channel (by (module, channel) across modules), *notes* one line
+    per export read.
+
+    *spec* is a range spec for every module of *modules* (``1-88``), a
+    per-module spec that names the modules itself (``2:1-114,3:1-96``),
+    or None for the biased channels of each module's newest bias export
+    in *folder*; *bias* names one module's export instead of the newest.
+    Raises ValueError for anything that cannot be recorded.
+    """
+    wanted: Dict[int, List[int]] = {}
+    ranges = None
+    if spec and ":" in spec:
+        wanted = parse_module_channels(spec, max_module=MAX_MODULE,
+                                       max_channel=MAX_CHANNEL)
+        modules = list(wanted)
+    elif spec:
+        ranges = parse_channel_spec(spec, max_value=MAX_CHANNEL, wildcard=False)
+    for m in modules:
+        if not 1 <= int(m) <= MAX_MODULE:
+            raise ValueError(f"module {m}: modules run 1-{MAX_MODULE}")
+    if bias is not None and len(modules) > 1:
+        raise ValueError("--bias names one module's export; several modules "
+                         "take the session's newest export each")
+    multi = len(modules) > 1
+    tuning: Dict[Any, dict] = {}
+    notes = []
+    for module in modules:
+        bias_path = (Path(bias) if bias is not None else
+                     latest_bias_export(folder, module) if folder else None)
+        biased, rows = biased_channels(bias_path) if bias_path else ([], {})
+        chosen = wanted.get(module) or ranges or biased
+        if not chosen:
+            raise ValueError(f"no channels given, and no bias export for "
+                             f"module {module} in the session to take them "
+                             "from")
+        wanted[module] = chosen
+        tuning.update({(module, c) if multi else c: row
+                       for c, row in rows.items()})
+        if bias_path:
+            notes.append(f"{bias_path.name}: {len(biased)} channels, "
+                         f"{calibrated(rows)} calibrated")
+    return wanted, tuning, notes
 
 
 def calibrated(tuning: Dict[Any, dict]) -> int:
@@ -495,10 +550,12 @@ async def _stop_parser(handle: _Parser, result, dirfile, log):
             "the parser wrote no dirfile" + (": " + tail if tail else ""))
 
 
-#: Seconds a fastrx probe waits for the channel stream before a run.
 #: Seconds for a freshly enabled channel streamer to flow before the
 #: stream is probed.
 CHANNEL_STREAMER_SETTLE_S = 1.0
+#: Channels a module has, the most a range spec may name.
+MAX_CHANNEL = 1024
+#: Seconds a fastrx probe waits for the channel stream before a run.
 FASTRX_PROBE_S = 1.0
 
 

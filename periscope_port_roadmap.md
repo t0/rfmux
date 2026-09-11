@@ -830,45 +830,102 @@ are now strict xfails that name the stage which clears them.
 
 ### Stage 4. Find Bias and Apply Bias (medium)
 
+Bias finding is one `find_bias_points` call, the way `bias_finding.md` makes
+it: the notebook's sections 2, 3 and 4 are all inside that call, so the button
+runs it whole and the tabs show what it looked at. Measured on synthetic
+schedules through the real packer, 201 points a sweep, `amplitude_method="both"`:
+**0.33 s for 200 resonators** over five steps in both directions, **1.8 s for
+1000**. So it goes on a thread -- 1.8 s is a visible freeze -- but it gets no
+progress bar, and `find_bias_points` offers no `progress_callback` to build one
+from.
+
 * Find Bias button and a persistent Bias Settings panel as a view over
-  `find_bias_points`: `amplitude_method` (both, derivative, hysteresis),
-  `frequency_method` (iq_derivative, minimum), `direction`,
-  `spike_prominence_factor` (default 0.5; the old GUI's 2.0 is the
-  reciprocal, do not copy it), `noise_gate_factor`, `max_discrepancy`,
-  `compare`, `max_distance_hz` (as absolute or fraction of span, resolved in
-  the dialog). `FindBiasTask` makes one call on `self.module_sweeps` and
-  returns the `BiasReport`; the panel adopts `report.catalog` and re-saves
-  the block, which now carries `bias_report`.
-* The report is shown, not popped up: a status line with counts and the
-  flagged names, and flag markers on the affected subplots, with
-  `flagged_because` in the tooltip.
-* Overlays (Show Bias Info): bold chosen-amplitude trace, bias-frequency
-  line in the grid magnitude plots, cross on the IQ loop, star and `a` in the
-  legend, dashed lines on the overview.
-* IQ Derivatives tab from `normalized_arc_speed` and `iq_arc_speed` for each
-  step with the bias frequency marked, and a verdict view: for each
-  resonator, each step's `BifurcationCheck.metric` against `threshold`, in
-  the form `example_plotting_bias.plot_bifurcation_verdict_map` draws. This
-  is the tool for calibrating the thresholds against a real array, which
-  the todo file says has not been done.
-* **The fit judges the choice** (merge survey §9.4): after Find Bias, run
-  `fit_sweeps_at_bias_amplitude` for the nonlinear model and show `a` next
-  to each finding, coloured against `BIFURCATION_A`.
-* Apply Bias runs `crs.apply_bias(self.catalog)` in `ApplyBiasTask`. On
-  success the panel publishes `{r.channel: r.bias.df_calibration}` for df
-  units, enables Get Noise Spectrum, and flashes "Bias applied". No
-  quantisation or NCO logic in the GUI. `apply_bias_output` and `_set_bias`
-  are deleted.
-* The main-window Bias KIDs button becomes "Apply Bias from File": load a
-  catalog (`from_dict` from a catalog or multisweep file, `from_csv` for a
-  CSV), show it in a table for editing (frequency and amplitude per name,
-  `update_bias_point`), then `apply_bias`. Custom bias in the multisweep panel is the
-  same table over `self.catalog`. No frequency-order matching.
+  `find_bias_points`, **grouped by the method each setting belongs to** so it
+  is clear what controls what: the common choices (`frequency_method`,
+  `direction`, `max_distance_hz`), then a group per bifurcation method --
+  derivative (`spike_prominence_factor`, `noise_gate_factor`) and hysteresis
+  (`max_discrepancy`, `compare`) -- with `amplitude_method` selecting which
+  groups are live. `max_distance_hz` is a radio between an absolute frequency
+  and a fraction of the sweep span, each enabling its own field, resolved to
+  hertz on the way out.
+  Settings persist across sessions through `settings.py`, as the fit settings
+  do, and a **Reset to Defaults** button puts back what the `find_bias_points`
+  signature says -- which is where the defaults are read from in the first
+  place, so no constant here can drift from the library's (§6, judgement calls
+  27 and 30).
+  `FindBiasTask` makes one call on `self.module_sweeps` with `save=False` and
+  returns the `BiasReport`; the panel adopts `report.catalog` and re-saves the
+  block, which now carries `bias_report`. Run Fit and Find Bias lock each other
+  out while either runs.
+  The settings offer only what the measurement supports: `"both"` and
+  `"hysteresis"` compare two directions, and a one-direction sweep has none to
+  compare.
+* **The sweep grids stay measurement plots.** No counts, no flag markers, no
+  report text on them. What the report changes there is two marks, both in the
+  chosen amplitude's own colour: the chosen step's trace is **thickened**, and a
+  **vertical line** stands at the bias frequency. Everything the report has to
+  say in words goes on the status line and in the diagnostics tab.
+* **Bias Diagnostics tab**, a fourth plot type through `update_sweep_grid` so
+  batching, the widget cache, the colorbar and the amplitude colours stay the
+  grids'. It carries what the notebook's sections 2 and 3 draw, which are the
+  same shape -- one line per step and direction against offset from centre:
+  - the point-to-point change in `normalized_arc_speed`, with **both bars drawn,
+    not just the binding one**. They are prominences in the same units
+    (`spike_prominence_factor * ptp(speed)` and
+    `noise_gate_factor * noise_floor(diff(speed))`, and `threshold` is the
+    higher), so drawing both says which one was binding -- the question the
+    `bifurcated_by_derivative` docstring otherwise answers by re-running with
+    `noise_gate_factor=0.0`. Binding bar solid, the other faded.
+  - `iq_arc_speed` with the chosen bias frequency marked, as
+    `plot_frequency_methods` draws it.
+* **Verdict map**, on demand rather than in the redraw path: rows are amplitude
+  steps, columns are `spike_prominence_factor` swept 0.02 to 1.0, a cell black
+  where `bifurcated_by_derivative` says bifurcated, a line at the current
+  factor, and bands where the noise gate is the higher bar -- inside a band the
+  prominence factor changes nothing. This is the tool for calibrating the
+  thresholds against a real array, which the todo file says has not been done.
+  Measured at **70 ms a resonator** (5 steps, 2 directions, 80 factors) calling
+  the library detector directly, so 0.84 s for a batch of 12: affordable on a
+  thread, and nothing is re-implemented to get it.
+* Apply Bias runs `crs.apply_bias(self.catalog)` in `ApplyBiasTask`. The button
+  is dead for the duration and the status line says "Applying bias...", then
+  "Bias applied" in green, which fades after `STATUS_MESSAGE_MS` as the fit
+  line does. On success the panel publishes
+  `{r.channel: r.bias.df_calibration}` for df units and enables Get Noise
+  Spectrum. No quantisation or NCO logic in the GUI: `apply_bias_output` and
+  `_set_bias` are deleted, both of which set the NCO by hand and rounded
+  frequencies themselves.
+* The legacy bias lane goes with it: `bias_kids_dialog.py`, `BiasKidsTask`,
+  `results_by_detector`, `update_data`, `_prepare_export_data`,
+  `bias_kids_output` and `nco_frequency_hz`. The main window's Bias KIDs button
+  is **removed, not replaced** -- see the deferred item below.
 * "Load bias amplitudes" in the multisweep dialog is the default
   `AmplitudeSchedule()` once the panel's catalog is the report's.
 * Test: flow test steps 5 and 6 (bias report has no warnings on the schedule;
-  every tone lands where the catalog says); `test_bias_kids_dialog.py`
-  replaced by a catalog-table test.
+  every tone lands where the catalog says); a settings-panel test beside
+  `test_fit_settings.py` for the defaults against the signature, the reset, and
+  the round trip through `settings.py`; `test_bias_kids_dialog.py` deleted with
+  the dialog.
+
+**Deferred out of this stage**
+
+* **Applying a bias from a file.** The old Bias KIDs button loaded a pickle and
+  programmed the board from it; it is removed here rather than ported, because
+  what it should load is now an open question -- a catalog file, a multisweep
+  file's `bias_report.catalog`, a CSV through `ResonatorCatalog.from_csv`, or
+  any of them -- and so is whether the frequencies and amplitudes should be
+  editable in a table before they are applied (`update_bias_point`). Decide the
+  source and the editing story, then build it. Nothing is lost meanwhile: a
+  measurement loaded through `store` carries its catalog, so Find Bias and
+  Apply Bias on a loaded file already do this for the case that matters.
+* **Fits beside the bias choice.** The merge survey's "the fit judges the
+  choice" (§9.4) -- `a` against `BIFURCATION_A` next to each finding -- is not
+  wired up here. How fitted quantities and bias findings share a view is its
+  own decision; stage 4 does the bias finding and nothing else.
+* **Find bias after sweep** as a checkbox that presses the button (§6,
+  judgement call 6), with "fit after sweep", when the tune-everything front
+  door arrives in stage 6.
+* **Detector Digest** -- still not scoped, per §6 judgement call 23.
 
 ### Stage 5. Delete the legacy path (small, one commit)
 

@@ -36,6 +36,7 @@ from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.fits import FitReport, SweepFit  # noqa: E402
+from rfmux.tuning.bias import BiasReport  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -1494,3 +1495,227 @@ def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
 
     assert panel.fit_status_label.text() == "Fitting... 37%"
     assert not panel._fit_status_timer.isActive()
+
+
+# ── finding a bias point ─────────────────────────────────────────────────────
+
+
+def _both_directions(catalog, qt_app, crs, **overrides):
+    """A schedule swept both ways, which is what the default test compares."""
+    return _run_multisweep(
+        crs, catalog, qt_app,
+        amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
+        sweep_direction=("upward", "downward"), **overrides)
+
+
+def _find_bias(panel, qt_app, **settings):
+    """Press Find Bias with one set of settings; return the status text."""
+    if settings:
+        panel.bias_settings.set_parameters(settings)
+    panel._find_bias()
+    assert spin_until(qt_app, panel._find_bias_task.isFinished, timeout=180), \
+        "the bias task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.bias_status_label.text()
+
+
+def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app):
+    """One call over the whole schedule, and a bias point per resonator."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    assert panel.bias_report is None
+
+    status = _find_bias(panel, qt_app)
+
+    assert len(panel.bias_report) == len(catalog.names())
+    assert {f.name for f in panel.bias_report.findings} == set(catalog.names())
+    assert "biased" in status
+
+
+def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app):
+    """The report's catalog is the array now, so what is applied and what a
+    re-run sweeps are one thing."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    before = panel.catalog
+
+    _find_bias(panel, qt_app)
+
+    assert panel.catalog is panel.bias_report.catalog
+    assert panel.catalog is not before
+    assert panel.catalog.names() == before.names()
+
+
+def test_the_bias_point_is_a_step_of_the_schedule_at_a_measured_frequency(
+        board, qt_app):
+    """Both halves of the choice come off the sweeps: the amplitude is one the
+    schedule walked, and the frequency is inside the sweep it was read from."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    _find_bias(panel, qt_app)
+
+    for finding in panel.bias_report.findings:
+        measured = collect_amplitude_iterations_for(
+            panel.module_sweeps, finding.name)[finding.iteration]["upward"]
+        assert finding.amplitude == measured["sweep_amplitude"]
+        assert (measured["frequencies"].min() <= finding.frequency_hz
+                <= measured["frequencies"].max())
+
+
+def test_the_report_goes_into_the_measurement_the_panel_holds(board, qt_app):
+    """As the fits do: the block carries it, so a save needs nothing else and
+    a notebook reads it back with ``BiasReport.from_dict``."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    assert "bias_report" not in panel.module_sweeps
+
+    _find_bias(panel, qt_app)
+
+    read_back = BiasReport.from_dict(panel.module_sweeps["bias_report"])
+    assert [f.name for f in read_back.findings] == \
+        [f.name for f in panel.bias_report.findings]
+
+
+def test_the_settings_window_is_what_the_search_runs_with(board, qt_app):
+    """The window is the arguments, so a changed threshold is the one the call
+    is made with and not a default underneath it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    _find_bias(panel, qt_app, amplitude_method="derivative",
+               frequency_method="minimum")
+
+    settings = panel.bias_report.settings
+    assert settings["amplitude_method"] == "derivative"
+    assert settings["frequency_method"] == "minimum"
+
+
+def test_a_fractional_distance_guard_is_resolved_against_the_span_swept(
+        board, qt_app):
+    """The window holds a fraction; what reaches the library is hertz, and the
+    span it is a fraction of is the one this measurement recorded."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, span_hz=80e3)
+    assert errors == []
+
+    panel.bias_settings._distance_radios["fraction"].setChecked(True)
+    panel.bias_settings.fraction_spin.setValue(0.25)
+    _find_bias(panel, qt_app)
+
+    assert panel.bias_report.settings["max_distance_hz"] == 20e3
+
+
+def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, output_directory):
+    """The report went into the block, so the file is out of date by exactly
+    that much until it is rewritten."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    path = panel.save_multisweep()
+
+    status = _find_bias(panel, qt_app)
+
+    assert path.name in status
+    reloaded = store.load(path)
+    block = next(iter(reloaded.values()))
+    assert "bias_report" in block
+
+
+def test_a_run_on_an_unsaved_multisweep_writes_no_file(board, qt_app, output_directory):
+    """Nothing is written behind the operator's back: a panel that was never
+    saved still has a Save button to press."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    _find_bias(panel, qt_app)
+
+    assert list(Path(output_directory).glob("*multisweep*")) == []
+
+
+def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app):
+    """Both walk every sweep the panel holds, so one at a time, and the
+    buttons say so."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    panel._find_bias()
+    assert not panel.find_bias_btn.isEnabled()
+    assert not panel.run_fit_btn.isEnabled()
+    assert panel.bias_status_label.text().startswith("Finding")
+
+    assert spin_until(qt_app, panel._find_bias_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.find_bias_btn.isEnabled()
+    assert panel.run_fit_btn.isEnabled()
+
+
+def test_a_finished_run_says_so_and_then_stops_saying_it(board, qt_app):
+    """A routine outcome on the status line, not a dialog, and not left on
+    screen once it has been read."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    status = _find_bias(panel, qt_app)
+
+    assert "biased" in status
+    assert panel._bias_status_timer.isActive()
+    panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
+
+
+def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app):
+    """A flag is the thing to read before applying anything, so it is said in
+    words rather than left in the report for someone to go looking for."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    # A guard of a few hertz disbelieves every answer, which is the flag this
+    # test needs and the only one a healthy schedule can be made to produce.
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    status = _find_bias(panel, qt_app)
+
+    assert panel.bias_report.flagged
+    assert "flagged" in status
+    assert panel.bias_report.flagged[0].name in status
+
+
+def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
+    """The default test compares two sweeps and this measurement has one, so
+    the window drops to the test that reads a single trace rather than letting
+    the press fail."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
+        sweep_direction="upward")
+    assert errors == []
+
+    assert panel.bias_settings.get_parameters()["amplitude_method"] == "derivative"
+    _find_bias(panel, qt_app)
+
+    assert len(panel.bias_report) == len(catalog.names())
+
+
+def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app):
+    """A report describes the sweeps it was made from, so it does not outlive
+    them into the next measurement."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    assert panel.bias_report is not None
+
+    _, _, completed, _, _ = _both_directions(catalog, qt_app, crs)
+    panel.show_measurement(*completed[0])
+
+    assert panel.bias_report is None

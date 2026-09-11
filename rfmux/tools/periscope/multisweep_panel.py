@@ -24,7 +24,10 @@ from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
-from .tasks import RunFitsSignals, RunFitsTask
+from .bias_settings_panel import BiasSettingsPanel
+from .tasks import (
+    ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
+    RunFitsSignals, RunFitsTask)
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for, store
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
@@ -137,8 +140,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.fit_settings = FitSettingsPanel(self)
         self.fit_settings.display_model_changed.connect(self._redraw_plots)
 
+        # Bias finding's settings, the same way, and what the last run
+        # concluded. The report's catalog becomes this panel's, so what is
+        # applied and what is re-swept are one thing.
+        self.bias_settings = BiasSettingsPanel(self)
+        self.bias_report = None
+
         self._fit_status_timer = QtCore.QTimer(self)
         self._fit_status_timer.setSingleShot(True)
+
+        self._bias_status_timer = QtCore.QTimer(self)
+        self._bias_status_timer.setSingleShot(True)
 
         self._live_redraw_timer = QtCore.QTimer(self)
         self._live_redraw_timer.setSingleShot(True)
@@ -214,6 +226,27 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self._populate_fit_models()
         self._populate_fit_amplitudes()
+
+        # Bias finding: the button, its settings, and what it is doing --
+        # shaped like the fit controls beside it, because it is the same
+        # gesture over a different call.
+        self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
+        self.find_bias_btn.setToolTip(
+            "Choose an operating amplitude and frequency for every resonator "
+            "in these sweeps, as the bias settings ask")
+        self.find_bias_btn.clicked.connect(self._find_bias)
+        bias_settings_btn = QtWidgets.QPushButton("\u2699")
+        bias_settings_btn.setMaximumWidth(30)
+        bias_settings_btn.setToolTip(
+            "Which bifurcation test, and where in a sweep the tone goes")
+        bias_settings_btn.clicked.connect(self._show_bias_settings)
+        self.bias_status_label = QtWidgets.QLabel("")
+        self.bias_status_label.setMinimumWidth(110)
+        # The label's own slot, for the reason the fit line's is.
+        self._bias_status_timer.timeout.connect(self.bias_status_label.clear)
+        self.bias_controls = grouped(
+            self.find_bias_btn, bias_settings_btn, self.bias_status_label)
+        toolbar_layout.addWidget(self.bias_controls)
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
         if self.bias_data_avail:
@@ -507,6 +540,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             AmplitudeSchedule.from_dict(call_params['amp_schedule']))
         self._populate_fit_amplitudes()
         self._populate_fit_models()
+        self.bias_settings.set_directions_swept(call_params.get('directions'))
+        self.bias_report = None
         self._redraw_plots()
 
     def complete_multisweep(self, module: int, container: dict):
@@ -814,7 +849,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._show_fit_status("No models to fit", ok=False)
             return
 
-        self.run_fit_btn.setEnabled(False)
+        self._set_analysis_enabled(False)
         self._show_fit_status("Fitting...", transient=False)
 
         signals = RunFitsSignals()
@@ -870,8 +905,82 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._show_fit_status(message, ok=False)
 
     def _fits_done(self):
-        self.run_fit_btn.setEnabled(True)
+        self._set_analysis_enabled(True)
         self._populate_fit_models()
+
+    # ── bias finding ─────────────────────────────────────────────────────────
+
+    def _show_bias_settings(self):
+        """Raise bias finding's settings window; it outlives any one run."""
+        self.bias_settings.show()
+        self.bias_settings.raise_()
+        self.bias_settings.activateWindow()
+
+    def _find_bias(self):
+        """Choose an operating point for every resonator, off the GUI thread."""
+        if self.module_sweeps is None:
+            self._show_bias_status("Nothing swept yet", ok=False)
+            return
+
+        span_hz = self.module_sweeps['call_params'].get('span_hz')
+        parameters = self.bias_settings.get_parameters(span_hz=span_hz)
+
+        self._set_analysis_enabled(False)
+        self._show_bias_status("Finding bias...", transient=False)
+
+        signals = FindBiasSignals()
+        signals.completed.connect(self._bias_found)
+        signals.error.connect(self._bias_error)
+        # Held so the thread is not collected while it runs.
+        self._find_bias_task = FindBiasTask(
+            self.module_sweeps, parameters, signals)
+        self._find_bias_task.start()
+
+    def _show_bias_status(self, message: str, *, ok: bool = True,
+                          transient: bool = True) -> None:
+        """Say what bias finding is doing, and stop saying it after a while."""
+        self.bias_status_label.setText(message)
+        colour = TABLEAU10_COLORS[2] if ok else TABLEAU10_COLORS[3]
+        self.bias_status_label.setStyleSheet(f"color: {colour};")
+        self._bias_status_timer.stop()
+        if transient:
+            self._bias_status_timer.start(STATUS_MESSAGE_MS)
+
+    def _bias_found(self, report):
+        """The report's catalog is the array now: hold it, draw it, re-save."""
+        self._set_analysis_enabled(True)
+        self.bias_report = report
+        self.catalog = report.catalog
+
+        message = f"{len(report.good)}/{len(report)} biased"
+        if report.flagged:
+            names = ", ".join(f.name for f in report.flagged[:3])
+            if len(report.flagged) > 3:
+                names += f", +{len(report.flagged) - 3} more"
+            message += f", {len(report.flagged)} flagged: {names}"
+        # The report went into the block, so a file that exists is now out of
+        # date by exactly this much.
+        if store.saved_path(self.multisweep_container):
+            try:
+                message += f" -- saved to {self.save_multisweep().name}"
+            except Exception as e:                      # noqa: BLE001 - reported
+                traceback.print_exc()
+                self._show_bias_status(
+                    f"{message}, but the save failed: {e}", ok=False)
+                self._redraw_plots()
+                return
+        self._show_bias_status(message, ok=not report.flagged)
+        self._redraw_plots()
+
+    def _bias_error(self, message: str):
+        self._set_analysis_enabled(True)
+        self._show_bias_status(message, ok=False)
+
+    def _set_analysis_enabled(self, enabled: bool) -> None:
+        """Fitting and bias finding both walk every sweep this panel holds, so
+        one runs at a time."""
+        self.run_fit_btn.setEnabled(enabled)
+        self.find_bias_btn.setEnabled(enabled)
 
     def handle_error(self, error_msg: str):
         """Say what went wrong where the sweep's progress is reported.

@@ -37,6 +37,7 @@ KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_FIND_RESONANCES = "find_resonances/parameters"
 KEY_FIT_SWEEPS = "fit_sweeps/parameters"
+KEY_FIND_BIAS = "find_bias/parameters"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -481,3 +482,32 @@ def set_fit_parameters(parameters: dict) -> None:
     """Remember the fit settings."""
     import json
     _get_settings().setValue(KEY_FIT_SWEEPS, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Bias Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_bias_parameters() -> dict:
+    """The saved bias-finding settings.
+
+    JSON, as for the resonance finder, so ``None`` -- which the direction and
+    the distance guard both use -- survives the round trip.
+
+    Returns:
+        dict: what was last saved, empty if nothing ever was. The panel fills
+        anything absent from ``find_bias_points``' own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIND_BIAS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_bias_parameters(parameters: dict) -> None:
+    """Remember the bias-finding settings."""
+    import json
+    _get_settings().setValue(KEY_FIND_BIAS, json.dumps(parameters))

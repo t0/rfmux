@@ -12,6 +12,7 @@ from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential
 from rfmux.pulse_capture.sources import _set_receive_timeout
 from rfmux.tuning.find_resonances import find_resonances_in_netanal
 from rfmux.tuning.fits import fit_sweeps, fit_sweeps_at_bias_amplitude
+from rfmux.tuning.bias import find_bias_points
 
 from typing import Dict, Any, Optional
 
@@ -630,6 +631,76 @@ class RunFitsTask(QtCore.QThread):
 
     def _progress(self, completed, total):
         self.signals.progress.emit(int(completed), int(total))
+
+
+class FindBiasSignals(QObject):
+    completed = pyqtSignal(object)              # the BiasReport
+    error = pyqtSignal(str)
+
+
+class FindBiasTask(QtCore.QThread):
+    """Finds one module's bias points off the GUI thread.
+
+    Analysis, not measurement: 0.33 s for 200 resonators over five amplitude
+    steps in both directions, 1.8 s for 1000. That is short enough to want no
+    progress reporting -- and ``find_bias_points`` offers no callback to build
+    any from -- but long enough that running it on the GUI thread would freeze
+    the window, so it gets a thread and the button goes dead while it runs.
+
+    The report carries the new catalog, and the sweeps come back carrying
+    ``bias_report``; the panel does the saving.
+    """
+
+    def __init__(self, module_sweeps: dict, parameters: dict,
+                 signals: FindBiasSignals):
+        super().__init__()
+        self.module_sweeps = module_sweeps
+        self.parameters = dict(parameters)
+        self.signals = signals
+
+    def run(self):
+        try:
+            # save=False: the panel re-saves through store, so the finder's
+            # autosave cannot put a second copy in a second place.
+            report = find_bias_points(self.module_sweeps, save=False,
+                                      **self.parameters)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(f"{type(e).__name__}: {e}")
+            return
+        self.signals.completed.emit(report)
+
+
+class ApplyBiasSignals(QObject):
+    completed = pyqtSignal()
+    error = pyqtSignal(str)
+
+
+class ApplyBiasTask(QtCore.QThread):
+    """Programs a catalog's bias points onto the board.
+
+    One ``crs.apply_bias`` call and nothing else: which NCO to use, and putting
+    the frequencies on the tone grid, are the driver's.
+    """
+
+    def __init__(self, crs, catalog, signals: ApplyBiasSignals):
+        super().__init__()
+        self.crs = crs
+        self.catalog = catalog
+        self.signals = signals
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(self.crs.apply_bias(self.catalog))
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(f"{type(e).__name__}: {e}")
+            return
+        finally:
+            loop.close()
+        self.signals.completed.emit()
 
 
 class CRSInitializeTask(QRunnable):

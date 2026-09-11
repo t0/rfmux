@@ -141,6 +141,7 @@ __all__ = [
     "BIFURCATION_METHODS",
     "FREQUENCY_METHODS",
     "HYSTERESIS_COMPARISONS",
+    "NEEDS_BOTH_DIRECTIONS",
     "BifurcationCheck",
     "AmplitudeChoice",
     "BiasFinding",
@@ -165,8 +166,9 @@ __all__ = [
 BIFURCATION_METHODS = ("both", "derivative", "hysteresis")
 
 #: The bifurcation methods that need both sweep directions, because comparing
-#: them is what they do. Checked once per call rather than once per resonator.
-_NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
+#: them is what they do. Checked once per call rather than once per resonator,
+#: and public so a caller can offer only the methods its measurement supports.
+NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
 
 #: What :func:`bifurcated_by_hysteresis` compares the two sweep directions in,
 #: and the default. ``"magnitude"`` compares their ``|S21|`` against frequency;
@@ -574,7 +576,7 @@ def find_bias_points(
 
     directions = _directions_swept(sweeps)
     if (
-        amplitude_method in _NEEDS_BOTH_DIRECTIONS
+        amplitude_method in NEEDS_BOTH_DIRECTIONS
         and not {"upward", "downward"} <= directions
     ):
         raise ValueError(

@@ -584,6 +584,58 @@ def test_changing_units_redraws_and_leaves_the_measurement_alone(board, qt_app):
     assert np.array_equal(sweep["iq_counts"], before)
 
 
+def test_a_rerun_starts_a_task_on_the_catalogs_module(board, qt_app):
+    """Re-run reads the module off the catalog, as starting a sweep does.
+
+    It used to read ``params['module']``, which the dialog stopped emitting
+    when the catalog became its subject -- so every re-run stopped with
+    "Target module not specified" before a sweep began.
+    """
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+
+    periscope = _periscope_with()
+    periscope.crs = crs
+    periscope.multisweep_windows["multisweep_0"] = {
+        "window": panel, "dock": None, "params": params}
+
+    periscope._start_multisweep_analysis_for_window(panel, params)
+
+    task_key = f"multisweep_0_module_{catalog.module}"
+    assert task_key in periscope.multisweep_tasks
+    task = periscope.multisweep_tasks[task_key]
+    try:
+        assert task.module == catalog.module
+        assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+        spin(qt_app)
+        assert panel.module_sweeps is not None
+    finally:
+        task.stop()
+        task.wait(2000)
+
+
+def test_stopping_a_sweep_finds_the_task_by_the_catalogs_module(board, qt_app):
+    """The stopper keys tasks the same way the starter does, or it silently
+    stops nothing."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+
+    periscope = _periscope_with()
+    periscope.crs = crs
+    periscope.multisweep_windows["multisweep_0"] = {
+        "window": panel, "dock": None, "params": params}
+    periscope._start_multisweep_analysis_for_window(panel, params)
+
+    periscope.stop_multisweep_task_for_window(panel)
+
+    assert periscope.multisweep_tasks == {}
+    assert periscope.multisweep_windows == {}
+
+
 def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):
     """A netanal panel holding one measured sweep of the standard array."""
     panel = NetworkAnalysisPanel(modules=[catalog.module])
@@ -903,6 +955,7 @@ def _periscope_with(session_manager=None):
     periscope.netanal_windows = {}
     periscope.multisweep_window_count = 0
     periscope.multisweep_windows = {}
+    periscope.multisweep_tasks = {}
     periscope.session_manager = session_manager
     periscope.dock_manager = _StubDockManager()
     return periscope

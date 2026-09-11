@@ -1448,7 +1448,7 @@ class PeriscopeRuntime:
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
             # Connect data_ready signal for session auto-export
-            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+            if getattr(self, 'session_manager', None) is not None:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel.sweep_finished.connect(
@@ -1571,7 +1571,7 @@ class PeriscopeRuntime:
                 panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
             
             # Connect data_ready signal for session auto-export
-            if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
+            if getattr(self, 'session_manager', None) is not None:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
@@ -1955,7 +1955,7 @@ class PeriscopeRuntime:
                 self.multisweep_windows[window_id] = {
                     'window': panel, 'dock': dock, 'params': call_params}
 
-                if hasattr(self, 'session_manager'):
+                if getattr(self, 'session_manager', None) is not None:
                     panel.data_ready.connect(self.session_manager.handle_data_ready)
 
                 main_dock = self.dock_manager.get_dock("main_plots")
@@ -1982,11 +1982,10 @@ class PeriscopeRuntime:
         for w_id, data in self.multisweep_windows.items():
             if data['window'] == window_instance: window_id = w_id; break
         if not window_id: QtWidgets.QMessageBox.critical(window_instance, "Error", "Could not find associated window to re-run multisweep."); return
-        
-        target_module = params.get('module')
-        if target_module is None: QtWidgets.QMessageBox.critical(window_instance, "Error", "Target module not specified for multisweep re-run."); return
-        
-        old_task_key = f"{window_id}_module_{target_module}"
+
+        # A catalog belongs to one module, so that is where the module comes
+        # from -- the same place _start_multisweep_analysis reads it.
+        old_task_key = f"{window_id}_module_{params['catalog'].module}"
         if old_task_key in self.multisweep_tasks: # Stop and remove old task if it exists
             old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
             
@@ -1994,7 +1993,7 @@ class PeriscopeRuntime:
         # Pass the window_instance to the task (now starts automatically since it's a QThread)
         
         # Connect data_ready signal for session auto-export
-        if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
+        if getattr(self, 'session_manager', None) is not None:
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
 
         signals = MultisweepSignals()
@@ -2014,8 +2013,10 @@ class PeriscopeRuntime:
         window_id = None; target_module = None
         for w_id, data in list(self.multisweep_windows.items()): # Iterate over a copy for safe removal
             if data['window'] == window_instance:
-                window_id = w_id; target_module = data['params'].get('module'); break
-        
+                window_id = w_id
+                target_module = getattr(data['params'].get('catalog'), 'module', None)
+                break
+
         if window_id and target_module:
             task_key = f"{window_id}_module_{target_module}"
             if task_key in self.multisweep_tasks:
@@ -2071,7 +2072,7 @@ class PeriscopeRuntime:
         
         # Determine notebook directory - requires an active session
         if notebook_dir is None:
-            if hasattr(self, 'session_manager') and self.session_manager.is_active:
+            if getattr(self, 'session_manager', None) is not None and self.session_manager.is_active:
                 notebook_dir = str(self.session_manager.session_path)
             else:
                 # No active session - prompt user to start one

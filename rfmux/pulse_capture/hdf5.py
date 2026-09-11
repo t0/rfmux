@@ -122,7 +122,7 @@ class _PulseFileWriter:
         meta.attrs["format_version"] = 1
         for cast, keys in self._META:
             for k in keys:
-                if k in capture_params:
+                if capture_params.get(k) is not None:
                     meta.attrs[k] = cast(capture_params[k])
         meta.attrs["channels"] = np.asarray(channels, dtype=np.int64)
         if "fast_channels" in capture_params:

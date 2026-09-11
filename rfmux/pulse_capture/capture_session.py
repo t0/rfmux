@@ -560,7 +560,7 @@ class PulseCaptureSession(_CallbackHost):
         self,
         channels: List[int],
         *,
-        module: int = 1,
+        module: Optional[int] = 1,
         streamer_mode: str = "slow",
         threshold_sigma: float = 5.0,
         end_sigma: float = DEFAULT_END_SIGMA,

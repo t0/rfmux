@@ -52,6 +52,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
+from ...pulse_capture.channel_keys import modules_of
 from ...pulse_capture.capture_session import (
     DualPulseCaptureSession,
     PulseCaptureConfig,
@@ -105,8 +106,10 @@ class PulseCaptureResult:
 
     streamer_mode: str
     config: PulseCaptureConfig
-    channels: List[int]
-    module: int
+    #: Channel numbers, or (module, channel) pairs for a capture that
+    #: spans modules, in which case ``module`` is None.
+    channels: List
+    module: Optional[int]
     #: Wall-clock (``time.time()``) at which the source started streaming.
     #: The HDF5 file's ``capture_start`` is stamped when its writer opens:
     #: after noise training for a single-stream file, at session
@@ -204,8 +207,8 @@ def _training_seconds(config: PulseCaptureConfig, rate: float) -> float:
 @macro(CRS, register=True)
 async def trigger_capture(
     crs: CRS,
-    channel: Union[None, int, List[int]] = None,
-    module: int = 1,
+    channel: Union[None, int, List[int], Dict[int, List[int]]] = None,
+    module: Optional[int] = 1,
     *,
     streamer_mode: str = "slow",
     time_run: float = 10.0,
@@ -223,12 +226,14 @@ async def trigger_capture(
 
     Parameters
     ----------
-    channel : int | list[int]
+    channel : int | list[int] | dict[int, list[int]]
         Channel(s) to monitor.  Max 4 for ``"fast"``, the PFB streamer's
         limit; ``"both"`` takes any number and streams the fast side for
-        the channels the PFB streamer carries.
+        the channels the PFB streamer carries.  ``{module: [channels]}``
+        captures the slow stream of several modules at once, keyed by
+        ``(module, channel)`` pairs in the result and the file.
     module : int
-        Module index (1-based).
+        Module index (1-based) of a plain channel list.
     streamer_mode : str
         ``"slow"``, ``"fast"`` (PFB, ~2.44 MHz) or ``"both"``.  In
         ``"both"`` the two streams are detected independently and their
@@ -283,12 +288,19 @@ async def trigger_capture(
     """
     if channel is None:
         raise ValueError("channel must be specified")
-    channels = list(channel) if isinstance(channel, list) else [channel]
-
     if streamer_mode not in ("slow", "fast", "both"):
         raise ValueError(
             f"streamer_mode must be 'slow', 'fast' or 'both', "
             f"not {streamer_mode!r}")
+    if isinstance(channel, dict):
+        if streamer_mode != "slow":
+            raise ValueError("a capture across modules reads the slow "
+                             "stream only")
+        channels = [(int(m), int(c)) for m in sorted(channel)
+                    for c in channel[m]]
+        module = None
+    else:
+        channels = list(channel) if isinstance(channel, list) else [channel]
     if streamer_mode == "fast" and len(channels) > 4:
         raise ValueError(
             f"the PFB streamer carries at most 4 channels, got "
@@ -342,8 +354,10 @@ async def trigger_capture(
 
     if verbose:
         rate_str = ", ".join(f"{k} {v:,.0f} Hz" for k, v in rates.items())
+        where = (f"modules={modules_of(channels)}" if module is None
+                 else f"module={module}")
         print(f"[trigger_capture] mode={streamer_mode}, ch={channels}, "
-              f"module={module}, {rate_str}")
+              f"{where}, {rate_str}")
         print(f"[trigger_capture] {train_s*1e3:.0f} ms noise training "
               f"+ {time_run:.2f} s capture")
 

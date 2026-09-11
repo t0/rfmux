@@ -326,10 +326,29 @@ def _drain(sock, first: bytes, size: int, cap: int) -> list:
     return batch
 
 
+#: How long a wanted module may stay silent before the source gives
+#: up on it: in stream time (the other modules' stamps) while packets
+#: flow, wall clock while none do.  A module whose streamer is off
+#: never advances its clock, so a duration on it would otherwise never
+#: be covered.
+MODULE_SILENCE_S = 2.0
+
+
+def _wanted_by_module(channels, module):
+    """``{module: [(channel number, key), ...]}`` for a session's channel
+    keys: a (module, channel) pair names its module, a plain channel is
+    on *module*."""
+    wanted = {}
+    for key in channels:
+        m, c = key if isinstance(key, tuple) else (module, key)
+        wanted.setdefault(int(m), []).append((int(c), key))
+    return wanted
+
+
 async def run_slow_source(
     capture_session,
     host: str,
-    module: int = 1,
+    module: Optional[int] = 1,
     *,
     duration_s: Optional[float] = None,
     should_stop: Optional[Callable[[], bool]] = None,
@@ -339,11 +358,13 @@ async def run_slow_source(
     Parameters
     ----------
     capture_session : PulseCaptureSession
-        Started session; its ``channels`` are extracted per packet.
+        Started session; its ``channels`` are extracted per packet.  A
+        plain channel is read from *module*; a ``(module, channel)`` key
+        names its own, so one source feeds a session that spans modules.
     host : str
         CRS hostname (multicast interface selector).
     module : int
-        1-indexed module to accept packets from.
+        1-indexed module of the plain channel keys.
     duration_s : float, optional
         Stop after this much *sample time* (from packet timestamps).
         None = run until ``should_stop`` returns True.
@@ -351,18 +372,30 @@ async def run_slow_source(
         Polled once per receive batch (up to _SLOW_DRAIN_CAP packets);
         return True to stop.
 
-    Returns the sample time covered (seconds).
+    A packet carries one module, so each module has its own
+    :class:`SlowIngest`; the duration is covered once any of them has
+    covered it, and the sample time returned is the longest.
 
     Raises ``ValueError`` when the packets are too narrow to carry a
-    requested channel: a short packet carries 128, and a capture that
-    waited on channel 200 of one would train forever.
+    requested channel (a short packet carries 128, and a capture that
+    waited on channel 200 of one would train forever), or when a wanted
+    module sends nothing for :data:`MODULE_SILENCE_S`.
     """
     origin_set = False
     loop = asyncio.get_running_loop()
-    requested = list(capture_session.channels)
-    ingest = SlowIngest(capture_session.feed_block, duration_s=duration_s)
-    columns: Optional[Tuple[Tuple[int, ...], np.ndarray]] = None
-    width = -1
+    wanted = _wanted_by_module(capture_session.channels, module)
+    ingests = {m: SlowIngest(capture_session.feed_block, duration_s=duration_s)
+               for m in wanted}
+    columns: dict = {}     # module -> (keys, index array) at the last width
+    widths: dict = {}
+    seen: set = set()
+    t_first: Optional[float] = None    # stamp of the first wanted packet
+
+    def silence():
+        missing = sorted(set(wanted) - seen)
+        return ValueError(
+            f"module(s) {missing} sent no slow packets: is the streamer "
+            "on for them?")
 
     with streamer.get_multicast_socket(
             host, port=streamer.STREAMER_PORT) as sock:
@@ -372,41 +405,57 @@ async def run_slow_source(
         while not done:
             if should_stop is not None and should_stop():
                 break
+            waiting = len(seen) < len(wanted)
             try:
                 data = await asyncio.wait_for(
                     loop.sock_recv(sock, streamer.LONG_PACKET_SIZE),
-                    streamer.STREAMER_TIMEOUT)
+                    min(streamer.STREAMER_TIMEOUT, MODULE_SILENCE_S)
+                    if waiting else streamer.STREAMER_TIMEOUT)
             except asyncio.TimeoutError:
+                if waiting:
+                    raise silence() from None
                 break
             for data in _drain(sock, data, streamer.LONG_PACKET_SIZE,
                                _SLOW_DRAIN_CAP):
                 pkt = streamer.ReadoutPacket(data)
-                if pkt.module != module - 1:
+                m = pkt.module + 1
+                ingest = ingests.get(m)
+                if ingest is None:
                     continue
+                seen.add(m)
                 raw = np.array(pkt)          # ADC counts, as get_samples reports them
                 ts = streamer.ts_to_seconds(pkt.ts)
+                if ts is not None and len(seen) < len(wanted):
+                    if t_first is None:
+                        t_first = ts
+                    elif ts - t_first > MODULE_SILENCE_S:
+                        raise silence()
                 if ts is not None and not origin_set:
                     set_origin = getattr(capture_session, "set_time_origin", None)
                     if set_origin is not None:
                         set_origin(streamer.ts_day_epoch(pkt.ts))
                     origin_set = True
-                if len(pkt) != width:
+                if len(pkt) != widths.get(m):
                     # Recomputed only when the packet mode changes, not
                     # per packet -- that would undo the point of
                     # blocking.
-                    width = len(pkt)
-                    columns = columns_for_width(requested, width)
-                    missing = [c for c in requested if c not in columns[0]]
+                    width = widths[m] = len(pkt)
+                    numbers = [c for c, _ in wanted[m]]
+                    kept, index = columns_for_width(numbers, width)
+                    missing = [c for c in numbers if c not in kept]
                     if missing:
                         mode = ("; short-packet mode"
                                 if width == streamer.SHORT_PACKET_CHANNELS
                                 else "")
                         raise ValueError(
-                            f"Channels {missing} are beyond the slow "
-                            f"packet width ({width} channels{mode}); the "
-                            "stream cannot carry them.")
-                if columns[0]:
-                    ingest.add(columns[0], raw[columns[1]], ts)
+                            f"Channels {missing} of module {m} are beyond "
+                            f"the slow packet width ({width} channels"
+                            f"{mode}); the stream cannot carry them.")
+                    key_of = dict(wanted[m])
+                    columns[m] = (tuple(key_of[c] for c in kept), index)
+                keys, index = columns[m]
+                if keys:
+                    ingest.add(keys, raw[index], ts)
                 else:
                     # No wanted channel in this packet, but still time
                     # passing -- the duration must not stall on it.
@@ -417,8 +466,11 @@ async def run_slow_source(
             # An explicit turn for whatever shares the loop -- in a dual
             # capture, the other stream.
             await asyncio.sleep(0)
-        ingest.flush()   # don't strand the tail of the capture
-    return ingest.elapsed
+        for ingest in ingests.values():
+            ingest.flush()   # don't strand the tail of the capture
+    if done and len(seen) < len(wanted):
+        raise silence()
+    return max((i.elapsed for i in ingests.values()), default=0.0)
 
 
 async def _active_pfb_channels(crs, module: int

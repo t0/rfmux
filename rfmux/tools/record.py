@@ -29,7 +29,7 @@ from rfmux.algorithms.measurement.record_streams import (
     record_streams,
 )
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
-from rfmux.tools.parser import parse_ranges
+from rfmux.core.channels import parse_channel_spec
 
 _DEFAULTS = PulseCaptureConfig()
 
@@ -139,7 +139,7 @@ def _run(*, serial, hostname, module, channels, duration, session,
     bias_path = Path(bias) if bias else latest_bias_export(folder, module)
     biased, calibrations = biased_channels(bias_path) if bias_path else ([], {})
     if channels:
-        chosen = [c + 1 for r in parse_ranges(channels, 1, 1024, "channel") for c in r]
+        chosen = parse_channel_spec(channels, max_value=1024, wildcard=False)
     elif biased:
         chosen = biased
     else:

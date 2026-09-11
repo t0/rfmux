@@ -36,6 +36,8 @@ import h5py
 from .detection import ChannelNoiseStats
 from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
+from .channel_keys import (ChannelKey, channel_group, check_keys,
+                           keys_from_attr, modules_of)
 
 
 
@@ -108,9 +110,10 @@ class _PulseFileWriter:
         (bool, ("enable_pileup",)),
     )
 
-    def __init__(self, path: str | Path, channels: List[int],
+    def __init__(self, path: str | Path, channels: List[ChannelKey],
                  capture_params: Dict[str, Any]):
         self.path = Path(path)
+        channels = check_keys(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
 
@@ -121,10 +124,10 @@ class _PulseFileWriter:
             for k in keys:
                 if k in capture_params:
                     meta.attrs[k] = cast(capture_params[k])
-        meta.attrs["channels"] = channels
+        meta.attrs["channels"] = np.asarray(channels, dtype=np.int64)
         if "fast_channels" in capture_params:
-            meta.attrs["fast_channels"] = [
-                int(c) for c in capture_params["fast_channels"]]
+            meta.attrs["fast_channels"] = np.asarray(
+                check_keys(capture_params["fast_channels"]), dtype=np.int64)
 
     # ── Shared helpers ────────────────────────────────────────────
 
@@ -256,8 +259,8 @@ class PulseHDF5Writer(_PulseFileWriter):
         self._noise_stats = dict(noise_stats)
 
         # ── Per-channel groups ────────────────────────────────────
-        for ch in channels:
-            grp = self.f.create_group(f"channel_{ch}")
+        for ch in check_keys(channels):
+            grp = self.f.create_group(channel_group(ch))
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
@@ -295,7 +298,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         """
         if noise_stats is None:
             noise_stats = self._noise_stats.get(channel)
-        self._append_pulse_to(f"channel_{channel}", pulse_idx, pulse_data,
+        self._append_pulse_to(channel_group(channel), pulse_idx, pulse_data,
                               noise_stats)
 
     def read_pulse(self, channel: int, pulse_idx: int) -> Optional[dict]:
@@ -307,7 +310,8 @@ class PulseHDF5Writer(_PulseFileWriter):
         involves no file locking.  Must be called from the same thread
         that writes (the h5py single-thread rule).
         """
-        return self._read_pulse_at(f"channel_{channel}/pulse_{pulse_idx:06d}")
+        return self._read_pulse_at(
+            f"{channel_group(channel)}/pulse_{pulse_idx:06d}")
 
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
@@ -318,7 +322,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         group attrs always reflect the most recent estimate.
         """
         self._noise_stats.update(noise_stats)
-        self._set_noise_stats(lambda ch: f"channel_{ch}", noise_stats)
+        self._set_noise_stats(channel_group, noise_stats)
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
         """Overwrite histogram datasets with current running histograms.
@@ -347,6 +351,9 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         slow/channel_<n>/pulse_*      fast/channel_<n>/pulse_*
         matched/channel_<n>/pair_*    (slow_idx/fast_idx, -1 = one-sided;
                                        optional cross-stream TOD datasets)
+
+    A (module, channel) key nests as ``module_<M>/channel_<n>`` under
+    each stream (see :mod:`.channel_keys`).
         histograms/slow/  histograms/fast/
         templates/slow/   templates/fast/
     """
@@ -365,10 +372,11 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         self.f["metadata"].attrs["layout"] = "dual"
         self.f["metadata"].attrs["streamer_mode"] = "both"
 
+        channels = check_keys(channels)
         for stream in self.STREAMS:
             sgrp = self.f.create_group(stream)
             for ch in channels:
-                grp = sgrp.create_group(f"channel_{ch}")
+                grp = sgrp.create_group(channel_group(ch))
                 grp.attrs["pulse_count"] = 0
                 _store_df_calibration(grp, df_calibrations, ch)
                 _store_units(grp, stored_units, ch)
@@ -376,25 +384,26 @@ class DualPulseHDF5Writer(_PulseFileWriter):
 
         matched = self.f.create_group("matched")
         for ch in channels:
-            mgrp = matched.create_group(f"channel_{ch}")
+            mgrp = matched.create_group(channel_group(ch))
             mgrp.attrs["pair_count"] = 0
         self.f.flush()
 
     def set_noise_stats(self, stream: str,
                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
         self._noise[stream].update(noise_stats)
-        self._set_noise_stats(lambda ch: f"{stream}/channel_{ch}",
+        self._set_noise_stats(lambda ch: f"{stream}/{channel_group(ch)}",
                               noise_stats)
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
                      pulse_data: dict) -> None:
-        self._append_pulse_to(f"{stream}/channel_{channel}", pulse_idx,
-                              pulse_data, self._noise[stream].get(channel))
+        self._append_pulse_to(f"{stream}/{channel_group(channel)}",
+                              pulse_idx, pulse_data,
+                              self._noise[stream].get(channel))
 
     def append_match(self, channel: int, pair: dict) -> None:
         if not self.is_open:
             return
-        key = f"matched/channel_{channel}"
+        key = f"matched/{channel_group(channel)}"
         if key not in self.f:
             return
         mgrp = self.f[key]
@@ -429,7 +438,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
                    pulse_idx: int) -> Optional[dict]:
         """Live read-back through the open write handle (writer thread)."""
         return self._read_pulse_at(
-            f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}")
+            f"{stream}/{channel_group(channel)}/pulse_{pulse_idx:06d}")
 
     def read_match(self, channel: int,
                    pair_idx: int) -> Optional[Dict[str, Any]]:
@@ -437,7 +446,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         viewer whose cache has let it go."""
         if not self.is_open:
             return None
-        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        key = f"matched/{channel_group(channel)}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
         return _pair_from_group(self.f[key], channel, pair_idx)
@@ -473,15 +482,29 @@ class PulseHDF5Reader:
         # Eagerly read metadata
         meta = self.f["metadata"]
         self.metadata: Dict[str, Any] = dict(meta.attrs)
-        self.channels: List[int] = list(self.metadata.get("channels", []))
+        #: Channel numbers, or (module, channel) pairs for a capture
+        #: that spans modules.
+        self.channels: List[ChannelKey] = keys_from_attr(
+            self.metadata.get("channels", []))
+        self.multi_module: bool = any(isinstance(k, tuple)
+                                      for k in self.channels)
         #: True for dual-layout ("both" mode) files
         self.dual: bool = "slow" in self.f and "fast" in self.f
         self.streams: List[str] = ["slow", "fast"] if self.dual else []
 
-    def _ch_key(self, channel: int, stream: Optional[str]) -> str:
+    @property
+    def modules(self) -> List[int]:
+        """The modules captured: from the pair keys, else the one in
+        the metadata."""
+        if self.multi_module:
+            return modules_of(self.channels)
+        return ([int(self.metadata["module"])]
+                if "module" in self.metadata else [])
+
+    def _ch_key(self, channel: ChannelKey, stream: Optional[str]) -> str:
         if self.dual:
-            return f"{stream or 'slow'}/channel_{channel}"
-        return f"channel_{channel}"
+            return f"{stream or 'slow'}/{channel_group(channel)}"
+        return channel_group(channel)
 
     # ── Channel-level queries ─────────────────────────────────────
 
@@ -617,7 +640,7 @@ class PulseHDF5Reader:
     # ── Matched pairs (dual files) ────────────────────────────────
 
     def pair_count(self, channel: int) -> int:
-        key = f"matched/channel_{channel}"
+        key = f"matched/{channel_group(channel)}"
         if self.f is not None and key in self.f:
             return int(self.f[key].attrs.get("pair_count", 0))
         return 0
@@ -628,7 +651,7 @@ class PulseHDF5Reader:
         and any stored cross-stream TOD windows."""
         if self.f is None:
             return None
-        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        key = f"matched/{channel_group(channel)}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
         return _pair_from_group(self.f[key], channel, pair_idx)

@@ -26,6 +26,7 @@ from ..core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       sampling_to_decimation)
 from ..streamer import SS_PER_SECOND
+from .channel_keys import channel_group
 from .hdf5 import PulseHDF5Reader
 
 # ── The recording ─────────────────────────────────────────────────
@@ -420,7 +421,7 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
 
     if reader.dual:
         raise ValueError(f"{reader.path}: already a dual file")
-    channels = [int(c) for c in reader.channels]
+    channels = list(reader.channels)
     fast_channels = [c for c in channels if c <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
     params = {**reader.metadata, "streamer_mode": "both",
@@ -439,7 +440,7 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
             if key in reader.metadata:
                 meta.attrs[key] = reader.metadata[key]
         for c in channels:
-            key = f"channel_{c}"
+            key = channel_group(c)
             del writer.f["slow"][key]
             reader.f.copy(reader.f[key], writer.f["slow"], name=key)
         writer.update_histograms("slow", reader.get_histograms())

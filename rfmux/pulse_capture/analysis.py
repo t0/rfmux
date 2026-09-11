@@ -362,7 +362,7 @@ def plot_groups(spec: str, channels) -> list:
     Returns ``[(label, [channels...]), ...]``.  Raises ValueError with
     the offending token, since the caller is a GUI field.
     """
-    present = sorted(int(c) for c in channels)
+    present = sorted(channels)
     cleaned = "".join(spec.split())
     if not cleaned:
         return [(f"Ch{c}", [c]) for c in present]

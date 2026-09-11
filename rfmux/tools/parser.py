@@ -38,6 +38,7 @@ from rfmux.streamer import (
     SS_PER_SECOND,
 )
 from rfmux.core.transferfunctions import decimated_stream_delay_s
+from rfmux.core import channels as channel_spec
 
 #: Low bits of a readout packet's fir_stage field: the decimation stage.
 #: Bit 3 flags short packets.
@@ -75,55 +76,35 @@ def resolve_interface(interface_name: str) -> str:
     raise ValueError(f"No IPv4 address found for interface '{interface_name}'")
 
 
-def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range]:
-    """
-    Parse comma-separated ranges like "1,5-10,20-30" into list of range objects.
-
-    Args:
-        spec: Comma-separated range specification (1-indexed)
-        min_val: Minimum allowed value (1-indexed)
-        max_val: Maximum allowed value (1-indexed)
-        name: Name for error messages (e.g., "channel", "module")
-
-    Returns:
-        List of range objects (0-indexed, exclusive end as per Python convention)
-
-    Examples:
-        >>> parse_ranges("1,5-10", 1, 100, "channel")
-        [range(0, 1), range(4, 10)]
-    """
-    ranges = []
-    for token in spec.split(","):
-        token = token.strip()
-        if "-" in token:
-            start_str, end_str = token.split("-", 1)
-            start, end = int(start_str), int(end_str)
+def _zero_indexed_ranges(values: list[int]) -> list[range]:
+    """Sorted 1-indexed numbers as 0-indexed ranges, consecutive runs
+    merged: [1, 2, 3, 5] -> [range(0, 3), range(4, 5)]."""
+    ranges: list[range] = []
+    for v in values:
+        if ranges and ranges[-1].stop == v - 1:
+            ranges[-1] = range(ranges[-1].start, v)
         else:
-            start = end = int(token)
-
-        if not (min_val <= start <= end <= max_val):
-            raise ValueError(
-                f"{name.capitalize()} range {start}-{end} out of bounds "
-                f"[{min_val}, {max_val}]"
-            )
-
-        # Convert to 0-indexed range (exclusive end)
-        ranges.append(range(start - 1, end))
-
+            ranges.append(range(v - 1, v))
     return ranges
 
-def parse_module_channels(specs: list[str]):
-    result = {}
-    for spec in specs:
-        mod_str, _, chan_str = spec.partition(":")
-        if not chan_str:
-            raise ValueError(f"Expected MODULE:CHANNELS, got {spec!r}")
-        module = int(mod_str)
-        if not 1 <= module <= TOTAL_MODULES:
-            raise ValueError(f"MODULE {mod_str} out of bounds [1, {TOTAL_MODULES}]")
-        channels = parse_ranges(chan_str, 1, TOTAL_CHANNELS, "channel")
-        result.setdefault(module - 1, []).extend(channels)
-    return result
+
+def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range]:
+    """Comma-separated 1-indexed ranges like "1,5-10,20-30" as 0-indexed
+    range objects: parse_ranges("1,5-10", 1, 100, "channel") is
+    [range(0, 1), range(4, 10)]."""
+    values = channel_spec.parse_channel_spec(
+        spec, name=name, max_value=max_val, wildcard=False)
+    if values[0] < min_val:
+        raise ValueError(f"{name.capitalize()}s run {min_val}-{max_val}, "
+                         f"so {values[0]} is out of range.")
+    return _zero_indexed_ranges(values)
+
+
+def parse_module_channels(specs: list[str]) -> dict[int, list[range]]:
+    """-c MODULE:CHANNELS specs as {0-indexed module: 0-indexed ranges}."""
+    by_module = channel_spec.parse_module_channels(
+        specs, max_module=TOTAL_MODULES, max_channel=TOTAL_CHANNELS)
+    return {m - 1: _zero_indexed_ranges(chs) for m, chs in by_module.items()}
 
 
 @dataclass

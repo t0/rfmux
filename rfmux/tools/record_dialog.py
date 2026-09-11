@@ -17,7 +17,7 @@ from ..algorithms.measurement.record_streams import (
     biased_channels, fastrx_bytes_per_s, latest_bias_export)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
-from .parser import parse_ranges
+from ..core.channels import parse_channel_spec
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -269,8 +269,8 @@ class RecordDialog(QtWidgets.QDialog):
     def _resolve_channels(self):
         if self.rb_ranges.isChecked():
             try:
-                chans = [c + 1 for r in parse_ranges(
-                    self.channels_edit.text(), 1, 1024, "channel") for c in r]
+                chans = parse_channel_spec(self.channels_edit.text(),
+                                           max_value=1024, wildcard=False)
             except Exception as e:
                 return None, str(e)
             return (chans, f"{len(chans)} channels") if chans else \

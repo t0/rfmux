@@ -48,6 +48,7 @@ from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
     PulseCaptureSession,
 )
+from ...pulse_capture.channel_keys import channel_suffix
 from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...core.transferfunctions import (
     apply_iq_conversion,
@@ -855,8 +856,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             counts_list = []
             n_pulses = 0
             for ch in chans:
-                t = data.get(f"time_s_ch{ch}")
-                counts = data.get(f"counts_ch{ch}")
+                t = data.get(f"time_s_{channel_suffix(ch)}")
+                counts = data.get(f"counts_{channel_suffix(ch)}")
                 if t is None or counts is None:
                     continue
                 t_arr = np.asarray(t, dtype=np.float64)
@@ -872,7 +873,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 # equals the template of rotated pulses -- but only if
                 # the two axes are transformed as a pair.
                 view = self._view_coeffs(ch)
-                means = {q: data.get(f"template_{q}_ch{ch}")
+                means = {q: data.get(f"template_{q}_{channel_suffix(ch)}")
                          for q in ("I", "Q")}
                 rotated = (view is not None and means["I"] is not None
                            and means["Q"] is not None)
@@ -894,7 +895,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     # The residual is a spread, not a signed pair: the
                     # rotation mixes the quadratures, so only its length
                     # carries over -- which is what `scale` already is.
-                    resid = data.get(f"residual_{quad}_ch{ch}")
+                    resid = data.get(f"residual_{quad}_{channel_suffix(ch)}")
                     if resid is None:
                         resid = blank
                     else:
@@ -1143,7 +1144,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
                 for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
                     rows.append([label, float(t), float(i), float(q)])
-            return rows, f"pulse_pair_ch{ch}_{idx:04d}_{stamp}.csv"
+            return rows, f"pulse_pair_{channel_suffix(ch)}_{idx:04d}_{stamp}.csv"
 
         if self._current_view is None:
             return [], ""
@@ -1154,7 +1155,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         rows = [["time_s", "Amp_I", "Amp_Q"]]
         for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
             rows.append([float(t), float(i), float(q)])
-        return rows, f"pulse_ch{ch}_{idx:06d}_{stamp}.csv"
+        return rows, f"pulse_{channel_suffix(ch)}_{idx:06d}_{stamp}.csv"
 
     def _export_histogram_rows(self, stamp):
         data = self._hist_data
@@ -1167,7 +1168,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 continue
             edges = np.asarray(edges, dtype=np.float64)
             for ch in sorted(self._counts):
-                counts = data.get(f"{metric}_counts_ch{ch}")
+                counts = data.get(f"{metric}_counts_{channel_suffix(ch)}")
                 if counts is None:
                     continue
                 for k, n in enumerate(np.asarray(counts)):
@@ -1182,14 +1183,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         rows = [["channel", "time_s", "template_I", "template_Q",
                  "residual_I", "residual_Q", "n_stacked"]]
         for ch in sorted(self._counts):
-            t = data.get(f"time_s_ch{ch}")
+            t = data.get(f"time_s_{channel_suffix(ch)}")
             if t is None:
                 continue
-            ti = data.get(f"template_I_ch{ch}")
-            tq = data.get(f"template_Q_ch{ch}")
-            ri = data.get(f"residual_I_ch{ch}")
-            rq = data.get(f"residual_Q_ch{ch}")
-            counts = data.get(f"counts_ch{ch}")
+            ti = data.get(f"template_I_{channel_suffix(ch)}")
+            tq = data.get(f"template_Q_{channel_suffix(ch)}")
+            ri = data.get(f"residual_I_{channel_suffix(ch)}")
+            rq = data.get(f"residual_Q_{channel_suffix(ch)}")
+            counts = data.get(f"counts_{channel_suffix(ch)}")
             for k in range(len(t)):
                 rows.append([
                     ch, float(t[k]),
@@ -1466,7 +1467,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         """Open an existing pulse-capture HDF5 for browsing."""
         self.reader = PulseHDF5Reader(path)
         meta = self.reader.metadata
-        channels = [int(c) for c in self.reader.channels]
+        channels = list(self.reader.channels)
 
         # Restore capture parameters so bands/labels reflect the file
         if "streamer_mode" in meta:
@@ -2727,7 +2728,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 for label, chans in series:
                     edges_list, counts_list = [], []
                     for ch in chans:
-                        counts = self._hist_data.get(f"{source}_counts_ch{ch}")
+                        counts = self._hist_data.get(f"{source}_counts_{channel_suffix(ch)}")
                         if counts is None:
                             continue
                         edges = base_edges

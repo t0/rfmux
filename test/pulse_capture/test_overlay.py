@@ -399,8 +399,9 @@ def test_the_merged_file_carries_fast_histograms_and_templates(tmp_path):
 
 
 def test_a_window_keeps_one_module_of_an_interleaved_recording(tmp_path):
-    """The writer interleaves every streaming module; a query with a
-    module keeps its records, and reads its sequence counter alone."""
+    """The writer interleaves every streaming module, and the modules'
+    records of one sample share its sequence number; a query with a
+    module keeps its records, so its gaps are counted right."""
     rec = Recording(_recording_file(tmp_path, spacing=1e-4,
                                     span=(-0.002, 0.02), modules=(2, 3)))
     w2 = rec.window(T - 0.001, T + 0.01, CHANNEL, module=2)
@@ -411,7 +412,7 @@ def test_a_window_keeps_one_module_of_an_interleaved_recording(tmp_path):
     assert w2.samples.real.max() == pytest.approx(AMP, rel=1e-3)
     assert not w3.samples.any()
     assert w2.seq_gaps == 0 and w3.seq_gaps == 0
-    assert both.seq_gaps > 0            # two counters read as one
+    assert both.seq_gaps > 0            # each number seen twice over
     assert w2.module == 2 and both.module is None
     assert rec.channel(CHANNEL, 0, 10, module=3).shape == (5,)
 

@@ -93,9 +93,10 @@ class Recording:
     day, and queries are read the same way.
 
     The writer records every module the channel stream carries, one
-    record per module per sample, interleaved; a query with a module
-    keeps that module's records, and its sequence counter is read on
-    its own.
+    record per module per sample, interleaved, and the modules' records
+    of one sample share its sequence number; a query with a module
+    keeps that module's records, so that consecutive numbers mean no
+    gap.
     """
 
     def __init__(self, source):

@@ -24,6 +24,7 @@ Usage (read)::
 
 from __future__ import annotations
 
+import json
 import time
 import warnings
 
@@ -56,27 +57,65 @@ def _store_units(grp, stored_units, channel) -> None:
         grp.attrs["stored_units"] = str(units)
 
 
-def _store_df_calibration(grp, df_calibrations, channel) -> None:
-    """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
+#: Attribute on a ``tuning`` group naming the fields stored as JSON.
+TUNING_JSON_FIELDS = "json_fields"
 
-    Expects the flat ``{channel: calibration}`` mapping.  Anything h5py
-    cannot store as an attribute is skipped with a warning rather than
-    raised: the pulses are worth more than the units they are labelled
-    in, and a writer that refuses to open costs the whole capture.
+
+def _json_default(value):
+    if isinstance(value, complex):
+        return [value.real, value.imag]
+    if isinstance(value, np.generic):
+        return _json_default(value.item())
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _store_tuning(grp, tuning, channel) -> None:
+    """Write *channel*'s tuning row under ``grp/tuning``.
+
+    A row is a bias_kids entry: its scalars and strings become
+    attributes (``df_calibration`` among them), its numeric arrays
+    datasets, and anything else (``fit_params`` and other mappings, lists
+    of strings) a JSON attribute named in ``json_fields``; a complex
+    number inside JSON is a two-element list.  None is skipped.  A field
+    h5py cannot store, or a row that is not one, is skipped with a
+    warning rather than raised: the pulses are worth more than their
+    labels, and a writer that refuses to open costs the whole capture.
     """
-    if not isinstance(df_calibrations, dict) or not df_calibrations:
+    if not isinstance(tuning, dict) or not tuning:
         return
-    value = df_calibrations.get(channel)
-    if value is None:
+    row = tuning.get(channel)
+    if row is None:
         return
-    if not isinstance(value, (int, float, complex, np.number)):
+    if not isinstance(row, dict) or any(not isinstance(k, str) for k in row):
         warnings.warn(
-            f"ignoring df_calibration for channel {channel}: expected a "
-            f"number, got {type(value).__name__}.  df_calibrations is the "
-            f"flat {{channel: calibration}} mapping, not one keyed by module.",
+            f"ignoring tuning for channel {channel}: expected a row of named "
+            f"fields, got {type(row).__name__}.  tuning is the flat "
+            f"{{channel: row}} mapping, not one keyed by module.",
             stacklevel=3)
         return
-    grp.attrs["df_calibration"] = value
+    tgrp = grp.create_group("tuning")
+    json_fields = []
+    for name, value in row.items():
+        if value is None:
+            continue
+        try:
+            if isinstance(value, (str, bytes, bool, int, float, complex,
+                                  np.generic)):
+                tgrp.attrs[name] = value
+                continue
+            arr = None if isinstance(value, dict) else np.asarray(value)
+            if arr is not None and arr.dtype.kind in "biufc":
+                tgrp.create_dataset(name, data=arr)
+            else:
+                tgrp.attrs[name] = json.dumps(value, default=_json_default)
+                json_fields.append(name)
+        except Exception as exc:
+            warnings.warn(f"tuning field {name!r} of channel {channel} not "
+                          f"stored: {exc}", stacklevel=3)
+    if json_fields:
+        tgrp.attrs[TUNING_JSON_FIELDS] = json_fields
 
 
 # ───────────────────────── Shared writer plumbing ───────────────────
@@ -238,9 +277,10 @@ class PulseHDF5Writer(_PulseFileWriter):
         Per-channel noise statistics from the estimation phase.
     capture_params : dict
         Capture configuration (streamer_mode, threshold_sigma, etc.).
-    df_calibrations : dict[int, complex], optional
-        Per-channel complex df calibration as ``measure_df_calibrations``
-        returns it: magnitude in hertz per volt, phase minus the angle of
+    tuning : dict[int, dict], optional
+        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        readout channel; its ``df_calibration`` is the complex factor
+        with magnitude in hertz per volt and phase minus the angle of
         the frequency direction in the (I, Q) plane.
     stored_units : dict[int, str], optional
         Per-channel units of the stored samples (``"Hz"`` or ``"V"``).
@@ -252,7 +292,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         channels: List[int],
         noise_stats: Dict[int, ChannelNoiseStats],
         capture_params: Dict[str, Any],
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         stored_units: Optional[Dict[int, str]] = None,
     ):
         super().__init__(path, channels, capture_params)
@@ -264,7 +304,7 @@ class PulseHDF5Writer(_PulseFileWriter):
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
-            _store_df_calibration(grp, df_calibrations, ch)
+            _store_tuning(grp, tuning, ch)
             _store_units(grp, stored_units, ch)
 
         # ── Histogram / template groups (updated periodically) ────
@@ -362,7 +402,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
-                 df_calibrations: Optional[Dict[int, complex]] = None,
+                 tuning: Optional[Dict[int, dict]] = None,
                  stored_units: Optional[Dict[int, str]] = None):
         super().__init__(path, channels, capture_params)
         self._noise: Dict[str, Dict[int, ChannelNoiseStats]] = {
@@ -378,7 +418,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
             for ch in channels:
                 grp = sgrp.create_group(channel_group(ch))
                 grp.attrs["pulse_count"] = 0
-                _store_df_calibration(grp, df_calibrations, ch)
+                _store_tuning(grp, tuning, ch)
                 _store_units(grp, stored_units, ch)
             self.f.create_group(f"histograms/{stream}")
 
@@ -572,15 +612,35 @@ class PulseHDF5Reader:
             return "iq"
         return str(meta.attrs.get("trigger_basis", "iq"))
 
-    def df_calibration(self, channel: int,
-                       stream: Optional[str] = None) -> Optional[complex]:
-        """Return the df calibration for *channel*, or None."""
+    def _tuning_group(self, channel, stream):
         if self.f is None:
             return None
         grp = self.f.get(self._ch_key(channel, stream))
-        if grp is None:
-            return None
-        return grp.attrs.get("df_calibration")
+        return None if grp is None else grp.get("tuning")
+
+    def tuning(self, channel: int, stream: Optional[str] = None) -> dict:
+        """The tuning row *channel* was captured with, as the writer was
+        handed it; ``{}`` when the file carries none."""
+        tgrp = self._tuning_group(channel, stream)
+        if tgrp is None:
+            return {}
+        json_fields = set(tgrp.attrs.get(TUNING_JSON_FIELDS, ()))
+        row = {}
+        for name, value in tgrp.attrs.items():
+            if name == TUNING_JSON_FIELDS:
+                continue
+            value = _convert_attr(value)
+            row[name] = json.loads(value) if name in json_fields else value
+        for name, ds in tgrp.items():
+            row[name] = ds[()]
+        return row
+
+    def df_calibration(self, channel: int,
+                       stream: Optional[str] = None) -> Optional[complex]:
+        """The df calibration *channel* was captured with, or None."""
+        tgrp = self._tuning_group(channel, stream)
+        value = None if tgrp is None else tgrp.attrs.get("df_calibration")
+        return None if value is None else complex(value)
 
     # ── Pulse-level queries ───────────────────────────────────────
 
@@ -832,6 +892,8 @@ def _convert_attr(val: Any) -> Any:
         return int(val)
     if isinstance(val, (np.floating,)):
         return float(val)
+    if isinstance(val, (np.complexfloating,)):
+        return complex(val)
     if isinstance(val, (np.bool_,)):
         return bool(val)
     if isinstance(val, bytes):

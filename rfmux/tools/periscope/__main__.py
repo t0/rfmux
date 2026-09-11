@@ -59,7 +59,8 @@ def _build_with_progress(crs_obj, config, loop, module):
     with the stages: generating alone, or generating, biasing, warming
     and calibrating when the array is biased.
 
-    Returns ``(resonator_count, df_calibrations)``.
+    Returns ``(resonator_count, tuning)``, the rows
+    ``measure_df_calibrations`` gives.
     """
     import threading
     import time
@@ -234,7 +235,7 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
-    initial_df_calibrations = None
+    initial_tuning = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
     
@@ -421,7 +422,7 @@ def main():
                     # apply_mock_config pins the seed into the config the
                     # session saves, so a restore rebuilds the same array.
                     if initial_mock_config.get("num_resonances", 0) > PROGRESS_MIN_RESONATORS:
-                        resonator_count, initial_df_calibrations = _build_with_progress(
+                        resonator_count, initial_tuning = _build_with_progress(
                             crs_obj, initial_mock_config, loop, args.module)
                     else:
                         _, resonator_count = loop.run_until_complete(
@@ -495,7 +496,7 @@ def main():
         dot_px=args.density_dot,
         crs=crs_obj,  # Pass the CRS object
         skip_startup_dialog=(session_config is not None),  # Skip dialog if already shown
-        df_calibrations=initial_df_calibrations,
+        tuning=initial_tuning,
     )
     
     # Store the initial mock configuration if in mock mode

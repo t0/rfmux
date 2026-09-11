@@ -206,12 +206,14 @@ tooltip. Raise `net.core.rmem_max` before a long fast capture (see
 ## Trigger in the frequency basis
 
 A pulse moves the resonance frequency, so in the IQ plane it lies along one
-direction set by the bias point. With a df calibration from `bias_kids`,
-the capture rotates each channel onto that direction, triggers on it, and
-stores the samples in hertz. Without one, a channel triggers and stores in
-volts on the I and Q axes. In Periscope the calibration comes from the Bias
-KIDs step of the tuning flow; in mock mode Periscope measures one for every
-simulated detector at startup.
+direction set by the bias point. With a df calibration in a channel's
+tuning row from `bias_kids`, the capture rotates the channel onto that
+direction, triggers on it, and stores the samples in hertz. Without one, a
+channel triggers and stores in volts on the I and Q axes. The file keeps the
+whole row (bias frequency, amplitude, sweep, fit parameters, calibration)
+with the channel's pulses. In Periscope the tuning comes from the Bias KIDs
+step of the tuning flow; in mock mode Periscope measures a calibration for
+every simulated detector at startup.
 
 The screenshots in this guide are frequency-basis captures: the axes are df
 and dissipation, and the amplitudes are in hertz.

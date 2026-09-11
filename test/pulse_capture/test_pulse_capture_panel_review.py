@@ -49,7 +49,7 @@ def panel(qt_app):
 def calibrated_panel(qt_app):
     """A calibrated channel whose live capture stores quadratures in
     volts, so every view is a conversion away from storage."""
-    for panel in _panel(qt_app, df_calibrations={1: {1: 2.0e6 + 0j}}):
+    for panel in _panel(qt_app, tuning={1: {1: {"df_calibration": 2.0e6 + 0j}}}):
         panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
         yield panel
 
@@ -220,7 +220,7 @@ def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
     peaks beside the stored ones; the volts and counts views draw those,
     named I and Q, and the df view the stored pair."""
     cal = 2.0e6 + 0j
-    panel = PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel = PulseCapturePanel(dark_mode=False, tuning={1: {1: {"df_calibration": cal}}})
     panel.capture_config = PulseCaptureConfig(trigger_basis="df")
     panel._counts = {1: 3}
     hz = np.array([0.0, 1000.0, 2000.0])

@@ -19,7 +19,7 @@ def test_config_and_session_defaults():
 def test_df_default_rotates_only_where_a_calibration_exists(cal, units):
     s = PulseCaptureSession(
         channels=[1], sample_rate=1000.0,
-        df_calibrations=({1: cal} if cal is not None else None))
+        tuning=({1: {"df_calibration": cal}} if cal is not None else None))
     s.start()
     n = 20
     s.feed_block(1, np.zeros(n), np.zeros(n), np.arange(n) / 1000.0)
@@ -31,7 +31,7 @@ def test_view_defaults_to_hertz_when_calibrated(qt_app):
     from rfmux.tools.periscope.pulse_capture_panel import (
         PulseCapturePanel, UNITS_DF, UNITS_VOLTS)
     with_cal = PulseCapturePanel(dark_mode=False,
-                                 df_calibrations={1: {1: 2.0e6 + 0j}})
+                                 tuning={1: {1: {"df_calibration": 2.0e6 + 0j}}})
     without = PulseCapturePanel(dark_mode=False)
     try:
         assert with_cal.units_combo.currentText() == UNITS_DF
@@ -44,7 +44,7 @@ def test_a_chosen_view_is_not_overridden(qt_app):
     from rfmux.tools.periscope.pulse_capture_panel import (
         PulseCapturePanel, UNITS_DF, UNITS_VOLTS)
     panel = PulseCapturePanel(dark_mode=False,
-                              df_calibrations={1: {1: 2.0e6 + 0j}})
+                              tuning={1: {1: {"df_calibration": 2.0e6 + 0j}}})
     try:
         assert panel.units_combo.currentText() == UNITS_DF
         panel.units_combo.setCurrentText(UNITS_VOLTS)       # the user's pick
@@ -60,7 +60,7 @@ def test_a_late_calibration_switches_an_untouched_view(qt_app):
     panel = PulseCapturePanel(dark_mode=False)
     try:
         assert panel.units_combo.currentText() == UNITS_VOLTS
-        panel.df_calibrations = {1: {1: 2.0e6 + 0j}}         # measured later
+        panel.tuning = {1: {1: {"df_calibration": 2.0e6 + 0j}}}         # measured later
         panel._apply_default_view()
         assert panel.units_combo.currentText() == UNITS_DF
     finally:
@@ -86,7 +86,7 @@ def test_settings_dialog_learns_whether_df_is_available(qt_app, monkeypatch):
         panel.channels_edit.setText("1,2")
         panel._on_capture_settings()
         assert seen["df_available"] is False
-        panel.df_calibrations = {1: {2: 2.0e6 + 0j}}
+        panel.tuning = {1: {2: {"df_calibration": 2.0e6 + 0j}}}
         panel._on_capture_settings()
         assert seen["df_available"] is True
     finally:
@@ -102,7 +102,7 @@ def test_uncalibrated_channel_is_shown_as_volts_on_the_quadratures(qt_app):
         assert panel.capture_config.trigger_basis == "df"
         assert panel._stored_state(1) == ("iq", "V")
         assert panel._axis_names(1) == ("I (V)", "Q (V)")
-        panel.df_calibrations = {1: {1: 2.0e6 + 0j}}
+        panel.tuning = {1: {1: {"df_calibration": 2.0e6 + 0j}}}
         assert panel._stored_state(1) == ("df", "Hz")
     finally:
         panel.close()

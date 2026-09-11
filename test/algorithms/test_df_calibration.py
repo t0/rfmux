@@ -97,8 +97,9 @@ def test_calibration_repeats_under_noise_and_drift():
     b = _Board(3)
     b = _measure(b)
     for ch in (1, 2):
-        assert abs(b[ch]) / abs(a[ch]) == pytest.approx(1.0, abs=0.1)
-        assert abs(np.degrees(np.angle(b[ch] / a[ch]))) < 5.0
+        ca, cb = a[ch]["df_calibration"], b[ch]["df_calibration"]
+        assert abs(cb) / abs(ca) == pytest.approx(1.0, abs=0.1)
+        assert abs(np.degrees(np.angle(cb / ca))) < 5.0
 
 
 def test_a_bifurcated_channel_is_warned_about_and_still_reported():

@@ -213,9 +213,10 @@ class DfCalibrationSignals(QObject):
 class DfCalibrationTask(QtCore.QThread):
     """Runs one df-calibration measurement off the GUI thread.
 
-    *measure* is a callable returning the coroutine to run; the app
-    hands in crs.measure_df_calibrations for the module, tests hand in
-    whatever they like.  Mock mode measures at startup
+    *measure* is a callable returning the coroutine to run, whose
+    result is ``{channel: tuning row}``; the app hands in
+    crs.measure_df_calibrations for the module, tests hand in whatever
+    they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """
 
@@ -228,8 +229,8 @@ class DfCalibrationTask(QtCore.QThread):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            cals = loop.run_until_complete(self.measure())
-            self.signals.completed.emit(self.module, dict(cals or {}))
+            rows = loop.run_until_complete(self.measure())
+            self.signals.completed.emit(self.module, dict(rows or {}))
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
@@ -973,7 +974,7 @@ class MultisweepTask(QtCore.QThread):
 class BiasKidsSignals(QObject):
     """Signals for BiasKidsTask."""
     progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
+    completed = pyqtSignal(int, dict, float)  # module, biased_results, nco_frequency_hz
     error = pyqtSignal(str)  # error_message
 
 
@@ -1033,17 +1034,11 @@ class BiasKidsTask(QtCore.QThread):
                         self.signals.error.emit("Bias KIDs operation returned empty list.")
                         return
                 
-                # Extract df_calibration values (result is now guaranteed to be a dict)
-                df_calibrations = {}
-                for det_idx, det_data in result.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
                 # Read the NCO frequency that was used during biasing
                 nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
                 
                 # Emit completion with results and NCO frequency
-                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
+                self.signals.completed.emit(self.module, result, float(nco_frequency_hz))
             else:
                 self.signals.error.emit("Bias KIDs operation returned no results.")
                 

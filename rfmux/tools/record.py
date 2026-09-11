@@ -23,6 +23,7 @@ import click
 
 from rfmux.algorithms.measurement.record_streams import (
     biased_channels,
+    calibrated,
     latest_bias_export,
     open_session,
     pulse_summary_lines,
@@ -156,24 +157,25 @@ def _run(*, serial, hostname, modules, channels, duration, session,
         raise click.UsageError("--bias names one module's export; several "
                                "modules take the session's newest export each")
     multi = len(modules) > 1
-    calibrations = {}
+    tuning = {}
     if not quiet:
         click.echo(f"[record] session {folder}")
     for module in modules:
         bias_path = Path(bias) if bias else latest_bias_export(folder, module)
-        biased, cals = biased_channels(bias_path) if bias_path else ([], {})
+        biased, rows = biased_channels(bias_path) if bias_path else ([], {})
         chosen = wanted.get(module) or ranges or biased
         if not chosen:
             raise click.UsageError(
                 f"no --channels, and no bias export for module {module} in "
                 "the session to take them from")
         wanted[module] = chosen
-        calibrations.update({(module, c) if multi else c: cal
-                             for c, cal in cals.items()})
+        tuning.update({(module, c) if multi else c: row
+                       for c, row in rows.items()})
         if not quiet:
             if bias_path:
                 click.echo(f"[record] bias export {bias_path.name}: "
-                           f"{len(biased)} channels, {len(cals)} calibrated")
+                           f"{len(biased)} channels, {calibrated(rows)} "
+                           f"calibrated")
             click.echo(f"[record] module {module}, channels "
                        f"{chosen[0]}-{chosen[-1]} ({len(chosen)}), "
                        f"{duration:.1f} s")
@@ -184,7 +186,7 @@ def _run(*, serial, hostname, modules, channels, duration, session,
             channels=wanted if multi else wanted[modules[0]],
             duration_s=duration, session=folder, capture=capture,
             parser=parser, fastrx=fastrx, config=config,
-            df_calibrations=calibrations or None,
+            tuning=tuning or None,
             parser_interface=parser_interface,
             fastrx_interface=fastrx_interface, fastrx_socket=fastrx_socket,
             merge_fastrx=merge_fastrx, verbose=not quiet))

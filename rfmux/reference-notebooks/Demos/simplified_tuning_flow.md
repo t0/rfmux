@@ -694,12 +694,15 @@ with open(out_path, "wb") as f:
 
 print(f"wrote {out_path} ({out_path.stat().st_size/1e6:.1f} MB)")
 
-# df_calibration is what pulse capture needs to report pulse heights in Hz:
-df_cals = {d.get("bias_channel", det): d["df_calibration"]
-           for det, d in bias_results.items()
-           if d.get("df_calibration") is not None}
-print(f"df calibrations for {len(df_cals)} channels; pass these to "
-      f"crs.trigger_capture(df_calibrations=…) or PulseCaptureSession")
+# The entries are the tuning record pulse capture stores with each
+# channel's pulses; the df_calibration in them is what reports pulse
+# heights in Hz:
+from rfmux.algorithms.measurement.df_calibration import tuning_rows
+tuning = tuning_rows(bias_results, await crs.get_nco_frequency(module=MODULE))
+print(f"tuning rows for {len(tuning)} channels, "
+      f"{sum(r.get('df_calibration') is not None for r in tuning.values())} "
+      f"with a df calibration; pass these to crs.trigger_capture(tuning=…) "
+      f"or PulseCaptureSession")
 ```
 
 ## 11. Where this maps in Periscope

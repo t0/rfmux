@@ -454,12 +454,11 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     params = {**reader.metadata, "streamer_mode": "both",
               "sample_rate_fast": PFB_SAMPLING_FREQ,
               "fast_channels": fast_channels}
-    cals = {c: reader.df_calibration(c) for c in channels
-            if reader.df_calibration(c) is not None}
+    tuning = {c: reader.tuning(c) for c in channels}
+    tuning = {c: row for c, row in tuning.items() if row}
     units = {c: reader.stored_units(c) for c in channels}
     writer = DualPulseHDF5Writer(tmp, channels, params,
-                                 df_calibrations=cals or None,
-                                 stored_units=units)
+                                 tuning=tuning or None, stored_units=units)
     try:
         meta = writer.f["metadata"]
         for key in ("capture_start", "time_origin_epoch",

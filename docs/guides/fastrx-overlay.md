@@ -44,8 +44,9 @@ on the 100G interface and,
 when there is none, shows the command that starts it and waits.
 
 It reads the board and never configures it. The session is a Periscope
-session folder: the channels and their df calibrations come from the
-newest bias export in it (`--channels 1-88` and `--bias <file>`
+session folder: the channels and their tuning rows (bias frequency,
+amplitude, fit, df calibration) come from the newest bias export in it
+and are stored with the capture (`--channels 1-88` and `--bias <file>`
 override), and the products are listed in its metadata so the session
 browser shows them. Without `--session` a new `session_YYYYMMDD_HHMMSS`
 folder is made under `--session-dir`.

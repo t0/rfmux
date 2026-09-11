@@ -22,7 +22,7 @@ import csv
 import datetime
 from pathlib import Path
 from dataclasses import replace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pyqtgraph as pg
@@ -58,6 +58,7 @@ from ...core.transferfunctions import (
 )
 from ...pulse_capture.detection import ChannelNoiseStats
 from ...pulse_capture.analysis import (
+    calibration_of,
     combine_histograms,
     combine_templates,
     display_transform,
@@ -211,14 +212,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         periscope=None,
         session_manager=None,
         dark_mode: bool = False,
-        df_calibrations: Optional[Dict[int, float]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         module: int = 1,
     ):
         super().__init__(parent)
         self.periscope = periscope
         self.session_manager = session_manager
         self.dark_mode = dark_mode
-        self.df_calibrations = df_calibrations
+        self.tuning = tuning
 
         self.capture_config = PulseCaptureConfig()
         self.task: Optional[PulseCaptureTask] = None
@@ -1356,7 +1357,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 fast_rate=PFB_SAMPLING_FREQ,
                 config=self.capture_config,
                 hdf5_path=path,
-                df_calibrations=self._flat_df_calibrations(),
+                tuning=self._flat_tuning(),
             )
         else:
             capture_session = PulseCaptureSession(
@@ -1364,7 +1365,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 module=module,
                 streamer_mode=mode,
                 hdf5_path=path,
-                df_calibrations=self._flat_df_calibrations(),
+                tuning=self._flat_tuning(),
                 sample_rate=fs,
                 **self.capture_config.session_kwargs(fs),
             )
@@ -2006,23 +2007,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  for name, n in counts.items() if n]
         return " — " + " / ".join(parts) if parts else ""
 
-    def _flat_df_calibrations(self) -> Dict[int, Any]:
-        """Calibrations for the selected module, as {channel: calibration}.
+    def _flat_tuning(self) -> Dict[int, dict]:
+        """Tuning rows for the selected module, as {channel: row}.
 
         Periscope keeps one mapping per module, because its plots are
         per-module; PulseCaptureSession and PulseHDF5Writer take the flat
         per-channel mapping.  Flattening here keeps the storage layer
-        from having to know about modules.  Accepts either shape, so a
-        headless caller's flat mapping passes through unchanged.
+        from having to know about modules.  Accepts either shape, told
+        apart by the keys (a row's are field names, a module's are
+        channels), so a headless caller's flat mapping passes through.
         """
-        cal = self.df_calibrations
-        if not isinstance(cal, dict) or not cal:
+        tuning = self.tuning
+        if not isinstance(tuning, dict) or not tuning:
             return {}
-        per_module = cal.get(int(self.module_spin.value()))
-        if isinstance(per_module, dict):
+        per_module = tuning.get(int(self.module_spin.value()))
+        if (isinstance(per_module, dict)
+                and not any(isinstance(k, str) for k in per_module)):
             return dict(per_module)
-        # Already flat: a headless caller's {channel: calibration}.
-        return {ch: v for ch, v in cal.items() if not isinstance(v, dict)}
+        return {ch: row for ch, row in tuning.items()
+                if isinstance(row, dict)
+                and all(isinstance(k, str) for k in row)}
 
     def _channel_cal(self, channel: int):
         """This channel's df calibration, from the session or the file.
@@ -2030,7 +2034,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         In review mode there is no Periscope session holding one, so the
         file is the only place it survives a capture.
         """
-        cal = self._flat_df_calibrations().get(channel)
+        cal = calibration_of(self._flat_tuning().get(channel))
         if cal is None and self.reader is not None:
             try:
                 cal = self.reader.df_calibration(channel)
@@ -2055,7 +2059,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 pass
         if units is None:
             _factor, units = storage_transform(
-                self._flat_df_calibrations().get(channel),
+                calibration_of(self._flat_tuning().get(channel)),
                 self.capture_config.trigger_basis)
         return ("df" if units == "Hz" else "iq"), units
 

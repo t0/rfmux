@@ -159,7 +159,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         dot_px: int = DENSITY_DOT_SIZE,       # Constant from .utils
         crs=None, # CRS object, type hint likely from .utils or a core module
         skip_startup_dialog: bool = False,  # Skip dialog if already handled by launcher
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
     ):
         """
         Initializes the Periscope main window.
@@ -219,9 +219,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.channel_noise_panel_count = 0
         self.loaded_channel_noise = False
         
-        # --- df Calibration Storage ---
-        # Stores calibration factors for frequency shift/dissipation conversion
-        # Structure: {module: {detector_idx: complex_calibration_factor}}
+        # --- Tuning storage ---
+        # The tuning rows per module, {module: {channel: bias_kids entry}},
+        # and the df calibration of every row that has one, which the
+        # plots convert with: {module: {channel: complex}}
+        self.tuning: Dict[int, Dict[int, dict]] = {}
         self.df_calibrations: Dict[int, Dict[int, complex]] = {}
 
         # --- Initialization Steps ---
@@ -238,13 +240,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # the window is up and streaming while the sweep runs.  Mock
         # mode only -- see _measure_df_calibrations.  The launcher
         # measures them behind its build window for large arrays and
-        # hands them in instead.
+        # hands the rows in instead.
         self._df_cal_task = None
-        if df_calibrations is None:
+        if tuning is None:
             self._start_df_calibration(self.module)
-        elif df_calibrations:
-            self._handle_df_calibration_ready(self.module,
-                                              dict(df_calibrations))
+        elif tuning:
+            self._handle_tuning_ready(self.module, dict(tuning))
 
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.
@@ -1549,7 +1550,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             periscope=self,
             session_manager=getattr(self, "session_manager", None),
             dark_mode=self.dark_mode,
-            df_calibrations=getattr(self, "df_calibrations", None),
+            tuning=getattr(self, "tuning", None),
             module=getattr(self, "module", 1),
         )
         self._dock_pulse_capture_panel(panel, f"Pulse Capture #{n}",
@@ -1898,12 +1899,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         if measure is None:
             return
         try:
-            cals = asyncio.run(measure())
+            rows = asyncio.run(measure())
         except Exception as exc:
             print(f"[Periscope] df calibration failed: {exc}")
             return
-        if cals:
-            self._handle_df_calibration_ready(module, dict(cals))
+        if rows:
+            self._handle_tuning_ready(module, dict(rows))
 
     def _df_calibration_measurement(self, module: int):
         """The coroutine factory both the startup worker and the
@@ -1940,24 +1941,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         task = getattr(self, "_df_cal_task", None)
         return task is not None and task.isRunning()
 
-    def _on_df_calibration_measured(self, module: int, cals: dict) -> None:
-        if cals:
-            self._handle_df_calibration_ready(module, cals)
+    def _on_df_calibration_measured(self, module: int, rows: dict) -> None:
+        if rows:
+            self._handle_tuning_ready(module, rows)
         self.statusBar().showMessage(
-            f"df calibrations measured for {len(cals)} channels on module "
+            f"df calibrations measured for {len(rows)} channels on module "
             f"{module}", 8000)
         self._df_cal_task = None
 
-    def _handle_df_calibration_ready(self, module: int, df_calibrations: Dict[int, complex]):
-        """Store a module's df calibrations, from bias_kids, the mock
-        startup measurement, or a loaded session: {detector index
-        (1-based): complex calibration factor}."""
-        # Store calibration data for this module
-        self.df_calibrations[module] = df_calibrations
-        
-        # Log to console instead of showing popup (already shown by MultisweepWindow)
-        num_calibrated = len(df_calibrations)
-        print(f"[Periscope] df calibration loaded for {num_calibrated} detectors on module {module}")
+    def _handle_tuning_ready(self, module: int, tuning: Dict[int, dict]):
+        """Hold a module's tuning rows, from bias_kids, the mock startup
+        measurement, or a loaded session: {readout channel: row}.  The
+        plots convert with the df calibration of every row that has one."""
+        self.tuning[module] = tuning
+        self.df_calibrations[module] = {
+            ch: row["df_calibration"] for ch, row in tuning.items()
+            if isinstance(row, dict) and row.get("df_calibration") is not None}
+        print(f"[Periscope] tuning loaded for {len(tuning)} detectors on "
+              f"module {module}, {len(self.df_calibrations[module])} with a "
+              f"df calibration")
 
     def _handle_psd_toggle(self, checked: bool):
         """
@@ -2078,7 +2080,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     self.statusBar().showMessage(
                         f"Mock array regenerated: {resonator_count} resonators",
                         5000)
-                    # The calibrations belong to the array that is gone.
+                    # The tuning belongs to the array that is gone.
+                    self.tuning.pop(self.module, None)
                     self.df_calibrations.pop(self.module, None)
                     if cfg.get("auto_bias_kids"):
                         self._start_df_calibration(self.module)

@@ -217,7 +217,7 @@ async def trigger_capture(
     end_sigma: Optional[float] = None,
     max_pulse_ms: Optional[float] = None,
     hdf5_path: Optional[Union[str, Path]] = None,
-    df_calibrations: Optional[Dict[int, complex]] = None,
+    tuning: Optional[Dict[int, dict]] = None,
     trigger_basis: Optional[str] = None,
     on_noise: Optional[Callable] = None,
     verbose: bool = True,
@@ -252,14 +252,17 @@ async def trigger_capture(
         how much of the stream is spent training before detection starts.
     hdf5_path : str | Path, optional
         Write a capture file as well (pulses, histograms, templates).
-    df_calibrations : dict[int, complex], optional
-        ``{channel: calibration}`` from
-        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids`.  Under
-        ``trigger_basis="df"`` (the default) a calibrated channel is
-        rotated into the frequency basis and its samples stored as Δf in
-        hertz; a channel without a calibration, or any channel under
-        ``"iq"``, is stored in volts on the quadratures.  The file
-        records the calibrations and each channel's ``stored_units``.
+    tuning : dict[int, dict], optional
+        ``{channel: row}``, each row a
+        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids` entry
+        keyed by its ``bias_channel`` (``tuning_rows`` builds it from the
+        output, ``measure_df_calibrations`` returns rows with only the
+        calibration).  Under ``trigger_basis="df"`` (the default) a
+        channel whose row has a ``df_calibration`` is rotated into the
+        frequency basis and its samples stored as Δf in hertz; a channel
+        without one, or any channel under ``"iq"``, is stored in volts on
+        the quadratures.  The file records every row under the channel's
+        ``tuning`` group and each channel's ``stored_units``.
         Keyed by readout channel, not detector index -- ``bias_kids``
         reports both, and ``bias_channel`` is the one that matches the
         channels captured here.
@@ -387,11 +390,11 @@ async def trigger_capture(
         result.fast_channels = fast_channels
         await _run_dual(result, host, channels, fast_channels, module,
                         slow_rate, duration_s, hdf5_path,
-                        df_calibrations, verbose, on_noise)
+                        tuning, verbose, on_noise)
     else:
         await _run_single(result, host, channels, module,
                           streamer_mode, slow_rate, duration_s,
-                          hdf5_path, df_calibrations, verbose, on_noise)
+                          hdf5_path, tuning, verbose, on_noise)
 
     if verbose:
         print(f"[trigger_capture] {result!r}")
@@ -399,7 +402,7 @@ async def trigger_capture(
 
 
 async def _run_single(result, host, channels, module, streamer_mode,
-                      slow_rate, duration_s, hdf5_path, df_calibrations,
+                      slow_rate, duration_s, hdf5_path, tuning,
                       verbose, on_noise=None) -> None:
     is_fast = streamer_mode == "fast"
     rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
@@ -408,7 +411,7 @@ async def _run_single(result, host, channels, module, streamer_mode,
     capture_session = PulseCaptureSession(
         channels=channels, module=module, streamer_mode=streamer_mode,
         sample_rate=rate, hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations,
+        tuning=tuning,
         on_pulse=_collector(stream), on_noise=on_noise,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
@@ -439,7 +442,7 @@ async def _run_single(result, host, channels, module, streamer_mode,
 
 
 async def _run_dual(result, host, channels, fast_channels, module,
-                    slow_rate, duration_s, hdf5_path, df_calibrations,
+                    slow_rate, duration_s, hdf5_path, tuning,
                     verbose, on_noise=None) -> None:
     slow = StreamResult.for_channels(slow_rate, channels)
     fast = StreamResult.for_channels(PFB_SAMPLING_FREQ, fast_channels)
@@ -449,7 +452,7 @@ async def _run_dual(result, host, channels, fast_channels, module,
         channels=channels, module=module, slow_rate=slow_rate,
         fast_rate=PFB_SAMPLING_FREQ, config=result.config,
         fast_channels=fast_channels, hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations,
+        tuning=tuning,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),
         on_pair=result.pairs.append, on_noise=on_noise,

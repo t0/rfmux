@@ -82,6 +82,7 @@ from .detection import (
 from . import walk
 from ..streamer import epoch_to_utc
 from .analysis import (
+    calibration_of,
     pulse_summary,
     storage_transform,
 )
@@ -524,10 +525,12 @@ class PulseCaptureSession(_CallbackHost):
     hdf5_path : str or Path, optional
         When given, a :class:`PulseHDF5Writer` streams every pulse to
         this file; when None, no file is written.
-    df_calibrations : dict[int, complex], optional
-        Per-channel df calibration as ``bias_kids`` reports it: magnitude
-        in hertz per volt, phase minus the angle of the frequency
-        direction in the (I, Q) plane.  Stored in the HDF5 file.
+    tuning : dict[int, dict], optional
+        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        readout channel.  Its ``df_calibration`` (magnitude in hertz per
+        volt, phase minus the angle of the frequency direction in the
+        (I, Q) plane) sets the storage transform; the whole row is
+        stored in the HDF5 file.
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
@@ -577,7 +580,7 @@ class PulseCaptureSession(_CallbackHost):
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         trigger_basis: str = "df",
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
@@ -627,7 +630,7 @@ class PulseCaptureSession(_CallbackHost):
                 buf_size)
         self.max_capture_samples = max(0, int(max_capture_samples))
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
-        self.df_calibrations = df_calibrations
+        self.tuning = tuning
         self.trigger_basis = (
             trigger_basis if trigger_basis in ("iq", "df") else "iq")
         #: Per-channel units of everything stored, filled in as channels
@@ -750,7 +753,7 @@ class PulseCaptureSession(_CallbackHost):
         """
         co = self._store_coeff.get(channel)
         if co is None:
-            cal = (self.df_calibrations or {}).get(channel)
+            cal = calibration_of((self.tuning or {}).get(channel))
             co, units = storage_transform(cal, self.trigger_basis)
             self.stored_units[channel] = units
             self._store_coeff[channel] = co
@@ -1118,7 +1121,7 @@ class PulseCaptureSession(_CallbackHost):
                     self.channels,
                     self.noise_stats,
                     capture_params,
-                    df_calibrations=self.df_calibrations,
+                    tuning=self.tuning,
                     stored_units=self.stored_units,
                 )
                 if self.time_origin_epoch is not None:
@@ -1351,7 +1354,7 @@ class DualPulseCaptureSession(_CallbackHost):
         config: Optional[PulseCaptureConfig] = None,
         fast_channels: Optional[List[int]] = None,
         hdf5_path=None,
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         match_window_s: Optional[float] = None,
         match_grace_s: Optional[float] = None,
         pair_window_wait_s: float = 3.0,
@@ -1386,7 +1389,7 @@ class DualPulseCaptureSession(_CallbackHost):
         # its samples to the slow stream's ADC counts (sources.py); that
         # scale is checked in mock, on loopback and on a board (0156: the
         # two streams agree to 0.2%).
-        self.df_calibrations = df_calibrations
+        self.tuning = tuning
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.on_noise = on_noise
@@ -1491,7 +1494,7 @@ class DualPulseCaptureSession(_CallbackHost):
             streamer_mode=stream,
             sample_rate=sample_rate,
             time_offset_s=time_offset_s,
-            df_calibrations=self.df_calibrations,
+            tuning=self.tuning,
             hdf5_path=None,  # the dual writer owns the file
             on_noise=lambda ns, s=stream: self._on_stream_noise(s, ns),
             on_pulse=lambda ch, idx, summary, data, s=stream:
@@ -1548,7 +1551,7 @@ class DualPulseCaptureSession(_CallbackHost):
         try:
             self.writer = DualPulseHDF5Writer(
                 self.hdf5_path, self.channels, capture_params,
-                df_calibrations=self.df_calibrations,
+                tuning=self.tuning,
                 stored_units=self.slow.stored_units)
             if self.time_origin_epoch is not None:
                 self.writer.set_time_origin(self.time_origin_epoch)

@@ -1444,9 +1444,9 @@ class PeriscopeRuntime:
             # Store panel reference
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows bias_kids produces land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
@@ -1587,9 +1587,9 @@ class PeriscopeRuntime:
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows bias_kids produces land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
@@ -1631,18 +1631,14 @@ class PeriscopeRuntime:
                 panel._generate_histograms()
                 panel.histograms_generated = True
             
-            # Extract and load df_calibrations if bias_kids_output exists
+            # The tuning rows of the export go to the main window
             if has_bias_data:
-                bias_output = load_params['bias_kids_output']
-                df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Load calibrations into main window
-                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
-                    self._handle_df_calibration_ready(target_module, df_calibrations)
-                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
+                from rfmux.algorithms.measurement.df_calibration import tuning_rows
+                tuning = tuning_rows(load_params['bias_kids_output'],
+                                     load_params.get('nco_frequency_hz'))
+                if tuning and hasattr(self, '_handle_tuning_ready'):
+                    self._handle_tuning_ready(target_module, tuning)
+                    print(f"[Session] Loaded the tuning of {len(tuning)} detectors from session file")
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")

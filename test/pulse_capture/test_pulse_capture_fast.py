@@ -332,27 +332,24 @@ def test_both_mode_end_to_end(qt_app, mock_crs, tmp_path, stream_guard):
         # between the two streams is a hardware measurement.
 
 
-def test_macro_stores_df_calibrations(mock_crs, tmp_path):
-    """crs.trigger_capture(df_calibrations=...) reaches the capture file.
+def test_macro_stores_the_tuning(mock_crs, tmp_path):
+    """crs.trigger_capture(tuning=...) reaches the capture file.
 
     Lives in this module to reuse its MockCRS rather than paying for a
     second server; it captures the slow stream, which is the cheapest
-    path through the macro.
-
-    The macro had no df_calibrations argument at all, so the only way to
-    label a headless capture in Hz was to bypass it and drive
-    PulseCaptureSession directly.  A signature check would not be enough:
-    the first attempt forwarded the value from the helper that builds the
-    session without giving that helper the parameter, which is a
-    NameError only a real call reaches.
+    path through the macro.  A signature check would not be enough: the
+    value is forwarded through the helper that builds the session, which
+    only a real call reaches.
     """
     loop, crs = mock_crs
     path = tmp_path / "headless_cal.h5"
+    row = {"df_calibration": 2.5e6, "bias_frequency": 1.2e9,
+           "sweep_amplitude": 0.01}
 
     result = loop.run_until_complete(crs.trigger_capture(
         channel=[1, 2], module=1, streamer_mode="slow", time_run=3.0,
         hdf5_path=path,
-        df_calibrations={1: 2.5e6},        # channel 2 left uncalibrated
+        tuning={1: row},        # channel 2 left uncalibrated
         verbose=False,
     ))
     assert result.streamer_mode == "slow"
@@ -360,8 +357,9 @@ def test_macro_stores_df_calibrations(mock_crs, tmp_path):
 
     with PulseHDF5Reader(path) as reader:
         assert reader.df_calibration(1) == pytest.approx(2.5e6)
-        # Uncalibrated channels stay in counts rather than getting a 1.0.
-        assert reader.df_calibration(2) is None
+        assert reader.tuning(1) == row
+        # An uncalibrated channel has no calibration rather than a 1.0.
+        assert reader.df_calibration(2) is None and reader.tuning(2) == {}
 
     # Uncalibrated channels stay in volts rather than being given a
     # scale of 1; storage_transform is what decides.
@@ -385,14 +383,16 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
     cals = loop.run_until_complete(
         crs.measure_df_calibrations(channels=[1, 2], module=1))
     assert cals, "no calibration measured against the simulator"
-    for ch, cal in cals.items():
+    for ch, row in cals.items():
+        cal = row["df_calibration"]
         assert isinstance(cal, complex) and np.isfinite(cal)
         assert abs(cal) > 0
+        assert row["df_calibration_source"] == "measured"
 
     path = tmp_path / "mock_cal.h5"
     result = loop.run_until_complete(crs.trigger_capture(
         channel=sorted(cals)[:1], module=1, streamer_mode="slow",
-        time_run=3.0, hdf5_path=path, df_calibrations=cals,
+        time_run=3.0, hdf5_path=path, tuning=cals,
         trigger_basis="df", verbose=False))
     ch = result.channels[0]
 
@@ -421,23 +421,24 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
         def __init__(self, board, is_mock=True):
             self.crs = board
             self.is_mock_mode = is_mock
+            self.tuning = {}
             self.df_calibrations = {}
 
         _measure_df_calibrations = Periscope._measure_df_calibrations
         _df_calibration_measurement = Periscope._df_calibration_measurement
-
-        def _handle_df_calibration_ready(self, module, cals):
-            self.df_calibrations[module] = cals
+        _handle_tuning_ready = Periscope._handle_tuning_ready
 
     f = Fake(crs)
-    assert not f.df_calibrations.get(1), "should start with none"
+    assert not f.tuning.get(1), "should start with none"
     f._measure_df_calibrations(1)
-    cals = f.df_calibrations.get(1) or {}
-    assert cals, "the measurement did not reach Periscope"
+    rows = f.tuning.get(1) or {}
+    assert rows, "the measurement did not reach Periscope"
+    cals = f.df_calibrations[1]
+    assert set(cals) == set(rows)
     assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
 
     # Not on hardware: sweeping moves a tuned array, so the calibration
     # there comes from bias_kids, not from picking a units option.
     g = Fake(crs, is_mock=False)
     g._measure_df_calibrations(1)
-    assert g.df_calibrations == {}
+    assert g.tuning == {} and g.df_calibrations == {}

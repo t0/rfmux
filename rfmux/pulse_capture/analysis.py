@@ -234,6 +234,15 @@ def pulse_summary(
     }
 
 
+def calibration_of(row):
+    """The df calibration a tuning row carries, or None.  A value that is
+    not a row passes through, so ``storage_transform`` can say what it
+    was handed."""
+    if isinstance(row, dict):
+        return row.get("df_calibration")
+    return row
+
+
 def storage_transform(df_calibration, trigger_basis: str = "iq"):
     """How one channel's samples are rotated and scaled for storage.
 
@@ -262,8 +271,8 @@ def storage_transform(df_calibration, trigger_basis: str = "iq"):
     if df_calibration is not None and cal is None:
         warnings.warn(
             "ignoring df_calibration: expected a number, got "
-            f"{type(df_calibration).__name__}.  df_calibrations is the "
-            "flat {channel: calibration} mapping, not one keyed by module.",
+            f"{type(df_calibration).__name__}.  tuning is the flat "
+            "{channel: row} mapping, not one keyed by module.",
             stacklevel=2)
     if trigger_basis == "df" and cal:
         basis, units = "df", "Hz"

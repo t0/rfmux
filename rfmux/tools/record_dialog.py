@@ -14,7 +14,7 @@ from typing import List, Optional
 from PyQt6 import QtCore, QtWidgets
 
 from ..algorithms.measurement.record_streams import (
-    biased_channels, fastrx_bytes_per_s, latest_bias_export)
+    biased_channels, calibrated, fastrx_bytes_per_s, latest_bias_export)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import parse_channel_spec, parse_module_channels
@@ -306,12 +306,12 @@ class RecordDialog(QtWidgets.QDialog):
             if bias is None:
                 return None, (f"no bias export for module {module} in the "
                               "session folder")
-            chans, cals = biased_channels(bias)
+            chans, rows = biased_channels(bias)
             if not chans:
                 return None, f"{bias.name} biased no channels"
             wanted[module] = chans
             notes.append(f"{bias.name}: {len(chans)} channels, "
-                         f"{len(cals)} calibrated")
+                         f"{calibrated(rows)} calibrated")
         return wanted, "\n".join(notes)
 
     def _fill_interfaces(self, running) -> None:

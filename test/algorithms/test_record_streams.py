@@ -390,14 +390,15 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     record._run(modules=[1], channels="3:5,2:1-2", **common)
     assert seen["module"] is None
     assert seen["channels"] == {2: [1, 2], 3: [5]}
-    assert set(seen["df_calibrations"]) == {(2, 1), (2, 2), (3, 7)}
+    assert set(seen["tuning"]) == {(2, 1), (2, 2), (3, 7)}
+    assert seen["tuning"][(3, 7)]["nco_frequency_hz"] == 1.0e9
     # Several modules with no ranges: each module's newest export.
     record._run(modules=[2, 3], channels=None, **common)
     assert seen["channels"] == {2: [1, 2], 3: [7]}
     # One module keeps plain channel keys.
     record._run(modules=[2], channels=None, **common)
     assert seen["module"] == 2 and seen["channels"] == [1, 2]
-    assert set(seen["df_calibrations"]) == {1, 2}
+    assert set(seen["tuning"]) == {1, 2}
     with pytest.raises(click.UsageError, match="no bias export for module 4"):
         record._run(modules=[2, 4], channels=None, **common)
 
@@ -469,10 +470,10 @@ def _bias_export(path, module, channels, calibrated=True, timestamp=""):
            for c in channels}
     with open(path, "wb") as f:
         pickle.dump({"target_module": module, "timestamp": timestamp,
-                     "bias_kids_output": out}, f)
+                     "bias_kids_output": out, "nco_frequency_hz": 1.0e9}, f)
 
 
-def test_newest_bias_export_for_the_module_gives_channels_and_calibrations(tmp_path):
+def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):
     # Written newest first: a copied folder keeps no file times, so the
     # export's own timestamp decides.
     _bias_export(tmp_path / "bias_module2_120000.pkl", 2, [4, 5], calibrated=False,
@@ -484,9 +485,14 @@ def test_newest_bias_export_for_the_module_gives_channels_and_calibrations(tmp_p
 
     newest = rs.latest_bias_export(tmp_path, 2)
     assert newest.name == "bias_module2_120000.pkl"
-    assert rs.biased_channels(newest) == ([4, 5], {})
-    assert rs.biased_channels(tmp_path / "bias_module2_100000.pkl") == (
-        [1, 2, 3], {1: 1e6 - 1e5j, 2: 2e6 - 1e5j, 3: 3e6 - 1e5j})
+    chans, rows = rs.biased_channels(newest)
+    assert chans == [4, 5] and set(rows) == {4, 5} and rs.calibrated(rows) == 0
+    chans, rows = rs.biased_channels(tmp_path / "bias_module2_100000.pkl")
+    assert chans == [1, 2, 3] and rs.calibrated(rows) == 3
+    # The row is the export's entry, keyed by its channel, with the NCO
+    # the tones were placed against.
+    assert rows[2] == {"bias_channel": 2, "df_calibration": 2e6 - 1e5j,
+                       "nco_frequency_hz": 1.0e9}
     assert rs.latest_bias_export(tmp_path, 3) is None
 
 

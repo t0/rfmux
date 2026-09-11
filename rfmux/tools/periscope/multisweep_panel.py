@@ -36,8 +36,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     Can be docked, floated, or tabbed within the main Periscope window.
     """
     
-    # Signal emitted when bias_kids algorithm completes with df_calibration data
-    df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
+    # bias_kids finished: the tuning rows, {bias_channel: bias_kids entry
+    # with nco_frequency_hz}, for the main window to hold
+    tuning_ready = pyqtSignal(int, dict)  # module, {channel: row}
     
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
@@ -2234,17 +2235,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         return fits_present(entry for iterations in self.results_by_detector.values()
                             for entry in iterations.values())
 
-    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
+    def _bias_kids_completed(self, module, biased_results, nco_frequency_hz):
         """Handle completion of the bias_kids task."""
+        from rfmux.algorithms.measurement.df_calibration import tuning_rows
         # Store the output
         self.bias_kids_output = biased_results
         
         # Store the NCO frequency used during biasing
         self.nco_frequency_hz = nco_frequency_hz
         
-        # Emit signal with df_calibration data
-        if df_calibrations:
-            self.df_calibration_ready.emit(module, df_calibrations)
+        tuning = tuning_rows(biased_results, nco_frequency_hz)
+        df_calibrations = {ch: r for ch, r in tuning.items()
+                           if r.get("df_calibration") is not None}
+        if tuning:
+            self.tuning_ready.emit(module, tuning)
         
         # Emit data_ready signal for session auto-export
         if biased_results:

@@ -62,7 +62,7 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     return Recording(_recording_file(tmp_path, spacing, span))
 
 
-def _capture(tmp_path, channels=(CHANNEL,), module=1):
+def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None):
     """A slow-only capture of the event on the first of *channels*
     (keys), stamps fed late as the board stamps them; the others see
     noise."""
@@ -71,7 +71,7 @@ def _capture(tmp_path, channels=(CHANNEL,), module=1):
                              max_pulse_ms=30.0, noise_train_ms=300.0)
     got = []
     s = PulseCaptureSession(channels=list(channels), module=module,
-                            sample_rate=FS, hdf5_path=path,
+                            sample_rate=FS, hdf5_path=path, tuning=tuning,
                             on_pulse=lambda ch, idx, summ, data: got.append(idx),
                             **cfg.session_kwargs(FS))
     s.start()
@@ -141,7 +141,7 @@ def test_counts_to_stored_follows_the_file(tmp_path):
     cal = 3000.0 * np.exp(1j * 0.7)                   # Hz per volt, rotated
     w = PulseHDF5Writer(path, [1, 2], {}, {
         "volts_per_count": 2e-6, "trigger_basis": "df"},
-        df_calibrations={1: cal}, stored_units={1: "Hz", 2: "V"})
+        tuning={1: {"df_calibration": cal}}, stored_units={1: "Hz", 2: "V"})
     w.finalize()
     with PulseHDF5Reader(path) as r:
         assert counts_to_stored(r, 1) == pytest.approx(cal * 2e-6)
@@ -249,7 +249,7 @@ def test_hertz_capture_projects_the_others_onto_its_axis(tmp_path):
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
                              max_pulse_ms=30.0, noise_train_ms=300.0)
     s = PulseCaptureSession(channels=[CHANNEL], sample_rate=FS,
-                            hdf5_path=path, df_calibrations={CHANNEL: cal},
+                            hdf5_path=path, tuning={CHANNEL: {"df_calibration": cal}},
                             **cfg.session_kwargs(FS))
     s.start()
     rng = np.random.default_rng(6)
@@ -325,7 +325,8 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
     with no fast trigger and the recording over its window, in the
     file's units, so Periscope reviews it as a both-mode capture."""
     from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
-    path = _capture(tmp_path)
+    row = {"bias_frequency": 1.0e9, "sweep_amplitude": 0.02}
+    path = _capture(tmp_path, tuning={CHANNEL: row})
     with PulseHDF5Reader(path) as r:
         before = r.get_pulse(CHANNEL, 1)
         n = r.pulse_count(CHANNEL)
@@ -341,6 +342,8 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
         assert list(r.metadata["fast_channels"]) == [CHANNEL]
         assert r.pulse_count(CHANNEL, "slow") == n
         assert r.pulse_count(CHANNEL, "fast") == 0
+        # The tuning goes with the channel onto both streams.
+        assert r.tuning(CHANNEL, "slow") == row == r.tuning(CHANNEL, "fast")
         after = r.get_pulse(CHANNEL, 1, "slow")
         np.testing.assert_array_equal(after["Amp_I"], before["Amp_I"])
         np.testing.assert_array_equal(after["Time"], before["Time"])

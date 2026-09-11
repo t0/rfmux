@@ -34,9 +34,11 @@ simulator files are unchanged in meaning.
   histogram and template accumulators, the HDF5 writers and reader, the
   stream sources and the single- and dual-stream capture sessions.
 - `crs.trigger_capture(channel, module, streamer_mode="slow", time_run=10.0,
-  config, threshold_sigma, end_sigma, max_pulse_ms, hdf5_path,
-  df_calibrations, trigger_basis)`: one-shot capture in slow, fast or both
-  modes.
+  config, threshold_sigma, end_sigma, max_pulse_ms, hdf5_path, tuning,
+  trigger_basis)`: one-shot capture in slow, fast or both modes. `tuning`
+  is `{channel: row}`, each row a `bias_kids` entry (`tuning_rows` in
+  `rfmux.algorithms.measurement.df_calibration` keys an output by channel;
+  `measure_df_calibrations` returns rows holding just the calibration).
 - The result carries the pulses per channel, the pairs and the per-stream
   results; with `hdf5_path` the same content is written as the capture runs.
 - Noise training before every capture: the threshold is `threshold_sigma`
@@ -44,12 +46,16 @@ simulator files are unchanged in meaning.
   baseline, so it holds for the correlated samples the decimators produce.
   Training lasts the 1/f window, `noise_train_ms` (5 s), and is not
   charged against `time_run`.
-- Triggering in the frequency basis (`trigger_basis="df"`): with a df
-  calibration a channel is rotated so the pulse lies along one axis before
-  thresholding, and stored in hertz; without one it stays on the quadratures
-  in volts. The file records
-  `trigger_basis`, `volts_per_count`, and per channel `stored_units` and
-  `df_calibration`.
+- Triggering in the frequency basis (`trigger_basis="df"`): a channel
+  whose tuning row has a `df_calibration` is rotated so the pulse lies along
+  one axis before thresholding, and stored in hertz; without one it stays on
+  the quadratures in volts. The file records `trigger_basis`,
+  `volts_per_count`, per channel `stored_units`, and the whole tuning row
+  under the channel's `tuning` group: scalars and strings as attributes
+  (`df_calibration`, `bias_frequency`, `sweep_amplitude`, ...), the sweep
+  arrays as datasets, `fit_params` as a JSON attribute.
+  `PulseHDF5Reader.tuning(channel)` gives the row back;
+  `df_calibration(channel)` just the calibration.
 - Per-pulse timing from the packet clock: `trigger_epoch` and `trigger_utc`
   on every pulse, `time_origin_epoch` and `time_origin_utc` on the file, no
   host clock involved.

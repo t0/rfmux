@@ -39,7 +39,7 @@ def test_a_multi_module_file_round_trips_its_pair_keys(tmp_path):
     path = tmp_path / "pulse.h5"
     noise = {k: ChannelNoiseStats(std_I=10.0, std_Q=10.0) for k in KEYS}
     w = PulseHDF5Writer(path, KEYS, noise, {"streamer_mode": "slow"},
-                        df_calibrations={(2, 5): 1 + 1j})
+                        tuning={(2, 5): {"df_calibration": 1 + 1j}})
     w.append_pulse((2, 5), 1, _pulse())
     hist = PulseHistogramSet(threshold_sigma=5.0)
     hist.add_pulse((2, 5), _pulse(), noise[(2, 5)])

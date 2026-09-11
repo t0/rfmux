@@ -36,13 +36,14 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
 from ...pulse_capture.channel_keys import describe
+from .df_calibration import tuning_rows
 
 SESSION_FOLDER_FORMAT = "session_%Y%m%d_%H%M%S"
 METADATA_FILE = "session_metadata.json"
@@ -125,19 +126,20 @@ def latest_bias_export(session: Path, module: int) -> Optional[Path]:
     return max(found)[2] if found else None
 
 
-def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, complex]]:
-    """The channels a bias_kids export biased, and the df calibration of
-    each one that has it."""
+def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
+    """The channels a bias_kids export biased, and the tuning row of each
+    (``tuning_rows`` of the export, with its NCO frequency)."""
     with open(bias_path, "rb") as f:
         export = pickle.load(f)
-    results = export.get("bias_kids_output") or {}
-    channels = sorted(int(r["bias_channel"]) for r in results.values()
-                      if r.get("bias_channel") is not None)
-    calibrations = {int(r["bias_channel"]): complex(r["df_calibration"])
-                    for r in results.values()
-                    if r.get("bias_channel") is not None
-                    and r.get("df_calibration") is not None}
-    return channels, calibrations
+    rows = tuning_rows(export.get("bias_kids_output"),
+                       export.get("nco_frequency_hz"))
+    return sorted(rows), rows
+
+
+def calibrated(tuning: Dict[Any, dict]) -> int:
+    """How many rows carry a df calibration."""
+    return sum(1 for r in tuning.values()
+               if isinstance(r, dict) and r.get("df_calibration") is not None)
 
 
 def by_module(module: Optional[int], channels) -> Dict[int, List[int]]:
@@ -223,7 +225,7 @@ async def record_streams(
     parser: bool = True,
     fastrx: bool = True,
     config: Optional[PulseCaptureConfig] = None,
-    df_calibrations: Optional[Dict[int, complex]] = None,
+    tuning: Optional[Dict[int, dict]] = None,
     trigger_basis: Optional[str] = None,
     parser_interface: Optional[str] = None,
     fastrx_interface: Optional[str] = None,
@@ -234,11 +236,11 @@ async def record_streams(
     """Record the selected products of *channels* on *module*, or of
     ``{module: channels}`` across modules, for *duration_s* into
     *session*.  A run across modules is keyed by (module, channel)
-    pairs in the capture, the file and *df_calibrations*; its products
-    are named ``modules2+3``.
+    pairs in the capture, the file and *tuning*; its products are named
+    ``modules2+3``.
 
     ``capture`` runs ``crs.trigger_capture`` on the slow stream with
-    *config*, *df_calibrations* and *trigger_basis*; ``parser`` runs
+    *config*, *tuning* and *trigger_basis*; ``parser`` runs
     ``rfmux parser`` as a subprocess on the board's 1G traffic
     (*parser_interface* overrides the interface it finds from the
     board's address); ``fastrx`` records channels 1 to the highest of
@@ -330,7 +332,7 @@ async def record_streams(
                 module=module, streamer_mode="slow",
                 time_run=duration_s, config=config,
                 hdf5_path=result.pulse_path,
-                df_calibrations=df_calibrations,
+                tuning=tuning,
                 trigger_basis=trigger_basis, on_noise=on_noise,
                 verbose=verbose)
         finally:

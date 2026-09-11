@@ -77,13 +77,13 @@ async def _capture(path):
 
     # auto_bias_kids skips the sweep-and-fit, so the simulated array has
     # no calibration; this is that measurement on its own.
-    df_cals = await crs.measure_df_calibrations(channels=CHANNELS,
-                                                module=MODULE)
+    tuning = await crs.measure_df_calibrations(channels=CHANNELS,
+                                               module=MODULE)
 
     session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
         sample_rate=fs, hdf5_path=str(path),
-        df_calibrations=df_cals,
+        tuning=tuning,
         **_capture_config().session_kwargs(fs),
     )
     session.start()
@@ -91,7 +91,7 @@ async def _capture(path):
                                     duration_s=60.0)
     session.stop()
     print(f"{session.total_pulses} pulses over {covered:.1f} s at {fs:.0f} Hz")
-    return df_cals, dec
+    return tuning, dec
 
 
 def _capture_config():
@@ -141,7 +141,7 @@ def _grab(app, widget, name):
     print(f"wrote {OUT / name}")
 
 
-def _shoot(path, df_cals):
+def _shoot(path, tuning):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PyQt6 import QtWidgets
 
@@ -150,7 +150,7 @@ def _shoot(path, df_cals):
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     _dark_chrome(app)
     panel = m.PulseCapturePanel(dark_mode=True,
-                                df_calibrations={MODULE: df_cals})
+                                tuning={MODULE: tuning})
     panel.module_spin.setValue(MODULE)
     panel.resize(1720, 950)
     panel.show()
@@ -217,8 +217,8 @@ def _select_tab(panel, label):
 def main():
     CAPTURE.mkdir(parents=True, exist_ok=True)
     path = CAPTURE / "release_demo.h5"
-    df_cals, dec = asyncio.run(_capture(path))
-    _shoot(path, df_cals)
+    tuning, dec = asyncio.run(_capture(path))
+    _shoot(path, tuning)
     _shoot_dialogs(dec)
 
 

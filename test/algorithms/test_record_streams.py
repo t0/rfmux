@@ -363,16 +363,17 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
     async def set_channel_streamer(**kw):
         board.streamer.append(kw)
     board.set_channel_streamer = set_channel_streamer
-    # Every recorded module, channels 1 to the highest of any of them,
-    # before the probe: module 2's stream still missing is still refused.
+    # Every recorded module, channels 1 to the highest of any of them
+    # rounded up to the board's multiple of 16, before the probe: module
+    # 2's stream still missing is still refused.
     with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
         asyncio.run(rs.record_streams(
             board, module=None, channels={1: [1, 9], 2: [3]}, duration_s=0.1,
             session=rs.open_session(base=tmp_path), sample_trunc="MID",
             channel_streamer=True, fastrx_socket=str(socket), verbose=False))
     assert board.streamer == [
-        {"channels": 9, "module": 1, "sample_trunc": "MID"},
-        {"channels": 9, "module": 2, "sample_trunc": "MID"}]
+        {"channels": 16, "module": 1, "sample_trunc": "MID"},
+        {"channels": 16, "module": 2, "sample_trunc": "MID"}]
     assert board.calls == []
     # A board without the call says so rather than failing inside it.
     with pytest.raises(RuntimeError, match="no channel streamer"):

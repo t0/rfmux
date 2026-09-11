@@ -47,7 +47,8 @@ when there is none, shows the command that starts it and waits.
 
 It reads the board and, unless asked to, never configures it:
 `--channel-streamer` turns the channel streamer on for the modules
-recorded, channels 1 to the highest, before the run, with
+recorded, channels 1 to the highest (rounded up to a multiple of 16, as
+the board takes it), before the run, with
 `--sample-trunc LOW|MID|HIGH` choosing the bits (below); without it a
 module whose channel stream is off is refused before anything is
 written. The session is a Periscope

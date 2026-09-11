@@ -11,30 +11,28 @@ pytest.importorskip(
 )
 
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
-from rfmux.pulse_capture.overlay import Recording, channel_location
+from rfmux.pulse_capture.overlay import Recording
 from test.test_fastrx_file import file_header, record, seconds_ts, write
 
 T0 = 43000.0
 DT = 1.0 / PFB_SAMPLING_FREQ
 
 
-def _file(tmp_path, seqs, *, t0=T0, mask=0b11, recent=lambda s: True,
+def _file(tmp_path, seqs, *, t0=T0, channels=256, recent=lambda s: True,
           **kw):
-    """Records for *seqs*, stamped t0 + seq * DT."""
-    recs = [record(mask, s, ts=seconds_ts(t0 + s * DT), recent=recent(s), **kw)
-            for s in seqs]
-    return write(tmp_path, [file_header(mask, len(recs))] + recs)
+    """Records of channels 1..channels for *seqs*, stamped t0 + seq * DT."""
+    recs = [record(channels, s, ts=seconds_ts(t0 + s * DT), recent=recent(s),
+                   **kw) for s in seqs]
+    return write(tmp_path, [file_header(channels, len(recs))] + recs)
 
 
-def test_channel_location_follows_the_parser_order():
-    assert channel_location(1) == (1, 0)
-    assert channel_location(128) == (1, 127)
-    assert channel_location(129) == (2, 0)
-    assert channel_location(200) == (2, 71)
-    assert channel_location(1024) == (8, 127)
-    for bad in (0, 1025):
-        with pytest.raises(ValueError):
-            channel_location(bad)
+def test_a_channel_outside_the_recording_is_refused(tmp_path):
+    f = Recording(_file(tmp_path, range(4), channels=200))
+    assert f.channels == 200
+    assert f.channel(200, 0, 1).shape == (1,)
+    for bad in (0, 201):
+        with pytest.raises(ValueError, match="not in the recording"):
+            f.channel(bad, 0, 1)
 
 
 def test_index_and_window_over_a_gap_and_an_undisciplined_stamp(tmp_path):
@@ -58,7 +56,7 @@ def test_index_and_window_over_a_gap_and_an_undisciplined_stamp(tmp_path):
     assert f.index_at(T0 + 8 * DT) == 7
     assert f.index_at(T0 + 8 * DT, side="right") == 9
 
-    w = f.window(T0 + 95 * DT, T0 + 115 * DT, channel=200)   # pipe 2, col 71
+    w = f.window(T0 + 95 * DT, T0 + 115 * DT, channel=200)   # on pipe 2
     assert (w.start, w.stop) == (95, 106)
     assert w.seq_gaps == 1 and w.dropouts == 0
     assert np.allclose(w.times[~np.isnan(w.times)],
@@ -104,6 +102,6 @@ def test_truncation_scales_to_counts(tmp_path):
 
 
 def test_empty_recording_has_no_time_axis(tmp_path):
-    f = Recording(write(tmp_path, [file_header(0b1, 0)]))
+    f = Recording(write(tmp_path, [file_header(128, 0)]))
     assert f.t_first is None and f.module is None
     assert f.seconds().shape == (0,)

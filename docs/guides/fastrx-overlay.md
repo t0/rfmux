@@ -56,8 +56,8 @@ stamp:
   `--noise-train-ms`, `--trigger-basis` are the capture's settings)
 - `parser_module<M>_HHMMSS.dirfile/serial_<NNNN>`, the parser's dirfile
   of the same channels, and a `.log` with its drop statistics
-- `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of the
-  pipes those channels are on
+- `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of
+  channels 1 to the highest of them
 
 After the run the command lists the channels that triggered with their
 pulse counts, merges the recording into the pulse file as its fast
@@ -114,10 +114,9 @@ rfmux fastrxd
 sudo <path it prints>/fastrxd -i <100G interface>
 ```
 
-Enable the channel streamer for the module and record. Channels 1 to 128
-are pipe 1, 129 to 256 pipe 2, and so on (channel c is column (c-1) % 128
-of pipe (c-1) // 128 + 1). One pipe is 2.44 M records per second, about
-1.5 GB per second on disk.
+Enable the channel streamer for the module and record. A recording keeps
+channels 1 to `channels` of every packet, 2.44 M records per second: 128
+channels is about 1.5 GB per second on disk, all 1024 about 10 GB.
 
 ```python
 import asyncio
@@ -133,7 +132,7 @@ async def enable():
 
 asyncio.run(enable())
 
-with fastrx.PacketWriter("/data/run.fastrx", pipes=[1]) as w:
+with fastrx.PacketWriter("/data/run.fastrx", channels=128) as w:
     w.wait(timeout=20)                       # seconds to record
     print("packets", w.packets, "overruns", w.overruns, "dropouts", w.dropouts)
 ```
@@ -145,7 +144,8 @@ counts: `"LOW"` keeps bits 15:0 and is exact while the signal stays within
 thousand counts and noise of a few hundred, HIGH leaves about one bit of
 noise; LOW or MID keeps it. The viewer scales every truncation back to
 counts. `overruns` counts records the disk was too slow to take. To check
-that packets are flowing before recording, `rfmux fastrx hud --pipe 1`.
+that packets are flowing before recording, `rfmux fastrx hud --module
+<module>`.
 
 Leaving the `with` block finalizes the file. The parser stops on Ctrl-C and
 the pulse capture in Periscope; the daemon can stay up.

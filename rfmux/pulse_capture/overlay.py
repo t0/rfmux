@@ -30,11 +30,9 @@ from .hdf5 import PulseHDF5Reader
 
 # ── The recording ─────────────────────────────────────────────────
 
-#: Channels per pipeline block: channel c (1-indexed, as everywhere in
-#: rfmux) is column (c-1) % 128 of pipe (c-1) // 128 + 1, the parser's
-#: channel order.
+#: Channels per pipeline block on the wire: bit p of a record's
+#: pipe_snapshot says whether channels p*128+1 to (p+1)*128 were sent.
 CHANNELS_PER_PIPE = 128
-NUM_PIPELINES = 8
 
 #: Scale from the truncated int16 on the wire to the ADC counts the 1G
 #: paths report, by sample_trunc.  The 24-bit sample is in counts: LOW
@@ -48,14 +46,6 @@ _DAY_S = 86400.0
 #: Records probed past an undisciplined stamp before giving up on it.
 _PROBE = 64
 _RECENT = 0x80000000
-
-
-def channel_location(channel: int) -> tuple[int, int]:
-    """(pipe, column) of a 1-indexed channel."""
-    top = NUM_PIPELINES * CHANNELS_PER_PIPE
-    if not 1 <= channel <= top:
-        raise ValueError(f"channel must be in 1..{top}, got {channel}")
-    return (channel - 1) // CHANNELS_PER_PIPE + 1, (channel - 1) % CHANNELS_PER_PIPE
 
 
 def _seconds_of_day(ts) -> np.ndarray:
@@ -91,8 +81,8 @@ class Recording:
     Wraps a ``rfmux.fastrx.PacketFile`` (or opens one from a path).  The
     extension maps the file and hands back strided views; nothing here
     reads more of it than the records asked for.  Every record is one
-    sample of each channel in its pipes, stamped by the board, so a
-    stamp is a sample time with no first-or-last-in-packet ambiguity.
+    sample of channels 1 to :attr:`channels`, stamped by the board, so
+    a stamp is a sample time with no first-or-last-in-packet ambiguity.
 
     Time is seconds of day, the axis pulse-capture files and parser
     dirfiles use.  A recording that crosses midnight is unwrapped: any
@@ -124,6 +114,11 @@ class Recording:
     @property
     def num_packets(self) -> int:
         return self.file.num_packets
+
+    @property
+    def channels(self) -> int:
+        """Every record holds the module's channels 1 to this."""
+        return int(self.file.channels)
 
     def __len__(self) -> int:
         return self.num_packets
@@ -180,8 +175,10 @@ class Recording:
                 stop: int | None = None) -> np.ndarray:
         """One channel's samples over records ``start:stop`` as complex
         ADC counts."""
-        pipe, col = channel_location(channel)
-        iq = self.file.pipe_iq(pipe)[start:stop, col, :]
+        if not 1 <= channel <= self.channels:
+            raise ValueError(f"channel {channel} is not in the recording, "
+                             f"which holds 1..{self.channels}")
+        iq = self.file.iq()[start:stop, channel - 1, :]
         z = iq[:, 0].astype(np.float32) + 1j * iq[:, 1].astype(np.float32)
         return z * np.float32(self.counts_per_lsb)
 
@@ -189,7 +186,7 @@ class Recording:
         """*channel* over seconds-of-day ``[t0, t1]``."""
         start = self.index_at(t0)
         stop = self.index_at(t1, side="right")
-        pipe, _ = channel_location(channel)
+        pipe = (channel - 1) // CHANNELS_PER_PIPE
         seq = self._seq[start:stop].astype(np.int64)
         snap = self.file.headers()[start:stop]["pipe_snapshot"]
         return Window(
@@ -197,7 +194,7 @@ class Recording:
             times=self.seconds(start, stop),
             samples=self.channel(channel, start, stop),
             seq_gaps=int(np.count_nonzero(np.diff(seq) != 1)) if seq.size else 0,
-            dropouts=int(np.count_nonzero((snap & (1 << (pipe - 1))) == 0)),
+            dropouts=int(np.count_nonzero((snap & (1 << pipe)) == 0)),
         )
 
 
@@ -424,9 +421,7 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     if reader.dual:
         raise ValueError(f"{reader.path}: already a dual file")
     channels = [int(c) for c in reader.channels]
-    mask = int(rec.file.pipe_mask)
-    fast_channels = [c for c in channels
-                     if mask & (1 << (channel_location(c)[0] - 1))]
+    fast_channels = [c for c in channels if c <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
     params = {**reader.metadata, "streamer_mode": "both",
               "sample_rate_fast": PFB_SAMPLING_FREQ,

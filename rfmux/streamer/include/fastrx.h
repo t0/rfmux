@@ -54,23 +54,25 @@ struct fastrxd_desc {
 /* Single-producer/single-consumer rings shared across the process boundary.
  *
  * head and tail are free-running counters; the ring is empty when they are
- * equal and full when they differ by the ring size.  Producer writes head;
- * consumer writes tail; a misbehaving client can corrupt its own ring but not
- * fastrxd's state. */
+ * equal.  Producer writes head; consumer writes tail; a misbehaving client can
+ * corrupt its own ring but not fastrxd's state.
+ *
+ * Both rings have one entry per UMEM frame, so neither can ever fill: every
+ * entry pins at least one distinct frame, and whoever is pushing holds a frame
+ * that is not yet in the ring.  Producers therefore never read the consumer's
+ * tail, and there is no full case to handle.  For the descriptor ring this
+ * also sets how long a client may stall before anything is lost: the whole
+ * pool, about 13 ms at 5 Mpps -- and when it does stall longer, it starves
+ * the NIC for everyone.  Clients are cooperative, so that is accepted. */
 
 #define FASTRXD_CACHELINE 64
-
-/* Must be power of 2 */
-#define FASTRXD_RING_SIZE 256
 
 struct fastrxd_desc_ring {
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> head;  /* written by fastrxd */
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> tail;  /* written by the client */
-	alignas(FASTRXD_CACHELINE) struct fastrxd_desc entries[FASTRXD_RING_SIZE];
+	alignas(FASTRXD_CACHELINE) struct fastrxd_desc entries[FASTRXD_NUM_FRAMES];
 };
 
-/* One entry per UMEM frame, so clients can never fill it -- this makes
- * reclamation logic straightforward, even when a client disappears */
 struct fastrxd_return_ring {
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> head;  /* written by the client */
 	alignas(FASTRXD_CACHELINE) std::atomic<uint32_t> tail;  /* written by fastrxd */
@@ -90,7 +92,6 @@ struct fastrxd_client_slot {
 
 	uint32_t client_id;  /* index of this slot in clients[] */
 	uint64_t dispatched; /* packets handed to this client */
-	uint64_t ring_drops; /* packets skipped: desc ring full */
 
 	/* The client sets this once its consuming thread is actually running. */
 	std::atomic<uint32_t> ready;
@@ -125,15 +126,24 @@ struct fastrxd_setup_reply {
  *   [ record 0 ][ record 1 ] ...                        fixed stride
  *   [ zero padding to a 4 KiB boundary ]                O_DIRECT tail
  *
- * A record is the wire header as received, followed by one I/Q block per pipe
- * in pipe_mask, then padding to record_stride.  pipe_mask is the set of pipes
- * recorded, which may differ from what the transmitter sent: each record's
- * own pipe_snapshot preserves the wire truth, but the record layout follows
- * pipe_mask alone.  A recorded pipe absent from a packet's snapshot is
- * zero-filled; pipe_snapshot disambiguates between real zeros and fill. */
+ * A record is the wire header as received, followed by the module's first
+ * `channels` I/Q pairs, then padding to record_stride.  A pipe carries
+ * SAMPLES_PER_PIPELINE consecutive channels of a module, so this is pipes
+ * 1..ceil(channels / SAMPLES_PER_PIPELINE) back to back, every block whole
+ * except the last, which holds the remainder -- and the payload is one
+ * contiguous (channels, 2) int16 array per record, sliceable as a whole or
+ * per pipe.
+ *
+ * channels is what the receiver chose to keep, not what the transmitter
+ * sent: it is fixed for the whole file so that every record has the same
+ * stride and a reader can hand out strided views without parsing.  A pipe
+ * the layout needs but a packet's pipe_snapshot lacks is zero-filled, so the
+ * timeline stays contiguous; the record's own header says which blocks are
+ * real.  The wire geometry is not repeated here for the same reason: every
+ * record's own header carries samples_per_packet and pipe_snapshot. */
 
 #define FASTRX_FILE_MAGIC        0x58464843u  /* "CHFX" when read as bytes */
-#define FASTRX_FILE_VERSION      1
+#define FASTRX_FILE_VERSION      2            /* 2: (samples_per_pipe, pipe_mask) -> channels */
 #define FASTRX_FILE_HEADER_BYTES 4096
 
 struct fastrx_file_header {
@@ -141,8 +151,9 @@ struct fastrx_file_header {
 	uint32_t version;          /* FASTRX_FILE_VERSION */
 
 	uint32_t record_stride;    /* bytes per record, including padding */
-	uint16_t samples_per_pipe; /* I/Q pairs per pipeline block */
-	uint16_t pipe_mask;        /* pipes recorded */
+	uint16_t channels;         /* I/Q pairs per record: the module's first
+	                            * that many (see above); receiver-side, to
+	                            * bound disk use (PacketWriter channels=) */
 
 	/* Zero-initialized; rewritten with the true count when it closes
 	 * cleanly. */
@@ -152,5 +163,5 @@ struct fastrx_file_header {
 	 * reserved and written as zero. */
 } PACKED;
 
-static_assert(sizeof(struct fastrx_file_header) == 24,
+static_assert(sizeof(struct fastrx_file_header) == 22,
               "file header layout no longer matches the disk format");

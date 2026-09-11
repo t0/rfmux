@@ -39,14 +39,22 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ... import streamer
-from ...core.transferfunctions import decimation_to_sampling
+from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
+                                       decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
-from ...pulse_capture.overlay import channel_location
 
 SESSION_FOLDER_FORMAT = "session_%Y%m%d_%H%M%S"
 METADATA_FILE = "session_metadata.json"
-FASTRX_BYTES_PER_PIPE_S = 1.5e9
 PARSER_EXIT_S = 10.0
+
+
+def fastrx_bytes_per_s(channels: int) -> float:
+    """Disk rate of a recording of channels 1 to *channels*: the record
+    stride (86-byte header, 4 bytes per channel, padded to 8) at the
+    channel-stream rate."""
+    return float(((86 + 4 * channels + 7) & ~7) * PFB_SAMPLING_FREQ)
+
+
 #: The parser as a child: it says so on stderr once imported, which is
 #: seconds after launch; nothing else starts before that.
 PARSER_CHILD = ("import sys; from rfmux.tools import parser; "
@@ -206,7 +214,8 @@ async def record_streams(
     *config*, *df_calibrations* and *trigger_basis*; ``parser`` runs
     ``rfmux parser`` as a subprocess on the board's 1G traffic
     (*parser_interface* overrides the interface it finds from the
-    board's address); ``fastrx`` records the pipes carrying *channels*
+    board's address); ``fastrx`` records channels 1 to the highest of
+    *channels*
     through the running fastrxd (*fastrx_interface* or *fastrx_socket*
     name it when several run).  Each requirement is checked before
     anything starts.
@@ -228,7 +237,7 @@ async def record_streams(
     if parser and importlib.util.find_spec("pygetdata") is None:
         raise RuntimeError("the parser dirfile needs pygetdata: "
                            "uv pip install -e .[dirfile]")
-    pipes: List[int] = []
+    fastrx_channels = 0
     fx = None
     if fastrx:
         try:
@@ -241,7 +250,7 @@ async def record_streams(
                 f"no fastrxd socket at {fastrx_socket}: is fastrxd running? "
                 "Start it with: "
                 + fx.start_command(Path(fastrx_socket).name))
-        pipes = sorted({channel_location(c)[0] for c in channels})
+        fastrx_channels = max(channels)
 
     result = RecordResult(session=session, module=module, channels=channels,
                           duration_s=float(duration_s), training_s=0.0)
@@ -250,7 +259,7 @@ async def record_streams(
         rate = decimation_to_sampling(6 if dec is None else dec)
         result.training_s = config.noise_samples(rate) / rate
     if fastrx:
-        need = duration_s * FASTRX_BYTES_PER_PIPE_S * len(pipes)
+        need = duration_s * fastrx_bytes_per_s(fastrx_channels)
         free = shutil.disk_usage(session).free
         if free < need:
             result.warnings.append(
@@ -298,7 +307,8 @@ async def record_streams(
             if fastrx:
                 result.fastrx_path = name("fastrx", ".fastrx")
                 writer = fx.PacketWriter(
-                    result.fastrx_path, pipes=pipes, socket=fastrx_socket)
+                    result.fastrx_path, channels=fastrx_channels,
+                    socket=fastrx_socket)
             say(f"[record] recording for {duration_s:.1f} s")
             await _hold(duration_s, stop, writer)
         finally:
@@ -309,8 +319,8 @@ async def record_streams(
                     "dropouts": writer.dropouts}
                 if writer.packets == 0:
                     result.warnings.append(
-                        f"no channel-stream packets on pipe(s) {pipes}: "
-                        f"is the channel streamer on for module {module}?")
+                        "no channel-stream packets: is the channel "
+                        f"streamer on for module {module}?")
 
     handle = None
     tasks: List[asyncio.Task] = []

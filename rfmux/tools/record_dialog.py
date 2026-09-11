@@ -14,10 +14,9 @@ from typing import Optional
 from PyQt6 import QtCore, QtWidgets
 
 from ..algorithms.measurement.record_streams import (
-    FASTRX_BYTES_PER_PIPE_S, biased_channels, latest_bias_export)
+    biased_channels, fastrx_bytes_per_s, latest_bias_export)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
-from ..pulse_capture.overlay import channel_location
 from .parser import parse_ranges
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
@@ -352,9 +351,8 @@ class RecordDialog(QtWidgets.QDialog):
             folder = self._session_folder() or \
                 Path(self.session_dir_edit.text() or ".").expanduser()
             if chans and folder.is_dir():
-                pipes = {channel_location(c)[0] for c in chans}
-                need = self.duration_spin.value() * FASTRX_BYTES_PER_PIPE_S \
-                    * len(pipes)
+                need = self.duration_spin.value() \
+                    * fastrx_bytes_per_s(max(chans))
                 free = shutil.disk_usage(folder).free
                 self.disk_label.setText(
                     f"disk: {free / 1e9:.0f} GB free in {folder}, about "

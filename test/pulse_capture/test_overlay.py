@@ -32,6 +32,7 @@ T0 = 43000.0
 T = T0 + 2.0                                      # the event, PFB clock
 AMP = 4000.0                                      # counts
 TAU = 0.005
+CHANNELS = 256                                    # per record
 CHANNEL = 200                                     # pipe 2, column 71
 
 
@@ -41,15 +42,15 @@ def _shape(t):
 
 def _recording_file(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     """The event as the channel stream would carry it, stamped on time,
-    on CHANNEL (pipe 2, column 71) with the other columns quiet."""
+    on CHANNEL with the other channels quiet."""
     t = T + np.arange(span[0], span[1], spacing)
     recs = []
     for i, ti in enumerate(t):
         block = np.zeros((128, 2), dtype=np.int16)
         block[71, 0] = int(round(float(_shape(ti))))
-        recs.append(record(0b11, i, ts=seconds_ts(ti), recent=True, sample_trunc=0,
-                           iq={2: block}))
-    return write(tmp_path, [file_header(0b11, len(recs))] + recs)
+        recs.append(record(CHANNELS, i, ts=seconds_ts(ti), recent=True,
+                           sample_trunc=0, iq={2: block}))
+    return write(tmp_path, [file_header(CHANNELS, len(recs))] + recs)
 
 
 def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):

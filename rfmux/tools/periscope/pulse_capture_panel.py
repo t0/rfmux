@@ -49,7 +49,8 @@ from ...pulse_capture.capture_session import (
     PulseCaptureSession,
 )
 from ...pulse_capture.channel_keys import (channel_arg, channel_suffix,
-                                           short_label, title_label)
+                                           short_label, split_key,
+                                           title_label)
 from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...core.transferfunctions import (
     apply_iq_conversion,
@@ -1630,6 +1631,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self.pulse_tree.addTopLevelItem(item)
             item.setExpanded(True)
             self._channel_items[c] = item
+        self._add_tuning_items()
         meta = QtWidgets.QTreeWidgetItem(["▦ Metadata", "", ""])
         meta.addChild(QtWidgets.QTreeWidgetItem(
             [f"mode={self.mode_combo.currentText()}", "", ""]))
@@ -2356,8 +2358,54 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         self._show_key(self._pulse_order[-1])
 
+    def _tuning_by_module(self) -> Dict[int, Dict[int, dict]]:
+        """The tuning rows with a sweep to show, per module: from the
+        file under review, else the rows a live capture is given."""
+        if self.reader is not None:
+            rows = {c: self.reader.tuning(c) for c in self.reader.channels}
+            module = self.reader.metadata.get("module")
+        else:
+            rows = self._flat_tuning()
+            module = int(self.module_spin.value())
+        out: Dict[int, Dict[int, dict]] = {}
+        for key, row in rows.items():
+            if not isinstance(row, dict) or "frequencies" not in row:
+                continue
+            m, ch = split_key(key, module)
+            out.setdefault(int(m), {})[int(ch)] = row
+        return out
+
+    def _add_tuning_items(self) -> None:
+        """One tree item per module whose channels carry their tuning:
+        double-click browses the sweeps as a multisweep window."""
+        by_module = self._tuning_by_module()
+        for module, rows in sorted(by_module.items()):
+            where = f" module {module}" if len(by_module) > 1 else ""
+            n = len(rows)
+            item = QtWidgets.QTreeWidgetItem(
+                [f"▦ Tuning{where} ({n} detector{'s' if n != 1 else ''})",
+                 "", "", ""])
+            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("tuning", module))
+            item.setToolTip(0, "Double-click to browse the sweeps the "
+                               "channels were tuned with")
+            self.pulse_tree.addTopLevelItem(item)
+
+    def _open_tuning_window(self, module: int) -> None:
+        periscope = self.periscope or find_parent_with_attr(
+            self, "open_tuning_window")
+        if periscope is None or not hasattr(periscope, "open_tuning_window"):
+            self._set_status("● Browsing the tuning needs the Periscope "
+                             "main window", "#9A9A9A")
+            return
+        rows = self._tuning_by_module().get(module) or {}
+        name = self.reader.path.name if self.reader is not None else "live capture"
+        periscope.open_tuning_window(rows, module, name)
+
     def _on_tree_double_click(self, item, column) -> None:
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if data and data[0] == "tuning":
+            self._open_tuning_window(data[1])
+            return
         if not data or data[0] not in ("pulse", "pair"):
             return
         self.follow_check.setChecked(False)

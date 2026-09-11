@@ -187,6 +187,13 @@ histograms and templates come from the file. A capture still running opens
 its live panel instead. Note -- it can take some time to load a large .hdf5
 record and re-generate the template and histograms.
 
+A capture taken after Bias KIDs carries each channel's tuning: the sweep at
+the chosen amplitude, the fit, the bias point and the df calibration. The
+pulse list shows it as a **Tuning** item, one per module. Double-click it to
+browse those sweeps in a multisweep window, one sweep per resonator, with
+the detector digest a double-click away as usual. The window reads nothing
+from the board and changes nothing on it.
+
 ## Fast and dual-stream captures
 
 The slow stream runs at 596 Hz at the default decimation stage and 38 kHz

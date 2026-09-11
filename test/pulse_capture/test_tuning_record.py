@@ -7,7 +7,8 @@ import pytest
 
 pytest.importorskip("h5py")
 
-from rfmux.algorithms.measurement.df_calibration import tuning_rows  # noqa: E402
+from rfmux.algorithms.measurement.df_calibration import (  # noqa: E402
+    tuning_export, tuning_rows)
 from rfmux.pulse_capture.detection import ChannelNoiseStats  # noqa: E402
 from rfmux.pulse_capture.hdf5 import (  # noqa: E402
     DualPulseHDF5Writer, PulseHDF5Reader, PulseHDF5Writer)
@@ -101,6 +102,31 @@ async def test_a_bias_kids_entry_stores_whole(tmp_path):
     assert back["nco_frequency_hz"] == 1.0e9
     assert back["nonlinear_fit_params"] == rows[1]["nonlinear_fit_params"]
     np.testing.assert_array_equal(back["iq_complex"], rows[1]["iq_complex"])
+
+
+def test_tuning_export_is_the_loaded_view_of_the_rows():
+    f = np.linspace(0.999e9, 1.001e9, 5)
+    rows = {3: {**ROW, "bias_channel": 3, "frequencies": f,
+                "bias_frequency": 1.0e9, "dac_scale_dbm": -2.0},
+            7: {**ROW, "bias_channel": 7, "frequencies": f + 1e8,
+                "bias_frequency": 1.1e9, "sweep_amplitude": 0.02},
+            9: {"df_calibration": 1.0}}         # no sweep: not shown
+    out = tuning_export(rows, 2)
+    assert out["target_module"] == 2
+    params = out["initial_parameters"]
+    assert params["module"] == 2 and params["amps"] == [0.01, 0.02]
+    assert params["sweep_direction"] == "upward"
+    assert params["span_hz"] == pytest.approx(2e6)
+    res = params["resonance_frequencies"]
+    assert len(res) == 7 and res[2] == 1.0e9 and res[6] == 1.1e9
+    assert all(np.isnan(res[k]) for k in (0, 1, 3, 4, 5))
+    assert out["dac_scales_used"] == {2: -2.0}
+    assert set(out["results_by_detector"]) == {3, 7}
+    assert out["results_by_detector"][7] == {0: rows[7]}
+    assert out["bias_kids_output"] == {3: rows[3], 7: rows[7]}
+    assert out["nco_frequency_hz"] == 1.0e9 and out["noise_data"] is None
+    with pytest.raises(ValueError, match="no tuning row with a sweep"):
+        tuning_export({9: rows[9]}, 2)
 
 
 def test_tuning_rows_key_bias_kids_output_by_channel():

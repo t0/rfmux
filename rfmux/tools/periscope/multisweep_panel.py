@@ -2267,7 +2267,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Show success dialog
         num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_section_frequencies)
+        total_detectors = len(self.results_by_detector)
         
         msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
         

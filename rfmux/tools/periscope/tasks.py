@@ -395,13 +395,11 @@ class DACScaleFetcher(QtCore.QThread):
         finally: loop.close()
         self.dac_scales_ready.emit(dac_scales)
     def _fetch_all_dac_scales(self, loop, dac_scales):
+        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
         for module_idx in range(1, 9): # Renamed module
             try:
-                dac_scale = loop.run_until_complete(self.crs.get_dac_scale('DBM', module=module_idx))
-                if dac_scale is not None:
-                    dac_scales[module_idx] = dac_scale - 1.5
-                else:
-                    dac_scales[module_idx] = None
+                dac_scales[module_idx] = loop.run_until_complete(
+                    dac_scale_dbm(self.crs, module_idx))
             except Exception as e:
                 if "Can't access module" in str(e) and "analog banking" in str(e):
                     dac_scales[module_idx] = None

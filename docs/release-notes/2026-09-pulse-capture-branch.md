@@ -69,6 +69,9 @@ simulator files are unchanged in meaning.
 - Periscope Pulse Capture panel: live capture with a pulse list, stacked I/Q
   or df/dissipation plots with the decision marks and bands, histograms,
   trigger-aligned templates, review mode for any capture file, and CSV export.
+  A **Tuning** item in the pulse list opens the sweeps the channels were
+  tuned with as a multisweep window, live or in review, without touching
+  the board.
 - Periscope Streamer Configuration dialog and `crs.configure_streamer`, over
   `StreamerConfig`, `describe` and `validate` in
   `rfmux.algorithms.measurement.streamer_config`: decimation, packet format,

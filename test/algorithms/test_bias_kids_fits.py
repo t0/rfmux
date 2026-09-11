@@ -46,6 +46,9 @@ class _Board:
     async def get_nco_frequency(self, module):
         return NCO
 
+    async def get_dac_scale(self, units="DBM", module=None):
+        return -0.5
+
     @contextlib.asynccontextmanager
     async def tuber_context(self):
         yield _Ctx(self)
@@ -121,6 +124,25 @@ async def test_measured_calibration_holds_for_a_narrow_resonator(qr):
     true = 1.0 / ((z[1] - z[0]) / (2 * h))
     assert out[1]["df_calibration_source"] == "measured"
     assert abs(out[1]["df_calibration"] / true - 1) < 0.03
+
+
+@pytest.mark.asyncio
+async def test_the_entry_carries_the_dac_scale_as_labelled():
+    out = await bk.bias_kids(_Board(), {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] == -0.5 - bk.DAC_SCALE_LABEL_OFFSET_DB
+
+
+@pytest.mark.asyncio
+async def test_a_board_without_a_dac_scale_still_biases():
+    board = _Board()
+
+    async def refuse(units="DBM", module=None):
+        raise RuntimeError("Can't access module 1: analog banking")
+    board.get_dac_scale = refuse
+    with pytest.warns(UserWarning, match="DAC scale not read"):
+        out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] is None
+    assert np.isfinite(out[1]["df_calibration"])
 
 
 @pytest.mark.asyncio

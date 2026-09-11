@@ -300,6 +300,48 @@ def tuning_rows(bias_kids_output, nco_frequency_hz=None) -> Dict[int, dict]:
     return rows
 
 
+def tuning_export(tuning: Dict[int, dict], module: int) -> dict:
+    """A capture's tuning rows for one module, ``{channel: row}``, in the
+    shape of a session's bias export, so the sweep each channel was
+    captured with can be browsed as a loaded multisweep: one iteration
+    per detector, keyed by channel as bias_kids keys them.  The
+    resonance list is indexed by channel, with NaN where the file has
+    no channel of that number."""
+    rows = {int(ch): row for ch, row in tuning.items()
+            if isinstance(row, dict) and "frequencies" in row}
+    if not rows:
+        raise ValueError("no tuning row with a sweep to show")
+
+    def first(name):
+        return next((r[name] for r in rows.values()
+                     if r.get(name) is not None), None)
+
+    amps = sorted({float(r.get("sweep_amplitude", r.get("amplitude")))
+                   for r in rows.values()
+                   if r.get("sweep_amplitude", r.get("amplitude")) is not None})
+    span = 0.0
+    freqs = np.asarray(next(iter(rows.values()))["frequencies"], dtype=float)
+    if freqs.size > 1:
+        span = float(freqs.max() - freqs.min())
+    resonances = [rows[ch].get("bias_frequency",
+                               rows[ch].get("original_center_frequency"))
+                  if ch in rows else float("nan")
+                  for ch in range(1, max(rows) + 1)]
+    return {
+        "target_module": int(module),
+        "initial_parameters": {
+            "module": int(module), "amps": amps,
+            "sweep_direction": first("direction") or first("sweep_direction")
+            or "upward",
+            "resonance_frequencies": resonances, "span_hz": span},
+        "dac_scales_used": {int(module): first("dac_scale_dbm")},
+        "results_by_detector": {ch: {0: row} for ch, row in rows.items()},
+        "bias_kids_output": rows,
+        "nco_frequency_hz": first("nco_frequency_hz"),
+        "noise_data": None,
+    }
+
+
 @macro(CRS, register=True)
 async def measure_df_calibrations(
     crs: CRS,

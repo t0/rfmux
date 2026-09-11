@@ -1518,7 +1518,28 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
+        """Browse the sweeps a capture's channels were tuned with, as a
+        loaded multisweep window: *tuning* is ``{channel: row}`` for
+        *module*.  Read-only: the board is not consulted or changed."""
+        from rfmux.algorithms.measurement.df_calibration import tuning_export
+        try:
+            load_params = tuning_export(tuning, module)
+        except ValueError as exc:
+            self.statusBar().showMessage(f"{name}: {exc}", 8000)
+            return None
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            load_params, source_type="capture",
+            title=f"Tuning of {name} (module {module})")
+        if panel is not None:
+            # One sweep per channel from a capture: nothing to re-run.
+            panel.rerun_btn.setEnabled(False)
+            panel.rerun_btn.setToolTip("A capture's tuning holds one sweep per "
+                                       "channel; re-run from a multisweep export")
+        return panel
+
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep",
+                                                  title: str = None) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
         
@@ -1528,7 +1549,10 @@ class PeriscopeRuntime:
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters', 
                         'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            source_type: "multisweep", "bias", "noise", or "capture" (a capture
+                        file's tuning: the DAC scale comes from the data, the board
+                        is not read) - affects naming and panel behavior
+            title: dock title; default "Multisweep #n (Loaded)"
             
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
@@ -1549,24 +1573,27 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
                 return None, None, None, None
 
-            try: 
-                dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
-            except:
-                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
-                return
+            if source_type == "capture":
+                dac_scales_for_panel = dict(load_params.get('dac_scales_used') or {})
+            else:
+                try:
+                    dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
+                except:
+                    QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                    return
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-            dac_scale_for_board = dac_scales_for_panel[target_module]
+                dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+                dac_scale_for_board = dac_scales_for_panel[target_module]
 
-            if dac_scale_for_mod != dac_scale_for_board:
-                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+                if dac_scale_for_mod != dac_scale_for_board:
+                    QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
             
             # For bias source type, also check for bias_kids_output
             has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
-            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
+            loaded_bias_flag = has_noise_data or (source_type in ("bias", "capture") and has_bias_data)
                 
             # Create panel
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
@@ -1580,7 +1607,7 @@ class PeriscopeRuntime:
             
             # MultisweepPanel dock is always named "Multisweep" regardless of source type
             # The source_type affects panel behavior, not the dock title
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            dock_title = title or f"Multisweep #{self.multisweep_window_count} (Loaded)"
             
             # Wrap in dock
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)

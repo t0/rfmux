@@ -539,12 +539,15 @@ def create_amplitude_color_map(amplitude_values, dark_mode):
             color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
         else:
             if use_cmap:
+                # As a QColor rather than the RGBA array the colormap hands
+                # back by default: a scatter plot reads an array of colour
+                # components as one pen per point.
                 normalized_idx = amp_idx / max(1, num_amps - 1)
                 if dark_mode:
                     map_value = 0.3 + normalized_idx * 0.7
                 else:
                     map_value = normalized_idx * 0.75
-                color = use_cmap.map(map_value)
+                color = use_cmap.map(map_value, mode=pg.ColorMap.QCOLOR)
             else:
                 color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]
 

@@ -1596,19 +1596,6 @@ class PeriscopeRuntime:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
-            
-            # Set NCO frequency based on resonance frequencies
-            reso_frequencies = params.get('resonance_frequencies', [])
-            
-            if reso_frequencies:
-                span_hz = params.get('span_hz', 0)
-                nco_freq = ((min(reso_frequencies) - span_hz/2) + (max(reso_frequencies) + span_hz/2)) / 2
-
-                # Only set NCO frequency if CRS is available (skip in offline mode)
-                if self.crs is not None:
-                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
-                else:
-                    print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
             # Load data into panel - handle both old (iteration) and new (detector) formats
             if 'results_by_detector' in load_params:

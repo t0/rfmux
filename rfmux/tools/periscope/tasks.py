@@ -981,7 +981,8 @@ class BiasKidsSignals(QObject):
 class BiasKidsTask(QtCore.QThread):
     """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
     
-    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None):
+    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None,
+                 nco_frequency_hz: Optional[float] = None):
         """
         Initialize the BiasKidsTask.
         
@@ -998,6 +999,9 @@ class BiasKidsTask(QtCore.QThread):
         self.multisweep_results = multisweep_results
         self.signals = signals
         self.bias_params = bias_params or {}
+        # The NCO the sweep was taken at, to set before biasing when the
+        # board is not already there (loaded data); None leaves it alone.
+        self.nco_frequency_hz = nco_frequency_hz
         self._running = True
         
     def stop(self):
@@ -1084,6 +1088,10 @@ class BiasKidsTask(QtCore.QThread):
             if key in self.bias_params:
                 kwargs[key] = self.bias_params[key]
         
-        # Call bias_kids with all parameters
+        # bias_kids places its tones relative to the board's NCO, so the
+        # board must be where the sweep was before it runs.
+        if self.nco_frequency_hz is not None:
+            await self.crs.set_nco_frequency(self.nco_frequency_hz,
+                                             module=self.module)
         result = await bias_kids(**kwargs)
         return result

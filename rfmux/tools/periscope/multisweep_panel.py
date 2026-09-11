@@ -2213,7 +2213,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.target_module,
             gui_format_results,
             self.bias_kids_signals,
-            bias_params  # Pass the dialog parameters
+            bias_params,  # Pass the dialog parameters
+            nco_frequency_hz=self._bias_nco_frequency(),
         )
         
         # Update UI to show operation in progress
@@ -2222,6 +2223,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Start the task
         self.bias_kids_task.start()
+
+    def _bias_nco_frequency(self):
+        """The NCO to set before biasing loaded data: where the sweep in
+        the file ran, which a live sweep left the board at already.
+        None when there is nothing to set."""
+        if not self.is_loaded_data or not self.conceptual_section_frequencies:
+            return None
+        from rfmux.algorithms.measurement.multisweep import sweep_nco_frequency
+        return sweep_nco_frequency(self.conceptual_section_frequencies,
+                                   float(self.initial_params.get('span_hz', 0) or 0))
 
     def _bias_kids_progress(self, module, progress):
         """Handle progress updates from the bias_kids task."""

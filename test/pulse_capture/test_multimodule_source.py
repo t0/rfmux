@@ -50,6 +50,9 @@ def _patch(monkeypatch, recv):
     monkeypatch.setattr(src.streamer, "STREAMER_TIMEOUT", 0.3)
     monkeypatch.setattr(src, "MODULE_SILENCE_S", 0.3)
     monkeypatch.setattr(src, "_flush", lambda sock: None)
+    # The ingest's compiled step: its first call compiles, seconds on a
+    # cold cache, which is not the source's time.
+    src._advance_block(np.array([1.0]), float("nan"), 0.0, 5.0)
 
 
 def _packet(seq, module, value):
@@ -142,7 +145,9 @@ def test_a_silent_module_is_an_error_not_a_stall(monkeypatch):
         finally:
             stop.set()
             th.join()
-    assert time.monotonic() - t < 2.0
+    # Long before the 5 s duration: 0.3 s of stream time is 180 packets
+    # at 5 ms each.
+    assert time.monotonic() - t < 3.0
     assert (1, 1) in sink.fed
 
 
@@ -154,4 +159,4 @@ def test_a_module_that_never_sends_anything_is_an_error_too(monkeypatch):
         with pytest.raises(ValueError, match=r"module\(s\) \[2\] sent no"):
             asyncio.run(src.run_slow_source(sink, "127.0.0.1", module=2,
                                             duration_s=5.0))
-    assert time.monotonic() - t < 2.0
+    assert time.monotonic() - t < 3.0

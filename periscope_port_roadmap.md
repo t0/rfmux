@@ -141,8 +141,8 @@ the deletion happens.
 
 ### 1.5 Where it stands now (2026-09-11)
 
-Stages 0, 1 and 2 are done: **Periscope measures, draws, saves and reloads the
-tuning flow through `rfmux.tuning`, up to the point where analyses begin.**
+Stages 0, 1 and 2 are done, and stage 3's fitting runs: **Periscope measures,
+fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
 
 * **Netanal.** One module at one probe amplitude, through `take_netanal`. The
   panel holds the driver's trace and derives magnitude and phase at draw time.
@@ -162,9 +162,18 @@ tuning flow through `rfmux.tuning`, up to the point where analyses begin.**
 * **One module.** A Periscope session controls the module named at startup;
   a file from another module opens read-only (§6, judgement call 31).
 
-What is deliberately *not* there yet: fits, bias finding and applying a bias
-(stages 3 and 4), and with them the digest and histogram tabs, which were
-deleted rather than ported (§9). The legacy bias and noise lane still runs on
+* **Fits.** Run Fit makes one `fit_sweeps` call off the GUI thread, over the
+  amplitudes a combo box chooses: all of them, each resonator's bias amplitude
+  (`fit_sweeps_at_bias_amplitude`), or one step of the schedule. The button is
+  dead while it runs and the label counts sweeps, because fitting is 80 ms a
+  sweep for all three models -- minutes over a real array, not the milliseconds
+  Find Resonances costs. The fits go into the sweep entries the panel already
+  draws from, so the Fit Results tab needs no state of its own, and a
+  measurement already on disk is re-saved where it was.
+
+What is deliberately *not* there yet: the fit histograms, bias finding and
+applying a bias (the rest of stages 3 and 4), and with them the digest and
+histogram tabs, which were deleted rather than ported (§9). The legacy bias and noise lane still runs on
 `_prepare_export_data`'s payload and is untouched until stage 4; the deprecated
 library modules go in stage 5.
 
@@ -762,17 +771,31 @@ are now strict xfails that name the stage which clears them.
 
 ### Stage 3. Fits on a button (medium)
 
-* Run Fit button and a persistent Fit Settings panel as a view over
-  `fit_sweeps`: models (three checkboxes), `approx_Qr`, `normalize`,
-  `fit_nonlinearity`, `n_extrema_points`, `max_residual`, and the amplitude
-  policy: all sweeps, one iteration, or the bias amplitude
-  (`fit_sweeps_at_bias_amplitude`). `RunFitsTask` makes the one call with
-  `progress_callback(completed, total)`; the panel's Fitting label reads
-  from it. Fits re-save the block in place through `store`.
-* Fit Results tab: measured magnitude, skewed and nonlinear model curves
-  from `skewed_model_magnitude` and `nonlinear_model_iq` on a finer grid,
-  `fr` lines, three-line legends with `a`; an amplitude selector populated
-  from iterations that have a fit; failed fits shown with `failed_because`.
+* ~~Run Fit button and a fit settings panel~~ **done (2026-09-11)**, and
+  smaller than planned: the settings are the amplitude choice alone --
+  all sweeps, one step, or each resonator's bias amplitude -- as a combo box
+  in the toolbar rather than a persistent window. Everything else
+  (`models`, `approx_Qr`, `normalize`, `fr_limit_hz`, `fit_nonlinearity`,
+  `n_extrema_points`, `max_residual`) is the library's default, which is one
+  fewer place for a GUI value to drift from the fitters'. Expose one when
+  something asks for it. `RunFitsTask` makes the one call with
+  `progress_callback(completed, total)`; the button greys out and the label
+  counts percent. Fits re-save the block in place through `store`.
+* ~~Fit Results tab~~ **done (2026-09-11)**: one subplot per resonator, the
+  measured magnitude and the skewed and nonlinear models over it, on a grid 25
+  times finer than the one measured. It reuses `update_sweep_grid` as a third
+  plot type, so batching, the widget cache, the colorbar and the amplitude
+  colours are the grids' own. A sweep with no fits is not drawn there, so an
+  empty subplot reads as "not fitted" rather than as a fit that failed; a
+  model that did not converge is absent and counted on the toolbar.
+  Still owed here: `fr` lines, `a` in the legend, and a per-model breakdown.
+  **Normalization**: the tab is normalized to each trace's *last* point, in
+  linear units, because that is what `normalize=True` does and what
+  `skewed_model_magnitude` returns. The toolbar's "Normalize Traces" is a
+  different convention -- the *first* point, in the displayed unit, so dB
+  subtraction -- and does not apply to this tab. Overlaying the models on the
+  Magnitude Sweeps grid would need that conversion, which is why they are on
+  a tab of their own.
 * Histograms, built new against the block: fr scatter, Qr/Qc/Qi on shared log
   bins, coloured by amplitude with the same colorbar as the grids, a step
   selector, and a `BIFURCATION_A` reference where `a` is shown. Read through

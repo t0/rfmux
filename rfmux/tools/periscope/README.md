@@ -107,8 +107,15 @@ For high-resolution analysis around identified resonance frequencies:
 
 1. First identify resonances using the Network Analysis feature
 2. Click "Take Multisweep" to configure a detailed sweep around resonances
-3. Analyze detector parameters and characteristics
-4. Export data for detailed offline analysis
+3. Choose which sweeps to fit -- all of them, each resonator at the amplitude
+   it is biased at, or one amplitude step -- and click "Run Fit"
+4. The Fit Results tab draws each resonator's measurement with the skewed and
+   nonlinear models over it, normalized to the trace's last point, which is the
+   fits' own convention. Measured points carry the sweep direction as their
+   symbol; colour is the drive amplitude, as on the other tabs
+5. Fits are written into the sweeps themselves, so a file saved afterwards
+   carries them and reopens with them; a measurement already saved is re-saved
+   where it was
 
 ### Import and Export Data
 Periscope provides several ways to reuse previously captured sweeps and to archive new measurements for offline study.

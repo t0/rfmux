@@ -35,6 +35,7 @@ from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E
 from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
+from rfmux.tuning.fits import FitReport, SweepFit  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -43,6 +44,9 @@ from rfmux.tuning.find_resonances import (  # noqa: E402
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
     NetworkAnalysisDialog,
+)
+from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
+    MODEL_OVERSAMPLE,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.tasks import (  # noqa: E402
@@ -446,7 +450,8 @@ def _grid_widgets(panel, tab_idx=0):
     """The subplot widgets the grid is showing, in the order it drew them."""
     panel.plot_tabs.setCurrentIndex(tab_idx)
     panel._redraw_plots()
-    grid = panel.mag_sweeps_grid if tab_idx == 0 else panel.iq_sweeps_grid
+    grid = {0: panel.mag_sweeps_grid, 1: panel.iq_sweeps_grid,
+            2: panel.fit_sweeps_grid}[tab_idx]
     return [grid.itemAt(i).widget() for i in range(grid.count())]
 
 
@@ -1225,3 +1230,164 @@ def test_unwrapping_cable_delay_redraws_the_measured_phase(board, qt_app):
     assert catalog.module in panel.module_cable_lengths
     after = panel.plots[catalog.module]["phase_curve"].getData()[1]
     assert not np.allclose(before, after)
+
+
+# --- step 4: fits ----------------------------------------------------------
+
+
+def _run_fits(panel, qt_app, choice=None):
+    """Press Run Fit with one amplitude choice; return the panel's status text."""
+    index = panel.fit_amplitude_combo.findData(choice)
+    assert index >= 0, f"no amplitude choice {choice!r} in the combo"
+    panel.fit_amplitude_combo.setCurrentIndex(index)
+
+    panel._run_fits()
+    assert spin_until(qt_app, panel._run_fits_task.isFinished, timeout=180), \
+        "the fit task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.fit_status_label.text()
+
+
+def _fitted_sweeps(panel):
+    """``{(name, step, direction): entry}`` for every sweep that carries fits."""
+    return {(name, step, direction): sweep
+            for name in panel._selected_names()
+            for step, by_direction in
+            collect_amplitude_iterations_for(panel.module_sweeps, name).items()
+            for direction, sweep in by_direction.items()
+            if sweep.get("fits")}
+
+
+def test_run_fit_writes_its_fits_into_the_sweeps_the_panel_holds(board, qt_app):
+    """The fits land in the block the panel is already drawing from, which is
+    what makes them appear without the panel being told anything."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    assert _fitted_sweeps(panel) == {}
+
+    status = _run_fits(panel, qt_app)
+
+    fitted = _fitted_sweeps(panel)
+    assert len(fitted) == len(catalog.names())
+    for sweep in fitted.values():
+        assert set(sweep["fits"]) == {"skewed", "nonlinear", "circle"}
+    assert "fitted" in status
+
+
+def test_the_panel_reads_back_the_parameters_the_fitters_wrote(board, qt_app):
+    """A fit's numbers are read off the entry, not copied anywhere else."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    skewed = sweep["fits"]["skewed"]
+    assert skewed["failed_because"] is None
+    # The resonance the fit found is the one the sweep was centred on.
+    assert abs(skewed["params"]["fr"] - sweep["original_center_frequency"]) < 100e3
+
+
+def test_fitting_at_the_bias_amplitude_fits_one_step_per_resonator(board, qt_app):
+    """The amplitude choice is the whole of the fit settings, and 'at bias
+    amplitude' means one iteration of the schedule per resonator."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    _run_fits(panel, qt_app, choice="bias")
+
+    steps_fitted = {name: set() for name in panel._selected_names()}
+    for (name, step, _direction) in _fitted_sweeps(panel):
+        steps_fitted[name].add(step)
+    assert all(len(steps) == 1 for steps in steps_fitted.values())
+
+
+def test_fitting_one_step_leaves_the_others_unfitted(board, qt_app):
+    """A step chosen by name is the only one fitted."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    _run_fits(panel, qt_app, choice=1)
+
+    assert {step for (_name, step, _direction) in _fitted_sweeps(panel)} == {1}
+
+
+def test_the_button_is_dead_while_the_fits_run(board, qt_app):
+    """Fitting is seconds to minutes, so the button cannot be pressed twice."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    panel._run_fits()
+    assert not panel.run_fit_btn.isEnabled()
+    assert panel.fit_status_label.text().startswith("Fitting")
+
+    assert spin_until(qt_app, panel._run_fits_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.run_fit_btn.isEnabled()
+
+
+def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
+    """Each resonator's panel carries its measured points and a curve for each
+    model that converged, on a grid finer than the one measured."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    measured, skewed, nonlinear = _grid_curves(panel, tab_idx=2)[0]
+
+    # The measurement, normalized the way the skewed fit normalizes it.
+    x, y = measured.getData()
+    assert np.allclose(
+        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(
+        y, np.abs(sweep["iq_counts"] / sweep["iq_counts"][-1]))
+
+    # The models, on MODEL_OVERSAMPLE points per measured point, tracking the
+    # measurement they were fitted to and drawn on the same axis as it.
+    for curve in (skewed, nonlinear):
+        model_x, model_y = curve.getData()
+        assert len(model_x) == MODEL_OVERSAMPLE * len(sweep["frequencies"])
+        assert np.allclose(np.interp(x, model_x, model_y), y, atol=0.05)
+
+
+def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
+    """A sweep with no fits is not drawn there: an empty panel says 'not
+    fitted', where a bare measurement would read as a fit that failed."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    assert _grid_curves(panel, tab_idx=2) == [[] for _ in panel._selected_names()]
+
+    _run_fits(panel, qt_app, choice=1)
+
+    # One step of two was fitted, so one measured trace and its two models.
+    assert all(len(subplot) == 3 for subplot in _grid_curves(panel, tab_idx=2))
+
+
+def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):
+    """A fit that failed is in what the toolbar says. Reporting only the
+    successes would make a failure indistinguishable from a fit never run."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    panel._fits_completed(FitReport(fits=[
+        SweepFit(name="BOTA", model="nonlinear", iteration=0,
+                 direction="upward", failed_because=None),
+        SweepFit(name="COTA", model="nonlinear", iteration=0,
+                 direction="upward", failed_because="the residual is too high"),
+    ]))
+
+    assert panel.fit_status_label.text() == "1/2 fitted, 1 failed"

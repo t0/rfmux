@@ -11,6 +11,7 @@ from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
 from rfmux.tuning.find_resonances import find_resonances_in_netanal
+from rfmux.tuning.fits import fit_sweeps, fit_sweeps_at_bias_amplitude
 
 from typing import Dict, Any, Optional
 
@@ -579,6 +580,53 @@ class FindResonancesTask(QtCore.QThread):
             self.signals.error.emit(self.module, f"{type(e).__name__}: {e}")
             return
         self.signals.completed.emit(self.module, search)
+
+
+class RunFitsSignals(QObject):
+    progress = pyqtSignal(int, int)             # sweeps fitted, sweeps to fit
+    completed = pyqtSignal(object)              # the FitReport
+    error = pyqtSignal(str)
+
+
+class RunFitsTask(QtCore.QThread):
+    """Fits one module's sweeps off the GUI thread.
+
+    Seconds, not milliseconds: 80 ms a sweep for all three models on the
+    simulator, so a schedule over a real array is minutes. Hence a thread, a
+    per-sweep progress count, and a button that goes dead while it runs.
+
+    The fits go into the sweep entries the panel already holds -- that is what
+    ``fit_sweeps`` does -- so there is nothing to hand back but the report.
+    """
+
+    def __init__(self, module_sweeps: dict, amplitude_choice, signals: RunFitsSignals):
+        super().__init__()
+        self.module_sweeps = module_sweeps
+        # None fits every sweep, "bias" each resonator's own bias amplitude,
+        # and an integer one amplitude step.
+        self.amplitude_choice = amplitude_choice
+        self.signals = signals
+
+    def run(self):
+        try:
+            # save=False: the panel re-saves through store, so the fitters'
+            # autosave cannot put a second copy in a second place.
+            if self.amplitude_choice == "bias":
+                report = fit_sweeps_at_bias_amplitude(
+                    self.module_sweeps, save=False,
+                    progress_callback=self._progress)
+            else:
+                report = fit_sweeps(
+                    self.module_sweeps, iterations=self.amplitude_choice,
+                    save=False, progress_callback=self._progress)
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            self.signals.error.emit(f"{type(e).__name__}: {e}")
+            return
+        self.signals.completed.emit(report)
+
+    def _progress(self, completed, total):
+        self.signals.progress.emit(int(completed), int(total))
 
 
 class CRSInitializeTask(QRunnable):

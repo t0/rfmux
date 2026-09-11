@@ -11,6 +11,7 @@ import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
 from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,
@@ -173,6 +174,10 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                     elif unit_mode == "volts":
                         plot_item.setLabel('left', 'Magnitude', units='V')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+            elif plot_type == 'fit':
+                _plot_fit(plot_item, traces, amplitude_to_color, pen_color, labels)
+                plot_item.setLabel('left', 'Normalized Magnitude')
+                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
                 _plot_iq(plot_item, traces, amplitude_to_color,
                          pen_color, unit_mode, normalize, labels)
@@ -242,6 +247,62 @@ def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color)
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
         plot_item.plot(offset_khz(sweep), magnitude, pen=pen, name=name)
+
+
+#: Points per measured point when drawing a model curve. A fit evaluated on the
+#: sweep's own frequencies is a polyline through the corners the fit saw, which
+#: is not what the model looks like.
+MODEL_OVERSAMPLE = 25
+
+
+def _model_on_a_finer_grid(reader, sweep):
+    """``(offsets_khz, model)`` from a reader, on a denser axis than was measured."""
+    frequencies = np.linspace(
+        sweep['frequencies'][0], sweep['frequencies'][-1],
+        MODEL_OVERSAMPLE * len(sweep['frequencies']))
+    finer = {**sweep, 'frequencies': frequencies}
+    return offset_khz(finer), reader(finer)
+
+
+def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, legend_labels=None):
+    """One resonator's measured magnitude with its fitted models over it.
+
+    Normalized to each trace's last point, because that is the skewed fit's own
+    convention: the model comes back in those units, so the measurement is put
+    into them rather than the model taken out of them. The nonlinear model is
+    in counts on top of ``iq_counts``, so it is divided by the same point.
+
+    Colour is the drive, as everywhere else on this panel. Line style is the
+    model -- solid skewed, dashed nonlinear -- and the measured points carry
+    the direction as their symbol, since style is spoken for here.
+
+    A sweep with no fits draws its measurement alone, and a model that did not
+    converge is simply absent: the count of what failed is on the toolbar.
+    """
+    if legend_labels:
+        _add_legend(plot_item, pen_color)
+
+    for step, direction, amplitude, sweep in traces:
+        counts = np.asarray(sweep['iq_counts'])
+        if len(counts) == 0 or counts[-1] == 0:
+            continue
+        color = amplitude_to_color.get(amplitude, pen_color)
+        name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
+        plot_item.plot(
+            offset_khz(sweep), np.abs(counts / counts[-1]),
+            pen=None, symbol='x' if direction == 'downward' else 'o',
+            symbolSize=4, symbolPen=color, symbolBrush=color, name=name)
+
+        for reader, style, scale in (
+            (skewed_model_magnitude, UPWARD_SWEEP_STYLE, 1.0),
+            (nonlinear_model_iq, DOWNWARD_SWEEP_STYLE, 1.0 / np.abs(counts[-1])),
+        ):
+            try:
+                offsets, model = _model_on_a_finer_grid(reader, sweep)
+            except (ValueError, KeyError):
+                continue    # no fit, or one that did not converge
+            plot_item.plot(offsets, np.abs(model) * scale,
+                           pen=pg.mkPen(color=color, width=LINE_WIDTH, style=style))
 
 
 def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,

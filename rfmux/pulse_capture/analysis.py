@@ -357,15 +357,24 @@ def plot_groups(spec: str, channels) -> list:
     its own, a range ``a-b`` whose channels are combined into one, or
     ``*`` / ``all`` for every channel combined.  An empty spec is one
     series per channel.  Channels absent from *channels* are dropped,
-    and a series that ends up empty is dropped with them.
+    and a series that ends up empty is dropped with them.  For a
+    capture across modules, whose channels are (module, channel) keys,
+    an item may name the module, ``2:1-10``; one that does not takes
+    the channel numbers of every module.
 
     Returns ``[(label, [channels...]), ...]``.  Raises ValueError with
     the offending token, since the caller is a GUI field.
     """
+    from .channel_keys import short_label
+
     present = sorted(channels)
+
+    def number(c):
+        return c[1] if isinstance(c, tuple) else c
+
     cleaned = "".join(spec.split())
     if not cleaned:
-        return [(f"Ch{c}", [c]) for c in present]
+        return [(short_label(c), [c]) for c in present]
     out = []
     for token in cleaned.split(","):
         if not token:
@@ -374,8 +383,10 @@ def plot_groups(spec: str, channels) -> list:
             if present:
                 out.append((f"All {len(present)} ch", list(present)))
             continue
-        lo, sep, hi = token.partition("-")
+        prefix, colon, rest = token.rpartition(":")
+        lo, sep, hi = rest.partition("-")
         try:
+            module = int(prefix) if colon else None
             start = int(lo)
             stop = int(hi) if sep else start
         except ValueError:
@@ -386,10 +397,14 @@ def plot_groups(spec: str, channels) -> list:
             raise ValueError(
                 f"Range {token!r} runs backwards -- write "
                 f"\"{stop}-{start}\".")
-        members = [c for c in present if start <= c <= stop]
+        members = [c for c in present if start <= number(c) <= stop
+                   and (module is None
+                        or (isinstance(c, tuple) and c[0] == module))]
         if not members:
             continue
         label = f"Ch{start}" if not sep else f"Ch{start}-{stop}"
+        if module is not None:
+            label = f"M{module}" + label
         out.append((label, members))
     return out
 

@@ -508,7 +508,10 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `--channels 2:1-114,3:1-96`; the products are named `modules2+3` and
   the pulse file keys its channels by (module, channel).
   `trigger_capture` takes the same `{module: [channels]}` for a slow
-  capture across modules. See the 100G and 1G overlay guide.
+  capture across modules. Periscope reviews such a file with the module
+  named beside each channel, its histogram Plot field taking `2:1-8` for
+  module 2's channels; a one-module file reads as before. See the 100G
+  and 1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

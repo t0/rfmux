@@ -36,6 +36,19 @@ def describe(key: ChannelKey) -> str:
     return f"channel {key}"
 
 
+def short_label(key: ChannelKey) -> str:
+    """``Ch5`` or ``M2Ch5``: a key in a status line or a legend."""
+    if isinstance(key, tuple):
+        return f"M{key[0]}Ch{key[1]}"
+    return f"Ch{key}"
+
+
+def title_label(key: ChannelKey) -> str:
+    """``Channel 5`` or ``Module 2 channel 5``: a key in a title."""
+    text = describe(key)
+    return text[0].upper() + text[1:]
+
+
 def channel_arg(key: ChannelKey) -> str:
     """``5`` or ``2:5``: a key as a command line spells it."""
     if isinstance(key, tuple):

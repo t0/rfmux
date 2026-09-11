@@ -22,6 +22,8 @@ from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
+from .fit_settings_panel import (
+    ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
 from .tasks import RunFitsSignals, RunFitsTask
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for, store
@@ -130,6 +132,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         self.fit_sweep_plots_cache = []  # List of plot widgets for the fit tab
 
+        # The fitters' settings outlive any one fit, and are shared by nothing
+        # else: one window per panel, as the measurement is one panel's.
+        self.fit_settings = FitSettingsPanel(self)
+
         self._live_redraw_timer = QtCore.QTimer(self)
         self._live_redraw_timer.setSingleShot(True)
         self._live_redraw_timer.timeout.connect(self._redraw_plots)
@@ -182,22 +188,31 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
         toolbar_layout.addWidget(self.bias_kids_btn)
 
-        # Fitting: which amplitudes to fit, the button, and what it is doing.
-        self.fit_amplitude_combo = QtWidgets.QComboBox()
-        self.fit_amplitude_combo.setToolTip(
-            "Which of the sweeps to fit: all of them, each resonator at the "
-            "amplitude it is biased at, or one amplitude step")
+        # Fitting: the button, its settings, and what it is doing.
         self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
         self.run_fit_btn.setToolTip(
-            "Fit the skewed, nonlinear and circle models to these sweeps")
+            "Fit resonator models to these sweeps, as the fit settings ask")
         self.run_fit_btn.clicked.connect(self._run_fits)
+        fit_settings_btn = QtWidgets.QPushButton("⚙")
+        fit_settings_btn.setMaximumWidth(30)
+        fit_settings_btn.setToolTip("Which models to fit, and which sweeps")
+        fit_settings_btn.clicked.connect(self._show_fit_settings)
         self.fit_status_label = QtWidgets.QLabel("")
         self.fit_status_label.setMinimumWidth(110)
-        # The fit controls wrap as one item, so the button keeps its label.
+        # The fit controls wrap as one item, so the button keeps its settings.
         self.fit_controls = grouped(
-            QtWidgets.QLabel("Fit:"), self.fit_amplitude_combo,
-            self.run_fit_btn, self.fit_status_label)
+            self.run_fit_btn, fit_settings_btn, self.fit_status_label)
         toolbar_layout.addWidget(self.fit_controls)
+
+        # Which model the Fit Results tab draws: one at a time, so a subplot
+        # carries one line over its points rather than one per model.
+        self.fit_model_combo = QtWidgets.QComboBox()
+        self.fit_model_combo.setToolTip("Which fitted model the Fit Results tab draws")
+        self.fit_model_combo.currentIndexChanged.connect(self._redraw_plots)
+        self.fit_model_controls = grouped(
+            QtWidgets.QLabel("Show fit:"), self.fit_model_combo)
+        toolbar_layout.addWidget(self.fit_model_controls)
+        self._populate_fit_models()
         self._populate_fit_amplitudes()
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
@@ -491,6 +506,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_amplitude_scale(
             AmplitudeSchedule.from_dict(call_params['amp_schedule']))
         self._populate_fit_amplitudes()
+        self._populate_fit_models()
         self._redraw_plots()
 
     def complete_multisweep(self, module: int, container: dict):
@@ -727,10 +743,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             batch_label=self.batch_info_label,
             widget_cache=widget_cache,
             dac_scale=dac_scale,
-            show_legend=use_legend
+            show_legend=use_legend,
+            fit_model=self.fit_model_combo.currentData() or 'skewed',
         )
 
     # ── fitting ──────────────────────────────────────────────────────────────
+
+    def _show_fit_settings(self):
+        """Raise the fitters' settings window; it outlives any one fit."""
+        self.fit_settings.show()
+        self.fit_settings.raise_()
+        self.fit_settings.activateWindow()
 
     def _populate_fit_amplitudes(self):
         """The amplitude choices, from the steps this measurement actually has.
@@ -738,18 +761,42 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         Rebuilt whenever a measurement arrives, because a schedule's steps are
         the choice: "step 3" means nothing until something has been swept.
         """
-        combo = self.fit_amplitude_combo
+        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+        self.fit_settings.set_amplitude_choices(
+            [("All amplitudes", ALL_AMPLITUDES),
+             ("At bias amplitude", BIAS_AMPLITUDE)]
+            + [(f"Step {step}: {self._step_label(step, dac_scale)}", step)
+               for step in sorted(self._step_amplitudes)])
+
+    def _populate_fit_models(self):
+        """Offer the models this measurement has fits for, keeping the choice.
+
+        What was fitted, not what the settings ask for: a block loaded from a
+        file was fitted by whatever fitted it, and one whose fits are still
+        being run has none of them yet.
+        """
+        combo = self.fit_model_combo
         previous = combo.currentData()
         combo.blockSignals(True)
         combo.clear()
-        combo.addItem("All amplitudes", None)
-        combo.addItem("At bias amplitude", "bias")
-        dac_scale = self.dac_scales.get(self.active_module_for_dac)
-        for step in sorted(self._step_amplitudes):
-            combo.addItem(f"Step {step}: {self._step_label(step, dac_scale)}", step)
+        for model in self._models_fitted():
+            combo.addItem(model.capitalize(), model)
         index = combo.findData(previous)
-        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.setCurrentIndex(max(0, index))
         combo.blockSignals(False)
+        self.fit_model_controls.setVisible(combo.count() > 0)
+
+    def _models_fitted(self) -> list:
+        """The models the sweeps carry fits for, in the order the tab lists them."""
+        if self.module_sweeps is None:
+            return []
+        present = {model
+                   for name in self._selected_names()
+                   for by_direction in
+                   collect_amplitude_iterations_for(self.module_sweeps, name).values()
+                   for sweep in by_direction.values()
+                   for model in (sweep.get('fits') or {})}
+        return [model for model in FIT_MODELS if model in present]
 
     def _step_label(self, step: int, dac_scale) -> str:
         """One step's drive, as a range when the resonators differ.
@@ -771,8 +818,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.fit_status_label.setText("Nothing swept yet")
             return
 
+        parameters = self.fit_settings.get_parameters()
+        if not parameters["models"]:
+            self.fit_status_label.setText("No models to fit")
+            return
+
         self.run_fit_btn.setEnabled(False)
-        self.fit_amplitude_combo.setEnabled(False)
         self.fit_status_label.setText("Fitting...")
 
         signals = RunFitsSignals()
@@ -781,7 +832,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         signals.error.connect(self._fits_error)
         # Held so the thread is not collected while it runs.
         self._run_fits_task = RunFitsTask(
-            self.module_sweeps, self.fit_amplitude_combo.currentData(), signals)
+            self.module_sweeps, parameters["models"],
+            parameters["amplitude_choice"], signals)
         self._run_fits_task.start()
 
     def _fits_progress(self, completed: int, total: int):
@@ -812,7 +864,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _fits_done(self):
         self.run_fit_btn.setEnabled(True)
-        self.fit_amplitude_combo.setEnabled(True)
+        self._populate_fit_models()
 
     def handle_error(self, error_msg: str):
         """Say what went wrong where the sweep's progress is reported.

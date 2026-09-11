@@ -36,6 +36,7 @@ KEY_USER_LIBRARY_PATH = "notebook/user_library_path"
 KEY_FONT_SCALE = "view/font_scale"
 KEY_CUSTOM_MATERIALS = "materials/custom_materials"
 KEY_FIND_RESONANCES = "find_resonances/parameters"
+KEY_FIT_SWEEPS = "fit_sweeps/parameters"
 
 # Default values
 DEFAULT_CONNECTION_MODE = "hardware"
@@ -451,3 +452,32 @@ def set_find_resonances_parameters(parameters: dict) -> None:
     """Remember the resonance finder's keyword arguments."""
     import json
     _get_settings().setValue(KEY_FIND_RESONANCES, json.dumps(parameters))
+
+
+# ─────────────────────────────────────────────────────────────────
+# Fit Settings
+# ─────────────────────────────────────────────────────────────────
+
+def get_fit_parameters() -> dict:
+    """The saved fit settings: which models, and which amplitudes.
+
+    JSON, as for the resonance finder, so ``None`` -- which the amplitude
+    choice uses to mean "all of them" -- survives the round trip.
+
+    Returns:
+        dict: what was last saved, empty if nothing ever was. The panel fills
+        anything absent from the fitters' own defaults.
+    """
+    import json
+    json_str = _get_settings().value(KEY_FIT_SWEEPS, "{}")
+    try:
+        saved = json.loads(json_str)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return saved if isinstance(saved, dict) else {}
+
+
+def set_fit_parameters(parameters: dict) -> None:
+    """Remember the fit settings."""
+    import json
+    _get_settings().setValue(KEY_FIT_SWEEPS, json.dumps(parameters))

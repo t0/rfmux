@@ -163,7 +163,8 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   a file from another module opens read-only (§6, judgement call 31).
 
 * **Fits.** Run Fit makes one `fit_sweeps` call off the GUI thread, over the
-  amplitudes a combo box chooses: all of them, each resonator's bias amplitude
+  models and amplitudes a persistent settings window holds: skewed, nonlinear
+  or both, on all the sweeps, each resonator's bias amplitude
   (`fit_sweeps_at_bias_amplitude`), or one step of the schedule. The button is
   dead while it runs and the label counts sweeps, because fitting is 80 ms a
   sweep for all three models -- minutes over a real array, not the milliseconds
@@ -771,19 +772,25 @@ are now strict xfails that name the stage which clears them.
 
 ### Stage 3. Fits on a button (medium)
 
-* ~~Run Fit button and a fit settings panel~~ **done (2026-09-11)**, and
-  smaller than planned: the settings are the amplitude choice alone --
-  all sweeps, one step, or each resonator's bias amplitude -- as a combo box
-  in the toolbar rather than a persistent window. Everything else
-  (`models`, `approx_Qr`, `normalize`, `fr_limit_hz`, `fit_nonlinearity`,
+* ~~Run Fit button and a persistent Fit Settings panel~~ **done
+  (2026-09-11)**, and smaller than planned: the settings are the models
+  (skewed and nonlinear, either or both) and the amplitude choice (all sweeps,
+  one step, or each resonator's bias amplitude). Everything else
+  (`approx_Qr`, `normalize`, `fr_limit_hz`, `fit_nonlinearity`,
   `n_extrema_points`, `max_residual`) is the library's default, which is one
   fewer place for a GUI value to drift from the fitters'. Expose one when
-  something asks for it. `RunFitsTask` makes the one call with
+  something asks for it. The circle fit is not offered: it fits the IQ loop, so
+  it draws nothing on a magnitude plot, and nothing reads it yet -- stage 4's
+  IQ work is where it earns a checkbox. `RunFitsTask` makes the one call with
   `progress_callback(completed, total)`; the button greys out and the label
   counts percent. Fits re-save the block in place through `store`.
 * ~~Fit Results tab~~ **done (2026-09-11)**: one subplot per resonator, the
-  measured magnitude and the skewed and nonlinear models over it, on a grid 25
-  times finer than the one measured. It reuses `update_sweep_grid` as a third
+  measured magnitude and *one* model over it, on a grid 25 times finer than the
+  one measured -- one at a time, chosen on the toolbar from the models the
+  sweeps carry fits for, so a subplot holds one line over its points rather
+  than one per model. The measurement keeps its drive colour, the model is
+  drawn in the foreground colour (white on black, black on white), and line
+  style is left to mean direction as it does on the other tabs. It reuses `update_sweep_grid` as a third
   plot type, so batching, the widget cache, the colorbar and the amplitude
   colours are the grids' own. A sweep with no fits is not drawn there, so an
   empty subplot reads as "not fitted" rather than as a fit that failed; a

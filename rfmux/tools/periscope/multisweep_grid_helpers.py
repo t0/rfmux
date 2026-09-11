@@ -38,7 +38,7 @@ def sweep_iq(sweep, unit_mode):
 def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, batch_size,
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
-                      dac_scale=None, show_legend=True):
+                      dac_scale=None, show_legend=True, fit_model='skewed'):
     """
     Update a grid layout with one subplot per resonator.
 
@@ -59,6 +59,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         widget_cache: Optional list to cache plot widgets for reuse
         dac_scale: Optional DAC scale (dBm) for formatting legend labels
         show_legend: Draw per-subplot legends (off when a colorbar is shown)
+        fit_model: which model the ``fit`` plot type draws over the measurement
     """
     if not traces_by_name:
         return
@@ -175,7 +176,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                         plot_item.setLabel('left', 'Magnitude', units='V')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
-                _plot_fit(plot_item, traces, amplitude_to_color, pen_color, labels)
+                _plot_fit(plot_item, traces, amplitude_to_color, pen_color,
+                          fit_model, labels)
                 plot_item.setLabel('left', 'Normalized Magnitude')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
@@ -264,24 +266,38 @@ def _model_on_a_finer_grid(reader, sweep):
     return offset_khz(finer), reader(finer)
 
 
-def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, legend_labels=None):
-    """One resonator's measured magnitude with its fitted models over it.
+#: How to read each model off a sweep, and what to divide its magnitude by so
+#: it lands on the same axis as the normalized measurement. The skewed fit
+#: already works in those units; the nonlinear model is in counts, on top of
+#: ``iq_counts``.
+FIT_READERS = {
+    'skewed': (skewed_model_magnitude, lambda counts: 1.0),
+    'nonlinear': (nonlinear_model_iq, lambda counts: 1.0 / np.abs(counts[-1])),
+}
+
+
+def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
+              legend_labels=None):
+    """One resonator's measured magnitude with one model fitted to it.
 
     Normalized to each trace's last point, because that is the skewed fit's own
     convention: the model comes back in those units, so the measurement is put
-    into them rather than the model taken out of them. The nonlinear model is
-    in counts on top of ``iq_counts``, so it is divided by the same point.
+    into them rather than the model taken out of them.
 
-    Colour is the drive, as everywhere else on this panel. Line style is the
-    model -- solid skewed, dashed nonlinear -- and the measured points carry
-    the direction as their symbol, since style is spoken for here.
+    The measurement keeps the colour it has on the other tabs -- its drive --
+    and the fit is drawn in the foreground colour, so that at a glance the
+    black or white line is the model and the coloured points are the data. One
+    model at a time, which leaves line style free to mean direction here as it
+    does everywhere else.
 
-    A sweep with no fits draws its measurement alone, and a model that did not
-    converge is simply absent: the count of what failed is on the toolbar.
+    A sweep with no fit of this model draws its measurement alone, and one that
+    did not converge is simply absent: the count of what failed is on the
+    toolbar.
     """
     if legend_labels:
         _add_legend(plot_item, pen_color)
 
+    reader, scale_of = FIT_READERS[fit_model]
     for step, direction, amplitude, sweep in traces:
         counts = np.asarray(sweep['iq_counts'])
         if len(counts) == 0 or counts[-1] == 0:
@@ -293,16 +309,14 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, legend_labels=No
             pen=None, symbol='x' if direction == 'downward' else 'o',
             symbolSize=4, symbolPen=color, symbolBrush=color, name=name)
 
-        for reader, style, scale in (
-            (skewed_model_magnitude, UPWARD_SWEEP_STYLE, 1.0),
-            (nonlinear_model_iq, DOWNWARD_SWEEP_STYLE, 1.0 / np.abs(counts[-1])),
-        ):
-            try:
-                offsets, model = _model_on_a_finer_grid(reader, sweep)
-            except (ValueError, KeyError):
-                continue    # no fit, or one that did not converge
-            plot_item.plot(offsets, np.abs(model) * scale,
-                           pen=pg.mkPen(color=color, width=LINE_WIDTH, style=style))
+        try:
+            offsets, model = _model_on_a_finer_grid(reader, sweep)
+        except (ValueError, KeyError):
+            continue    # no fit of this model, or one that did not converge
+        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
+        plot_item.plot(
+            offsets, np.abs(model) * scale_of(counts),
+            pen=pg.mkPen(color=pen_color, width=LINE_WIDTH, style=style))
 
 
 def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,

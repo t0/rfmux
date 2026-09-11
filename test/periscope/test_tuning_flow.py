@@ -1235,11 +1235,13 @@ def test_unwrapping_cable_delay_redraws_the_measured_phase(board, qt_app):
 # --- step 4: fits ----------------------------------------------------------
 
 
-def _run_fits(panel, qt_app, choice=None):
-    """Press Run Fit with one amplitude choice; return the panel's status text."""
-    index = panel.fit_amplitude_combo.findData(choice)
-    assert index >= 0, f"no amplitude choice {choice!r} in the combo"
-    panel.fit_amplitude_combo.setCurrentIndex(index)
+def _run_fits(panel, qt_app, choice=None, models=("skewed", "nonlinear")):
+    """Press Run Fit with one set of settings; return the panel's status text."""
+    panel.fit_settings.set_parameters({"models": models})
+    panel.fit_settings.set_amplitude_choice(choice)
+    assert panel.fit_settings.get_parameters() == {
+        "models": tuple(models), "amplitude_choice": choice}, \
+        f"the settings window does not offer {choice!r}"
 
     panel._run_fits()
     assert spin_until(qt_app, panel._run_fits_task.isFinished, timeout=180), \
@@ -1271,7 +1273,7 @@ def test_run_fit_writes_its_fits_into_the_sweeps_the_panel_holds(board, qt_app):
     fitted = _fitted_sweeps(panel)
     assert len(fitted) == len(catalog.names())
     for sweep in fitted.values():
-        assert set(sweep["fits"]) == {"skewed", "nonlinear", "circle"}
+        assert set(sweep["fits"]) == {"skewed", "nonlinear"}
     assert "fitted" in status
 
 
@@ -1324,6 +1326,7 @@ def test_the_button_is_dead_while_the_fits_run(board, qt_app):
     panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
     assert errors == []
 
+    panel.fit_settings.set_parameters({"models": ("skewed",)})
     panel._run_fits()
     assert not panel.run_fit_btn.isEnabled()
     assert panel.fit_status_label.text().startswith("Fitting")
@@ -1343,21 +1346,73 @@ def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
 
     name = panel._selected_names()[0]
     sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
-    measured, skewed, nonlinear = _grid_curves(panel, tab_idx=2)[0]
 
-    # The measurement, normalized the way the skewed fit normalizes it.
-    x, y = measured.getData()
-    assert np.allclose(
-        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
-    assert np.allclose(
-        y, np.abs(sweep["iq_counts"] / sweep["iq_counts"][-1]))
+    for model in ("skewed", "nonlinear"):
+        _show_fit_model(panel, model)
+        measured, fit = _grid_curves(panel, tab_idx=2)[0]
 
-    # The models, on MODEL_OVERSAMPLE points per measured point, tracking the
-    # measurement they were fitted to and drawn on the same axis as it.
-    for curve in (skewed, nonlinear):
-        model_x, model_y = curve.getData()
+        # The measurement, normalized the way the skewed fit normalizes it.
+        x, y = measured.getData()
+        assert np.allclose(
+            x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+        assert np.allclose(
+            y, np.abs(sweep["iq_counts"] / sweep["iq_counts"][-1]))
+
+        # The model, on MODEL_OVERSAMPLE points per measured point, tracking
+        # the measurement it was fitted to and on the same axis as it.
+        model_x, model_y = fit.getData()
         assert len(model_x) == MODEL_OVERSAMPLE * len(sweep["frequencies"])
         assert np.allclose(np.interp(x, model_x, model_y), y, atol=0.05)
+
+
+def _show_fit_model(panel, model):
+    """Pick the model the Fit Results tab draws."""
+    index = panel.fit_model_combo.findData(model)
+    assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
+    panel.fit_model_combo.setCurrentIndex(index)
+
+
+def test_only_the_chosen_model_is_drawn(board, qt_app):
+    """One line over the points, not one per model: the tab is legible with a
+    schedule's worth of traces on it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    assert [panel.fit_model_combo.itemData(i)
+            for i in range(panel.fit_model_combo.count())] == ["skewed", "nonlinear"]
+    for model in ("skewed", "nonlinear"):
+        _show_fit_model(panel, model)
+        assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
+
+
+def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
+    """The selector says what the sweeps carry, not what could have been run."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    assert panel._models_fitted() == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    assert panel._models_fitted() == ["skewed"]
+
+
+def test_the_fit_is_drawn_in_the_foreground_colour(board, qt_app):
+    """The data keeps the colour it has on the other tabs -- its drive -- and
+    the model is the black or white line over it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    measured, fit = _grid_curves(panel, tab_idx=2)[0]
+    assert fit.opts["pen"].color().name() == "#000000"      # light mode
+    assert measured.opts["symbolBrush"] != "k"
+
+    panel.dark_mode = True
+    measured, fit = _grid_curves(panel, tab_idx=2)[0]
+    assert fit.opts["pen"].color().name() == "#ffffff"
 
 
 def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
@@ -1372,8 +1427,8 @@ def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
 
     _run_fits(panel, qt_app, choice=1)
 
-    # One step of two was fitted, so one measured trace and its two models.
-    assert all(len(subplot) == 3 for subplot in _grid_curves(panel, tab_idx=2))
+    # One step of two was fitted, so one measured trace and its one model.
+    assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
 
 
 def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):
@@ -1391,3 +1446,18 @@ def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):
     ]))
 
     assert panel.fit_status_label.text() == "1/2 fitted, 1 failed"
+
+
+def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
+    """No models checked is a setting that cannot be acted on; the fitters
+    would raise on an empty selection, and the toolbar says so first."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.fit_settings.set_parameters({"models": ()})
+
+    panel._run_fits()
+
+    assert panel.fit_status_label.text() == "No models to fit"
+    assert panel.run_fit_btn.isEnabled()
+    assert _fitted_sweeps(panel) == {}

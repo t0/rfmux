@@ -599,9 +599,11 @@ class RunFitsTask(QtCore.QThread):
     ``fit_sweeps`` does -- so there is nothing to hand back but the report.
     """
 
-    def __init__(self, module_sweeps: dict, amplitude_choice, signals: RunFitsSignals):
+    def __init__(self, module_sweeps: dict, models, amplitude_choice,
+                 signals: RunFitsSignals):
         super().__init__()
         self.module_sweeps = module_sweeps
+        self.models = tuple(models)
         # None fits every sweep, "bias" each resonator's own bias amplitude,
         # and an integer one amplitude step.
         self.amplitude_choice = amplitude_choice
@@ -613,11 +615,12 @@ class RunFitsTask(QtCore.QThread):
             # autosave cannot put a second copy in a second place.
             if self.amplitude_choice == "bias":
                 report = fit_sweeps_at_bias_amplitude(
-                    self.module_sweeps, save=False,
+                    self.module_sweeps, models=self.models, save=False,
                     progress_callback=self._progress)
             else:
                 report = fit_sweeps(
-                    self.module_sweeps, iterations=self.amplitude_choice,
+                    self.module_sweeps, models=self.models,
+                    iterations=self.amplitude_choice,
                     save=False, progress_callback=self._progress)
         except Exception as e:
             traceback.print_exc(file=sys.stderr)

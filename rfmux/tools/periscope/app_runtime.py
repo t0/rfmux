@@ -1427,18 +1427,9 @@ class PeriscopeRuntime:
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
             window_id = f"multisweep_{self.multisweep_window_count}"; self.multisweep_window_count += 1
-            target_module = params.get('module')
-            if target_module is None: QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for multisweep."); return
-            
-            # A multisweep measures a catalog. One comes from Find Resonances,
-            # which names what it accepted; frequencies typed into the dialog
-            # by hand are named here instead. Stage 2's dialog does this in a
-            # Custom frequencies mode of its own, where it can say so.
-            if 'catalog' not in params:
-                params['catalog'] = ResonatorCatalog.from_frequencies(
-                    params['resonance_frequencies'],
-                    module=target_module,
-                    amplitude=params['amps'][0])
+            # A multisweep measures a catalog, and a catalog belongs to one
+            # module, so that is where the module comes from.
+            target_module = params['catalog'].module
 
             # Create panel
             dac_scales_for_panel = self.dac_scales if hasattr(self, 'dac_scales') else {}

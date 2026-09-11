@@ -308,7 +308,6 @@ class NetworkAnalysisExportMixin:
                 f"Module {active_module}: run Find Resonances first.", ok=False)
             return
         catalog = search.to_catalog(module=active_module, amplitude=float(amplitude))
-        resonances = [r.bias.frequency_hz for r in catalog]
         
         # Walk up parent hierarchy to find Periscope instance
         # (panel may be wrapped in QDockWidget, so parent() might not be Periscope directly)
@@ -323,10 +322,9 @@ class NetworkAnalysisExportMixin:
         
         # Create and show the dialog
         dialog = MultisweepDialog(
-            parent=self, 
-            section_center_frequencies=resonances, 
-            dac_scales=dac_scales_for_dialog, 
-            current_module=active_module
+            parent=self,
+            catalog=catalog,
+            dac_scales=dac_scales_for_dialog,
         )
         
         # Process dialog result
@@ -334,7 +332,6 @@ class NetworkAnalysisExportMixin:
             params = dialog.get_parameters()
             if not params:
                 return
-            params['catalog'] = catalog
 
             # Find Periscope parent (walk up hierarchy if needed)
             parent = find_parent_with_attr(self, '_start_multisweep_analysis')

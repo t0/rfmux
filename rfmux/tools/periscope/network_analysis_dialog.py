@@ -144,7 +144,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
         self.numpad_enter_shortcut.activated.connect(self.accept)
         
-        self._update_dbm_from_normalized() # Initial update of dBm field based on default amplitude
         self.setMinimumSize(500, 600) # Set a reasonable minimum size
         
     def _get_selected_modules(self) -> list[int]:
@@ -256,7 +255,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     
     
         self._update_dac_scale_info()
-        self._update_dbm_from_normalized()
 
 
     @QtCore.pyqtSlot()
@@ -356,7 +354,6 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         """
         self.dac_scales = scales_dict
         self._update_dac_scale_info() # Update the DAC scale display label
-        self._update_dbm_from_normalized() # Recalculate dBm based on new scales
     
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
@@ -409,7 +406,6 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
         # Initial update of dBm field, especially if DAC scales were passed in constructor
         # or if _fetch_dac_scales is not called (e.g., no CRS object).
         self._update_dac_scale_info() # Call this first to set up dac_scale_info label correctly
-        self._update_dbm_from_normalized() 
         self.setMinimumSize(500, 600)
 
     def _get_selected_modules(self) -> list[int]:

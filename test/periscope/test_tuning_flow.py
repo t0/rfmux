@@ -1018,8 +1018,7 @@ def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
     assert errors == []
     path = panel.save_multisweep()
 
-    dialog = MultisweepDialog(section_center_frequencies=[],
-                              dac_scales={catalog.module: -0.5},
+    dialog = MultisweepDialog(dac_scales={catalog.module: -0.5},
                               current_module=catalog.module,
                               load_multisweep=True)
     dialog._on_file_selected(str(path))
@@ -1034,7 +1033,8 @@ def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
     assert int(dialog.npoints_edit.text()) == 21
     assert int(dialog.nsamps_edit.text()) == 10
     assert dialog.load_btn.isEnabled()
-    assert len(dialog.sections_edit.text().split(",")) == len(catalog.names())
+    assert dialog.catalog.names() == panel.catalog.names()
+    assert dialog.schedule() == AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
 
 
 def test_the_measurement_name_becomes_the_files_label(qt_app):

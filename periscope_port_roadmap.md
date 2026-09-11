@@ -458,19 +458,38 @@ are now strict xfails that name the stage which clears them.
   `call_params["catalog"]` rather than holding a second copy, and reports an
   error on its status line -- `handle_error`'s modal, opened from a signal
   handler, is what deadlocked a headless run.
-* **Dialog.** A view over `AmplitudeSchedule`. The amplitude group has one
-  radio per constructor: at each resonator's catalog amplitude (the default,
-  `AmplitudeSchedule()`), one absolute amplitude, an explicit list, a ramp
-  (start, stop, steps, linear or log), multiplicative (start factor, stop
-  factor, steps, log or linear). `describe(catalog, n_directions, dac_scale_dbm)`
-  fills a live summary line (sweeps, sections, amplitude and power range);
-  `validate()` feeds the tick/warning/cross status label and enables Start.
-  Direction is two checkboxes producing the tuple. Span, points and nsamps
-  as now, with the library's defaults. A "Custom frequencies" mode builds a
-  fresh catalog with `from_frequencies` and therefore needs an amplitude and
-  mints new names, which the dialog says. Measurement name becomes the
-  `label`. Checkboxes "Fit after sweep" and "Find bias after sweep" press
-  the stage 3 and 4 buttons on completion. Return starts the sweep.
+* **Dialog (done).** A view over `AmplitudeSchedule`, and over the driver's
+  own arguments. **The dialog's subject is a `ResonatorCatalog`**, not a
+  frequency list: the schedule resolves against it, so validation and the
+  summary are about the array that will actually be swept, and the caller no
+  longer attaches `params['catalog']` after the fact. The amplitude group has
+  one radio per constructor — each resonator's catalog amplitude (the default,
+  `AmplitudeSchedule()`), one absolute amplitude, an explicit list, a ramp, and
+  multiplicative — each with its own fields, enabled with its radio.
+  `validate(catalog, n_directions)` fills the tick/warning/cross status label
+  and disables Start on an error; `describe(catalog, n_directions,
+  dac_scale_dbm)` fills the summary line. **No number on screen is the
+  dialog's own arithmetic.** Direction is two checkboxes producing the tuple,
+  and neither ticked is an error on the status line rather than a modal. Span,
+  points and nsamps read their defaults out of `multisweep`'s signature — which
+  is how `MULTISWEEP_DEFAULT_SPAN_HZ` was found to be 200 kHz against the
+  driver's 100 kHz (§6, judgement call 27). The measurement name is the
+  `label`, with a live preview of the filename `store` will write. A "Custom
+  frequencies" mode mints a catalog with `from_frequencies`, which needs an
+  amplitude and invents names, and says so — retiring the same fallback in
+  `_start_multisweep_analysis`. Return starts the sweep when Start is enabled.
+
+  Dropped rather than shipped inert: "Fit after sweep" and "Find bias after
+  sweep", which would press stage 3 and 4 buttons that do not exist yet.
+
+  The re-run went with it. `_rerun_multisweep` was 120 lines of picking sweep
+  centres out of a history of previous sweeps at the nearest amplitude; it is
+  now "open the dialog on this panel's catalog, then start the task", because
+  the catalog already carries where every resonator is and what it is driven
+  at. `_get_closest_remembered_cf`, `conceptual_section_frequencies` as a
+  stored list, `current_run_amps`, `probe_amplitudes` and `total_iterations`
+  went with it; the noise path's frequency lookup is now a property off the
+  catalog.
 
   Four controls went with the task rewrite rather than waiting for this
   bullet, because a control that drives nothing is worse than a missing one:
@@ -1100,6 +1119,24 @@ Listed so they can be overruled.
     records what it showed, since the question it answered — where the array
     sits across the band — is not one a grid of per-resonator panels can
     answer, and something will want to answer it again.
+29. **No dBm input anywhere in the dialogs** (maclean, 2026-09-10). Both
+    dialogs carried a Power (dBm) field that converted to and from normalized
+    DAC units as you typed, with a Fill (dBm) button beside it. The drivers
+    take normalized units; the conversion needs a DAC scale the dialog may not
+    have yet; and two fields that rewrite each other is a live edit fighting
+    the user. Gone from `NetworkAnalysisDialogBase`, so both dialogs lose it:
+    `dbm_edit`, `_update_dbm_from_normalized`, `_update_normalized_from_dbm`,
+    `_validate_dbm_values`, `_parse_dbm_values` and the fill button. The DAC
+    full scale is still *shown*, and the multisweep summary still reports the
+    power range — but that comes from `describe(dac_scale_dbm=)`, which is the
+    library converting, not the dialog.
+30. **The multisweep dialog's defaults come from `multisweep`'s signature**
+    (stage 2), as the netanal comb's now do. `MULTISWEEP_DEFAULT_SPAN_HZ` was
+    200 kHz against the driver's 100 kHz, so every sweep Periscope offered was
+    twice the span a notebook's would be. Deleted along with
+    `MULTISWEEP_DEFAULT_NPOINTS`, `_NSAMPLES` and `_AMPLITUDE`. Two such drifts
+    found by two different tests now; a GUI constant that restates a library
+    default is the pattern to distrust.
 
 ---
 
@@ -1109,7 +1146,7 @@ Listed so they can be overruled.
 |---|---|---|
 | 0 (done) | deleted the mocked smoke test and its shipped scaffolding; flow test pinning the two runtime breaks as strict xfails; a worker thread driving a warmed board, and the `ProgrammingError` the warm-up prevents; per-panel signals; the session folder as `store`'s output directory | `test/periscope/test_tuning_flow.py`, `test_multisweep_signals_per_task.py`, `test_session_store_directory.py` |
 | 1 (done) | the netanal step, no longer an xfail; the trace reaching the panel carries the driver's keys and complex IQ; the panel stores it and draws `abs(iq_counts)`; the cable-delay unwrap runs over that trace; the completion signal carries the container; a saved netanal reads back through `store.load` as the measured sweep, under store's name with the user's label; a second save writes the same file; a finished netanal lands in the session folder and is registered there; it loads back into a panel with its resonance search; the session browser types it from `file_metadata`; the measurement name is the label, and Import fills the dialog in from the container. Then the search: it finds the array through the real task and marks what it found, the settings panel is what it runs with, rejected candidates are drawn with their reason, a search updates the file the netanal is in and writes none when there is no file; the settings panel asks for exactly the finder's arguments with the finder's defaults and remembers them; the status line clears itself off the label's own slot. Then the handover: `to_catalog` names the accepted candidates at the probe amplitude, and a double-click rejects a resonance rather than deleting it, accepts a rejected one back as it was found, accepts an arbitrary frequency with `nan` measurements and a tooltip that says so, and updates the netanal file the search is in (and writes none when there is no file). The library side is in `test/tuning/test_find_resonances.py`. Still to come: the remaining QoL | `test/periscope/test_tuning_flow.py`, `test_find_resonances_settings.py`, `test_netanal_status_line.py` |
-| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` (describe/validate wiring); the digest and histogram cases removed from `test_viewbox_lifetime.py` and `test_laptop_fit.py` with the panels; a saved sweep loading back into a panel, drawing with no board, and filling the dialog in | `test/periscope/`, `test_same_measurement_both_ways.py` |
+| 2 | flow step 3 through the task; the panel's redraw over a measured block (one curve per name/step/direction, carrying the entry's own frequencies and `abs(iq_counts)`), a live `partial_data` curve in the colour its finished sweep gets, and units/Normalize/batch changing the drawing without touching `module_sweeps`; Periscope's pickle against a headless one on the same seeded array (file, data and derived results); dialog as a view over `AmplitudeSchedule` the digest and histogram cases removed from `test_viewbox_lifetime.py` and `test_laptop_fit.py` with the panels; a saved sweep loading back into a panel, drawing with no board, and filling the dialog in; the dialog as a view over `AmplitudeSchedule` — each radio builds the constructor it names, the summary carries `describe`'s numbers, `validate`'s complaints disable Start, and every key emitted is one `multisweep` accepts | `test/periscope/`, `test_multisweep_dialog_params.py`, `test_same_measurement_both_ways.py` |
 | 3 | flow step 4; fit panel reads what `fit_sweeps` wrote, and a failed fit reads as failed; a histogram tab built new over `entry["fits"]` | `test/periscope/` |
 | 4 | flow steps 5-6; bias table dialog; overlays present after a report | `test/periscope/` |
 | 5 | deletions; tier counts in `AGENTS.md` and `test/README.md` | root |

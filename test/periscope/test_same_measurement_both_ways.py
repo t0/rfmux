@@ -20,6 +20,7 @@ pytest.importorskip("PyQt6")
 from test.qt_helpers import spin, spin_until  # noqa: E402
 
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
+from rfmux.core.transferfunctions import BASE_FREQUENCY  # noqa: E402
 from rfmux.mock.standard_array import standard_array  # noqa: E402
 from rfmux.tuning import store  # noqa: E402
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
@@ -219,31 +220,27 @@ def test_a_netanal_through_periscope_is_the_file_a_script_writes(
                         values=False) == []
 
 
-def test_a_periscope_netanal_is_no_further_off_than_two_script_ones(
-        quiet_board, qt_app, output_directory):
-    """Periscope's sweep sits inside the driver's own run-to-run spread.
+def test_a_periscope_netanal_measures_where_a_script_one_does(quiet_board, qt_app,
+                                                              output_directory):
+    """The two sweeps agree to within what the simulator's own scatter allows.
 
-    The control is two script runs of the same call: whatever they differ by is
-    what the simulator does on its own. Periscope's has to be no worse, which
-    is the strongest value claim available while the driver does not repeat.
+    The bounds are physical rather than statistical: one tone-grid step for the
+    frequencies, since a comb laid out differently -- the ``max_chans`` drift
+    this test found -- moves tones by half a spacing, and 1% for the magnitudes,
+    which any unit or conversion error clears by orders of magnitude. Both sit
+    an order above the ~100 Hz and ~5e-4 the simulator scatters by, so this
+    says Periscope measured the same thing without pinning noise.
     """
     loop, crs, catalog = quiet_board
 
-    def script_trace():
-        container = loop.run_until_complete(
-            crs.take_netanal(module=catalog.module, save=False, **NETANAL))
-        return next(iter(container.values()))["results"]
+    container = loop.run_until_complete(
+        crs.take_netanal(module=catalog.module, save=False, **NETANAL))
+    theirs = next(iter(container.values()))["results"]
 
-    first, second = script_trace(), script_trace()
     store.set_created_by("periscope")
     from_periscope = _netanal_through_periscope(crs, catalog.module, qt_app)
-    theirs = next(iter(store.load(from_periscope).values()))["results"]
+    ours = next(iter(store.load(from_periscope).values()))["results"]
 
-    def spread(a, b):
-        return (np.max(np.abs(a["frequencies"] - b["frequencies"])),
-                np.max(np.abs(a["iq_counts"] - b["iq_counts"])))
-
-    control_freq, control_iq = spread(first, second)
-    freq, iq = spread(first, theirs)
-    assert freq <= 3 * control_freq
-    assert iq <= 3 * control_iq
+    assert np.max(np.abs(ours["frequencies"] - theirs["frequencies"])) < BASE_FREQUENCY
+    assert np.max(np.abs(ours["iq_counts"] - theirs["iq_counts"])) < (
+        0.01 * np.max(np.abs(theirs["iq_counts"])))

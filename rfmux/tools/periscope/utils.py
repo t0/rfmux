@@ -120,10 +120,6 @@ DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
 DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
 
 # Multisweep defaults
-MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default
-MULTISWEEP_DEFAULT_SPAN_HZ = 200000.0  # 200 kHz span per resonance
-MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
-MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
 # How long a transient status message stays in a panel's toolbar.
 STATUS_MESSAGE_MS = 8000

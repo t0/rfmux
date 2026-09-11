@@ -1040,8 +1040,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         while the thread is still running.
         
         Args:
-            dialog: A dialog instance with dac_scales dict, _update_dac_scale_info(),
-                    and _update_dbm_from_normalized() methods.
+            dialog: A dialog instance with a dac_scales dict and an
+                    _update_dac_scale_info() method.
         """
         if self.crs is None:
             return
@@ -1057,7 +1057,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Connect signals to dialog updates
         self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
         self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
-        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
         self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
         
         self._active_dac_fetcher.start()
@@ -1394,13 +1393,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         active_module = self.module
 
         # --- Launch dialog even if no resonances yet ---
-        dialog = MultisweepDialog( parent=netanal_dialog, 
-                                   section_center_frequencies=[],
-                                   dac_scales=netanal_dialog.dac_scales,   # may be {}
-                                   current_module=active_module,       # may be None
-                                   initial_params=None ,                # nothing prefilled
-                                   load_multisweep = True
-                                 )
+        dialog = MultisweepDialog(parent=netanal_dialog,
+                                  dac_scales=netanal_dialog.dac_scales,  # may be {}
+                                  current_module=active_module,          # may be None
+                                  load_multisweep=True)
 
         
         if dialog.exec():

@@ -83,14 +83,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_windows = []
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
-        # Stores the initial/base CFs for detector ID and fallback. Order is important.
-        self.conceptual_section_frequencies: list[float] = list(self.initial_params.get('resonance_frequencies', []))
-        # Stores {amp: {conceptual_idx: output_cf}}
+        # Stores {amp: {conceptual_idx: output_cf}}, for the legacy lane only
         self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
-        # Amps used for the last configured/completed run, to compare if settings changed.
-        self.current_run_amps: list[float] = list(self.initial_params.get('amps', []))
-        # probe_amplitudes is used for progress display, should reflect current_run_amps
-        self.probe_amplitudes = list(self.current_run_amps) # Ensure it's a copy and reflects current run
 
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
@@ -404,33 +398,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         progress_layout.addLayout(hlayout)
 
-        # Current amplitude label below progress bar
-        self.current_amp_label = QtWidgets.QLabel()
-        num_amplitudes = len(self.probe_amplitudes)
-        
-        # Calculate total iterations based on sweep direction
-        sweep_direction = self.initial_params.get('sweep_direction', 'upward')
-        self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
-        
-        if num_amplitudes > 0:
-            # Initial message showing what's about to happen
-            # When sweep_direction is "both", MultisweepTask does upward first
-            # Normalize sweep_direction to handle potential case or whitespace issues
-            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
-            
-            if sweep_direction_norm == "downward":
-                direction_text = "Down"
-            elif sweep_direction_norm == "upward" or sweep_direction_norm == "both":
-                direction_text = "Up"
-            else:
-                # Fallback for unexpected sweep_direction values
-                direction_text = "Unknown"
-                print(f"WARNING: Unexpected sweep_direction value: '{sweep_direction}'")
-                
-            self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {self.probe_amplitudes[0]:.4f} ({direction_text})")
-        else:
-            self.current_amp_label.setText("No sweeps defined. (Waiting...)")
-        self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter) # Center the text
+        # What the call is about to do, until its first sweep reports back
+        self.current_amp_label = QtWidgets.QLabel(self._planned_sweeps_text())
+        self.current_amp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         progress_layout.addWidget(self.current_amp_label)
         
         layout.addWidget(self.progress_group)
@@ -581,6 +551,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
 
         self._redraw_plots() # Refresh plots with the new data
+
+    @property
+    def conceptual_section_frequencies(self) -> list[float]:
+        """Where each resonator sits, for the noise panel's channel mapping.
+
+        Off the catalog rather than off a list beside it, so it cannot go stale
+        when the array does.
+        """
+        if self.catalog is None:
+            return []
+        return [self.catalog[name].bias.frequency_hz
+                for name in self.catalog.names()]
 
     def _set_amplitude_scale(self, amp):
         """Resolve the schedule's amplitudes for the catalog being swept.
@@ -744,152 +726,63 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         }
     
     def _rerun_multisweep(self):
+        """Sweep the panel's array again, with settings the dialog can change.
+
+        The catalog is the seed: it carries where each resonator is and what it
+        is driven at, so a re-run centres on wherever the array is now without
+        any history of previous sweeps to consult. After Find Bias that catalog
+        is the report's, which is what makes the sweep iterative.
         """
-        Allows the user to re-run the multisweep analysis, potentially with modified parameters.
-        Opens a MultisweepDialog to gather new parameters.
-        """
-        # Ensure MultisweepDialog is available (local import to avoid circular dependencies if any)
         from .dialogs import MultisweepDialog
 
-        if not self.conceptual_section_frequencies: # Check conceptual frequencies
-            QtWidgets.QMessageBox.warning(self, "Cannot Re-run",
-                                          "No center frequencies are known to periscope to run on.")
+        if self.catalog is None:
+            self.current_amp_label.setText("Nothing to sweep: no array in this panel.")
             return
 
-        # --- Determine frequencies to seed the dialog ---
-        dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
+        dialog = MultisweepDialog(parent=self, catalog=self.catalog,
+                                  dac_scales=self.dac_scales,
+                                  initial_params=self.initial_params.copy())
+        if not dialog.exec():
+            return
 
-        ##### Getting the fit values for updating in re-run ######
+        params = dialog.get_parameters()
+        if not params:
+            return
 
+        self.is_loaded_data = False
+        periscope = self._get_periscope_parent()
+        if periscope:
+            my_dock = periscope.dock_manager.find_dock_for_widget(self)
+            if my_dock:
+                my_dock.setWindowTitle(
+                    my_dock.windowTitle().replace(" (Loaded)", ""))
+        self.noise_spectrum_btn.setEnabled(False)
 
-        
-        if self.current_run_amps: # If there was a previous/current run configuration
-            # Use a representative amplitude from the current/last run to seed the dialog
-            # For simplicity, let's use the first amplitude from the current_run_amps.
-            representative_amp_for_seeding = self.current_run_amps[0]
-            for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                remembered_cf = self._get_closest_remembered_cf(idx, representative_amp_for_seeding)
-                if remembered_cf is not None:
-                    dialog_seed_frequencies[idx] = remembered_cf
-        
-        
-        # Prepare other parameters for the dialog
-        dialog_initial_params = self.initial_params.copy() # Use a copy of the window's last run parameters
-        # The 'resonance_frequencies' in dialog_initial_params will be overwritten by dialog_seed_frequencies
-        # when creating the dialog instance if MultisweepDialog uses its 'initial_params' argument
-        # to populate its own 'resonance_frequencies' field.
-        # However, MultisweepDialog takes 'resonance_frequencies' as a direct argument.
+        self.initial_params.update(params)
+        self.catalog = params['catalog']
+        self._set_amplitude_scale(params['amp'])
 
-        dialog = MultisweepDialog(
-            parent=self,
-            section_center_frequencies=dialog_seed_frequencies, # Seed with potentially updated CFs
-            dac_scales=self.dac_scales,
-            current_module=self.target_module,
-            initial_params=dialog_initial_params, # Pass other existing params
-            load_multisweep = False,
-            editable_sections = True
-        )
+        self.multisweep_container = None
+        self.module_sweeps = None
+        self._live.clear()
+        self._redraw_plots()
 
-        if dialog.exec(): # True if user clicked OK
-            # Reset the loaded data flag since we're now generating fresh data
-            self.is_loaded_data = False
-            
-            # Update the dock title to remove "(Loaded)" suffix
-            periscope = self._get_periscope_parent()
-            if periscope:
-                my_dock = periscope.dock_manager.find_dock_for_widget(self)
-                if my_dock:
-                    # Get current title and remove " (Loaded)" if present
-                    current_title = my_dock.windowTitle()
-                    new_title = current_title.replace(" (Loaded)", "")
-                    my_dock.setWindowTitle(new_title)
-            
-            self.noise_spectrum_btn.setEnabled(False)
-            new_params_from_dialog = dialog.get_parameters()
-            if not new_params_from_dialog:
-                return # Dialog returned None, likely due to validation error
+        self.progress_bar.setValue(0)
+        self.progress_group.setVisible(True)
+        self.current_amp_label.setText(self._planned_sweeps_text())
 
-            new_amps_for_this_run = list(new_params_from_dialog.get('amps', []))
-            # section_frequencies_from_dialog are the ones dialog was seeded with, as it doesn't change them.
-            section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
+        parent_widget = self._get_periscope_parent()
+        if parent_widget is None:
+            self.current_amp_label.setText(
+                "Cannot re-run: no Periscope window to start the sweep from.")
+            return
+        parent_widget._start_multisweep_analysis_for_window(self, self.initial_params)
 
-            # --- Determine the final input CFs for the new sweep task ---
-            # This list will be passed to the MultisweepTask as its baseline.
-            # The task itself will then refine this per amplitude.
-            final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
-
-            if not new_amps_for_this_run: # No amplitudes specified, fall back or warn
-                 QtWidgets.QMessageBox.warning(self, "Configuration Error", "No amplitudes specified for the new sweep.")
-                 # Default to conceptual, or could use section_frequencies_from_dialog
-                 final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-            elif new_amps_for_this_run == self.current_run_amps:
-                # Amplitudes haven't changed from the last run configuration.
-                # Use the frequencies that were in the dialog (which were seeded from history).
-                final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-            else:
-                # Amplitudes have changed. For each conceptual section,
-                # find the best historical CF based on the *new* representative amplitude.
-                # If no history, use what was in the dialog (which was seeded based on old rep. amp or conceptual).
-                if new_amps_for_this_run: # Ensure there's at least one new amp
-                    representative_new_amp = new_amps_for_this_run[0]
-                    for idx, conceptual_cf in enumerate(self.conceptual_section_frequencies):
-                        remembered_cf = self._get_closest_remembered_cf(idx, representative_new_amp)
-                        if remembered_cf is not None:
-                            final_baseline_cfs_for_new_task[idx] = remembered_cf
-                        else:
-                            # Fallback to what was in the dialog for this index if no better history for new amp
-                            if idx < len(section_frequencies_from_dialog):
-                                 final_baseline_cfs_for_new_task[idx] = section_frequencies_from_dialog[idx]
-                            # Else it remains the conceptual_cf (already initialized)
-                else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
-                    final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
-
-
-            # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
-            new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task
-            
-            # Store the parameters that will actually be used for this run
-            self.initial_params.update(new_params_from_dialog)
-            self.current_run_amps = new_amps_for_this_run # Update current run amps
-            self.probe_amplitudes = list(self.current_run_amps) # For progress display
-
-            # Reset window state for the new sweep
-            self.results_by_detector.clear()
-            self.multisweep_container = None
-            self.module_sweeps = None
-            self._live.clear()
-            self.catalog = self.initial_params.get('catalog', self.catalog)
-            self._set_amplitude_scale(self.initial_params.get('amp'))
-
-            self._redraw_plots() # Clear plots
-            if self.progress_bar: self.progress_bar.setValue(0)
-            if self.progress_group: self.progress_group.setVisible(True)
-            
-            # Re-calculate total iterations based on new sweep direction
-            num_amplitudes = len(self.probe_amplitudes)
-            sweep_direction = self.initial_params.get('sweep_direction', 'upward')
-            self.total_iterations = num_amplitudes * (2 if sweep_direction == "both" else 1)
-            
-            # Determine initial direction text - consistent with our other direction text logic
-            sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
-            direction_text = "Down" if sweep_direction_norm == "downward" else "Up"
-
-            
-            
-            if self.current_amp_label:
-                if num_amplitudes > 0:
-                    first_amplitude = self.probe_amplitudes[0]
-                    self.current_amp_label.setText(f"Iteration 1/{self.total_iterations}: Amplitude {first_amplitude:.4f} ({direction_text})")
-                else:
-                    self.current_amp_label.setText("No sweeps defined. (Waiting...)")
-            
-            parent_widget = self._get_periscope_parent()
-            if parent_widget and hasattr(parent_widget, '_start_multisweep_analysis_for_window'):
-                # Pass self.initial_params which now contains the correctly determined baseline CFs
-                parent_widget._start_multisweep_analysis_for_window(self, self.initial_params) # type: ignore
-            else:
-                QtWidgets.QMessageBox.warning(self, "Error",
-                                              "Cannot trigger re-run. Parent linkage or method missing.")
+    def _planned_sweeps_text(self) -> str:
+        """How many sweeps the configured call will take, before it starts."""
+        directions = self.initial_params.get('sweep_direction', 'upward')
+        n_directions = 1 if isinstance(directions, str) else len(directions)
+        return f"{len(self._step_amplitudes) * n_directions} sweeps to take..."
 
     def closeEvent(self, event: pg.QtGui.QCloseEvent):
         """

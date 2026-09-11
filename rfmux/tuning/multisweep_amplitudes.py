@@ -667,8 +667,9 @@ class AmplitudeSchedule:
             "info",
             f"{self.nsteps} amplitude step{'' if self.nsteps == 1 else 's'} × "
             f"{n_directions} direction{'' if n_directions == 1 else 's'} = "
-            f"{self.nsteps * n_directions} sweeps of {len(names)} "
-            f"section{'' if len(names) == 1 else 's'}.",
+            f"{self.nsteps * n_directions} "
+            f"sweep{'' if self.nsteps * n_directions == 1 else 's'} of "
+            f"{len(names)} section{'' if len(names) == 1 else 's'}.",
         ))
         return issues
 

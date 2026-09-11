@@ -1,16 +1,39 @@
-"""Dialog for multisweep settings."""
+"""The Multisweep dialog: a view over ``crs.multisweep``'s own arguments.
 
-from .utils import (
-    QtWidgets, QtCore, QtGui, QDoubleValidator, QIntValidator,
-    DEFAULT_AMPLITUDE, MULTISWEEP_DEFAULT_SPAN_HZ, MULTISWEEP_DEFAULT_NPOINTS, 
-    MULTISWEEP_DEFAULT_NSAMPLES, traceback
-)
-from .network_analysis_base import NetworkAnalysisDialogBase
+Nothing here computes what a sweep will do. The amplitude group builds an
+:class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` through the
+constructor each radio names, and the schedule's own ``describe`` and
+``validate`` fill the summary line and the status label. What the dialog emits
+is the keyword arguments the driver takes, and nothing else.
+"""
+
+import inspect
+import traceback
+
+import numpy as np
+from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QDoubleValidator, QIntValidator
+
+from rfmux.algorithms.measurement.multisweep import multisweep
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, store
-from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
-import numpy as np
-from PyQt6.QtCore import Qt
+
+from .network_analysis_base import NetworkAnalysisDialogBase
+from .utils import DEFAULT_AMPLITUDE
+
+# What the driver does when you say nothing. Read once, at import, so the
+# dialog cannot offer a default the library does not have.
+DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(multisweep).parameters.items()
+    if parameter.default is not inspect.Parameter.empty
+}
+
+#: Severity to icon, worst first — the order the status label picks from.
+_SEVERITY = [("error", "✗"), ("warning", "⚠"), ("info", "✓")]
+_SEVERITY_COLOR = {"error": "#CC3333", "warning": "#CC8833", "info": "#338833"}
+
 
 def load_multisweep_container(parent: QtWidgets.QWidget, file_path: str):
     """Read a saved multisweep with ``store.load``, or say why it is not one.
@@ -37,319 +60,509 @@ def load_multisweep_container(parent: QtWidgets.QWidget, file_path: str):
 
 
 class MultisweepDialog(NetworkAnalysisDialogBase):
-    """
-    Dialog for configuring a Multisweep operation.
-    Inherits from NetworkAnalysisDialogBase for amplitude settings and DAC scale handling.
-    Allows specifying parameters for sweeping multiple pre-identified resonances.
-    """
-    def __init__(self, parent: QtWidgets.QWidget = None, 
-                 section_center_frequencies: list[float] | None = None, 
-                 dac_scales: dict[int, float] = None, 
-                 current_module: int | None = None, 
-                 initial_params: dict | None = None, load_multisweep = False, editable_sections = False):
-        """
-        Initializes the Multisweep configuration dialog.
+    """Configure one ``crs.multisweep`` call over a :class:`ResonatorCatalog`."""
 
+    def __init__(self, parent: QtWidgets.QWidget = None,
+                 catalog: ResonatorCatalog | None = None,
+                 dac_scales: dict[int, float] = None,
+                 current_module: int | None = None,
+                 initial_params: dict | None = None,
+                 load_multisweep: bool = False):
+        """
         Args:
-            parent: The parent widget.
-            section_center_frequencies: List of center frequencies (in Hz) for each sweep section.
-            dac_scales: Pre-fetched DAC scales.
-            current_module: The module ID on which the multisweep will be performed.
-            initial_params: Dictionary of initial parameters to populate fields.
+            catalog: the array to sweep. A multisweep measures a catalog, so
+                this is the dialog's subject: the schedule resolves against it,
+                and the summary and validation are about it.
+            dac_scales: pre-fetched DAC scales, for the power range in the
+                summary and the full-scale label.
+            current_module: the module, when there is no catalog to read it off
+                — the load and custom-frequency modes before one exists.
+            initial_params: a previous call's arguments, to seed the fields.
+            load_multisweep: offer Import and a Load button rather than a sweep.
         """
         super().__init__(parent, params=initial_params, dac_scales=dac_scales)
-        self.section_center_frequencies = section_center_frequencies or []
-        self.current_module = current_module # Store the current module for DAC scale and params
+        self.catalog = catalog
+        self.current_module = (catalog.module if catalog is not None
+                               else current_module)
         self.load_multisweep = load_multisweep
-        self.editable_sections = editable_sections
 
         self.use_data_from_file = False
         self.loaded_container = None
-        self.section_count = 0
 
         self.setWindowTitle("Multisweep Configuration")
         self.setModal(True)
 
-        
-        # if self.load_multisweep:
-        #     self._setup_load_ui()
-        # else:
         self._setup_ui()
-            
-        # Asynchronously fetch DAC scales if not provided and CRS is available
-        # This is similar to NetworkAnalysisParamsDialog logic   
-        
-        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
-            main_periscope_window = parent.parent()
-            if hasattr(main_periscope_window, 'crs') and main_periscope_window.crs is not None:
-                # Only fetch if dac_scales weren't passed in and we have a method to do so
-                if not self.dac_scales and hasattr(self, '_fetch_dac_scales_for_dialog'):
-                    self._fetch_dac_scales_for_dialog(main_periscope_window.crs)
-                elif self.dac_scales: # If scales were provided, update UI
-                    self._update_dac_scale_info()
-                    self._update_dbm_from_normalized()
 
+        if self.crs_for_dac_scales() is not None and not self.dac_scales:
+            self._fetch_dac_scales_for_dialog(self.crs_for_dac_scales())
+        self._update_dac_scale_info()
+        self._refresh()
 
+    # ── the board, for the DAC scale only ────────────────────────────────────
+
+    def crs_for_dac_scales(self):
+        """The board, if a Periscope is above us, so full scale can be shown."""
+        widget = self.parent()
+        while widget is not None:
+            crs = getattr(widget, "crs", None)
+            if crs is not None:
+                return crs
+            widget = widget.parent()
+        return None
 
     def _fetch_dac_scales_for_dialog(self, crs_obj):
-        """
-        Initiates asynchronous fetching of DAC scales for this dialog.
-        This method is specific to MultisweepDialog if its DAC fetching needs
-        to be handled differently or if it's called from a different context.
-        Currently, it's similar to the one in NetworkAnalysisParamsDialog.
+        from .tasks import DACScaleFetcher
+        self._fetcher = DACScaleFetcher(crs_obj)
+        self._fetcher.dac_scales_ready.connect(self._on_dac_scales_ready_dialog)
+        self._fetcher.start()
 
-        Args:
-            crs_obj: The CRS object to query.
-        """
-        self.fetcher = DACScaleFetcher(crs_obj)
-        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready_dialog)
-        self.fetcher.start()
-
-    @QtCore.pyqtSlot(dict)
     def _on_dac_scales_ready_dialog(self, scales_dict: dict[int, float]):
-        """
-        Slot to handle received DAC scales specifically for this dialog instance.
-        Updates DAC scales and refreshes relevant UI parts.
-
-        Args:
-            scales_dict: Dictionary of module ID to DAC scale (dBm).
-        """
-        self.dac_scales = scales_dict
+        self.dac_scales.update(scales_dict)
         self._update_dac_scale_info()
-        self._update_dbm_from_normalized()
-
-    @staticmethod
-    def _direction_text(sweep_direction) -> str:
-        """The combo entry for one of multisweep's own *sweep_direction* values.
-
-        Both directions is a sequence there, so a re-run seeded from a previous
-        call's arguments finds "Both" rather than falling back to Upward.
-        """
-        if not isinstance(sweep_direction, str):
-            if not sweep_direction:
-                return "Upward"
-            if len(sweep_direction) > 1:
-                return "Both"
-            sweep_direction = sweep_direction[0]
-        return {"upward": "Upward", "downward": "Downward"}.get(
-            str(sweep_direction).lower(), "Upward")
+        self._refresh()
 
     def _get_selected_modules(self) -> list[int]:
-        """
-        Returns the module relevant for this multisweep dialog.
-        For multisweep, it's typically a single, pre-determined module.
-
-        Returns:
-            A list containing the current_module ID if set, otherwise an empty list.
-        """
         return [self.current_module] if self.current_module is not None else []
 
+    # ── the UI ───────────────────────────────────────────────────────────────
 
-    def _update_section_count(self, text):
-        """Update label with section count based on QLineEdit content."""
-        text = text.strip()
-        if not text:
-            self.sections_info_label.setText("No data. Enter manually if desired.")
-            self.start_btn.setEnabled(False)
-            self.load_btn.setEnabled(False)
-            return
-        self.start_btn.setEnabled(True)
-        # Split on commas, ignore empty pieces
-        parts = [p.strip() for p in text.split(",") if p.strip()]
-        self.section_count = len(parts)
-        self.sections_info_label.setText(f"Loaded {self.section_count} section(s).")
-    
     def _setup_ui(self):
-        """Sets up the user interface elements for the Multisweep dialog."""
         layout = QtWidgets.QVBoxLayout(self)
 
-        # Display information about target resonances
         if self.load_multisweep:
             self.import_button = QtWidgets.QPushButton("Import Sweep File")
             self.import_button.clicked.connect(self._import_file)
             layout.addWidget(self.import_button)
-    
-            # --- Sweep Sections ---
-            section_info_group = QtWidgets.QGroupBox("Sweep sections")
-            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
-            
-            section_label_layout = QtWidgets.QHBoxLayout()
-            self.sections_info_label = QtWidgets.QLabel("No file loaded. Enter manually if desired.")
-            self.sections_info_label.setWordWrap(True)
-            section_label_layout.addWidget(self.sections_info_label, stretch=1)
-            
-            section_info_layout.addLayout(section_label_layout)
-    
-            # Manual input fallback (comma-separated sweep central frequencies in MHz)
-            self.sections_edit = QtWidgets.QLineEdit()
-            self.sections_edit.setPlaceholderText("Enter sweep central frequencies (MHz, comma separated)")
-            self.sections_edit.textChanged.connect(self._update_section_count)
-            section_info_layout.addWidget(self.sections_edit)
-            layout.addWidget(section_info_group)
 
-        elif self.editable_sections:
-            section_info_group = QtWidgets.QGroupBox("Sweep sections")
-            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
-            
-            section_label_layout = QtWidgets.QHBoxLayout()
-            self.sections_info_label = QtWidgets.QLabel("Central frequencies for re-run")
-            self.sections_info_label.setWordWrap(True)
-            section_label_layout.addWidget(self.sections_info_label, stretch=1)
-            
-            section_info_layout.addLayout(section_label_layout)
-    
-            # Default input fallback (comma-separated sweep central frequencies in MHz)
-            self.sections_edit = QtWidgets.QLineEdit()
-            section_freq_rerun = ", ".join([f"{f / 1e6:.9f}" for f in self.section_center_frequencies])
-            self.sections_edit.setText(section_freq_rerun)
-            self.sections_edit.textChanged.connect(self._update_section_count)
-            section_info_layout.addWidget(self.sections_edit)
-            layout.addWidget(section_info_group)
-            
+        layout.addWidget(self._sections_group())
+        layout.addWidget(self._amplitude_group())
+        layout.addWidget(self._parameters_group())
+        layout.addWidget(self._output_group())
+
+        self.status_label = QtWidgets.QLabel()
+        self.status_label.setWordWrap(True)
+        layout.addWidget(self.status_label)
+
+        self.summary_label = QtWidgets.QLabel()
+        self.summary_label.setWordWrap(True)
+        layout.addWidget(self.summary_label)
+
+        layout.addLayout(self._buttons())
+
+        for key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+            shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
+            shortcut.activated.connect(self._start_if_valid)
+
+        self.setMinimumWidth(520)
+
+    def _sections_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Sweep sections")
+        form = QtWidgets.QVBoxLayout(group)
+
+        self.sections_info_label = QtWidgets.QLabel()
+        self.sections_info_label.setWordWrap(True)
+        form.addWidget(self.sections_info_label)
+
+        self.custom_frequencies_cb = QtWidgets.QCheckBox("Custom frequencies")
+        self.custom_frequencies_cb.setToolTip(
+            "Sweep frequencies you type rather than the array you came from.\n"
+            "A fresh catalog is built from them, which means new names and one\n"
+            "amplitude for every resonator.")
+        self.custom_frequencies_cb.toggled.connect(self._refresh)
+        form.addWidget(self.custom_frequencies_cb)
+
+        self.custom_widget = QtWidgets.QWidget()
+        custom_form = QtWidgets.QFormLayout(self.custom_widget)
+        custom_form.setContentsMargins(0, 0, 0, 0)
+        self.sections_edit = QtWidgets.QLineEdit()
+        self.sections_edit.setPlaceholderText(
+            "Sweep centres (MHz, comma separated)")
+        self.sections_edit.textChanged.connect(self._refresh)
+        custom_form.addRow("Frequencies (MHz):", self.sections_edit)
+        self.custom_amp_edit = QtWidgets.QLineEdit(str(DEFAULT_AMPLITUDE))
+        self.custom_amp_edit.setValidator(QDoubleValidator(0.0, 1.0, 9, self))
+        self.custom_amp_edit.textChanged.connect(self._refresh)
+        custom_form.addRow("Amplitude for each:", self.custom_amp_edit)
+        form.addWidget(self.custom_widget)
+
+        return group
+
+    def _amplitude_group(self) -> QtWidgets.QGroupBox:
+        """One radio per ``AmplitudeSchedule`` constructor, each with its own
+        fields; the selected one is the schedule."""
+        group = QtWidgets.QGroupBox("Amplitude schedule")
+        grid = QtWidgets.QGridLayout(group)
+        self.schedule_buttons = QtWidgets.QButtonGroup(self)
+
+        def radio(row, key, text, tip, fields=()):
+            button = QtWidgets.QRadioButton(text)
+            button.setToolTip(tip)
+            self.schedule_buttons.addButton(button)
+            button.setProperty("schedule_kind", key)
+            grid.addWidget(button, row, 0)
+            holder = QtWidgets.QWidget()
+            line = QtWidgets.QHBoxLayout(holder)
+            line.setContentsMargins(0, 0, 0, 0)
+            for label, widget in fields:
+                if label:
+                    line.addWidget(QtWidgets.QLabel(label))
+                line.addWidget(widget)
+            line.addStretch(1)
+            grid.addWidget(holder, row, 1)
+            self._schedule_fields[key] = holder
+            return button
+
+        self._schedule_fields = {}
+
+        self.catalog_radio = radio(
+            0, "catalog", "Each resonator's own amplitude",
+            "AmplitudeSchedule(): one pass, at the amplitude the catalog "
+            "records for each resonator.")
+
+        self.single_amp_edit = self._number(DEFAULT_AMPLITUDE)
+        self.single_radio = radio(
+            1, "single", "One amplitude",
+            "AmplitudeSchedule(x): one pass, at this amplitude for everything.",
+            [("", self.single_amp_edit)])
+
+        self.list_amp_edit = QtWidgets.QLineEdit("0.001, 0.002, 0.004")
+        self.list_amp_edit.textChanged.connect(self._refresh)
+        self.list_radio = radio(
+            2, "explicit", "A list of amplitudes",
+            "AmplitudeSchedule.explicit([...]): these amplitudes, in this order.",
+            [("", self.list_amp_edit)])
+
+        self.ramp_start_edit = self._number(0.001)
+        self.ramp_stop_edit = self._number(0.01)
+        self.ramp_steps_edit = self._integer(5)
+        self.ramp_spacing = self._spacing_combo()
+        self.ramp_radio = radio(
+            3, "ramp", "A ramp",
+            "AmplitudeSchedule.ramp(start, stop, steps): absolute amplitudes, "
+            "the same for every resonator.",
+            [("from", self.ramp_start_edit), ("to", self.ramp_stop_edit),
+             ("in", self.ramp_steps_edit), ("steps,", self.ramp_spacing)])
+
+        self.factor_start_edit = self._number(0.5)
+        self.factor_stop_edit = self._number(2.0)
+        self.factor_steps_edit = self._integer(5)
+        self.factor_spacing = self._spacing_combo()
+        self.multiplicative_radio = radio(
+            4, "multiplicative", "Multiples of each catalog amplitude",
+            "AmplitudeSchedule.multiplicative(start, stop, steps): every "
+            "resonator keeps its own scale and walks the same factors.",
+            [("×", self.factor_start_edit), ("to ×", self.factor_stop_edit),
+             ("in", self.factor_steps_edit), ("steps,", self.factor_spacing)])
+
+        self.schedule_buttons.buttonToggled.connect(self._refresh)
+        self._seed_schedule_from(self.params.get("amp"))
+        return group
+
+    def _number(self, default) -> QtWidgets.QLineEdit:
+        edit = QtWidgets.QLineEdit(f"{default:g}")
+        edit.setValidator(QDoubleValidator(0.0, 1e6, 9, self))
+        edit.setMaximumWidth(90)
+        edit.textChanged.connect(self._refresh)
+        return edit
+
+    def _integer(self, default) -> QtWidgets.QLineEdit:
+        edit = QtWidgets.QLineEdit(str(default))
+        edit.setValidator(QIntValidator(1, 1000, self))
+        edit.setMaximumWidth(60)
+        edit.textChanged.connect(self._refresh)
+        return edit
+
+    def _spacing_combo(self) -> QtWidgets.QComboBox:
+        combo = QtWidgets.QComboBox()
+        combo.addItems(["log", "linear"])
+        combo.currentIndexChanged.connect(self._refresh)
+        return combo
+
+    def _seed_schedule_from(self, amp):
+        """Select the radio that says what a previous call's ``amp`` was."""
+        if isinstance(amp, AmplitudeSchedule):
+            if amp.relative and amp.steps == (1.0,):
+                self.catalog_radio.setChecked(True)
+            elif amp.relative:
+                self.multiplicative_radio.setChecked(True)
+                self.factor_start_edit.setText(f"{amp.steps[0]:g}")
+                self.factor_stop_edit.setText(f"{amp.steps[-1]:g}")
+                self.factor_steps_edit.setText(str(len(amp.steps)))
+            else:
+                self.list_radio.setChecked(True)
+                self.list_amp_edit.setText(
+                    ", ".join(f"{v:g}" for v in amp.steps))
+        elif isinstance(amp, (int, float)):
+            self.single_radio.setChecked(True)
+            self.single_amp_edit.setText(f"{float(amp):g}")
         else:
-            section_info_group = QtWidgets.QGroupBox("Sweep sections")
-            section_info_layout = QtWidgets.QVBoxLayout(section_info_group)
-            num_sections = len(self.section_center_frequencies)
-            section_label_text = f"Number of sections to sweep: {num_sections}"
-            if num_sections > 0:
-                # Show first few sweep central frequencies for quick reference
-                section_freq_mhz_str = ", ".join([f"{f / 1e6:.3f}" for f in self.section_center_frequencies[:5]])
-                if num_sections > 5:
-                    section_freq_mhz_str += ", ..."  # Indicate more frequencies exist
-                section_label_text += f"\nFrequencies (MHz): {section_freq_mhz_str}"
-    
-            
-            self.sections_info_label = QtWidgets.QLabel(section_label_text)
-            self.sections_info_label.setWordWrap(True)
-            section_info_layout.addWidget(self.sections_info_label)
-            layout.addWidget(section_info_group)
+            self.catalog_radio.setChecked(True)
 
-        # Sweep parameters group
-        param_group = QtWidgets.QGroupBox("Sweep Parameters")
-        param_form_layout = QtWidgets.QFormLayout(param_group)
+    def _parameters_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Sweep Parameters")
+        form = QtWidgets.QFormLayout(group)
 
-        # Span per section (kHz)
-        default_span_khz = self.params.get('span_hz', MULTISWEEP_DEFAULT_SPAN_HZ) / 1e3
-        self.span_khz_edit = QtWidgets.QLineEdit(str(default_span_khz))
-        self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 2, self)) # Min 0.1 kHz, Max 10 MHz
-        param_form_layout.addRow("Span per section (kHz):", self.span_khz_edit)
+        span_khz = self.params.get("span_hz", DEFAULTS["span_hz"]) / 1e3
+        self.span_khz_edit = QtWidgets.QLineEdit(f"{span_khz:g}")
+        self.span_khz_edit.setValidator(QDoubleValidator(0.1, 10000.0, 3, self))
+        self.span_khz_edit.textChanged.connect(self._refresh)
+        form.addRow("Span per section (kHz):", self.span_khz_edit)
 
-        # Number of points per sweep
-        default_npoints = self.params.get('npoints_per_sweep', MULTISWEEP_DEFAULT_NPOINTS)
-        self.npoints_edit = QtWidgets.QLineEdit(str(default_npoints))
-        self.npoints_edit.setValidator(QIntValidator(2, 10000, self)) # Min 2 points
-        param_form_layout.addRow("Number of points per sweep:", self.npoints_edit)
+        self.npoints_edit = QtWidgets.QLineEdit(str(self.params.get(
+            "npoints_per_sweep", DEFAULTS["npoints_per_sweep"])))
+        self.npoints_edit.setValidator(QIntValidator(2, 10000, self))
+        self.npoints_edit.textChanged.connect(self._refresh)
+        form.addRow("Points per sweep:", self.npoints_edit)
 
-        # Samples to average (nsamps)
-        default_nsamps = self.params.get('nsamps', MULTISWEEP_DEFAULT_NSAMPLES)
-        self.nsamps_edit = QtWidgets.QLineEdit(str(default_nsamps))
-        self.nsamps_edit.setValidator(QIntValidator(1, 10000, self)) # Min 1 sample
-        param_form_layout.addRow("Samples to average per point (nsamps):", self.nsamps_edit)
+        self.nsamps_edit = QtWidgets.QLineEdit(str(self.params.get(
+            "nsamps", DEFAULTS["nsamps"])))
+        self.nsamps_edit.setValidator(QIntValidator(1, 10000, self))
+        self.nsamps_edit.textChanged.connect(self._refresh)
+        form.addRow("Samples to average per point:", self.nsamps_edit)
 
-        
-        self.setup_amplitude_group(param_form_layout) # Shared amplitude settings
+        directions = self._seeded_directions()
+        self.upward_cb = QtWidgets.QCheckBox("Upward")
+        self.upward_cb.setChecked("upward" in directions)
+        self.downward_cb = QtWidgets.QCheckBox("Downward")
+        self.downward_cb.setChecked("downward" in directions)
+        for box in (self.upward_cb, self.downward_cb):
+            box.toggled.connect(self._refresh)
+        direction_row = QtWidgets.QWidget()
+        direction_layout = QtWidgets.QHBoxLayout(direction_row)
+        direction_layout.setContentsMargins(0, 0, 0, 0)
+        direction_layout.addWidget(self.upward_cb)
+        direction_layout.addWidget(self.downward_cb)
+        direction_layout.addStretch(1)
+        form.addRow("Sweep direction:", direction_row)
 
+        self.dac_scale_info = QtWidgets.QLabel("Unknown")
+        self.dac_scale_info.setWordWrap(True)
+        form.addRow("DAC full scale (dBm):", self.dac_scale_info)
 
-        # Sweep direction selection
-        self.sweep_direction_combo = QtWidgets.QComboBox()
-        self.sweep_direction_combo.addItems(["Upward", "Downward", "Both"])
-        
-        self.sweep_direction_combo.setCurrentText(
-            self._direction_text(self.params.get('sweep_direction', 'upward')))
+        return group
 
-        self.sweep_direction_combo.setToolTip(
-            "Direction of frequency sweep:\n"
-            "- Upward: Sweep from lower to higher frequencies.\n"
-            "- Downward: Sweep from higher to lower frequencies.\n"
-            "- Both: Perform both sweep directions sequentially."
-        )
-        param_form_layout.addRow("Sweep Direction:", self.sweep_direction_combo)
+    def _seeded_directions(self) -> tuple[str, ...]:
+        seeded = self.params.get("sweep_direction",
+                                 self.params.get("directions", "upward"))
+        if isinstance(seeded, str):
+            return (seeded,)
+        return tuple(seeded)
 
-        layout.addWidget(param_group)
+    def _output_group(self) -> QtWidgets.QGroupBox:
+        group = QtWidgets.QGroupBox("Measurement")
+        form = QtWidgets.QFormLayout(group)
+        self.label_edit = QtWidgets.QLineEdit(self.params.get("label") or "")
+        self.label_edit.setPlaceholderText("optional name for this measurement")
+        self.label_edit.textChanged.connect(self._refresh)
+        form.addRow("Name:", self.label_edit)
+        self.filename_label = QtWidgets.QLabel()
+        form.addRow("Saves as:", self.filename_label)
+        return group
 
+    def _buttons(self) -> QtWidgets.QHBoxLayout:
+        row = QtWidgets.QHBoxLayout()
+        self.start_btn = QtWidgets.QPushButton("Start Multisweep")
+        self.start_btn.setDefault(True)
+        self.start_btn.clicked.connect(self.accept)
+        row.addWidget(self.start_btn)
 
-
-        if self.load_multisweep:
-            btn_layout = QtWidgets.QHBoxLayout()
-            self.start_btn = QtWidgets.QPushButton("Start Multisweep")
-            self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
-            self.start_btn.setEnabled(False)
-            self.load_btn = QtWidgets.QPushButton("Load Multisweep")
-            self.load_btn.setEnabled(False) ### Will enable once file is available.
-            self.cancel_btn = QtWidgets.QPushButton("Cancel")
-            btn_layout.addWidget(self.start_btn)
-            btn_layout.addWidget(self.load_btn)
-            btn_layout.addWidget(self.cancel_btn)
-            layout.addLayout(btn_layout)
-        
-            self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
-    
-            self.load_btn.clicked.connect(self._load_data_avail) 
-            
-            self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
-
-        else:
-            btn_layout = QtWidgets.QHBoxLayout()
-            self.start_btn = QtWidgets.QPushButton("Start Multisweep")
-            self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
-            self.load_btn = QtWidgets.QPushButton("Load Multisweep")
+        self.load_btn = QtWidgets.QPushButton("Load Multisweep")
+        self.load_btn.setEnabled(False)
+        self.load_btn.clicked.connect(self._load_data_avail)
+        if not self.load_multisweep:
             self.load_btn.hide()
-            self.cancel_btn = QtWidgets.QPushButton("Cancel")
-            btn_layout.addWidget(self.start_btn)
-            btn_layout.addWidget(self.cancel_btn)
-            layout.addLayout(btn_layout)
-        
-            self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot            
-            self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
-            
-        # Create keyboard shortcuts for Enter/Return keys to trigger "Start Multisweep"
-        # This works regardless of which widget has focus
-        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
-        self.enter_shortcut.activated.connect(self.accept)
-        
-        # Also handle numpad Enter
-        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
-        self.numpad_enter_shortcut.activated.connect(self.accept)
+        row.addWidget(self.load_btn)
 
-        # Initial update of dBm field if DAC scales are already known
-        if self.dac_scales: # Check if dac_scales were passed or fetched synchronously before UI setup
-            self._update_dac_scale_info() # Ensure info label is also up-to-date
-            self._update_dbm_from_normalized()
-        
-        self.setMinimumWidth(500) # Ensure dialog is wide enough
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.clicked.connect(self.reject)
+        row.addWidget(self.cancel_btn)
+        return row
+
+    # ── what the fields say ──────────────────────────────────────────────────
+
+    def _schedule_kind(self) -> str:
+        button = self.schedule_buttons.checkedButton()
+        return button.property("schedule_kind") if button else "catalog"
+
+    def _numbers(self, text: str) -> list[float]:
+        return [float(part) for part in text.replace(",", " ").split()]
+
+    def schedule(self) -> AmplitudeSchedule:
+        """The schedule the selected radio names. Raises on unusable fields."""
+        kind = self._schedule_kind()
+        if kind == "single":
+            return AmplitudeSchedule(float(self.single_amp_edit.text()))
+        if kind == "explicit":
+            return AmplitudeSchedule.explicit(
+                self._numbers(self.list_amp_edit.text()))
+        if kind == "ramp":
+            return AmplitudeSchedule.ramp(
+                float(self.ramp_start_edit.text()),
+                float(self.ramp_stop_edit.text()),
+                int(self.ramp_steps_edit.text()),
+                spacing=self.ramp_spacing.currentText())
+        if kind == "multiplicative":
+            return AmplitudeSchedule.multiplicative(
+                float(self.factor_start_edit.text()),
+                float(self.factor_stop_edit.text()),
+                int(self.factor_steps_edit.text()),
+                spacing=self.factor_spacing.currentText())
+        return AmplitudeSchedule()
+
+    def directions(self):
+        """One direction as a string, both as the sequence multisweep takes."""
+        chosen = tuple(d for d, box in (("upward", self.upward_cb),
+                                        ("downward", self.downward_cb))
+                       if box.isChecked())
+        return chosen[0] if len(chosen) == 1 else chosen
+
+    def sweep_catalog(self) -> ResonatorCatalog | None:
+        """The array to sweep: the one handed in, or one minted from typed
+        frequencies, which needs an amplitude and invents names."""
+        if not self.custom_frequencies_cb.isChecked():
+            return self.catalog
+        frequencies = [f * 1e6 for f in self._numbers(self.sections_edit.text())]
+        if not frequencies or self.current_module is None:
+            return None
+        return ResonatorCatalog.from_frequencies(
+            frequencies, module=self.current_module,
+            amplitude=float(self.custom_amp_edit.text()))
+
+    # ── the live preview ─────────────────────────────────────────────────────
+
+    def _refresh(self, *_args):
+        """Say what this call would do, and whether it can run at all.
+
+        Every number shown is one the schedule computed: ``validate`` for the
+        complaints and ``describe`` for the summary, so the dialog and the
+        driver cannot disagree about what was asked for.
+        """
+        if not hasattr(self, "status_label"):
+            return
+
+        self.custom_widget.setVisible(self.custom_frequencies_cb.isChecked())
+        for kind, holder in self._schedule_fields.items():
+            holder.setEnabled(kind == self._schedule_kind())
+
+        catalog = None
+        issues = []
+        try:
+            catalog = self.sweep_catalog()
+        except (ValueError, TypeError) as exc:
+            issues.append(("error", str(exc)))
+
+        if catalog is None and not issues:
+            issues.append(("error", "No resonators to sweep."))
+        self.sections_info_label.setText(
+            f"{len(catalog.names())} resonators, "
+            f"{catalog.names()[0]} to {catalog.names()[-1]}"
+            if catalog is not None and catalog.names() else "No array loaded.")
+
+        directions = self.directions()
+        if not directions:
+            issues.append(("error", "Pick at least one sweep direction."))
+        n_directions = 1 if isinstance(directions, str) else len(directions)
+
+        schedule = None
+        if catalog is not None:
+            try:
+                schedule = self.schedule()
+            except (ValueError, TypeError) as exc:
+                issues.append(("error", str(exc)))
+            else:
+                issues.extend(schedule.validate(catalog, max(n_directions, 1)))
+
+        issues.extend(self._parameter_issues())
+        self._show_issues(issues)
+        self._show_summary(schedule, catalog, n_directions)
+        self.filename_label.setText(
+            store._filename("multisweep", self.label_edit.text().strip() or None,
+                            store._now()))
+
+        blocked = any(severity == "error" for severity, _ in issues)
+        self.start_btn.setEnabled(not blocked)
+
+    def _parameter_issues(self) -> list[tuple[str, str]]:
+        issues = []
+        try:
+            if float(self.span_khz_edit.text()) <= 0:
+                issues.append(("error", "Span must be positive."))
+        except ValueError:
+            issues.append(("error", "Span is not a number."))
+        try:
+            if int(self.npoints_edit.text()) < 2:
+                issues.append(("error", "A sweep needs at least two points."))
+        except ValueError:
+            issues.append(("error", "Points per sweep is not a whole number."))
+        try:
+            if int(self.nsamps_edit.text()) < 1:
+                issues.append(("error", "Samples to average must be at least 1."))
+        except ValueError:
+            issues.append(("error", "Samples to average is not a whole number."))
+        return issues
+
+    def _show_issues(self, issues):
+        for severity, icon in _SEVERITY:
+            said = [message for level, message in issues if level == severity]
+            if said:
+                self.status_label.setText(f"{icon} {said[0]}")
+                self.status_label.setStyleSheet(
+                    f"color: {_SEVERITY_COLOR[severity]};")
+                self.status_label.setToolTip("\n".join(
+                    message for _, message in issues))
+                return
+        self.status_label.setText("")
+        self.status_label.setToolTip("")
+
+    def _show_summary(self, schedule, catalog, n_directions):
+        if schedule is None or catalog is None:
+            self.summary_label.setText("")
+            return
+        dac_scale = self.dac_scales.get(self.current_module)
+        try:
+            described = schedule.describe(catalog, max(n_directions, 1), dac_scale)
+        except (ValueError, TypeError):
+            self.summary_label.setText("")
+            return
+        sweeps, sections = described["n_sweeps"], described["n_sections"]
+        text = (f"{sweeps} sweep{'' if sweeps == 1 else 's'} of "
+                f"{sections} section{'' if sections == 1 else 's'}, "
+                f"{described['amplitude_min']:.4g} to "
+                f"{described['amplitude_max']:.4g} normalized")
+        if "power_dbm_min" in described:
+            text += (f" ({described['power_dbm_min']:+.1f} to "
+                     f"{described['power_dbm_max']:+.1f} dBm)")
+        self.summary_label.setText(text)
+
+    def _start_if_valid(self):
+        if self.start_btn.isEnabled():
+            self.accept()
+
+    # ── loading a previous sweep ─────────────────────────────────────────────
 
     def _load_data_avail(self):
-        """Mark that data should be loaded from file and accept the dialog."""
         self.use_data_from_file = True
         self.accept()
 
     def _import_file(self):
-        """
-        Trigger non-blocking async file dialog instead of blocking getOpenFileName.
-        """
         QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
 
     def _open_file_dialog_async(self):
-        """Open a non-blocking file dialog to select a multisweep parameter file."""
-        if not hasattr(self, "_file_dialog") or self._file_dialog is None:
-            self._file_dialog = QtWidgets.QFileDialog(self, "Load Multisweep Parameters")
-            self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
-            self._file_dialog.setNameFilters([
-                "Pickle Files (*.pkl *.pickle)",
-                "All Files (*)",
-            ])
+        if getattr(self, "_file_dialog", None) is None:
+            self._file_dialog = QtWidgets.QFileDialog(
+                self, "Load Multisweep Parameters")
+            self._file_dialog.setFileMode(
+                QtWidgets.QFileDialog.FileMode.ExistingFile)
+            self._file_dialog.setNameFilters(
+                ["Pickle Files (*.pkl *.pickle)", "All Files (*)"])
             self._file_dialog.setOptions(
                 QtWidgets.QFileDialog.Option.DontUseNativeDialog
-                | QtWidgets.QFileDialog.Option.ReadOnly
-            )
+                | QtWidgets.QFileDialog.Option.ReadOnly)
             self._file_dialog.setModal(False)
             self._file_dialog.fileSelected.connect(self._on_file_selected)
-            self._file_dialog.rejected.connect(self._on_file_dialog_closed)
-
         self._file_dialog.open()
 
-
-    @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
         """Fill the fields in from what the file records about the sweep."""
         container = load_multisweep_container(self, path)
@@ -358,124 +571,44 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
 
         self.loaded_container = container
         self.load_btn.setEnabled(True)
-        self.start_btn.setEnabled(True)
 
         block = next(iter(container.values()))
         call_params = block["call_params"]
-        catalog = ResonatorCatalog.from_dict(call_params["catalog"])
+        self.catalog = ResonatorCatalog.from_dict(call_params["catalog"])
+        self.current_module = self.catalog.module
 
-        centers = [catalog[name].bias.frequency_hz for name in catalog.names()]
-        self.sections_edit.setText(",".join(f"{f / 1e6:.9f}" for f in centers))
-        self.sections_info_label.setText(f"Loaded {len(centers)} sections from file.")
-
-        self.span_khz_edit.setText(str(call_params["span_hz"] / 1e3))
+        self.span_khz_edit.setText(f"{call_params['span_hz'] / 1e3:g}")
         self.npoints_edit.setText(str(call_params["npoints_per_sweep"]))
         self.nsamps_edit.setText(str(call_params["nsamps"]))
+        directions = call_params["directions"]
+        self.upward_cb.setChecked("upward" in directions)
+        self.downward_cb.setChecked("downward" in directions)
+        self._seed_schedule_from(
+            AmplitudeSchedule.from_dict(call_params["amp_schedule"]))
+        self._update_dac_scale_info()
+        self._refresh()
 
-        idx = self.sweep_direction_combo.findText(
-            self._direction_text(call_params["directions"]),
-            Qt.MatchFlag.MatchFixedString)
-        if idx >= 0:
-            self.sweep_direction_combo.setCurrentIndex(idx)
+    # ── what the task is given ───────────────────────────────────────────────
 
-        # The amplitudes the call actually walked, which is what the schedule
-        # resolves to and not the base it was spelled with.
-        schedule = AmplitudeSchedule.from_dict(call_params["amp_schedule"])
-        amplitudes = sorted({a for step in schedule.resolve_steps(catalog)
-                             for a in step.amplitudes.values()})
-        self.amp_edit.setText(", ".join(f"{a:g}" for a in amplitudes))
-
-    @QtCore.pyqtSlot()
-    def _on_file_dialog_closed(self):
-        """Handle closure of the file dialog without file selection."""
-        pass  # Optional: keep or clear dialog
-
-    
     def get_parameters(self) -> dict | None:
-        """
-        Retrieves and validates the parameters for the multisweep operation.
-
-        Returns:
-            A dictionary of parameters if valid, otherwise None.
-            Shows an error message on invalid input or validation failure.
-        """
-        params_dict = {}
+        """``crs.multisweep``'s keyword arguments, or the loaded container."""
+        if self.use_data_from_file:
+            return self.loaded_container
         try:
-            if self.use_data_from_file:
-                return self.loaded_container
-            else:
-                amp_text = self.amp_edit.text().strip()
-                # Parse the text from the amplitude edit field.
-                # _parse_amplitude_values returns a list of floats.
-                amps_list = self._parse_amplitude_values(amp_text) 
-    
-                # If amp_text was empty or unparsable, _parse_amplitude_values returns an empty list.
-                # In this case, we must provide a default list of amplitudes for the task.
-                if not amps_list:
-                    # Use a list containing a single default amplitude.
-                    # Prioritize default from initial params if available, else global default.
-                    initial_amp_setting = self.params.get('amp', DEFAULT_AMPLITUDE) # Could be from 'amp' or 'amps'[0] via setup_amplitude_group
-                    
-                    # Ensure initial_amp_setting is a single float value
-                    if isinstance(initial_amp_setting, list):
-                        single_default = initial_amp_setting[0] if initial_amp_setting else DEFAULT_AMPLITUDE
-                    else:
-                        single_default = initial_amp_setting
-    
-                    amps_list = [single_default]
-    
-                params_dict['amps'] = amps_list
-
-                # multisweep's own 'amp' argument: a number is one sweep, a
-                # schedule is one per step, and both come back in one result.
-                params_dict['amp'] = (
-                    amps_list[0] if len(amps_list) == 1
-                    else AmplitudeSchedule.explicit(amps_list))
-                
-                params_dict['span_hz'] = float(self.span_khz_edit.text()) * 1e3 # Convert kHz to Hz
-                params_dict['npoints_per_sweep'] = int(self.npoints_edit.text())
-                params_dict['nsamps'] = int(self.nsamps_edit.text())
-                
-                # Get sweep direction
-                sweep_direction_text = self.sweep_direction_combo.currentText()
-                # Both directions is the sequence multisweep takes, in the
-                # order it measures them, not a third direction.
-                params_dict['sweep_direction'] = {
-                    "Upward": "upward",
-                    "Downward": "downward",
-                    "Both": ("upward", "downward"),
-                }.get(sweep_direction_text, "upward")
-                    
-                # Include the essential context for the multisweep
-                if self.load_multisweep:
-                    params_dict['resonance_frequencies'] = []  # Using legacy key for backward compatibility
-                    freqs = self.sections_edit.text().split(',')
-                    for f in freqs:
-                        params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
-                else:
-                    params_dict['resonance_frequencies'] = self.section_center_frequencies
-                params_dict['module'] = self.current_module
-    
-                # Basic validation
-                if params_dict['span_hz'] <= 0:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Span must be positive.")
-                    return None
-                if params_dict['npoints_per_sweep'] < 2:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Number of points per sweep must be at least 2.")
-                    return None
-                if params_dict['nsamps'] < 1:
-                    QtWidgets.QMessageBox.warning(self, "Validation Error", "Samples to average must be at least 1.")
-                    return None
-                if len(params_dict['resonance_frequencies']) < 1:
-                     QtWidgets.QMessageBox.warning(self, "Configuration Error", "No target sweep sections specified for multisweep.")
-                     return None
-    
-    
-                return params_dict
-        except ValueError as e: # Handles errors from float() or int() conversion
-            QtWidgets.QMessageBox.critical(self, "Input Error", f"Invalid numerical input: {str(e)}")
-            return None
-        except Exception as e: # Catch any other unexpected errors
+            catalog = self.sweep_catalog()
+            if catalog is None:
+                return None
+            return {
+                "catalog": catalog,
+                "amp": self.schedule(),
+                "span_hz": float(self.span_khz_edit.text()) * 1e3,
+                "npoints_per_sweep": int(self.npoints_edit.text()),
+                "nsamps": int(self.nsamps_edit.text()),
+                "sweep_direction": self.directions(),
+                "label": self.label_edit.text().strip() or None,
+            }
+        except Exception as e:
             traceback.print_exc()
-            QtWidgets.QMessageBox.critical(self, "Error", f"Could not parse parameters: {str(e)}")
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Could not read the sweep settings: {e}")
             return None

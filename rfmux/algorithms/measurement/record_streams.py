@@ -36,7 +36,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
@@ -139,6 +139,26 @@ def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, complex]]:
     return channels, calibrations
 
 
+def by_module(module: Optional[int], channels) -> Dict[int, List[int]]:
+    """``{module: sorted channels}`` from a channel list on *module* or
+    a mapping of them; modules with no channels are dropped."""
+    if isinstance(channels, dict):
+        found = {int(m): sorted(set(int(c) for c in chs))
+                 for m, chs in channels.items()}
+    else:
+        found = {int(module): sorted(set(int(c) for c in channels))}
+    return {m: chs for m, chs in sorted(found.items()) if chs}
+
+
+def modules_tag(modules: Iterable[int]) -> str:
+    """``module2`` or ``modules2+3``: the module part of a product's
+    name."""
+    modules = list(modules)
+    if len(modules) == 1:
+        return f"module{modules[0]}"
+    return "modules" + "+".join(str(m) for m in modules)
+
+
 def channel_spec(channels: Iterable[int]) -> str:
     """Channels as the parser's ``-c`` ranges: ``1-4,7``."""
     runs: List[List[int]] = []
@@ -163,10 +183,13 @@ class _Parser:
 @dataclass
 class RecordResult:
     session: Path
-    module: int
-    channels: List[int]
+    #: The one module recorded, or None for a run across modules, whose
+    #: ``channels`` are then (module, channel) pairs.
+    module: Optional[int]
+    channels: List
     duration_s: float
     training_s: float
+    modules: List[int] = field(default_factory=list)
     #: When the recording window opened: the end of noise training, or
     #: once the parser was up without a capture.
     started_at: Optional[float] = None
@@ -190,8 +213,8 @@ class RecordResult:
 
 async def record_streams(
     crs,
-    module: int,
-    channels: Iterable[int],
+    module: Optional[int],
+    channels: Union[Iterable[int], Dict[int, Iterable[int]]],
     duration_s: float,
     *,
     session: Path,
@@ -207,8 +230,11 @@ async def record_streams(
     merge_fastrx: bool = True,
     verbose: bool = True,
 ) -> RecordResult:
-    """Record the selected products of *module* for *duration_s* into
-    *session*.
+    """Record the selected products of *channels* on *module*, or of
+    ``{module: channels}`` across modules, for *duration_s* into
+    *session*.  A run across modules is keyed by (module, channel)
+    pairs in the capture, the file and *df_calibrations*; its products
+    are named ``modules2+3``.
 
     ``capture`` runs ``crs.trigger_capture`` on the slow stream with
     *config*, *df_calibrations* and *trigger_basis*; ``parser`` runs
@@ -220,9 +246,16 @@ async def record_streams(
     name it when several run).  Each requirement is checked before
     anything starts.
     """
-    channels = sorted(set(int(c) for c in channels))
-    if not channels:
+    wanted = by_module(module, channels)
+    if not wanted:
         raise ValueError("no channels to record")
+    modules = list(wanted)
+    if len(modules) == 1:
+        module = modules[0]
+        channels = list(wanted[module])
+    else:
+        module = None
+        channels = [(m, c) for m in modules for c in wanted[m]]
     if duration_s <= 0:
         raise ValueError(f"duration must be positive, got {duration_s}")
     if not (capture or parser or fastrx):
@@ -250,10 +283,17 @@ async def record_streams(
                 f"no fastrxd socket at {fastrx_socket}: is fastrxd running? "
                 "Start it with: "
                 + fx.start_command(Path(fastrx_socket).name))
-        fastrx_channels = max(channels)
+        fastrx_channels = max(c for chs in wanted.values() for c in chs)
+        silent = await asyncio.to_thread(
+            _fastrx_silent_modules, fx, fastrx_socket, modules)
+        if silent:
+            raise RuntimeError(
+                f"no channel-stream packets from module(s) {silent}: is "
+                "the channel streamer on for them?")
 
     result = RecordResult(session=session, module=module, channels=channels,
-                          duration_s=float(duration_s), training_s=0.0)
+                          duration_s=float(duration_s), training_s=0.0,
+                          modules=modules)
     if capture:
         dec = await crs.get_decimation()
         rate = decimation_to_sampling(6 if dec is None else dec)
@@ -270,7 +310,7 @@ async def record_streams(
     host = streamer.resolve_host(crs.tuber_hostname)
 
     def name(kind: str, ext: str) -> Path:
-        return session / f"{kind}_module{module}_{stamp}{ext}"
+        return session / f"{kind}_{modules_tag(modules)}_{stamp}{ext}"
 
     started = asyncio.Event()
     stop = asyncio.Event()
@@ -285,7 +325,8 @@ async def record_streams(
         try:
             result.pulse_path = name("pulse", ".h5")
             result.capture = await crs.trigger_capture(
-                channel=channels, module=module, streamer_mode="slow",
+                channel=wanted if module is None else channels,
+                module=module, streamer_mode="slow",
                 time_run=duration_s, config=config,
                 hdf5_path=result.pulse_path,
                 df_calibrations=df_calibrations,
@@ -320,7 +361,7 @@ async def record_streams(
                 if writer.packets == 0:
                     result.warnings.append(
                         "no channel-stream packets: is the channel "
-                        f"streamer on for module {module}?")
+                        f"streamer on for module(s) {modules}?")
 
     handle = None
     tasks: List[asyncio.Task] = []
@@ -328,7 +369,7 @@ async def record_streams(
         if parser:
             result.parser_log = name("parser", ".log")
             handle = await _start_parser(
-                host, parser_interface, module, channels,
+                host, parser_interface, wanted,
                 name("parser", ".dirfile"), result.parser_log)
             await handle.ready.wait()
             if not handle.up:
@@ -400,11 +441,13 @@ def _log_tail(log: Path) -> str:
         return ""
 
 
-async def _start_parser(host, interface, module, channels, dirfile, log) -> _Parser:
+async def _start_parser(host, interface, wanted, dirfile, log) -> _Parser:
+    """The parser on the channels of each module of *wanted*."""
     where = ["-i", interface] if interface else ["-H", host]
-    cmd = [sys.executable, "-c", PARSER_CHILD, *where,
-           "-d", str(dirfile), "-c", f"{module}:{channel_spec(channels)}",
-           "--drop-stats"]
+    cmd = [sys.executable, "-c", PARSER_CHILD, *where, "-d", str(dirfile)]
+    for module, channels in wanted.items():
+        cmd += ["-c", f"{module}:{channel_spec(channels)}"]
+    cmd.append("--drop-stats")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE)
@@ -444,6 +487,22 @@ async def _stop_parser(handle: _Parser, result, dirfile, log):
             "the parser wrote no dirfile" + (": " + tail if tail else ""))
 
 
+#: Seconds a fastrx probe waits for the channel stream before a run.
+FASTRX_PROBE_S = 1.0
+
+
+def _fastrx_silent_modules(fx, socket: str, modules: List[int],
+                           timeout_s: float = FASTRX_PROBE_S) -> List[int]:
+    """The wanted *modules* the channel stream did not carry during one
+    short capture, whose ``modules_seen`` counts every module's packets
+    (the window is the capture of a few thousand of one module's, or
+    the whole timeout when that module is silent)."""
+    with fx.PacketCapture(socket=socket) as c:
+        seen = c.capture(4096, channels=1, module=modules[0],
+                         timeout=timeout_s)["modules_seen"]
+    return [m for m in modules if not seen & (1 << (m - 1))]
+
+
 def _merge(pulse_path: Path, fastrx_path: Path) -> None:
     from ...pulse_capture.overlay import merge_fastrx
     merge_fastrx(pulse_path, fastrx_path)
@@ -472,11 +531,18 @@ def pulse_summary_lines(capture) -> List[str]:
     rows = [(ch, len(by_idx), max(s.get("snr", 0.0) for s in by_idx.values()))
             for ch, by_idx in stream.summaries.items() if by_idx]
     rows.sort(key=lambda r: (-r[1], r[0]))
-    lines = [f"channel {ch}: {n} pulse{'s' if n != 1 else ''}, "
+    lines = [f"{_where(ch)}: {n} pulse{'s' if n != 1 else ''}, "
              f"best {snr:.1f}\u03c3" for ch, n, snr in rows]
     lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
                  f"{len(stream.summaries)} channels")
     return lines
+
+
+def _where(key) -> str:
+    """``channel 5`` or ``module 2 channel 5``."""
+    if isinstance(key, tuple):
+        return f"module {key[0]} channel {key[1]}"
+    return f"channel {key}"
 
 
 def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
@@ -487,12 +553,14 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
                        ("fastrx", result.fastrx_path)):
         if path is not None and path.exists():
             register_export(result.session, str(path.relative_to(result.session)),
-                            kind, f"module{result.module}")
+                            kind, modules_tag(result.modules))
     metadata = _load_metadata(result.session)
     metadata.setdefault("recordings", []).append({
         "timestamp": datetime.datetime.now().isoformat(),
         "module": result.module,
-        "channels": result.channels,
+        "modules": result.modules,
+        "channels": [list(c) if isinstance(c, tuple) else c
+                     for c in result.channels],
         "duration_s": result.duration_s,
         "training_s": result.training_s,
         "started_at": result.started_at,

@@ -9,7 +9,7 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -17,7 +17,7 @@ from ..algorithms.measurement.record_streams import (
     biased_channels, fastrx_bytes_per_s, latest_bias_export)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
-from ..core.channels import parse_channel_spec
+from ..core.channels import parse_channel_spec, parse_module_channels
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -99,11 +99,12 @@ class RecordDialog(QtWidgets.QDialog):
         self.serial_edit.setPlaceholderText("0156")
         self.hostname_edit = QtWidgets.QLineEdit()
         self.hostname_edit.setPlaceholderText("only when not <serial>.local")
-        self.module_spin = QtWidgets.QSpinBox()
-        self.module_spin.setRange(1, 8)
+        self.modules_edit = QtWidgets.QLineEdit()
+        self.modules_edit.setPlaceholderText(
+            "1, or 2,3 for one RF line over several modules")
         add("CRS serial:", self.serial_edit)
         add("Hostname:", self.hostname_edit)
-        add("Module:", self.module_spin)
+        add("Modules:", self.modules_edit)
 
         # ── Session ──────────────────────────────────────────────
         self.rb_existing = QtWidgets.QRadioButton("Existing folder")
@@ -122,14 +123,15 @@ class RecordDialog(QtWidgets.QDialog):
 
         # ── Channels and duration ────────────────────────────────
         self.rb_bias = QtWidgets.QRadioButton(
-            "Biased channels of the session's newest bias export")
+            "Biased channels of the session's newest bias export per module")
         self.bias_label = QtWidgets.QLabel()
         self.rb_ranges = QtWidgets.QRadioButton("Ranges")
         self.channels_edit = QtWidgets.QLineEdit()
         self.channels_group = QtWidgets.QButtonGroup(self)
         self.channels_group.addButton(self.rb_bias)
         self.channels_group.addButton(self.rb_ranges)
-        self.channels_edit.setPlaceholderText("1-88 or 1,5-10")
+        self.channels_edit.setPlaceholderText(
+            "1-88 or 1,5-10 on every module; 2:1-114,3:1-96 per module")
         add("Channels:", self.rb_bias)
         add("", self.bias_label)
         add("", self._row(self.rb_ranges, self.channels_edit))
@@ -211,7 +213,7 @@ class RecordDialog(QtWidgets.QDialog):
         for w in (self.rb_existing, self.rb_new, self.rb_bias, self.rb_ranges,
                   self.fastrx_check, self.parser_check, self.capture_check):
             w.toggled.connect(self._refresh)
-        self.module_spin.valueChanged.connect(self._refresh)
+        self.modules_edit.textChanged.connect(self._refresh)
         self.duration_spin.valueChanged.connect(self._refresh)
         self.fastrx_iface_combo.currentTextChanged.connect(self._refresh)
         self.capture_form.updated.connect(self._refresh)
@@ -253,12 +255,20 @@ class RecordDialog(QtWidgets.QDialog):
             return p if p.is_dir() else None
         return None
 
+    def _modules(self) -> Optional[List[int]]:
+        try:
+            return parse_channel_spec(self.modules_edit.text(), name="module",
+                                      max_value=8, wildcard=False)
+        except ValueError:
+            return None
+
     def _channels(self):
-        """(channels, note): the channel list the options resolve to, or
-        None with the reason.  Reading the bias exports costs a tenth
-        of a second, so the answer is kept until an input changes."""
+        """(channels, note): the ``{module: channels}`` the options
+        resolve to, or None with the reason.  Reading the bias exports
+        costs a tenth of a second, so the answer is kept until an input
+        changes."""
         key = (self.rb_ranges.isChecked(), self.channels_edit.text(),
-               self._session_folder(), self.module_spin.value())
+               self._session_folder(), self.modules_edit.text())
         cached = getattr(self, "_channels_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
@@ -267,24 +277,42 @@ class RecordDialog(QtWidgets.QDialog):
         return result
 
     def _resolve_channels(self):
+        modules = self._modules()
         if self.rb_ranges.isChecked():
+            text = self.channels_edit.text()
             try:
-                chans = parse_channel_spec(self.channels_edit.text(),
-                                           max_value=1024, wildcard=False)
-            except Exception as e:
+                if ":" in text:
+                    wanted = parse_module_channels(text, max_module=8,
+                                                   max_channel=1024)
+                else:
+                    if modules is None:
+                        return None, "name the modules, like 1 or 2,3"
+                    chans = parse_channel_spec(text, max_value=1024,
+                                               wildcard=False)
+                    wanted = {m: chans for m in modules}
+            except ValueError as e:
                 return None, str(e)
-            return (chans, f"{len(chans)} channels") if chans else \
-                (None, "no channels")
+            n = sum(len(c) for c in wanted.values())
+            return wanted, (f"{n} channels on module(s) "
+                            f"{', '.join(str(m) for m in wanted)}")
+        if modules is None:
+            return None, "name the modules, like 1 or 2,3"
         folder = self._session_folder()
-        bias = latest_bias_export(folder, self.module_spin.value()) \
-            if folder else None
-        if bias is None:
-            return None, ("no bias export for this module in the session "
-                          "folder" if folder else
-                          "an existing session folder is needed")
-        chans, cals = biased_channels(bias)
-        return (chans or None,
-                f"{bias.name}: {len(chans)} channels, {len(cals)} calibrated")
+        if folder is None:
+            return None, "an existing session folder is needed"
+        wanted, notes = {}, []
+        for module in modules:
+            bias = latest_bias_export(folder, module)
+            if bias is None:
+                return None, (f"no bias export for module {module} in the "
+                              "session folder")
+            chans, cals = biased_channels(bias)
+            if not chans:
+                return None, f"{bias.name} biased no channels"
+            wanted[module] = chans
+            notes.append(f"{bias.name}: {len(chans)} channels, "
+                         f"{len(cals)} calibrated")
+        return wanted, "\n".join(notes)
 
     def _fill_interfaces(self, running) -> None:
         """The parser's list: interfaces under 100 Gb/s; fastrx's: the
@@ -351,8 +379,8 @@ class RecordDialog(QtWidgets.QDialog):
             folder = self._session_folder() or \
                 Path(self.session_dir_edit.text() or ".").expanduser()
             if chans and folder.is_dir():
-                need = self.duration_spin.value() \
-                    * fastrx_bytes_per_s(max(chans))
+                need = self.duration_spin.value() * fastrx_bytes_per_s(
+                    max(c for chs in chans.values() for c in chs))
                 free = shutil.disk_usage(folder).free
                 self.disk_label.setText(
                     f"disk: {free / 1e9:.0f} GB free in {folder}, about "
@@ -378,7 +406,7 @@ class RecordDialog(QtWidgets.QDialog):
         return {
             "serial": self.serial_edit.text().strip(),
             "hostname": self.hostname_edit.text().strip() or None,
-            "module": self.module_spin.value(),
+            "modules": self._modules() or [1],
             "channels": (self.channels_edit.text().strip()
                          if self.rb_ranges.isChecked() else None),
             "duration": self.duration_spin.value(),
@@ -433,7 +461,7 @@ class RecordDialog(QtWidgets.QDialog):
         v = lambda key, default: s.value(_KEY + key, default)
         self.serial_edit.setText(str(v("serial", "")))
         self.hostname_edit.setText(str(v("hostname", "")))
-        self.module_spin.setValue(int(v("module", 1)))
+        self.modules_edit.setText(str(v("modules", "1")))
         (self.rb_existing if v("session_mode", "existing") == "existing"
          else self.rb_new).setChecked(True)
         self.session_dir_edit.setText(str(v("session_dir", str(Path.cwd()))))
@@ -462,7 +490,7 @@ class RecordDialog(QtWidgets.QDialog):
         o = self.get_options()
         for key, value in (
                 ("serial", o["serial"]), ("hostname", o["hostname"] or ""),
-                ("module", o["module"]),
+                ("modules", self.modules_edit.text().strip()),
                 ("session_mode", "existing" if self.rb_existing.isChecked()
                  else "new"),
                 ("session_path", self.session_path_edit.text()),

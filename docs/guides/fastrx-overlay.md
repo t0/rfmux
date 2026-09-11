@@ -48,8 +48,22 @@ session folder: the channels and their df calibrations come from the
 newest bias export in it (`--channels 1-88` and `--bias <file>`
 override), and the products are listed in its metadata so the session
 browser shows them. Without `--session` a new `session_YYYYMMDD_HHMMSS`
-folder is made under `--session-dir`. The products, sharing one time
-stamp:
+folder is made under `--session-dir`.
+
+One RF line made of several modules is recorded as one run: repeat
+`--module` for each, and the channels come from each module's newest
+bias export (`--channels 1-88` applies the same ranges to every module;
+`--channels 2:1-114,3:1-96` names the modules itself). The dialog's
+Modules field takes `2,3` the same way. The capture reads the slow
+stream of every module through one source, the parser takes one
+`-c MODULE:RANGE` per module, and the fastrx recording holds every
+module the channel stream carries; a module that is not streaming
+stops the run before the recording window opens. The products are named
+`modules2+3` in place of `module2`, and the pulse file keys its
+channels by (module, channel), which Periscope's review shows with the
+module.
+
+The products, sharing one time stamp:
 
 - `pulse_module<M>_HHMMSS.h5`, a slow-stream pulse capture
   (`--threshold-sigma`, `--end-sigma`, `--min-pulse-ms`, `--max-pulse-ms`,

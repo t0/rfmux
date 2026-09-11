@@ -29,7 +29,7 @@ from rfmux.algorithms.measurement.record_streams import (
     record_streams,
 )
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
-from rfmux.core.channels import parse_channel_spec
+from rfmux.core.channels import parse_channel_spec, parse_module_channels
 
 _DEFAULTS = PulseCaptureConfig()
 
@@ -39,7 +39,8 @@ async def _main(serial: str, hostname: str | None, **kw):
     import rfmux
     if serial.upper() == "MOCK":
         from rfmux.mock.helpers import create_mock_crs
-        crs = await create_mock_crs(module=kw["module"], verbose=False)
+        crs = await create_mock_crs(
+            module=kw["module"] or min(kw["channels"]), verbose=False)
         await asyncio.sleep(2.0)             # stream warm-up
         try:
             return await record_streams(crs, **kw)
@@ -58,10 +59,13 @@ async def _main(serial: str, hostname: str | None, **kw):
               help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board; "
                    "with no options at all, a dialog asks for everything")
 @click.option("--hostname", default=None, help="Board address when it is not <serial>.local")
-@click.option("--module", type=int, default=1, show_default=True)
+@click.option("--module", "modules", type=int, multiple=True, default=(1,),
+              show_default=True,
+              help="Module to record; repeat it for one RF line over several")
 @click.option("--channels", default=None,
-              help="Channel ranges, 1-88 or 1,5-10; default: the biased channels of "
-                   "the session's newest bias export")
+              help="Channel ranges, 1-88 or 1,5-10, on every module, or per "
+                   "module as 2:1-114,3:1-96; default: the biased channels of "
+                   "the session's newest bias export for each module")
 @click.option("--duration", type=float, default=None,
               help="Seconds to record, after the capture's noise training")
 @click.option("--session", type=click.Path(file_okay=False), default=None,
@@ -97,11 +101,12 @@ async def _main(serial: str, hostname: str | None, **kw):
 @click.option("--trigger-basis", type=click.Choice(["df", "iq"]), default=_DEFAULTS.trigger_basis,
               show_default=True)
 @click.option("-q", "--quiet", is_flag=True)
-def cli(serial, hostname, module, channels, duration, session, session_dir,
+def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
         fastrx_socket, merge_fastrx, show, bias, threshold_sigma, end_sigma,
         min_pulse_ms, max_pulse_ms, noise_train_ms, trigger_basis, quiet):
-    """Record the slow and channel streams of one module into a session."""
+    """Record the slow and channel streams of a module, or of several
+    feeding one RF line, into a session."""
     if serial is None:
         ctx = click.get_current_context()
         given = [name for name in ctx.params if name != "quiet"
@@ -122,7 +127,7 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
         _DEFAULTS, threshold_sigma=threshold_sigma, end_sigma=end_sigma,
         min_pulse_ms=min_pulse_ms, max_pulse_ms=max_pulse_ms,
         noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
-    _run(serial=serial, hostname=hostname, module=module, channels=channels,
+    _run(serial=serial, hostname=hostname, modules=list(modules), channels=channels,
          duration=duration, session=session, session_dir=session_dir,
          capture=capture, parser=parser, fastrx=fastrx,
          parser_interface=parser_interface, fastrx_interface=fastrx_interface,
@@ -130,32 +135,52 @@ def cli(serial, hostname, module, channels, duration, session, session_dir,
          bias=bias, config=config, quiet=quiet)
 
 
-def _run(*, serial, hostname, module, channels, duration, session,
+def _run(*, serial, hostname, modules, channels, duration, session,
          session_dir, capture, parser, fastrx, parser_interface,
          fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
          quiet):
-    """One recording, from the command line's options or the dialog's."""
+    """One recording, from the command line's options or the dialog's.
+    *channels* is a range spec for every module of *modules*, a
+    per-module spec (which names the modules itself), or None for each
+    module's newest bias export."""
     folder = open_session(Path(session) if session else None, Path(session_dir))
-    bias_path = Path(bias) if bias else latest_bias_export(folder, module)
-    biased, calibrations = biased_channels(bias_path) if bias_path else ([], {})
-    if channels:
-        chosen = parse_channel_spec(channels, max_value=1024, wildcard=False)
-    elif biased:
-        chosen = biased
-    else:
-        raise click.UsageError(
-            "no --channels, and no bias export in the session to take them from")
+    wanted = {}
+    ranges = None
+    if channels and ":" in channels:
+        wanted = parse_module_channels(channels, max_channel=1024)
+        modules = list(wanted)
+    elif channels:
+        ranges = parse_channel_spec(channels, max_value=1024, wildcard=False)
+    if bias and len(modules) > 1:
+        raise click.UsageError("--bias names one module's export; several "
+                               "modules take the session's newest export each")
+    multi = len(modules) > 1
+    calibrations = {}
     if not quiet:
         click.echo(f"[record] session {folder}")
-        if bias_path:
-            click.echo(f"[record] bias export {bias_path.name}: "
-                       f"{len(biased)} channels, {len(calibrations)} calibrated")
-        click.echo(f"[record] module {module}, channels {chosen[0]}-{chosen[-1]} "
-                   f"({len(chosen)}), {duration:.1f} s")
+    for module in modules:
+        bias_path = Path(bias) if bias else latest_bias_export(folder, module)
+        biased, cals = biased_channels(bias_path) if bias_path else ([], {})
+        chosen = wanted.get(module) or ranges or biased
+        if not chosen:
+            raise click.UsageError(
+                f"no --channels, and no bias export for module {module} in "
+                "the session to take them from")
+        wanted[module] = chosen
+        calibrations.update({(module, c) if multi else c: cal
+                             for c, cal in cals.items()})
+        if not quiet:
+            if bias_path:
+                click.echo(f"[record] bias export {bias_path.name}: "
+                           f"{len(biased)} channels, {len(cals)} calibrated")
+            click.echo(f"[record] module {module}, channels "
+                       f"{chosen[0]}-{chosen[-1]} ({len(chosen)}), "
+                       f"{duration:.1f} s")
 
     try:
         result = asyncio.run(_main(
-            serial, hostname, module=module, channels=chosen,
+            serial, hostname, module=None if multi else modules[0],
+            channels=wanted if multi else wanted[modules[0]],
             duration_s=duration, session=folder, capture=capture,
             parser=parser, fastrx=fastrx, config=config,
             df_calibrations=calibrations or None,

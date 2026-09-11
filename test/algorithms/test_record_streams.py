@@ -11,6 +11,7 @@ import sys
 import time
 from types import SimpleNamespace
 
+import click
 import pytest
 
 from rfmux.algorithms.measurement import record_streams as rs
@@ -54,9 +55,9 @@ def fake_recorders(monkeypatch):
     it takes PARSER_UP_S to come up, as the real one takes seconds."""
     log = {}
 
-    async def start(host, interface, module, channels, dirfile, logfile):
+    async def start(host, interface, wanted, dirfile, logfile):
         log["start"] = time.time()
-        log["cmd"] = (host, interface, module, channels)
+        log["cmd"] = (host, interface, wanted)
         dirfile.mkdir()
         (dirfile / "serial_0042").mkdir()
         logfile.write_text("")
@@ -94,7 +95,7 @@ def test_the_window_opens_when_training_ends_and_lasts_the_duration(
     assert board.t_started == pytest.approx(t0 + PARSER_UP_S, abs=0.05)
     assert result.started_at == pytest.approx(board.t_trained, abs=0.05)
     assert log["stop"] - result.started_at == pytest.approx(DURATION_S, abs=0.1)
-    assert log["cmd"] == ("127.0.0.1", None, 2, [1, 2, 3])
+    assert log["cmd"] == ("127.0.0.1", None, {2: [1, 2, 3]})
     call = board.calls[0]
     assert call["time_run"] == DURATION_S and call["streamer_mode"] == "slow"
     assert call["hdf5_path"].name.startswith("pulse_module2_")
@@ -272,6 +273,133 @@ def test_pulse_summary_lines_name_the_busiest_channel_first():
         "channel 2: 2 pulses, best 8.0\u03c3",
         "channel 1: 1 pulse, best 6.0\u03c3",
         "3 pulses on 2 of 3 channels"]
+    capture = SimpleNamespace(primary=SimpleNamespace(summaries={
+        (2, 5): {1: {"snr": 6.0}}, (3, 1): {}}))
+    assert rs.pulse_summary_lines(capture)[0] == \
+        "module 2 channel 5: 1 pulse, best 6.0\u03c3"
+
+
+def test_a_run_across_modules_is_keyed_by_pairs_and_named_for_them(
+        tmp_path, fake_recorders):
+    board = _Board()
+    session = rs.open_session(base=tmp_path)
+    result = asyncio.run(rs.record_streams(
+        board, module=None, channels={3: [2, 1], 2: [5]},
+        duration_s=DURATION_S, session=session, fastrx=False, verbose=False))
+    assert fake_recorders["cmd"] == ("127.0.0.1", None, {2: [5], 3: [1, 2]})
+    call = board.calls[0]
+    assert call["channel"] == {2: [5], 3: [1, 2]} and call["module"] is None
+    assert call["hdf5_path"].name.startswith("pulse_modules2+3_")
+    assert result.module is None and result.modules == [2, 3]
+    assert result.channels == [(2, 5), (3, 1), (3, 2)]
+    meta = rs._load_metadata(session)
+    assert meta["recordings"][-1]["modules"] == [2, 3]
+    assert meta["recordings"][-1]["channels"] == [[2, 5], [3, 1], [3, 2]]
+    assert meta["exports"][-1]["identifier"] == "modules2+3"
+
+
+def test_a_mapping_of_one_module_is_a_plain_one_module_run(
+        tmp_path, fake_recorders):
+    board = _Board()
+    result = asyncio.run(rs.record_streams(
+        board, module=None, channels={2: [3, 1]}, duration_s=DURATION_S,
+        session=rs.open_session(base=tmp_path), fastrx=False, verbose=False))
+    assert board.calls[0]["channel"] == [1, 3] and board.calls[0]["module"] == 2
+    assert result.module == 2 and result.channels == [1, 3]
+
+
+def test_the_parser_gets_one_range_per_module(tmp_path, monkeypatch):
+    """The real command line: one -c MODULE:RANGE per module."""
+    argv = []
+
+    class Stderr:
+        lines = [b"parser up\n", b""]
+
+        async def readline(self):
+            return self.lines.pop(0)
+
+    async def fake_exec(*cmd, **kw):
+        argv.extend(cmd)
+        return SimpleNamespace(stderr=Stderr(), returncode=None)
+
+    monkeypatch.setattr(rs.asyncio, "create_subprocess_exec", fake_exec)
+
+    async def run():
+        handle = await rs._start_parser("127.0.0.1", None, {2: [5], 3: [1, 2]},
+                                        tmp_path / "p.dirfile", tmp_path / "p.log")
+        await handle.ready.wait()
+        await handle.pump
+        return handle.up
+
+    assert asyncio.run(run())
+    assert argv[argv.index("-d") + 1:] == [
+        str(tmp_path / "p.dirfile"), "-c", "2:5", "-c", "3:1-2", "--drop-stats"]
+
+
+def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(
+        tmp_path, fake_recorders, monkeypatch):
+    fastrx = pytest.importorskip("rfmux.fastrx")
+
+    class Capture:
+        def __init__(self, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            pass
+
+        def capture(self, n, channels, module, timeout):
+            return {"modules_seen": 0b0001}      # module 1 only
+
+    monkeypatch.setattr(fastrx, "PacketCapture", Capture)
+    socket = tmp_path / "enp2s0f0np0"
+    socket.touch()
+    board = _Board()
+    with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
+        asyncio.run(rs.record_streams(
+            board, module=None, channels={1: [1], 2: [1]}, duration_s=0.1,
+            session=rs.open_session(base=tmp_path),
+            fastrx_socket=str(socket), verbose=False))
+    assert board.calls == []
+
+
+def test_the_command_takes_per_module_ranges_and_bias_exports(
+        tmp_path, monkeypatch):
+    from rfmux.tools import record
+    folder = tmp_path / "session_x"
+    folder.mkdir()
+    _bias_export(folder / "bias_module2_1.pkl", 2, [1, 2])
+    _bias_export(folder / "bias_module3_1.pkl", 3, [7])
+    seen = {}
+
+    async def fake_main(serial, hostname, **kw):
+        seen.update(kw)
+        return rs.RecordResult(session=folder, module=kw["module"],
+                               channels=[], duration_s=1.0, training_s=0.0)
+
+    monkeypatch.setattr(record, "_main", fake_main)
+    common = dict(serial="0156", hostname=None, duration=1.0,
+                  session=str(folder), session_dir=".", capture=True,
+                  parser=False, fastrx=False, parser_interface=None,
+                  fastrx_interface=None, fastrx_socket=None,
+                  merge_fastrx=False, show="none", bias=None,
+                  config=PulseCaptureConfig(), quiet=True)
+    # Per-module ranges name the modules; the exports give calibrations.
+    record._run(modules=[1], channels="3:5,2:1-2", **common)
+    assert seen["module"] is None
+    assert seen["channels"] == {2: [1, 2], 3: [5]}
+    assert set(seen["df_calibrations"]) == {(2, 1), (2, 2), (3, 7)}
+    # Several modules with no ranges: each module's newest export.
+    record._run(modules=[2, 3], channels=None, **common)
+    assert seen["channels"] == {2: [1, 2], 3: [7]}
+    # One module keeps plain channel keys.
+    record._run(modules=[2], channels=None, **common)
+    assert seen["module"] == 2 and seen["channels"] == [1, 2]
+    assert set(seen["df_calibrations"]) == {1, 2}
+    with pytest.raises(click.UsageError, match="no bias export for module 4"):
+        record._run(modules=[2, 4], channels=None, **common)
 
 
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):

@@ -27,7 +27,7 @@ def _dialog(tmp_path, monkeypatch, running=()):
 
 def _session_with_bias(tmp_path, module=2, channels=(3, 7)):
     folder = tmp_path / "session_x"
-    folder.mkdir()
+    folder.mkdir(exist_ok=True)
     export = {"target_module": module, "timestamp": "2026",
               "bias_kids_output": {
                   i: {"bias_channel": c, "df_calibration": 1 + 1j}
@@ -39,7 +39,7 @@ def _session_with_bias(tmp_path, module=2, channels=(3, 7)):
 def test_options_are_the_runners_arguments(qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
     dlg.serial_edit.setText("0156")
-    dlg.module_spin.setValue(2)
+    dlg.modules_edit.setText("2")
     folder = _session_with_bias(tmp_path)
     dlg.rb_existing.setChecked(True)
     dlg.session_path_edit.setText(str(folder))
@@ -48,8 +48,8 @@ def test_options_are_the_runners_arguments(qt_app, tmp_path, monkeypatch):
     dlg.fastrx_iface_combo.setEditText("enp2s0f0np0")
     o = dlg.get_options()
     assert set(o) == set(inspect.signature(_run).parameters) - {"quiet"}
-    assert (o["serial"], o["module"], o["channels"], o["session"]) == \
-        ("0156", 2, None, str(folder))
+    assert (o["serial"], o["modules"], o["channels"], o["session"]) == \
+        ("0156", [2], None, str(folder))
     assert "bias_module2_1.pkl: 2 channels, 2 calibrated" in \
         dlg.bias_label.text()
     assert dlg.record_btn.isEnabled(), dlg.status_label.text()
@@ -136,4 +136,31 @@ def test_the_pulse_capture_settings_have_their_own_tab(
     assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())] == \
         ["Run", "Pulse capture"]
     assert dlg.tabs.widget(1).isAncestorOf(dlg.capture_form)
+
+
+def test_several_modules_take_an_export_each_or_per_module_ranges(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.serial_edit.setText("0156")
+    folder = _session_with_bias(tmp_path, module=2, channels=(3, 7))
+    _session_with_bias(tmp_path, module=3, channels=(1,))
+    dlg.rb_existing.setChecked(True)
+    dlg.session_path_edit.setText(str(folder))
+    dlg.fastrx_check.setChecked(False)
+    dlg.rb_bias.setChecked(True)
+    dlg.modules_edit.setText("2,3")
+    assert dlg.get_options()["modules"] == [2, 3]
+    assert dlg.bias_label.text().splitlines() == [
+        "bias_module2_1.pkl: 2 channels, 2 calibrated",
+        "bias_module3_1.pkl: 1 channels, 1 calibrated"]
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    dlg.modules_edit.setText("2,4")
+    assert not dlg.record_btn.isEnabled()
+    assert "no bias export for module 4" in dlg.status_label.text()
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("2:1-4,3:1-2")
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    assert dlg._channels()[0] == {2: [1, 2, 3, 4], 3: [1, 2]}
+    dlg.channels_edit.setText("1-4")
+    assert dlg._channels()[0] == {2: [1, 2, 3, 4], 4: [1, 2, 3, 4]}
 

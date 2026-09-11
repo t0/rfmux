@@ -502,7 +502,13 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   the command opens a dialog with every choice, remembered between
   runs, the pulse capture settings on their own tab and the newest
   session under the default path filled in; it checks for fastrxd and
-  shows the command to start it. See the 100G and 1G overlay guide.
+  shows the command to start it. Several modules feeding one RF line
+  are one run: `--module 2 --module 3` (the dialog's Modules field),
+  with the channels from each module's newest bias export or
+  `--channels 2:1-114,3:1-96`; the products are named `modules2+3` and
+  the pulse file keys its channels by (module, channel).
+  `trigger_capture` takes the same `{module: [channels]}` for a slow
+  capture across modules. See the 100G and 1G overlay guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

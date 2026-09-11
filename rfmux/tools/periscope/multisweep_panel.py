@@ -245,8 +245,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_status_label.setMinimumWidth(110)
         # The label's own slot, for the reason the fit line's is.
         self._bias_status_timer.timeout.connect(self.bias_status_label.clear)
+        self.apply_bias_btn = QtWidgets.QPushButton("Apply Bias")
+        self.apply_bias_btn.setToolTip(
+            "Park a tone on every resonator, at the frequency and amplitude "
+            "this panel's catalog carries")
+        self.apply_bias_btn.clicked.connect(self._apply_bias)
         self.bias_controls = grouped(
-            self.find_bias_btn, bias_settings_btn, self.bias_status_label)
+            self.find_bias_btn, bias_settings_btn, self.apply_bias_btn,
+            self.bias_status_label)
         toolbar_layout.addWidget(self.bias_controls)
 
         self.noise_spectrum_btn = QtWidgets.QPushButton("Get Noise Spectrum")
@@ -1005,6 +1011,49 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_analysis_enabled(True)
         self._show_bias_status(message, ok=False)
 
+    # ── applying it ──────────────────────────────────────────────────────────
+
+    def _apply_bias(self):
+        """Park a tone on every resonator, off the GUI thread.
+
+        The catalog is the whole of the instruction. Which NCO carries it, and
+        putting the frequencies on the tone grid, are ``apply_bias``'s -- this
+        panel does neither.
+        """
+        if self.catalog is None or len(self.catalog) == 0:
+            self._show_bias_status("Nothing to bias", ok=False)
+            return
+        periscope = self._get_periscope_parent()
+        if periscope is None or periscope.crs is None:
+            self._show_bias_status("No board to bias", ok=False)
+            return
+
+        self.apply_bias_btn.setEnabled(False)
+        self._show_bias_status("Applying bias...", transient=False)
+
+        signals = ApplyBiasSignals()
+        signals.completed.connect(self._bias_applied)
+        signals.error.connect(self._apply_bias_error)
+        # Held so the thread is not collected while it runs.
+        self._apply_bias_task = ApplyBiasTask(
+            periscope.crs, self.catalog, signals)
+        self._apply_bias_task.start()
+
+    def _bias_applied(self):
+        """The tones are on the air: publish what reads them in hertz."""
+        self.apply_bias_btn.setEnabled(True)
+        calibrations = {r.channel: r.bias.df_calibration for r in self.catalog
+                        if r.bias.df_calibration is not None}
+        if calibrations:
+            self.df_calibration_ready.emit(self.target_module, calibrations)
+        self.bias_data_avail = True
+        self.noise_spectrum_btn.setEnabled(True)
+        self._show_bias_status("Bias applied")
+
+    def _apply_bias_error(self, message: str):
+        self.apply_bias_btn.setEnabled(True)
+        self._show_bias_status(message, ok=False)
+
     def _set_analysis_enabled(self, enabled: bool) -> None:
         """Fitting and bias finding both walk every sweep this panel holds, so
         one runs at a time."""
@@ -1105,6 +1154,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         self.is_foreign_module = True
         self.rerun_btn.setEnabled(False)
+        self.apply_bias_btn.setEnabled(False)
+        self.apply_bias_btn.setToolTip(
+            f"This file was taken on module {file_module}, and this Periscope "
+            f"controls module {self.target_module}.")
         self.rerun_btn.setToolTip(
             f"This file was taken on module {file_module}, and this Periscope "
             f"controls module {self.target_module}.")

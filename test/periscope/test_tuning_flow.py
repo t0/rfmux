@@ -2001,3 +2001,143 @@ def test_the_bars_follow_the_settings(board, qt_app):
     after = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
     assert not np.allclose(before, after)
 
+
+# ── applying it ──────────────────────────────────────────────────────────────
+
+
+def _panel_on_a_board(panel, crs):
+    """Parent *panel* to just enough Periscope to find a board through.
+
+    Keep the returned stub alive for as long as the panel is used: it now owns
+    the panel, and a destroyed parent takes its children's C++ objects with it.
+    """
+    periscope = _periscope_with()
+    periscope.crs = crs
+    panel.setParent(periscope)
+    return periscope
+
+
+def _apply_bias(panel, qt_app):
+    """Press Apply Bias; return the panel's status text."""
+    panel._apply_bias()
+    assert spin_until(qt_app, panel._apply_bias_task.isFinished, timeout=180), \
+        "the apply task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.bias_status_label.text()
+
+
+def test_apply_bias_puts_every_tone_where_the_panels_catalog_says(board, qt_app):
+    """The catalog is the whole instruction, and what lands on the board is
+    what it carries -- on the tone grid, which is ``apply_bias``'s doing."""
+    loop, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    assert _apply_bias(panel, qt_app) == "Bias applied"
+
+    nco = loop.run_until_complete(crs.get_nco_frequency(module=catalog.module))
+    for resonator in panel.catalog:
+        played = nco + loop.run_until_complete(crs.get_frequency(
+            channel=resonator.channel, module=catalog.module))
+        assert played == pytest.approx(resonator.bias.frequency_hz, abs=1.0)
+        assert loop.run_until_complete(crs.get_amplitude(
+            channel=resonator.channel, module=catalog.module)) == \
+            pytest.approx(resonator.bias.amplitude)
+
+
+def test_the_button_is_dead_while_the_bias_is_applied(board, qt_app):
+    """It programs the board, so it cannot be pressed twice, and it says what
+    it is doing while it is not pressable."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    panel._apply_bias()
+    assert not panel.apply_bias_btn.isEnabled()
+    assert panel.bias_status_label.text() == "Applying bias..."
+
+    assert spin_until(qt_app, panel._apply_bias_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.apply_bias_btn.isEnabled()
+
+
+def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app):
+    """A routine outcome on the status line, and not left on screen once it
+    has been read."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    assert _apply_bias(panel, qt_app) == "Bias applied"
+    assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
+    assert panel._bias_status_timer.isActive()
+
+    panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
+
+
+def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app):
+    """df units come off the bias point's own calibration, by channel -- which
+    is what the main window stores and the streams are displayed through."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    published = []
+    panel.df_calibration_ready.connect(
+        lambda module, cals: published.append((module, cals)))
+
+    _apply_bias(panel, qt_app)
+
+    module, calibrations = published[0]
+    assert module == catalog.module
+    assert calibrations == {r.channel: r.bias.df_calibration
+                            for r in panel.catalog}
+
+
+def test_a_noise_spectrum_needs_a_bias_first(board, qt_app):
+    """The button that reads a biased array is dead until one is."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    assert not panel.noise_spectrum_btn.isEnabled()
+
+    _apply_bias(panel, qt_app)
+
+    assert panel.noise_spectrum_btn.isEnabled()
+
+
+def test_a_file_from_another_module_cannot_program_this_one(board, qt_app):
+    """It opens and draws; what goes away is every control that would touch
+    the board."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+
+    panel.mark_foreign_module(catalog.module + 1)
+
+    assert not panel.apply_bias_btn.isEnabled()
+    assert not panel.rerun_btn.isEnabled()
+
+
+def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app):
+    """An offline panel is a viewer. Nothing is programmed and nothing pops
+    up; the status line says why."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _find_bias(panel, qt_app)
+
+    panel._apply_bias()      # no Periscope parent, so no board
+
+    assert panel.bias_status_label.text() == "No board to bias"
+    assert panel.apply_bias_btn.isEnabled()

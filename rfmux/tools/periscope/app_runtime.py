@@ -1495,19 +1495,17 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "bias") -> tuple:
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict) -> tuple:
         """
-        Create and display a MultisweepPanel from a legacy bias or noise payload.
+        Create and display a MultisweepPanel from a noise payload.
 
         The multisweep lane loads through ``_load_multisweep_analysis`` and the
         container ``store`` writes; this reads ``_prepare_export_data``'s flat
-        payload, which only the bias and noise paths still produce. It goes
-        with them.
+        payload, which only the noise path still produces. It goes with it.
 
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters',
-                        'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "bias" or "noise" - affects naming and panel behavior
+                        'dac_scales_used' and 'noise_data'.
 
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
@@ -1542,15 +1540,11 @@ class PeriscopeRuntime:
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
-            
-            # For bias source type, also check for bias_kids_output
-            has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
-            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
-                
+
             # Create panel
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
                                    dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode, 
-                                   loaded_bias=loaded_bias_flag, is_loaded_data=True)
+                                   loaded_bias=has_noise_data, is_loaded_data=True)
             
             # Load noise spectrum data if it exists
             if has_noise_data:
@@ -1558,7 +1552,6 @@ class PeriscopeRuntime:
                 panel.noise_spectrum_btn.setEnabled(True)
             
             # MultisweepPanel dock is always named "Multisweep" regardless of source type
-            # The source_type affects panel behavior, not the dock title
             dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
             
             # Wrap in dock
@@ -1589,35 +1582,6 @@ class PeriscopeRuntime:
                 else:
                     print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
-            # Load data into panel - handle both old (iteration) and new (detector) formats
-            if 'results_by_detector' in load_params:
-                # New format: load directly into panel
-                panel.results_by_detector = load_params['results_by_detector']
-                panel._redraw_plots()
-            elif 'results_by_iteration' in load_params:
-                # Old format: convert via migration helper, then feed through update_data
-                iteration_params = load_params.get('results_by_iteration', [])
-                if isinstance(iteration_params, dict):
-                    iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
-                for i in range(len(iteration_params)):
-                    amplitude = iteration_params[i]['amplitude']
-                    direction = iteration_params[i]['direction']
-                    data = iteration_params[i]['data']
-                    panel.update_data(target_module, i, amplitude, direction, data, None)
-            
-            # Extract and load df_calibrations if bias_kids_output exists
-            if has_bias_data:
-                bias_output = load_params['bias_kids_output']
-                df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Load calibrations into main window
-                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
-                    self._handle_df_calibration_ready(target_module, df_calibrations)
-                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
-            
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:

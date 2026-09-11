@@ -111,7 +111,6 @@ class SessionBrowserPanel(QtWidgets.QWidget):
         self.filter_combo.addItem("Notebooks (.ipynb)", "ipynb")
         self.filter_combo.addItem("Network Analysis", "netanal")
         self.filter_combo.addItem("Multisweep", "multisweep")
-        self.filter_combo.addItem("Bias KIDs", "bias")
         self.filter_combo.addItem("Noise Spectrum", "noise")
         self.filter_combo.addItem("Pulse Capture", "pulse")
         self.filter_combo.addItem("Screenshots", "screenshot")

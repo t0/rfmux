@@ -48,8 +48,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     Can be docked, floated, or tabbed within the main Periscope window.
     """
     
-    # Signal emitted when bias_kids algorithm completes with df_calibration data
-    df_calibration_ready = pyqtSignal(int, dict)  # module, {detector_idx: df_calibration}
+    # Emitted once a bias is on the air, so df units have a scale to read by.
+    df_calibration_ready = pyqtSignal(int, dict)  # module, {channel: df_calibration}
     
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
@@ -91,9 +91,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.noise_spectrum_windows = []
         self.noise_panel_count = 0    # Counter for naming noise tabs
         
-        # Stores {amp: {conceptual_idx: output_cf}}, for the legacy lane only
-        self.last_output_cfs_by_amp_and_conceptual_idx: dict[float, dict[int, float]] = {}
-
         self.setWindowTitle(f"Multisweep Results - Module {self.target_module}")
 
         # What the measurement is: multisweep's container, this module's block
@@ -110,21 +107,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._step_amplitudes = {}
         self._set_amplitude_scale(self.initial_params.get('amp'))
 
-        # The legacy bias and noise lane's shape, filled only by update_data on
-        # the legacy load path and read only by that lane. Nothing draws it.
-        self.results_by_detector = {}
-        self.current_amplitude_being_processed = None # Tracks the amplitude currently being processed
-        self.current_iteration_being_processed = None # Tracks the current iteration
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
         self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
         
         # Module context for DAC scale lookup (can be different from target_module if needed)
         self.active_module_for_dac = self.target_module
-
-        # Bias KIDs output storage
-        self.bias_kids_output = None  # Stores the output from bias_kids algorithm
-        self.nco_frequency_hz = None  # NCO frequency used when biasing (stored for export)
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
@@ -199,12 +187,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar_layout.addWidget(self.rerun_btn)
         
-        # Bias KIDs Button
-        self.bias_kids_btn = QtWidgets.QPushButton("Bias KIDs")
-        self.bias_kids_btn.clicked.connect(self._bias_kids)
-        self.bias_kids_btn.setToolTip("Bias detectors at optimal operating points based on multisweep results")
-        toolbar_layout.addWidget(self.bias_kids_btn)
-
         # Fitting: the button, its settings, and what it is doing.
         self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
         self.run_fit_btn.setToolTip(
@@ -608,45 +590,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             if hasattr(self, 'progress_group') and not self.progress_group.isVisible():
                 self.progress_group.setVisible(True)
         
-    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
-        """
-        Receives final data for a completed iteration of a multisweep for the target module.
-        Stores the data for plotting and updates the CF history.
-
-        Args:
-            module (int): The module reporting data.
-            iteration (int): The current iteration index.
-            amplitude (float): The probe amplitude for which data is provided.
-            direction (str): The sweep direction ("upward" or "downward").
-            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
-            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
-        """
-        if module != self.target_module: return
-        
-        self.current_amplitude_being_processed = amplitude
-        self.current_iteration_being_processed = iteration
-
-        
-        # Store data in detector-based structure, keyed by iteration index.
-        # The amplitude and direction are stored inside each entry, not as keys,
-        # so that all detectors share the same iteration indices even if they
-        # use different amplitudes in the future.
-        if results_for_plotting:
-            for detector_id, det_data in results_for_plotting.items():
-                if detector_id not in self.results_by_detector:
-                    self.results_by_detector[detector_id] = {}
-                entry = dict(det_data)
-                entry['amplitude'] = amplitude
-                entry['direction'] = direction
-                entry['iteration'] = iteration
-                self.results_by_detector[detector_id][iteration] = entry
-
-        # --- Update CF history using the pre-mapped results_for_history ---
-        if results_for_history:
-            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
-
-        self._redraw_plots() # Refresh plots with the new data
-
     @property
     def conceptual_section_frequencies(self) -> list[float]:
         """Where each resonator sits, for the noise panel's channel mapping.
@@ -1070,11 +1013,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.progress_bar.setValue(0)
 
     def _prepare_export_data(self) -> dict:
-        """
-        Prepare data dictionary for export.
-        
-        Returns:
-            Dictionary containing all multisweep data for export
+        """The noise lane's payload: a spectrum and what it was taken under.
+
+        The measurement itself goes through ``store``; this is what the noise
+        panel writes beside it, and it goes when that panel is rebuilt on the
+        catalog.
         """
         # Handle lack of noise data more gracefully
         if self.spectrum_noise_data:
@@ -1087,9 +1030,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'target_module': self.target_module,
             'initial_parameters': self.initial_params,
             'dac_scales_used': self.dac_scales,
-            'results_by_detector': self.results_by_detector,
-            'bias_kids_output': self.bias_kids_output,  # Include bias_kids results if available
-            'nco_frequency_hz': self.nco_frequency_hz,  # NCO frequency used for biasing
             'noise_data': spectrum_data
         }
     
@@ -1463,37 +1403,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         dock.show()
         dock.raise_()
 
-    def _get_closest_remembered_cf(self, conceptual_idx: int, target_amp: float) -> float | None:
-        """
-        Finds the remembered output CF for a given conceptual section index,
-        for the amplitude in history closest to target_amp.
-
-        Args:
-            conceptual_idx: Index in self.conceptual_section_frequencies.
-            target_amp: The amplitude we are trying to find a historical match for.
-
-        Returns:
-            The remembered output CF (float) or None if no suitable history found.
-        """
-        min_abs_amp_diff = np.inf
-        best_cf_found = None
-
-        if not self.last_output_cfs_by_amp_and_conceptual_idx:
-            return None
-
-        for amp_in_history, cfs_at_this_amp in self.last_output_cfs_by_amp_and_conceptual_idx.items():
-            if conceptual_idx in cfs_at_this_amp:
-                remembered_cf = cfs_at_this_amp[conceptual_idx]
-                current_diff = abs(amp_in_history - target_amp)
-
-                if current_diff < min_abs_amp_diff:
-                    min_abs_amp_diff = current_diff
-                    best_cf_found = remembered_cf
-                elif current_diff == min_abs_amp_diff:
-                    pass
-        
-        return best_cf_found
-    
     def _get_periscope_parent(self):
         """Find and return the Periscope parent window.
 
@@ -1523,136 +1432,3 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         for noise_window in self.noise_spectrum_windows:
             if hasattr(noise_window, 'apply_theme'):
                 noise_window.apply_theme(dark_mode)
-    
-    def _bias_kids(self):
-        """
-        Run the bias_kids algorithm on the current multisweep results.
-        Programs detectors at optimal operating points and stores calibration data.
-        """
-        # Check prerequisites
-        if not self.results_by_detector:
-            QtWidgets.QMessageBox.warning(self, "No Data", 
-                                        "No multisweep data available. Please run a multisweep first.")
-            return
-        
-        # Get Periscope parent
-        periscope = self._get_periscope_parent()
-        if not periscope:
-            QtWidgets.QMessageBox.warning(self, "Parent Not Available", 
-                                        "Parent window not available. Cannot access CRS object.")
-            return
-            
-        if periscope.crs is None:
-            QtWidgets.QMessageBox.warning(self, "CRS Not Available", 
-                                        "CRS object is None. Cannot bias detectors.")
-            return
-        # Import the dialog
-        from .bias_kids_dialog import BiasKidsDialog
-        
-        # Show dialog to get parameters
-        dialog = BiasKidsDialog(self, self.target_module,
-                                fits_present=self._fits_present())
-        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-            return  # User cancelled
-        
-        # Get parameters from dialog
-        bias_params = dialog.get_parameters()
-        
-        # Pass detector-indexed format directly to bias_kids
-        gui_format_results = {
-            'results_by_detector': self.results_by_detector
-        }
-        
-        # Import BiasKidsTask and BiasKidsSignals from tasks module
-        from .tasks import BiasKidsTask, BiasKidsSignals
-        
-        # Create signals for communication with the task
-        self.bias_kids_signals = BiasKidsSignals()
-        self.bias_kids_signals.progress.connect(self._bias_kids_progress)
-        self.bias_kids_signals.completed.connect(self._bias_kids_completed)
-        self.bias_kids_signals.error.connect(self._bias_kids_error)
-        
-        # Ensure we have a valid module number
-        if self.target_module is None:
-            QtWidgets.QMessageBox.warning(self, "Module Not Set", 
-                                        "Target module is not set. Cannot bias detectors.")
-            return
-        # Create and start the task with dialog parameters
-        self.bias_kids_task = BiasKidsTask(
-            periscope.crs,
-            self.target_module,
-            gui_format_results,
-            self.bias_kids_signals,
-            bias_params  # Pass the dialog parameters
-        )
-        
-        # Update UI to show operation in progress
-        self.bias_kids_btn.setEnabled(False)
-        self.bias_kids_btn.setText("Biasing...")
-        
-        # Start the task
-        self.bias_kids_task.start()
-
-    def _bias_kids_progress(self, module, progress):
-        """Handle progress updates from the bias_kids task."""
-        # Could update a progress indicator if desired
-        pass
-    
-    def _fits_present(self) -> set:
-        """Which resonance fits the current results carry, for the Bias
-        KIDs dialog to preselect from."""
-        from rfmux.algorithms.measurement.df_calibration import fits_present
-        return fits_present(entry for iterations in self.results_by_detector.values()
-                            for entry in iterations.values())
-
-    def _bias_kids_completed(self, module, biased_results, df_calibrations, nco_frequency_hz):
-        """Handle completion of the bias_kids task."""
-        # Store the output
-        self.bias_kids_output = biased_results
-        
-        # Store the NCO frequency used during biasing
-        self.nco_frequency_hz = nco_frequency_hz
-        
-        # Emit signal with df_calibration data
-        if df_calibrations:
-            self.df_calibration_ready.emit(module, df_calibrations)
-        
-        # Emit data_ready signal for session auto-export
-        if biased_results:
-            export_data = self._prepare_export_data()
-            identifier = f"module{module}"
-            self.data_ready.emit("bias", identifier, export_data)
-        
-        # Show success dialog
-        num_biased = len(biased_results)
-        total_detectors = len(self.conceptual_section_frequencies)
-        
-        msg = f"Successfully biased {num_biased} out of {total_detectors} detectors.\n\n"
-        
-        if num_biased > 0:
-            msg += "The detectors have been programmed at their optimal operating points."
-            if df_calibrations:
-                msg += "\n\nFrequency shift calibration data has been loaded into the main window."
-        else:
-            msg += "No detectors met the criteria for biasing."
-        
-        QtWidgets.QMessageBox.information(self, "Bias KIDs Complete", msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
-        self.noise_spectrum_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None
-    
-    def _bias_kids_error(self, error_msg):
-        """Handle errors from the bias_kids task."""
-        QtWidgets.QMessageBox.critical(self, "Bias KIDs Error", error_msg)
-        
-        # Reset UI
-        self.bias_kids_btn.setEnabled(True)
-        self.bias_kids_btn.setText("Bias KIDs")
-        
-        # Clean up the task
-        self.bias_kids_task = None

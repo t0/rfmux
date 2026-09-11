@@ -65,7 +65,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     def __init__(self, parent: QtWidgets.QWidget = None,
                  catalog: ResonatorCatalog | None = None,
                  dac_scales: dict[int, float] = None,
-                 current_module: int | None = None,
+                 module: int | None = None,
                  initial_params: dict | None = None,
                  load_multisweep: bool = False):
         """
@@ -75,15 +75,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                 and the summary and validation are about it.
             dac_scales: pre-fetched DAC scales, for the power range in the
                 summary and the full-scale label.
-            current_module: the module, when there is no catalog to read it off
-                — the load and custom-frequency modes before one exists.
+            module: this session's module, for the load and custom-frequency
+                modes, where there is no catalog yet to read it off.
             initial_params: a previous call's arguments, to seed the fields.
             load_multisweep: offer Import and a Load button rather than a sweep.
         """
-        super().__init__(parent, params=initial_params, dac_scales=dac_scales)
+        super().__init__(parent, params=initial_params, dac_scales=dac_scales,
+                         module=catalog.module if catalog is not None else module)
         self.catalog = catalog
-        self.current_module = (catalog.module if catalog is not None
-                               else current_module)
         self.load_multisweep = load_multisweep
 
         self.use_data_from_file = False
@@ -121,9 +120,6 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.dac_scales.update(scales_dict)
         self._update_dac_scale_info()
         self._refresh()
-
-    def _get_selected_modules(self) -> list[int]:
-        return [self.current_module] if self.current_module is not None else []
 
     # ── the UI ───────────────────────────────────────────────────────────────
 
@@ -423,10 +419,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         if not self.custom_frequencies_cb.isChecked():
             return self.catalog
         frequencies = [f * 1e6 for f in self._numbers(self.sections_edit.text())]
-        if not frequencies or self.current_module is None:
+        if not frequencies or self.module is None:
             return None
         return ResonatorCatalog.from_frequencies(
-            frequencies, module=self.current_module,
+            frequencies, module=self.module,
             amplitude=float(self.custom_amp_edit.text()))
 
     # ── the live preview ─────────────────────────────────────────────────────
@@ -519,7 +515,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         if schedule is None or catalog is None:
             self.summary_label.setText("")
             return
-        dac_scale = self.dac_scales.get(self.current_module)
+        dac_scale = self.dac_scales.get(self.module)
         try:
             described = schedule.describe(catalog, max(n_directions, 1), dac_scale)
         except (ValueError, TypeError):
@@ -575,7 +571,7 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         block = next(iter(container.values()))
         call_params = block["call_params"]
         self.catalog = ResonatorCatalog.from_dict(call_params["catalog"])
-        self.current_module = self.catalog.module
+        self.module = self.catalog.module
 
         self.span_khz_edit.setText(f"{call_params['span_hz'] / 1e3:g}")
         self.npoints_edit.setText(str(call_params["npoints_per_sweep"]))

@@ -42,9 +42,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
     analysis_finished = QtCore.pyqtSignal()
     
-    def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
+    def __init__(self, parent=None, module=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
-        self.modules = modules or []
+        # One Periscope is one module, so one panel is one module's sweep.
+        self.module = module
         # module -> the trace take_netanal measured
         self.netanal_traces = {}
         # Every module's output under its module identifier, the shape
@@ -66,6 +67,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.module_cable_lengths = {} # For Requirement 2
         self.dark_mode = dark_mode  # Store dark mode setting
         self.is_loaded_data = is_loaded_data  # Track if this is from loaded data
+        # A file taken on another module: show it, but do not offer to measure
+        # from it. One Periscope controls one module, and re-running here would
+        # sweep this session's module with that file's settings.
+        self.is_foreign_module = False
 
         # The finder's thresholds, set once and kept: one window per panel,
         # non-modal, so a search is a button press and not a form to fill in.
@@ -113,9 +118,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         toolbar_global_layout.addWidget(save_btn)
 
         # Edit Other Parameters button (renamed to Re-run Analysis)
-        edit_params_btn = QtWidgets.QPushButton("Re-run analysis")
-        edit_params_btn.clicked.connect(self._edit_parameters)
-        toolbar_global_layout.addWidget(edit_params_btn)
+        self.edit_params_btn = QtWidgets.QPushButton("Re-run analysis")
+        self.edit_params_btn.clicked.connect(self._edit_parameters)
+        toolbar_global_layout.addWidget(self.edit_params_btn)
 
         # Show/Hide resonances checkbox
         self.show_resonances_cb = QtWidgets.QCheckBox("Show Resonances")
@@ -242,26 +247,19 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     def _setup_progress_bars(self, layout):
         """Set up progress bars for each module."""
         self.progress_group = None
-        if self.modules:
+        self.progress_bars = {}
+        if self.module is not None:
             self.progress_group = QtWidgets.QGroupBox("Analysis Progress")
             progress_layout = QtWidgets.QVBoxLayout(self.progress_group)
-            
-            self.progress_bars = {}
-            for module in self.modules:
-                hlayout = QtWidgets.QHBoxLayout()
-                label = QtWidgets.QLabel(f"Module {module}:")
-                pbar = QtWidgets.QProgressBar()
-                pbar.setRange(0, 100)
-                pbar.setValue(0)
-                hlayout.addWidget(label)
-                hlayout.addWidget(pbar)
-
-                progress_layout.addLayout(hlayout)
-                self.progress_bars[module] = pbar
-
+            hlayout = QtWidgets.QHBoxLayout()
+            pbar = QtWidgets.QProgressBar()
+            pbar.setRange(0, 100)
+            pbar.setValue(0)
+            hlayout.addWidget(QtWidgets.QLabel(f"Module {self.module}:"))
+            hlayout.addWidget(pbar)
+            progress_layout.addLayout(hlayout)
+            self.progress_bars[self.module] = pbar
             layout.addWidget(self.progress_group)
-        else:
-            self.progress_bars = {}
 
     def _hide_progress_bars(self):
         """Hide the entire Analysis Progress group."""
@@ -280,17 +278,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     
     def _setup_plot_area(self, layout):
         """Set up the plot area with tabs for each module."""
-        self.tabs = QtWidgets.QTabWidget()
-        self.tabs.currentChanged.connect(self._on_active_module_changed) # For Requirement 2
-        layout.addWidget(self.tabs)
-        
         self.plots = {}
-        # Initialize amp_plot and phase_plot to None or a default PlotWidget
-        # to ensure they are bound before setXLink is called.
-        last_amp_plot: Optional[pg.PlotWidget] = None
-        last_phase_plot: Optional[pg.PlotWidget] = None
+        if self.module is None:
+            return
 
-        for module in self.modules:
+        # Keyed by module because that is how the container this panel holds is
+        # keyed, not because a panel can show two.
+        for module in (self.module,):
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
 
@@ -336,7 +330,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
             tab_layout.addWidget(amp_plot)
             tab_layout.addWidget(phase_plot)
-            self.tabs.addTab(tab, f"Module {module}")
+            layout.addWidget(tab)
             
             self.plots[module] = {
                 'amp_plot': amp_plot, # amp_plot is PlotWidget here
@@ -349,19 +343,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 'resonance_lines_phase': [], # For storing phase resonance lines
                 'rejected_markers': rejected_markers,
             }
-            last_amp_plot = amp_plot
-            last_phase_plot = phase_plot
-            
-        # Apply zoom box mode
-        self._apply_zoom_box_mode()
+            phase_plot.setXLink(amp_plot)
+            self._apply_theme_to_plot(amp_plot)
+            self._apply_theme_to_plot(phase_plot)
 
-        # Link the x-axis of the last created amplitude and phase plots for synchronized zooming
-        if last_phase_plot and last_amp_plot:
-            last_phase_plot.setXLink(last_amp_plot)
-        
-        # Apply initial theme based on dark_mode setting
-        if last_amp_plot: self._apply_theme_to_plot(last_amp_plot)
-        if last_phase_plot: self._apply_theme_to_plot(last_phase_plot)
+        self._apply_zoom_box_mode()
         
     def _apply_theme_to_plot(self, plot_widget):
         """Apply the current theme to a specific plot widget."""
@@ -662,14 +648,27 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.plots[module]['amp_plot'].getPlotItem().setTitle(title, color=pen_color)
 
     def _active_module(self) -> Optional[int]:
-        """The module whose tab is showing, or None if none is."""
-        index = self.tabs.currentIndex()
-        if index < 0:
-            return None
-        try:
-            return int(self.tabs.tabText(index).split(" ")[1])
-        except (IndexError, ValueError):
-            return None
+        """This panel's module -- one Periscope controls one."""
+        return self.module
+
+    def mark_foreign_module(self, file_module: int) -> None:
+        """Say this file was taken on another module, and stop offering to measure.
+
+        The file is shown as it is: nothing about it is rewritten, and neither
+        is the session's module. What goes away is every control that would
+        start a measurement from settings taken somewhere else.
+        """
+        self.is_foreign_module = True
+        self.edit_params_btn.setEnabled(False)
+        self.edit_params_btn.setToolTip(
+            f"This file was taken on module {file_module}, and this Periscope "
+            f"controls module {self.module}.")
+        self.take_multisweep_btn.setEnabled(False)
+        self.take_multisweep_btn.setToolTip(self.edit_params_btn.toolTip())
+        self._show_status(
+            f"Loaded a module {file_module} measurement; this session is on "
+            f"module {self.module}, so it is shown but cannot be re-run.",
+            ok=False)
 
     def _module_block(self, module: int) -> Optional[dict]:
         """One module's output out of the container, as the finder wants it."""
@@ -711,7 +710,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         params_for_dialog.pop('module_cable_lengths', None)
         params_for_dialog.pop('cable_length', None) 
 
-        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog)
+        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog, module=self.module)
         if dialog.exec():
             updated_general_params = dialog.get_parameters() 
             
@@ -758,18 +757,15 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.original_params = params.copy()  
         self.current_params = params.copy()   
 
-        default_cable_length_for_all = params.get('cable_length', DEFAULT_CABLE_LENGTH)
-        for mod_id in self.modules: 
-            self.module_cable_lengths[mod_id] = params.get('module_cable_lengths', {}).get(mod_id, default_cable_length_for_all)
-
-        if self.tabs.count() > 0:
-            self._on_active_module_changed(self.tabs.currentIndex())
-        elif self.modules: 
-            first_module_id = self.modules[0]
-            initial_cable_length = self.module_cable_lengths.get(first_module_id, DEFAULT_CABLE_LENGTH)
+        default_cable_length = params.get('cable_length', DEFAULT_CABLE_LENGTH)
+        if self.module is not None:
+            self.module_cable_lengths[self.module] = params.get(
+                'module_cable_lengths', {}).get(self.module, default_cable_length)
             self.cable_length_spin.blockSignals(True)
-            self.cable_length_spin.setValue(initial_cable_length)
+            self.cable_length_spin.setValue(
+                self.module_cable_lengths[self.module])
             self.cable_length_spin.blockSignals(False)
+            self._update_multisweep_button_state(self.module)
         
         if not hasattr(self, 'plots') or not self.plots:
             return
@@ -827,16 +823,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()
-
-        if self._all_modules_complete():
-            self.analysis_finished.emit()
+        self.analysis_finished.emit()
     
-    def _all_modules_complete(self) -> bool:
-        """Check if all modules have completed analysis."""
-        if not self.progress_bars:
-            return False
-        return all(pbar.value() == 100 for pbar in self.progress_bars.values())
-            
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""
         self.dark_mode = dark_mode

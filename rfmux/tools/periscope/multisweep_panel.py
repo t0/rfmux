@@ -73,6 +73,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.dark_mode = dark_mode                 # Store dark mode setting
         self.bias_data_avail = loaded_bias
         self.is_loaded_data = is_loaded_data       # Track if this is from loaded data
+        # A file taken on another module: shown, but not something to sweep from.
+        self.is_foreign_module = False
         self.spectrum_noise_data = {}
 
         self.debug_noise_data = {}
@@ -777,6 +779,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 "Cannot re-run: no Periscope window to start the sweep from.")
             return
         parent_widget._start_multisweep_analysis_for_window(self, self.initial_params)
+
+    def mark_foreign_module(self, file_module: int) -> None:
+        """Say this file was taken on another module, and stop offering to sweep.
+
+        Nothing about the file or the session is rewritten; what goes away is
+        the control that would start a measurement from it.
+        """
+        self.is_foreign_module = True
+        self.rerun_btn.setEnabled(False)
+        self.rerun_btn.setToolTip(
+            f"This file was taken on module {file_module}, and this Periscope "
+            f"controls module {self.target_module}.")
+        self.current_amp_label.setText(
+            f"Module {file_module} measurement, shown but not re-runnable here.")
 
     def _planned_sweeps_text(self) -> str:
         """How many sweeps the configured call will take, before it starts."""

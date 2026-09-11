@@ -14,21 +14,21 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     parameter parsing.
     """
     def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None,
-                 modules: list[int] = None, dac_scales: dict[int, float] = None):
+                 module: int | None = None, dac_scales: dict[int, float] = None):
         """
         Initializes the base dialog.
 
         Args:
             parent: The parent widget.
             params: Dictionary of existing parameters to populate fields.
-            modules: List of module numbers relevant to this dialog.
+            module: the module this Periscope controls. One session is one
+                module, so a dialog never asks which.
             dac_scales: Dictionary mapping module numbers to their DAC scales in dBm.
         """
         super().__init__(parent)
         self.params = params or {}  # Store initial parameters, default to empty dict
-        self.modules = modules or [1, 2, 3, 4] # Default or passed-in modules
-        # Initialize DAC scales for relevant modules, defaulting to None (unknown)
-        self.dac_scales = dac_scales or {module_idx: None for module_idx in self.modules}
+        self.module = module
+        self.dac_scales = dac_scales or {}
         self.currently_updating = False # Flag to prevent recursive updates between amp/dBm fields
         
     def setup_amplitude_group(self, layout: QtWidgets.QFormLayout) -> QtWidgets.QGroupBox:
@@ -169,46 +169,12 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         return self._parse_numeric_values(amp_text)
         
     def _update_dac_scale_info(self):
-        """What full scale is on the selected modules, as the board reports it."""
-        selected_modules = self._get_selected_modules()
-        scales_text_list = [
-            f"Module {module_idx}: {scale:+.2f} dBm" if (
-                scale := self.dac_scales.get(module_idx)) is not None
-            else f"Module {module_idx}: Unknown"
-            for module_idx in selected_modules
-        ]
+        """What full scale is on this session's module, as the board reports it."""
+        scale = self.dac_scales.get(self.module)
         self.dac_scale_info.setText(
-            "\n".join(scales_text_list) if selected_modules
-            else "Unknown (no modules selected)")
+            f"{scale:+.2f} dBm" if scale is not None else "Unknown")
     
-    def _get_selected_modules(self) -> list[int]:
-        """
-        Placeholder method to get the list of currently selected modules.
-        Subclasses must override this to provide actual module selection logic.
-
-        Returns:
-            An empty list. Subclasses should return a list of integer module IDs.
-        """
-        # This method must be implemented by subclasses
-        return [] 
-        
     def _get_selected_dac_scale(self) -> float | None:
-        """
-        Retrieves the DAC scale for the currently selected module(s).
-        If multiple modules are selected, it returns the DAC scale of the first
-        module in the selection that has a known DAC scale.
-
-        Returns:
-            The DAC scale in dBm as a float, or None if no scale is known
-            for any selected module or if no modules are selected.
-        """
-        selected_modules = self._get_selected_modules()
-        if not selected_modules:
-            return None
-        
-        for module_idx in selected_modules:
-            dac_scale = self.dac_scales.get(module_idx)
-            if dac_scale is not None:
-                return dac_scale # Return the first known DAC scale
-        return None # No known DAC scale for any of the selected modules
+        """This session's module's full scale in dBm, or None if unknown."""
+        return self.dac_scales.get(self.module)
     

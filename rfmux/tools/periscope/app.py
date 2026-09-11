@@ -1077,8 +1077,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         # NetworkAnalysisDialog from .ui (which imports from .dialogs)
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        dialog.module_entry.setText(str(self.module))
+        dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
         
         # Fetch DAC scales if CRS is available
         self._fetch_dac_scales_for_dialog(dialog)
@@ -1101,8 +1100,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Initialize and start a new network analysis process.
 
-        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget 
-        and one `NetworkAnalysisTask` per module, each performing its sweep in a
+        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget
+        and one `NetworkAnalysisTask`, sweeping this session's module in a
         background thread.
 
         Args:
@@ -1113,13 +1112,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if self.crs is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            selected_module_param = params.get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
@@ -1128,7 +1120,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # dBm, which is a legend, not a reason to refuse the measurement.
             window_signals = NetworkAnalysisSignals()
             dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
-            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode)
+            panel = NetworkAnalysisPanel(self, self.module, dac_scales_local, dark_mode=self.dark_mode)
             panel.set_params(params)
             
             # Wrap panel in dock
@@ -1157,11 +1149,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 QtCore.Qt.ConnectionType.QueuedConnection)
 
             panel.analysis_finished.connect(
-                lambda p=panel: self._save_netanal_to_session(p, modules_to_run)
-            )
-            
-            for mod_iter in modules_to_run:
-                self._start_netanal_task(mod_iter, params, window_id)
+                lambda p=panel: self._save_netanal_to_session(p, [self.module]))
+
+            self._start_netanal_task(self.module, params, window_id)
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1192,7 +1182,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 return
 
             blocks = list(container.values())
-            modules_to_run = [block['module'] for block in blocks]
+            file_modules = sorted({int(block['module']) for block in blocks})
+            # A file taken elsewhere is shown, not adopted: neither it nor the
+            # session's module is rewritten, and the panel stops offering to
+            # measure from it.
+            foreign = [m for m in file_modules if m != self.module]
 
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
@@ -1203,7 +1197,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # it cannot when none is.
             window_signals = NetworkAnalysisSignals()
             dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
-            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
+            panel = NetworkAnalysisPanel(self, file_modules[0], dac_scales_local,
+                                         dark_mode=self.dark_mode, is_loaded_data=True)
             panel._hide_progress_bars()
             panel.set_params(dict(blocks[0]['call_params']))
             panel.netanal_container = container
@@ -1223,6 +1218,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     panel.draw_search(
                         block['module'],
                         ResonanceSearch.from_dict(trace['resonance_search']))
+
+            if foreign:
+                panel.mark_foreign_module(foreign[0])
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1382,20 +1380,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         # Try to get active module
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
+        netanal_dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
         
         # Fetch DAC scales if CRS is available
         self._fetch_dac_scales_for_dialog(netanal_dialog)
         if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
         
-        active_module = self.module
-
         # --- Launch dialog even if no resonances yet ---
         dialog = MultisweepDialog(parent=netanal_dialog,
                                   dac_scales=netanal_dialog.dac_scales,  # may be {}
-                                  current_module=active_module,          # may be None
+                                  module=self.module,
                                   load_multisweep=True)
 
         
@@ -1510,8 +1505,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         # NetworkAnalysisDialog from .ui (which imports from .dialogs)
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        dialog.module_entry.setText(str(self.module))
+        dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
         
         # Fetch DAC scales if CRS is available
         self._fetch_dac_scales_for_dialog(dialog)
@@ -1533,8 +1527,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             return
 
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
+        netanal_dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
         
         # Fetch DAC scales if CRS is available
         self._fetch_dac_scales_for_dialog(netanal_dialog)

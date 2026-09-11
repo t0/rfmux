@@ -1,10 +1,10 @@
 """What Periscope hands a NetworkAnalysisTask, and what it takes to start one.
 
 One netanal is one module at one probe amplitude: ``take_netanal`` takes a
-scalar ``amp`` and returns one trace tagged with it.  The dialogs still offer
-a list -- they are rewritten later in the port -- so the resolution to a single
-amplitude happens here, in the one line that starts the task, and this is the
-test that says so.
+scalar ``amp`` and returns one trace tagged with it.  The netanal dialog still
+offers a list of amplitudes, so the resolution to a single one happens here, in
+the one line that starts the task, and this is the test that says so. The
+module is not the dialog's to offer at all: one Periscope controls one.
 
 What is *not* needed to start one is a DAC scale, which only decides whether
 the legend can say dBm.
@@ -89,6 +89,7 @@ def test_a_sweep_starts_without_a_dac_scale(periscope_and_tasks, qt_app, monkeyp
     periscope.dark_mode = False
     periscope.netanal_window_count = 0
     periscope.netanal_windows = {}
+    periscope.module = 1
     periscope.dock_manager = _StubDockManager()
     assert not hasattr(periscope, "dac_scales")
 
@@ -96,21 +97,29 @@ def test_a_sweep_starts_without_a_dac_scale(periscope_and_tasks, qt_app, monkeyp
     monkeypatch.setattr(QtWidgets.QMessageBox, "critical",
                         lambda *args, **kwargs: refused.append(args[-1]))
 
-    periscope._start_network_analysis({"amp": 0.001, "module": [2], "npoints": 100})
+    periscope._start_network_analysis({"amp": 0.001, "npoints": 100})
 
     assert refused == []
-    assert [task.module for task in started] == [2]
+    assert [task.module for task in started] == [1]
     panel = periscope.netanal_windows["netanal_0"]["window"]
     assert panel.dac_scales == {}
 
 
-def test_one_task_per_module_under_its_own_key(periscope_and_tasks):
-    """Each module's sweep is its own task, so one module finishing does not
-    evict another's."""
+def test_the_session_module_is_what_gets_swept(periscope_and_tasks, qt_app, monkeypatch):
+    """One Periscope controls one module, so a module in the parameters is not
+    a thing the sweep can be sent to. The session's module is what runs."""
     periscope, started = periscope_and_tasks
+    QtWidgets.QMainWindow.__init__(periscope)
+    periscope.crs = object()
+    periscope.dark_mode = False
+    periscope.netanal_window_count = 0
+    periscope.netanal_windows = {}
+    periscope.module = 1
+    periscope.dock_manager = _StubDockManager()
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical",
+                        lambda *args, **kwargs: None)
 
-    for module in (1, 2):
-        periscope._start_netanal_task(module, {"amp": 0.001}, "na-1")
+    periscope._start_network_analysis({"amp": 0.001, "module": 2, "npoints": 100})
 
-    assert sorted(periscope.netanal_tasks) == ["na-1_1", "na-1_2"]
-    assert [task.module for task in started] == [1, 2]
+    assert [task.module for task in started] == [1]
+    assert sorted(periscope.netanal_tasks) == ["netanal_0_1"]

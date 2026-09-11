@@ -176,7 +176,7 @@ NETANAL = dict(amp=0.004, fmin=FMIN, fmax=FMAX, npoints=200, nsamps=10)
 
 def _netanal_through_periscope(crs, module, qt_app):
     """One network analysis the way the GUI takes it."""
-    panel = NetworkAnalysisPanel(modules=[module])
+    panel = NetworkAnalysisPanel(module=module)
     panel.current_params = {"amp": NETANAL["amp"]}
     signals = NetworkAnalysisSignals()
     errors, completed = [], []

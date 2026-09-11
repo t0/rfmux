@@ -31,7 +31,7 @@ from test.qt_helpers import spin, spin_until  # noqa: E402
 
 from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
 from rfmux.core.resonators import on_grid  # noqa: E402
-from rfmux.mock.standard_array import standard_array  # noqa: E402
+from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E402
 from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
@@ -203,7 +203,7 @@ def test_network_analysis_panel_holds_the_trace(board, qt_app):
     """The panel stores what it was handed and draws magnitude from the
     measured IQ."""
     _, crs, catalog = board
-    panel = NetworkAnalysisPanel(modules=[catalog.module])
+    panel = NetworkAnalysisPanel(module=catalog.module)
 
     errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
     assert errors == []
@@ -638,7 +638,7 @@ def test_stopping_a_sweep_finds_the_task_by_the_catalogs_module(board, qt_app):
 
 def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):
     """A netanal panel holding one measured sweep of the standard array."""
-    panel = NetworkAnalysisPanel(modules=[catalog.module])
+    panel = NetworkAnalysisPanel(module=catalog.module)
     panel.current_params = {"amp": amplitude}
     panel.dac_scales = {catalog.module: -0.5}
 
@@ -956,6 +956,7 @@ def _periscope_with(session_manager=None):
     periscope.multisweep_window_count = 0
     periscope.multisweep_windows = {}
     periscope.multisweep_tasks = {}
+    periscope.module = STANDARD_MODULE
     periscope.session_manager = session_manager
     periscope.dock_manager = _StubDockManager()
     return periscope
@@ -1072,7 +1073,7 @@ def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
     path = panel.save_multisweep()
 
     dialog = MultisweepDialog(dac_scales={catalog.module: -0.5},
-                              current_module=catalog.module,
+                              module=catalog.module,
                               load_multisweep=True)
     dialog._on_file_selected(str(path))
 
@@ -1093,7 +1094,7 @@ def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
 def test_the_measurement_name_becomes_the_files_label(qt_app):
     """What the user types as the measurement name is store's ``label``, which
     is what goes on the end of the filename."""
-    dialog = NetworkAnalysisDialog(modules=[1], dac_scales={1: -0.5})
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
     dialog.label_edit.setText("cold plate 2")
 
     assert dialog.get_parameters()["label"] == "cold plate 2"
@@ -1104,21 +1105,21 @@ def test_the_measurement_name_becomes_the_files_label(qt_app):
 
 def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory):
     """Import reads the file with ``store.load`` and fills the fields in from
-    what the driver recorded about the sweep -- the module it ran on, the
-    amplitude it probed at, the name it was saved under."""
+    what the driver recorded about the sweep -- the amplitude it probed at and
+    the name it was saved under. Not the module: one Periscope is one module,
+    which is why the dialog no longer has a field for it."""
     _, crs, catalog = board
     panel = _panel_with_a_sweep(crs, catalog, qt_app)
     panel.current_params["label"] = "an import"
     path = panel.save_netanal()
 
-    dialog = NetworkAnalysisDialog(modules=[catalog.module], dac_scales={catalog.module: -0.5})
+    dialog = NetworkAnalysisDialog(module=catalog.module, dac_scales={catalog.module: -0.5})
     dialog._on_file_selected(str(path))
 
     module_id = crs.module[catalog.module].index()
     assert np.array_equal(
         netanal_trace(dialog.loaded_container[module_id])["iq_counts"],
         panel.netanal_traces[catalog.module]["iq_counts"])
-    assert dialog.module_entry.text() == str(catalog.module)
     assert float(dialog.amp_edit.text()) == 0.004
     assert dialog.label_edit.text() == "an import"
     assert dialog.load_btn.isEnabled()
@@ -1133,6 +1134,82 @@ def test_the_session_browser_knows_what_periscope_wrote(board, qt_app, output_di
     path = panel.save_netanal()
 
     assert SessionManager().identify_file_type(str(path)) == "netanal"
+
+
+# ── one Periscope, one module ────────────────────────────────────────────────
+
+def _periscope_on_module(module):
+    periscope = _periscope_with()
+    periscope.module = module
+    return periscope
+
+
+def test_a_netanal_from_another_module_opens_but_cannot_be_re_run(
+        board, qt_app, output_directory):
+    """One Periscope controls one module, so a file taken on another is shown
+    and nothing more: re-running would sweep *this* module with that file's
+    settings, and taking a multisweep would sweep this module's resonators."""
+    _, crs, catalog = board
+    path = _panel_with_a_sweep(crs, catalog, qt_app).save_netanal()
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_network_analysis(store.load(path))
+
+    panel = periscope.netanal_windows["netanal_0"]["window"]
+    assert panel.is_foreign_module
+    assert not panel.edit_params_btn.isEnabled()
+    assert not panel.take_multisweep_btn.isEnabled()
+    assert str(catalog.module) in panel.edit_params_btn.toolTip()
+    # The measurement is shown as it was taken.
+    assert panel.netanal_traces[catalog.module]["sweep_amplitude"] == 0.004
+
+
+def test_loading_a_foreign_netanal_rewrites_nothing(board, qt_app, output_directory):
+    """Neither the file's module nor the session's is touched."""
+    _, crs, catalog = board
+    path = _panel_with_a_sweep(crs, catalog, qt_app).save_netanal()
+    before = store.load(path)
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_network_analysis(store.load(path))
+
+    assert periscope.module == catalog.module + 1
+    after = store.load(path)
+    assert [b["module"] for b in after.values()] == [b["module"] for b in before.values()]
+
+
+def test_a_netanal_on_this_module_is_fully_usable(board, qt_app, output_directory):
+    """The same load on the session's own module leaves every control alive."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    path = panel.save_netanal()
+
+    periscope = _periscope_on_module(catalog.module)
+    periscope._load_network_analysis(store.load(path))
+
+    loaded = periscope.netanal_windows["netanal_0"]["window"]
+    assert not loaded.is_foreign_module
+    assert loaded.edit_params_btn.isEnabled()
+    assert loaded.take_multisweep_btn.isEnabled()   # it carries a search
+
+
+def test_a_multisweep_from_another_module_opens_but_cannot_be_re_run(
+        board, qt_app, output_directory):
+    """The same rule for the sweep panel: shown, not re-runnable."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    assert loaded.is_foreign_module
+    assert not loaded.rerun_btn.isEnabled()
+    assert str(catalog.module) in loaded.rerun_btn.toolTip()
+    assert loaded.module_sweeps is not None       # still shown
 
 
 def test_unwrapping_cable_delay_redraws_the_measured_phase(board, qt_app):

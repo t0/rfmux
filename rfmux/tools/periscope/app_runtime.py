@@ -1949,6 +1949,10 @@ class PeriscopeRuntime:
                     is_loaded_data=True)
                 panel._hide_progress_bars()
                 panel.show_measurement(block['module'], container)
+                # Shown as it is; nothing rewritten, and no offer to sweep from
+                # settings taken on another module.
+                if block['module'] != self.module:
+                    panel.mark_foreign_module(block['module'])
 
                 dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
                 dock = self.dock_manager.create_dock(panel, dock_title, window_id)

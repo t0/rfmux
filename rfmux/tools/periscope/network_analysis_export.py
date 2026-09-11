@@ -30,14 +30,14 @@ class NetworkAnalysisExportMixin:
     
     Requirements from the host class:
     - netanal_traces: module -> the trace take_netanal measured
-    - netanal_container: the modules' outputs, keyed by module identifier
+    - netanal_container: the module's output, keyed by module identifier
     - current_params: Dictionary of current analysis parameters
     - resonance_searches: module -> the ResonanceSearch that names its resonances
     - plots: Dictionary of plot information per module
     - module_cable_lengths: Dictionary of cable lengths per module
     - cable_length_spin: QDoubleSpinBox for cable length adjustment
     - tabs: QTabWidget containing module tabs
-    - modules: List of module identifiers
+    - module: the one module this Periscope controls
     - take_multisweep_btn: QPushButton for taking multisweep
     """
 
@@ -48,10 +48,10 @@ class NetworkAnalysisExportMixin:
     def save_netanal(self) -> Optional[Path]:
         """Write the measurement through ``store``, and return where it went.
 
-        One file for however many modules the panel ran, keyed by module
-        identifier the way a driver's return is, so it opens in a notebook with
-        ``store.load``. Saving the same panel twice overwrites the same file:
-        the container carries the path it was written to.
+        Keyed by module identifier the way a driver's return is, so it opens
+        in a notebook with ``store.load``. Saving the same panel twice
+        overwrites the same file: the container carries the path it was written
+        to.
         """
         if not self.netanal_container:
             return None
@@ -109,28 +109,8 @@ class NetworkAnalysisExportMixin:
         self.cable_length_spin.blockSignals(False)
 
     def _get_active_module(self) -> Optional[int]:
-        """
-        Get the active module from the current tab.
-        
-        Returns:
-            The active module identifier or None if no module is selected
-        """
-        current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0:
-            QtWidgets.QMessageBox.warning(self, "No Module", "Select a module tab.")
-            return None
-            
-        active_module_text = self.tabs.tabText(current_tab_index)
-        try:
-            active_module = int(active_module_text.split(" ")[1])
-            return active_module
-        except (IndexError, ValueError):
-            QtWidgets.QMessageBox.critical(
-                self, 
-                "Error", 
-                f"Invalid module tab: {active_module_text}"
-            )
-            return None
+        """This panel's module. One Periscope controls one."""
+        return self.module
 
     def _sweep_for_cable_delay(self, active_module: int) -> Optional[dict]:
         """The module's sweep, which the delay fit runs on."""
@@ -214,42 +194,14 @@ class NetworkAnalysisExportMixin:
         Args:
             new_length: The new cable length value in meters
         """
-        current_tab_index = self.tabs.currentIndex()
-        if current_tab_index < 0 or not self.modules or current_tab_index >= len(self.modules):
+        if self.module is None:
             return
-            
-        active_module_id = self.modules[current_tab_index]
-        self.module_cable_lengths[active_module_id] = new_length
-        self._update_multisweep_button_state(active_module_id)
+        self.module_cable_lengths[self.module] = new_length
+        self._update_multisweep_button_state(self.module)
 
     #
     # 3. Module Tab and UI Management Methods
     #
-
-    def _on_active_module_changed(self, index: int) -> None:
-        """
-        Update UI elements when the active module tab changes.
-        
-        Args:
-            index: The index of the newly selected tab
-        """
-        if index < 0 or not self.modules or index >= len(self.modules):
-            self._update_multisweep_button_state(None)
-            return
-            
-        active_module_id = self.modules[index]
-        
-        # Update cable length spinner
-        if active_module_id in self.module_cable_lengths:
-            self.cable_length_spin.blockSignals(True)
-            self.cable_length_spin.setValue(self.module_cable_lengths[active_module_id])
-            self.cable_length_spin.blockSignals(False)
-        else:
-            self.cable_length_spin.blockSignals(True)
-            self.cable_length_spin.setValue(self.current_params.get('cable_length', DEFAULT_CABLE_LENGTH))
-            self.cable_length_spin.blockSignals(False)
-            
-        self._update_multisweep_button_state(active_module_id)
 
     def _update_multisweep_button_state(self, module_id: Optional[int] = None) -> None:
         """
@@ -260,23 +212,12 @@ class NetworkAnalysisExportMixin:
         """
         if not hasattr(self, 'take_multisweep_btn'):
             return
-            
-        # Get module_id from current tab if not provided
         if module_id is None:
-            current_tab_index = self.tabs.currentIndex()
-            if current_tab_index < 0:
-                self.take_multisweep_btn.setEnabled(False)
-                return
-                
-            active_module_text = self.tabs.tabText(current_tab_index)
-            try:
-                module_id = int(active_module_text.split(" ")[1])
-            except (IndexError, ValueError):
-                self.take_multisweep_btn.setEnabled(False)
-                return
-        
+            module_id = self.module
+
         search = self.resonance_searches.get(module_id)
-        self.take_multisweep_btn.setEnabled(bool(search and search.candidates))
+        self.take_multisweep_btn.setEnabled(
+            bool(search and search.candidates) and not self.is_foreign_module)
 
     #
     # 4. Multisweep Dialog Management

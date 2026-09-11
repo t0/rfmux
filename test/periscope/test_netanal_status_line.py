@@ -21,7 +21,7 @@ from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
 
 @pytest.fixture
 def panel(qt_app):
-    made = NetworkAnalysisPanel(modules=[1])
+    made = NetworkAnalysisPanel(module=1)
     yield made
     made.close()
 

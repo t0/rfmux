@@ -25,7 +25,7 @@ def _flow_layouts(widget):
 
 @pytest.mark.parametrize("make", [
     lambda: MultisweepPanel(dark_mode=False),
-    lambda: NetworkAnalysisPanel(modules=[1], dark_mode=False),
+    lambda: NetworkAnalysisPanel(module=1, dark_mode=False),
     lambda: PulseCapturePanel(dark_mode=False),
 ])
 def test_panel_toolbars_wrap_and_fit(qt_app, make):

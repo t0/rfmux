@@ -388,6 +388,11 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
 #: How faint the bar that did not bind is drawn, against the one that did.
 UNBINDING_BAR_ALPHA = 110
 
+#: Fraction of the range left clear around the bifurcation plot's contents.
+#: The bar is the outermost thing on a subplot where nothing crossed it, and
+#: pyqtgraph's own padding is too small to tell it from the frame.
+BAR_PADDING = 0.12
+
 
 def _derivative_bars(entry, settings) -> tuple[float, float]:
     """``(prominence bar, noise bar)`` for one trace, from the library itself.
@@ -426,6 +431,9 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
     if legend_labels:
         _add_legend(plot_item, pen_color)
 
+    # Room above the bar, so that when nothing reaches it the line reads as a
+    # threshold rather than as the top of the frame.
+    plot_item.getViewBox().setDefaultPadding(BAR_PADDING)
     plot_item.addLine(y=1.0, pen=pg.mkPen(color=pen_color, width=1))
     plot_item.addLine(y=-1.0, pen=pg.mkPen(color=pen_color, width=1))
 

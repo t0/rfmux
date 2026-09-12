@@ -153,8 +153,9 @@ class RecordDialog(QtWidgets.QDialog):
             "Turn the channel streamer on for these modules")
         self.streamer_check.setToolTip(
             "Before the run, set_channel_streamer for every module recorded, "
-            "channels 1 to the highest; otherwise the board is only read, "
-            "and a module whose channel stream is off is refused")
+            "channels 1 to the highest rounded up to whole pipelines of 128 "
+            "(fastrxd drops a partial pipeline); otherwise the board is only "
+            "read, and a module whose channel stream is off is refused")
         self.trunc_combo = QtWidgets.QComboBox()
         for choice in ("LOW", "MID", "HIGH"):
             self.trunc_combo.addItem(choice, choice)

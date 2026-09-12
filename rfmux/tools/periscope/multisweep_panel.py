@@ -125,6 +125,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         self.fit_sweep_plots_cache = []  # List of plot widgets for the fit tab
         self.bias_sweep_plots_cache = []  # List of plot widgets for the bias tab
+        self.freq_sweep_plots_cache = []  # List of plot widgets for the bias frequency tab
 
         # The fitters' settings outlive any one fit, and are shared by nothing
         # else: one window per panel, as the measurement is one panel's.
@@ -386,6 +387,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                "A spike past \u00b11 with one the other way beside it is what "
                "that test calls a bifurcation.")
 
+        # Tab 5: what choosing the bias frequency looked at
+        self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
+            self._create_sweep_tab()
+        self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias Frequency")
+        self.plot_tabs.setTabToolTip(
+            5, "How far each resonator's IQ trace moves per hertz at the drive "
+               "it is biased at -- what the iq_derivative method maximizes. "
+               "The line is where the tone will go, on the hardware grid; the "
+               "gap to the peak is that quantization. With the 'minimum' "
+               "frequency method the line is at the dip instead, and need not "
+               "sit at this curve's peak.")
+
         # Every tab that is a grid of one subplot per resonator, and the four
         # things that differ between them. Keyed by the tab itself, so adding
         # one is adding a row rather than renumbering a chain of branches.
@@ -398,6 +411,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                   self.fit_sweep_plots_cache, self.fit_colorbar),
             self.bias_sweeps_tab: ('bias', self.bias_sweeps_grid,
                                    self.bias_sweep_plots_cache, self.bias_colorbar),
+            self.freq_sweeps_tab: ('frequency', self.freq_sweeps_grid,
+                                   self.freq_sweep_plots_cache, self.freq_colorbar),
         }
 
         # Set default tab to Magnitude Sweeps
@@ -738,6 +753,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if plot_type == 'fit':
             traces_by_name = {name: self._fit_traces(name, traces_by_name.get(name, []))
                               for name in names}
+        elif plot_type == 'frequency':
+            traces_by_name = {name: self._bias_step_traces(name, traces_by_name.get(name, []))
+                              for name in names}
         if not traces_by_name:
             return
 
@@ -808,6 +826,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 return []
             choice = bias.iteration
         return [trace for trace in fitted if trace[0] == choice]
+
+    def _bias_step_traces(self, name: str, traces: list) -> list:
+        """One resonator's traces at the step it is biased at, and no others.
+
+        Empty until a bias has been found: the other steps chose nothing, so a
+        grid of them would bury the one that did.
+        """
+        bias = self._bias_by_name().get(name)
+        if bias is None:
+            return []
+        return [trace for trace in traces if trace[0] == bias.iteration]
 
     def _bias_by_name(self) -> dict:
         """``{name: BiasFinding}`` for the grids to mark, empty until a
@@ -929,9 +958,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _fits_completed(self, report):
         """The fits are in the sweeps the panel holds: draw them, and re-save."""
         self._fits_done()
-        message = f"{len(report.fitted)}/{len(report)} fitted"
-        if report.failed:
-            message += f", {len(report.failed)} failed"
+        message = self._fit_tally(report)
         # The fits went into the block, so a file that exists is now out of
         # date by exactly this much. A panel never saved keeps the Save button.
         if store.saved_path(self.multisweep_container):
@@ -944,6 +971,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 return
         self._show_fit_status(message)
         self._redraw_plots()
+
+    @staticmethod
+    def _fit_tally(report) -> str:
+        """What the run did, per model when more than one was asked for.
+
+        "7/8 fitted" over two models says nothing about which of them is the
+        one struggling, and that is usually the question -- the nonlinear fit
+        fails on traces the skewed one is happy with.
+        """
+        models = list(dict.fromkeys(fit.model for fit in report.fits))
+        if len(models) > 1:
+            per_model = ", ".join(
+                f"{model} {sum(1 for f in report.for_model(model) if f.fitted)}"
+                f"/{len(report.for_model(model))}" for model in models)
+            return f"{per_model} fitted"
+        message = f"{len(report.fitted)}/{len(report)} fitted"
+        if report.failed:
+            message += f", {len(report.failed)} failed"
+        return message
 
     def _fits_error(self, message: str):
         self._fits_done()

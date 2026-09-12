@@ -39,7 +39,7 @@ from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.fits import BIFURCATION_A, FitReport, SweepFit  # noqa: E402
 from rfmux.tuning.bias import (  # noqa: E402
-    BiasReport, bifurcated_by_derivative, normalized_arc_speed)
+    BiasReport, bifurcated_by_derivative, iq_arc_speed, normalized_arc_speed)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -1675,6 +1675,68 @@ def _converged(panel, model, step=None):
             and sweep["fits"][model]["failed_because"] is None}
 
 
+def test_the_fit_tab_marks_where_the_model_put_the_resonance(board, qt_app):
+    """An ``fr`` line per drawn model, in its sweep's drive colour, so how far
+    the resonance moved between one drive and the next is readable."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_fit_model(panel, "skewed")
+
+    name = panel._selected_names()[0]
+    lines = _infinite_lines(panel, tab_idx=2)[0]
+    drawn = sorted(line.value() for line in lines)
+
+    fitted = [sweep for sweep in collect_amplitude_iterations_for(
+                  panel.module_sweeps, name).values()
+              for sweep in sweep.values()
+              if sweep["fits"]["skewed"]["failed_because"] is None]
+    assert len(fitted) > 1
+    assert drawn == pytest.approx(sorted(
+        (sweep["fits"]["skewed"]["params"]["fr"]
+         - sweep["original_center_frequency"]) / 1e3 for sweep in fitted))
+
+
+def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
+    """``a`` is the number that says the drive was too loud, so it is on the
+    line it came from rather than only in the file."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("nonlinear",))
+    _show_fit_model(panel, "nonlinear")
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    labels = [entry[1].text for entry in
+              _grid_widgets(panel, tab_idx=2)[0].getPlotItem().legend.items]
+
+    assert any(f"a {sweep['fits']['nonlinear']['params']['a']:.2f}" in label
+               for label in labels)
+
+
+def test_fitting_several_models_says_how_each_of_them_did(board, qt_app):
+    """One tally over two models says nothing about which is struggling, and
+    that is usually the question."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    panel._fits_completed(FitReport(fits=[
+        SweepFit(name="BOTA", model="skewed", iteration=0,
+                 direction="upward", failed_because=None),
+        SweepFit(name="COTA", model="skewed", iteration=0,
+                 direction="upward", failed_because=None),
+        SweepFit(name="BOTA", model="nonlinear", iteration=0,
+                 direction="upward", failed_because=None),
+        SweepFit(name="COTA", model="nonlinear", iteration=0,
+                 direction="upward", failed_because="the residual is too high"),
+    ]))
+
+    assert panel.fit_status_label.text() == "skewed 2/2, nonlinear 1/2 fitted"
+
+
 def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):
     """Every converged fit is either in the bins or counted off the axis.
 
@@ -2110,6 +2172,13 @@ def _infinite_lines(panel, tab_idx=0):
             for w in _grid_widgets(panel, tab_idx)]
 
 
+def _bands(panel, tab_idx=0):
+    """The filled bands on each subplot, innermost last."""
+    return [[item for item in w.getPlotItem().items
+             if isinstance(item, pg.LinearRegionItem)]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
 def _trace_widths(panel, name, tab_idx=0):
     """``{(step, direction): pen width}`` for one resonator's subplot."""
     index = panel._selected_names().index(name)
@@ -2474,3 +2543,84 @@ def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app, swe
 
     assert panel.bias_status_label.text() == "No board to bias"
     assert panel.apply_bias_btn.isEnabled()
+
+
+def test_the_bar_is_a_shaded_band_and_not_only_a_pair_of_lines(board, qt_app,
+                                                              swept_container):
+    """A bar encloses a region -- everything inside it is not a spike -- and
+    the step that was chosen shows the gate that did not bind nested in it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    bands = _bands(panel, BIAS_TAB)[0]
+
+    assert len(bands) == 2, "the bar in force, and the gate that did not bind"
+    applied, unbinding = (band.getRegion() for band in bands)
+    assert applied == pytest.approx((-1.0, 1.0))
+    assert -1.0 <= unbinding[0] and unbinding[1] <= 1.0
+    assert all(band.zValue() < 0 for band in bands), "behind the traces"
+
+
+# ── the bias frequency tab ───────────────────────────────────────────────────
+
+BIAS_FREQ_TAB = 5
+
+
+def test_the_bias_frequency_tab_draws_what_chose_the_frequency(board, qt_app,
+                                                               swept_container):
+    """The IQ arc speed the ``iq_derivative`` method maximizes, read off the
+    library rather than re-derived here, with the tone's frequency on it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    curves = _grid_curves(panel, BIAS_FREQ_TAB)[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+
+    frequencies, speed = iq_arc_speed(sweep)
+    x, y = curves[0].getData()
+    assert np.allclose(
+        x, (frequencies - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(y, speed)
+
+
+def test_the_line_on_it_is_where_the_tone_will_go(board, qt_app, swept_container):
+    """Where the tone lands is on the hardware grid; the gap to the curve's
+    own peak is that quantization, which is what the tab is for."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+    lines = _infinite_lines(panel, BIAS_FREQ_TAB)[0]
+
+    assert [line.value() for line in lines] == [pytest.approx(
+        (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3)]
+
+
+def test_only_the_step_the_resonator_is_biased_at_is_drawn(board, qt_app,
+                                                           swept_container):
+    """The other steps chose nothing, and a grid of them would bury the one
+    that did."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    for name, curves in zip(panel._selected_names(),
+                            _grid_curves(panel, BIAS_FREQ_TAB)):
+        measured = collect_amplitude_iterations_for(panel.module_sweeps, name)
+        directions = len(measured[panel._bias_by_name()[name].iteration])
+        assert len(curves) == directions
+        assert len(measured) > 1, "the schedule walked more than one step"
+
+
+def test_the_bias_frequency_tab_is_empty_until_a_bias_is_found(board, qt_app,
+                                                               swept_container):
+    """Nothing has chosen a step yet, so there is no step to draw."""
+    panel = _panel_showing(swept_container, board)
+
+    assert _grid_curves(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]
+    assert _infinite_lines(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]

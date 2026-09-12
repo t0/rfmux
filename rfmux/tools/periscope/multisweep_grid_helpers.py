@@ -11,7 +11,8 @@ import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
 from rfmux.core.transferfunctions import convert_roc_to_volts
-from rfmux.tuning.bias import bifurcated_by_derivative, normalized_arc_speed
+from rfmux.tuning.bias import (
+    bifurcated_by_derivative, iq_arc_speed, normalized_arc_speed)
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
@@ -48,7 +49,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         grid_layout: QGridLayout to populate with plots
         traces_by_name: ``{name: [(step, direction, amplitude, sweep), ...]}``,
             in the order to draw them; *sweep* is one of multisweep's entries
-        plot_type: 'magnitude', 'iq', 'fit' or 'bias'
+        plot_type: 'magnitude', 'iq', 'fit', 'bias' or 'frequency'
         current_batch: Current batch index (0-based)
         batch_size: Number of resonators per batch
         amplitude_to_color: Dict mapping drive amplitude to colour
@@ -187,6 +188,11 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 _plot_bifurcation(plot_item, traces, amplitude_to_color,
                                   pen_color, bias, bias_settings or {}, labels)
                 plot_item.setLabel('left', 'Change in arc speed / bar')
+                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+            elif plot_type == 'frequency':
+                _plot_bias_frequency(plot_item, traces, amplitude_to_color,
+                                     pen_color, bias, labels)
+                plot_item.setLabel('left', 'IQ arc speed', units='Counts/Hz')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
                 _plot_fit(plot_item, traces, amplitude_to_color, pen_color,
@@ -345,6 +351,11 @@ FIT_READERS = {
 #: that where the two agree the coloured line is still visible under it.
 MODEL_LINE_WIDTH = 1
 
+#: How faint the line at a fit's ``fr`` is. It marks where the model put the
+#: resonance; it is not a thing that was measured, so it sits behind the two
+#: lines that were.
+FR_LINE_ALPHA = 120
+
 
 def _si(value: float) -> str:
     """A Q, short enough for a legend: ``29.6k``, ``1.24M``."""
@@ -440,10 +451,35 @@ def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
             pen=pg.mkPen(color=pen_color, width=MODEL_LINE_WIDTH, style=style),
             name=(fit_legend_label(sweep, fit_model) if legend_labels
                   else _once(f"{fit_model.capitalize()} fit", said)))
+        _fr_line(plot_item, sweep, fit_model, amplitude, amplitude_to_color,
+                 pen_color)
+
+
+def _fr_line(plot_item, sweep, fit_model, amplitude, amplitude_to_color, pen_color):
+    """A line where this model put the resonance, in its sweep's drive colour.
+
+    The colour rather than the model's own, because the reading is how far
+    ``fr`` moved between one drive and the next, and that is only legible if
+    each line is paired with the trace it came off.
+    """
+    params = ((sweep.get('fits') or {}).get(fit_model) or {}).get('params') or {}
+    if params.get('fr') is None:
+        return
+    colour = pg.mkColor(amplitude_to_color.get(amplitude, pen_color))
+    colour.setAlpha(FR_LINE_ALPHA)
+    plot_item.addLine(
+        x=(params['fr'] - sweep['original_center_frequency']) / 1e3,
+        pen=pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE))
 
 
 #: How faint the bar that did not bind is drawn, against the one that did.
-UNBINDING_BAR_ALPHA = 110
+UNBINDING_BAR_ALPHA = 160
+
+#: How solid the band inside a bar is filled. A bar is a region -- everything
+#: inside it is "not a spike" -- and a filled region says that at a glance
+#: where two horizontal lines leave the eye to do the work.
+BAR_FILL_ALPHA = 26
+UNBINDING_FILL_ALPHA = 30
 
 #: Fraction of the range left clear around the bifurcation plot's contents.
 #: The bar is the outermost thing on a subplot where nothing crossed it, and
@@ -491,8 +527,15 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
     # Room above the bar, so that when nothing reaches it the line reads as a
     # threshold rather than as the top of the frame.
     plot_item.getViewBox().setDefaultPadding(BAR_PADDING)
+    _bar_band(plot_item, 1.0, pen_color, BAR_FILL_ALPHA)
     plot_item.addLine(y=1.0, pen=pg.mkPen(color=pen_color, width=1))
     plot_item.addLine(y=-1.0, pen=pg.mkPen(color=pen_color, width=1))
+
+    # The bar that did not bind, over the chosen step's traces. Collected
+    # rather than drawn inside the loop: that step is swept in both directions,
+    # each with a bar of its own, and two translucent bands one on top of the
+    # other read as one darker band that means nothing.
+    unbinding = []
 
     for step, direction, amplitude, sweep in traces:
         try:
@@ -516,12 +559,66 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
             name=name)
 
         if chosen:
-            other = min(prominence_bar, noise_bar) / bar
-            colour = pg.mkColor(pen_color)
-            colour.setAlpha(UNBINDING_BAR_ALPHA)
-            faint = pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE)
+            unbinding.append(min(prominence_bar, noise_bar) / bar)
+
+    if unbinding:
+        colour = pg.mkColor(pen_color)
+        colour.setAlpha(UNBINDING_BAR_ALPHA)
+        faint = pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE)
+        # One band, at the lowest of them: below that line the noise gate is
+        # what decides, whichever direction the sweep was taken in.
+        _bar_band(plot_item, min(unbinding), pen_color, UNBINDING_FILL_ALPHA)
+        for other in unbinding:
             for sign in (1.0, -1.0):
                 plot_item.addLine(y=sign * other, pen=faint)
+
+
+def _bar_band(plot_item, bar: float, pen_color, alpha: int) -> None:
+    """Fill the band a bar encloses, behind everything drawn on top of it.
+
+    Nested where both bars are shown: the inner band is the gate that did not
+    bind, so the two shades together say how much of the bar in force is the
+    noise gate and how much the prominence.
+    """
+    colour = pg.mkColor(pen_color)
+    colour.setAlpha(alpha)
+    band = pg.LinearRegionItem(
+        values=(-bar, bar), orientation='horizontal', movable=False,
+        brush=pg.mkBrush(colour), pen=pg.mkPen(None))
+    band.setZValue(-10)
+    plot_item.addItem(band)
+
+
+def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
+                         bias, legend_labels=None):
+    """What choosing the bias frequency looked at, at the drive it was chosen at.
+
+    :func:`~rfmux.tuning.bias.iq_arc_speed` is the quantity the default
+    ``"iq_derivative"`` method maximizes -- how far the IQ trace moves per hertz
+    -- so its peak is the answer and the line is where the tone will actually
+    go, after ``BiasPoint`` puts it on the hardware grid. The gap between the
+    two is that quantization, which is the reading this tab exists for.
+
+    Only the step the resonator is biased at is drawn. The other steps chose
+    nothing, and a grid of them would bury the one that did.
+    """
+    if legend_labels:
+        _add_legend(plot_item, pen_color)
+
+    for step, direction, amplitude, sweep in traces:
+        try:
+            frequencies, speed = iq_arc_speed(sweep)
+        except (ValueError, KeyError):
+            continue        # too short or too degenerate to differentiate
+        plot_item.plot(
+            (frequencies - sweep['original_center_frequency']) / 1e3, speed,
+            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color,
+                           chosen=True),
+            name=legend_labels.get((step, direction, amplitude)) if legend_labels else None)
+
+    if bias is not None and traces:
+        _bias_frequency_line(plot_item, bias, traces[0][3], amplitude_to_color,
+                             pen_color)
 
 
 def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,

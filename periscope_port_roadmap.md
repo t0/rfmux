@@ -178,8 +178,10 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   setting belongs to and a Reset to Defaults that reads the finder's signature.
   The report's catalog becomes the panel's; the block carries `bias_report`;
   the sweep grids thicken the chosen step and put a line at the bias frequency,
-  and a Bias Diagnostics tab draws what the derivative test looks at, in units
-  of the bar it applied. Apply Bias runs `crs.apply_bias(catalog)` and
+  a Bias Diagnostics tab draws what the derivative test looks at, in units of
+  the bar it applied and with the band that bar encloses shaded, and a Bias
+  Frequency tab draws what chose the frequency -- the IQ arc speed at the
+  biased step, with the tone's frequency on it. Apply Bias runs `crs.apply_bias(catalog)` and
   publishes each channel's `df_calibration`. The legacy bias lane is gone.
 
 * **Histograms.** A Fit Histograms tab reads the same fits over the whole
@@ -815,7 +817,15 @@ are now strict xfails that name the stage which clears them.
   colours are the grids' own. A sweep with no fits is not drawn there, so an
   empty subplot reads as "not fitted" rather than as a fit that failed; a
   model that did not converge is absent and counted on the toolbar.
-  Still owed here: `fr` lines, `a` in the legend, and a per-model breakdown.
+  ~~Still owed here: `fr` lines, `a` in the legend, and a per-model
+  breakdown.~~ **done (2026-09-11)**: a dashed line at each drawn fit's `fr`,
+  in its sweep's drive colour rather than the model's, because the reading is
+  how far the resonance moved between one drive and the next and that is only
+  legible if the line pairs with the trace it came off. `a` was already in
+  `FIT_LEGEND_PARAMS` and is now pinned by a test. The status line breaks the
+  tally down by model when more than one ran (`skewed 8/8, nonlinear 7/8
+  fitted`), because one number over two models says nothing about which of
+  them is struggling.
   **Normalization**: the tab is normalized to each trace's *last* point, in
   linear units, because that is what `normalize=True` does and what
   `skewed_model_magnitude` returns. The toolbar's "Normalize Traces" is a
@@ -916,9 +926,22 @@ from.
     `noise_gate_factor * noise_floor(diff(speed))`, and `threshold` is the
     higher), so drawing both says which one was binding -- the question the
     `bifurcated_by_derivative` docstring otherwise answers by re-running with
-    `noise_gate_factor=0.0`. Binding bar solid, the other faded.
-  - `iq_arc_speed` with the chosen bias frequency marked, as
-    `plot_frequency_methods` draws it.
+    `noise_gate_factor=0.0`. Binding bar solid, the other faded. **The band
+    each bar encloses is shaded** (2026-09-11, maclean asked): a bar is a
+    region, and a trace that stays inside the shading is a trace the test
+    passed, which two horizontal lines leave the eye to work out. Shading the
+    non-binding bar found a defect the lines had hidden -- the chosen step is
+    swept in both directions, so that band was drawn twice and read as one
+    darker band meaning nothing. It is now drawn once, at the lower of the two,
+    which is the line below which the noise gate decides whichever direction
+    the sweep was taken in.
+  - ~~`iq_arc_speed` with the chosen bias frequency marked~~ **done
+    (2026-09-11)** as a **Bias Frequency tab**, a fifth plot type: each
+    resonator's arc speed at the step it is biased at, with a line where the
+    tone will go. Only that step is drawn -- the others chose nothing -- so the
+    tab is empty until Find Bias has run. The gap between the line and the
+    curve's peak is `BiasPoint`'s quantization onto the hardware grid, which is
+    the reading the tab exists for (§6, judgement call 34).
 * **Verdict map**, on demand rather than in the redraw path: rows are amplitude
   steps, columns are `spike_prominence_factor` swept 0.02 to 1.0, a cell black
   where `bifurcated_by_derivative` says bifurcated, a line at the current
@@ -1366,6 +1389,16 @@ Listed so they can be overruled.
     aggregate -- and wanting the nonlinear model on one while reading the
     skewed Qs on the other is the ordinary case. Overrule by giving both the
     same settings name, which is a one-word change.
+
+34. **The Bias Frequency tab draws the arc speed, whichever frequency method
+    ran** (2026-09-11). `iq_arc_speed` is the public reader that exists for
+    seeing what `"iq_derivative"` maximized. `"minimum"` looked at `|S21|`
+    instead, and there is no reader for that -- writing one here would be a
+    second copy of a library path, which rule 10 forbids, and the Magnitude
+    tab already draws it. So the tab draws the arc speed always and the
+    tooltip says that under `"minimum"` the line need not sit at the peak.
+    Overrule by adding a magnitude reader to `rfmux/tuning/bias.py` and keying
+    the tab off `frequency_method`.
 
 ---
 

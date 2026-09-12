@@ -77,15 +77,9 @@ def resolve_interface(interface_name: str) -> str:
 
 
 def _zero_indexed_ranges(values: list[int]) -> list[range]:
-    """Sorted 1-indexed numbers as 0-indexed ranges, consecutive runs
-    merged: [1, 2, 3, 5] -> [range(0, 3), range(4, 5)]."""
-    ranges: list[range] = []
-    for v in values:
-        if ranges and ranges[-1].stop == v - 1:
-            ranges[-1] = range(ranges[-1].start, v)
-        else:
-            ranges.append(range(v - 1, v))
-    return ranges
+    """1-indexed numbers as 0-indexed ranges, consecutive runs merged:
+    [1, 2, 3, 5] -> [range(0, 3), range(4, 5)]."""
+    return [range(a - 1, b) for a, b in channel_spec.channel_runs(values)]
 
 
 def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range]:

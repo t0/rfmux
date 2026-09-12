@@ -656,14 +656,6 @@ def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):
     assert rs.latest_bias_export(tmp_path, 3) is None
 
 
-def test_channel_spec_is_the_parsers_grammar():
-    from rfmux.tools.parser import parse_ranges
-    channels = [1, 2, 3, 5, 7, 8, 9, 20]
-    spec = rs.channel_spec(channels)
-    assert spec == "1-3,5,7-9,20"
-    assert [c + 1 for r in parse_ranges(spec, 1, 1024, "channel") for c in r] == channels
-
-
 def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch):
     session = rs.open_session(base=tmp_path)
     board = _Board()

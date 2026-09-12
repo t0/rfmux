@@ -25,7 +25,7 @@ import numpy as np
 from ..core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       sampling_to_decimation)
-from ..streamer import SS_PER_SECOND
+from ..streamer import SS_PER_SECOND, TIMESTAMP_RECENT
 from .channel_keys import channel_group, split_key
 from .hdf5 import PulseHDF5Reader
 
@@ -46,7 +46,6 @@ COUNTS_PER_LSB = {0: 1.0, 1: 16.0, 2: 256.0}
 _DAY_S = 86400.0
 #: Records probed past an undisciplined stamp before giving up on it.
 _PROBE = 64
-_RECENT = 0x80000000
 
 
 def _seconds_of_day(ts) -> np.ndarray:
@@ -55,7 +54,7 @@ def _seconds_of_day(ts) -> np.ndarray:
     ts = np.asarray(ts)
     t = (ts["h"].astype(np.float64) * 3600.0 + ts["m"] * 60.0 + ts["s"]
          + ts["ss"] / SS_PER_SECOND)
-    return np.where(ts["c"] & _RECENT, t, np.nan)
+    return np.where(ts["c"] & TIMESTAMP_RECENT, t, np.nan)
 
 
 @dataclass

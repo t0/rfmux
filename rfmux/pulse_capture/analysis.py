@@ -374,6 +374,8 @@ def plot_groups(spec: str, channels) -> list:
     Returns ``[(label, [channels...]), ...]``.  Raises ValueError with
     the offending token, since the caller is a GUI field.
     """
+    from ..core.channels import (ALL_CHANNELS_TOKENS, parse_channel_spec,
+                                 parse_module_channels)
     from .channel_keys import short_label
 
     present = sorted(channels)
@@ -388,30 +390,22 @@ def plot_groups(spec: str, channels) -> list:
     for token in cleaned.split(","):
         if not token:
             continue
-        if token.lower() in ("*", "all"):
+        if token.lower() in ALL_CHANNELS_TOKENS:
             if present:
                 out.append((f"All {len(present)} ch", list(present)))
             continue
-        prefix, colon, rest = token.rpartition(":")
-        lo, sep, hi = rest.partition("-")
-        try:
-            module = int(prefix) if colon else None
-            start = int(lo)
-            stop = int(hi) if sep else start
-        except ValueError:
-            raise ValueError(
-                f"Could not read {token!r}. Use channels like \"1,2\", "
-                f"ranges like \"2-19\" to combine, or \"*\".") from None
-        if stop < start:
-            raise ValueError(
-                f"Range {token!r} runs backwards -- write "
-                f"\"{stop}-{start}\".")
-        members = [c for c in present if start <= number(c) <= stop
+        if ":" in token:
+            [(module, numbers)] = parse_module_channels(token).items()
+        else:
+            module, numbers = None, parse_channel_spec(token, wildcard=False)
+        wanted = set(numbers)
+        members = [c for c in present if number(c) in wanted
                    and (module is None
                         or (isinstance(c, tuple) and c[0] == module))]
         if not members:
             continue
-        label = f"Ch{start}" if not sep else f"Ch{start}-{stop}"
+        label = (f"Ch{numbers[0]}" if len(numbers) == 1
+                 else f"Ch{numbers[0]}-{numbers[-1]}")
         if module is not None:
             label = f"M{module}" + label
         out.append((label, members))

@@ -4,13 +4,31 @@ dialogs: ranges like ``1,5-8,20`` and per-module ranges like
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 #: Spellings of the "every biased channel" wildcard.
 ALL_CHANNELS_TOKENS = ("all", "*")
 #: Readout modules a board has, numbered 1-4 everywhere in Python
 #: (0-3 on the wire: NUM_MODULES in the streamer's packet.h).
 MAX_MODULE = 4
+
+
+def channel_runs(values: Iterable[int]) -> List[Tuple[int, int]]:
+    """*values* as sorted inclusive runs: ``[3, 1, 2, 5]`` ->
+    ``[(1, 3), (5, 5)]``."""
+    runs: List[List[int]] = []
+    for v in sorted(set(int(v) for v in values)):
+        if runs and v == runs[-1][1] + 1:
+            runs[-1][1] = v
+        else:
+            runs.append([v, v])
+    return [(a, b) for a, b in runs]
+
+
+def format_channel_spec(values: Iterable[int]) -> str:
+    """The spec that parses back to *values*: ``1-3,5``."""
+    return ",".join(f"{a}-{b}" if a != b else str(a)
+                    for a, b in channel_runs(values))
 
 
 def parse_channel_spec(text: str, *, name: str = "channel",

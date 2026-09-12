@@ -52,7 +52,7 @@ from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
-from ...pulse_capture.channel_keys import modules_of
+from ...pulse_capture.channel_keys import modules_of, pair_keys
 from ...pulse_capture.capture_session import (
     DualPulseCaptureSession,
     PulseCaptureConfig,
@@ -299,8 +299,7 @@ async def trigger_capture(
         if streamer_mode != "slow":
             raise ValueError("a capture across modules reads the slow "
                              "stream only")
-        channels = [(int(m), int(c)) for m in sorted(channel)
-                    for c in channel[m]]
+        channels = pair_keys(channel)
         module = None
     else:
         channels = list(channel) if isinstance(channel, list) else [channel]

@@ -5,7 +5,15 @@ and the per-module form."""
 
 import pytest
 
-from rfmux.core.channels import parse_channel_spec, parse_module_channels
+from rfmux.core.channels import (channel_runs, format_channel_spec,
+                                 parse_channel_spec, parse_module_channels)
+
+
+def test_runs_merge_consecutive_numbers_and_format_back_to_a_spec():
+    assert channel_runs([3, 1, 2, 5, 5]) == [(1, 3), (5, 5)]
+    assert channel_runs([]) == []
+    assert format_channel_spec([3, 1, 2, 5]) == "1-3,5"
+    assert parse_channel_spec(format_channel_spec([7, 9, 8])) == [7, 8, 9]
 
 
 def test_a_bound_names_the_offending_token():

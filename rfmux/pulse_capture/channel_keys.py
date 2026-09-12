@@ -8,7 +8,7 @@ as ``module_<M>/channel_<n>`` and ``..._m<M>ch<n>``.
 
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union
 
 import numpy as np
 
@@ -70,6 +70,24 @@ def split_key(key: ChannelKey, module=None):
     if isinstance(key, tuple):
         return key[0], key[1]
     return (None if module is None else int(module)), int(key)
+
+
+def keys_by_module(keys: Iterable[ChannelKey], module=None
+                   ) -> Dict[int, List[Tuple[int, ChannelKey]]]:
+    """``{module: [(channel number, key), ...]}`` of *keys*, modules in
+    order: a pair key names its module, a plain channel is on
+    *module*."""
+    out: Dict[int, List[Tuple[int, ChannelKey]]] = {}
+    for key in keys:
+        m, c = split_key(key, module)
+        out.setdefault(int(m), []).append((c, key))
+    return dict(sorted(out.items()))
+
+
+def pair_keys(wanted: Dict[int, Iterable[int]]) -> List[Tuple[int, int]]:
+    """Every channel of ``{module: channels}`` as a (module, channel)
+    key, modules in order."""
+    return [(int(m), int(c)) for m in sorted(wanted) for c in wanted[m]]
 
 
 def check_keys(keys: Iterable) -> List[ChannelKey]:

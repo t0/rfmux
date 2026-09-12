@@ -42,6 +42,7 @@ import numpy as np
 from numba import njit
 
 from .. import streamer
+from .channel_keys import keys_by_module
 from ..core.transferfunctions import PFB_SAMPLING_FREQ
 
 
@@ -334,17 +335,6 @@ def _drain(sock, first: bytes, size: int, cap: int) -> list:
 MODULE_SILENCE_S = 2.0
 
 
-def _wanted_by_module(channels, module):
-    """``{module: [(channel number, key), ...]}`` for a session's channel
-    keys: a (module, channel) pair names its module, a plain channel is
-    on *module*."""
-    wanted = {}
-    for key in channels:
-        m, c = key if isinstance(key, tuple) else (module, key)
-        wanted.setdefault(int(m), []).append((int(c), key))
-    return wanted
-
-
 async def run_slow_source(
     capture_session,
     host: str,
@@ -383,7 +373,7 @@ async def run_slow_source(
     """
     origin_set = False
     loop = asyncio.get_running_loop()
-    wanted = _wanted_by_module(capture_session.channels, module)
+    wanted = keys_by_module(capture_session.channels, module)
     ingests = {m: SlowIngest(capture_session.feed_block, duration_s=duration_s)
                for m in wanted}
     columns: dict = {}     # module -> (keys, index array) at the last width

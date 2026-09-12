@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import List, Optional
@@ -15,7 +14,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
-    fastrx_bytes_per_s, resolve_channels)
+    fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
@@ -28,23 +27,6 @@ _SHOW = ("periscope", "overlay", "none")
 
 #: Mb/s at and above which an interface is a channel-stream (100G) one.
 _FAST_MBPS = 100_000
-
-
-def interface_speeds() -> dict:
-    """{interface: negotiated Mb/s} for the host's interfaces, without
-    loopback; None for one without a link or a reported speed."""
-    speeds = {}
-    try:
-        names = sorted(n for n in os.listdir("/sys/class/net") if n != "lo")
-    except OSError:
-        return speeds
-    for name in names:
-        try:
-            speed = int(Path("/sys/class/net", name, "speed").read_text())
-        except (OSError, ValueError):
-            speed = None
-        speeds[name] = speed if speed and speed > 0 else None
-    return speeds
 
 
 def _label(name: str, speed) -> str:
@@ -87,6 +69,8 @@ class RecordDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("rfmux record")
         self.settings = settings or QtCore.QSettings(ORGANIZATION, APPLICATION)
+        #: (folder, bytes free): read once per folder, again on Check.
+        self._disk = (None, 0)
         outer = QtWidgets.QVBoxLayout(self)
         self.tabs = QtWidgets.QTabWidget()
         outer.addWidget(self.tabs)
@@ -377,7 +361,9 @@ class RecordDialog(QtWidgets.QDialog):
             if chans and folder.is_dir():
                 need = self.duration_spin.value() * fastrx_bytes_per_s(
                     max(c for chs in chans.values() for c in chs))
-                free = shutil.disk_usage(folder).free
+                if self._disk[0] != folder or self.sender() is self.recheck_btn:
+                    self._disk = (folder, shutil.disk_usage(folder).free)
+                free = self._disk[1]
                 self.disk_label.setText(
                     f"disk: {free / 1e9:.0f} GB free in {folder}, about "
                     f"{need / 1e9:.0f} GB needed")

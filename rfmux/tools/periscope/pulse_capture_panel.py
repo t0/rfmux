@@ -49,7 +49,7 @@ from ...pulse_capture.capture_session import (
     PulseCaptureSession,
 )
 from ...pulse_capture.channel_keys import (channel_arg, channel_suffix,
-                                           short_label, split_key,
+                                           keys_by_module, short_label,
                                            title_label)
 from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...core.transferfunctions import (
@@ -2367,13 +2367,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             rows = self._flat_tuning()
             module = int(self.module_spin.value())
-        out: Dict[int, Dict[int, dict]] = {}
-        for key, row in rows.items():
-            if not isinstance(row, dict) or "frequencies" not in row:
-                continue
-            m, ch = split_key(key, module)
-            out.setdefault(int(m), {})[int(ch)] = row
-        return out
+        rows = {k: r for k, r in rows.items()
+                if isinstance(r, dict) and "frequencies" in r}
+        return {m: {c: rows[key] for c, key in pairs}
+                for m, pairs in keys_by_module(rows, module).items()}
 
     def _add_tuning_items(self) -> None:
         """One tree item per module whose channels carry their tuning:

@@ -32,6 +32,7 @@ import dataclasses
 import datetime
 import importlib.util
 import json
+import os
 import pickle
 import shutil
 import signal
@@ -45,9 +46,10 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
-from ...core.channels import (MAX_MODULE, parse_channel_spec,
-                              parse_module_channels)
-from ...pulse_capture.channel_keys import describe
+from ...core.channels import (MAX_MODULE, format_channel_spec,
+                              parse_channel_spec, parse_module_channels)
+from ...pulse_capture.channel_keys import (describe, keys_by_module,
+                                           pair_keys)
 from .df_calibration import tuning_rows
 
 SESSION_FOLDER_FORMAT = "session_%Y%m%d_%H%M%S"
@@ -60,6 +62,23 @@ def fastrx_bytes_per_s(channels: int) -> float:
     stride (86-byte header, 4 bytes per channel, padded to 8) at the
     channel-stream rate."""
     return float(((86 + 4 * channels + 7) & ~7) * PFB_SAMPLING_FREQ)
+
+
+def interface_speeds() -> dict:
+    """{interface: negotiated Mb/s} for the host's interfaces, without
+    loopback; None for one without a link or a reported speed."""
+    speeds = {}
+    try:
+        names = sorted(n for n in os.listdir("/sys/class/net") if n != "lo")
+    except OSError:
+        return speeds
+    for name in names:
+        try:
+            speed = int(Path("/sys/class/net", name, "speed").read_text())
+        except (OSError, ValueError):
+            speed = None
+        speeds[name] = speed if speed and speed > 0 else None
+    return speeds
 
 
 #: The parser as a child: it says so on stderr once imported, which is
@@ -200,12 +219,9 @@ def calibrated(tuning: Dict[Any, dict]) -> int:
 def by_module(module: Optional[int], channels) -> Dict[int, List[int]]:
     """``{module: sorted channels}`` from a channel list on *module* or
     a mapping of them; modules with no channels are dropped."""
-    if isinstance(channels, dict):
-        found = {int(m): sorted(set(int(c) for c in chs))
-                 for m, chs in channels.items()}
-    else:
-        found = {int(module): sorted(set(int(c) for c in channels))}
-    return {m: chs for m, chs in sorted(found.items()) if chs}
+    keys = pair_keys(channels) if isinstance(channels, dict) else channels
+    return {m: sorted({c for c, _ in pairs})
+            for m, pairs in keys_by_module(keys, module).items()}
 
 
 def modules_tag(modules: Iterable[int]) -> str:
@@ -215,17 +231,6 @@ def modules_tag(modules: Iterable[int]) -> str:
     if len(modules) == 1:
         return f"module{modules[0]}"
     return "modules" + "+".join(str(m) for m in modules)
-
-
-def channel_spec(channels: Iterable[int]) -> str:
-    """Channels as the parser's ``-c`` ranges: ``1-4,7``."""
-    runs: List[List[int]] = []
-    for c in sorted(set(int(c) for c in channels)):
-        if runs and c == runs[-1][1] + 1:
-            runs[-1][1] = c
-        else:
-            runs.append([c, c])
-    return ",".join(f"{a}-{b}" if a != b else str(a) for a, b in runs)
 
 
 # ── The recording ──────────────────────────────────────────────────
@@ -315,7 +320,7 @@ async def record_streams(
         channels = list(wanted[module])
     else:
         module = None
-        channels = [(m, c) for m in modules for c in wanted[m]]
+        channels = pair_keys(wanted)
     if duration_s <= 0:
         raise ValueError(f"duration must be positive, got {duration_s}")
     if not (capture or parser or fastrx):
@@ -509,7 +514,7 @@ async def _start_parser(host, interface, wanted, dirfile, log) -> _Parser:
     where = ["-i", interface] if interface else ["-H", host]
     cmd = [sys.executable, "-c", PARSER_CHILD, *where, "-d", str(dirfile)]
     for module, channels in wanted.items():
-        cmd += ["-c", f"{module}:{channel_spec(channels)}"]
+        cmd += ["-c", f"{module}:{format_channel_spec(channels)}"]
     cmd.append("--drop-stats")
     proc = await asyncio.create_subprocess_exec(
         *cmd, stdout=asyncio.subprocess.DEVNULL,

@@ -37,7 +37,7 @@ from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E
 from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
-from rfmux.tuning.fits import FitReport, SweepFit  # noqa: E402
+from rfmux.tuning.fits import BIFURCATION_A, FitReport, SweepFit  # noqa: E402
 from rfmux.tuning.bias import (  # noqa: E402
     BiasReport, bifurcated_by_derivative, normalized_arc_speed)
 from rfmux.tuning.find_resonances import (  # noqa: E402
@@ -48,6 +48,9 @@ from rfmux.tuning.find_resonances import (  # noqa: E402
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
     NetworkAnalysisDialog,
+)
+from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
+    HISTOGRAM_PARAMS,
 )
 from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
 from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
@@ -457,8 +460,8 @@ def _grid_widgets(panel, tab_idx=0):
     """The subplot widgets the grid is showing, in the order it drew them."""
     panel.plot_tabs.setCurrentIndex(tab_idx)
     panel._redraw_plots()
-    grid = {0: panel.mag_sweeps_grid, 1: panel.iq_sweeps_grid,
-            2: panel.fit_sweeps_grid, 3: panel.bias_sweeps_grid}[tab_idx]
+    _plot_type, grid, _cache, _colorbar = \
+        panel._sweep_grids[panel.plot_tabs.currentWidget()]
     return [grid.itemAt(i).widget() for i in range(grid.count())]
 
 
@@ -1634,6 +1637,189 @@ def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
     assert not panel._fit_status_timer.isActive()
 
 
+# ── the fit histograms tab ───────────────────────────────────────────────────
+
+HISTOGRAM_TAB = 3
+
+
+def _histogram_plots(panel):
+    """The histogram tab's plots, in the order it drew them.
+
+    The first is the ``fr`` scatter; the rest are the histograms of
+    ``HISTOGRAM_PARAMS[model]``, in that order.
+    """
+    panel.plot_tabs.setCurrentIndex(HISTOGRAM_TAB)
+    panel._redraw_plots()
+    grid = panel.fit_histograms_tab._grid
+    return [grid.itemAt(i).widget() for i in range(grid.count())]
+
+
+def _show_histogram_model(panel, model):
+    """Pick the model the histogram tab bins."""
+    combo = panel.fit_histograms_tab.toolbar.model_combo
+    index = combo.findData(model)
+    assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
+    combo.setCurrentIndex(index)
+
+
+def _binned(plot):
+    """How many values a histogram plot has in it, over every drive on it."""
+    return sum(curve.getData()[1].sum()
+               for curve in plot.getPlotItem().listDataItems())
+
+
+def _converged(panel, model, step=None):
+    """The sweeps carrying a converged *model* fit, read off the entries."""
+    return {where: sweep for where, sweep in _fitted_sweeps(panel).items()
+            if (step is None or where[1] == step)
+            and sweep["fits"][model]["failed_because"] is None}
+
+
+def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):
+    """Every converged fit is either in the bins or counted off the axis.
+
+    A quality factor a fit made negative cannot go on a log axis; leaving it
+    out silently is a histogram that is wrong rather than one that is short, so
+    the plot it is missing from says how many it is missing.
+    """
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    plots = _histogram_plots(panel)
+
+    assert len(plots) == 1 + len(HISTOGRAM_PARAMS["skewed"])
+    converged = len(_converged(panel, "skewed"))
+    assert converged > 0
+    not_binned = panel.fit_histograms_tab.not_binned
+    for param, plot in zip(HISTOGRAM_PARAMS["skewed"], plots[1:]):
+        assert _binned(plot) + not_binned.get(param, 0) == converged
+        assert str(not_binned.get(param, "")) in plot.getPlotItem().titleLabel.text
+
+
+def test_the_frequency_scatter_carries_the_fr_each_fit_found(board, qt_app):
+    """One point per fit, at the value on the entry -- read, not recomputed."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    scatters = [item for item in _histogram_plots(panel)[0].getPlotItem().items
+                if isinstance(item, pg.ScatterPlotItem)]
+
+    measured = sorted(sweep["fits"]["skewed"]["params"]["fr"] / 1e6
+                      for sweep in _converged(panel, "skewed").values())
+    drawn = sorted(point.pos().y() for scatter in scatters
+                   for point in scatter.points())
+    assert drawn == pytest.approx(measured)
+
+
+def test_the_quality_factors_share_one_set_of_bins(board, qt_app):
+    """Qr, Qc and Qi on separate bins each fill their own axis and look alike;
+    shared bins are what makes them readable against each other."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    edges = [plot.getPlotItem().listDataItems()[0].getData()[0]
+             for plot in _histogram_plots(panel)[1:]]
+
+    assert all(np.allclose(other, edges[0]) for other in edges[1:])
+
+
+def test_the_nonlinearity_is_binned_against_where_bifurcation_starts(board, qt_app):
+    """``a`` means nothing without BIFURCATION_A beside it, and the skewed
+    model has no ``a`` to mark."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    _show_histogram_model(panel, "nonlinear")
+    a_plot = _histogram_plots(panel)[1 + HISTOGRAM_PARAMS["nonlinear"].index("a")]
+    lines = [item for item in a_plot.getPlotItem().items
+             if isinstance(item, pg.InfiniteLine)]
+    assert [line.value() for line in lines] == [pytest.approx(BIFURCATION_A)]
+
+    _show_histogram_model(panel, "skewed")
+    assert not any(isinstance(item, pg.InfiniteLine)
+                   for plot in _histogram_plots(panel)
+                   for item in plot.getPlotItem().items)
+
+
+def test_a_fit_the_fitter_rejected_is_counted_rather_than_binned(board, qt_app):
+    """A parameter the fitter converged on and then disowned would move the
+    distribution without being a measurement of anything."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    before = _binned(_histogram_plots(panel)[1])
+
+    rejected = next(iter(_converged(panel, "skewed").values()))
+    rejected["fits"]["skewed"]["failed_because"] = "the residual is too high"
+
+    assert _binned(_histogram_plots(panel)[1]) == before - 1
+    assert "1 rejected by the fitter" in panel.fit_histograms_tab._status.text()
+
+
+def test_a_quality_factor_no_log_axis_can_hold_is_named_on_its_plot(board, qt_app):
+    """A fit can converge on a negative Q. It cannot be drawn on a log axis, so
+    the plot says how many of them it is missing rather than being short."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    before = _binned(_histogram_plots(panel)[1 + HISTOGRAM_PARAMS["skewed"].index("Qi")])
+
+    next(iter(_converged(panel, "skewed").values()))["fits"]["skewed"]["params"]["Qi"] = -1.0
+
+    plot = _histogram_plots(panel)[1 + HISTOGRAM_PARAMS["skewed"].index("Qi")]
+    assert panel.fit_histograms_tab.not_binned == {"Qi": 1}
+    assert _binned(plot) == before - 1
+    assert "1 off the axis" in plot.getPlotItem().titleLabel.text
+
+
+def test_the_histograms_bin_the_amplitude_step_they_are_asked_for(board, qt_app):
+    """A step selector, so a schedule's steps can be read one at a time as well
+    as overlaid."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    combo = panel.fit_histograms_tab.toolbar.amplitude_combo
+    combo.setCurrentIndex(combo.findData(1))
+
+    at_step = len(_converged(panel, "skewed", step=1))
+    assert 0 < at_step < len(_converged(panel, "skewed"))
+    plot = _histogram_plots(panel)[1]
+    assert _binned(plot) + panel.fit_histograms_tab.not_binned.get("Qr", 0) == at_step
+
+
+def test_the_two_fit_tabs_are_chosen_independently(board, qt_app):
+    """They answer different questions about the same fits, so the model one is
+    showing is not the model the other is."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    _show_fit_model(panel, "nonlinear")
+    _show_histogram_model(panel, "skewed")
+
+    assert panel.fit_display.get_model() == "nonlinear"
+    assert panel.fit_histograms_tab.toolbar.get_model() == "skewed"
+
+
 # ── finding a bias point ─────────────────────────────────────────────────────
 @pytest.fixture(scope="module")
 def swept_container(board, qt_app):
@@ -2030,7 +2216,7 @@ def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_contain
 
 # ── the bias diagnostics tab ─────────────────────────────────────────────────
 
-BIAS_TAB = 3
+BIAS_TAB = 4
 
 
 def _on_bias_tab(swept_container, board):

@@ -493,27 +493,31 @@ def set_fit_parameters(parameters: dict) -> None:
     _get_settings().setValue(KEY_FIT_SWEEPS, json.dumps(parameters))
 
 
-def get_fit_display() -> dict:
-    """What the Fit Results tab was last showing: which model, which amplitude.
+def get_fit_display(name: str = "fits") -> dict:
+    """What a tab showing fits was last showing: which model, which amplitude.
 
     JSON, as for the fit settings, so ``None`` -- which the amplitude choice
     uses to mean "all of them" -- survives the round trip.
+
+    Args:
+        name: which tab's choice, since more than one draws fits and they are
+            chosen independently.
 
     Returns:
         dict: what was last saved, empty if nothing ever was.
     """
     import json
     try:
-        saved = json.loads(_get_settings().value(KEY_FIT_DISPLAY, "{}"))
+        saved = json.loads(_get_settings().value(f"{KEY_FIT_DISPLAY}/{name}", "{}"))
     except (json.JSONDecodeError, TypeError):
         return {}
     return saved if isinstance(saved, dict) else {}
 
 
-def set_fit_display(display: dict) -> None:
-    """Remember what the Fit Results tab is showing."""
+def set_fit_display(display: dict, name: str = "fits") -> None:
+    """Remember what a tab showing fits is showing."""
     import json
-    _get_settings().setValue(KEY_FIT_DISPLAY, json.dumps(display))
+    _get_settings().setValue(f"{KEY_FIT_DISPLAY}/{name}", json.dumps(display))
 
 
 # ─────────────────────────────────────────────────────────────────

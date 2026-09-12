@@ -23,6 +23,7 @@ from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .multisweep_grid_helpers import create_amplitude_color_map
 from .fit_display_toolbar import FitDisplayToolbar
+from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
 from .bias_settings_panel import BiasSettingsPanel
@@ -133,6 +134,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # one model, over one step of the schedule or all of them.
         self.fit_display = FitDisplayToolbar(self)
         self.fit_display.display_changed.connect(self._redraw_plots)
+
+        # The same fits over the whole array. It reads the block itself and
+        # carries its own toolbar, so it is built here rather than assembled
+        # from grids and colorbars like the tabs below.
+        self.fit_histograms_tab = FitHistogramsTab(self)
 
         # Bias finding's settings, the same way, and what the last run
         # concluded. The report's catalog becomes this panel's, so what is
@@ -364,14 +370,35 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._create_sweep_tab(toolbar=self.fit_display)
         self.plot_tabs.addTab(self.fit_sweeps_tab, "Fit Results")
 
-        # Tab 3: what the derivative bifurcation test looks at
+        # Tab 3: the same fits, over the whole array rather than one at a time
+        self.plot_tabs.addTab(self.fit_histograms_tab, "Fit Histograms")
+        self.plot_tabs.setTabToolTip(
+            3, "Every fitted parameter on the array at once: where each "
+               "resonance sits and how the quality factors and the "
+               "nonlinearity are distributed, at each drive.")
+
+        # Tab 4: what the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias Diagnostics")
         self.plot_tabs.setTabToolTip(
-            3, "The point-to-point change in each sweep's normalized arc "
+            4, "The point-to-point change in each sweep's normalized arc "
                "speed, in units of the bar the derivative test applied to it. "
                "A spike past \u00b11 with one the other way beside it is what "
                "that test calls a bifurcation.")
+
+        # Every tab that is a grid of one subplot per resonator, and the four
+        # things that differ between them. Keyed by the tab itself, so adding
+        # one is adding a row rather than renumbering a chain of branches.
+        self._sweep_grids = {
+            self.mag_sweeps_tab: ('magnitude', self.mag_sweeps_grid,
+                                  self.mag_sweep_plots_cache, self.mag_colorbar),
+            self.iq_sweeps_tab: ('iq', self.iq_sweeps_grid,
+                                 self.iq_sweep_plots_cache, self.iq_colorbar),
+            self.fit_sweeps_tab: ('fit', self.fit_sweeps_grid,
+                                  self.fit_sweep_plots_cache, self.fit_colorbar),
+            self.bias_sweeps_tab: ('bias', self.bias_sweeps_grid,
+                                   self.bias_sweep_plots_cache, self.bias_colorbar),
+        }
 
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
@@ -679,18 +706,36 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                        for a in step.values()})
 
     def _redraw_plots(self):
-        """Redraw the grid on the active tab."""
+        """Redraw whatever the active tab draws."""
         if self.module_sweeps is None and not self._live:
             return
-        self._redraw_sweep_grid(self.plot_tabs.currentIndex())
-    
-    def _redraw_sweep_grid(self, tab_idx):
-        """Redraw one tab's grid: magnitude (0), IQ (1), fits (2), bias (3)."""
+        tab = self.plot_tabs.currentWidget()
+        if tab is self.fit_histograms_tab:
+            self._redraw_fit_histograms()
+        else:
+            self._redraw_sweep_grid(tab)
+
+    def _redraw_fit_histograms(self):
+        """Hand the histogram tab the block and the grids' colour scale.
+
+        It reads the fits itself, through the library, so nothing about what it
+        bins is decided here.
+        """
+        self.fit_histograms_tab.show_sweeps(
+            self.module_sweeps,
+            create_amplitude_color_map(self._amplitudes_drawn(), self.dark_mode),
+            self.dark_mode,
+            self._bias_by_name())
+
+    def _redraw_sweep_grid(self, tab):
+        """Redraw one grid tab: one subplot per resonator, of *tab*'s kind."""
         from .multisweep_grid_helpers import update_sweep_grid
+
+        plot_type, grid_layout, widget_cache, colorbar = self._sweep_grids[tab]
 
         names = self._selected_names()
         traces_by_name = self._collect_traces(names)
-        if tab_idx == 2:
+        if plot_type == 'fit':
             traces_by_name = {name: self._fit_traces(name, traces_by_name.get(name, []))
                               for name in names}
         if not traces_by_name:
@@ -701,28 +746,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Get DAC scale for label formatting
         dac_scale = self.dac_scales.get(self.active_module_for_dac)
-
-        # Determine plot type, grid, cache, and colorbar based on tab
-        if tab_idx == 0:
-            plot_type = 'magnitude'
-            grid_layout = self.mag_sweeps_grid
-            widget_cache = self.mag_sweep_plots_cache
-            colorbar = self.mag_colorbar
-        elif tab_idx == 2:
-            plot_type = 'fit'
-            grid_layout = self.fit_sweeps_grid
-            widget_cache = self.fit_sweep_plots_cache
-            colorbar = self.fit_colorbar
-        elif tab_idx == 3:
-            plot_type = 'bias'
-            grid_layout = self.bias_sweeps_grid
-            widget_cache = self.bias_sweep_plots_cache
-            colorbar = self.bias_colorbar
-        else:  # tab_idx == 1
-            plot_type = 'iq'
-            grid_layout = self.iq_sweeps_grid
-            widget_cache = self.iq_sweep_plots_cache
-            colorbar = self.iq_colorbar
 
         has_downward = any(direction == 'downward'
                            for traces in traces_by_name.values()
@@ -812,19 +835,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
              ("At bias amplitude", BIAS_AMPLITUDE)] + self._step_choices())
 
     def _populate_fit_display(self):
-        """Offer the Fit Results tab what this measurement has to draw.
+        """Offer both fit tabs what this measurement has to draw.
 
         The models it carries fits for -- what was fitted, not what the
         settings ask for: a block loaded from a file was fitted by whatever
         fitted it, and one whose fits are still being run has none of them yet
         -- and the steps it walked, with the bias step among them once
-        something has chosen one.
+        something has chosen one. Each tab chooses from them independently.
         """
-        self.fit_display.set_models_fitted(self._models_fitted())
-        self.fit_display.set_amplitude_choices(
-            [("All amplitudes", ALL_AMPLITUDES)]
-            + ([("At bias amplitude", BIAS_AMPLITUDE)] if self.bias_report else [])
-            + self._step_choices())
+        models = self._models_fitted()
+        choices = ([("All amplitudes", ALL_AMPLITUDES)]
+                   + ([("At bias amplitude", BIAS_AMPLITUDE)] if self.bias_report else [])
+                   + self._step_choices())
+        for toolbar in (self.fit_display, self.fit_histograms_tab.toolbar):
+            toolbar.set_models_fitted(models)
+            toolbar.set_amplitude_choices(choices)
 
     def _step_choices(self) -> list:
         """``[(label, step), ...]`` for the steps this measurement walked."""
@@ -971,7 +996,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_analysis_enabled(True)
         self.bias_report = report
         self.catalog = report.catalog
-        # The bias step is now a thing the Fit Results tab can be asked for.
+        # The bias step is now a thing the fit tabs can be asked for.
         self._populate_fit_display()
 
         # The report's own words: every resonator gets a bias point, and a flag

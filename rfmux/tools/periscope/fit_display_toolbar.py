@@ -1,11 +1,13 @@
-"""What the Fit Results tab draws: which model, and over which sweeps.
+"""What a tab drawing fits draws: which model, and over which sweeps.
 
 A view control rather than a fit setting, so it sits in the tab it changes
 instead of in the fitters' settings window. The models on offer are the ones
 the sweeps carry fits for and the amplitudes are the steps the measurement
 walked, so the multisweep panel says what both are; the bias step is among
-them once something has chosen one. Both choices persist across Periscope
-sessions through :mod:`~rfmux.tools.periscope.settings`.
+them once something has chosen one. The Fit Results and Fit Histograms tabs
+each have one, chosen independently and each persisting across Periscope
+sessions under its own *name*, through
+:mod:`~rfmux.tools.periscope.settings`.
 """
 
 from __future__ import annotations
@@ -19,17 +21,18 @@ from .layouts import FlowLayout, labelled
 
 
 class FitDisplayToolbar(QtWidgets.QWidget):
-    """The Fit Results tab's own toolbar: one model, one set of amplitudes."""
+    """A fit tab's own toolbar: one model, one set of amplitudes."""
 
     #: Emitted when either choice changes, so the tab can redraw.
     display_changed = pyqtSignal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, name: str = "fits"):
         super().__init__(parent)
+        self._name = name
         # What was last drawn, held apart from the combos: they carry only
         # what the measurement on screen has, and a choice it cannot honour is
         # picked up again by one that can.
-        saved = periscope_settings.get_fit_display()
+        saved = periscope_settings.get_fit_display(name)
         self._wanted_model = saved.get("model")
         self._wanted_amplitude = saved.get("amplitude", ALL_AMPLITUDES)
         self._setup_ui()
@@ -91,8 +94,8 @@ class FitDisplayToolbar(QtWidgets.QWidget):
 
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.setToolTip(
-            "Which fitted model is drawn over the measurement. One at a time, "
-            "so a subplot carries one line over its points")
+            "Which fitted model is drawn. One at a time, so a plot shows one "
+            "model's answer rather than three overlaid")
         self.model_combo.setEnabled(False)
         layout.addWidget(labelled("Fit:", self.model_combo))
 
@@ -108,5 +111,6 @@ class FitDisplayToolbar(QtWidgets.QWidget):
         self._wanted_model = self.get_model()
         self._wanted_amplitude = self.get_amplitude()
         periscope_settings.set_fit_display(
-            {"model": self._wanted_model, "amplitude": self._wanted_amplitude})
+            {"model": self._wanted_model, "amplitude": self._wanted_amplitude},
+            self._name)
         self.display_changed.emit()

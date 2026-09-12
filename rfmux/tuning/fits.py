@@ -109,6 +109,8 @@ __all__ = [
     "fit_sweeps",
     "fit_sweeps_at_bias_amplitude",
     "fit_section",
+    "FIT_PARAMS",
+    "collect_fit_params",
     "skewed_model_magnitude",
     "nonlinear_model_iq",
     "gain_corrected_iq",
@@ -142,6 +144,11 @@ BIFURCATION_A = 4 * np.sqrt(3) / 9
 #: other three Qs rather than fitted, which is why they have no error below.
 SKEWED_PARAMS = ("fr", "Qr", "Qc", "Qi", "Qcre", "Qcim", "A")
 SKEWED_FITTED_PARAMS = ("fr", "Qr", "Qcre", "Qcim", "A")
+
+#: The named parameters each model reports, for a caller building a display or
+#: a table over them. ``circle`` is absent: it records a centre and a radius,
+#: not named parameters.
+FIT_PARAMS = {"skewed": SKEWED_PARAMS, "nonlinear": NONLINEAR_PARAMS}
 
 
 class FitFailed(Exception):
@@ -631,6 +638,81 @@ def centered_iq(entry: Mapping) -> np.ndarray:
             "fit_sweeps(..., models=('circle',)) on it first."
         )
     return np.asarray(entry["iq_counts"]) - fit["center"]
+
+
+def collect_fit_params(
+    sweeps,
+    model: str,
+    *,
+    names=None,
+    iterations=None,
+    directions=None,
+) -> list[dict]:
+    """One model's fitted parameters across a whole module, one row per sweep.
+
+    The per-entry readers above answer about one sweep. This answers about the
+    array: every ``fr``, every ``Qr``, every ``a``, with the coordinates and the
+    drive amplitude each was measured at, which is what a histogram or a table
+    of an array is made of::
+
+        rows = collect_fit_params(module_sweeps, "skewed")
+        plt.hist([r["params"]["Qi"] for r in rows], bins=40)
+
+    A sweep with no fit for *model*, or one whose fit did not converge, has no
+    parameters and so is not a row. One that converged on something the fitter
+    then rejected -- the nonlinear fit above ``max_residual`` -- *is* a row,
+    carrying its ``failed_because``, because what it converged to is usually
+    the clue. Callers that want only the clean fits filter on that.
+
+    Args:
+        sweeps: one module's sweep result, as :func:`fit_sweeps` takes it.
+        model: which model's parameters, from :data:`FIT_PARAMS`.
+        names: resonators to include; every one of them by default.
+        iterations: amplitude steps to include; every one by default.
+        directions: sweep directions to include; both by default.
+
+    Returns:
+        list[dict]: ``name``, ``iteration``, ``direction``, ``amplitude``,
+        ``params``, ``errors`` and ``failed_because``, in the order the sweeps
+        were measured. ``params`` and ``errors`` are the entry's own dicts, not
+        copies.
+    """
+    if model not in FIT_PARAMS:
+        raise ValueError(
+            f"Unknown model {model!r}: named parameters come from "
+            f"{tuple(FIT_PARAMS)}."
+            + (" The circle fit records a centre and a radius; read those off "
+               "the entry, or use centered_iq()." if model == "circle" else "")
+        )
+
+    sections = list(_walk(sweeps))
+    keep_names = _filter_names(names, {s.name for s in sections})
+    keep_iterations = _as_filter(iterations, "iterations")
+    keep_directions = _as_filter(directions, "directions")
+
+    rows = []
+    for section in sections:
+        if section.name not in keep_names:
+            continue
+        if keep_iterations is not None and section.iteration not in keep_iterations:
+            continue
+        if keep_directions is not None and section.direction not in keep_directions:
+            continue
+        fit = (section.entry.get("fits") or {}).get(model)
+        if fit is None or fit.get("params") is None:
+            continue
+        rows.append(
+            {
+                "name": section.name,
+                "iteration": section.iteration,
+                "direction": section.direction,
+                "amplitude": section.entry.get("sweep_amplitude"),
+                "params": fit["params"],
+                "errors": fit.get("errors") or {},
+                "failed_because": fit.get("failed_because"),
+            }
+        )
+    return rows
 
 
 def _params_of(entry: Mapping, model: str) -> dict:

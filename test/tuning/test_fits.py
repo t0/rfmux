@@ -16,10 +16,12 @@ import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.tuning.fits import (
+    FIT_PARAMS,
     MODELS,
     FitFailed,
     FitReport,
     centered_iq,
+    collect_fit_params,
     fit_nonlinear_iq,
     fit_section,
     fit_skewed,
@@ -359,6 +361,78 @@ def test_reading_a_model_that_did_not_converge_gives_the_reason():
 
     with pytest.raises(ValueError, match="did not converge.*too few"):
         skewed_model_magnitude(entry)
+
+
+# ─── the fits of a whole array ────────────────────────────────────────────────
+
+
+def test_every_fitted_sweep_is_one_row_with_where_and_what_it_was_driven_at():
+    sweeps = a_schedule()
+    fit_sweeps(sweeps, models=("skewed",))
+
+    rows = collect_fit_params(sweeps, "skewed")
+
+    assert len(rows) == 12  # 3 steps x 2 directions x 2 resonators
+    assert {(r["name"], r["iteration"], r["direction"]) for r in rows} == {
+        (name, step, direction)
+        for name in ("R0001", "R0002")
+        for step in (0, 1, 2)
+        for direction in ("upward", "downward")
+    }
+    row = rows[0]
+    assert row["amplitude"] == sweeps["results"][row["iteration"]][row["direction"]][row["name"]]["sweep_amplitude"]
+    assert set(FIT_PARAMS["skewed"]) <= set(row["params"])
+
+
+def test_a_sweep_with_no_fit_for_that_model_is_not_a_row():
+    sweeps = a_schedule()
+    fit_sweeps(sweeps, models=("skewed",), iterations=0)
+
+    rows = collect_fit_params(sweeps, "skewed")
+
+    assert {r["iteration"] for r in rows} == {0}
+
+
+def test_the_selection_arguments_narrow_the_rows():
+    sweeps = a_schedule()
+    fit_sweeps(sweeps, models=("nonlinear",))
+
+    rows = collect_fit_params(sweeps, "nonlinear",
+                              names="R0002", iterations=1, directions="upward")
+
+    assert len(rows) == 1
+    assert (rows[0]["name"], rows[0]["iteration"], rows[0]["direction"]) == \
+        ("R0002", 1, "upward")
+
+
+def test_a_fit_that_converged_but_was_rejected_is_a_row_carrying_the_reason():
+    sweeps = a_multisweep()
+    fit_sweeps(sweeps, models=("nonlinear",), max_residual=0.0)
+
+    rows = collect_fit_params(sweeps, "nonlinear")
+
+    assert len(rows) == 1
+    assert "max_residual" in rows[0]["failed_because"]
+    assert rows[0]["params"]["fr"] == pytest.approx(FR, rel=1e-3)
+
+
+def test_a_fit_that_did_not_converge_is_not_a_row():
+    sweeps = a_multisweep(sections={"R0001": {
+        "frequencies": np.linspace(FR, FR + 1e3, 3),
+        "iq_counts": np.ones(3, dtype=complex),
+        "sweep_amplitude": 1e-3,
+    }})
+    fit_sweeps(sweeps, models=("skewed",))
+
+    assert collect_fit_params(sweeps, "skewed") == []
+
+
+def test_asking_for_the_circle_fits_parameters_says_it_has_none():
+    sweeps = a_multisweep()
+    fit_sweeps(sweeps, models=("circle",))
+
+    with pytest.raises(ValueError, match="centre and a radius"):
+        collect_fit_params(sweeps, "circle")
 
 
 # ─── what gets fitted ─────────────────────────────────────────────────────────

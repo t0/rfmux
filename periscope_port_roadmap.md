@@ -182,11 +182,15 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   of the bar it applied. Apply Bias runs `crs.apply_bias(catalog)` and
   publishes each channel's `df_calibration`. The legacy bias lane is gone.
 
-What is deliberately *not* there yet: the fit histograms, and with them the
-digest and histogram tabs, which were deleted rather than ported (§9). The
-noise lane still runs on `_prepare_export_data`'s payload and is untouched
-until it is rebuilt on the catalog; the deprecated library modules go in
-stage 5.
+* **Histograms.** A Fit Histograms tab reads the same fits over the whole
+  array: `fr` as a scatter against the resonator, the quality factors binned on
+  shared log bins, `a` against `BIFURCATION_A`, one outline per drive. It reads
+  through `collect_fit_params`, so a notebook makes the same figures.
+
+What is deliberately *not* there yet: the detector digest, deleted rather than
+ported (§9) and to be decided on now that the fit tabs exist. The noise lane
+still runs on `_prepare_export_data`'s payload and is untouched until it is
+rebuilt on the catalog; the deprecated library modules go in stage 5.
 
 Four drifts between the GUI's defaults and the library's were found on the way,
 two of them by the both-ways test: `max_chans` 1024 against 1023, and
@@ -819,11 +823,34 @@ are now strict xfails that name the stage which clears them.
   subtraction -- and does not apply to this tab. Overlaying the models on the
   Magnitude Sweeps grid would need that conversion, which is why they are on
   a tab of their own.
-* Histograms, built new against the block: fr scatter, Qr/Qc/Qi on shared log
-  bins, coloured by amplitude with the same colorbar as the grids, a step
-  selector, and a `BIFURCATION_A` reference where `a` is shown. Read through
-  `entry["fits"][model]["params"]` and `errors`, skipping entries whose fit
-  carries `failed_because`.
+* ~~Histograms, built new against the block~~ **done (2026-09-11)** as a Fit
+  Histograms tab: an `fr` scatter against the resonator each fit belongs to,
+  and one histogram per parameter worth binning -- `Qr`, `Qc`, `Qi` for the
+  skewed model, `Qr` and `a` for the nonlinear one -- with the quality factors
+  on one shared set of log bins so they are read against each other rather
+  than each filling its own axis. One outline per drive, in the grids'
+  amplitude colours, rather than stacked bars that hide each other. `a`
+  carries a `BIFURCATION_A` line.
+
+  The reading is a library call, not a walk: `collect_fit_params(module_sweeps,
+  model)` in `rfmux/tuning/fits.py` returns one row per fitted sweep --
+  `name`, `iteration`, `direction`, `amplitude`, `params`, `errors`,
+  `failed_because` -- so a notebook makes the same figures from the same rows,
+  and `FIT_PARAMS` says which parameters a model reports. The circle fit is
+  refused by name there, because it records a centre and a radius rather than
+  named parameters, and an empty list would have read as "nothing fitted".
+
+  A fit the fitter *rejected* -- the nonlinear fit above `max_residual`,
+  which keeps its parameters -- is a row but is not binned, and is counted
+  above the plots instead. Binning it would move the distribution without
+  being a measurement of anything; dropping it silently would make a rejected
+  array look like a clean one (§6, judgement call 32).
+
+  The tab has its own `FitDisplayToolbar`, chosen and persisted independently
+  of the Fit Results tab's: the two answer different questions about the same
+  fits. That made the panel's tab dispatch a registry keyed by the tab widget
+  (`_sweep_grids`) instead of an if/elif chain on tab index, so adding a tab is
+  adding a row rather than renumbering branches.
 * **Detector Digest, written from scratch** — stage 2 deleted it rather than
   porting it (§6, judgement call 23), and it is designed once the pieces it
   shows exist rather than reassembled from the old one. A resonator's sweeps
@@ -1322,6 +1349,23 @@ Listed so they can be overruled.
     load path used to silently rewrite the module in the parameters to the
     active one, which is the version of this that quietly sweeps the wrong
     array.
+
+32. **A rejected fit is counted, not binned** (2026-09-11). The nonlinear fit
+    keeps its parameters when it converges above `max_residual`, because what
+    it converged to is the clue to why. `collect_fit_params` returns those rows
+    carrying their `failed_because`, so the caller decides; the Fit Histograms
+    tab leaves them out of the bins and says how many it left out. Binning them
+    would move the distribution without measuring anything, and dropping them
+    silently would make a rejected array look like a clean one. Overrule by
+    binning everything and colouring the rejected ones differently, if seeing
+    where they land turns out to matter more than the distribution being clean.
+
+33. **Each fit tab chooses its own model and amplitude** (2026-09-11). One
+    `FitDisplayToolbar` class, two instances, persisted under their own names.
+    They answer different questions -- one resonator in detail, the array in
+    aggregate -- and wanting the nonlinear model on one while reading the
+    skewed Qs on the other is the ordinary case. Overrule by giving both the
+    same settings name, which is a one-word change.
 
 ---
 

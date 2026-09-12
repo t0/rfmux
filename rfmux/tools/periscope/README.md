@@ -126,7 +126,17 @@ For high-resolution analysis around identified resonance frequencies:
    legend says "Measured" and "<model> fit" once. The axis is normalized to
    each trace's last point, which is the fits' own convention, so the
    toolbar's "Normalize Traces" does not apply here
-5. Fits are written into the sweeps themselves, so a file saved afterwards
+5. The Fit Histograms tab answers the same fits over the whole array rather
+   than one resonator at a time: a scatter of every fitted `fr` against the
+   resonator it belongs to, and the quality factors binned on one shared set
+   of log bins so they can be read against each other. The nonlinear model
+   puts `a` beside a line at the nonlinearity where bifurcation starts. Each
+   drive gets its own outline in its own colour, so what raising the drive did
+   to the array is the shape of the change. It carries the same "Fit" and
+   "Amplitude" toolbar as the Fit Results tab, chosen independently of it, and
+   says above the plots how many fits are drawn and how many the fitters
+   rejected and so are not binned
+6. Fits are written into the sweeps themselves, so a file saved afterwards
    carries them and reopens with them; a measurement already saved is re-saved
    where it was
 

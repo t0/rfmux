@@ -18,6 +18,7 @@ from ..algorithms.measurement.record_streams import (
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
+from ..core.session_folder import newest_session
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -424,14 +425,6 @@ class RecordDialog(QtWidgets.QDialog):
 
     # ── Persistence ──────────────────────────────────────────────
 
-    @staticmethod
-    def newest_session(base: Path) -> Optional[Path]:
-        """The newest session folder under *base*, by the stamp in its
-        name, or None."""
-        found = sorted(p for p in Path(base).expanduser().glob("session_*")
-                       if p.is_dir() and (p / "session_metadata.json").exists())
-        return found[-1] if found else None
-
     def _saved_config(self) -> PulseCaptureConfig:
         raw = self.settings.value(_KEY + "capture_config", "")
         try:
@@ -452,7 +445,7 @@ class RecordDialog(QtWidgets.QDialog):
         saved = str(v("session_path", ""))
         if not (saved and Path(saved).expanduser().is_dir()):
             # The newest session under the default path, when there is one.
-            newest = self.newest_session(Path(self.session_dir_edit.text()))
+            newest = newest_session(Path(self.session_dir_edit.text()))
             saved = str(newest) if newest else ""
         self.session_path_edit.setText(saved)
         (self.rb_bias if v("channels_mode", "bias") == "bias"

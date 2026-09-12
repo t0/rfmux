@@ -25,10 +25,10 @@ import click
 
 from rfmux.algorithms.measurement.record_streams import (
     resolve_channels,
-    open_session,
     pulse_summary_lines,
     record_streams,
 )
+from rfmux.core.session_folder import open_session
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
 from rfmux.pulse_capture.channel_keys import channel_arg
 

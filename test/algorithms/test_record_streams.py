@@ -15,6 +15,8 @@ import click
 import pytest
 
 from rfmux.algorithms.measurement import record_streams as rs
+from rfmux.core import session_folder as core_session
+from rfmux.core.session_folder import load_metadata
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
 from test.record_helpers import bias_export as _bias_export, fake_fastrx
 
@@ -84,7 +86,7 @@ def fake_recorders(monkeypatch):
 def test_the_window_opens_when_training_ends_and_lasts_the_duration(
         tmp_path, fake_recorders):
     board = _Board()
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     t0 = time.time()
     result = asyncio.run(rs.record_streams(
         board, module=2, channels=[3, 1, 2], duration_s=DURATION_S,
@@ -112,7 +114,7 @@ def test_without_a_capture_the_window_opens_once_the_parser_listens(
     t0 = time.time()
     result = asyncio.run(rs.record_streams(
         board, module=1, channels=[1], duration_s=DURATION_S,
-        session=rs.open_session(base=tmp_path), capture=False, fastrx=False,
+        session=core_session.open_session(base=tmp_path), capture=False, fastrx=False,
         verbose=False))
     assert board.calls == []
     assert result.started_at - t0 >= PARSER_UP_S - 0.01
@@ -129,7 +131,7 @@ def test_a_capture_that_never_trains_opens_no_window(
     with pytest.raises(RuntimeError, match="stream ended"):
         asyncio.run(rs.record_streams(
             _Board(dies="before training"), module=1, channels=[1],
-            duration_s=DURATION_S, session=rs.open_session(base=tmp_path),
+            duration_s=DURATION_S, session=core_session.open_session(base=tmp_path),
             fastrx=False, verbose=False))
     # The parser was launched and is stopped again.
     assert fake_recorders["start"] <= fake_recorders["stop"]
@@ -168,7 +170,7 @@ def test_a_parser_that_dies_on_start_stops_the_run_before_the_capture(
     with pytest.raises(RuntimeError, match="before it was up: no such interface"):
         asyncio.run(rs.record_streams(
             board, module=1, channels=[1], duration_s=DURATION_S,
-            session=rs.open_session(base=tmp_path), fastrx=False,
+            session=core_session.open_session(base=tmp_path), fastrx=False,
             verbose=False))
     assert board.calls == []
 
@@ -178,7 +180,7 @@ def test_the_parser_subprocess_is_started_stopped_and_logged(
     board = _Board()
     result = asyncio.run(rs.record_streams(
         board, module=2, channels=[1, 2], duration_s=DURATION_S,
-        session=rs.open_session(base=tmp_path), fastrx=False, verbose=False))
+        session=core_session.open_session(base=tmp_path), fastrx=False, verbose=False))
     assert result.dirfile_path.name == "serial_0042"
     log = result.parser_log.read_text()
     assert log.startswith("parser up") and "Drop Statistics" in log
@@ -190,7 +192,7 @@ def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
         tmp_path, fake_parser_child):
     """The recording ends through its stop event, not by cancelling
     the cleanup: the parser still gets its SIGINT and is reaped."""
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     t0 = time.time()
     # The board fails a quarter of the way into a long window: the
     # run ends then, not when the window would have.
@@ -200,7 +202,7 @@ def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
             duration_s=4.0, session=session, fastrx=False,
             verbose=False))
     assert time.time() - t0 < 4.0
-    run = rs._load_metadata(session)["recordings"][0]
+    run = load_metadata(session)["recordings"][0]
     assert run["dirfile"].endswith("serial_0042")
     log = (session / run["dirfile"]).parent.with_suffix(".log").read_text()
     assert "Drop Statistics" in log
@@ -213,7 +215,7 @@ def test_a_recorder_failing_after_training_raises_its_own_error(
     async def hold(*_):
         raise RuntimeError("writer gone")
     monkeypatch.setattr(rs, "_hold", hold)
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     with pytest.raises(RuntimeError, match="writer gone"):
         asyncio.run(rs.record_streams(
             _Board(), module=1, channels=[1], duration_s=DURATION_S,
@@ -224,7 +226,7 @@ def test_a_missing_fastrxd_socket_is_refused_before_the_capture(
         tmp_path, fake_recorders):
     pytest.importorskip("rfmux.fastrx")
     board = _Board()
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     with pytest.raises(RuntimeError, match="is fastrxd running"):
         asyncio.run(rs.record_streams(
             board, module=1, channels=[1], duration_s=DURATION_S,
@@ -236,7 +238,7 @@ def test_a_missing_fastrxd_socket_is_refused_before_the_capture(
 def test_the_recording_covers_the_window_and_reports_its_stats(
         tmp_path, fake_recorders, monkeypatch):
     fx = fake_fastrx(monkeypatch, tmp_path)
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     board = _Board()
     result = asyncio.run(rs.record_streams(
         board, module=2, channels=[3, 9], duration_s=DURATION_S,
@@ -252,7 +254,7 @@ def test_the_recording_covers_the_window_and_reports_its_stats(
     assert result.warnings == [
         "no channel-stream packets: is the channel streamer on for "
         "module(s) [2]?"]
-    meta = rs._load_metadata(session)
+    meta = load_metadata(session)
     assert meta["recordings"][0]["fastrx_stats"] == result.fastrx_stats
     assert ("fastrx", "module2") in [
         (e["data_type"], e["identifier"]) for e in meta["exports"]]
@@ -263,7 +265,7 @@ def test_a_disk_too_small_for_the_recording_warns(
     fake_fastrx(monkeypatch, tmp_path, packets=5000)
     monkeypatch.setattr(rs.shutil, "disk_usage",
                         lambda p: SimpleNamespace(free=1))
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     result = asyncio.run(rs.record_streams(
         _Board(), module=1, channels=[1], duration_s=DURATION_S,
         session=session, capture=False, merge_fastrx=False, verbose=False))
@@ -363,7 +365,7 @@ def test_pulse_summary_lines_name_the_busiest_channel_first():
 def test_a_run_across_modules_is_keyed_by_pairs_and_named_for_them(
         tmp_path, fake_recorders):
     board = _Board()
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     result = asyncio.run(rs.record_streams(
         board, module=None, channels={3: [2, 1], 2: [5]},
         duration_s=DURATION_S, session=session, fastrx=False, verbose=False))
@@ -373,7 +375,7 @@ def test_a_run_across_modules_is_keyed_by_pairs_and_named_for_them(
     assert call["hdf5_path"].name.startswith("pulse_modules2+3_")
     assert result.module is None and result.modules == [2, 3]
     assert result.channels == [(2, 5), (3, 1), (3, 2)]
-    meta = rs._load_metadata(session)
+    meta = load_metadata(session)
     assert meta["recordings"][-1]["modules"] == [2, 3]
     assert meta["recordings"][-1]["channels"] == [[2, 5], [3, 1], [3, 2]]
     assert meta["exports"][-1]["identifier"] == "modules2+3"
@@ -384,7 +386,7 @@ def test_a_mapping_of_one_module_is_a_plain_one_module_run(
     board = _Board()
     result = asyncio.run(rs.record_streams(
         board, module=None, channels={2: [3, 1]}, duration_s=DURATION_S,
-        session=rs.open_session(base=tmp_path), fastrx=False, verbose=False))
+        session=core_session.open_session(base=tmp_path), fastrx=False, verbose=False))
     assert board.calls[0]["channel"] == [1, 3] and board.calls[0]["module"] == 2
     assert result.module == 2 and result.channels == [1, 3]
 
@@ -433,7 +435,7 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
     with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
         asyncio.run(rs.record_streams(
             board, module=None, channels={1: [1, 9], 2: [3]}, duration_s=0.1,
-            session=rs.open_session(base=tmp_path), sample_trunc="MID",
+            session=core_session.open_session(base=tmp_path), sample_trunc="MID",
             channel_streamer=True, fastrx_socket=fx.socket, verbose=False))
     assert board.streamer == [
         {"channels": 16, "module": 1, "sample_trunc": "MID"},
@@ -443,7 +445,7 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
     with pytest.raises(RuntimeError, match="no channel streamer"):
         asyncio.run(rs.record_streams(
             _Board(), module=1, channels=[1], duration_s=0.1,
-            session=rs.open_session(base=tmp_path), channel_streamer=True,
+            session=core_session.open_session(base=tmp_path), channel_streamer=True,
             fastrx_socket=fx.socket, verbose=False))
 
 
@@ -454,7 +456,7 @@ def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(
     with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
         asyncio.run(rs.record_streams(
             board, module=None, channels={1: [1], 2: [1]}, duration_s=0.1,
-            session=rs.open_session(base=tmp_path), verbose=False))
+            session=core_session.open_session(base=tmp_path), verbose=False))
     assert board.calls == []
 
 
@@ -606,12 +608,12 @@ def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
 
 
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     assert session.name.startswith("session_")
     result = asyncio.run(rs.record_streams(
         _Board(), module=2, channels=[1], duration_s=DURATION_S,
         session=session, fastrx=False, verbose=False))
-    meta = rs._load_metadata(session)
+    meta = load_metadata(session)
     assert [(e["data_type"], e["identifier"]) for e in meta["exports"]] == [
         ("parser", "module2")]          # the fake capture wrote no file
     run = meta["recordings"][0]
@@ -625,17 +627,18 @@ def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
 def test_an_existing_session_keeps_its_metadata(tmp_path):
     folder = tmp_path / "session_20260909_153654"
     folder.mkdir()
-    (folder / rs.METADATA_FILE).write_text('{"created": "then", "exports": [{"filename": "x"}]}')
-    assert rs.open_session(folder) == folder
-    rs.register_export(folder, "pulse_module2_1.h5", "pulse", "module2")
-    meta = rs._load_metadata(folder)
+    (folder / core_session.METADATA_FILE).write_text('{"created": "then", "exports": [{"filename": "x"}]}')
+    assert core_session.open_session(folder) == folder
+    core_session.register_export(folder, "pulse_module2_1.h5", "pulse", "module2")
+    meta = load_metadata(folder)
     assert meta["created"] == "then"
     assert [e["filename"] for e in meta["exports"]] == ["x", "pulse_module2_1.h5"]
 
 
 def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):
     # Written newest first: a copied folder keeps no file times, so the
-    # export's own timestamp decides.
+    # listing's timestamp decides; a file the listing lacks is not an
+    # export.
     _bias_export(tmp_path / "bias_module2_120000.pkl", 2, [4, 5], calibrated=False,
                  timestamp="2026-09-09T12:00:00")
     _bias_export(tmp_path / "bias_module1_110000.pkl", 1, [7],
@@ -654,10 +657,12 @@ def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):
     assert rows[2] == {"bias_channel": 2, "df_calibration": 2e6 - 1e5j,
                        "nco_frequency_hz": 1.0e9}
     assert rs.latest_bias_export(tmp_path, 3) is None
+    (tmp_path / "bias_module3_130000.pkl").write_bytes(b"")
+    assert rs.latest_bias_export(tmp_path, 3) is None
 
 
 def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch):
-    session = rs.open_session(base=tmp_path)
+    session = core_session.open_session(base=tmp_path)
     board = _Board()
     monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: None)
     with pytest.raises(RuntimeError, match="pygetdata"):
@@ -703,7 +708,7 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
         try:
             return await rs.record_streams(
                 crs, module=1, channels=[1, 2], duration_s=duration,
-                session=rs.open_session(base=tmp_path), fastrx=False,
+                session=core_session.open_session(base=tmp_path), fastrx=False,
                 config=config, verbose=False)
         finally:
             await crs.stop_udp_streaming()
@@ -723,7 +728,7 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
             <= (result.training_s + duration) * rate + 256)
     assert "Drop Statistics" in result.parser_log.read_text()
 
-    meta = rs._load_metadata(result.session)
+    meta = load_metadata(result.session)
     assert sorted(e["data_type"] for e in meta["exports"]) == ["parser", "pulse"]
     run_meta = meta["recordings"][0]
     assert run_meta["started_at"] - result.capture.start_time >= 0.9 * result.training_s

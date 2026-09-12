@@ -158,11 +158,11 @@ if platform.system() == "Windows":
 def review_session(review) -> dict:
     """The session Periscope opens for ``--review``: the file's folder,
     loaded when it is a session folder."""
+    from rfmux.core.session_folder import is_session
     from .session_startup_dialog import UnifiedStartupDialog
     session_dir = Path(review).resolve().parent
     return {
-        'mode': (UnifiedStartupDialog.SESS_LOAD
-                 if (session_dir / "session_metadata.json").exists()
+        'mode': (UnifiedStartupDialog.SESS_LOAD if is_session(session_dir)
                  else UnifiedStartupDialog.SESS_NONE),
         'path': str(session_dir),
         'folder_name': None,
@@ -391,21 +391,14 @@ def main():
             # Check if we're loading a session with mock config
             load_mock_config_from_session = False
             if session_mode == UnifiedStartupDialog.SESS_LOAD and session_config['path']:
-                # Try to load session metadata to check for mock config
-                import json
-                from pathlib import Path
-                metadata_file = Path(session_config['path']) / 'session_metadata.json'
-                if metadata_file.exists():
-                    try:
-                        with open(metadata_file, 'r') as f:
-                            metadata = json.load(f)
-                        if 'mock_mode_config' in metadata:
-                            # Session has saved mock config - use it instead of showing dialog
-                            initial_mock_config = metadata['mock_mode_config']
-                            load_mock_config_from_session = True
-                            print("[Session] Loading mock configuration from session")
-                    except Exception as e:
-                        print(f"[Session] Warning: Could not load mock config from session: {e}")
+                # A session with a saved mock config uses it instead of
+                # showing the dialog
+                from rfmux.core.session_folder import load_metadata
+                metadata = load_metadata(session_config['path'])
+                if 'mock_mode_config' in metadata:
+                    initial_mock_config = metadata['mock_mode_config']
+                    load_mock_config_from_session = True
+                    print("[Session] Loading mock configuration from session")
             
             # Only show dialog if we're NOT loading config from a session
             if not load_mock_config_from_session:

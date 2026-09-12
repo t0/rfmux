@@ -7,16 +7,21 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from rfmux.core.session_folder import register_export
+
 
 def bias_export(path, module, channels, calibrated=True, timestamp="",
                 nco=1.0e9):
-    """A Bias KIDs export of *channels* on *module* at *path*."""
+    """A Bias KIDs export of *channels* on *module* at *path*, listed
+    in the folder's metadata as Periscope lists it."""
     out = {c: {"bias_channel": c,
                "df_calibration": (complex(1e6 * c, -1e5) if calibrated else None)}
            for c in channels}
     with open(path, "wb") as f:
         pickle.dump({"target_module": module, "timestamp": timestamp,
                      "bias_kids_output": out, "nco_frequency_hz": nco}, f)
+    register_export(Path(path).parent, Path(path).name, "bias",
+                    f"module{module}", timestamp or None)
     return Path(path)
 
 

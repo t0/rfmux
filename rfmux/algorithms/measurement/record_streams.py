@@ -14,12 +14,13 @@ the capture's duration.  The capture and the recording then cover the
 same stretch, and the dirfile that stretch plus the training span.
 Without the capture the recording starts as soon as the parser is up.
 
-Products follow the Periscope session convention, one folder
+Products go into a Periscope session folder (rfmux.core.session_folder:
 ``session_YYYYMMDD_HHMMSS/`` holding ``<type>_module<M>_HHMMSS.<ext>``
-and a ``session_metadata.json`` that lists them, so an existing
-Periscope session can take them alongside its bias export, which is
-where the channels and df calibrations come from by default::
+and the metadata that lists them), so an existing session takes them
+alongside its bias export, which is where the channels and df
+calibrations come from by default::
 
+    from rfmux.core.session_folder import open_session
     result = await record_streams(
         crs, module=2, channels=range(1, 89), duration_s=20.0,
         session=open_session("~/data/session_20260909_153654"))
@@ -31,7 +32,6 @@ import asyncio
 import dataclasses
 import datetime
 import importlib.util
-import json
 import os
 import pickle
 import shutil
@@ -46,14 +46,14 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
+from ...core.session_folder import (is_session, latest_export, load_metadata,
+                             register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
 from ...pulse_capture.channel_keys import (describe, keys_by_module,
                                            pair_keys)
 from .df_calibration import tuning_rows
 
-SESSION_FOLDER_FORMAT = "session_%Y%m%d_%H%M%S"
-METADATA_FILE = "session_metadata.json"
 PARSER_EXIT_S = 10.0
 
 
@@ -90,64 +90,9 @@ PARSER_CHILD = ("import sys; from rfmux.tools import parser; "
 
 # ── The session folder ─────────────────────────────────────────────
 
-def open_session(path: Optional[Path] = None,
-                 base: Optional[Path] = None) -> Path:
-    """The session folder at *path*, or a new one under *base* (the
-    working directory), with its metadata file."""
-    if path is None:
-        stamp = datetime.datetime.now().strftime(SESSION_FOLDER_FORMAT)
-        path = Path(base or ".") / stamp
-    path = Path(path).expanduser()
-    path.mkdir(parents=True, exist_ok=True)
-    if not (path / METADATA_FILE).exists():
-        _save_metadata(path, {
-            "created": datetime.datetime.now().isoformat(),
-            "folder_name": path.name,
-            "base_path": str(path.resolve().parent),
-            "exports": [],
-            "screenshots": [],
-        })
-    return path
-
-
-def _load_metadata(session: Path) -> dict:
-    try:
-        with open(session / METADATA_FILE) as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
-
-
-def _save_metadata(session: Path, metadata: dict) -> None:
-    with open(session / METADATA_FILE, "w") as f:
-        json.dump(metadata, f, indent=2, default=str)
-
-
-def register_export(session: Path, filename: str, data_type: str,
-                    identifier: str) -> None:
-    """List a file in the session's exports, as Periscope's browser
-    expects them."""
-    metadata = _load_metadata(session)
-    metadata.setdefault("exports", []).append({
-        "filename": filename,
-        "data_type": data_type,
-        "identifier": identifier,
-        "timestamp": datetime.datetime.now().isoformat(),
-    })
-    _save_metadata(session, metadata)
-
-
 def latest_bias_export(session: Path, module: int) -> Optional[Path]:
-    """The newest bias_kids export for *module* in the session, by the
-    export's own timestamp (a copied folder keeps no file times)."""
-    found = []
-    for path in Path(session).glob("bias_*.pkl"):
-        with open(path, "rb") as f:
-            export = pickle.load(f)
-        if export.get("target_module") == module:
-            found.append((str(export.get("timestamp", "")),
-                          path.stat().st_mtime, path))
-    return max(found)[2] if found else None
+    """The newest Bias KIDs export for *module* the session lists."""
+    return latest_export(session, "bias", f"module{module}")
 
 
 def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
@@ -326,7 +271,7 @@ async def record_streams(
     if not (capture or parser or fastrx):
         raise ValueError("nothing selected to record")
     session = Path(session)
-    if not (session / METADATA_FILE).exists():
+    if not is_session(session):
         raise ValueError(f"{session} is not a session folder; open_session() makes one")
     config = config or PulseCaptureConfig()
     say = print if verbose else (lambda *a, **k: None)
@@ -636,7 +581,7 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         if path is not None and path.exists():
             register_export(result.session, str(path.relative_to(result.session)),
                             kind, modules_tag(result.modules))
-    metadata = _load_metadata(result.session)
+    metadata = load_metadata(result.session)
     metadata.setdefault("recordings", []).append({
         "timestamp": datetime.datetime.now().isoformat(),
         "module": result.module,
@@ -655,4 +600,4 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         "capture_config": dataclasses.asdict(config),
         "warnings": result.warnings,
     })
-    _save_metadata(result.session, metadata)
+    save_metadata(result.session, metadata)

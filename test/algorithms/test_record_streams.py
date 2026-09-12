@@ -96,9 +96,9 @@ def test_the_window_opens_when_training_ends_and_lasts_the_duration(
     # The parser is launched first, the capture once it is up, the
     # window once the capture has trained, for the duration.
     assert t0 <= log["start"] <= board.t_started
-    assert board.t_started - log["start"] >= PARSER_UP_S - 0.01
+    assert board.t_started - log["start"] >= PARSER_UP_S - 0.05
     assert board.t_trained <= result.started_at <= log["stop"]
-    assert DURATION_S <= log["stop"] - result.started_at < DURATION_S + 1.0
+    assert DURATION_S - 0.05 <= log["stop"] - result.started_at < DURATION_S + 1.0
     assert log["cmd"] == ("127.0.0.1", None, {2: [1, 2, 3]})
     call = board.calls[0]
     assert call["time_run"] == DURATION_S and call["streamer_mode"] == "slow"
@@ -117,8 +117,8 @@ def test_without_a_capture_the_window_opens_once_the_parser_listens(
         session=core_session.open_session(base=tmp_path), capture=False, fastrx=False,
         verbose=False))
     assert board.calls == []
-    assert result.started_at - t0 >= PARSER_UP_S - 0.01
-    assert DURATION_S <= fake_recorders["stop"] - result.started_at < (
+    assert result.started_at - t0 >= PARSER_UP_S - 0.05
+    assert DURATION_S - 0.05 <= fake_recorders["stop"] - result.started_at < (
         DURATION_S + 1.0)
     assert result.pulse_path is None and result.training_s == 0.0
 

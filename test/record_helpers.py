@@ -60,6 +60,7 @@ def fake_fastrx(monkeypatch, tmp_path, *, modules_seen=0b1111, packets=0):
         socket=str(socket), writers=writers,
         resolve_socket=lambda interface, sock: sock or str(socket),
         start_command=lambda name: f"sudo fastrxd -i {name}",
+        record_stride=lambda channels: (86 + 4 * channels + 7) & ~7,
         PacketCapture=Capture, PacketWriter=Writer)
     monkeypatch.setattr(rfmux, "fastrx", fx, raising=False)
     return fx

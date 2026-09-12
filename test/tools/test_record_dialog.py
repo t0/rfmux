@@ -18,7 +18,8 @@ def _dialog(tmp_path, monkeypatch, running=()):
                         lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
                                  "wlan0": None})
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
-                           start_command=lambda i: f"sudo fastrxd -i {i}")
+                           start_command=lambda i: f"sudo fastrxd -i {i}",
+                           record_stride=lambda c: (86 + 4 * c + 7) & ~7)
     monkeypatch.setattr(rd, "_fastrx", lambda: fake)
     settings = QtCore.QSettings(str(tmp_path / "record.ini"),
                                 QtCore.QSettings.Format.IniFormat)

@@ -358,9 +358,9 @@ class RecordDialog(QtWidgets.QDialog):
                 problems.append("fastrxd is not running")
             folder = self._session_folder() or \
                 Path(self.session_dir_edit.text() or ".").expanduser()
-            if chans and folder.is_dir():
+            if chans and folder.is_dir() and fx is not None:
                 need = self.duration_spin.value() * fastrx_bytes_per_s(
-                    max(c for chs in chans.values() for c in chs))
+                    fx, max(c for chs in chans.values() for c in chs))
                 if self._disk[0] != folder or self.sender() is self.recheck_btn:
                     self._disk = (folder, shutil.disk_usage(folder).free)
                 free = self._disk[1]

@@ -57,11 +57,11 @@ METADATA_FILE = "session_metadata.json"
 PARSER_EXIT_S = 10.0
 
 
-def fastrx_bytes_per_s(channels: int) -> float:
+def fastrx_bytes_per_s(fx, channels: int) -> float:
     """Disk rate of a recording of channels 1 to *channels*: the record
-    stride (86-byte header, 4 bytes per channel, padded to 8) at the
+    stride, as the fastrx module *fx* lays a record out, at the
     channel-stream rate."""
-    return float(((86 + 4 * channels + 7) & ~7) * PFB_SAMPLING_FREQ)
+    return float(fx.record_stride(channels) * PFB_SAMPLING_FREQ)
 
 
 def interface_speeds() -> dict:
@@ -367,7 +367,7 @@ async def record_streams(
         rate = decimation_to_sampling(6 if dec is None else dec)
         result.training_s = config.noise_samples(rate) / rate
     if fastrx:
-        need = duration_s * fastrx_bytes_per_s(fastrx_channels)
+        need = duration_s * fastrx_bytes_per_s(fx, fastrx_channels)
         free = shutil.disk_usage(session).free
         if free < need:
             result.warnings.append(

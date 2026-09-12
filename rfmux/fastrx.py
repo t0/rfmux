@@ -19,6 +19,7 @@ from .streamer._fastrx import (
     NUM_MODULES,
     SOCKET_DIR,
     PacketFile,
+    record_stride,
 )
 from .streamer._fastrx import PacketCapture as _PacketCapture
 from .streamer._fastrx import PacketWriter as _PacketWriter
@@ -27,6 +28,7 @@ __all__ = [
     "PacketCapture",
     "PacketWriter",
     "PacketFile",
+    "record_stride",
     "get_samples",
     "resolve_socket",
     "daemon_path",

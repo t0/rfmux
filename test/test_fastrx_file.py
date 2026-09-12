@@ -31,6 +31,12 @@ def stride_for(channels: int) -> int:
     return (86 + channels * 2 * 2 + 7) & ~7
 
 
+def test_the_bound_stride_is_the_formats():
+    """What the writer lays out and record_streams budgets by."""
+    for channels in (1, 16, 114, SPP, MAX_CHANNELS):
+        assert fastrx.record_stride(channels) == stride_for(channels)
+
+
 def file_header(channels: int, num_records: int, stride: int | None = None,
                 *, magic=FILE_MAGIC, version=FILE_VERSION) -> bytes:
     if stride is None:

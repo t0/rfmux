@@ -20,6 +20,7 @@ from rfmux.core.transferfunctions import (
     sampling_to_decimation)
 from rfmux.pulse_capture.capture_session import (
     PulseCaptureConfig, PulseCaptureSession)
+from rfmux.pulse_capture import overlay as overlay_module
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader, PulseHDF5Writer
 from rfmux.pulse_capture.overlay import (
     Recording, correlation_lag_s, counts_to_stored, merge_fastrx,
@@ -169,12 +170,14 @@ def test_correlation_lag_reads_a_known_offset():
                                  "Q": np.zeros(1)}, dt) is None
 
 
-def _dirfile(tmp_path, channel=CHANNEL):
+def _dirfile(tmp_path, channel=CHANNEL, dec_stage=True):
     """The event as the parser writes it: long packets stamped late by
-    the board, dec stage 6, so the timebase is corrected as written."""
+    the board, dec stage 6, so the timebase is corrected as written.
+    Without *dec_stage*, as an older parser wrote it: the raw stamps
+    and no stage."""
     gd = pytest.importorskip("pygetdata")
     from rfmux.streamer import ReadoutPacket, Timestamp, TimestampSource
-    from rfmux.tools.parser import (BoardStats, ModuleStats,
+    from rfmux.tools.parser import (SS_PER_SECOND, BoardStats, ModuleStats,
                                     setup_dirfile_for_module, write_dec_stage)
     path = str(tmp_path / "serial_0042")
     board = BoardStats()
@@ -207,7 +210,24 @@ def _dirfile(tmp_path, channel=CHANNEL):
                    pkt.raw_samples[2 * (channel - 1):2 * channel],
                    first_frame=frame, first_sample=0)
     board.dirfile.close()
+    if not dec_stage:
+        df = gd.dirfile(path, gd.RDWR)
+        df.alter("m01_timebase", gd.entry(
+            gd.LINCOM_ENTRY, "m01_timebase", 0,
+            (("m01_ts_sbs", "m01_ts_ss"), (1.0, 1 / SS_PER_SECOND), (0, 0))))
+        df.delete("m01_ts_delay", gd.DEL_DATA)
+        df.delete("m01_dec_stage", gd.DEL_DATA)
+        df.close()
     return path
+
+
+def test_an_older_dirfile_is_shifted_by_the_stage_its_spacing_implies(
+        tmp_path):
+    from rfmux.pulse_capture.overlay import dirfile_window
+    old = _dirfile(tmp_path, dec_stage=False)
+    w = dirfile_window(old, 1, CHANNEL, T - 0.01, T + 0.03)
+    assert w["shift_s"] == pytest.approx(-LATE)
+    assert w["times"][np.argmax(w["I"])] == pytest.approx(T, abs=1.0 / FS)
 
 
 def test_the_parser_trace_joins_in_the_same_units(tmp_path):
@@ -368,6 +388,49 @@ def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
         assert not r.dual
     with PulseHDF5Reader(out) as r:
         assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
+
+
+def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(tmp_path):
+    path = _capture(tmp_path)
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+
+    def boom(*a):
+        raise RuntimeError("h5 write failed")
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(overlay_module, "_merge_into", boom)
+        with pytest.raises(RuntimeError, match="h5 write failed"):
+            merge_fastrx(path, fx)
+    assert list(tmp_path.glob("*.merging")) == []
+    with PulseHDF5Reader(path) as r:
+        assert not r.dual
+    merge_fastrx(path, fx)
+    with pytest.raises(ValueError, match="already a dual file"):
+        merge_fastrx(path, fx)
+
+
+def test_the_commands_write_the_figures_and_merge(tmp_path):
+    from click.testing import CliRunner
+    from rfmux.tools.fastrx import cli
+    path = _capture(tmp_path)
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    dirfile = _dirfile(tmp_path)
+    run = CliRunner().invoke
+    fig = tmp_path / "overlay.png"
+    r = run(cli, ["overlay", path, fx, "--channel", str(CHANNEL), "--pad",
+                  "2", "--dirfile", dirfile, "--save", str(fig)])
+    assert r.exit_code == 0, r.output
+    assert r.output == f"wrote {fig}\n" and fig.stat().st_size > 0
+    fig = tmp_path / "window.png"
+    r = run(cli, ["overlay-dirfile", dirfile, fx, "--channel", str(CHANNEL),
+                  "--t0", str(T - 0.01), "--t1", str(T + 0.03),
+                  "--save", str(fig)])
+    assert r.exit_code == 0, r.output
+    assert fig.stat().st_size > 0
+    out = tmp_path / "both.h5"
+    r = run(cli, ["merge", path, fx, "-o", str(out)])
+    assert r.exit_code == 0 and r.output == f"wrote {out}\n"
+    r = run(cli, ["merge", str(out), fx])
+    assert r.exit_code == 1 and "already a dual file" in r.output
 
 
 def test_a_pulse_the_recording_misses_gets_no_fast_window(tmp_path):

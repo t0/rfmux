@@ -1,7 +1,6 @@
 """Offscreen tests for the rfmux record dialog."""
 
 import inspect
-import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +10,7 @@ from PyQt6 import QtCore  # noqa: E402
 
 from rfmux.tools import record_dialog as rd  # noqa: E402
 from rfmux.tools.record import _run  # noqa: E402
+from test.record_helpers import bias_export  # noqa: E402
 
 
 def _dialog(tmp_path, monkeypatch, running=()):
@@ -28,11 +28,7 @@ def _dialog(tmp_path, monkeypatch, running=()):
 def _session_with_bias(tmp_path, module=2, channels=(3, 7)):
     folder = tmp_path / "session_x"
     folder.mkdir(exist_ok=True)
-    export = {"target_module": module, "timestamp": "2026",
-              "bias_kids_output": {
-                  i: {"bias_channel": c, "df_calibration": 1 + 1j}
-                  for i, c in enumerate(channels)}}
-    (folder / f"bias_module{module}_1.pkl").write_bytes(pickle.dumps(export))
+    bias_export(folder / f"bias_module{module}_1.pkl", module, channels)
     return folder
 
 

@@ -161,3 +161,31 @@ def test_a_module_that_never_sends_anything_is_an_error_too(monkeypatch):
             asyncio.run(src.run_slow_source(sink, "127.0.0.1", module=2,
                                             duration_s=5.0))
     assert time.monotonic() - t < 3.0
+
+
+def test_a_module_still_silent_when_the_duration_is_covered_is_an_error(
+        monkeypatch):
+    """Module 1 covers a short duration before the silence span runs
+    out: the run ends in the error, not in a capture missing a module."""
+    with _loopback_pair() as (recv, send, port):
+        _patch(monkeypatch, recv)
+        sink = _Sink([(1, 1), (3, 1)])
+        stop = threading.Event()
+
+        def pump():
+            k = 0
+            while not stop.is_set():
+                send.sendto(_packet(k, 1, 10.0), ("127.0.0.1", port))
+                k += 1
+                time.sleep(0.005)
+
+        th = threading.Thread(target=pump)
+        th.start()
+        try:
+            with pytest.raises(ValueError, match=r"module\(s\) \[3\] sent no"):
+                asyncio.run(src.run_slow_source(sink, "127.0.0.1",
+                                                duration_s=0.1))
+        finally:
+            stop.set()
+            th.join()
+    assert len(sink.fed[(1, 1)]) >= 0.1 * FS

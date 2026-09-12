@@ -219,7 +219,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
 but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
-the test group installed they report zero skips.
+the test group and the `dirfile` extra installed they report zero skips.
 Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus

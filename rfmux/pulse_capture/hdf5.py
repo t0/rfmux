@@ -391,11 +391,11 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         slow/channel_<n>/pulse_*      fast/channel_<n>/pulse_*
         matched/channel_<n>/pair_*    (slow_idx/fast_idx, -1 = one-sided;
                                        optional cross-stream TOD datasets)
+        histograms/slow/  histograms/fast/
+        templates/slow/   templates/fast/
 
     A (module, channel) key nests as ``module_<M>/channel_<n>`` under
     each stream (see :mod:`.channel_keys`).
-        histograms/slow/  histograms/fast/
-        templates/slow/   templates/fast/
     """
 
     STREAMS = ("slow", "fast")

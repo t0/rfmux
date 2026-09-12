@@ -21,6 +21,7 @@ and background tasks in `tasks.py`.
 
 import argparse
 import textwrap
+from pathlib import Path
 import sys
 import os
 import signal
@@ -154,6 +155,20 @@ import platform
 if platform.system() == "Windows":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+def review_session(review) -> dict:
+    """The session Periscope opens for ``--review``: the file's folder,
+    loaded when it is a session folder."""
+    from .session_startup_dialog import UnifiedStartupDialog
+    session_dir = Path(review).resolve().parent
+    return {
+        'mode': (UnifiedStartupDialog.SESS_LOAD
+                 if (session_dir / "session_metadata.json").exists()
+                 else UnifiedStartupDialog.SESS_NONE),
+        'path': str(session_dir),
+        'folder_name': None,
+    }
+
+
 def main():
     """
     Command-line entry point for the Periscope application.
@@ -270,17 +285,9 @@ def main():
     
     # Show the startup dialog with pre-filled values
     if args.review is not None:
-        from pathlib import Path
         review = Path(args.review).resolve()
         args.crs_board = "OFFLINE"
-        session_dir = review.parent
-        session_config = {
-            'mode': (UnifiedStartupDialog.SESS_LOAD
-                     if (session_dir / "session_metadata.json").exists()
-                     else UnifiedStartupDialog.SESS_NONE),
-            'path': str(session_dir),
-            'folder_name': None,
-        }
+        session_config = review_session(review)
     else:
         dialog = UnifiedStartupDialog(None, prefill=prefill if prefill else None)
     

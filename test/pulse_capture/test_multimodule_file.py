@@ -6,8 +6,9 @@ import numpy as np
 import pytest
 
 from rfmux.pulse_capture.accumulators import PulseHistogramSet, PulseTemplateSet
-from rfmux.pulse_capture.channel_keys import (channel_group, channel_suffix,
-                                              check_keys, keys_from_attr)
+from rfmux.pulse_capture.channel_keys import (channel_arg, channel_group,
+                                              channel_suffix, check_keys,
+                                              keys_from_attr, parse_key)
 from rfmux.pulse_capture.detection import ChannelNoiseStats
 from rfmux.pulse_capture.hdf5 import (DualPulseHDF5Writer, PulseHDF5Reader,
                                       PulseHDF5Writer)
@@ -26,6 +27,8 @@ def test_keys_name_groups_and_datasets():
     assert channel_group((2, 5)) == "module_2/channel_5"
     assert channel_suffix(5) == "ch5"
     assert channel_suffix((2, 5)) == "m2ch5"
+    for key in (5, (2, 5)):
+        assert parse_key(channel_arg(key)) == key
     assert check_keys([np.int64(3), 4]) == [3, 4]
     assert check_keys([[2, 5], (3, 1)]) == KEYS
     with pytest.raises(ValueError, match="all be numbers or all"):

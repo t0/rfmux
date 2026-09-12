@@ -3,23 +3,17 @@ carries a Tuning item per module, live or in review, and the main
 window opens the file's sweeps read-only."""
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
-from rfmux.pulse_capture.capture_session import (  # noqa: E402
-    PulseCaptureConfig, PulseCaptureSession)
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
     PulseCapturePanel)
 from rfmux.tools.periscope.utils import QtWidgets  # noqa: E402
-from test.qt_helpers import spin  # noqa: E402
-
-FS = 20000.0
+from test.pulse_capture.capture_files import capture_file  # noqa: E402
+from test.qt_helpers import bare_periscope, spin  # noqa: E402
 
 
 def _row(channel, f0, amp=0.01):
@@ -32,21 +26,8 @@ def _row(channel, f0, amp=0.01):
 
 
 def _file(tmp_path, channels, module, tuning):
-    path = tmp_path / "tuned.h5"
-    s = PulseCaptureSession(
-        channels=channels, module=module, sample_rate=FS, hdf5_path=path,
-        tuning=tuning,
-        **PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
-                             max_pulse_ms=50.0,
-                             noise_train_ms=20.0).session_kwargs(FS))
-    s.start()
-    n = int(0.3 * FS)
-    rng = np.random.default_rng(1)
-    for key in channels:
-        s.feed_block(key, rng.normal(0, 1.0, n), rng.normal(0, 1.0, n),
-                     43000.0 + np.arange(n) / FS)
-    s.stop()
-    return path
+    return capture_file(tmp_path / "tuned.h5", channels, module,
+                        tuning=tuning)
 
 
 def _tuning_items(panel):
@@ -117,23 +98,8 @@ def test_without_a_main_window_the_item_says_so(qt_app, tmp_path, panel):
     assert "main window" in panel.status_label.text()
 
 
-def _main_window(monkeypatch):
-    for kind in ("warning", "critical"):
-        monkeypatch.setattr(QtWidgets.QMessageBox, kind,
-                            lambda *a, **k: pytest.fail(f"dialog: {a[2]}"))
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.crs, p.host, p.dark_mode = None, "OFFLINE", False
-    p.multisweep_window_count, p.multisweep_windows = 0, {}
-    p.tuning, p.df_calibrations = {}, {}
-    p.dock_manager = MagicMock()
-    p.dock_manager.get_dock.return_value = None
-    p.tabifyDockWidget = MagicMock()
-    return p
-
-
 def test_the_main_window_opens_the_sweeps_read_only(qt_app, monkeypatch):
-    p = _main_window(monkeypatch)
+    p = bare_periscope(monkeypatch)
     rows = {3: _row(3, 1.0e9), 7: _row(7, 1.1e9, amp=0.02)}
     panel = p.open_tuning_window(rows, 2, "tuned.h5")
     try:
@@ -152,14 +118,27 @@ def test_the_main_window_opens_the_sweeps_read_only(qt_app, monkeypatch):
         spin(qt_app)
 
 
+def test_rows_the_window_produces_later_reach_the_main_window(
+        qt_app, monkeypatch):
+    p = bare_periscope(monkeypatch)
+    panel = p.open_tuning_window({3: _row(3, 1.0e9)}, 2, "tuned.h5")
+    try:
+        later = {9: _row(9, 1.2e9)}
+        panel.tuning_ready.emit(2, later)
+        assert p.tuning[2] == later
+    finally:
+        panel.close()
+        spin(qt_app)
+
+
 def test_rows_without_a_sweep_open_nothing(qt_app, monkeypatch):
-    p = _main_window(monkeypatch)
+    p = bare_periscope(monkeypatch)
     assert p.open_tuning_window({1: {"df_calibration": 1.0}}, 1, "x.h5") is None
     assert "no tuning row with a sweep" in p.statusBar().currentMessage()
 
 
 def test_the_bias_message_counts_detectors_with_data(qt_app, monkeypatch):
-    p = _main_window(monkeypatch)
+    p = bare_periscope(monkeypatch)
     rows = {3: _row(3, 1.0e9), 7: _row(7, 1.1e9)}
     panel = p.open_tuning_window(rows, 2, "tuned.h5")
     said = []

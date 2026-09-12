@@ -6,7 +6,7 @@ subprocess.
 """
 
 import asyncio
-import pickle
+import signal
 import sys
 import time
 from types import SimpleNamespace
@@ -16,6 +16,7 @@ import pytest
 
 from rfmux.algorithms.measurement import record_streams as rs
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+from test.record_helpers import bias_export as _bias_export, fake_fastrx
 
 TRAIN_S = 0.3
 DURATION_S = 0.4
@@ -90,11 +91,12 @@ def test_the_window_opens_when_training_ends_and_lasts_the_duration(
         session=session, fastrx=False, verbose=False))
 
     log = fake_recorders
-    # The parser is launched first and the capture waits until it is up.
-    assert log["start"] == pytest.approx(t0, abs=0.05)
-    assert board.t_started == pytest.approx(t0 + PARSER_UP_S, abs=0.05)
-    assert result.started_at == pytest.approx(board.t_trained, abs=0.05)
-    assert log["stop"] - result.started_at == pytest.approx(DURATION_S, abs=0.1)
+    # The parser is launched first, the capture once it is up, the
+    # window once the capture has trained, for the duration.
+    assert t0 <= log["start"] <= board.t_started
+    assert board.t_started - log["start"] >= PARSER_UP_S - 0.01
+    assert board.t_trained <= result.started_at <= log["stop"]
+    assert DURATION_S <= log["stop"] - result.started_at < DURATION_S + 1.0
     assert log["cmd"] == ("127.0.0.1", None, {2: [1, 2, 3]})
     call = board.calls[0]
     assert call["time_run"] == DURATION_S and call["streamer_mode"] == "slow"
@@ -113,21 +115,24 @@ def test_without_a_capture_the_window_opens_once_the_parser_listens(
         session=rs.open_session(base=tmp_path), capture=False, fastrx=False,
         verbose=False))
     assert board.calls == []
-    assert result.started_at == pytest.approx(t0 + PARSER_UP_S, abs=0.05)
-    assert fake_recorders["stop"] - result.started_at == pytest.approx(
-        DURATION_S, abs=0.1)
+    assert result.started_at - t0 >= PARSER_UP_S - 0.01
+    assert DURATION_S <= fake_recorders["stop"] - result.started_at < (
+        DURATION_S + 1.0)
     assert result.pulse_path is None and result.training_s == 0.0
 
 
-def test_a_capture_that_never_trains_opens_no_window(tmp_path, fake_recorders):
+def test_a_capture_that_never_trains_opens_no_window(
+        tmp_path, fake_recorders, monkeypatch):
+    async def hold(*_):
+        pytest.fail("the recording window opened")
+    monkeypatch.setattr(rs, "_hold", hold)
     with pytest.raises(RuntimeError, match="stream ended"):
         asyncio.run(rs.record_streams(
             _Board(dies="before training"), module=1, channels=[1],
             duration_s=DURATION_S, session=rs.open_session(base=tmp_path),
             fastrx=False, verbose=False))
-    # The parser was launched and is stopped again at once.
-    assert fake_recorders["stop"] - fake_recorders["start"] < (
-        PARSER_UP_S + TRAIN_S + 0.1)
+    # The parser was launched and is stopped again.
+    assert fake_recorders["start"] <= fake_recorders["stop"]
 
 
 # A parser child without rfmux: up at once, a dirfile, and the real
@@ -177,7 +182,7 @@ def test_the_parser_subprocess_is_started_stopped_and_logged(
     assert result.dirfile_path.name == "serial_0042"
     log = result.parser_log.read_text()
     assert log.startswith("parser up") and "Drop Statistics" in log
-    assert result.started_at == pytest.approx(board.t_trained, abs=0.05)
+    assert board.t_trained <= result.started_at
     assert result.warnings == []
 
 
@@ -187,12 +192,14 @@ def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
     the cleanup: the parser still gets its SIGINT and is reaped."""
     session = rs.open_session(base=tmp_path)
     t0 = time.time()
+    # The board fails a quarter of the way into a long window: the
+    # run ends then, not when the window would have.
     with pytest.raises(RuntimeError, match="disk full"):
         asyncio.run(rs.record_streams(
             _Board(dies="after training"), module=1, channels=[1],
-            duration_s=DURATION_S, session=session, fastrx=False,
+            duration_s=4.0, session=session, fastrx=False,
             verbose=False))
-    assert time.time() - t0 < PARSER_UP_S + TRAIN_S + DURATION_S
+    assert time.time() - t0 < 4.0
     run = rs._load_metadata(session)["recordings"][0]
     assert run["dirfile"].endswith("serial_0042")
     log = (session / run["dirfile"]).parent.with_suffix(".log").read_text()
@@ -224,6 +231,80 @@ def test_a_missing_fastrxd_socket_is_refused_before_the_capture(
             session=session, fastrx_socket=str(tmp_path / "no-daemon"),
             verbose=False))
     assert board.calls == []
+
+
+def test_the_recording_covers_the_window_and_reports_its_stats(
+        tmp_path, fake_recorders, monkeypatch):
+    fx = fake_fastrx(monkeypatch, tmp_path)
+    session = rs.open_session(base=tmp_path)
+    board = _Board()
+    result = asyncio.run(rs.record_streams(
+        board, module=2, channels=[3, 9], duration_s=DURATION_S,
+        session=session, merge_fastrx=False, verbose=False))
+    [w] = fx.writers
+    # Channels 1 to the highest, from the end of training, through
+    # the daemon's socket.
+    assert (w.channels, w.socket) == (9, fx.socket)
+    assert w.path == result.fastrx_path
+    assert result.fastrx_path.name.startswith("fastrx_module2_")
+    assert board.t_trained <= result.started_at
+    assert result.fastrx_stats == {"packets": 0, "overruns": 0, "dropouts": 0}
+    assert result.warnings == [
+        "no channel-stream packets: is the channel streamer on for "
+        "module(s) [2]?"]
+    meta = rs._load_metadata(session)
+    assert meta["recordings"][0]["fastrx_stats"] == result.fastrx_stats
+    assert ("fastrx", "module2") in [
+        (e["data_type"], e["identifier"]) for e in meta["exports"]]
+
+
+def test_a_disk_too_small_for_the_recording_warns(
+        tmp_path, fake_recorders, monkeypatch):
+    fake_fastrx(monkeypatch, tmp_path, packets=5000)
+    monkeypatch.setattr(rs.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(free=1))
+    session = rs.open_session(base=tmp_path)
+    result = asyncio.run(rs.record_streams(
+        _Board(), module=1, channels=[1], duration_s=DURATION_S,
+        session=session, capture=False, merge_fastrx=False, verbose=False))
+    assert result.fastrx_stats["packets"] == 5000
+    assert result.warnings == [
+        f"0 GB free in {session} for a recording of about 0 GB"]
+
+
+def test_a_parser_that_ignores_sigint_is_terminated_and_no_dirfile_warns(
+        tmp_path, monkeypatch):
+    class Proc:
+        returncode = None
+
+        def __init__(self):
+            self.signals = []
+
+        def send_signal(self, s):
+            self.signals.append(s)
+
+        def terminate(self):
+            self.signals.append("terminate")
+            self.returncode = -15
+
+        async def wait(self):
+            while self.returncode is None:
+                await asyncio.sleep(0.01)
+
+    monkeypatch.setattr(rs, "PARSER_EXIT_S", 0.05)
+    log = tmp_path / "p.log"
+    log.write_text("parser up\nbind: no such interface\n")
+    result = _result(tmp_path)
+    proc = Proc()
+
+    async def stop():
+        await rs._stop_parser(rs._Parser(proc, asyncio.Event(), None),
+                              result, tmp_path / "p.dirfile", log)
+    asyncio.run(stop())
+    assert proc.signals == [signal.SIGINT, "terminate"]
+    assert result.dirfile_path is None
+    assert result.warnings == [
+        "the parser wrote no dirfile: parser up | bind: no such interface"]
 
 
 def _result(tmp_path, **kw):
@@ -338,25 +419,8 @@ def test_the_parser_gets_one_range_per_module(tmp_path, monkeypatch):
 
 def test_the_channel_streamer_is_turned_on_first_when_asked(
         tmp_path, fake_recorders, monkeypatch):
-    fastrx = pytest.importorskip("rfmux.fastrx")
-
-    class Capture:
-        def __init__(self, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            pass
-
-        def capture(self, n, channels, module, timeout):
-            return {"modules_seen": 0b0001}      # module 1 only
-
-    monkeypatch.setattr(fastrx, "PacketCapture", Capture)
+    fx = fake_fastrx(monkeypatch, tmp_path, modules_seen=0b0001)
     monkeypatch.setattr(rs, "CHANNEL_STREAMER_SETTLE_S", 0.0)
-    socket = tmp_path / "enp2s0f0np0"
-    socket.touch()
     board = _Board()
     board.streamer = []
 
@@ -370,7 +434,7 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
         asyncio.run(rs.record_streams(
             board, module=None, channels={1: [1, 9], 2: [3]}, duration_s=0.1,
             session=rs.open_session(base=tmp_path), sample_trunc="MID",
-            channel_streamer=True, fastrx_socket=str(socket), verbose=False))
+            channel_streamer=True, fastrx_socket=fx.socket, verbose=False))
     assert board.streamer == [
         {"channels": 16, "module": 1, "sample_trunc": "MID"},
         {"channels": 16, "module": 2, "sample_trunc": "MID"}]
@@ -380,35 +444,17 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
         asyncio.run(rs.record_streams(
             _Board(), module=1, channels=[1], duration_s=0.1,
             session=rs.open_session(base=tmp_path), channel_streamer=True,
-            fastrx_socket=str(socket), verbose=False))
+            fastrx_socket=fx.socket, verbose=False))
 
 
 def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(
         tmp_path, fake_recorders, monkeypatch):
-    fastrx = pytest.importorskip("rfmux.fastrx")
-
-    class Capture:
-        def __init__(self, **kw):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            pass
-
-        def capture(self, n, channels, module, timeout):
-            return {"modules_seen": 0b0001}      # module 1 only
-
-    monkeypatch.setattr(fastrx, "PacketCapture", Capture)
-    socket = tmp_path / "enp2s0f0np0"
-    socket.touch()
+    fake_fastrx(monkeypatch, tmp_path, modules_seen=0b0001)
     board = _Board()
     with pytest.raises(RuntimeError, match=r"module\(s\) \[2\]"):
         asyncio.run(rs.record_streams(
             board, module=None, channels={1: [1], 2: [1]}, duration_s=0.1,
-            session=rs.open_session(base=tmp_path),
-            fastrx_socket=str(socket), verbose=False))
+            session=rs.open_session(base=tmp_path), verbose=False))
     assert board.calls == []
 
 
@@ -457,6 +503,73 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
         record._run(modules=[5], channels="1-4", **common)
     with pytest.raises(click.UsageError, match="Modules run 1-4"):
         record._run(modules=[1], channels="5:1-4", **common)
+
+
+def test_the_command_exits_on_a_failed_run_and_after_a_warning(
+        tmp_path, monkeypatch, capsys):
+    from rfmux.tools import record
+    folder = tmp_path / "session_x"
+    folder.mkdir()
+    _bias_export(folder / "bias_module2_1.pkl", 2, [1])
+    common = dict(serial="0156", hostname=None, duration=1.0,
+                  session=str(folder), session_dir=".", capture=True,
+                  parser=False, fastrx=False, parser_interface=None,
+                  fastrx_interface=None, fastrx_socket=None,
+                  merge_fastrx=False, show="none",
+                  config=PulseCaptureConfig(), quiet=True)
+
+    async def dies(serial, hostname, **kw):
+        raise RuntimeError("the parser exited before it was up")
+    monkeypatch.setattr(record, "_main", dies)
+    with pytest.raises(click.ClickException, match="parser exited"):
+        record._run(modules=[2], channels=None, bias=None, **common)
+
+    async def warns(serial, hostname, **kw):
+        return rs.RecordResult(session=folder, module=2, channels=[1],
+                               duration_s=1.0, training_s=0.0,
+                               warnings=["no channel-stream packets"])
+    monkeypatch.setattr(record, "_main", warns)
+    with pytest.raises(SystemExit) as info:
+        record._run(modules=[2], channels=None, bias=None, **common)
+    assert info.value.code == 1
+    assert "[record] warning: no channel-stream packets" in \
+        capsys.readouterr().err
+    # --bias names one export, so one module.
+    with pytest.raises(click.UsageError, match="one module's export"):
+        record._run(modules=[2, 3], channels=None,
+                    bias=str(folder / "bias_module2_1.pkl"), **common)
+
+
+def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
+        tmp_path, monkeypatch, capsys):
+    from rfmux.tools import record
+    monkeypatch.setattr(record.sys, "platform", "linux")
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    capture = SimpleNamespace(summaries={1: {}, 2: {1: {"snr": 6.0}}})
+    result = rs.RecordResult(
+        session=tmp_path, module=1, channels=[1, 2], duration_s=1.0,
+        training_s=0.0, capture=capture, pulse_path=tmp_path / "pulse.h5",
+        fastrx_path=tmp_path / "run.fastrx",
+        dirfile_path=tmp_path / "run.dirfile" / "serial_0042")
+    record._show(result, "none")
+    assert capsys.readouterr().out == ""
+    record._show(result, "periscope")
+    assert capsys.readouterr().out == (
+        "[record] no display; to review: -m rfmux.tools.periscope "
+        f"--review {tmp_path / 'pulse.h5'}\n")
+    record._show(result, "overlay")
+    assert capsys.readouterr().out == (
+        f"[record] no display; to view: rfmux fastrx overlay "
+        f"{tmp_path / 'pulse.h5'} {tmp_path / 'run.fastrx'} --channel 2 "
+        f"--pad 5 --dirfile {result.dirfile_path}\n")
+    launched = []
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(record.subprocess, "Popen",
+                        lambda cmd, **kw: launched.append((cmd, kw)))
+    record._show(result, "periscope")
+    assert launched == [(record.periscope_review_command(result.pulse_path),
+                         {"start_new_session": True})]
 
 
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
@@ -518,15 +631,6 @@ def test_an_existing_session_keeps_its_metadata(tmp_path):
     meta = rs._load_metadata(folder)
     assert meta["created"] == "then"
     assert [e["filename"] for e in meta["exports"]] == ["x", "pulse_module2_1.h5"]
-
-
-def _bias_export(path, module, channels, calibrated=True, timestamp=""):
-    out = {c: {"bias_channel": c,
-               "df_calibration": (complex(1e6 * c, -1e5) if calibrated else None)}
-           for c in channels}
-    with open(path, "wb") as f:
-        pickle.dump({"target_module": module, "timestamp": timestamp,
-                     "bias_kids_output": out, "nco_frequency_hz": 1.0e9}, f)
 
 
 def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):

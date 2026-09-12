@@ -111,7 +111,7 @@ Directories mirror the package under test.
 | `algorithms/` | `rfmux/algorithms/measurement/`: measurement flows, streamer config |
 | `periscope/` | `rfmux/tools/periscope/`: panels, dialogs, receiver, shutdown |
 | `pulse_capture/` | `rfmux/pulse_capture/`: detection, session, ingest, HDF5, plus its Periscope panel and task |
-| `tools/` | `rfmux/tools/` outside Periscope: the parser's dirfile output |
+| `tools/` | `rfmux/tools/` outside Periscope: the parser's dirfile output and range grammar, the record dialog |
 | `notebooks/` | Jupyter-based tests |
 
 ## Notebook tests
@@ -140,7 +140,7 @@ process group). `test/test_fastrx_file.py`,
 extension was built. That needs Linux with clang, libxdp, libbpf and
 liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
 `test/tools/test_parser_dirfile.py` skips unless pygetdata is installed
-(`pip install -e .[dirfile]`, with libgetdata on the system). With fastrx
+(`uv pip install -e .[dirfile]`, with libgetdata on the system). With fastrx
 built and the test and dirfile groups installed, every tier below
 `hardware` reports zero skips on Linux.
 

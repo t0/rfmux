@@ -35,7 +35,10 @@ by hand it is one call per module:
 await crs.set_channel_streamer(channels=128, module=<module>, sample_trunc="LOW")
 ```
 
-`channels` is a multiple of 16. `sample_trunc` picks 16 of the 24 bits of
+`channels` is a whole number of pipelines, 128 each: the board takes any
+multiple of 16, but fastrxd drops every packet whose pipelines are not
+all full, and only its exit statistics say so. `sample_trunc` picks 16 of
+the 24 bits of
 each sample, which is in ADC counts: `"LOW"` keeps bits 15:0 and is exact
 while the signal stays within ±32767 counts, `"MID"` keeps bits 19:4
 (counts/16) and `"HIGH"` bits 23:8 (counts/256), each dropping the finer
@@ -88,8 +91,8 @@ The **Run** tab:
   bits beside it. Off, the recorder only reads the board, and a module
   whose channel stream is off is refused before anything is written. On,
   it calls `set_channel_streamer` for every module recorded, channels 1 to
-  the highest rounded up to a multiple of 16, and lets the stream flow for
-  a second before checking it.
+  the highest rounded up to whole pipelines of 128, and lets the stream
+  flow for a second before checking it.
 - **Merge the recording into the pulse file after the run.**
 - **After the run**: Periscope in review mode on the pulse file, the
   overlay viewer on the channel with the most pulses, or nothing.

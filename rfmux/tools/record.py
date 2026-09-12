@@ -91,7 +91,8 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--channel-streamer/--no-channel-streamer", default=False,
               show_default=True,
               help="Turn the channel streamer on for the recorded modules, "
-                   "channels 1 to the highest, before the run")
+                   "channels 1 to the highest in whole pipelines of 128, "
+                   "before the run")
 @click.option("--sample-trunc", type=click.Choice(["LOW", "MID", "HIGH"]),
               default="LOW", show_default=True,
               help="With --channel-streamer: " + TRUNC_HELP)

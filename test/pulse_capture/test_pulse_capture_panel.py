@@ -224,6 +224,38 @@ def _build_capture_file(tmp_path, n_pulses=3):
     return path
 
 
+def test_review_of_a_merged_file_shows_the_recording_under_each_pulse(
+        qt_app, tmp_path):
+    """A slow capture with a fastrx recording merged in reviews as a
+    both-mode file: one slow-triggered pair per pulse, its fast trace
+    from the recording."""
+    pytest.importorskip("rfmux.fastrx")
+    from rfmux.pulse_capture.overlay import merge_fastrx
+    from test.test_fastrx_file import file_header, record, seconds_ts, write
+    path = _build_capture_file(tmp_path)
+    # The capture's stamps run from 0; a recording of channel 1 (pipe 1,
+    # column 0) over the same seconds, its spacing coarse because the
+    # index reads stamps, not a rate.
+    recs = []
+    for i, t in enumerate(np.arange(0.0, 3000 * DT, 1e-3)):
+        block = np.zeros((128, 2), dtype=np.int16)
+        block[0, 0] = 7
+        recs.append(record(0b1, i, ts=seconds_ts(float(t)), recent=True,
+                           sample_trunc=0, iq={1: block}))
+    fx = write(tmp_path, [file_header(0b1, len(recs))] + recs)
+    merge_fastrx(path, fx)
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    assert panel._both_mode
+    ch_item = panel._channel_items[1]
+    assert ch_item.childCount() == 3
+    row = ch_item.child(0)
+    assert row.text(0) == "\u25c6 slow only"
+    assert row.text(2) == "+fast data"
+    assert "fast shown from ring" in panel.pulse_info.text()
+
+
 def test_review_mode(qt_app, tmp_path):
     path = _build_capture_file(tmp_path)
     panel = PulseCapturePanel(dark_mode=False)
@@ -612,7 +644,7 @@ def test_the_three_views(qt_app):
     cal = 2.0e6 + 0.0j
 
     panel = PulseCapturePanel(dark_mode=False,
-                              df_calibrations={1: {1: cal}})
+                              tuning={1: {1: {"df_calibration": cal}}})
     panel.module_spin.setValue(1)
     # The views are exercised from a capture stored on the quadratures.
     from rfmux.pulse_capture import PulseCaptureConfig
@@ -667,30 +699,30 @@ def test_df_view_is_refused_without_a_calibration(qt_app, monkeypatch):
     spin(qt_app)
 
 
-def test_df_calibrations_reach_the_session_flat(qt_app):
-    """What the panel hands a session is {channel: cal}, not {module: ...}.
+def test_tuning_reaches_the_session_flat(qt_app):
+    """What the panel hands a session is {channel: row}, not {module: ...}.
 
     Periscope stores one mapping per module.  The session and the HDF5
-    writer take the flat per-channel mapping the tuning flow builds, and
-    passing the nested one through is what made the writer refuse the
-    file, losing the capture rather than the units.
+    writer take the flat per-channel mapping, and passing the nested one
+    through would hand the writer a table where a row should be, losing
+    the units.  The two shapes are told apart by their keys: a row's are
+    field names.
     """
+    r1, r2, r9 = ({"df_calibration": 2.0e6, "bias_frequency": 1e9},
+                  {"df_calibration": 3.0e6}, {"df_calibration": 9.9e9})
     panel = PulseCapturePanel(dark_mode=False,
-                              df_calibrations={1: {1: 2.0e6, 2: 3.0e6},
-                                               2: {1: 9.9e9}})
+                              tuning={1: {1: r1, 2: r2}, 2: {1: r9}})
     panel.module_spin.setValue(1)
-    flat = panel._flat_df_calibrations()
-    assert flat == {1: 2.0e6, 2: 3.0e6}
-    assert all(not isinstance(v, dict) for v in flat.values())
+    assert panel._flat_tuning() == {1: r1, 2: r2}
 
     # Module 2 is a different set, and must not leak into module 1.
     panel.module_spin.setValue(2)
-    assert panel._flat_df_calibrations() == {1: 9.9e9}
+    assert panel._flat_tuning() == {1: r9}
 
-    # A headless caller's already-flat mapping survives unchanged.
-    flat_panel = PulseCapturePanel(dark_mode=False,
-                                   df_calibrations={1: 5.0e6})
-    assert flat_panel._flat_df_calibrations() == {1: 5.0e6}
+    # A headless caller's already-flat mapping survives unchanged, even
+    # for a channel number that is also a module number.
+    flat_panel = PulseCapturePanel(dark_mode=False, tuning={1: r1, 2: r2})
+    assert flat_panel._flat_tuning() == {1: r1, 2: r2}
 
     panel.close()
     flat_panel.close()
@@ -706,7 +738,7 @@ def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
     path = tmp_path / "reviewed.h5"
     writer = PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
                              {"streamer_mode": "slow", "sample_rate": 596.0},
-                             df_calibrations={1: 2.0e6})
+                             tuning={1: {"df_calibration": 2.0e6}})
     writer.finalize()
 
     panel = PulseCapturePanel(dark_mode=False)      # no calibration passed in
@@ -1434,7 +1466,7 @@ def test_axis_labels_name_what_is_plotted(qt_app, tmp_path, monkeypatch):
     PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},
                     {"streamer_mode": "slow", "sample_rate": 596.0,
                      "trigger_basis": "df", "stored_units": "Hz"},
-                    df_calibrations={1: 2.0e6 + 0j},
+                    tuning={1: {"df_calibration": 2.0e6 + 0j}},
                     stored_units={1: "Hz"}).finalize()
 
     panel = m.PulseCapturePanel(dark_mode=False)
@@ -1475,7 +1507,7 @@ def test_live_capture_knows_what_it_stored(qt_app):
 
     cal = 2.0e6 + 0j
     panel = m.PulseCapturePanel(dark_mode=False,
-                                df_calibrations={1: {1: cal}})
+                                tuning={1: {1: {"df_calibration": cal}}})
     panel.module_spin.setValue(1)
 
     # Default basis: frequency, so a calibrated channel is stored in
@@ -1522,7 +1554,7 @@ def test_templates_are_rotated_not_just_scaled(qt_app):
     t = np.linspace(0.0, 0.1, 64)
     env = 100.0 * np.exp(-t / 0.02)
 
-    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel = m.PulseCapturePanel(dark_mode=False, tuning={1: {1: {"df_calibration": cal}}})
     # Stored on the quadratures and viewed in volts, the state this
     # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig
@@ -1604,7 +1636,7 @@ def test_noise_bands_follow_the_rotation(qt_app):
     cal = 2.0e6 * np.exp(1j * np.radians(40.0))
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
-    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel = m.PulseCapturePanel(dark_mode=False, tuning={1: {1: {"df_calibration": cal}}})
     # Stored on the quadratures and viewed in volts, the state this
     # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig
@@ -1673,7 +1705,7 @@ def test_noise_strip_follows_the_view(qt_app):
     cal = 2.0e6 * np.exp(1j * np.radians(40.0))
     ns = ChannelNoiseStats(mean_I=3.0, std_I=0.5, mean_Q=-7.0, std_Q=0.5)
 
-    panel = m.PulseCapturePanel(dark_mode=False, df_calibrations={1: {1: cal}})
+    panel = m.PulseCapturePanel(dark_mode=False, tuning={1: {1: {"df_calibration": cal}}})
     # Stored on the quadratures and viewed in volts, the state this
     # test exercises.
     from rfmux.pulse_capture import PulseCaptureConfig

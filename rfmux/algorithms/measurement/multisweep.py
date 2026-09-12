@@ -80,6 +80,16 @@ def _get_recalculated_center_freq(
 
     return new_frequency_hz, actual_method_applied
 
+def sweep_nco_frequency(center_frequencies, span_hz: float) -> float:
+    """The NCO a sweep of *center_frequencies* with *span_hz* each runs
+    at: the middle of the band the sweep covers.  Placeholders (NaN)
+    in the list are ignored."""
+    cfs = [cf for cf in center_frequencies if np.isfinite(cf)]
+    lo = min(cf - span_hz / 2 for cf in cfs)
+    hi = max(cf + span_hz / 2 for cf in cfs)
+    return (lo + hi) / 2
+
+
 @macro(CRS, register=True)
 async def multisweep(
     crs: CRS,
@@ -329,9 +339,7 @@ async def multisweep(
 
     # --- Calculate all NCO frequencies upfront ---
     for region_cfs_calc in nco_regions:
-        region_min_f = min(cf - span_hz/2 for cf in region_cfs_calc)
-        region_max_f = max(cf + span_hz/2 for cf in region_cfs_calc)
-        nco_frequencies.append((region_min_f + region_max_f) / 2)
+        nco_frequencies.append(sweep_nco_frequency(region_cfs_calc, span_hz))
 
     # --- Measurement Loop ---
     total_nco_regions = len(nco_regions)

@@ -218,8 +218,9 @@ def decimated_stream_delay_s(dec_stage):
 
     A property of the firmware, stated here beside the CIC droop
     correction that uses the same filters.  Where it is acted on —
-    DualPulseCaptureSession pulling the slow clock back, and the mock
-    stamping its slow packets late — is marked TEMPORARY, to be removed
+    PulseCaptureSession pulling the slow clock back, the parser's
+    dirfile timebase doing the same, and the mock stamping its slow
+    packets late — is marked TEMPORARY, to be removed
     when the RTL timestamps the decimated stream at its filter centroid.
     This function stays: it describes the filters either way.
     """

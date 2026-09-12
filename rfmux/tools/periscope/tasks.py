@@ -213,9 +213,10 @@ class DfCalibrationSignals(QObject):
 class DfCalibrationTask(QtCore.QThread):
     """Runs one df-calibration measurement off the GUI thread.
 
-    *measure* is a callable returning the coroutine to run; the app
-    hands in crs.measure_df_calibrations for the module, tests hand in
-    whatever they like.  Mock mode measures at startup
+    *measure* is a callable returning the coroutine to run, whose
+    result is ``{channel: tuning row}``; the app hands in
+    crs.measure_df_calibrations for the module, tests hand in whatever
+    they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """
 
@@ -228,8 +229,8 @@ class DfCalibrationTask(QtCore.QThread):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            cals = loop.run_until_complete(self.measure())
-            self.signals.completed.emit(self.module, dict(cals or {}))
+            rows = loop.run_until_complete(self.measure())
+            self.signals.completed.emit(self.module, dict(rows or {}))
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
@@ -249,12 +250,12 @@ class IQTask(QRunnable):
         if len(self.I) < 2: self._handle_insufficient_data(); return
         payload = self._compute_density() if self.mode == "density" else self._compute_scatter()
         self.signals.done.emit(self.row, self.mode, payload)
-        
+
     def _handle_insufficient_data(self):
         # DENSITY_GRID from .utils
         empty_payload = (np.zeros((DENSITY_GRID, DENSITY_GRID), np.uint8), (0,1,0,1)) if self.mode == "density" else ([],[],[])
         self.signals.done.emit(self.row, self.mode, empty_payload)
-        
+
     def _compute_density(self):
         # DENSITY_GRID, gaussian_filter, SMOOTH_SIGMA, LOG_COMPRESS, convolve from .utils
         g = DENSITY_GRID; hist = np.zeros((g, g), np.uint32)
@@ -269,7 +270,7 @@ class IQTask(QRunnable):
         if LOG_COMPRESS: hist = np.log1p(hist, out=hist.astype(np.float32))
         if hist.max() > 0: hist = (hist * (255.0 / hist.max())).astype(np.uint8)
         return (hist, (Imin, Imax, Qmin, Qmax))
-        
+
     def _apply_dot_dilation(self, hist, ix, qy, g):
         # convolve from .utils
         r = self.dot_px // 2
@@ -282,7 +283,7 @@ class IQTask(QRunnable):
                     ys, xs = qy + dy, ix + dx
                     mask = ((0 <= ys) & (ys < g) & (0 <= xs) & (xs < g))
                     np.add.at(hist, (ys[mask], xs[mask]), 1)
-                    
+
     def _compute_scatter(self):
         # SCATTER_POINTS, pg from .utils
         N = len(self.I)
@@ -317,20 +318,20 @@ class PSDTask(QRunnable):
     def _handle_insufficient_data(self):
         payload = ([], [], [], [], [], [], 0.0) if self.mode == "SSB" else ([], [])
         self.signals.done.emit(self.row, self.mode, self.ch, payload)
-        
+
     def _compute_ssb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
         # Determine input units based on whether data was already converted to volts
         input_units = "volts" if self.real_units else "adc_counts"
-        
+
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
                                          scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
                                          input_units=input_units)
-        
+
         freq_iq = spec_iq["freq_iq"]
         psd_i = spec_iq["psd_i"]
         psd_q = spec_iq["psd_q"]
-        
+
         # For magnitude PSD: compute in frequency domain from I and Q PSDs
         # For uncorrelated I and Q noise, magnitude PSD ≈ PSD_I + PSD_Q
         # This avoids artifacts from computing PSD of time-domain magnitude
@@ -343,9 +344,9 @@ class PSDTask(QRunnable):
             psd_q_linear = 10**(psd_q / 10)
             psd_m_linear = psd_i_linear + psd_q_linear
             psd_m = 10 * np.log10(psd_m_linear)
-        
+
         freq_m = freq_iq  # Same frequency grid
-        
+
         # Apply exponential binning if enabled
         if self.exp_binning and len(freq_iq) > 1:
             freq_iq_binned, psd_i_binned = exp_bin_noise_data(freq_iq, psd_i, self.nbins)
@@ -353,14 +354,14 @@ class PSDTask(QRunnable):
             freq_m_binned, psd_m_binned = exp_bin_noise_data(freq_m, psd_m, self.nbins)
             return (freq_iq_binned, psd_i_binned, psd_q_binned, psd_m_binned,
                     freq_m_binned, psd_m_binned, float(self.dec_stage))
-        
+
         return (freq_iq, psd_i, psd_q, psd_m, freq_m, psd_m, float(self.dec_stage))
-        
+
     def _compute_dsb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
         # Determine input units based on whether data was already converted to volts
         input_units = "volts" if self.real_units else "adc_counts"
-        
+
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
                                          scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
                                          input_units=input_units)
@@ -368,12 +369,12 @@ class PSDTask(QRunnable):
         order = np.argsort(freq_dsb)
         freq_dsb_sorted = freq_dsb[order]
         psd_dsb_sorted = psd_dsb[order]
-        
+
         # Apply exponential binning if enabled
         if self.exp_binning and len(freq_dsb_sorted) > 1:
             freq_dsb_binned, psd_dsb_binned = exp_bin_noise_data(freq_dsb_sorted, psd_dsb_sorted, self.nbins)
             return (freq_dsb_binned, psd_dsb_binned)
-        
+
         return (freq_dsb_sorted, psd_dsb_sorted)
 
 class CRSInitializeSignals(QObject):
@@ -394,19 +395,14 @@ class DACScaleFetcher(QtCore.QThread):
         finally: loop.close()
         self.dac_scales_ready.emit(dac_scales)
     def _fetch_all_dac_scales(self, loop, dac_scales):
+        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
         for module_idx in range(1, 9): # Renamed module
             try:
-                dac_scale = loop.run_until_complete(self.crs.get_dac_scale('DBM', module=module_idx))
-                if dac_scale is not None:
-                    dac_scales[module_idx] = dac_scale - 1.5
-                else:
-                    dac_scales[module_idx] = None
+                dac_scales[module_idx] = loop.run_until_complete(
+                    dac_scale_dbm(self.crs, module_idx))
             except Exception as e:
-                if "Can't access module" in str(e) and "analog banking" in str(e):
-                    dac_scales[module_idx] = None
-                else:
-                    print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
-                    dac_scales[module_idx] = None
+                print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
+                dac_scales[module_idx] = None
 
 class NetworkAnalysisTask(QtCore.QThread):
     """QThread subclass for performing network analysis operations without blocking the GUI."""
@@ -418,12 +414,12 @@ class NetworkAnalysisTask(QtCore.QThread):
         self._running, self._last_update_time = True, 0
         self._update_interval = NETANAL_UPDATE_INTERVAL
         self._task, self._loop = None, None
-        
+
     def stop(self):
         """Stop the network analysis task and cancel any ongoing async operation."""
         self._running = False
         self.requestInterruption()
-    
+
     async def _cleanup_channels(self):
         try:
             # Direct approach to set amplitudes to zero without using async with
@@ -432,24 +428,24 @@ class NetworkAnalysisTask(QtCore.QThread):
         except Exception as e:
             print(f"Error in _cleanup_channels: {e}", file=sys.stderr)
             pass
-    
+
     def run(self):
         """QThread entry point - runs in a separate thread."""
         # Create asyncio loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         try:
             progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
             task_params = self._extract_parameters()
-            
+
             # Setup phase: Clear channels and set cable length
             if task_params['clear_channels'] and not self.isInterruptionRequested():
                 loop.run_until_complete(self.crs.clear_channels(module=self.module))
-                
+
             if not self.isInterruptionRequested():
                 loop.run_until_complete(self.crs.set_cable_length(length=task_params['cable_length'], module=self.module))
-            
+
             # Main analysis phase
             if not self.isInterruptionRequested():
                 # Combine parameters for the take_netanal call
@@ -465,10 +461,10 @@ class NetworkAnalysisTask(QtCore.QThread):
                     'progress_callback': progress_cb,
                     'data_callback': data_cb
                 }
-                
+
                 # Process the network analysis asynchronously without blocking
                 result = loop.run_until_complete(self._process_network_analysis(loop, netanal_params))
-                
+
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
                     fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
@@ -476,7 +472,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                     self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
                     self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
                     self.signals.completed.emit(self.module)
-            
+
         except asyncio.CancelledError:
             self.signals.error.emit(f"Analysis canceled for module {self.module}")
             if loop.is_running():
@@ -495,10 +491,10 @@ class NetworkAnalysisTask(QtCore.QThread):
             if loop.is_running():
                 loop.stop()
             loop.close()
-            
+
     def _create_progress_callback(self):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
-        
+
     def _create_data_callback(self):
         def data_cb(module_idx, freqs_raw, amps_raw, phases_raw): # Renamed module
             if self._running:
@@ -510,22 +506,22 @@ class NetworkAnalysisTask(QtCore.QThread):
                 self.signals.data_update.emit(module_idx, freqs, amps, phases)
                 self.signals.data_update_with_amp.emit(module_idx, freqs, amps, phases, self.amplitude)
         return data_cb
-    
+
     def _extract_parameters(self):
         # Constants from .utils
         return {'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
                 'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
                 'cable_length': self.params.get('cable_length', DEFAULT_CABLE_LENGTH), 'clear_channels': self.params.get('clear_channels', True)}
-        
+
     async def _process_network_analysis(self, loop, netanal_params):
         """Process a single network analysis operation asynchronously.
-        
+
         This method periodically yields control back to the event loop to keep the GUI responsive.
         """
         netanal_coro = self.crs.take_netanal(**netanal_params)
         task = loop.create_task(netanal_coro)
-        
+
         # Check for interruption while the task is running
         while not task.done():
             if self.isInterruptionRequested():
@@ -533,7 +529,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 await asyncio.sleep(0.01)  # Give the cancellation a chance to process
                 return None
             await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop - this is crucial for preventing GUI freezing
-        
+
         # Get the result when the task is done
         if not task.cancelled():
             try:
@@ -614,7 +610,7 @@ class MultisweepTask(QtCore.QThread):
     def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: Any):
         """
         Initialize the MultisweepTask.
-        
+
         Args:
             crs: Control and Readout System object
             params: Dictionary of parameters for the multisweep
@@ -632,7 +628,7 @@ class MultisweepTask(QtCore.QThread):
         self.current_iteration = -1
         self.current_direction = ""
         self._task_completed = asyncio.Event()
-        
+
         # ThreadPool configuration for fitting operations
         self._executor = None
         # Use multiple workers for parallel fitting (reserve 1 core for GUI)
@@ -651,12 +647,12 @@ class MultisweepTask(QtCore.QThread):
         """QThread entry point - runs in a separate thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         module_idx = self.params.get('module')
         if module_idx is None:
             self.signals.error.emit(-1, -1, "Module not specified in multisweep parameters.")
             return
-        
+
         try:
             amplitudes = self.params.get('amps', [DEFAULT_AMPLITUDE])
             sweep_direction = self.params.get('sweep_direction', 'upward')
@@ -667,7 +663,7 @@ class MultisweepTask(QtCore.QThread):
                 if self.isInterruptionRequested():
                     self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep canceled.")
                     return
-                
+
                 self.current_amplitude = amp_val
                 current_sweep_cfs_for_this_amp = []
                 # conceptual_idx_to_input_cf_map = {} # Not strictly needed if results are always index-keyed
@@ -681,15 +677,15 @@ class MultisweepTask(QtCore.QThread):
                     chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
                     current_sweep_cfs_for_this_amp.append(chosen_input_cf)
                     # conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
-                
+
                 directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
-                
+
                 for direction_val in directions_to_sweep: # Renamed 'direction' to 'direction_val' to avoid conflict
                     self.current_iteration = iteration_index
                     self.current_direction = direction_val
-                    
+
                     self.signals.starting_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
-                    
+
                     multisweep_params = {
                         'center_frequencies': current_sweep_cfs_for_this_amp,
                         'span_hz': self.params['span_hz'],
@@ -702,13 +698,13 @@ class MultisweepTask(QtCore.QThread):
                         'rotate_saved_data': self.params.get('rotate_saved_data', False),
                         'sweep_direction': direction_val
                     }
-                    
+
                     raw_results_from_crs = loop.run_until_complete(self._process_multisweep(loop, multisweep_params))
-                    
+
                     if self.isInterruptionRequested():
                         self.signals.error.emit(module_idx, amp_val, "Multisweep canceled during execution.")
                         return
-                    
+
                     # is_bifurcated comes with the multisweep's results.
                     # Now apply fitting analysis using the (potentially) bifurcation-annotated data
                     # Use async version with ThreadPoolExecutor for better responsiveness
@@ -716,7 +712,7 @@ class MultisweepTask(QtCore.QThread):
                         self._process_fitting_async(raw_results_from_crs)
                     )
                     results_for_plotting = enhanced_results 
-                    
+
                     results_for_history = {}
                     if enhanced_results: 
                         for res_idx, data_dict_val in enhanced_results.items():
@@ -728,13 +724,13 @@ class MultisweepTask(QtCore.QThread):
                                     results_for_history[conceptual_idx] = bias_freq
                                 else: print(f"Warning: No bias frequency found for index {res_idx}", file=sys.stderr)
                             else: print(f"Warning (MultisweepTask): Non-integer key {res_idx} in results", file=sys.stderr)
-                    
+
                     if results_for_plotting is not None:
                         self.signals.data_update.emit(module_idx, iteration_index, amp_val, direction_val, results_for_plotting, results_for_history)
-                    
+
                     self.signals.completed_iteration.emit(module_idx, iteration_index, amp_val, direction_val)
                     iteration_index += 1
-            
+
             self.signals.all_completed.emit()
         except asyncio.CancelledError:
             self.signals.error.emit(module_idx, self.current_amplitude, "Multisweep task canceled by user.")
@@ -750,14 +746,14 @@ class MultisweepTask(QtCore.QThread):
         self._task_completed.clear()
         multisweep_coro = self.crs.multisweep(**multisweep_params)
         task = loop.create_task(multisweep_coro)
-        
+
         while not task.done():
             if self.isInterruptionRequested():
                 task.cancel()
                 await asyncio.sleep(0.01) 
                 return None
             await asyncio.sleep(0.1) 
-        
+
         if not task.cancelled():
             try:
                 return await task
@@ -765,30 +761,30 @@ class MultisweepTask(QtCore.QThread):
                 print(f"Error in _process_multisweep: {e}", file=sys.stderr)
                 raise
         return None
-    
+
     async def _process_fitting_async(self, raw_results):
         """Process fitting analysis asynchronously using ThreadPoolExecutor."""
         if not raw_results:
             return raw_results
-        
+
         # For larger datasets, use parallel processing
         return await self._process_fitting_multi_thread(raw_results)
-    
+
     async def _process_fitting_multi_thread(self, raw_results):
         """Process fitting using multiple threads for better performance."""
         loop = asyncio.get_event_loop()
-        
+
         # Split resonances into chunks for parallel processing
         resonance_items = list(raw_results.items())
         num_chunks = min(self._max_workers, len(resonance_items))
         chunk_size = max(1, len(resonance_items) // num_chunks)
-        
+
         chunks = []
         for i in range(0, len(resonance_items), chunk_size):
             chunk = dict(resonance_items[i:i + chunk_size])
             if chunk:
                 chunks.append(chunk)
-        
+
         # Process chunks in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=self._max_workers) as executor:
             # Submit all chunks for processing
@@ -804,47 +800,47 @@ class MultisweepTask(QtCore.QThread):
                     len(chunks)
                 )
                 futures.append(asyncio.wrap_future(future))
-            
+
             # Collect results as they complete
             enhanced_results = {}
             completed = 0
-            
+
             for future in asyncio.as_completed(futures):
                 if self.isInterruptionRequested():
                     # Cancel remaining futures
                     for f in futures:
                         f.cancel()
                     return raw_results
-                
+
                 try:
                     chunk_results = await future
                     enhanced_results.update(chunk_results)
                     completed += 1
-                    
+
                     # Chunk completed (no progress emission to avoid clutter)
-                        
+
                 except Exception as e:
                     print(f"Error processing chunk: {e}", file=sys.stderr)
                     # Continue with other chunks
-            
+
             return enhanced_results
-    
+
     def _process_chunk_thread_safe(self, chunk, apply_skewed, apply_nonlinear, module_idx, chunk_idx, total_chunks):
         """Process a chunk of resonances in a thread."""
         # Process this chunk using the existing logic
         return self._apply_fitting_analysis(chunk, apply_skewed, apply_nonlinear, module_idx)
-    
+
     def _apply_fitting_analysis(self, raw_results, apply_skewed, apply_nonlinear, module_idx):
         """Apply fitting analysis (skewed and/or nonlinear) to multisweep results.
-        
+
         This method runs in a worker thread for parallel processing.
         Emits progress signals for GUI updates (thread-safe via Qt's queued connections).
         """
         # This runs in a separate thread, so we need to be careful about Qt signals
-        
+
         # Initialize enhanced_results as a copy to preserve raw data if fitting is skipped or fails
         enhanced_results = {k: v.copy() for k, v in raw_results.items()}
-        
+
         if not apply_skewed and not apply_nonlinear:
             # If no fitting is requested, add flags indicating this
             for res_idx in enhanced_results:
@@ -853,14 +849,14 @@ class MultisweepTask(QtCore.QThread):
                 enhanced_results[res_idx]['nonlinear_fit_applied'] = False
                 enhanced_results[res_idx]['nonlinear_fit_success'] = False
             return enhanced_results
-        
+
         try:
             if apply_skewed:
                 # Emit progress signal (thread-safe via Qt's queued connections)
                 if module_idx is not None and self._running:
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying skewed fits")
-                
+
                 # Perform skewed fitting
                 skewed_results = fitting_module_direct.fit_skewed_multisweep(
                     enhanced_results,
@@ -869,7 +865,7 @@ class MultisweepTask(QtCore.QThread):
                     center_iq_circle=True,
                     normalize_fit=True
                 )
-                
+
                 # Update results
                 for res_idx in enhanced_results:
                     if res_idx in skewed_results:
@@ -877,7 +873,7 @@ class MultisweepTask(QtCore.QThread):
                         enhanced_results[res_idx]['skewed_fit_applied'] = True
                         fit_p = enhanced_results[res_idx].get('fit_params', {})
                         enhanced_results[res_idx]['skewed_fit_success'] = fit_p.get('fr') is not None and fit_p.get('fr') != 'nan'
-                        
+
                         # Generate skewed model magnitude if fit was successful
                         if enhanced_results[res_idx]['skewed_fit_success'] and fit_p:
                             frequencies = enhanced_results[res_idx].get('frequencies')
@@ -902,13 +898,13 @@ class MultisweepTask(QtCore.QThread):
                 for res_idx in enhanced_results:
                     enhanced_results[res_idx]['skewed_fit_applied'] = False
                     enhanced_results[res_idx]['skewed_fit_success'] = False
-            
+
             if apply_nonlinear:
                 # Emit progress signal
                 if module_idx is not None and self._running:
                     self.signals.fitting_progress.emit(module_idx, 
                         "Fitting in progress: Applying non-linear fits")
-                
+
                 # Perform nonlinear fitting
                 # Disable parallel processing since we're already in a thread
                 nonlinear_results = fitting_nonlinear.fit_nonlinear_iq_multisweep(
@@ -918,7 +914,7 @@ class MultisweepTask(QtCore.QThread):
                     verbose=False,
                     parallel=False  # Avoid nested thread pools
                 )
-                
+
                 # Update results
                 for res_idx in enhanced_results:
                     if res_idx in nonlinear_results:
@@ -926,7 +922,7 @@ class MultisweepTask(QtCore.QThread):
                         enhanced_results[res_idx]['nonlinear_fit_applied'] = True
                         if 'nonlinear_fit_success' not in enhanced_results[res_idx]:
                             enhanced_results[res_idx]['nonlinear_fit_success'] = False
-                        
+
                         # Generate nonlinear model IQ if fit was successful
                         if enhanced_results[res_idx].get('nonlinear_fit_success', False):
                             nl_params = enhanced_results[res_idx].get('nonlinear_fit_params', {})
@@ -954,13 +950,13 @@ class MultisweepTask(QtCore.QThread):
                 for res_idx in enhanced_results:
                     enhanced_results[res_idx]['nonlinear_fit_applied'] = False
                     enhanced_results[res_idx]['nonlinear_fit_success'] = False
-            
+
             # Emit completion
             if module_idx is not None and self._running:
                 self.signals.fitting_progress.emit(module_idx, "Fitting Completed")
-            
+
             return enhanced_results
-            
+
         except Exception as e:
             print(f"Error in thread-safe fitting analysis: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
@@ -973,17 +969,18 @@ class MultisweepTask(QtCore.QThread):
 class BiasKidsSignals(QObject):
     """Signals for BiasKidsTask."""
     progress = pyqtSignal(int, float)  # module, progress_percentage
-    completed = pyqtSignal(int, dict, dict, float)  # module, biased_results, df_calibrations, nco_frequency_hz
+    completed = pyqtSignal(int, dict, float)  # module, biased_results, nco_frequency_hz
     error = pyqtSignal(str)  # error_message
 
 
 class BiasKidsTask(QtCore.QThread):
     """QThread subclass for running the bias_kids algorithm without blocking the GUI."""
-    
-    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None):
+
+    def __init__(self, crs: "CRS", module: int, multisweep_results: dict, signals: BiasKidsSignals, bias_params: Optional[Dict[str, Any]] = None,
+                 nco_frequency_hz: Optional[float] = None):
         """
         Initialize the BiasKidsTask.
-        
+
         Args:
             crs: Control and Readout System object
             module: Module number to bias
@@ -997,31 +994,34 @@ class BiasKidsTask(QtCore.QThread):
         self.multisweep_results = multisweep_results
         self.signals = signals
         self.bias_params = bias_params or {}
+        # The NCO the sweep was taken at, to set before biasing when the
+        # board is not already there (loaded data); None leaves it alone.
+        self.nco_frequency_hz = nco_frequency_hz
         self._running = True
-        
+
     def stop(self):
         """Stop the task."""
         self._running = False
         self.requestInterruption()
-        
+
     def run(self):
         """QThread entry point - runs in a separate thread."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         try:
             # Progress callback
             def progress_cb(module, progress):
                 if self._running:
                     self.signals.progress.emit(module, progress)
-            
+
             # Run the bias_kids algorithm
             result = loop.run_until_complete(self._run_bias_kids(progress_cb))
-            
+
             if self.isInterruptionRequested():
                 self.signals.error.emit("Bias KIDs operation was cancelled.")
                 return
-                
+
             if result:
                 # Handle both dict and list return types from bias_kids
                 if isinstance(result, list):
@@ -1032,21 +1032,15 @@ class BiasKidsTask(QtCore.QThread):
                     else:
                         self.signals.error.emit("Bias KIDs operation returned empty list.")
                         return
-                
-                # Extract df_calibration values (result is now guaranteed to be a dict)
-                df_calibrations = {}
-                for det_idx, det_data in result.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
+
                 # Read the NCO frequency that was used during biasing
                 nco_frequency_hz = loop.run_until_complete(self.crs.get_nco_frequency(module=self.module))
-                
+
                 # Emit completion with results and NCO frequency
-                self.signals.completed.emit(self.module, result, df_calibrations, float(nco_frequency_hz))
+                self.signals.completed.emit(self.module, result, float(nco_frequency_hz))
             else:
                 self.signals.error.emit("Bias KIDs operation returned no results.")
-                
+
         except asyncio.CancelledError:
             self.signals.error.emit("Bias KIDs operation was cancelled.")
         except Exception as e:
@@ -1058,12 +1052,12 @@ class BiasKidsTask(QtCore.QThread):
             if loop.is_running():
                 loop.stop()
             loop.close()
-            
+
     async def _run_bias_kids(self, progress_callback):
         """Run the bias_kids algorithm asynchronously."""
         # Import bias_kids as a regular function
         from rfmux.algorithms.measurement.bias_kids import bias_kids
-        
+
         # Extract parameters from bias_params
         kwargs = {
             'crs': self.crs,
@@ -1071,7 +1065,7 @@ class BiasKidsTask(QtCore.QThread):
             'module': self.module,
             'progress_callback': progress_callback
         }
-        
+
         # Add optional parameters from dialog
         if 'fit_method' in self.bias_params:
             kwargs['fit_method'] = self.bias_params['fit_method']
@@ -1088,7 +1082,11 @@ class BiasKidsTask(QtCore.QThread):
         for key in ('measure_calibration', 'calibration_step'):
             if key in self.bias_params:
                 kwargs[key] = self.bias_params[key]
-        
-        # Call bias_kids with all parameters
+
+        # bias_kids places its tones relative to the board's NCO, so the
+        # board must be where the sweep was before it runs.
+        if self.nco_frequency_hz is not None:
+            await self.crs.set_nco_frequency(self.nco_frequency_hz,
+                                             module=self.module)
         result = await bias_kids(**kwargs)
         return result

@@ -441,7 +441,7 @@ class MockCRSStreamer(threading.Thread):
         # packet later by the CIC group delay, so the mock does too.
         # TEMPORARY firmware behaviour: delete this term when the RTL
         # timestamps the decimated stream at its filter centroid (and
-        # zero the default in DualPulseCaptureSession alongside).
+        # zero the default in PulseCaptureSession alongside).
         ts = self._timestamp_at(t_frame + decimated_stream_delay_s(dec))
 
         pkt = ReadoutPacket(

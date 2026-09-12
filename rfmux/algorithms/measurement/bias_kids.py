@@ -232,6 +232,24 @@ def _bias_point_from_fit(entry: Dict, fit_method: str) -> None:
         entry['bias_frequency_source'] = fit_method
 
 
+#: Periscope labels probe amplitudes against the board's DAC scale less
+#: this; the record carries the same number so the labels agree.
+DAC_SCALE_LABEL_OFFSET_DB = 1.5
+
+
+async def dac_scale_dbm(crs, module: int) -> Optional[float]:
+    """The module's DAC scale in dBm as amplitudes are labelled against
+    it, or None when the board reports none: a module the analog
+    banking does not expose has none."""
+    try:
+        scale = await crs.get_dac_scale('DBM', module=module)
+    except Exception as e:
+        if "Can't access module" in str(e) and "analog banking" in str(e):
+            return None
+        raise
+    return None if scale is None else float(scale) - DAC_SCALE_LABEL_OFFSET_DB
+
+
 async def bias_kids(
     crs,
     multisweep_results: Union[Dict, List[Dict]],
@@ -322,6 +340,8 @@ async def bias_kids(
         - 'df_calibration': Hz per volt at the bias point: measured, or from the fit
         - 'df_calibration_source': "measured" or "fit"
         - 'df_calibration_fit': the fit's calibration, when both exist
+        - 'dac_scale_dbm': the module's DAC scale as dac_scale_dbm reads it,
+          so the amplitude can be labelled in dBm later; None if unread
     """
     
     # Detect multi-amplitude format and find optimal bias points
@@ -402,6 +422,12 @@ async def bias_kids(
         _bias_point_from_fit(det_data, fit_method)
 
     nco_freq = await crs.get_nco_frequency(module=module)
+    try:
+        dac_scale = await dac_scale_dbm(crs, module)
+    except Exception as exc:
+        warnings.warn(f"module {module}: DAC scale not read ({exc}); the "
+                      f"tuning record carries none", stacklevel=2)
+        dac_scale = None
     
     
     # Set default bandpass parameters if not provided
@@ -537,6 +563,7 @@ async def bias_kids(
             # Copy the original multisweep data and add bias info
             biased_data = multisweep_results[det_idx].copy()
             biased_data['bias_channel'] = config['channel']
+            biased_data['dac_scale_dbm'] = dac_scale
             biased_data['bifurcation_suspected'] = config['bifurcation_suspected']
             biased_data['bias_successful'] = True
             biased_data['optimal_phase_degrees'] = optimal_phase

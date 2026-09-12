@@ -284,6 +284,64 @@ def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None) -> co
     return cal
 
 
+def tuning_rows(bias_kids_output, nco_frequency_hz=None) -> Dict[int, dict]:
+    """``{bias_channel: row}`` from a ``bias_kids`` output (its
+    ``bias_kids_output`` export field), each row the entry with
+    ``nco_frequency_hz`` added when given: the tuning record a capture
+    stores with each channel's pulses."""
+    rows = {}
+    for entry in (bias_kids_output or {}).values():
+        if not isinstance(entry, dict) or entry.get("bias_channel") is None:
+            continue
+        row = dict(entry)
+        if nco_frequency_hz is not None:
+            row["nco_frequency_hz"] = float(nco_frequency_hz)
+        rows[int(entry["bias_channel"])] = row
+    return rows
+
+
+def tuning_export(tuning: Dict[int, dict], module: int) -> dict:
+    """A capture's tuning rows for one module, ``{channel: row}``, in the
+    shape of a session's bias export, so the sweep each channel was
+    captured with can be browsed as a loaded multisweep: one iteration
+    per detector, keyed by channel as bias_kids keys them.  The
+    resonance list is indexed by channel, with NaN where the file has
+    no channel of that number."""
+    rows = {int(ch): row for ch, row in tuning.items()
+            if isinstance(row, dict) and "frequencies" in row}
+    if not rows:
+        raise ValueError("no tuning row with a sweep to show")
+
+    def first(name):
+        return next((r[name] for r in rows.values()
+                     if r.get(name) is not None), None)
+
+    amps = sorted({float(r.get("sweep_amplitude", r.get("amplitude")))
+                   for r in rows.values()
+                   if r.get("sweep_amplitude", r.get("amplitude")) is not None})
+    span = 0.0
+    freqs = np.asarray(next(iter(rows.values()))["frequencies"], dtype=float)
+    if freqs.size > 1:
+        span = float(freqs.max() - freqs.min())
+    resonances = [rows[ch].get("bias_frequency",
+                               rows[ch].get("original_center_frequency"))
+                  if ch in rows else float("nan")
+                  for ch in range(1, max(rows) + 1)]
+    return {
+        "target_module": int(module),
+        "initial_parameters": {
+            "module": int(module), "amps": amps,
+            "sweep_direction": first("direction") or first("sweep_direction")
+            or "upward",
+            "resonance_frequencies": resonances, "span_hz": span},
+        "dac_scales_used": {int(module): first("dac_scale_dbm")},
+        "results_by_detector": {ch: {0: row} for ch, row in rows.items()},
+        "bias_kids_output": rows,
+        "nco_frequency_hz": first("nco_frequency_hz"),
+        "noise_data": None,
+    }
+
+
 @macro(CRS, register=True)
 async def measure_df_calibrations(
     crs: CRS,
@@ -321,13 +379,14 @@ async def measure_df_calibrations(
     Returns
     -------
     dict
-        Complex calibration per channel, as ``bias_kids`` reports it:
-        multiply IQ in volts by it to get frequency shift + j
-        dissipation in hertz.  Its magnitude is hertz per volt; its
-        phase is minus the angle of the frequency direction in the
-        (I, Q) plane, so the product turns that direction onto the real
-        axis.  Channels whose sweep gives no usable derivative are left
-        out rather than guessed at.
+        ``{channel: row}`` with the fields of a ``bias_kids`` entry this
+        measurement produces: ``df_calibration``, the complex factor
+        that multiplies IQ in volts into frequency shift + j dissipation
+        in hertz (magnitude hertz per volt, phase minus the angle of the
+        frequency direction in the (I, Q) plane, so the product turns
+        that direction onto the real axis), and ``df_calibration_source``
+        ``"measured"``.  Channels whose sweep gives no usable derivative
+        are left out rather than guessed at.
     """
     if channels is None:
         from .channel_selection import get_biased_channels
@@ -375,7 +434,7 @@ async def measure_df_calibrations(
                 ctx.set_frequency(bias[ch] - nco, channel=ch, module=module)
             await ctx()
 
-    out: Dict[int, complex] = {}
+    out: Dict[int, dict] = {}
     fell_back: List[int] = []
     for ch in channels:
         if identify_bifurcation(iq[ch]):
@@ -400,7 +459,8 @@ async def measure_df_calibrations(
                           f"{exc}", stacklevel=2)
             continue
         if np.isfinite(cal) and cal != 0:
-            out[ch] = complex(cal)
+            out[ch] = {"df_calibration": complex(cal),
+                       "df_calibration_source": "measured"}
     if fell_back:
         warnings.warn(f"{len(fell_back)} of {len(channels)} channels had no "
                       f"usable resonance fit, so their df calibration is the "

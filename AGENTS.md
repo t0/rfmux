@@ -208,10 +208,10 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 864 tests, ~1 min
-pytest --tier=portable              # No CRS, no GUI: 42 tests, ~9 s
-pytest --tier=full                  # All 884 that run without a board, ~4 min
-pytest --tier=acquisition           # MockCRS server + real UDP: 20 tests, ~3 min (inside full)
+pytest --tier=quick                 # Edit loop: 1014 tests, ~1 min
+pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
+pytest --tier=full                  # All 1036 that run without a board, ~4 min
+pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope
@@ -219,7 +219,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
 but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
-the test group installed they report zero skips.
+the test group and the `dirfile` extra installed they report zero skips.
 Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus

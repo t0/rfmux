@@ -51,6 +51,7 @@ import numpy as np
 
 from .detection import ChannelNoiseStats
 from .analysis import pulse_summary
+from .channel_keys import channel_suffix
 
 
 # ═══════════════════════════ Histograms ═════════════════════════
@@ -338,7 +339,7 @@ class PulseHistogramSet:
                     continue        # an unrotated channel has no raw pair
                 result[f"{name}_bins"] = acc.bin_centers
                 result[f"{name}_edges"] = acc.bin_edges
-                result[f"{name}_counts_ch{ch}"] = acc.counts.copy()
+                result[f"{name}_counts_{channel_suffix(ch)}"] = acc.counts.copy()
         return result
 
     def total_pulses(self, channel: Optional[int] = None) -> int:
@@ -519,7 +520,7 @@ class PulseTemplateSet:
         result: Dict[str, np.ndarray] = {}
         for ch, acc in self.templates.items():
             for key, value in acc.to_dict(self.sample_rate).items():
-                result[f"{key}_ch{ch}"] = (
+                result[f"{key}_{channel_suffix(ch)}"] = (
                     value if isinstance(value, np.ndarray)
                     else np.asarray(value))
         return result

@@ -82,6 +82,7 @@ from .detection import (
 from . import walk
 from ..streamer import epoch_to_utc
 from .analysis import (
+    calibration_of,
     pulse_summary,
     storage_transform,
 )
@@ -510,15 +511,26 @@ class PulseCaptureSession(_CallbackHost):
     sample_rate : float, optional
         Nominal sample rate in Hz (metadata only; all timing derives
         from the timestamps fed to :meth:`feed_sample`).
+    time_offset_s : float, optional
+        Added to every timestamp before it reaches the engine and the
+        file.  The board stamps the decimated stream late by its CIC
+        group delay while the PFB stream is stamped on time, so a
+        ``"slow"`` session with a sample rate defaults to minus that
+        delay, putting its clock on the PFB axis; any other mode, or
+        no rate, defaults to 0.0.  Pass 0.0 to leave the board's
+        timestamps alone.  Recorded in the file as
+        ``slow_time_offset_s``.
     noise_samples : int
         Samples per channel to accumulate before estimating noise.
     hdf5_path : str or Path, optional
         When given, a :class:`PulseHDF5Writer` streams every pulse to
         this file; when None, no file is written.
-    df_calibrations : dict[int, complex], optional
-        Per-channel df calibration as ``bias_kids`` reports it: magnitude
-        in hertz per volt, phase minus the angle of the frequency
-        direction in the (I, Q) plane.  Stored in the HDF5 file.
+    tuning : dict[int, dict], optional
+        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        readout channel.  Its ``df_calibration`` (magnitude in hertz per
+        volt, phase minus the angle of the frequency direction in the
+        (I, Q) plane) sets the storage transform; the whole row is
+        stored in the HDF5 file.
     histogram_flush_every : int
         Flush histograms to HDF5 and fire ``on_histograms`` every N
         pulses (and once at stop).  Default 50.
@@ -551,7 +563,7 @@ class PulseCaptureSession(_CallbackHost):
         self,
         channels: List[int],
         *,
-        module: int = 1,
+        module: Optional[int] = 1,
         streamer_mode: str = "slow",
         threshold_sigma: float = 5.0,
         end_sigma: float = DEFAULT_END_SIGMA,
@@ -562,12 +574,13 @@ class PulseCaptureSession(_CallbackHost):
         min_end_samples: int = 10,
         buf_size: int = 5000,
         sample_rate: Optional[float] = None,
+        time_offset_s: Optional[float] = None,
         noise_samples: int = 1000,
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
         hdf5_path: Optional[str | Path] = None,
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         trigger_basis: str = "df",
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
@@ -592,6 +605,16 @@ class PulseCaptureSession(_CallbackHost):
         self.min_end_samples = max(1, int(min_end_samples))
         self.buf_size = buf_size
         self.sample_rate = sample_rate
+        # TEMPORARY firmware compensation: when the RTL timestamps the
+        # decimated stream at its filter centroid, make this default to
+        # 0.0 (see decimated_stream_delay_s in core.transferfunctions,
+        # and the matching stamp in mock/udp_streamer.py).  Keep the
+        # slow_time_offset_s file attribute: older files carry it.
+        if time_offset_s is None:
+            time_offset_s = (
+                -decimated_stream_delay_s(sampling_to_decimation(sample_rate))
+                if streamer_mode == "slow" and sample_rate else 0.0)
+        self.time_offset_s = float(time_offset_s)
         self.noise_samples = int(noise_samples)
         self.baseline_window = int(baseline_window)
         # Resolved here (not in the engine) so noise estimation measures
@@ -607,7 +630,7 @@ class PulseCaptureSession(_CallbackHost):
                 buf_size)
         self.max_capture_samples = max(0, int(max_capture_samples))
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
-        self.df_calibrations = df_calibrations
+        self.tuning = tuning
         self.trigger_basis = (
             trigger_basis if trigger_basis in ("iq", "df") else "iq")
         #: Per-channel units of everything stored, filled in as channels
@@ -730,7 +753,7 @@ class PulseCaptureSession(_CallbackHost):
         """
         co = self._store_coeff.get(channel)
         if co is None:
-            cal = (self.df_calibrations or {}).get(channel)
+            cal = calibration_of((self.tuning or {}).get(channel))
             co, units = storage_transform(cal, self.trigger_basis)
             self.stored_units[channel] = units
             self._store_coeff[channel] = co
@@ -780,6 +803,13 @@ class PulseCaptureSession(_CallbackHost):
         factor = self._storage_coeffs(channel)
         return apply_iq_conversion(i_vals, q_vals, factor)
 
+    def shifted(self, t):
+        """Timestamp(s) as fed, moved onto the session's time axis by
+        ``time_offset_s``.  None stays None; NaN stays NaN."""
+        if t is None or not self.time_offset_s:
+            return t
+        return t + self.time_offset_s
+
     def feed_sample(
         self,
         channel: int,
@@ -797,6 +827,7 @@ class PulseCaptureSession(_CallbackHost):
         derives from these timestamps and NaN would silently poison
         durations and tau.
         """
+        timestamp = self.shifted(timestamp)
         i_val, q_val = self._to_trigger_basis(channel, i_val, q_val)
         if self.state is CaptureState.ESTIMATING:
             self._feed_block_prepared(
@@ -840,7 +871,7 @@ class PulseCaptureSession(_CallbackHost):
         """
         I = np.asarray(i_vals, dtype=np.float64)
         Q = np.asarray(q_vals, dtype=np.float64)
-        T = np.asarray(timestamps, dtype=np.float64)
+        T = self.shifted(np.asarray(timestamps, dtype=np.float64))
         I, Q = self._to_trigger_basis(channel, I, Q)
         self._feed_block_prepared(channel, I, Q, T)
 
@@ -990,6 +1021,7 @@ class PulseCaptureSession(_CallbackHost):
             "dropped_invalid_ts": self.dropped_invalid_ts,
             "source": dict(self.source),
             "time_origin_epoch": self.time_origin_epoch,
+            "time_offset_s": self.time_offset_s,
             "hdf5_path": str(self.hdf5_path) if self.hdf5_path else None,
             "baseline_window": self.baseline_window,
             "baseline_window_ms": (
@@ -1080,6 +1112,8 @@ class PulseCaptureSession(_CallbackHost):
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
                 capture_params[key] = self.sample_rate
+            if self.streamer_mode == "slow":
+                capture_params["slow_time_offset_s"] = self.time_offset_s
             capture_params.update(self.storage_description())
             try:
                 self.writer = PulseHDF5Writer(
@@ -1087,7 +1121,7 @@ class PulseCaptureSession(_CallbackHost):
                     self.channels,
                     self.noise_stats,
                     capture_params,
-                    df_calibrations=self.df_calibrations,
+                    tuning=self.tuning,
                     stored_units=self.stored_units,
                 )
                 if self.time_origin_epoch is not None:
@@ -1320,7 +1354,7 @@ class DualPulseCaptureSession(_CallbackHost):
         config: Optional[PulseCaptureConfig] = None,
         fast_channels: Optional[List[int]] = None,
         hdf5_path=None,
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         match_window_s: Optional[float] = None,
         match_grace_s: Optional[float] = None,
         pair_window_wait_s: float = 3.0,
@@ -1342,16 +1376,10 @@ class DualPulseCaptureSession(_CallbackHost):
         self.module = module
         self.config = config or PulseCaptureConfig()
         #: Added to every slow timestamp before it reaches the engine,
-        #: the matcher or the file.  The decimated stream's timestamps
-        #: are late by its CIC group delay while the PFB stream's are
-        #: not, so by default the slow clock is pulled back by that
-        #: delay to put both streams on one axis.  Pass 0.0 to leave
-        #: the board's timestamps alone.
-        #: TEMPORARY firmware compensation: when the RTL timestamps the
-        #: decimated stream at its filter centroid, make this default
-        #: to 0.0 (see decimated_stream_delay_s in core.transferfunctions,
-        #: and the matching stamp in mock/udp_streamer.py).  Keep the
-        #: slow_time_offset_s file attribute: older files carry it.
+        #: the matcher or the file: the slow stream session's
+        #: ``time_offset_s``, which pulls the CIC-delayed slow clock
+        #: onto the PFB axis by default (see PulseCaptureSession).
+        #: Pass 0.0 to leave the board's timestamps alone.
         self.slow_time_offset_s = float(
             -decimated_stream_delay_s(sampling_to_decimation(slow_rate))
             if slow_time_offset_s is None else slow_time_offset_s)
@@ -1361,7 +1389,7 @@ class DualPulseCaptureSession(_CallbackHost):
         # its samples to the slow stream's ADC counts (sources.py); that
         # scale is checked in mock, on loopback and on a board (0156: the
         # two streams agree to 0.2%).
-        self.df_calibrations = df_calibrations
+        self.tuning = tuning
         # Parity with PulseCaptureSession (panel/task read this)
         self.hdf5_path = Path(hdf5_path) if hdf5_path is not None else None
         self.on_noise = on_noise
@@ -1409,7 +1437,8 @@ class DualPulseCaptureSession(_CallbackHost):
         #: board's inter-stream clock skew, one sample per event.
         self._time_offsets: List[float] = []
 
-        self.slow = self._make_stream("slow", slow_rate)
+        self.slow = self._make_stream("slow", slow_rate,
+                                      time_offset_s=self.slow_time_offset_s)
         self.fast = self._make_stream("fast", fast_rate, self.fast_channels)
         #: Source-compatible facades: run_slow_source/run_pfb_source
         #: read ``channels`` and call ``feed_block``, so routing those
@@ -1448,8 +1477,8 @@ class DualPulseCaptureSession(_CallbackHost):
         self.fast_feed.source = self.fast.source
 
     def _make_stream(self, stream: str, sample_rate: float,
-                     channels: Optional[List[int]] = None
-                     ) -> PulseCaptureSession:
+                     channels: Optional[List[int]] = None,
+                     time_offset_s: float = 0.0) -> PulseCaptureSession:
         kwargs = self.config.session_kwargs(sample_rate)
         # Union-window extraction happens up to grace_s after a pulse
         # (single-trigger expiry): the ring must cover the full window
@@ -1464,7 +1493,8 @@ class DualPulseCaptureSession(_CallbackHost):
             module=self.module,
             streamer_mode=stream,
             sample_rate=sample_rate,
-            df_calibrations=self.df_calibrations,
+            time_offset_s=time_offset_s,
+            tuning=self.tuning,
             hdf5_path=None,  # the dual writer owns the file
             on_noise=lambda ns, s=stream: self._on_stream_noise(s, ns),
             on_pulse=lambda ch, idx, summary, data, s=stream:
@@ -1521,7 +1551,7 @@ class DualPulseCaptureSession(_CallbackHost):
         try:
             self.writer = DualPulseHDF5Writer(
                 self.hdf5_path, self.channels, capture_params,
-                df_calibrations=self.df_calibrations,
+                tuning=self.tuning,
                 stored_units=self.slow.stored_units)
             if self.time_origin_epoch is not None:
                 self.writer.set_time_origin(self.time_origin_epoch)
@@ -1529,16 +1559,9 @@ class DualPulseCaptureSession(_CallbackHost):
             self.writer = None
             self._error(f"Could not open HDF5 file {self.hdf5_path}: {e}")
 
-    def _slow_clock(self, t):
-        """Slow-stream timestamp(s) moved onto the shared time axis."""
-        if t is None or not self.slow_time_offset_s:
-            return t
-        return t + self.slow_time_offset_s
-
     def feed_slow(self, ch: int, i: float, q: float, t) -> None:
-        t = self._slow_clock(t)
         self.slow.feed_sample(ch, i, q, t)
-        self._advance_matcher("slow", t)
+        self._advance_matcher("slow", self.slow.shifted(t))
 
     def feed_fast(self, ch: int, i: float, q: float, t) -> None:
         self.fast.feed_sample(ch, i, q, t)
@@ -1557,9 +1580,8 @@ class DualPulseCaptureSession(_CallbackHost):
         """Feed one stream a block and advance its clock once, off the
         last usable timestamp in the block."""
         stamps = np.asarray(timestamps, dtype=np.float64)
-        if stream == "slow":
-            stamps = self._slow_clock(stamps)
         session.feed_block(ch, i_vals, q_vals, stamps)
+        stamps = session.shifted(stamps)
         usable = stamps[np.isfinite(stamps)]
         if usable.size:
             self._advance_matcher(stream, float(usable[-1]))

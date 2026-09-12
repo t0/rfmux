@@ -86,7 +86,7 @@ def test_dual_streams_receive_the_calibrations():
     d = DualPulseCaptureSession(
         channels=[1], module=1, slow_rate=1000.0, fast_rate=10000.0,
         config=cfg, hdf5_path=None,
-        df_calibrations={1: 2.0e6 + 0j})
+        tuning={1: {"df_calibration": 2.0e6 + 0j}})
     d.start()
     t = np.arange(50) / 1000.0
     z = np.zeros(50)

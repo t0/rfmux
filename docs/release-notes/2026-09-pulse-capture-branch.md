@@ -34,9 +34,11 @@ simulator files are unchanged in meaning.
   histogram and template accumulators, the HDF5 writers and reader, the
   stream sources and the single- and dual-stream capture sessions.
 - `crs.trigger_capture(channel, module, streamer_mode="slow", time_run=10.0,
-  config, threshold_sigma, end_sigma, max_pulse_ms, hdf5_path,
-  df_calibrations, trigger_basis)`: one-shot capture in slow, fast or both
-  modes.
+  config, threshold_sigma, end_sigma, max_pulse_ms, hdf5_path, tuning,
+  trigger_basis)`: one-shot capture in slow, fast or both modes. `tuning`
+  is `{channel: row}`, each row a `bias_kids` entry (`tuning_rows` in
+  `rfmux.algorithms.measurement.df_calibration` keys an output by channel;
+  `measure_df_calibrations` returns rows holding just the calibration).
 - The result carries the pulses per channel, the pairs and the per-stream
   results; with `hdf5_path` the same content is written as the capture runs.
 - Noise training before every capture: the threshold is `threshold_sigma`
@@ -44,12 +46,16 @@ simulator files are unchanged in meaning.
   baseline, so it holds for the correlated samples the decimators produce.
   Training lasts the 1/f window, `noise_train_ms` (5 s), and is not
   charged against `time_run`.
-- Triggering in the frequency basis (`trigger_basis="df"`): with a df
-  calibration a channel is rotated so the pulse lies along one axis before
-  thresholding, and stored in hertz; without one it stays on the quadratures
-  in volts. The file records
-  `trigger_basis`, `volts_per_count`, and per channel `stored_units` and
-  `df_calibration`.
+- Triggering in the frequency basis (`trigger_basis="df"`): a channel
+  whose tuning row has a `df_calibration` is rotated so the pulse lies along
+  one axis before thresholding, and stored in hertz; without one it stays on
+  the quadratures in volts. The file records `trigger_basis`,
+  `volts_per_count`, per channel `stored_units`, and the whole tuning row
+  under the channel's `tuning` group: scalars and strings as attributes
+  (`df_calibration`, `bias_frequency`, `sweep_amplitude`, ...), the sweep
+  arrays as datasets, `fit_params` as a JSON attribute.
+  `PulseHDF5Reader.tuning(channel)` gives the row back;
+  `df_calibration(channel)` just the calibration.
 - Per-pulse timing from the packet clock: `trigger_epoch` and `trigger_utc`
   on every pulse, `time_origin_epoch` and `time_origin_utc` on the file, no
   host clock involved.
@@ -63,6 +69,9 @@ simulator files are unchanged in meaning.
 - Periscope Pulse Capture panel: live capture with a pulse list, stacked I/Q
   or df/dissipation plots with the decision marks and bands, histograms,
   trigger-aligned templates, review mode for any capture file, and CSV export.
+  A **Tuning** item in the pulse list opens the sweeps the channels were
+  tuned with as a multisweep window, live or in review, without touching
+  the board.
 - Periscope Streamer Configuration dialog and `crs.configure_streamer`, over
   `StreamerConfig`, `describe` and `validate` in
   `rfmux.algorithms.measurement.streamer_config`: decimation, packet format,
@@ -476,11 +485,44 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   packets by stamp until it is within 0.125 s, counting them as
   `flushed_packets`. `lost_packets` comes from the queue's own sequence
   accounting. `busy` is processing time over wall time.
-- The dual session shifts every slow timestamp by minus the CIC group delay
+- Every slow capture shifts its timestamps by minus the CIC group delay
   (2.8 to 3.0 slow samples at stages 3 to 6, 1.5 at stage 0; 4.99 ms at
-  stage 6) before the engine, the matcher and the file. The shift is
-  recorded as `slow_time_offset_s`, 0 when not applied; pass
-  `slow_time_offset_s=0.0` to opt out.
+  stage 6) before the engine, the matcher and the file, so slow and PFB
+  clocks share one axis. The shift is recorded as `slow_time_offset_s`, 0
+  when not applied; pass `time_offset_s=0.0` (`slow_time_offset_s=0.0` on
+  the dual session) to opt out. The parser's dirfile `timebase` applies
+  the same shift per packet from its `dec_stage`; the raw stamp fields
+  are unchanged.
+- `rfmux record --serial <NNNN> --module <M> --duration <s> --session <folder>`
+  takes a slow-stream pulse capture, a parser dirfile and a fastrx
+  recording of one module for the same stretch into one session folder,
+  reading the board only (`--channel-streamer`, with `--sample-trunc`,
+  turns the channel streamer on for the recorded modules first). The
+  parser is up before the capture starts and
+  the fastrx writer starts when the capture's noise training ends; the
+  channels and df calibrations come from the session's newest bias
+  export. `trigger_capture` gained
+  `on_noise=` for that. After the run it lists the channels that
+  triggered, merges the recording into the pulse file as its fast
+  stream (`--no-merge-fastrx`; `rfmux fastrx merge` for an older run)
+  and opens Periscope in review mode on the file (`--show overlay` for
+  the overlay viewer on the busiest channel, `--show none`). The merged
+  file is a both-mode file that Periscope reviews with the recording
+  under every pulse. `periscope --review <pulse.h5>` opens any capture
+  file that way, offline, without the startup dialog. With no options
+  the command opens a dialog with every choice, remembered between
+  runs, the pulse capture settings on their own tab and the newest
+  session under the default path filled in; it checks for fastrxd and
+  shows the command to start it. Several modules feeding one RF line
+  are one run: `--module 2 --module 3` (the dialog's Modules field),
+  with the channels from each module's newest bias export or
+  `--channels 2:1-114,3:1-96`; the products are named `modules2+3` and
+  the pulse file keys its channels by (module, channel).
+  `trigger_capture` takes the same `{module: [channels]}` for a slow
+  capture across modules. Periscope reviews such a file with the module
+  named beside each channel, its histogram Plot field taking `2:1-8` for
+  module 2's channels; a one-module file reads as before. See the 100G
+  captures guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

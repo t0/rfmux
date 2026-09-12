@@ -496,7 +496,7 @@ class TestPulseHDF5:
         writer = PulseHDF5Writer(
             path, [1], noise_stats,
             {"streamer_mode": "slow"},
-            df_calibrations={1: 42.5},
+            tuning={1: {"df_calibration": 42.5}},
         )
         writer.finalize()
 
@@ -551,17 +551,16 @@ class TestPulseHDF5:
             self, tmp_path):
         """A wrong-shaped mapping must not take the capture with it.
 
-        Periscope keys its calibrations by module, so passing them
-        straight through handed h5py a dict.  It refused, the writer's
-        constructor raised, and PulseCaptureSession turned that into
-        ``writer = None`` -- a capture that ran and saved nothing.
+        Periscope keys its tuning by module, so passing it straight
+        through hands the writer a {channel: row} table where a row
+        should be.  Refusing it would cost the whole capture.
         """
         path = tmp_path / "nested.h5"
-        with pytest.warns(UserWarning, match="df_calibration"):
+        with pytest.warns(UserWarning, match="tuning for channel 1"):
             writer = PulseHDF5Writer(
                 path, [1], {1: _make_noise_stats()},
                 {"streamer_mode": "slow"},
-                df_calibrations={1: {1: 42.5}},   # {module: {channel: cal}}
+                tuning={1: {1: {"df_calibration": 42.5}}},   # {module: {channel: row}}
             )
             writer.finalize()
 
@@ -2319,7 +2318,8 @@ class TestPostNoiseHoldIsBounded:
         assert s.state.name == "ESTIMATING"
         held_I, _held_Q, held_T = s._pending_post_noise[1]
         assert held_I.shape[0] == s.noise_samples
-        assert held_T[-1] == pytest.approx((k - 1) / 1e4), "the newest are kept"
+        assert held_T[-1] == pytest.approx(s.shifted((k - 1) / 1e4)), \
+            "the newest are kept"
 
 
 class TestInPulseNoise:

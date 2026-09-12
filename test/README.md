@@ -7,12 +7,12 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 42 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 864 | ~1 min | Default while editing. |
-| `pytest --tier=acquisition` | 20 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 884 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 43 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1014 | ~1 min | Default while editing. |
+| `pytest --tier=acquisition` | 22 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 1036 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 959 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 1111 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -111,6 +111,7 @@ Directories mirror the package under test.
 | `algorithms/` | `rfmux/algorithms/measurement/`: measurement flows, streamer config |
 | `periscope/` | `rfmux/tools/periscope/`: panels, dialogs, receiver, shutdown |
 | `pulse_capture/` | `rfmux/pulse_capture/`: detection, session, ingest, HDF5, plus its Periscope panel and task |
+| `tools/` | `rfmux/tools/` outside Periscope: the parser's dirfile output and range grammar, the record dialog |
 | `notebooks/` | Jupyter-based tests |
 
 ## Notebook tests
@@ -133,11 +134,15 @@ test, so run it by hand when its notebook changes.
 A few tests skip on macOS or Windows because they pin platform behaviour:
 `recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT` (absent on
 Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT` to a
-process group). `test/test_fastrx_file.py` skips at collection unless the
-fastrx extension was built. That needs Linux with clang, libxdp, libbpf and
-liburing present at install time (`rfmux/streamer/CMakeLists.txt`). With
-fastrx built and the test group installed, every tier below `hardware`
-reports zero skips on Linux.
+process group). `test/test_fastrx_file.py`,
+`test/pulse_capture/test_recording_index.py` and
+`test/pulse_capture/test_overlay.py` skip at collection unless the fastrx
+extension was built. That needs Linux with clang, libxdp, libbpf and
+liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
+`test/tools/test_parser_dirfile.py` skips unless pygetdata is installed
+(`uv pip install -e .[dirfile]`, with libgetdata on the system). With fastrx
+built and the test and dirfile groups installed, every tier below
+`hardware` reports zero skips on Linux.
 
 ## CI
 

@@ -2,6 +2,7 @@
 sweeps that lack it, moves the bias frequency onto the fitted curve,
 chooses the amplitude by the fitted nonlinearity, and calibrates there."""
 import contextlib
+import warnings
 
 import numpy as np
 import pytest
@@ -45,6 +46,9 @@ class _Board:
 
     async def get_nco_frequency(self, module):
         return NCO
+
+    async def get_dac_scale(self, units="DBM", module=None):
+        return -0.5
 
     @contextlib.asynccontextmanager
     async def tuber_context(self):
@@ -121,6 +125,38 @@ async def test_measured_calibration_holds_for_a_narrow_resonator(qr):
     true = 1.0 / ((z[1] - z[0]) / (2 * h))
     assert out[1]["df_calibration_source"] == "measured"
     assert abs(out[1]["df_calibration"] / true - 1) < 0.03
+
+
+@pytest.mark.asyncio
+async def test_the_entry_carries_the_dac_scale_as_labelled():
+    out = await bk.bias_kids(_Board(), {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] == -0.5 - bk.DAC_SCALE_LABEL_OFFSET_DB
+
+
+@pytest.mark.asyncio
+async def test_a_module_the_banking_hides_has_no_dac_scale_quietly():
+    board = _Board()
+
+    async def refuse(units="DBM", module=None):
+        raise RuntimeError("Can't access module 1: analog banking")
+    board.get_dac_scale = refuse
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] is None
+    assert np.isfinite(out[1]["df_calibration"])
+
+
+@pytest.mark.asyncio
+async def test_any_other_dac_scale_failure_warns_and_biases():
+    board = _Board()
+
+    async def broken(units="DBM", module=None):
+        raise RuntimeError("tuber timeout")
+    board.get_dac_scale = broken
+    with pytest.warns(UserWarning, match="DAC scale not read"):
+        out = await bk.bias_kids(board, {1: _entry()}, module=1)
+    assert out[1]["dac_scale_dbm"] is None
 
 
 @pytest.mark.asyncio

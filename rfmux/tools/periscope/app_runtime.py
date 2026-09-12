@@ -1444,9 +1444,9 @@ class PeriscopeRuntime:
             # Store panel reference
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows bias_kids produces land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
@@ -1518,7 +1518,28 @@ class PeriscopeRuntime:
     
         return dac_scales    
     
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep") -> tuple:
+    def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
+        """Browse the sweeps a capture's channels were tuned with, as a
+        loaded multisweep window: *tuning* is ``{channel: row}`` for
+        *module*.  Read-only: the board is not consulted or changed."""
+        from rfmux.algorithms.measurement.df_calibration import tuning_export
+        try:
+            load_params = tuning_export(tuning, module)
+        except ValueError as exc:
+            self.statusBar().showMessage(f"{name}: {exc}", 8000)
+            return None
+        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
+            load_params, source_type="capture",
+            title=f"Tuning of {name} (module {module})")
+        if panel is not None:
+            # One sweep per channel from a capture: nothing to re-run.
+            panel.rerun_btn.setEnabled(False)
+            panel.rerun_btn.setToolTip("A capture's tuning holds one sweep per "
+                                       "channel; re-run from a multisweep export")
+        return panel
+
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep",
+                                                  title: str = None) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
         
@@ -1528,7 +1549,10 @@ class PeriscopeRuntime:
         Args:
             load_params: Loaded data dictionary containing 'initial_parameters', 
                         'results_by_iteration', 'dac_scales_used', etc.
-            source_type: "multisweep", "bias", or "noise" - affects naming and panel behavior
+            source_type: "multisweep", "bias", "noise", or "capture" (a capture
+                        file's tuning: the DAC scale comes from the data, the board
+                        is not read) - affects naming and panel behavior
+            title: dock title; default "Multisweep #n (Loaded)"
             
         Returns:
             tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
@@ -1549,24 +1573,27 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
                 return None, None, None, None
 
-            try: 
-                dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
-            except:
-                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
-                return
+            if source_type == "capture":
+                dac_scales_for_panel = dict(load_params.get('dac_scales_used') or {})
+            else:
+                try:
+                    dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
+                except:
+                    QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                    return
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-            dac_scale_for_board = dac_scales_for_panel[target_module]
+                dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+                dac_scale_for_board = dac_scales_for_panel[target_module]
 
-            if dac_scale_for_mod != dac_scale_for_board:
-                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+                if dac_scale_for_mod != dac_scale_for_board:
+                    QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
             
             # For bias source type, also check for bias_kids_output
             has_bias_data = 'bias_kids_output' in load_params and load_params['bias_kids_output'] is not None
-            loaded_bias_flag = has_noise_data or (source_type == "bias" and has_bias_data)
+            loaded_bias_flag = has_noise_data or (source_type in ("bias", "capture") and has_bias_data)
                 
             # Create panel
             panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
@@ -1580,35 +1607,22 @@ class PeriscopeRuntime:
             
             # MultisweepPanel dock is always named "Multisweep" regardless of source type
             # The source_type affects panel behavior, not the dock title
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
+            dock_title = title or f"Multisweep #{self.multisweep_window_count} (Loaded)"
             
             # Wrap in dock
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows bias_kids produces land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
-            
-            # Set NCO frequency based on resonance frequencies
-            reso_frequencies = params.get('resonance_frequencies', [])
-            
-            if reso_frequencies:
-                span_hz = params.get('span_hz', 0)
-                nco_freq = ((min(reso_frequencies) - span_hz/2) + (max(reso_frequencies) + span_hz/2)) / 2
-
-                # Only set NCO frequency if CRS is available (skip in offline mode)
-                if self.crs is not None:
-                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
-                else:
-                    print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
             # Load data into panel - handle both old (iteration) and new (detector) formats
             if 'results_by_detector' in load_params:
@@ -1631,18 +1645,14 @@ class PeriscopeRuntime:
                 panel._generate_histograms()
                 panel.histograms_generated = True
             
-            # Extract and load df_calibrations if bias_kids_output exists
+            # The tuning rows of the export go to the main window
             if has_bias_data:
-                bias_output = load_params['bias_kids_output']
-                df_calibrations = {}
-                for det_idx, det_data in bias_output.items():
-                    if det_data.get('df_calibration') is not None:
-                        df_calibrations[det_idx] = det_data['df_calibration']
-                
-                # Load calibrations into main window
-                if df_calibrations and hasattr(self, '_handle_df_calibration_ready'):
-                    self._handle_df_calibration_ready(target_module, df_calibrations)
-                    print(f"[Session] Loaded df calibrations for {len(df_calibrations)} detectors from session file")
+                from rfmux.algorithms.measurement.df_calibration import tuning_rows
+                tuning = tuning_rows(load_params['bias_kids_output'],
+                                     load_params.get('nco_frequency_hz'))
+                if tuning and hasattr(self, '_handle_tuning_ready'):
+                    self._handle_tuning_ready(target_module, tuning)
+                    print(f"[Session] Loaded the tuning of {len(tuning)} detectors from session file")
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")

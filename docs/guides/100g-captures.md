@@ -2,18 +2,13 @@
 
 The channel stream (fastrx, 100G) carries every channel of a module at the
 PFB rate; the 1G paths carry the decimated slow stream (the parser, and
-pulse capture) and at most four PFB channels. All three are stamped by the
+pulse capture) and at most four PFB channels. All three are timestamped by the
 board's IRIG clock, so a pulse recorded on the slow stream can be looked up
 in a fastrx recording and drawn over it. `rfmux record` takes the three
-together for the same stretch, into one session folder, and this guide is
-how to use it: the dialog, the command line, what the run does, and the
-viewer.
-
-The board stamps the decimated stream late by its CIC group delay (5 ms at
-stage 6, 117 µs at stage 1). Pulse-capture files and parser dirfiles are
-written with that delay taken out, so nothing here needs to know the stage.
-Files written before that correction are shifted by the viewer from their
-slow rate.
+together for the same stretch, into one session folder, merging the 100G 
+and 1G records for pulses, or generating a time-base-browsable record of
+aligned fast and slow data. This guide is how to use it: the dialog, the 
+command line, what the run does, and the viewer.
 
 Needs: Linux with the fastrx extension built (clang, libxdp, libbpf and
 liburing at install time), a 100G NIC on the channel-stream network, and
@@ -31,7 +26,7 @@ rfmux fastrxd
 sudo <path it prints>/fastrxd -i <100G interface>
 ```
 
-**The channel streamer.** Each module's channel stream is switched on
+**The channel streamer.** Each module's 100G streamer is enabled on the CRS
 separately, and switching on the slow streamer does not switch it on. The
 recorder can do it for you (the check box or `--channel-streamer` below);
 by hand it is one call per module:
@@ -47,13 +42,19 @@ while the signal stays within ±32767 counts, `"MID"` keeps bits 19:4
 bits. With DC levels of a few thousand counts and noise of a few hundred,
 HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales
 every truncation back to counts. `rfmux fastrx hud --module <module>` shows
-whether packets are flowing.
+whether packets are flowing. For typical MKID applications the LOW truncation
+is ideal, since most of the dynamic range is consumed by having many channels
+that are each relatively small individual signals.
 
-**A session with a bias export.** The recorder takes its channels from
-the session's newest Bias KIDs export for each module, and stores each
-channel's tuning (the sweep at the chosen amplitude, the fit, the bias
-point, the df calibration) with its pulses. Tune in Periscope with a
-session active, or name channel ranges by hand.
+**A session with a bias export.** The recorder needs to know about which channels
+are biased, and their tuning information in order to issue a Pulse Capture
+session in df units. It does this by reading from the session's newest Bias KIDs 
+export for each module, and stores each channel's tuning (the sweep at the chosen 
+amplitude, the fit, the bias point, the df calibration) with its pulses.
+
+Tune in Periscope with a session active, or name channel ranges by hand to bypass this.
+If bypassed the df and tuning fields will be missing, and Pulse Capture triggering will
+be on the I and Q bases.
 
 ## 2. Recording with the dialog
 

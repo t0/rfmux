@@ -1511,12 +1511,14 @@ class PeriscopeRuntime:
             loop.quit()
     
         fetcher.dac_scales_ready.connect(on_ready)
-        fetcher.finished.connect(fetcher.deleteLater)
     
         fetcher.start()
-        loop.exec_()   # waits until on_ready() calls loop.quit()
+        loop.exec()    # until on_ready() quits it
+        # run() returns after the emit: the thread must have ended
+        # before the fetcher goes out of scope, or Qt aborts.
+        fetcher.wait()
     
-        return dac_scales    
+        return dac_scales
     
     def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
         """Browse the sweeps a capture's channels were tuned with, as a

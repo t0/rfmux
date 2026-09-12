@@ -1805,6 +1805,28 @@ def test_the_histograms_bin_the_amplitude_step_they_are_asked_for(board, qt_app)
     assert _binned(plot) + panel.fit_histograms_tab.not_binned.get("Qr", 0) == at_step
 
 
+def test_the_histograms_can_bin_each_resonator_at_the_step_it_is_biased_at(
+        board, qt_app, swept_container):
+    """'At bias amplitude' is a different step for different resonators, which
+    no step filter can express -- and it is on offer only once something has
+    chosen one."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    combo = panel.fit_histograms_tab.toolbar.amplitude_combo
+    assert combo.findData(BIAS_AMPLITUDE) == -1
+
+    _find_bias(panel, qt_app)
+    combo.setCurrentIndex(combo.findData(BIAS_AMPLITUDE))
+
+    at_bias = {where for where, sweep in _converged(panel, "skewed").items()
+               if where[1] == panel._bias_by_name()[where[0]].iteration}
+    assert 0 < len(at_bias) < len(_converged(panel, "skewed"))
+    plot = _histogram_plots(panel)[1]
+    assert _binned(plot) + panel.fit_histograms_tab.not_binned.get("Qr", 0) \
+        == len(at_bias)
+
+
 def test_the_two_fit_tabs_are_chosen_independently(board, qt_app):
     """They answer different questions about the same fits, so the model one is
     showing is not the model the other is."""

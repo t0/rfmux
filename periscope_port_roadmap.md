@@ -178,10 +178,11 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   setting belongs to and a Reset to Defaults that reads the finder's signature.
   The report's catalog becomes the panel's; the block carries `bias_report`;
   the sweep grids thicken the chosen step and put a line at the bias frequency,
-  a Bias Diagnostics tab draws what the derivative test looks at, in units of
-  the bar it applied and with the band that bar encloses shaded, and a Bias
-  Frequency tab draws what chose the frequency -- the IQ arc speed at the
-  biased step, with the tone's frequency on it. Apply Bias runs `crs.apply_bias(catalog)` and
+  a **Bias: detect bifurc** tab draws what the derivative test looks at, in
+  units of the bar it applied, with the band that bar encloses shaded and a
+  legend naming both bars, and a **Bias: frequency** tab draws what chose the
+  frequency -- the IQ arc speed at the biased step, with `dI/df` and `dQ/df`
+  under it and the tone's frequency on it. Apply Bias runs `crs.apply_bias(catalog)` and
   publishes each channel's `df_calibration`. The legacy bias lane is gone.
 
 * **Histograms.** A Fit Histograms tab reads the same fits over the whole
@@ -916,7 +917,7 @@ from.
   chosen amplitude's own colour: the chosen step's trace is **thickened**, and a
   **vertical line** stands at the bias frequency. Everything the report has to
   say in words goes on the status line and in the diagnostics tab.
-* **Bias Diagnostics tab**, a fourth plot type through `update_sweep_grid` so
+* **Bias: detect bifurc tab**, a fourth plot type through `update_sweep_grid` so
   batching, the widget cache, the colorbar and the amplitude colours stay the
   grids'. It carries what the notebook's sections 2 and 3 draw, which are the
   same shape -- one line per step and direction against offset from centre:
@@ -934,14 +935,25 @@ from.
     swept in both directions, so that band was drawn twice and read as one
     darker band meaning nothing. It is now drawn once, at the lower of the two,
     which is the line below which the noise gate decides whichever direction
-    the sweep was taken in.
+    the sweep was taken in. **The legend names the bars, not the traces**
+    (2026-09-13, maclean asked): the colorbar already says which drive a line
+    is, and nothing else on a subplot said what `±1` was a threshold *of*. One
+    row per bar, drawn as its line with its band under it, since on the plot
+    the two are one thing; the row names whichever of the spike prominence and
+    the noise gate was in force, or "higher of the two" where the steps drawn
+    disagree.
   - ~~`iq_arc_speed` with the chosen bias frequency marked~~ **done
-    (2026-09-11)** as a **Bias Frequency tab**, a fifth plot type: each
+    (2026-09-11)** as a **Bias: frequency tab**, a fifth plot type: each
     resonator's arc speed at the step it is biased at, with a line where the
     tone will go. Only that step is drawn -- the others chose nothing -- so the
     tab is empty until Find Bias has run. The gap between the line and the
     curve's peak is `BiasPoint`'s quantization onto the hardware grid, which is
-    the reading the tab exists for (§6, judgement call 34).
+    the reading the tab exists for (§6, judgement call 34). `dI/df` and `dQ/df`
+    are drawn under the speed as thin green and red lines (2026-09-13, maclean
+    asked), off a new `iq_derivatives` reader in `rfmux/tuning/bias.py` --
+    `iq_arc_speed` is now its magnitude, so the two cannot disagree. Neither
+    colour is a `TABLEAU10_COLORS` entry: the green in that list is the third
+    drive's, which a first attempt collided with.
 * **Verdict map**, on demand rather than in the redraw path: rows are amplitude
   steps, columns are `spike_prominence_factor` swept 0.02 to 1.0, a cell black
   where `bifurcated_by_derivative` says bifurcated, a line at the current
@@ -1390,7 +1402,7 @@ Listed so they can be overruled.
     skewed Qs on the other is the ordinary case. Overrule by giving both the
     same settings name, which is a one-word change.
 
-34. **The Bias Frequency tab draws the arc speed, whichever frequency method
+34. **The Bias: frequency tab draws the arc speed, whichever frequency method
     ran** (2026-09-11). `iq_arc_speed` is the public reader that exists for
     seeing what `"iq_derivative"` maximized. `"minimum"` looked at `|S21|`
     instead, and there is no reader for that -- writing one here would be a

@@ -29,6 +29,7 @@ from rfmux.tuning.bias import (
     find_bias_frequency,
     find_bias_points,
     iq_arc_speed,
+    iq_derivatives,
     iq_derivatives_at,
     normalized_arc_speed,
     # The pieces of the derivative test that have their own behaviour to pin
@@ -770,6 +771,41 @@ def test_the_arc_speed_reader_peaks_where_the_frequency_method_puts_the_tone():
     frequencies, speed = iq_arc_speed(entry)
 
     assert frequencies[np.argmax(speed)] == pytest.approx(find_bias_frequency(entry))
+
+
+def test_the_arc_speed_is_the_magnitude_of_the_two_derivatives():
+    """One reader, so a plot of the components and a plot of the speed over
+    them cannot disagree about what was differentiated."""
+    entry = a_sweep(a=0.0)
+
+    frequencies, dI_df, dQ_df = iq_derivatives(entry)
+    same_frequencies, speed = iq_arc_speed(entry)
+
+    assert np.allclose(frequencies, same_frequencies)
+    assert np.allclose(np.abs(dI_df + 1j * dQ_df), speed)
+
+
+def test_the_derivatives_are_ascending_in_frequency_whichever_way_it_was_swept():
+    """A downward sweep is stored in its own order; a derivative against
+    frequency is not."""
+    entry = a_sweep(a=0.0)
+    reversed_entry = {**entry,
+                      "frequencies": entry["frequencies"][::-1],
+                      "iq_counts": entry["iq_counts"][::-1],
+                      "sweep_direction": "downward"}
+
+    frequencies, dI_df, dQ_df = iq_derivatives(reversed_entry)
+
+    assert np.all(np.diff(frequencies) > 0)
+    assert np.allclose((dI_df, dQ_df), iq_derivatives(entry)[1:])
+
+
+def test_a_sweep_too_short_to_spline_says_so_rather_than_returning_nothing():
+    entry = {"frequencies": np.array([1e9, 1e9 + 1e3]),
+             "iq_counts": np.ones(2, dtype=complex)}
+
+    with pytest.raises(ValueError, match="at least four points"):
+        iq_derivatives(entry)
 
 
 def test_the_normalized_speed_reader_is_what_the_detector_differentiates():

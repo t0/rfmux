@@ -153,6 +153,7 @@ __all__ = [
     "bifurcated_by_hysteresis",
     "bifurcated_by_either",
     "iq_arc_speed",
+    "iq_derivatives",
     "normalized_arc_speed",
     "iq_derivative_splines",
     "iq_derivatives_at",
@@ -1451,14 +1452,41 @@ def iq_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
     Raises:
         ValueError: for a trace too short or too degenerate to differentiate.
     """
+    frequencies, dI_df, dQ_df = iq_derivatives(entry)
+    return frequencies, np.abs(dI_df + 1j * dQ_df)
+
+
+def iq_derivatives(entry: Mapping) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``dI/df`` and ``dQ/df`` along one sweep, in counts per hertz.
+
+    The two components :func:`iq_arc_speed` takes the magnitude of. Which of
+    them carries the response is worth seeing on its own: a resonance the tone
+    sits on moves mostly in one of I or Q, and a trace whose speed comes almost
+    entirely from one component is a trace whose IQ loop is not where it was
+    assumed to be.
+
+    Counts per hertz, as :func:`iq_arc_speed` is. The volts-per-hertz pair a
+    bias point is calibrated with is :func:`iq_derivatives_at`, at one
+    frequency.
+
+    Args:
+        entry: one sweep, as ``multisweep`` returns it.
+
+    Returns:
+        tuple: ``(frequencies, dI_df, dQ_df)``, all ascending in frequency —
+        which is the reverse of a downward sweep's own order.
+
+    Raises:
+        ValueError: for a trace too short or too degenerate to differentiate.
+    """
     frequencies, iq = _sorted_trace(entry, "iq_counts")
-    speed = _arc_length_speed(frequencies, iq)
-    if speed is None:
+    try:
+        dI_df, dQ_df = iq_derivative_splines(frequencies, iq)
+    except ValueError as exc:
         raise ValueError(
-            "This sweep is too short, or its frequencies repeat, so there is "
-            "no derivative to take. At least four distinct points are needed."
-        )
-    return frequencies, speed
+            f"This sweep cannot be differentiated: {exc}"
+        ) from exc
+    return frequencies, dI_df(frequencies), dQ_df(frequencies)
 
 
 def normalized_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
@@ -1714,7 +1742,7 @@ def _point_to_point_speed(
     the same thing on every resonator of an array.
 
     Deliberately finite differences rather than the spline
-    :func:`_arc_length_speed` uses: a spline smooths a jump across several
+    :func:`iq_derivatives` uses: a spline smooths a jump across several
     samples, which is exactly the feature this is trying to catch — and it
     smears the down-spike far enough from the up-spike that the adjacency test
     stops finding the pair.
@@ -1738,21 +1766,6 @@ def _point_to_point_speed(
         )
         / np.abs(spacing)
     )
-
-
-def _arc_length_speed(frequencies: np.ndarray, iq: np.ndarray) -> np.ndarray | None:
-    """How fast the IQ trace moves per hertz, at each point of the sweep.
-
-    ``|dI/df + j·dQ/df|`` off the splines, evaluated on the sweep's own grid,
-    so a peak in it is a frequency that was actually measured — and in the same
-    units as the trace, because this one is read for its position rather than
-    compared against a threshold. None when the sweep cannot be splined at all.
-    """
-    try:
-        dI_df, dQ_df = iq_derivative_splines(frequencies, iq)
-    except ValueError:
-        return None
-    return np.abs(dI_df(frequencies) + 1j * dQ_df(frequencies))
 
 
 #: Name → detector, so a new way of spotting bifurcation is a function and an

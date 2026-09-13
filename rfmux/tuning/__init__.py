@@ -59,6 +59,7 @@ from .bias import (
     find_bias_frequency,
     find_bias_points,
     iq_arc_speed,
+    iq_derivatives,
     iq_derivatives_at,
     normalized_arc_speed,
 )
@@ -116,6 +117,7 @@ __all__ = [
     "find_bias_frequency",
     "find_bias_points",
     "iq_arc_speed",
+    "iq_derivatives",
     "iq_derivatives_at",
     "normalized_arc_speed",
     "ResonanceCandidate",

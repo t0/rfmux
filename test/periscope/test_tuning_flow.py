@@ -39,7 +39,8 @@ from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.fits import BIFURCATION_A, FitReport, SweepFit  # noqa: E402
 from rfmux.tuning.bias import (  # noqa: E402
-    BiasReport, bifurcated_by_derivative, iq_arc_speed, normalized_arc_speed)
+    BiasReport, bifurcated_by_derivative, iq_arc_speed, iq_derivatives,
+    normalized_arc_speed)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -54,11 +55,15 @@ from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
 )
 from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
 from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
+    DERIVATIVE_COLORS,
     MODEL_OVERSAMPLE,
     create_amplitude_color_map,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
-from rfmux.tools.periscope.utils import TABLEAU10_COLORS  # noqa: E402
+from rfmux.tools.periscope.utils import (  # noqa: E402
+    TABLEAU10_COLORS,
+    UPWARD_SWEEP_STYLE,
+)
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     MultisweepSignals,
     MultisweepTask,
@@ -2566,6 +2571,20 @@ def test_the_bar_is_a_shaded_band_and_not_only_a_pair_of_lines(board, qt_app,
 BIAS_FREQ_TAB = 5
 
 
+def _upward_curve(panel, colour, index=0, tab_idx=None):
+    """The one upward-sweep curve of *colour* on a subplot.
+
+    Both directions of the biased step are drawn, in one colour per quantity,
+    so the line style is what tells them apart.
+    """
+    tab_idx = BIAS_FREQ_TAB if tab_idx is None else tab_idx
+    matching = [curve for curve in _grid_curves(panel, tab_idx)[index]
+                if curve.opts["pen"].color().name() == pg.mkColor(colour).name()
+                and curve.opts["pen"].style() == UPWARD_SWEEP_STYLE]
+    assert len(matching) == 1, f"{len(matching)} upward curves of {colour}"
+    return matching[0]
+
+
 def test_the_bias_frequency_tab_draws_what_chose_the_frequency(board, qt_app,
                                                                swept_container):
     """The IQ arc speed the ``iq_derivative`` method maximizes, read off the
@@ -2574,13 +2593,14 @@ def test_the_bias_frequency_tab_draws_what_chose_the_frequency(board, qt_app,
     _find_bias(panel, qt_app)
 
     name = panel._selected_names()[0]
-    curves = _grid_curves(panel, BIAS_FREQ_TAB)[0]
     finding = panel._bias_by_name()[name]
     sweep = collect_amplitude_iterations_for(
         panel.module_sweeps, name)[finding.iteration]["upward"]
+    drive = create_amplitude_color_map(
+        panel._amplitudes_drawn(), panel.dark_mode)[finding.amplitude]
 
     frequencies, speed = iq_arc_speed(sweep)
-    x, y = curves[0].getData()
+    x, y = _upward_curve(panel, drive).getData()
     assert np.allclose(
         x, (frequencies - sweep["original_center_frequency"]) / 1e3)
     assert np.allclose(y, speed)
@@ -2613,7 +2633,8 @@ def test_only_the_step_the_resonator_is_biased_at_is_drawn(board, qt_app,
                             _grid_curves(panel, BIAS_FREQ_TAB)):
         measured = collect_amplitude_iterations_for(panel.module_sweeps, name)
         directions = len(measured[panel._bias_by_name()[name].iteration])
-        assert len(curves) == directions
+        # The arc speed and the two components it is made of, each direction.
+        assert len(curves) == 3 * directions
         assert len(measured) > 1, "the schedule walked more than one step"
 
 
@@ -2624,3 +2645,72 @@ def test_the_bias_frequency_tab_is_empty_until_a_bias_is_found(board, qt_app,
 
     assert _grid_curves(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]
     assert _infinite_lines(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]
+
+
+def _legend_names(panel, tab_idx, index=0):
+    """The legend rows on one subplot, in the order they were added."""
+    legend = _grid_widgets(panel, tab_idx)[index].getPlotItem().legend
+    return [entry[1].text for entry in legend.items] if legend else []
+
+
+def test_the_frequency_tab_shows_which_component_carries_the_response(
+        board, qt_app, swept_container):
+    """``dI/df`` and ``dQ/df`` under the speed they make, each in its own
+    colour, because a speed that is almost all one component is an IQ loop
+    that is not oriented the way it was assumed to be."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+    frequencies, dI_df, dQ_df = iq_derivatives(sweep)
+
+    for label, values in (("dI/df", dI_df), ("dQ/df", dQ_df)):
+        x, y = _upward_curve(panel, DERIVATIVE_COLORS[label]).getData()
+        assert np.allclose(
+            x, (frequencies - sweep["original_center_frequency"]) / 1e3)
+        assert np.allclose(y, values)
+
+    # Named once each, however many traces carry them -- the colour means the
+    # component, and the speed line keeps its drive label beside them.
+    names = _legend_names(panel, BIAS_FREQ_TAB)
+    assert [row for row in names if row in ("dI/df", "dQ/df")] == ["dI/df", "dQ/df"]
+
+
+def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_container):
+    """The colorbar means drive amplitude; a component drawn in one of its
+    colours would read as another sweep."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    drives = {pg.mkColor(colour).name() for colour in create_amplitude_color_map(
+        panel._amplitudes_drawn(), panel.dark_mode).values()}
+
+    assert not drives & {pg.mkColor(c).name() for c in DERIVATIVE_COLORS.values()}
+
+
+def test_the_bifurcation_tab_says_what_its_threshold_is_a_threshold_of(
+        board, qt_app, swept_container):
+    """The colorbar says which drive a line is; nothing else on the subplot
+    says what ±1 is, or what the shading means."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    names = _legend_names(panel, BIAS_TAB)
+
+    assert any(row.startswith("\u00b11: threshold (") for row in names)
+    assert any("did not bind" in row for row in names)
+    # Named for the bar in force, which is one of the two the settings scale.
+    assert any(bar in row for row in names
+               for bar in ("spike prominence", "noise gate", "higher of the two"))
+
+
+def test_the_two_bias_tabs_say_which_step_of_the_flow_they_are(qt_app):
+    """Two tabs about biasing, named so they sort and read together."""
+    panel = MultisweepPanel(target_module=1, initial_params={}, dac_scales={})
+    titles = [panel.plot_tabs.tabText(i) for i in range(panel.plot_tabs.count())]
+
+    assert titles[BIAS_TAB] == "Bias: detect bifurc"
+    assert titles[BIAS_FREQ_TAB] == "Bias: frequency"

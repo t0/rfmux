@@ -380,7 +380,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Tab 4: what the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
-        self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias Diagnostics")
+        self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: detect bifurc")
         self.plot_tabs.setTabToolTip(
             4, "The point-to-point change in each sweep's normalized arc "
                "speed, in units of the bar the derivative test applied to it. "
@@ -390,7 +390,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Tab 5: what choosing the bias frequency looked at
         self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
             self._create_sweep_tab()
-        self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias Frequency")
+        self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias: frequency")
         self.plot_tabs.setTabToolTip(
             5, "How far each resonator's IQ trace moves per hertz at the drive "
                "it is biased at -- what the iq_derivative method maximizes. "

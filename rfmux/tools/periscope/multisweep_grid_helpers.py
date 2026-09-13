@@ -12,7 +12,7 @@ from PyQt6 import QtWidgets
 
 from rfmux.core.transferfunctions import convert_roc_to_volts
 from rfmux.tuning.bias import (
-    bifurcated_by_derivative, iq_arc_speed, normalized_arc_speed)
+    bifurcated_by_derivative, iq_arc_speed, iq_derivatives, normalized_arc_speed)
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
@@ -520,8 +520,12 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
     too, faintly. Below ±1 it is the noise gate that decided; at ±1 the two
     coincide. That is the question the detector otherwise answers by being run
     again with one of the two switched off.
+
+    The legend is always drawn here, and names the two bars rather than the
+    traces: the colorbar says which drive a line is, and nothing else on the
+    subplot says what ``±1`` is a threshold *of*.
     """
-    if legend_labels:
+    if traces:
         _add_legend(plot_item, pen_color)
 
     # Room above the bar, so that when nothing reaches it the line reads as a
@@ -536,6 +540,10 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
     # each with a bar of its own, and two translucent bands one on top of the
     # other read as one darker band that means nothing.
     unbinding = []
+    # Which of the two was in force, over every trace drawn. A set, because
+    # different steps of a schedule can be held by different bars, and a legend
+    # that named one of them would be wrong on the others.
+    binding_kinds = set()
 
     for step, direction, amplitude, sweep in traces:
         try:
@@ -558,8 +566,12 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
                            chosen=chosen),
             name=name)
 
+        binding_kinds.add(_bar_kind(prominence_bar, noise_bar))
         if chosen:
             unbinding.append(min(prominence_bar, noise_bar) / bar)
+
+    if traces:
+        _bar_legend(plot_item, pen_color, binding_kinds, bool(unbinding))
 
     if unbinding:
         colour = pg.mkColor(pen_color)
@@ -571,6 +583,55 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
         for other in unbinding:
             for sign in (1.0, -1.0):
                 plot_item.addLine(y=sign * other, pen=faint)
+
+
+#: What the two bars of the derivative test are called, in the words the
+#: settings window uses for the factor that scales each.
+BAR_NAMES = ("spike prominence", "noise gate")
+
+
+def _bar_kind(prominence_bar: float, noise_bar: float) -> str:
+    """Which of the two was in force on one trace, by name.
+
+    The detector applies the higher, and reports only that one, so this is the
+    same comparison it made.
+    """
+    return BAR_NAMES[1] if noise_bar >= prominence_bar else BAR_NAMES[0]
+
+
+def _bar_legend(plot_item, pen_color, binding_kinds: set, has_unbinding: bool) -> None:
+    """Name the threshold and its shading, and the gate that did not bind.
+
+    One entry per bar, drawn as the line with its band under it, because on the
+    plot the two are one thing: the line is where the threshold is and the
+    shading is everything under it, which is the half of the reading that says
+    "no spike here".
+    """
+    named = (next(iter(binding_kinds)) if len(binding_kinds) == 1
+             else "higher of the two")
+    _legend_key(plot_item, f"\u00b11: threshold ({named})",
+                pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
+    if has_unbinding:
+        colour = pg.mkColor(pen_color)
+        colour.setAlpha(UNBINDING_BAR_ALPHA)
+        other = next((n for n in BAR_NAMES if n != named), "the other bar")
+        _legend_key(
+            plot_item, f"{other}, did not bind",
+            pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE),
+            pen_color, UNBINDING_FILL_ALPHA)
+
+
+def _legend_key(plot_item, name: str, pen, fill_color, fill_alpha: int) -> None:
+    """A legend row for something that is not a plotted curve.
+
+    ``ItemSample`` paints from an item's ``opts``, so a detached
+    ``PlotDataItem`` carrying the pen and fill of a band draws that band's own
+    swatch without a second copy of it going onto the plot.
+    """
+    colour = pg.mkColor(fill_color)
+    colour.setAlpha(fill_alpha)
+    plot_item.legend.addItem(
+        pg.PlotDataItem(pen=pen, fillLevel=0, fillBrush=pg.mkBrush(colour)), name)
 
 
 def _bar_band(plot_item, bar: float, pen_color, alpha: int) -> None:
@@ -589,6 +650,21 @@ def _bar_band(plot_item, bar: float, pen_color, alpha: int) -> None:
     plot_item.addItem(band)
 
 
+#: The two components of the arc speed, under the line whose magnitude they
+#: make. Green and red rather than the panel's usual I/Q blue and orange: those
+#: two mean measured I and Q on the IQ tab, and these are their derivatives.
+#: Neither is a ``TABLEAU10_COLORS`` entry, which is what a drive is drawn in
+#: when there are few enough of them to have distinct colours -- the green in
+#: that list is the third drive's -- and inferno, which carries the drives
+#: above that, has no green at all and no red this bright.
+DERIVATIVE_COLORS = {"dI/df": "#00B050", "dQ/df": "#FF2D2D"}
+
+#: How wide a component is drawn, against the arc speed over it. Thin, because
+#: the speed is the quantity the method maximizes and the components are what
+#: it is made of.
+DERIVATIVE_LINE_WIDTH = 1
+
+
 def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
                          bias, legend_labels=None):
     """What choosing the bias frequency looked at, at the drive it was chosen at.
@@ -599,22 +675,41 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
     go, after ``BiasPoint`` puts it on the hardware grid. The gap between the
     two is that quantization, which is the reading this tab exists for.
 
+    ``dI/df`` and ``dQ/df`` are drawn under it, thin, because which of them
+    carries the response is the other half of the reading: a speed that comes
+    almost entirely from one component is an IQ loop that is not oriented the
+    way it was assumed to be.
+
     Only the step the resonator is biased at is drawn. The other steps chose
     nothing, and a grid of them would bury the one that did.
     """
-    if legend_labels:
+    if traces:
         _add_legend(plot_item, pen_color)
 
+    # Which of the components the legend has already named. One entry each,
+    # not one per direction: the colour means the component, and the pair of
+    # them is the same pair on every trace of the subplot.
+    said = set()
     for step, direction, amplitude, sweep in traces:
         try:
-            frequencies, speed = iq_arc_speed(sweep)
+            frequencies, dI_df, dQ_df = iq_derivatives(sweep)
+            _same, speed = iq_arc_speed(sweep)
         except (ValueError, KeyError):
             continue        # too short or too degenerate to differentiate
+        offsets = (frequencies - sweep['original_center_frequency']) / 1e3
+        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
+        for label, values in (("dI/df", dI_df), ("dQ/df", dQ_df)):
+            plot_item.plot(
+                offsets, values,
+                pen=pg.mkPen(color=DERIVATIVE_COLORS[label],
+                             width=DERIVATIVE_LINE_WIDTH, style=style),
+                name=_once(label, said))
         plot_item.plot(
-            (frequencies - sweep['original_center_frequency']) / 1e3, speed,
+            offsets, speed,
             pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color,
                            chosen=True),
-            name=legend_labels.get((step, direction, amplitude)) if legend_labels else None)
+            name=(legend_labels.get((step, direction, amplitude)) if legend_labels
+                  else _once("IQ arc speed", said)))
 
     if bias is not None and traces:
         _bias_frequency_line(plot_item, bias, traces[0][3], amplitude_to_color,

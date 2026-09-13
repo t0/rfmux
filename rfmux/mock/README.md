@@ -133,7 +133,8 @@ See `config.py` for the complete list of parameters. Key categories:
 - **Convergence**: convergence_tolerance, cache settings, and the branch
   memory (branch_substep_hz, branch_max_substeps) that gives a bifurcated
   resonance its hysteresis: a sweep down rides the deep branch to the
-  fold, a sweep up jumps at the other
+  fold, a sweep up jumps at the other, and a tone switched off leaves
+  its resonator at rest
 - **UDP streaming**: udp_noise_level, scale_factor
 - **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay,
   and the per-pulse draws pulse_random_amp_* and pulse_random_tau_*

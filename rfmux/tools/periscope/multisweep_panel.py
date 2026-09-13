@@ -1025,17 +1025,18 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 
                 # Calculate magnitude and phase
                 s21_mag_raw = np.abs(iq_complex)
+                ref = UnitConverter.sweep_reference(freqs_hz)
                 s21_mag_processed = UnitConverter.convert_amplitude(
-                    s21_mag_raw, iq_complex, self.unit_mode, 
-                    normalize=self.normalize_traces
+                    s21_mag_raw, iq_complex, self.unit_mode,
+                    normalize=self.normalize_traces, ref_index=ref
                 )
                 # Use pre-calculated phase if available, otherwise calculate from IQ
-                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex))) 
-                
+                phase_deg = data.get('phase_degrees', np.degrees(np.angle(iq_complex)))
+
                 if self.normalize_traces and len(phase_deg) > 0:
-                    first_phase_val = phase_deg[0]
-                    if np.isfinite(first_phase_val):
-                        phase_deg = phase_deg - first_phase_val
+                    ref_phase_val = phase_deg[ref]
+                    if np.isfinite(ref_phase_val):
+                        phase_deg = phase_deg - ref_phase_val
                 
                 # Plot magnitude curve
                 mag_curve = self.combined_mag_plot.plot(pen=pen)

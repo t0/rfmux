@@ -7,6 +7,7 @@ import contextlib
 import io
 
 import numpy as np
+import pytest
 
 from rfmux.mr_resonator import jit_physics as jp
 
@@ -96,6 +97,33 @@ def test_each_module_keeps_its_own_branches():
             1, num_samples=2, sample_rate=fs)[1][0])
         m.calculate_module_response_coupled(2, num_samples=2, sample_rate=fs)
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
+
+
+def test_a_tone_switched_off_leaves_its_resonator_at_rest():
+    """Inside the bistable region a tone that arrived from above is on
+    the deep branch; switched off and back on at the same frequency it
+    finds the resonator at rest, on the low branch."""
+    m, f0 = _model()
+    crs = m.mock_crs
+    fs = 625e6 / 256 / 64
+    crs._nco_frequencies[1] = 0.0
+    crs._phases[(1, 1)] = 0.0
+    inside = f0 - 1.5e5                       # bistable at 0.01: -205..-65 kHz
+    for f in np.arange(f0 + 1e5, inside - 1, -5e3):
+        crs._frequencies[(1, 1)] = float(f)
+        crs._amplitudes[(1, 1)] = 0.01
+        deep = m.calculate_module_response_coupled(
+            1, num_samples=2, sample_rate=fs)[1][0]
+    crs._amplitudes[(1, 1)] = 0.0
+    m.calculate_module_response_coupled(1, num_samples=2, sample_rate=fs)
+    crs._amplitudes[(1, 1)] = 0.01
+    back = m.calculate_module_response_coupled(
+        1, num_samples=2, sample_rate=fs)[1][0]
+    m._branch_memory.clear()
+    m._convergence_cache.clear()
+    rest = _sweep(m, [inside], 0.01)[0]
+    assert abs(deep) / 0.01 < rest - 0.3
+    assert abs(back) / 0.01 == pytest.approx(rest, abs=1e-3)
 
 
 def test_the_seeded_solver_holds_the_deep_branch_and_converges():

@@ -228,7 +228,9 @@ def _plot_detector_magnitude(plot_item, detector_data, amplitude_to_color,
             continue
 
         mag = np.abs(iq)
-        mag_converted = UnitConverter.convert_amplitude(mag, iq, unit_mode, normalize=normalize)
+        mag_converted = UnitConverter.convert_amplitude(
+            mag, iq, unit_mode, normalize=normalize,
+            ref_index=UnitConverter.sweep_reference(freqs))
 
         # Color from amplitude, line style from direction
         if single_sweep:

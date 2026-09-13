@@ -441,8 +441,16 @@ class UnitConverter:
         return v_peak / v_peak_max
 
     @staticmethod
-    def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None, 
-                          current_mode: str = "counts", normalize: bool = False) -> np.ndarray:
+    def sweep_reference(freqs: np.ndarray) -> int:
+        """The index a sweep is normalised at: its lowest frequency, so
+        a downward sweep and an upward one are referenced at the same
+        point and their traces compare."""
+        return int(np.argmin(freqs)) if len(freqs) else 0
+
+    @staticmethod
+    def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None,
+                          current_mode: str = "counts", normalize: bool = False,
+                          ref_index: int = 0) -> np.ndarray:
         mode_to_use = unit_mode if unit_mode is not None else current_mode # Renamed mode
         if mode_to_use == "counts": result = amps.copy()
         elif mode_to_use == "volts": result = convert_roc_to_volts(amps) # from rfmux.core.transferfunctions
@@ -450,7 +458,7 @@ class UnitConverter:
         else: result = amps.copy()
             
         if normalize and len(result) > 0:
-            ref_val = result[0]
+            ref_val = result[ref_index]
             if mode_to_use == "dbm":
                 if np.isfinite(ref_val): result = result - ref_val
             else:

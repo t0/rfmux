@@ -178,7 +178,8 @@ class MockResonatorModel:
         self._cache_key_params = {}
         #: {tone: (frequency, nearest resonator, its current)}: the
         #: branch a resonator is on under each tone, keyed by (module,
-        #: channel) where the caller has one, else by the resonator.
+        #: channel) where the caller has one, else by the resonator; a
+        #: tone that is switched off is dropped.
         self._branch_memory = {}
 
     # --- MR_Resonator Methods ---
@@ -1023,11 +1024,14 @@ class MockResonatorModel:
         """Whether a cached state (its converged current) is on the
         branch the tone's resonator is on now.  A bifurcated resonance
         has two, far apart in current; a hit must not hand a sweep the
-        other direction's."""
+        other direction's, and a tone without a memory is at rest, so it
+        solves from there once rather than taking either."""
         prev = self._branch_memory.get(self._branch_key(tone, nearest))
         have = cached.get('current')
-        if prev is None or prev[1] != nearest or have is None:
+        if have is None:
             return True
+        if prev is None or prev[1] != nearest:
+            return False
         # Relative: the currents that shift a resonance by its width
         # are a small fraction of Istar, and the branches differ by
         # ten times, not by a fraction.
@@ -1674,6 +1678,14 @@ class MockResonatorModel:
                 if freq is not None:
                     obs_channels.append(ch)
                     obs_freqs.append(freq + nco_freq)
+
+        # A tone that is off leaves its resonator at rest: its branch is
+        # forgotten, so a tone switched back on starts from rest.
+        on = {(module, ch) for ch, _, _, _ in raw_channel_configs}
+        with self._physics_lock:
+            for key in [k for k in self._branch_memory
+                        if k[0] == module and k not in on]:
+                del self._branch_memory[key]
 
         # Process the collected configuration (outside lock where possible, though S21 calculation needs physics lock)
         s21_call_count = 0

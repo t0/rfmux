@@ -956,9 +956,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             f"Fitting... {100 * completed // max(1, total)}%", transient=False)
 
     def _fits_completed(self, report):
-        """The fits are in the sweeps the panel holds: draw them, and re-save."""
+        """The fits are in the sweeps the panel holds: draw them, and re-save.
+
+        The status line says only that the run finished: what the fits found,
+        and which of them did not converge, is on the tabs that draw them.
+        """
         self._fits_done()
-        message = self._fit_tally(report)
         # The fits went into the block, so a file that exists is now out of
         # date by exactly this much. A panel never saved keeps the Save button.
         if store.saved_path(self.multisweep_container):
@@ -966,27 +969,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 self.save_multisweep()
             except Exception as e:                      # noqa: BLE001 - reported
                 traceback.print_exc()
-                self._show_fit_status(f"{message}, but the save failed: {e}", ok=False)
+                self._show_fit_status(
+                    f"Fits complete, but the save failed: {e}", ok=False)
                 self._redraw_plots()
                 return
-        self._show_fit_status(message)
+        self._show_fit_status("Fits complete")
         self._redraw_plots()
-
-    @staticmethod
-    def _fit_tally(report) -> str:
-        """That the run finished, and anything in it that did not.
-
-        The successes are not counted: a fit that worked is the ordinary case,
-        and what it found is on the tabs. What is worth a word is a model that
-        did not converge and which one it was -- the nonlinear fit fails on
-        traces the skewed one is happy with.
-        """
-        if not report.failed:
-            return "Fits complete"
-        per_model = ", ".join(
-            f"{model} {sum(1 for f in report.failed if f.model == model)}"
-            for model in dict.fromkeys(f.model for f in report.failed))
-        return f"Fits complete ({per_model} failed)"
 
     def _fits_error(self, message: str):
         self._fits_done()

@@ -108,9 +108,8 @@ For high-resolution analysis around identified resonance frequencies:
 1. First identify resonances using the Network Analysis feature
 2. Click "Take Multisweep" to configure a detailed sweep around resonances
 3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
-   there in green when it finishes — with a count per model of anything that
-   did not converge, since a fit that worked is the ordinary case and what it
-   found is on the tabs. The ⚙ holds the settings, which persist
+   there in green when it finishes — what the fits found, and which of them did
+   not converge, is on the tabs that draw them. The ⚙ holds the settings, which persist
    between sessions: which models to fit (skewed, nonlinear, or both) and which
    sweeps -- all of them, each resonator at the amplitude it is biased at, or
    one amplitude step

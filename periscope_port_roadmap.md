@@ -823,11 +823,12 @@ are now strict xfails that name the stage which clears them.
   how far the resonance moved between one drive and the next and that is only
   legible if the line pairs with the trace it came off. `a` was already in
   `FIT_LEGEND_PARAMS` and is now pinned by a test. The status line says
-  `Fits complete`, and names a model that did not converge with a count
-  (`Fits complete (nonlinear 1 failed)`) -- successes are not tallied and the
-  file is not named (maclean, 2026-09-13): a fit that worked is the ordinary
-  case and what it found is on the tabs, but *which* model is struggling is
-  the question one number over two models cannot answer.
+  `Fits complete` and nothing else (maclean, 2026-09-13) -- no tally, no
+  per-model breakdown, no filename: what the fits found and which of them did
+  not converge is on the tabs that draw them. The per-model breakdown this
+  entry once owed was built and then removed as part of that; a save that
+  *fails* is still reported, because that is a failure the operator has to
+  act on.
   **Normalization**: the tab is normalized to each trace's *last* point, in
   linear units, because that is what `normalize=True` does and what
   `skewed_model_magnitude` returns. The toolbar's "Normalize Traces" is a

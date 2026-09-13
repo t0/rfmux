@@ -38,7 +38,7 @@ from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E
 from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
-from rfmux.tuning.fits import BIFURCATION_A, FitReport, SweepFit  # noqa: E402
+from rfmux.tuning.fits import BIFURCATION_A  # noqa: E402
 from rfmux.tuning.bias import (  # noqa: E402
     FLAG_KINDS, BiasReport, bifurcated_by_derivative, iq_arc_speed,
     iq_derivatives, normalized_arc_speed)
@@ -1579,23 +1579,6 @@ def test_a_new_measurement_takes_the_bias_amplitude_off_the_fit_tab(
     assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) == -1
 
 
-def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):
-    """A fit that failed is in what the toolbar says. Reporting only the
-    successes would make a failure indistinguishable from a fit never run."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
-    assert errors == []
-
-    panel._fits_completed(FitReport(fits=[
-        SweepFit(name="BOTA", model="nonlinear", iteration=0,
-                 direction="upward", failed_because=None),
-        SweepFit(name="COTA", model="nonlinear", iteration=0,
-                 direction="upward", failed_because="the residual is too high"),
-    ]))
-
-    assert panel.fit_status_label.text() == "Fits complete (nonlinear 1 failed)"
-
-
 def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
     """No models checked is a setting that cannot be acted on; the fitters
     would raise on an empty selection, and the toolbar says so first."""
@@ -1716,27 +1699,6 @@ def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
 
     assert any(f"a {sweep['fits']['nonlinear']['params']['a']:.2f}" in label
                for label in labels)
-
-
-def test_fitting_several_models_says_which_of_them_failed(board, qt_app):
-    """One tally over two models says nothing about which is struggling, and
-    that is usually the question."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
-    assert errors == []
-
-    panel._fits_completed(FitReport(fits=[
-        SweepFit(name="BOTA", model="skewed", iteration=0,
-                 direction="upward", failed_because=None),
-        SweepFit(name="COTA", model="skewed", iteration=0,
-                 direction="upward", failed_because=None),
-        SweepFit(name="BOTA", model="nonlinear", iteration=0,
-                 direction="upward", failed_because=None),
-        SweepFit(name="COTA", model="nonlinear", iteration=0,
-                 direction="upward", failed_because="the residual is too high"),
-    ]))
-
-    assert panel.fit_status_label.text() == "Fits complete (nonlinear 1 failed)"
 
 
 def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):

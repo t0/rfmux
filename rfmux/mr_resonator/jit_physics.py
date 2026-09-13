@@ -342,10 +342,23 @@ def _converged_lekid_parameters_par(
     L_array, R_array, C_array, Cc_array,
     base_Lk, base_Lg, base_L_junk,
     input_atten_dB, ZLNA,
-    Istar, tolerance, max_iterations, damp=0.1
+    Istar, tolerance, max_iterations, initial_currents,
+    damp=0.1, damp_min=0.02, damp_max=0.5
 ):
     """
     Self-consistent convergence loop for current-dependent inductance.
+
+    The iteration is I <- I + d (F(I) - I), F the current each resonator
+    carries with the inductance its current sets.  It starts from
+    *initial_currents*, the branch each resonator is on, so a
+    bifurcated resonance stays on the branch a sweep pushed it onto
+    until that branch ends.  The step d is 1 / (1 - s), s the secant
+    slope of F between the last two iterates, clamped to
+    [damp_min, damp_max]: near-linear points converge in a few
+    iterations, the deep branch (slope well below zero) stays stable,
+    and a positive step can never settle on the unstable middle branch,
+    whose slope exceeds one.  The first step, and any whose slope
+    estimate is degenerate, is *damp*.
     
     Performs the entire convergence calculation in compiled code for
     maximum performance (2-5x speedup over Python loops).
@@ -372,8 +385,10 @@ def _converged_lekid_parameters_par(
         Convergence tolerance
     max_iterations : int
         Maximum convergence iterations
-    damp : float
-        Damping factor for convergence stability
+    initial_currents : ndarray (complex)
+        The current each resonator starts from
+    damp, damp_min, damp_max : float
+        The first step, and the bounds of the adaptive step
         
     Returns
     -------
@@ -389,10 +404,15 @@ def _converged_lekid_parameters_par(
     n = len(L_array)
     w = 2.0 * np.pi * frequency
     
-    # Working arrays (copies to avoid modifying inputs)
-    L_work = L_array.copy()
-    currents_array = np.zeros(n, dtype=np.complex128)
-    current_factors = np.ones(n, dtype=np.float64)
+    # Working arrays: the state the seed currents set
+    currents_array = initial_currents.copy()
+    current_factors = 1.0 + (np.abs(currents_array)**2 / (Istar * Istar))
+    L_work = np.empty(n, dtype=np.float64)
+    for i in prange(n):
+        L_work[i] = base_Lk[i] * current_factors[i] + base_Lg[i] + base_L_junk[i]
+    steps = np.empty(n, dtype=np.float64)
+    g_prev = np.zeros(n, dtype=np.complex128)
+    I_prev = np.zeros(n, dtype=np.complex128)
     
     # Attenuator values
     att_factor = 10.0**(input_atten_dB/20.0)
@@ -445,8 +465,20 @@ def _converged_lekid_parameters_par(
             Zpar = 1.0 / (1.0/r3 + 1.0/impedances[i] + 1.0/ZLNA)
             currents_new[i] = Iin * Zpar / impedances[i]
         
-        # Step 3: Apply damping for stability
-        currents_array = currents_array + damp * (currents_new - currents_array)
+        # Step 3: the adaptive step, from the secant slope of F
+        g = currents_new - currents_array
+        for i in prange(n):
+            steps[i] = damp
+            if iteration > 0:
+                dI = currents_array[i] - I_prev[i]
+                if abs(dI) > 1e-300:
+                    den = 1.0 - (1.0 + (g[i] - g_prev[i]) / dI)
+                    if abs(den) > 1e-300:
+                        d = (1.0 / den).real
+                        steps[i] = min(max(d, damp_min), damp_max)
+            I_prev[i] = currents_array[i]
+            g_prev[i] = g[i]
+        currents_array = currents_array + steps * g
         
         # Step 4: Calculate new current factors
         new_factors = 1.0 + (np.abs(currents_array)**2 / (Istar * Istar))
@@ -485,12 +517,18 @@ _converged_lekid_parameters_ser = _serial_twin(
     fastmath=True)
 
 
-def converged_lekid_parameters(frequency, amplitude, L_array, *args, **kwargs):
-    """Self-consistent convergence loop for current-dependent inductance."""
+def converged_lekid_parameters(frequency, amplitude, L_array, *args,
+                               initial_currents=None, **kwargs):
+    """Self-consistent convergence loop for current-dependent inductance,
+    from *initial_currents* (every resonator at rest when None)."""
     fn = (_converged_lekid_parameters_par
           if len(L_array) >= PARALLEL_MIN_N
           else _converged_lekid_parameters_ser)
-    return fn(frequency, amplitude, L_array, *args, **kwargs)
+    if initial_currents is None:
+        initial_currents = np.zeros(len(L_array), dtype=np.complex128)
+    return fn(frequency, amplitude, L_array, *args,
+              np.ascontiguousarray(initial_currents, dtype=np.complex128),
+              **kwargs)
 
 
 # ============================================================================

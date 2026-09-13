@@ -168,8 +168,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 ### MockCRS Physics
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
-- Single convergence loop: `converged_lekid_parameters()`, seeded with each
-  tone's last currents (the model's branch memory) and stepped adaptively,
+- Single convergence loop: `converged_lekid_parameters()`, seeded with the
+  current a tone's nearest resonator last had under it (the model's branch
+  memory) and stepped adaptively,
   so a bifurcated resonance is hysteretic: currents are a small fraction
   of Istar (a linewidth of shift is a 1e-4 change in Lk)
 - Reproducibility requires concrete `resonator_random_seed` in config
@@ -211,9 +212,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1019 tests, ~1 min
+pytest --tier=quick                 # Edit loop: 1020 tests, ~1 min
 pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1041 that run without a board, ~4 min
+pytest --tier=full                  # All 1042 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

@@ -54,6 +54,9 @@ def test_a_bifurcated_resonance_is_hysteretic():
     jump_up = grid[np.argmax(np.abs(np.diff(up)))]
     jump_down = grid[np.argmax(np.abs(np.diff(down)))]
     assert jump_down < jump_up - 50e3
+    # The lower fold is at -204.9 kHz: the deep branch is held to it,
+    # not left a grid step or two early.
+    assert jump_down < f0 - 200e3
     # The cache serves each direction its own branch on a repeat.
     np.testing.assert_allclose(_sweep(m, grid[::-1], 0.01)[::-1], down,
                                atol=1e-6)
@@ -67,6 +70,32 @@ def test_the_batched_sweep_takes_the_same_branch():
     m._branch_memory.clear()
     np.testing.assert_allclose(swept, _sweep(m, grid[::-1], 0.01)[::-1],
                                rtol=1e-9)
+
+
+def test_each_module_keeps_its_own_branches():
+    """Channel 1 of module 1 sweeps down through the bifurcation while
+    channel 1 of module 2 sits on another resonator, the modules taking
+    turns as the streamer has them: module 1 keeps its deep branch."""
+    m, f0 = _model()
+    crs = m.mock_crs
+    grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
+    down = _sweep(m, grid[::-1], 0.01)[::-1]
+    m._branch_memory.clear()
+    m._convergence_cache.clear()
+    other = sorted(m.resonator_frequencies)[0]
+    fs = 625e6 / 256 / 64
+    for mod in (1, 2):
+        crs._nco_frequencies[mod] = 0.0
+        crs._amplitudes[(mod, 1)] = 0.01 if mod == 1 else 0.001
+        crs._phases[(mod, 1)] = 0.0
+    crs._frequencies[(2, 1)] = other
+    seen = []
+    for f in grid[::-1]:
+        crs._frequencies[(1, 1)] = f
+        seen.append(m.calculate_module_response_coupled(
+            1, num_samples=2, sample_rate=fs)[1][0])
+        m.calculate_module_response_coupled(2, num_samples=2, sample_rate=fs)
+    np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
 def test_the_seeded_solver_holds_the_deep_branch_and_converges():

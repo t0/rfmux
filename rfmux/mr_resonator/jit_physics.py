@@ -352,7 +352,7 @@ def _converged_lekid_parameters_par(
     carries with the inductance its current sets.  It starts from
     *initial_currents*, the branch each resonator is on, so a
     bifurcated resonance stays on the branch a sweep pushed it onto
-    until that branch ends.  The step d is 1 / (1 - s), s the secant
+    until that branch ends.  The step d is 1 / (1 - s), s the real part of the secant
     slope of F between the last two iterates, clamped to
     [damp_min, damp_max]: near-linear points converge in a few
     iterations, the deep branch (slope well below zero) stays stable,
@@ -370,8 +370,9 @@ def _converged_lekid_parameters_par(
     amplitude : float
         Input voltage amplitude
     L_array, R_array, C_array, Cc_array : ndarray
-        Initial circuit parameters for all resonators.
-        L_array = Lk + Lg + L_junk (total resonator inductance)
+        Circuit parameters for all resonators.  L_array only sets the
+        count: the inductance is rebuilt from base_Lk under the
+        currents, and the returned L is the converged total.
     base_Lk, base_Lg, base_L_junk : ndarray
         Base inductance values (before current modification).
         Only Lk changes with current; Lg and L_junk are fixed.

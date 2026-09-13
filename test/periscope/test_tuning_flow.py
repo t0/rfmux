@@ -1290,7 +1290,7 @@ def test_run_fit_writes_its_fits_into_the_sweeps_the_panel_holds(board, qt_app):
     assert len(fitted) == len(catalog.names())
     for sweep in fitted.values():
         assert set(sweep["fits"]) == {"skewed", "nonlinear"}
-    assert "fitted" in status
+    assert status == "Fits complete"
 
 
 def test_the_panel_reads_back_the_parameters_the_fitters_wrote(board, qt_app):
@@ -1593,7 +1593,7 @@ def test_a_failed_fit_is_counted_rather_than_passed_over(board, qt_app):
                  direction="upward", failed_because="the residual is too high"),
     ]))
 
-    assert panel.fit_status_label.text() == "1/2 fitted, 1 failed"
+    assert panel.fit_status_label.text() == "Fits complete (nonlinear 1 failed)"
 
 
 def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
@@ -1620,7 +1620,7 @@ def test_a_finished_fit_says_so_in_green_and_then_stops_saying_it(board, qt_app)
 
     status = _run_fits(panel, qt_app, models=("skewed",))
 
-    assert "fitted" in status
+    assert status == "Fits complete"
     assert TABLEAU10_COLORS[2] in panel.fit_status_label.styleSheet()
     assert panel._fit_status_timer.isActive()
 
@@ -1718,7 +1718,7 @@ def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
                for label in labels)
 
 
-def test_fitting_several_models_says_how_each_of_them_did(board, qt_app):
+def test_fitting_several_models_says_which_of_them_failed(board, qt_app):
     """One tally over two models says nothing about which is struggling, and
     that is usually the question."""
     _, crs, catalog = board
@@ -1736,7 +1736,7 @@ def test_fitting_several_models_says_how_each_of_them_did(board, qt_app):
                  direction="upward", failed_because="the residual is too high"),
     ]))
 
-    assert panel.fit_status_label.text() == "skewed 2/2, nonlinear 1/2 fitted"
+    assert panel.fit_status_label.text() == "Fits complete (nonlinear 1 failed)"
 
 
 def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):
@@ -2056,9 +2056,8 @@ def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, swept_contai
     panel = _panel_showing(swept_container, board)
     path = panel.save_multisweep()
 
-    status = _find_bias(panel, qt_app)
+    _find_bias(panel, qt_app)
 
-    assert path.name in status
     reloaded = store.load(path)
     block = next(iter(reloaded.values()))
     assert "bias_report" in block
@@ -2104,9 +2103,11 @@ def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app, swept_conta
     assert panel.bias_status_label.text() == ""
 
 
-def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app, swept_container):
-    """A flag is the thing to read before applying anything, so it is said in
-    words rather than left in the report for someone to go looking for."""
+def test_a_flagged_run_says_how_many_and_then_stops_saying_it(board, qt_app,
+                                                             swept_container):
+    """The count, and nothing else: which resonators are flagged is on their
+    own subplots, so the status line has no list to hold and no reason to
+    stay."""
     panel = _panel_showing(swept_container, board)
 
     # A guard of a few hertz disbelieves every answer, which is the flag this
@@ -2116,8 +2117,8 @@ def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app, swept_cont
     status = _find_bias(panel, qt_app)
 
     assert panel.bias_report.flagged
-    assert "flagged" in status
-    assert panel.bias_report.flagged[0].name in status
+    assert status == (f"Bias found ({len(panel.bias_report.flagged)} of "
+                      f"{len(panel.bias_report)} flagged)")
     # Which resonators are flagged is on their own subplots, so the status
     # line gets out of the way like any other outcome.
     assert panel._bias_status_timer.isActive()

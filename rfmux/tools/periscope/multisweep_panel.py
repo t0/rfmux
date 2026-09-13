@@ -963,7 +963,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # date by exactly this much. A panel never saved keeps the Save button.
         if store.saved_path(self.multisweep_container):
             try:
-                message += f" -- saved to {self.save_multisweep().name}"
+                self.save_multisweep()
             except Exception as e:                      # noqa: BLE001 - reported
                 traceback.print_exc()
                 self._show_fit_status(f"{message}, but the save failed: {e}", ok=False)
@@ -974,22 +974,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     @staticmethod
     def _fit_tally(report) -> str:
-        """What the run did, per model when more than one was asked for.
+        """That the run finished, and anything in it that did not.
 
-        "7/8 fitted" over two models says nothing about which of them is the
-        one struggling, and that is usually the question -- the nonlinear fit
-        fails on traces the skewed one is happy with.
+        The successes are not counted: a fit that worked is the ordinary case,
+        and what it found is on the tabs. What is worth a word is a model that
+        did not converge and which one it was -- the nonlinear fit fails on
+        traces the skewed one is happy with.
         """
-        models = list(dict.fromkeys(fit.model for fit in report.fits))
-        if len(models) > 1:
-            per_model = ", ".join(
-                f"{model} {sum(1 for f in report.for_model(model) if f.fitted)}"
-                f"/{len(report.for_model(model))}" for model in models)
-            return f"{per_model} fitted"
-        message = f"{len(report.fitted)}/{len(report)} fitted"
-        if report.failed:
-            message += f", {len(report.failed)} failed"
-        return message
+        if not report.failed:
+            return "Fits complete"
+        per_model = ", ".join(
+            f"{model} {sum(1 for f in report.failed if f.model == model)}"
+            for model in dict.fromkeys(f.model for f in report.failed))
+        return f"Fits complete ({per_model} failed)"
 
     def _fits_error(self, message: str):
         self._fits_done()
@@ -1046,19 +1043,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._populate_fit_display()
 
         # What was found, not what was done: nothing is on the board until
-        # Apply Bias. A flag says a point is a fallback rather than a
-        # measurement, and the names say which.
+        # Apply Bias. Which resonators are flagged is on their own subplots,
+        # so the count is all this has to carry.
         message = f"Bias found ({len(report.flagged)} of {len(report)} flagged)"
-        if report.flagged:
-            names = ", ".join(f.name for f in report.flagged[:3])
-            if len(report.flagged) > 3:
-                names += f", +{len(report.flagged) - 3} more"
-            message += f": {names}"
         # The report went into the block, so a file that exists is now out of
         # date by exactly this much.
         if store.saved_path(self.multisweep_container):
             try:
-                message += f" -- saved to {self.save_multisweep().name}"
+                self.save_multisweep()
             except Exception as e:                      # noqa: BLE001 - reported
                 traceback.print_exc()
                 self._show_bias_status(

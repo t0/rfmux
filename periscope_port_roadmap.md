@@ -822,10 +822,12 @@ are now strict xfails that name the stage which clears them.
   in its sweep's drive colour rather than the model's, because the reading is
   how far the resonance moved between one drive and the next and that is only
   legible if the line pairs with the trace it came off. `a` was already in
-  `FIT_LEGEND_PARAMS` and is now pinned by a test. The status line breaks the
-  tally down by model when more than one ran (`skewed 8/8, nonlinear 7/8
-  fitted`), because one number over two models says nothing about which of
-  them is struggling.
+  `FIT_LEGEND_PARAMS` and is now pinned by a test. The status line says
+  `Fits complete`, and names a model that did not converge with a count
+  (`Fits complete (nonlinear 1 failed)`) -- successes are not tallied and the
+  file is not named (maclean, 2026-09-13): a fit that worked is the ordinary
+  case and what it found is on the tabs, but *which* model is struggling is
+  the question one number over two models cannot answer.
   **Normalization**: the tab is normalized to each trace's *last* point, in
   linear units, because that is what `normalize=True` does and what
   `skewed_model_magnitude` returns. The toolbar's "Normalize Traces" is a
@@ -1439,7 +1441,10 @@ Listed so they can be overruled.
 
     **The Find Bias status says what was found, not what was done**
     (maclean, 2026-09-13): `Bias found (2 of 9 flagged)`, where it read
-    `9 biased` -- nothing reaches the board until Apply Bias.
+    `9 biased` -- nothing reaches the board until Apply Bias. That count is the
+    whole message: the flagged *names* are on their own subplots now, and
+    neither status line names the file it re-saved. A save that *fails* is
+    still reported, because that is a failure the operator has to act on.
 
 ---
 

@@ -1064,10 +1064,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     f"{message}, but the save failed: {e}", ok=False)
                 self._redraw_plots()
                 return
-        # A flag is the thing to read before applying anything, so it stays on
-        # screen; a clean run says so and gets out of the way.
-        self._show_bias_status(message, ok=not report.flagged,
-                               transient=not report.flagged)
+        # Red for a run with flags in it, but it fades like any other outcome:
+        # which resonators are flagged, and why, is on their own subplots, so
+        # the status line does not have to hold it.
+        self._show_bias_status(message, ok=not report.flagged)
         self._redraw_plots()
 
     def _bias_error(self, message: str):

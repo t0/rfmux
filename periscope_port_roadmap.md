@@ -1412,6 +1412,23 @@ Listed so they can be overruled.
     Overrule by adding a magnitude reader to `rfmux/tuning/bias.py` and keying
     the tab off `frequency_method`.
 
+35. **A flag rides on the bias line, not on the status line** (2026-09-13,
+    maclean asked). The status line's red message used to be the only place a
+    flagged run was reported, so it was held on screen indefinitely while every
+    other outcome faded. It now fades on `STATUS_MESSAGE_MS` like the rest, and
+    the flag moved to the mark it is about: the bias frequency line is dashed
+    (solid and dotted already mean upward and downward) and carries a legend
+    row, `f_bias` over the drive it was chosen at, which reads
+    `f_bias \u2014 FLAGGED` on a fallback. The *reason* is a sentence, so it is
+    the subplot's tooltip rather than a legend row or text on the canvas.
+
+    Two sub-choices to overrule if wanted: the drive is formatted in the
+    panel's display units (`-50.5 dBm`) rather than as the raw normalized
+    amplitude, matching the colorbar and the trace labels beside it; and the
+    fade uses the existing `STATUS_MESSAGE_MS` (8 s) rather than a shorter
+    timeout of its own, because a flagged run is the more important message of
+    the two and giving it less time than a clean one reads backwards.
+
 ---
 
 ## 7. Test plan

@@ -55,14 +55,17 @@ from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
 )
 from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
 from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
+    BIAS_LINE_STYLE,
     DERIVATIVE_COLORS,
     MODEL_OVERSAMPLE,
     create_amplitude_color_map,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import (  # noqa: E402
+    DOWNWARD_SWEEP_STYLE,
     TABLEAU10_COLORS,
     UPWARD_SWEEP_STYLE,
+    UnitConverter,
 )
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     MultisweepSignals,
@@ -2133,8 +2136,11 @@ def test_a_flagged_finding_is_named_on_the_status_line(board, qt_app, swept_cont
     assert panel.bias_report.flagged
     assert "flagged" in status
     assert panel.bias_report.flagged[0].name in status
-    # It is the thing to read before applying anything, so it does not fade.
-    assert not panel._bias_status_timer.isActive()
+    # Which resonators are flagged is on their own subplots, so the status
+    # line gets out of the way like any other outcome.
+    assert panel._bias_status_timer.isActive()
+    panel._bias_status_timer.timeout.emit()   # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
 
 
 def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
@@ -2280,9 +2286,82 @@ def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_cont
     assert marked == pytest.approx(expected)
 
 
-def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app, swept_container):
-    """The counts, the flags and the reasons are the status line's. A
-    measurement plot stays a measurement plot: two marks, no text."""
+def test_the_bias_line_is_named_with_the_drive_it_was_chosen_at(board, qt_app,
+                                                               swept_container):
+    """A bare vertical line says nothing about which drive it belongs to, and
+    the drive reads in the units the panel is displaying, as the colorbar and
+    the trace labels do."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    index, finding = next(
+        (i, panel._bias_by_name()[name])
+        for i, name in enumerate(panel._selected_names())
+        if panel._bias_by_name()[name].good)
+    drive = UnitConverter.format_probe_label(
+        finding.amplitude, panel.unit_mode,
+        panel.dac_scales.get(panel.active_module_for_dac))
+
+    rows = _legend_names(panel, MAG_TAB, index)
+
+    assert f"f_bias<br>bias amp. = {drive}" in rows
+
+
+def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
+    """It is the one thing on the plot that is not a measurement, so the
+    colorbar taking over the drives does not take its label away."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, **BIFURCATING)      # more drives than a legend holds
+    assert errors == []
+    _find_bias(panel, qt_app)
+
+    _grid_widgets(panel, MAG_TAB)
+    assert not panel.mag_colorbar.isHidden(), "this measurement should use the bar"
+
+    rows = _legend_names(panel, MAG_TAB)
+    assert [row for row in rows if row.startswith("f_bias")], \
+        "the bias line lost its label when the drives went to the colorbar"
+
+
+def test_the_bias_line_is_dashed_where_a_sweep_is_solid_or_dotted(board, qt_app,
+                                                                  swept_container):
+    """Line style means direction on these plots; the bias line is not a third
+    direction, so it takes a style of its own."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    lines = _infinite_lines(panel, MAG_TAB)[0]
+
+    assert [line.pen.style() for line in lines] == [BIAS_LINE_STYLE]
+    assert BIAS_LINE_STYLE not in (UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE)
+
+
+def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
+                                                                swept_container):
+    """The mark a flag is about is the bias line, so the flag is on that line's
+    legend row -- beside the resonator, rather than in a list of names on a
+    status line that fades. And nowhere else: a flag on a sound point would
+    mean nothing."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    findings = panel._bias_by_name()
+    assert panel.bias_report.flagged and panel.bias_report.good, \
+        "this test needs the measurement to have some of each"
+
+    flagged_on_plot = {
+        name: any("FLAGGED" in row for row in _legend_names(panel, MAG_TAB, index))
+        for index, name in enumerate(panel._selected_names())
+        if index < len(_grid_widgets(panel, MAG_TAB))}
+
+    assert flagged_on_plot == {name: not findings[name].good
+                               for name in flagged_on_plot}
+
+
+def test_the_reason_a_point_is_flagged_stays_off_the_canvas(board, qt_app,
+                                                           swept_container):
+    """Why a point is flagged is a sentence. The legend says *that* it is; the
+    sentence is the subplot's tooltip, so a measurement plot keeps its area."""
     panel = _panel_showing(swept_container, board)
     titles = [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)]
 
@@ -2292,9 +2371,12 @@ def test_nothing_the_report_says_in_words_reaches_the_sweep_grids(board, qt_app,
     assert panel.bias_report.flagged
 
     assert [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)] == titles
-    for widget in _grid_widgets(panel):
+    for name, widget in zip(panel._selected_names(), _grid_widgets(panel)):
+        finding = panel._bias_by_name()[name]
         assert not [item for item in widget.getPlotItem().items
                     if isinstance(item, pg.TextItem)]
+        assert widget.toolTip() == (
+            "" if finding.good else f"{name} is flagged: {finding.flagged_because}")
 
 
 def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_container):
@@ -2312,6 +2394,7 @@ def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_contain
 
 # ── the bias diagnostics tab ─────────────────────────────────────────────────
 
+MAG_TAB = 0
 BIAS_TAB = 4
 
 

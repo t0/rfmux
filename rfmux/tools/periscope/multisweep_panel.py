@@ -1045,14 +1045,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # The bias step is now a thing the fit tabs can be asked for.
         self._populate_fit_display()
 
-        # The report's own words: every resonator gets a bias point, and a flag
-        # says that one is a fallback rather than a measurement.
-        message = f"{len(report)} biased"
+        # What was found, not what was done: nothing is on the board until
+        # Apply Bias. A flag says a point is a fallback rather than a
+        # measurement, and the names say which.
+        message = f"Bias found ({len(report.flagged)} of {len(report)} flagged)"
         if report.flagged:
             names = ", ".join(f.name for f in report.flagged[:3])
             if len(report.flagged) > 3:
                 names += f", +{len(report.flagged) - 3} more"
-            message += f", {len(report.flagged)} flagged: {names}"
+            message += f": {names}"
         # The report went into the block, so a file that exists is now out of
         # date by exactly this much.
         if store.saved_path(self.multisweep_container):

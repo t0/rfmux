@@ -1422,12 +1422,25 @@ Listed so they can be overruled.
     `f_bias \u2014 FLAGGED` on a fallback. The *reason* is a sentence, so it is
     the subplot's tooltip rather than a legend row or text on the canvas.
 
-    Two sub-choices to overrule if wanted: the drive is formatted in the
-    panel's display units (`-50.5 dBm`) rather than as the raw normalized
-    amplitude, matching the colorbar and the trace labels beside it; and the
-    fade uses the existing `STATUS_MESSAGE_MS` (8 s) rather than a shorter
-    timeout of its own, because a flagged run is the more important message of
-    the two and giving it less time than a clean one reads backwards.
+    The drive on that row is the **normalized amplitude** (maclean, 2026-09-13)
+    -- what a bias amplitude is, and what goes back into a re-run -- rather
+    than the panel's display units; the colorbar beside it carries the same
+    number in dBm. The fade uses the existing `STATUS_MESSAGE_MS` (8 s) rather
+    than a shorter timeout of its own, because a flagged run is the more
+    important message of the two and giving it less time than a clean one
+    reads backwards.
+
+    **The flag is named, not just marked** (maclean, 2026-09-13). `_concern`
+    now returns `(kind, sentence)` and `BiasFinding` carries both, the kind
+    being one of `FLAG_KINDS` -- `already bifurcated`, `never bifurcated`,
+    `off centre` -- so a legend row, a table and a notebook call a flag the
+    same thing and the two words cannot drift from the sentence. Added with a
+    default and read with `.get()`, so `BiasReport.SCHEMA_VERSION` did not have
+    to move and files written before it still load.
+
+    **The Find Bias status says what was found, not what was done**
+    (maclean, 2026-09-13): `Bias found (2 of 9 flagged)`, where it read
+    `9 biased` -- nothing reaches the board until Apply Bias.
 
 ---
 

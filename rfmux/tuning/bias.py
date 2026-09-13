@@ -142,6 +142,10 @@ __all__ = [
     "FREQUENCY_METHODS",
     "HYSTERESIS_COMPARISONS",
     "NEEDS_BOTH_DIRECTIONS",
+    "FLAG_KINDS",
+    "FLAG_BIFURCATED_AT_QUIETEST",
+    "FLAG_NEVER_BIFURCATED",
+    "FLAG_OFF_CENTRE",
     "BifurcationCheck",
     "AmplitudeChoice",
     "BiasFinding",
@@ -184,6 +188,16 @@ FREQUENCY_METHODS = ("iq_derivative", "minimum")
 #: The direction the bias frequency is measured on when an amplitude step has
 #: more than one and the caller did not say.
 PREFERRED_DIRECTION = "upward"
+
+#: What each thing that flags a bias point is called, in two words. The
+#: sentence on a finding says what happened; this says which of the three it
+#: was, so a table or a plot label can carry the reason without carrying a
+#: paragraph. :func:`_concern` writes both, from one branch each, so they
+#: cannot come to disagree.
+FLAG_BIFURCATED_AT_QUIETEST = "already bifurcated"
+FLAG_NEVER_BIFURCATED = "never bifurcated"
+FLAG_OFF_CENTRE = "off centre"
+FLAG_KINDS = (FLAG_BIFURCATED_AT_QUIETEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
 
 #: How many samples apart :func:`bifurcated_by_derivative` will accept its
 #: up-spike and down-spike, at most. ``1`` is a jump crossed in a single
@@ -315,6 +329,9 @@ class BiasFinding:
     ``flagged_because`` is a sentence or ``None``. It is set when the answer is
     a *default* rather than something the amplitude steps actually established:
     usable, the best available, and not what the analysis set out to find.
+    ``flagged_kind`` is the same thing in two words, one of
+    :data:`FLAG_KINDS`, for a label or a tally that has no room for the
+    sentence.
     """
 
     name: str
@@ -326,6 +343,7 @@ class BiasFinding:
     bifurcated_at: float | None  # amplitude where bifurcation was first seen
     checks: dict[int, BifurcationCheck]  # every amplitude step examined
     flagged_because: str | None = None
+    flagged_kind: str | None = None  # one of FLAG_KINDS
 
     @property
     def good(self) -> bool:
@@ -349,6 +367,7 @@ class BiasFinding:
             "bifurcated_at": _or_none(self.bifurcated_at),
             "checks": _checks_to_dict(self.checks),
             "flagged_because": self.flagged_because,
+            "flagged_kind": self.flagged_kind,
         }
 
     @classmethod
@@ -363,6 +382,7 @@ class BiasFinding:
             bifurcated_at=_or_none(d.get("bifurcated_at")),
             checks=_checks_from_dict(d["checks"]),
             flagged_because=d.get("flagged_because"),
+            flagged_kind=d.get("flagged_kind"),
         )
 
 
@@ -711,6 +731,12 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
 
     # 7. Finally, is this an operating point we actually established, or a
     #    default we fell back to? _concern is the one place that decides.
+    flagged_kind, flagged_because = _concern(
+        choice,
+        measured_hz=measured_hz,
+        centre_hz=centre_hz,
+        max_distance_hz=max_distance_hz,
+    )
     return BiasFinding(
         name=resonator.name,
         iteration=choice.iteration,
@@ -720,12 +746,8 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
         dQ_df=dQ_df,
         bifurcated_at=choice.bifurcated_at,
         checks=choice.checks,
-        flagged_because=_concern(
-            choice,
-            measured_hz=measured_hz,
-            centre_hz=centre_hz,
-            max_distance_hz=max_distance_hz,
-        ),
+        flagged_kind=flagged_kind,
+        flagged_because=flagged_because,
     )
 
 
@@ -735,8 +757,9 @@ def _concern(
     measured_hz: float,
     centre_hz: float,
     max_distance_hz: float | None,
-) -> str | None:
-    """Why this bias point is worth a second look, or None if it looks sound.
+) -> tuple[str | None, str | None]:
+    """Why this bias point is worth a second look, or ``(None, None)`` if it
+    looks sound.
 
     One place, so that "good bias point" means one thing across the module and
     a reader can see the whole standard at once. Ordered worst first, and only
@@ -746,25 +769,29 @@ def _concern(
     Every one of these still produces a usable bias point. What they have in
     common is that the measurement did not establish the answer, so it is a
     default that was fallen back to rather than something that was found.
+
+    Returns:
+        tuple: ``(kind, sentence)`` — the kind one of :data:`FLAG_KINDS`, for a
+        label or a tally, and the sentence for a reader.
     """
     if choice.is_bifurcated_at_bias:
-        return (
+        return FLAG_BIFURCATED_AT_QUIETEST, (
             f"the quietest amplitude measured ({choice.amplitude:g}) was already "
             f"bifurcated, so there was nothing below it to fall back to"
         )
     if choice.bifurcated_at is None:
-        return (
+        return FLAG_NEVER_BIFURCATED, (
             f"nothing bifurcated, so this is the loudest amplitude measured "
             f"({choice.amplitude:g}) rather than a limit that was found"
         )
     if _too_far(measured_hz, centre_hz, max_distance_hz):
-        return (
+        return FLAG_OFF_CENTRE, (
             f"the resonance came out {(measured_hz - centre_hz) / 1e3:+.1f} kHz "
             f"from the sweep centre, past the {max_distance_hz / 1e3:.1f} kHz "
             f"asked for — usually a neighbour in the span, or a resonance pulled "
             f"out of it — so the tone was left where the sweep was centred"
         )
-    return None
+    return None, None
 
 
 def _too_far(measured_hz: float, centre_hz: float, max_distance_hz: float | None):

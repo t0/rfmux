@@ -21,6 +21,10 @@ from scipy.signal import find_peaks
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.tuning.bias import (
+    FLAG_BIFURCATED_AT_QUIETEST,
+    FLAG_KINDS,
+    FLAG_NEVER_BIFURCATED,
+    FLAG_OFF_CENTRE,
     BiasReport,
     bifurcated_by_derivative,
     bifurcated_by_either,
@@ -1137,6 +1141,7 @@ def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
     assert report.catalog["R0001"].bias.amplitude == pytest.approx(finding.amplitude)
     assert not finding.good
     assert "quietest amplitude" in finding.flagged_because
+    assert finding.flagged_kind == FLAG_BIFURCATED_AT_QUIETEST
     assert [f.name for f in report.flagged] == ["R0001", "R0002"]
 
 
@@ -1147,6 +1152,7 @@ def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
     assert finding.bifurcated_at is None
     assert not finding.good
     assert "loudest amplitude measured" in finding.flagged_because
+    assert finding.flagged_kind == FLAG_NEVER_BIFURCATED
 
 
 def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
@@ -1155,6 +1161,19 @@ def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
     assert report.flagged == []
     assert [f.name for f in report.good] == ["R0001", "R0002"]
     assert report["R0001"].flagged_because is None
+    assert report["R0001"].flagged_kind is None
+
+
+def test_every_flag_has_a_two_word_kind_and_a_sentence_together():
+    """A label with no room for the sentence still has to say which flag it
+    is, and a reader still has to get the sentence -- so neither exists
+    without the other."""
+    report = find_bias_points(a_schedule((JUMPED, JUMPED, JUMPED)))
+
+    for finding in report.findings:
+        assert (finding.flagged_kind is None) == (finding.flagged_because is None)
+        assert finding.flagged_kind in (None,) + FLAG_KINDS
+        assert len((finding.flagged_kind or "").split()) <= 2
 
 
 def with_the_sweep_centre_moved(sweeps, name, by_hz):
@@ -1186,6 +1205,7 @@ def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
     assert finding.frequency_hz == report.catalog["R0001"].bias.frequency_hz
     assert not finding.good
     assert "left where the sweep was centred" in finding.flagged_because
+    assert finding.flagged_kind == FLAG_OFF_CENTRE
 
     # Its neighbour was not moved, so it is measured and not flagged.
     assert [f.name for f in report.flagged] == ["R0001"]

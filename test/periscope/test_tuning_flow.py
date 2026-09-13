@@ -15,6 +15,7 @@ The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
 
 import asyncio
 import copy
+from dataclasses import replace
 import inspect
 import threading
 from pathlib import Path
@@ -39,8 +40,8 @@ from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
 from rfmux.tuning.fits import BIFURCATION_A, FitReport, SweepFit  # noqa: E402
 from rfmux.tuning.bias import (  # noqa: E402
-    BiasReport, bifurcated_by_derivative, iq_arc_speed, iq_derivatives,
-    normalized_arc_speed)
+    FLAG_KINDS, BiasReport, bifurcated_by_derivative, iq_arc_speed,
+    iq_derivatives, normalized_arc_speed)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -1983,7 +1984,8 @@ def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app, swept
 
     assert len(panel.bias_report) == len(catalog.names())
     assert {f.name for f in panel.bias_report.findings} == set(catalog.names())
-    assert "biased" in status
+    # What was found, not what was done: nothing is on the board until Apply.
+    assert status.startswith("Bias found (")
 
 
 def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app, swept_container):
@@ -2115,7 +2117,7 @@ def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app):
                                  findings=good,
                                  settings=panel.bias_report.settings))
 
-    assert panel.bias_status_label.text() == f"{len(good)} biased"
+    assert panel.bias_status_label.text() == f"Bias found (0 of {len(good)} flagged)"
     assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
     assert panel._bias_status_timer.isActive()
     panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
@@ -2286,25 +2288,45 @@ def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_cont
     assert marked == pytest.approx(expected)
 
 
+def _all_flagged(panel, qt_app):
+    """Find bias with a guard no answer can satisfy, so every point is a
+    fallback.
+
+    How many of a real run come back flagged depends on the array, the schedule
+    and what the board was last asked to do, so a test that needs flags asks
+    for them rather than hoping a measurement supplies some.
+    """
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    _find_bias(panel, qt_app)
+    assert panel.bias_report.flagged, "a guard of a millihertz flagged nothing"
+    return panel
+
+
+def _with_the_flags_cleared(panel):
+    """The same findings, sound -- which is what the library writes when it has
+    nothing to report about them."""
+    return BiasReport(
+        catalog=panel.bias_report.catalog,
+        findings=[replace(f, flagged_kind=None, flagged_because=None)
+                  for f in panel.bias_report.findings],
+        settings=panel.bias_report.settings)
+
+
 def test_the_bias_line_is_named_with_the_drive_it_was_chosen_at(board, qt_app,
-                                                               swept_container):
-    """A bare vertical line says nothing about which drive it belongs to, and
-    the drive reads in the units the panel is displaying, as the colorbar and
-    the trace labels do."""
+                                                                swept_container):
+    """A bare vertical line says nothing about which drive it belongs to. The
+    drive is the normalized amplitude, which is what a bias amplitude is and
+    what goes back into a re-run."""
     panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
 
-    index, finding = next(
-        (i, panel._bias_by_name()[name])
-        for i, name in enumerate(panel._selected_names())
-        if panel._bias_by_name()[name].good)
-    drive = UnitConverter.format_probe_label(
-        finding.amplitude, panel.unit_mode,
-        panel.dac_scales.get(panel.active_module_for_dac))
+    name = panel._selected_names()[0]
+    amplitude = panel._bias_by_name()[name].amplitude
 
-    rows = _legend_names(panel, MAG_TAB, index)
+    rows = _legend_names(panel, MAG_TAB)
 
-    assert f"f_bias<br>bias amp. = {drive}" in rows
+    assert [row for row in rows if row.endswith(f"bias amp. = {amplitude:.4g}")]
 
 
 def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
@@ -2341,21 +2363,29 @@ def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
                                                                 swept_container):
     """The mark a flag is about is the bias line, so the flag is on that line's
     legend row -- beside the resonator, rather than in a list of names on a
-    status line that fades. And nowhere else: a flag on a sound point would
-    mean nothing."""
-    panel = _panel_showing(swept_container, board)
-    _find_bias(panel, qt_app)
-    findings = panel._bias_by_name()
-    assert panel.bias_report.flagged and panel.bias_report.good, \
-        "this test needs the measurement to have some of each"
+    status line that fades. It says which flag, in the library's own two words,
+    so the plot and a notebook call it the same thing; and a sound point does
+    not carry one, or the flag would mean nothing."""
 
-    flagged_on_plot = {
-        name: any("FLAGGED" in row for row in _legend_names(panel, MAG_TAB, index))
+    panel = _all_flagged(_panel_showing(swept_container, board), qt_app)
+    findings = panel._bias_by_name()
+
+    named_on_plot = {
+        name: next((row.split("\u2014")[1].split("<br>")[0].strip()
+                    for row in _legend_names(panel, MAG_TAB, index)
+                    if row.startswith("f_bias \u2014")), None)
         for index, name in enumerate(panel._selected_names())
         if index < len(_grid_widgets(panel, MAG_TAB))}
 
-    assert flagged_on_plot == {name: not findings[name].good
-                               for name in flagged_on_plot}
+    assert named_on_plot == {name: findings[name].flagged_kind
+                             for name in named_on_plot}
+    assert set(named_on_plot.values()) - {None} <= set(FLAG_KINDS)
+    assert any(named_on_plot.values()), "nothing on screen carried a flag"
+
+    # And nowhere else: the same findings with nothing to report carry no flag.
+    panel._bias_found(_with_the_flags_cleared(panel))
+    assert not [row for row in _legend_names(panel, MAG_TAB)
+                if row.startswith("f_bias \u2014")]
 
 
 def test_the_reason_a_point_is_flagged_stays_off_the_canvas(board, qt_app,

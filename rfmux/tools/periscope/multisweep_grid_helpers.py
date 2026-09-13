@@ -176,8 +176,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
             if plot_type == 'magnitude':
                 _plot_magnitude(plot_item, traces, amplitude_to_color,
-                                pen_color, unit_mode, normalize, labels, bias,
-                                dac_scale)
+                                pen_color, unit_mode, normalize, labels, bias)
                 # Y-axis label
                 if normalize:
                     units = 'dB' if unit_mode == "dbm" else ''
@@ -197,7 +196,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'frequency':
                 _plot_bias_frequency(plot_item, traces, amplitude_to_color,
-                                     pen_color, bias, labels, unit_mode, dac_scale)
+                                     pen_color, bias, labels)
                 plot_item.setLabel('left', 'IQ arc speed', units='Counts/Hz')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
@@ -266,22 +265,23 @@ def _biased_at(bias, step) -> bool:
 BIAS_LINE_STYLE = QtCore.Qt.PenStyle.DashLine
 
 
-def bias_legend_label(bias, unit_mode, dac_scale) -> str:
+def bias_legend_label(bias) -> str:
     """What the bias frequency line is called, over two lines.
 
-    The drive in the units the panel is displaying, as every other amplitude on
-    it is, rather than the normalized number -- the colorbar beside it is in
-    those units too. A flagged point says so here, because this is the mark on
-    the plot that a flag is about; *why* it is flagged is a sentence, and
-    sentences go in the subplot's tooltip rather than in a legend row.
+    The drive in normalized DAC units, which is what a bias amplitude *is* and
+    what goes back into a re-run -- the colorbar carries the same number in
+    whatever the panel is displaying.
+
+    A flagged point names its flag here in two words, because this is the mark
+    on the plot that a flag is about. The two words are the library's
+    (:data:`~rfmux.tuning.bias.FLAG_KINDS`), so the plot and a notebook call a
+    flag the same thing; the sentence behind it goes in the subplot's tooltip.
     """
-    drive = UnitConverter.format_probe_label(bias.amplitude, unit_mode, dac_scale)
-    flag = "" if bias.good else " \u2014 FLAGGED"
-    return f"f_bias{flag}<br>bias amp. = {drive}"
+    flag = "" if bias.good else f" \u2014 {bias.flagged_kind}"
+    return f"f_bias{flag}<br>bias amp. = {bias.amplitude:.4g}"
 
 
-def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color,
-                         unit_mode='dbm', dac_scale=None):
+def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
     """A vertical line where the tone goes, in the chosen drive's own colour.
 
     Named in the legend, because a bare vertical line on a magnitude plot says
@@ -293,7 +293,7 @@ def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color,
     pen = pg.mkPen(color=color, width=LINE_WIDTH, style=BIAS_LINE_STYLE)
     plot_item.addLine(x=offset, pen=pen)
     if plot_item.legend is not None:
-        _legend_key(plot_item, bias_legend_label(bias, unit_mode, dac_scale), pen)
+        _legend_key(plot_item, bias_legend_label(bias), pen)
 
 
 def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
@@ -315,7 +315,7 @@ def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
 
 def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
                     unit_mode='dbm', normalize=False, legend_labels=None,
-                    bias=None, dac_scale=None):
+                    bias=None):
     """Plot |S21| against frequency offset for one resonator.
 
     Args:
@@ -328,7 +328,6 @@ def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         legend_labels: Optional {(step, direction, amplitude): label}
         bias: Optional BiasFinding; its step is drawn thick and its frequency
             gets a line
-        dac_scale: Optional DAC scale (dBm), for the bias line's drive label
     """
     # A legend for the bias line even when the colorbar is carrying the drives:
     # the line is the one thing on this plot that is not a measurement, and it
@@ -352,8 +351,7 @@ def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
     # Any drawn sweep will do: they are all centred on the same frequency, and
     # the line is a frequency.
     if bias is not None and drawn is not None:
-        _bias_frequency_line(plot_item, bias, drawn, amplitude_to_color, pen_color,
-                             unit_mode, dac_scale)
+        _bias_frequency_line(plot_item, bias, drawn, amplitude_to_color, pen_color)
 
 
 #: Points per measured point when drawing a model curve. A fit evaluated on the
@@ -702,7 +700,7 @@ DERIVATIVE_LINE_WIDTH = 1
 
 
 def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
-                         bias, legend_labels=None, unit_mode='dbm', dac_scale=None):
+                         bias, legend_labels=None):
     """What choosing the bias frequency looked at, at the drive it was chosen at.
 
     :func:`~rfmux.tuning.bias.iq_arc_speed` is the quantity the default
@@ -749,7 +747,7 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
 
     if bias is not None and traces:
         _bias_frequency_line(plot_item, bias, traces[0][3], amplitude_to_color,
-                             pen_color, unit_mode, dac_scale)
+                             pen_color)
 
 
 def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,

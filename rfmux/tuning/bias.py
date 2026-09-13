@@ -780,8 +780,8 @@ def _concern(
         )
     if choice.bifurcated_at is None:
         return FLAG_NEVER_BIFURCATED, (
-            f"nothing bifurcated, so this is the loudest amplitude measured "
-            f"({choice.amplitude:g}) rather than a limit that was found"
+            f"nothing bifurcated up to {choice.amplitude:g}, "
+            f"the loudest amplitude measured"
         )
     if _too_far(measured_hz, centre_hz, max_distance_hz):
         return FLAG_OFF_CENTRE, (

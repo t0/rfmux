@@ -1433,8 +1433,8 @@ Listed so they can be overruled.
     **The flag is named, not just marked** (maclean, 2026-09-13). `_concern`
     now returns `(kind, sentence)` and `BiasFinding` carries both, the kind
     being one of `FLAG_KINDS` -- `already bifurcated`, `never bifurcated`,
-    `off centre` -- so a legend row, a table and a notebook call a flag the
-    same thing and the two words cannot drift from the sentence. Added with a
+    `freq out of bounds` -- so a legend row, a table and a notebook call a
+    flag the same thing, and the label cannot drift from the sentence. Added with a
     default and read with `.get()`, so `BiasReport.SCHEMA_VERSION` did not have
     to move and files written before it still load.
 

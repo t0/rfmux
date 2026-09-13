@@ -272,8 +272,8 @@ def bias_legend_label(bias) -> str:
     what goes back into a re-run -- the colorbar carries the same number in
     whatever the panel is displaying.
 
-    A flagged point names its flag here in two words, because this is the mark
-    on the plot that a flag is about. The two words are the library's
+    A flagged point names its flag here, because this is the mark on the plot
+    that a flag is about. The words are the library's
     (:data:`~rfmux.tuning.bias.FLAG_KINDS`), so the plot and a notebook call a
     flag the same thing; the sentence behind it goes in the subplot's tooltip.
     """

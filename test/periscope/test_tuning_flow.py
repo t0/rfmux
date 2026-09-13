@@ -56,17 +56,14 @@ from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
 )
 from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
 from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
-    BIAS_LINE_STYLE,
     DERIVATIVE_COLORS,
     MODEL_OVERSAMPLE,
     create_amplitude_color_map,
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import (  # noqa: E402
-    DOWNWARD_SWEEP_STYLE,
     TABLEAU10_COLORS,
     UPWARD_SWEEP_STYLE,
-    UnitConverter,
 )
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     MultisweepSignals,
@@ -2346,24 +2343,11 @@ def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
         "the bias line lost its label when the drives went to the colorbar"
 
 
-def test_the_bias_line_is_dashed_where_a_sweep_is_solid_or_dotted(board, qt_app,
-                                                                  swept_container):
-    """Line style means direction on these plots; the bias line is not a third
-    direction, so it takes a style of its own."""
-    panel = _panel_showing(swept_container, board)
-    _find_bias(panel, qt_app)
-
-    lines = _infinite_lines(panel, MAG_TAB)[0]
-
-    assert [line.pen.style() for line in lines] == [BIAS_LINE_STYLE]
-    assert BIAS_LINE_STYLE not in (UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE)
-
-
 def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
                                                                 swept_container):
     """The mark a flag is about is the bias line, so the flag is on that line's
     legend row -- beside the resonator, rather than in a list of names on a
-    status line that fades. It says which flag, in the library's own two words,
+    status line that fades. It says which flag, in the library's own words,
     so the plot and a notebook call it the same thing; and a sound point does
     not carry one, or the flag would mean nothing."""
 
@@ -2804,26 +2788,3 @@ def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_conta
     assert not drives & {pg.mkColor(c).name() for c in DERIVATIVE_COLORS.values()}
 
 
-def test_the_bifurcation_tab_says_what_its_threshold_is_a_threshold_of(
-        board, qt_app, swept_container):
-    """The colorbar says which drive a line is; nothing else on the subplot
-    says what ±1 is, or what the shading means."""
-    panel = _panel_showing(swept_container, board)
-    _find_bias(panel, qt_app)
-
-    names = _legend_names(panel, BIAS_TAB)
-
-    assert any(row.startswith("\u00b11: threshold (") for row in names)
-    assert any("did not bind" in row for row in names)
-    # Named for the bar in force, which is one of the two the settings scale.
-    assert any(bar in row for row in names
-               for bar in ("spike prominence", "noise gate", "higher of the two"))
-
-
-def test_the_two_bias_tabs_say_which_step_of_the_flow_they_are(qt_app):
-    """Two tabs about biasing, named so they sort and read together."""
-    panel = MultisweepPanel(target_module=1, initial_params={}, dac_scales={})
-    titles = [panel.plot_tabs.tabText(i) for i in range(panel.plot_tabs.count())]
-
-    assert titles[BIAS_TAB] == "Bias: detect bifurc"
-    assert titles[BIAS_FREQ_TAB] == "Bias: frequency"

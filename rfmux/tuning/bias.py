@@ -189,14 +189,13 @@ FREQUENCY_METHODS = ("iq_derivative", "minimum")
 #: more than one and the caller did not say.
 PREFERRED_DIRECTION = "upward"
 
-#: What each thing that flags a bias point is called, in two words. The
-#: sentence on a finding says what happened; this says which of the three it
-#: was, so a table or a plot label can carry the reason without carrying a
-#: paragraph. :func:`_concern` writes both, from one branch each, so they
-#: cannot come to disagree.
+#: What each thing that flags a bias point is called, short enough for a plot
+#: label or a table column. The sentence on a finding says what happened; this
+#: says which of the three it was. :func:`_concern` writes both, from one
+#: branch each, so they cannot come to disagree.
 FLAG_BIFURCATED_AT_QUIETEST = "already bifurcated"
 FLAG_NEVER_BIFURCATED = "never bifurcated"
-FLAG_OFF_CENTRE = "off centre"
+FLAG_OFF_CENTRE = "freq out of bounds"
 FLAG_KINDS = (FLAG_BIFURCATED_AT_QUIETEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
 
 #: How many samples apart :func:`bifurcated_by_derivative` will accept its
@@ -329,7 +328,7 @@ class BiasFinding:
     ``flagged_because`` is a sentence or ``None``. It is set when the answer is
     a *default* rather than something the amplitude steps actually established:
     usable, the best available, and not what the analysis set out to find.
-    ``flagged_kind`` is the same thing in two words, one of
+    ``flagged_kind`` is the same thing in a few words, one of
     :data:`FLAG_KINDS`, for a label or a tally that has no room for the
     sentence.
     """

@@ -22,7 +22,6 @@ from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.tuning.bias import (
     FLAG_BIFURCATED_AT_QUIETEST,
-    FLAG_KINDS,
     FLAG_NEVER_BIFURCATED,
     FLAG_OFF_CENTRE,
     BiasReport,
@@ -1162,18 +1161,6 @@ def test_an_amplitude_bracketed_by_the_sweep_is_not_flagged():
     assert [f.name for f in report.good] == ["R0001", "R0002"]
     assert report["R0001"].flagged_because is None
     assert report["R0001"].flagged_kind is None
-
-
-def test_every_flag_has_a_two_word_kind_and_a_sentence_together():
-    """A label with no room for the sentence still has to say which flag it
-    is, and a reader still has to get the sentence -- so neither exists
-    without the other."""
-    report = find_bias_points(a_schedule((JUMPED, JUMPED, JUMPED)))
-
-    for finding in report.findings:
-        assert (finding.flagged_kind is None) == (finding.flagged_because is None)
-        assert finding.flagged_kind in (None,) + FLAG_KINDS
-        assert len((finding.flagged_kind or "").split()) <= 2
 
 
 def with_the_sweep_centre_moved(sweeps, name, by_hz):

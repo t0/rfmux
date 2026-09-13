@@ -190,10 +190,17 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   shared log bins, `a` against `BIFURCATION_A`, one outline per drive. It reads
   through `collect_fit_params`, so a notebook makes the same figures.
 
-What is deliberately *not* there yet: the detector digest, deleted rather than
-ported (§9) and to be decided on now that the fit tabs exist. The noise lane
-still runs on `_prepare_export_data`'s payload and is untouched until it is
-rebuilt on the catalog; the deprecated library modules go in stage 5.
+* **The digest.** A Detector Digest tab is one resonator at the size of the
+  panel: every drive it was swept at as a trace and as a loop, then the one
+  sweep it is biased at with the fitted model over it and the bias frequency
+  marked. Under the plots, a column of parameter/value rows for the bias
+  point and one for each fit of that sweep. Double-clicking any grid subplot
+  opens it there. It reads the block, the fits and the bias report and
+  measures nothing.
+
+The noise lane still runs on `_prepare_export_data`'s payload and is untouched
+until it is rebuilt on the catalog; the deprecated library modules go in
+stage 5.
 
 Four drifts between the GUI's defaults and the library's were found on the way,
 two of them by the both-ways test: `max_chans` 1024 against 1023, and
@@ -282,7 +289,7 @@ and from the merge decisions of 2026-09-08.
 | `utils.py` | `MULTISWEEP_DEFAULT_SPAN_HZ`, `_NPOINTS`, `_NSAMPLES`, `_AMPLITUDE`, and the hardcoded `DEFAULT_MAX_CHANNELS`/`DEFAULT_MAX_SPAN` (§6, judgement calls 27 and 30) | the drivers' own signatures, read at import |
 | `multisweep_panel.py` | `handle_error`'s modal `QMessageBox.critical` (`:1163`), which blocks the GUI thread until dismissed and deadlocks a headless run | a transient status label, per AGENTS.md's rule on dialogs |
 | `multisweep_panel.py` | the Combined Plots tab and everything only it used: `_create_combined_tab`, `_redraw_combined_plots`, `_toggle_cf_lines_visibility` and the Show Center Frequencies checkbox, `_update_mag_plot_label`, the combined plot/legend/curve/CF-line attributes and colorbar, and the tab-index branches in `_redraw_plots`, `_on_plot_tab_changed` and `_next_batch` (stage 2) | nothing for now; §9.3 records what it showed |
-| `detector_digest_panel.py` | the whole module, its `ui.py` export, the Digest tab, `_open_detector_digest_for_index`, `detector_digest_windows`, `_navigate_digest_to_detector`, the digest `eventFilter` and double-click handler, the auto-open on the noise load path, and the Check Noise button with `_take_noise_samps`, its only caller (stage 2) | nothing in stage 2; rebuilt from scratch against the block and the catalog once fits and bias points exist (§6, judgement call 23) |
+| `detector_digest_panel.py` | the whole module, its `ui.py` export, the Digest tab, `_open_detector_digest_for_index`, `detector_digest_windows`, `_navigate_digest_to_detector`, the digest `eventFilter` and double-click handler, the auto-open on the noise load path, and the Check Noise button with `_take_noise_samps`, its only caller (stage 2) | `detector_digest_tab.py`, written from scratch against the block, the fits and the bias report (§6, judgement call 23; §9.1 for what changed). Check Noise did not come back: it measured |
 | `parameter_histograms_panel.py` | the Histograms tab, `_generate_histograms`, `_ensure_histogram_panel` and the cache invalidation (stage 2) | a tab built in stage 3 over `entry["fits"]`, when there is something to bin |
 | `app.py` | `apply_bias_output`, `_set_bias` NCO midpoint, mock-mode `_start_df_calibration`, `handle_bias_kids` payload plumbing | `crs.apply_bias(catalog)`; see §6 for mock-mode df |
 | `app_runtime.py` | the legacy loaders (`results_by_iteration`, `bias_kids_output`, `iq_volts` back-fill, flat fit keys), NCO placement for loaded multisweeps, `iq_complex` reads in `_convert_iq_data` | `store.load`; `apply_bias` owns the NCO |
@@ -864,15 +871,11 @@ are now strict xfails that name the stage which clears them.
   fits. That made the panel's tab dispatch a registry keyed by the tab widget
   (`_sweep_grids`) instead of an if/elif chain on tab index, so adding a tab is
   adding a row rather than renumbering branches.
-* **Detector Digest, written from scratch** — stage 2 deleted it rather than
-  porting it (§6, judgement call 23), and it is designed once the pieces it
-  shows exist rather than reassembled from the old one. A resonator's sweeps
-  at every step, its fitted parameters and errors, keyboard navigation between
-  resonators and steps, and Check Noise back with it (a `get_samples` call, not
-  analysis, so it needs `_take_noise_samps` again). The bifurcation reading is
-  `a` against `BIFURCATION_A` until stage 4 hands it the report's own checks.
-  Scope this when stage 3 starts, not now; if the fit tabs turn out to say
-  enough on their own, the honest outcome is that it does not come back.
+* **Detector Digest, written from scratch** — done, as a tab of the multisweep
+  panel (`detector_digest_tab.py`). §9.1 records what it kept from the old
+  panel and what it does differently. Check Noise did not come back with it:
+  it is the one control the old panel had that measured, and the digest is a
+  reader.
 * Mutual locking of Run Fit and Find Bias while one runs; transient
   "Fits complete" label.
 * Test: flow test step 4 fits the schedule and checks the panel reads the
@@ -1003,7 +1006,7 @@ from.
 * **Find bias after sweep** as a checkbox that presses the button (§6,
   judgement call 6), with "fit after sweep", when the tune-everything front
   door arrives in stage 6.
-* **Detector Digest** -- still not scoped, per §6 judgement call 23.
+* **Detector Digest** -- done; see §9.1.
 * **The verdict map** was scoped but not built: rows are amplitude steps,
   columns a sweep of `spike_prominence_factor`, a cell black where
   `bifurcated_by_derivative` says bifurcated, with bands where the noise gate
@@ -1523,6 +1526,37 @@ The code is in git: `detector_digest_panel.py` (1208 lines) and
 `parameter_histograms_panel.py` (781) as of `8f72fc3`.
 
 ### 9.1 Detector digest — one resonator, in detail
+
+**Rebuilt** as `detector_digest_tab.py`, a tab of the multisweep panel. What it
+does differently from the inventory below, and why:
+
+* **A tab, not also a window.** The old digest was both, which meant two copies
+  of the navigation state and a `parent_window` back-pointer to keep weak. A
+  tab reads the panel's one copy of the block, the catalog and the report.
+* **Named, not numbered.** Navigation is `catalog.names()` through a combo box
+  and the arrow keys; the integer detector spinbox is gone.
+* **The third plot is the bias point**, not `|S21|` in dB over every step
+  again: the one sweep the tone will sit on, with the model fitted to *that*
+  sweep over it and the bias frequency marked. The left plot keeps the
+  amplitude steps and drops the model, so each plot draws one thing. There is
+  no amplitude selector, because the plot that shows a fit shows one drive and
+  the bias report says which.
+* **Columns of `parameter: value` under the plots**, not a Parameter / Value /
+  Description table per model: one column for the bias point and one per fit
+  of the sweep it is biased at, headed by model and direction. Each parameter
+  sits beside its error, with the meaning and the full precision in the row's
+  tooltip. The Status row is `failed_because`; the bias column carries the
+  report's own `bifurcated_at` and the flag, which is where the flag sentence
+  lives rather than over the plots.
+* **Check Noise did not come back.** It is the one control the old panel had
+  that measured, and the digest is a reader.
+* Model curves come from `skewed_model_magnitude` / `nonlinear_model_iq`
+  through `model_in_counts`, which puts a reader's own units back into counts;
+  nothing is denormalised by hand. They are drawn in cyan rather than the
+  foreground colour the Fit Results grid uses: over one drive's trace, a black
+  line vanishes into the near-black bottom of the drive colormap.
+
+The inventory it was rebuilt from:
 
 A separate dockable window, opened by double-clicking a subplot, and also a tab
 of the multisweep panel.

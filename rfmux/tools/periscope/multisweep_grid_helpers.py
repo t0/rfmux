@@ -6,6 +6,8 @@ entries, read here and not copied. The caller says which resonators to draw and
 hands over their sweeps; everything on a subplot comes off the entry.
 """
 
+import weakref
+
 import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
@@ -18,7 +20,7 @@ from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,
     UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    square_axes, UnitConverter,
+    ClickableViewBox, square_axes, UnitConverter,
 )
 
 
@@ -41,7 +43,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                       amplitude_to_color, dark_mode, unit_mode='dbm', normalize=False,
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
                       dac_scale=None, show_legend=True, fit_model='skewed',
-                      bias_by_name=None, bias_settings=None):
+                      bias_by_name=None, bias_settings=None,
+                      on_resonator_double_click=None):
     """
     Update a grid layout with one subplot per resonator.
 
@@ -67,6 +70,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             resonator's operating point on the sweeps it was chosen from
         bias_settings: Optional ``find_bias_points`` arguments, for the bars
             the 'bias' plot type draws
+        on_resonator_double_click: Optional ``callable(name)``, called when a
+            subplot is double-clicked, with the resonator it is drawing
     """
     if not traces_by_name:
         return
@@ -112,12 +117,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
     # Expand cache if needed
     while len(widget_cache) < num_plots:
-        plot_widget = pg.PlotWidget()
-        plot_widget.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        widget_cache.append(plot_widget)
+        widget_cache.append(_new_subplot(on_resonator_double_click))
 
     # Hide all cached widgets first
     for widget in widget_cache:
@@ -157,6 +157,12 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             else:
                 plot_item.setTitle(name, color=pen_color)
 
+            # Which resonator this subplot is currently drawing, for a
+            # double-click to name. On the view box rather than captured in the
+            # connection, because a cached widget draws a different resonator
+            # on every batch and the connection is made once.
+            plot_widget.getViewBox().resonator_name = name
+
             # Style axes
             for axis_name in ("left", "bottom", "right", "top"):
                 ax = plot_item.getAxis(axis_name)
@@ -175,20 +181,9 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 else f"{name} is flagged: {bias.flagged_because}")
 
             if plot_type == 'magnitude':
-                _plot_magnitude(plot_item, traces, amplitude_to_color,
-                                pen_color, unit_mode, normalize, labels, bias)
-                # Y-axis label
-                if normalize:
-                    units = 'dB' if unit_mode == "dbm" else ''
-                    plot_item.setLabel('left', 'Normalized Magnitude', units=units)
-                else:
-                    if unit_mode == "counts":
-                        plot_item.setLabel('left', 'Magnitude', units='Counts')
-                    elif unit_mode == "dbm":
-                        plot_item.setLabel('left', 'Power', units='dBm')
-                    elif unit_mode == "volts":
-                        plot_item.setLabel('left', 'Magnitude', units='V')
-                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+                plot_magnitude(plot_item, traces, amplitude_to_color,
+                               pen_color, unit_mode, normalize, labels, bias)
+                magnitude_axis_labels(plot_item, unit_mode, normalize)
             elif plot_type == 'bias':
                 _plot_bifurcation(plot_item, traces, amplitude_to_color,
                                   pen_color, bias, bias_settings or {}, labels)
@@ -205,11 +200,9 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 plot_item.setLabel('left', 'Normalized Magnitude')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
-                _plot_iq(plot_item, traces, amplitude_to_color,
-                         pen_color, unit_mode, normalize, labels, bias)
-                iq_units = 'Counts' if unit_mode == 'counts' else 'V'
-                plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
-                plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
+                plot_iq(plot_item, traces, amplitude_to_color,
+                        pen_color, unit_mode, normalize, labels, bias)
+                iq_axis_labels(plot_item, unit_mode)
                 square_axes(plot_item)
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
@@ -230,6 +223,75 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 # ---------------------------------------------------------------------------
 # Per-resonator plotting helpers
 # ---------------------------------------------------------------------------
+
+def _new_subplot(on_resonator_double_click):
+    """One grid subplot, wired to say which resonator was double-clicked.
+
+    A :class:`~rfmux.tools.periscope.utils.ClickableViewBox` rather than the
+    plain one, so the panel's zoom box control reaches these plots as it does
+    every other plot in Periscope.
+    """
+    view_box = ClickableViewBox()
+    plot_widget = pg.PlotWidget(viewBox=view_box)
+    plot_widget.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
+    if on_resonator_double_click is not None:
+        callback = _weakly(on_resonator_double_click)
+        view_box.doubleClickedEvent.connect(
+            lambda event, vb=view_box: _named_double_click(vb, event, callback()))
+    return plot_widget
+
+
+def _weakly(callback):
+    """``callback()`` again, without owning it when it is a bound method.
+
+    The subplot belongs to the panel and the method it calls is the panel's, so
+    a connection that held the method strongly would close the cycle
+    ``test_viewbox_lifetime.py`` exists to keep out. A plain function closes no
+    such cycle and is held as it is.
+    """
+    try:
+        return weakref.WeakMethod(callback)
+    except TypeError:
+        return lambda: callback
+
+
+def _named_double_click(view_box, event, callback):
+    """Hand *callback* the resonator this subplot is drawing, and take the event.
+
+    Accepting it is what stops the view box falling through to its coordinate
+    readout: a double-click here means "show me this one", not "what is under
+    the cursor".
+    """
+    name = getattr(view_box, 'resonator_name', None)
+    if name is None or callback is None:
+        return
+    callback(name)
+    event.accept()
+
+
+def magnitude_axis_labels(plot_item, unit_mode, normalize):
+    """Label a magnitude-against-frequency plot for the units it is drawn in."""
+    if normalize:
+        units = 'dB' if unit_mode == "dbm" else ''
+        plot_item.setLabel('left', 'Normalized Magnitude', units=units)
+    elif unit_mode == "counts":
+        plot_item.setLabel('left', 'Magnitude', units='Counts')
+    elif unit_mode == "dbm":
+        plot_item.setLabel('left', 'Power', units='dBm')
+    elif unit_mode == "volts":
+        plot_item.setLabel('left', 'Magnitude', units='V')
+    plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+
+
+def iq_axis_labels(plot_item, unit_mode):
+    """Label an IQ loop plot for the units it is drawn in."""
+    iq_units = 'Counts' if unit_mode == 'counts' else 'V'
+    plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
+    plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
+
 
 def _add_legend(plot_item, pen_color):
     legend_color = '#CCCCCC' if pen_color in ('w', (255, 255, 255)) else '#333333'
@@ -293,7 +355,7 @@ def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
     pen = pg.mkPen(color=color, width=LINE_WIDTH, style=BIAS_LINE_STYLE)
     plot_item.addLine(x=offset, pen=pen)
     if plot_item.legend is not None:
-        _legend_key(plot_item, bias_legend_label(bias), pen)
+        legend_key(plot_item, bias_legend_label(bias), pen)
 
 
 def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
@@ -313,9 +375,9 @@ def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
         symbolPen=pg.mkPen(color=color, width=2), symbolBrush=None)
 
 
-def _plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
-                    unit_mode='dbm', normalize=False, legend_labels=None,
-                    bias=None):
+def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
+                   unit_mode='dbm', normalize=False, legend_labels=None,
+                   bias=None):
     """Plot |S21| against frequency offset for one resonator.
 
     Args:
@@ -378,6 +440,28 @@ FIT_READERS = {
     'nonlinear': (nonlinear_model_iq, lambda counts: 1.0 / np.abs(counts[-1])),
 }
 
+
+def model_in_counts(sweep, fit_model):
+    """``(offsets_khz, model)`` for one fitted sweep, in that sweep's own counts.
+
+    Each reader works in its own units -- the skewed fit normalized to the
+    trace's last point, the nonlinear model already in counts -- and
+    :func:`_plot_fit` puts the *measurement* into the fit's units to draw them
+    together. A plot drawn in the panel's units needs the opposite, so the same
+    pair of numbers is applied the other way round. The nonlinear model stays
+    complex, which is what puts it on an IQ plane; the skewed model is a
+    magnitude and has no loop to draw.
+
+    Raises:
+        ValueError: if this sweep has no fit of *fit_model*, or one that did
+            not converge -- the readers' own message says which.
+    """
+    reader, scale_of = FIT_READERS[fit_model]
+    counts = np.asarray(sweep['iq_counts'])
+    offsets, model = _model_on_a_finer_grid(reader, sweep)
+    return offsets, model * scale_of(counts) * np.abs(counts[-1])
+
+
 #: How wide the model is drawn. Thinner than the measurement it lies on, so
 #: that where the two agree the coloured line is still visible under it.
 MODEL_LINE_WIDTH = 1
@@ -388,13 +472,16 @@ MODEL_LINE_WIDTH = 1
 FR_LINE_ALPHA = 120
 
 
-def _si(value: float) -> str:
-    """A Q, short enough for a legend: ``29.6k``, ``1.24M``."""
+def si(value: float, digits: int = 3) -> str:
+    """A Q, short enough for a legend: ``29.6k``, ``1.24M``.
+
+    *digits* is significant figures; two is what an uncertainty gets.
+    """
     if abs(value) >= 1e6:
-        return f"{value / 1e6:.3g}M"
+        return f"{value / 1e6:.{digits}g}M"
     if abs(value) >= 1e3:
-        return f"{value / 1e3:.3g}k"
-    return f"{value:.3g}"
+        return f"{value / 1e3:.{digits}g}k"
+    return f"{value:.{digits}g}"
 
 
 #: What a model's legend entry says it fitted, in the order it says it. The
@@ -402,8 +489,8 @@ def _si(value: float) -> str:
 #: legend that listed it all would cover the plot it labels.
 FIT_LEGEND_PARAMS = (
     ("fr", lambda value: f"fr {value / 1e6:.4f} MHz"),
-    ("Qr", lambda value: f"Qr {_si(value)}"),
-    ("Qi", lambda value: f"Qi {_si(value)}"),
+    ("Qr", lambda value: f"Qr {si(value)}"),
+    ("Qi", lambda value: f"Qi {si(value)}"),
     ("a", lambda value: f"a {value:.2f}"),
 )
 
@@ -640,19 +727,19 @@ def _bar_legend(plot_item, pen_color, binding_kinds: set, has_unbinding: bool) -
     """
     named = (next(iter(binding_kinds)) if len(binding_kinds) == 1
              else "higher of the two")
-    _legend_key(plot_item, f"\u00b11: threshold ({named})",
-                pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
+    legend_key(plot_item, f"\u00b11: threshold ({named})",
+               pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
     if has_unbinding:
         colour = pg.mkColor(pen_color)
         colour.setAlpha(UNBINDING_BAR_ALPHA)
         other = next((n for n in BAR_NAMES if n != named), "the other bar")
-        _legend_key(
+        legend_key(
             plot_item, f"{other}, did not bind",
             pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE),
             pen_color, UNBINDING_FILL_ALPHA)
 
 
-def _legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) -> None:
+def legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) -> None:
     """A legend row for something that is not a plotted curve.
 
     ``ItemSample`` paints from an item's ``opts``, so a detached
@@ -750,8 +837,8 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
                              pen_color)
 
 
-def _plot_iq(plot_item, traces, amplitude_to_color, pen_color,
-             unit_mode='dbm', normalize=False, legend_labels=None, bias=None):
+def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
+            unit_mode='dbm', normalize=False, legend_labels=None, bias=None):
     """Plot the IQ loops of one resonator.
 
     Args:

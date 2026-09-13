@@ -21,6 +21,7 @@ from .utils import (
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
+from .detector_digest_tab import DetectorDigestTab
 from .multisweep_grid_helpers import create_amplitude_color_map
 from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
@@ -140,6 +141,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # carries its own toolbar, so it is built here rather than assembled
         # from grids and colorbars like the tabs below.
         self.fit_histograms_tab = FitHistogramsTab(self)
+
+        # One resonator at a time, in detail. It owns which resonator and which
+        # fit it is showing, and says so; the panel feeds it what it holds.
+        self.detector_digest_tab = DetectorDigestTab(self)
+        self.detector_digest_tab.display_changed.connect(self._redraw_plots)
 
         # Bias finding's settings, the same way, and what the last run
         # concluded. The report's catalog becomes this panel's, so what is
@@ -358,46 +364,59 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs = QtWidgets.QTabWidget()
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
         
-        # Tab 0: Magnitude Sweeps (per-detector grid)
+        # Magnitude Sweeps (per-detector grid)
         self.mag_sweeps_tab, self.mag_sweeps_grid, self.mag_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.mag_sweeps_tab, "Magnitude Sweeps")
         
-        # Tab 1: IQ Circles (per-detector grid)
+        # IQ Circles (per-detector grid)
         self.iq_sweeps_tab, self.iq_sweeps_grid, self.iq_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.iq_sweeps_tab, "IQ Circles")
         
-        # Tab 2: Fit Results (per-detector grid, models over the measurement)
+        # One resonator at a time, beside the grids of all of them
+        self.plot_tabs.addTab(self.detector_digest_tab, "Detector Digest")
+        self._tab_tooltip(
+            self.detector_digest_tab,
+            "One resonator at the size of the panel: every drive it was swept "
+            "at, then the one it is biased at with its fitted model over it, "
+            "and under them a column of numbers for the bias point and one for "
+            "each fit of that sweep. Double-click a subplot on any grid tab to "
+            "come here on that resonator.")
+
+        # Fit Results (per-detector grid, models over the measurement)
         self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = \
             self._create_sweep_tab(toolbar=self.fit_display)
         self.plot_tabs.addTab(self.fit_sweeps_tab, "Fit Results")
 
-        # Tab 3: the same fits, over the whole array rather than one at a time
+        # The same fits, over the whole array rather than one at a time
         self.plot_tabs.addTab(self.fit_histograms_tab, "Fit Histograms")
-        self.plot_tabs.setTabToolTip(
-            3, "Every fitted parameter on the array at once: where each "
-               "resonance sits and how the quality factors and the "
-               "nonlinearity are distributed, at each drive.")
+        self._tab_tooltip(
+            self.fit_histograms_tab,
+            "Every fitted parameter on the array at once: where each "
+            "resonance sits and how the quality factors and the "
+            "nonlinearity are distributed, at each drive.")
 
-        # Tab 4: what the derivative bifurcation test looks at
+        # What the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: detect bifurc")
-        self.plot_tabs.setTabToolTip(
-            4, "The point-to-point change in each sweep's normalized arc "
-               "speed, in units of the bar the derivative test applied to it. "
-               "A spike past \u00b11 with one the other way beside it is what "
-               "that test calls a bifurcation.")
+        self._tab_tooltip(
+            self.bias_sweeps_tab,
+            "The point-to-point change in each sweep's normalized arc "
+            "speed, in units of the bar the derivative test applied to it. "
+            "A spike past \u00b11 with one the other way beside it is what "
+            "that test calls a bifurcation.")
 
-        # Tab 5: what choosing the bias frequency looked at
+        # What choosing the bias frequency looked at
         self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
             self._create_sweep_tab()
         self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias: frequency")
-        self.plot_tabs.setTabToolTip(
-            5, "How far each resonator's IQ trace moves per hertz at the drive "
-               "it is biased at -- what the iq_derivative method maximizes. "
-               "The line is where the tone will go, on the hardware grid; the "
-               "gap to the peak is that quantization. With the 'minimum' "
-               "frequency method the line is at the dip instead, and need not "
-               "sit at this curve's peak.")
+        self._tab_tooltip(
+            self.freq_sweeps_tab,
+            "How far each resonator's IQ trace moves per hertz at the drive "
+            "it is biased at -- what the iq_derivative method maximizes. "
+            "The line is where the tone will go, on the hardware grid; the "
+            "gap to the peak is that quantization. With the 'minimum' "
+            "frequency method the line is at the dip instead, and need not "
+            "sit at this curve's peak.")
 
         # Every tab that is a grid of one subplot per resonator, and the four
         # things that differ between them. Keyed by the tab itself, so adding
@@ -420,6 +439,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         layout.addWidget(self.plot_tabs)
         
+    def _tab_tooltip(self, tab, text: str) -> None:
+        """Say what a tab shows, found by the tab rather than by its number."""
+        self.plot_tabs.setTabToolTip(self.plot_tabs.indexOf(tab), text)
+
     def _create_sweep_tab(self, toolbar=None):
         """Create a tab for sweep plots (magnitude or IQ). Returns (tab, grid_layout, colorbar).
 
@@ -503,12 +526,17 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._apply_zoom_box_mode()
 
     def _apply_zoom_box_mode(self):
-        """Applies the current zoom_box_mode state to the grid subplots."""
-        for widget in (self.mag_sweep_plots_cache + self.iq_sweep_plots_cache
-                       + self.fit_sweep_plots_cache):
-            view_box = widget.getViewBox()
-            if isinstance(view_box, ClickableViewBox):
-                view_box.enableZoomBoxMode(self.zoom_box_mode)
+        """Applies the current zoom_box_mode state to every plot the panel owns.
+
+        The caches are read off ``_sweep_grids`` rather than listed, so a tab
+        added there is covered by the checkbox without being named twice.
+        """
+        for _kind, _grid, cache, _colorbar in self._sweep_grids.values():
+            for widget in cache:
+                view_box = widget.getViewBox()
+                if isinstance(view_box, ClickableViewBox):
+                    view_box.enableZoomBoxMode(self.zoom_box_mode)
+        self.detector_digest_tab.enable_zoom_box(self.zoom_box_mode)
 
     def _setup_progress_bar(self, layout):
         """Set up progress bar in a separate group, similar to NetworkAnalysisWindow."""
@@ -727,6 +755,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         tab = self.plot_tabs.currentWidget()
         if tab is self.fit_histograms_tab:
             self._redraw_fit_histograms()
+        elif tab is self.detector_digest_tab:
+            self._redraw_detector_digest()
         else:
             self._redraw_sweep_grid(tab)
 
@@ -741,6 +771,35 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             create_amplitude_color_map(self._amplitudes_drawn(), self.dark_mode),
             self.dark_mode,
             self._bias_by_name())
+
+    def _redraw_detector_digest(self):
+        """Hand the digest one resonator's traces, and the block behind them.
+
+        The traces come from the same walk the grids draw, so the digest shows
+        a sweep as soon as it lands; the fits it tabulates come off the block,
+        which is what has any.
+        """
+        self.detector_digest_tab.set_resonators(self._selected_names())
+        name = self.detector_digest_tab.resonator()
+        self.detector_digest_tab.show_resonator(
+            traces=self._collect_traces([name]).get(name, []) if name else [],
+            sweeps=self.module_sweeps,
+            bias=self._bias_by_name().get(name),
+            amplitude_to_color=create_amplitude_color_map(
+                self._amplitudes_drawn(), self.dark_mode),
+            dark_mode=self.dark_mode,
+            unit_mode=self.unit_mode,
+            normalize=self.normalize_traces,
+            dac_scale=self.dac_scales.get(self.active_module_for_dac))
+
+    def _show_in_digest(self, name: str) -> None:
+        """Open the digest on *name*, which is what a double-click on a grid means.
+
+        The tab is raised first, so that choosing the resonator redraws the
+        digest rather than the grid that was double-clicked.
+        """
+        self.plot_tabs.setCurrentWidget(self.detector_digest_tab)
+        self.detector_digest_tab.select(name)
 
     def _redraw_sweep_grid(self, tab):
         """Redraw one grid tab: one subplot per resonator, of *tab*'s kind."""
@@ -806,6 +865,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             fit_model=self.fit_display.get_model() or 'skewed',
             bias_by_name=self._bias_by_name(),
             bias_settings=self.bias_settings.get_parameters(),
+            on_resonator_double_click=self._show_in_digest,
         )
 
     def _fit_traces(self, name: str, traces: list) -> list:
@@ -876,7 +936,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         choices = ([("All amplitudes", ALL_AMPLITUDES)]
                    + ([("At bias amplitude", BIAS_AMPLITUDE)] if self.bias_report else [])
                    + self._step_choices())
-        for toolbar in (self.fit_display, self.fit_histograms_tab.toolbar):
+        for toolbar in (self.fit_display, self.fit_histograms_tab.toolbar,
+                        self.detector_digest_tab.toolbar):
             toolbar.set_models_fitted(models)
             toolbar.set_amplitude_choices(choices)
 

@@ -7,7 +7,8 @@ walked, so the multisweep panel says what both are; the bias step is among
 them once something has chosen one. The Fit Results and Fit Histograms tabs
 each have one, chosen independently and each persisting across Periscope
 sessions under its own *name*, through
-:mod:`~rfmux.tools.periscope.settings`.
+:mod:`~rfmux.tools.periscope.settings`. The Detector Digest has the model
+half alone: that page is about one drive, so it has no drive to choose.
 """
 
 from __future__ import annotations
@@ -21,14 +22,20 @@ from .layouts import FlowLayout, labelled
 
 
 class FitDisplayToolbar(QtWidgets.QWidget):
-    """A fit tab's own toolbar: one model, one set of amplitudes."""
+    """A fit tab's own toolbar: one model, and one set of amplitudes if it
+    draws more than one sweep."""
 
     #: Emitted when either choice changes, so the tab can redraw.
     display_changed = pyqtSignal()
 
-    def __init__(self, parent=None, *, name: str = "fits"):
+    def __init__(self, parent=None, *, name: str = "fits",
+                 amplitudes: bool = True):
         super().__init__(parent)
         self._name = name
+        # Whether this tab has a choice of sweeps to make at all: a tab drawing
+        # one sweep has none, and a combo offering one would be a control that
+        # changes nothing.
+        self._amplitudes = amplitudes
         # What was last drawn, held apart from the combos: they carry only
         # what the measurement on screen has, and a choice it cannot honour is
         # picked up again by one that can.
@@ -37,7 +44,8 @@ class FitDisplayToolbar(QtWidgets.QWidget):
         self._wanted_amplitude = saved.get("amplitude", ALL_AMPLITUDES)
         self._setup_ui()
         self.model_combo.currentIndexChanged.connect(self._changed)
-        self.amplitude_combo.currentIndexChanged.connect(self._changed)
+        if self.amplitude_combo is not None:
+            self.amplitude_combo.currentIndexChanged.connect(self._changed)
 
     # ── what is drawn ────────────────────────────────────────────────────────
 
@@ -46,7 +54,12 @@ class FitDisplayToolbar(QtWidgets.QWidget):
         return self.model_combo.currentData()
 
     def get_amplitude(self):
-        """Which sweeps to draw: a step, ``BIAS_AMPLITUDE``, or ``ALL_AMPLITUDES``."""
+        """Which sweeps to draw: a step, ``BIAS_AMPLITUDE``, or ``ALL_AMPLITUDES``.
+
+        A toolbar built without the control draws whatever it is given.
+        """
+        if self.amplitude_combo is None:
+            return ALL_AMPLITUDES
         return self.amplitude_combo.currentData()
 
     def set_models_fitted(self, models) -> None:
@@ -66,8 +79,11 @@ class FitDisplayToolbar(QtWidgets.QWidget):
 
         A step means nothing until something has been swept at it, and "at
         bias" nothing until something has chosen one, so the panel says which
-        of them this measurement has.
+        of them this measurement has. A toolbar without the control ignores
+        them.
         """
+        if self.amplitude_combo is None:
+            return
         self._refill(self.amplitude_combo, choices, self._wanted_amplitude)
 
     def _refill(self, combo, choices, wanted) -> None:
@@ -98,6 +114,10 @@ class FitDisplayToolbar(QtWidgets.QWidget):
             "model's answer rather than three overlaid")
         self.model_combo.setEnabled(False)
         layout.addWidget(labelled("Fit:", self.model_combo))
+
+        if not self._amplitudes:
+            self.amplitude_combo = None
+            return
 
         self.amplitude_combo = QtWidgets.QComboBox()
         self.amplitude_combo.setToolTip(

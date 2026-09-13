@@ -397,8 +397,10 @@ stages the whole port; what follows is the netanal part of it.
   time. `take_netanal`'s `data_callback` was changed to match: it passed
   `(module, freqs, amps, phases)` and now passes `(module, partial)` with the
   trace's own keys, so no measurement algorithm computes magnitude or phase.
-* `detector_digest_panel.py` reads `iq_complex` off stored sweep entries
-  (`:653`, `:810`), which is the multisweep half of the same change (stage 2).
+* ~~`detector_digest_panel.py` reads `iq_complex` off stored sweep entries
+  (`:653`, `:810`), which is the multisweep half of the same change
+  (stage 2).~~ Done. That panel was deleted, and the `detector_digest_tab.py`
+  written in its place draws off `iq_counts` through the grid helpers.
 * `network_analysis_panel.py` and `network_analysis_export.py` carry their own
   `parameters`/`modules` payload, which `call_params` now duplicates. Still
   open: `build_export_dict` walks the traces but writes that payload, and the

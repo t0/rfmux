@@ -175,9 +175,11 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
   1. **Apply Bias** parks a tone on every resonator in the panel's catalog, at the frequency and amplitude it carries. Which NCO carries them, and putting the frequencies on the tone grid, are `apply_bias`'s doing.
   2. On success each channel's `df_calibration` is published to the main window, so the streams can be displayed in hertz.
 
-- **Take Noise** 
-  1. Opening the Detector Digest on a resonance also provides a **Take Noise** shortcut. The digest overlays the newly acquired noise timestream with the loaded rotation data, letting you confirm phase alignment, biasing and overall noise behavior without rerunning the full sweep. One can click it multiple times to see the evolution of noise in their data stream.
-  2. Noise captures are tied to the currently selected detector, making it straightforward to iterate on the bias solution and immediately see the impact on the detector’s timestream statistics.
+- **Detector Digest**
+  1. The **Detector Digest** tab is one resonator at the size of the panel, which is the question a grid of subplots cannot answer. Double-click any subplot on any grid tab to open the digest on that resonator; the arrow keys and the combo box walk the catalog from there.
+  2. Three plots: its magnitude at every drive it was swept at, the same sweeps as IQ loops, and — on the right — the one sweep it is biased at, with the fitted model over it in cyan and a line where the tone will actually go. The left two are the measurement alone; the fit is drawn on the plot of the sweep it was fitted to. There is no drive selector, because the right-hand plot is about one drive: the one Find Bias chose. Until it has run, that plot says so.
+  3. Under the plots, a column of `parameter: value` rows for each thing worth reading off this resonator: the bias point — its step, its drive, its frequency and offset, the responsivity there, the drive bifurcation was first seen at, and the flag if it carries one — and then one column per fit of the sweep it is biased at, headed by the model and the sweep direction, with each parameter beside its error. Hover a row for what the parameter means and the number the fit actually produced; the values are selectable, to be copied into a notebook. The fit columns are `collect_fit_params`'s rows, so a notebook tabulates the same thing.
+  4. It measures nothing. Everything on it comes off the multisweep, the fits and the bias report the panel already holds, so it is worth opening on a file as much as on a sweep that has just finished.
 
 All import dialogs validate that the selected file contains the expected data structure and will notify you if a file is missing required sections, helping prevent accidental misuse of unrelated files
 

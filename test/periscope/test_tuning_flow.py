@@ -28,7 +28,7 @@ import pytest
 pytest.importorskip("PyQt6")
 
 import pyqtgraph as pg  # noqa: E402
-from PyQt6 import QtWidgets  # noqa: E402
+from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 
 from test.qt_helpers import spin, spin_until  # noqa: E402
 
@@ -38,7 +38,8 @@ from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E
 from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
 from rfmux.tuning import (  # noqa: E402
     AmplitudeSchedule, collect_amplitude_iterations_for, store)
-from rfmux.tuning.fits import BIFURCATION_A  # noqa: E402
+from rfmux.tuning.fits import (  # noqa: E402
+    BIFURCATION_A, collect_fit_params)
 from rfmux.tuning.bias import (  # noqa: E402
     FLAG_KINDS, BiasReport, bifurcated_by_derivative, iq_arc_speed,
     iq_derivatives, normalized_arc_speed)
@@ -51,6 +52,7 @@ from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
     NetworkAnalysisDialog,
 )
+from rfmux.tools.periscope.detector_digest_tab import MODEL_COLOR  # noqa: E402
 from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
     HISTOGRAM_PARAMS,
 )
@@ -64,6 +66,7 @@ from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import (  # noqa: E402
     TABLEAU10_COLORS,
     UPWARD_SWEEP_STYLE,
+    UnitConverter,
 )
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     MultisweepSignals,
@@ -462,7 +465,19 @@ def test_a_finished_multisweep_lands_in_the_session_folder(board, qt_app, tmp_pa
     assert registered == [(str(written[0]), "multisweep")]
 
 
-def _grid_widgets(panel, tab_idx=0):
+#: Which tab is which, by position in the panel's tab bar. Named here because
+#: the helpers below open a tab by number, and a tab added in the middle moves
+#: every tab after it.
+MAGNITUDE_TAB = 0
+IQ_TAB = 1
+DIGEST_TAB = 2
+FIT_TAB = 3
+HISTOGRAM_TAB = 4
+BIAS_TAB = 5
+BIAS_FREQ_TAB = 6
+
+
+def _grid_widgets(panel, tab_idx=MAGNITUDE_TAB):
     """The subplot widgets the grid is showing, in the order it drew them."""
     panel.plot_tabs.setCurrentIndex(tab_idx)
     panel._redraw_plots()
@@ -471,7 +486,7 @@ def _grid_widgets(panel, tab_idx=0):
     return [grid.itemAt(i).widget() for i in range(grid.count())]
 
 
-def _grid_curves(panel, tab_idx=0):
+def _grid_curves(panel, tab_idx=MAGNITUDE_TAB):
     """The curves on each subplot, in the order they were plotted."""
     return [w.getPlotItem().listDataItems() for w in _grid_widgets(panel, tab_idx)]
 
@@ -518,7 +533,7 @@ def test_the_iq_grid_draws_the_loop_the_entry_carries(board, qt_app):
 
     name = panel._selected_names()[0]
     sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
-    i_vals, q_vals = _grid_curves(panel, tab_idx=1)[0][0].getData()
+    i_vals, q_vals = _grid_curves(panel, tab_idx=IQ_TAB)[0][0].getData()
 
     assert np.allclose(i_vals, np.real(sweep["iq_volts"]))
     assert np.allclose(q_vals, np.imag(sweep["iq_volts"]))
@@ -1365,7 +1380,7 @@ def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
 
     for model in ("skewed", "nonlinear"):
         _show_fit_model(panel, model)
-        measured, fit = _grid_curves(panel, tab_idx=2)[0]
+        measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0]
 
         # The measurement, normalized the way the skewed fit normalizes it.
         x, y = measured.getData()
@@ -1397,7 +1412,7 @@ def _show_fit_amplitude(panel, choice):
     combo.setCurrentIndex(index)
 
 
-def _measured_curves(panel, tab_idx=2):
+def _measured_curves(panel, tab_idx=FIT_TAB):
     """Per subplot, the curves that are measurement rather than model: the
     model is the foreground colour, the measurement its drive's."""
     foreground = "#ffffff" if panel.dark_mode else "#000000"
@@ -1419,7 +1434,7 @@ def test_only_the_chosen_model_is_drawn(board, qt_app):
             for i in range(combo.count())] == ["skewed", "nonlinear"]
     for model in ("skewed", "nonlinear"):
         _show_fit_model(panel, model)
-        assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
+        assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=FIT_TAB))
 
 
 def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
@@ -1440,13 +1455,13 @@ def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app, swept_con
     panel = _panel_showing(swept_container, board)
     _run_fits(panel, qt_app, choice=0, models=("skewed",))
 
-    measured, fit = _grid_curves(panel, tab_idx=2)[0][:2]
+    measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
     assert fit.opts["pen"].color().name() == "#000000"      # light mode
     assert measured.opts["pen"].color().name() == TABLEAU10_COLORS[0]
     assert fit.opts["pen"].width() < measured.opts["pen"].width()
 
     panel.dark_mode = True
-    _measured, fit = _grid_curves(panel, tab_idx=2)[0][:2]
+    _measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
     assert fit.opts["pen"].color().name() == "#ffffff"
 
 
@@ -1458,12 +1473,12 @@ def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
         crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
     assert errors == []
 
-    assert _grid_curves(panel, tab_idx=2) == [[] for _ in panel._selected_names()]
+    assert _grid_curves(panel, tab_idx=FIT_TAB) == [[] for _ in panel._selected_names()]
 
     _run_fits(panel, qt_app, choice=1)
 
     # One step of two was fitted, so one measured trace and its one model.
-    assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=2))
+    assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=FIT_TAB))
 
 
 def test_the_fit_tab_draws_the_amplitude_step_it_is_asked_for(board, qt_app,
@@ -1492,16 +1507,16 @@ def test_the_colorbar_follows_what_is_on_screen_not_what_was_measured(board, qt_
     assert errors == []
     _run_fits(panel, qt_app, models=("skewed",))
 
-    _grid_widgets(panel, tab_idx=2)
+    _grid_widgets(panel, tab_idx=FIT_TAB)
     assert not panel.fit_colorbar.isHidden()
 
     _show_fit_amplitude(panel, 2)
-    _grid_widgets(panel, tab_idx=2)
+    _grid_widgets(panel, tab_idx=FIT_TAB)
 
     assert panel.fit_colorbar.isHidden()
 
 
-def _legend_texts(panel, tab_idx=2):
+def _legend_texts(panel, tab_idx=FIT_TAB):
     """Per subplot, what its legend says, in the order it says it."""
     return [[label.text for _sample, label in (w.getPlotItem().legend.items
                                                if w.getPlotItem().legend else [])]
@@ -1624,9 +1639,6 @@ def test_the_progress_report_is_not_cleared_under_the_fit(qt_app):
 
 # ── the fit histograms tab ───────────────────────────────────────────────────
 
-HISTOGRAM_TAB = 3
-
-
 def _histogram_plots(panel):
     """The histogram tab's plots, in the order it drew them.
 
@@ -1670,7 +1682,7 @@ def test_the_fit_tab_marks_where_the_model_put_the_resonance(board, qt_app):
     _show_fit_model(panel, "skewed")
 
     name = panel._selected_names()[0]
-    lines = _infinite_lines(panel, tab_idx=2)[0]
+    lines = _infinite_lines(panel, tab_idx=FIT_TAB)[0]
     drawn = sorted(line.value() for line in lines)
 
     fitted = [sweep for sweep in collect_amplitude_iterations_for(
@@ -1695,7 +1707,7 @@ def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
     name = panel._selected_names()[0]
     sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
     labels = [entry[1].text for entry in
-              _grid_widgets(panel, tab_idx=2)[0].getPlotItem().legend.items]
+              _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().legend.items]
 
     assert any(f"a {sweep['fits']['nonlinear']['params']['a']:.2f}" in label
                for label in labels)
@@ -2120,7 +2132,7 @@ def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app,
 # ── what the report puts on the sweep grids ──────────────────────────────────
 
 
-def _infinite_lines(panel, tab_idx=0):
+def _infinite_lines(panel, tab_idx=MAGNITUDE_TAB):
     """The vertical lines on each subplot -- ``addLine`` items, which are not
     data items and so do not show up in ``listDataItems``."""
     return [[item for item in w.getPlotItem().items
@@ -2128,14 +2140,14 @@ def _infinite_lines(panel, tab_idx=0):
             for w in _grid_widgets(panel, tab_idx)]
 
 
-def _bands(panel, tab_idx=0):
+def _bands(panel, tab_idx=MAGNITUDE_TAB):
     """The filled bands on each subplot, innermost last."""
     return [[item for item in w.getPlotItem().items
              if isinstance(item, pg.LinearRegionItem)]
             for w in _grid_widgets(panel, tab_idx)]
 
 
-def _trace_widths(panel, name, tab_idx=0):
+def _trace_widths(panel, name, tab_idx=MAGNITUDE_TAB):
     """``{(step, direction): pen width}`` for one resonator's subplot."""
     index = panel._selected_names().index(name)
     traces = panel._collect_traces([name])[name]
@@ -2206,15 +2218,15 @@ def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_cont
     the loop rather than a line across it."""
     panel = _panel_showing(swept_container, board)
     panel.normalize_traces = False
-    panel.plot_tabs.setCurrentIndex(1)
+    panel.plot_tabs.setCurrentIndex(IQ_TAB)
     panel._redraw_plots()
-    before = len(_grid_curves(panel, tab_idx=1)[0])
+    before = len(_grid_curves(panel, tab_idx=IQ_TAB)[0])
 
     _find_bias(panel, qt_app)
 
     name = panel._selected_names()[0]
     finding = panel.bias_report[name]
-    curves = _grid_curves(panel, tab_idx=1)[0]
+    curves = _grid_curves(panel, tab_idx=IQ_TAB)[0]
     markers = [c for c in curves if len(c.getData()[0]) == 1]
     # One per direction of the chosen step, each on its own trace.
     directions = collect_amplitude_iterations_for(
@@ -2267,7 +2279,7 @@ def test_the_bias_line_is_named_with_the_drive_it_was_chosen_at(board, qt_app,
     name = panel._selected_names()[0]
     amplitude = panel._bias_by_name()[name].amplitude
 
-    rows = _legend_names(panel, MAG_TAB)
+    rows = _legend_names(panel, MAGNITUDE_TAB)
 
     assert [row for row in rows if row.endswith(f"bias amp. = {amplitude:.4g}")]
 
@@ -2281,10 +2293,10 @@ def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
     assert errors == []
     _find_bias(panel, qt_app)
 
-    _grid_widgets(panel, MAG_TAB)
+    _grid_widgets(panel, MAGNITUDE_TAB)
     assert not panel.mag_colorbar.isHidden(), "this measurement should use the bar"
 
-    rows = _legend_names(panel, MAG_TAB)
+    rows = _legend_names(panel, MAGNITUDE_TAB)
     assert [row for row in rows if row.startswith("f_bias")], \
         "the bias line lost its label when the drives went to the colorbar"
 
@@ -2302,10 +2314,10 @@ def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
 
     named_on_plot = {
         name: next((row.split("\u2014")[1].split("<br>")[0].strip()
-                    for row in _legend_names(panel, MAG_TAB, index)
+                    for row in _legend_names(panel, MAGNITUDE_TAB, index)
                     if row.startswith("f_bias \u2014")), None)
         for index, name in enumerate(panel._selected_names())
-        if index < len(_grid_widgets(panel, MAG_TAB))}
+        if index < len(_grid_widgets(panel, MAGNITUDE_TAB))}
 
     assert named_on_plot == {name: findings[name].flagged_kind
                              for name in named_on_plot}
@@ -2314,7 +2326,7 @@ def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
 
     # And nowhere else: the same findings with nothing to report carry no flag.
     panel._bias_found(_with_the_flags_cleared(panel))
-    assert not [row for row in _legend_names(panel, MAG_TAB)
+    assert not [row for row in _legend_names(panel, MAGNITUDE_TAB)
                 if row.startswith("f_bias \u2014")]
 
 
@@ -2354,8 +2366,6 @@ def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_contain
 
 # ── the bias diagnostics tab ─────────────────────────────────────────────────
 
-MAG_TAB = 0
-BIAS_TAB = 4
 
 
 def _on_bias_tab(swept_container, board):
@@ -2611,7 +2621,6 @@ def test_the_bar_is_a_shaded_band_and_not_only_a_pair_of_lines(board, qt_app,
 
 # ── the bias frequency tab ───────────────────────────────────────────────────
 
-BIAS_FREQ_TAB = 5
 
 
 def _upward_curve(panel, colour, index=0, tab_idx=None):
@@ -2732,3 +2741,345 @@ def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_conta
         panel._amplitudes_drawn(), panel.dark_mode).values()}
 
     assert not drives & {pg.mkColor(c).name() for c in DERIVATIVE_COLORS.values()}
+
+
+# ── the detector digest ──────────────────────────────────────────────────────
+
+
+def _digest(panel, qt_app):
+    """The digest tab, showing, on whichever resonator it is on."""
+    panel.plot_tabs.setCurrentIndex(DIGEST_TAB)
+    panel._redraw_plots()
+    spin(qt_app)
+    return panel.detector_digest_tab
+
+
+def _digest_curves(digest, plot):
+    """The curves on one of the digest's three plots, in the order drawn."""
+    return digest._plots[plot].getPlotItem().listDataItems()
+
+
+def _digest_lines(digest, plot):
+    return [item for item in digest._plots[plot].getPlotItem().items
+            if isinstance(item, pg.InfiniteLine)]
+
+
+def _at_bias(panel, digest):
+    """The traces the digest draws on its bias plot: one amplitude step's."""
+    iteration = panel._bias_by_name()[digest.resonator()].iteration
+    return [trace for trace in digest._traces if trace[0] == iteration]
+
+
+def _digest_rows(digest):
+    """``{heading: {name: (value, tooltip)}}`` of the columns under the plots."""
+    columns = {}
+    for box in digest._columns_host.findChildren(QtWidgets.QGroupBox):
+        rows = {}
+        grid = box.layout()
+        for row in range(grid.rowCount()):
+            name = grid.itemAtPosition(row, 0)
+            value = grid.itemAtPosition(row, 1)
+            if name is None or value is None:
+                continue
+            rows[name.widget().text().rstrip(":")] = (value.widget().text(),
+                                                      value.widget().toolTip())
+        columns[box.title()] = rows
+    return columns
+
+
+def _digest_columns(digest):
+    """The same, as ``{heading: {name: value}}``."""
+    return {title: {name: value for name, (value, _tip) in rows.items()}
+            for title, rows in _digest_rows(digest).items()}
+
+
+def _show_digest_model(digest, model):
+    digest.toolbar.model_combo.setCurrentIndex(
+        digest.toolbar.model_combo.findData(model))
+
+
+def _sweep_arrays(panel):
+    """Every measured trace the panel holds, to compare a block against itself."""
+    return {(name, step, direction): np.asarray(sweep["iq_counts"])
+            for name in panel._selected_names()
+            for step, by_direction in
+            collect_amplitude_iterations_for(panel.module_sweeps, name).items()
+            for direction, sweep in by_direction.items()}
+
+
+class _DoubleClick:
+    """Enough of a mouse event for the grid's double-click handler."""
+
+    def __init__(self):
+        self.accepted = False
+
+    def accept(self):
+        self.accepted = True
+
+
+def test_the_digest_draws_every_sweep_of_the_resonator_it_is_on(
+        board, qt_app, swept_container):
+    """One resonator at the size of the panel: every drive, as a trace and as
+    a loop."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    assert digest.resonator() == name
+    traces = panel._collect_traces([name])[name]
+    assert len(_digest_curves(digest, 0)) == len(traces)
+    assert len(_digest_curves(digest, 1)) == len(traces)
+
+
+def test_a_digest_curve_is_the_sweep_it_was_read_from(board, qt_app, swept_container):
+    """Drawn off the entry, in the units the panel is showing."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    _step, _direction, _amplitude, sweep = digest._traces[0]
+    x, y = _digest_curves(digest, 0)[0].getData()
+
+    assert np.allclose(
+        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+    counts = np.asarray(sweep["iq_counts"])
+    assert np.allclose(y, UnitConverter.convert_amplitude(
+        np.abs(counts), counts, panel.unit_mode,
+        normalize=panel.normalize_traces))
+
+
+def test_the_digest_walks_the_catalogs_own_names(board, qt_app, swept_container):
+    """Resonators are named, and the array ends where the catalog ends."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+    names = panel._selected_names()
+
+    assert digest.resonator() == names[0]
+    digest.next_btn.click()
+    assert digest.resonator() == names[1]
+    digest.prev_btn.click()
+    digest.prev_btn.click()
+    assert digest.resonator() == names[0]
+
+
+def test_the_arrow_keys_walk_the_array(board, qt_app, swept_container):
+    """Reading an array one resonator at a time is a keyboard job."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+    names = panel._selected_names()
+
+    digest.keyPressEvent(QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Right,
+        QtCore.Qt.KeyboardModifier.NoModifier))
+
+    assert digest.resonator() == names[1]
+
+
+def test_double_clicking_a_subplot_opens_it_in_the_digest(
+        board, qt_app, swept_container):
+    """The grid says which resonator looks wrong; the digest says what is
+    wrong with it, and the way between them is the subplot itself."""
+    panel = _panel_showing(swept_container, board)
+    widgets = _grid_widgets(panel)
+    name = panel._selected_names()[2]
+
+    event = _DoubleClick()
+    widgets[2].getViewBox().doubleClickedEvent.emit(event)
+    spin(qt_app)
+
+    assert panel.plot_tabs.currentWidget() is panel.detector_digest_tab
+    assert panel.detector_digest_tab.resonator() == name
+    assert event.accepted, \
+        "the view box's coordinate readout would pop up over the digest"
+
+
+def test_the_zoom_box_control_reaches_the_grid_subplots(
+        board, qt_app, swept_container):
+    """The checkbox is on the panel's toolbar and says it is on by default;
+    a grid drawn into a plain view box ignored it."""
+    panel = _panel_showing(swept_container, board)
+    widgets = _grid_widgets(panel)
+
+    panel._toggle_zoom_box_mode(False)
+    assert all(w.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+               for w in widgets)
+
+    panel._toggle_zoom_box_mode(True)
+    assert all(w.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+               for w in widgets)
+
+
+def test_the_left_plot_is_the_measurement_and_nothing_else(
+        board, qt_app, swept_container):
+    """What every drive did, with no model over it: a fit belongs on the plot
+    of the one sweep it was fitted to."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    digest = _digest(panel, qt_app)
+
+    assert len(_digest_curves(digest, 0)) == len(digest._traces)
+
+
+def test_the_bias_plot_draws_the_sweep_the_tone_will_sit_on(
+        board, qt_app, swept_container):
+    """One drive of the schedule, the one chosen, and a line where the tone
+    goes on it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    at_bias = _at_bias(panel, digest)
+    assert 0 < len(at_bias) < len(digest._traces), \
+        "this measurement should have more drives than the one it is biased at"
+    assert len(_digest_curves(digest, 2)) == len(at_bias)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    sweep = at_bias[0][3]
+    offset = (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3
+    assert [line.value() for line in _digest_lines(digest, 2)] == pytest.approx([offset])
+
+
+def test_the_bias_plot_draws_the_model_on_the_measurements_own_axis(
+        board, qt_app, swept_container):
+    """The skewed fit works normalized to its trace's last point; drawn in
+    those units on a plot of dBm the model would sit sixty dB off the sweep."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+    _show_digest_model(digest, "skewed")
+
+    drawn = len(_at_bias(panel, digest))
+    curves = _digest_curves(digest, 2)
+    measured = np.concatenate([curve.getData()[1] for curve in curves[:drawn]])
+
+    models = curves[drawn:]
+    assert len(models) == drawn
+    for curve in models:
+        assert measured.min() <= np.median(curve.getData()[1]) <= measured.max()
+
+
+def test_the_bias_plot_says_when_nothing_has_chosen_a_drive_yet(
+        board, qt_app, swept_container):
+    """Find Bias has not been pressed, so there is no bias sweep to draw and
+    no fit at a bias amplitude to tabulate."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    assert _digest_curves(digest, 2) == []
+    assert "none found yet" in digest._plots[2].getPlotItem().titleLabel.text.lower()
+    assert list(_digest_columns(digest)) == ["Bias point"]
+
+
+def test_the_bias_column_carries_the_point_that_was_chosen(
+        board, qt_app, swept_container):
+    """The numbers behind the operating point, under the plots that show it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    rows = _digest_columns(digest)["Bias point"]
+
+    assert rows["Amplitude step"] == str(finding.iteration)
+    assert rows["Frequency"] == f"{finding.frequency_hz / 1e6:.6f} MHz"
+    assert rows["Drive"] == UnitConverter.format_probe_label(
+        finding.amplitude, panel.unit_mode,
+        panel.dac_scales[panel.active_module_for_dac])
+
+
+def test_a_flagged_point_says_so_in_the_bias_column(
+        board, qt_app, swept_container):
+    """A flag is a property of the bias point, so it sits with the numbers
+    that describe it rather than over the plots."""
+    panel = _all_flagged(_panel_showing(swept_container, board), qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    assert not finding.good
+    flagged = _digest_columns(digest)["Bias point"]["Flagged"]
+    assert finding.flagged_kind in flagged
+    assert finding.flagged_because in flagged
+
+
+def test_a_fit_column_carries_what_the_fitter_wrote(
+        board, qt_app, swept_container):
+    """One column per fit of the sweep the tone sits on, off the same rows a
+    notebook gets out of ``collect_fit_params``."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    fits = collect_fit_params(panel.module_sweeps, "skewed",
+                              names=[digest.resonator()],
+                              iterations=[finding.iteration])
+    assert fits, "the sweep the tone sits on should carry a skewed fit"
+
+    rows = _digest_rows(digest)
+    for fit in fits:
+        value, tooltip = rows[f"Skewed fit \u2014 {fit['direction']}"]["fr"]
+        assert value.startswith(f"{fit['params']['fr'] / 1e6:.6f}")
+        assert value.endswith("MHz")
+        # The row is rounded to something readable; the number the fit
+        # actually produced is a hover away.
+        assert repr(float(fit["params"]["fr"])) in tooltip
+
+
+def test_the_digest_reads_the_measurement_without_touching_it(
+        board, qt_app, swept_container):
+    """It is a view over what is already in the block: it measures nothing and
+    it writes nothing."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    before = _sweep_arrays(panel)
+
+    digest = _digest(panel, qt_app)
+    digest.next_btn.click()
+    digest.prev_btn.click()
+
+    after = _sweep_arrays(panel)
+    assert before.keys() == after.keys()
+    assert all(np.array_equal(before[key], after[key]) for key in before)
+
+
+def _digest_legend(digest, plot):
+    legend = digest._plots[plot].getPlotItem().legend
+    return [entry[1].text for entry in legend.items] if legend else []
+
+
+def test_a_few_drives_are_named_beside_the_traces(board, qt_app, swept_container):
+    """One resonator has one sweep per step, which is a legend's worth of
+    lines -- so the digest names them rather than reaching for the bar."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    assert digest.colorbar.isHidden()
+    assert len(_digest_legend(digest, 0)) == len(digest._traces)
+
+
+def test_many_drives_go_to_the_colorbar(board, qt_app):
+    """Past three drives a legend of them stops being a legend, which is the
+    rule the grids follow and the reason they have a bar."""
+    _, crs, catalog = board
+    panel, errors, _completed, _records, _partials = _run_multisweep(
+        crs, catalog, qt_app, **BIFURCATING)
+    assert errors == []
+
+    digest = _digest(panel, qt_app)
+
+    assert not digest.colorbar.isHidden()
+    assert _digest_legend(digest, 0) == [], \
+        "the drives belong to the bar, and nothing else has asked for a row yet"
+
+
+def test_the_model_colour_is_not_a_drive_colour(qt_app):
+    """On the bias plot the model lies over one drive's trace, so it cannot be
+    drawn in a colour a drive is drawn in -- including the near-black bottom of
+    the colormap that carries a long schedule."""
+    for drawn in (3, 12):        # a legend's worth of drives, and a bar's
+        for dark_mode in (False, True):
+            drives = {pg.mkColor(colour).name()
+                      for colour in create_amplitude_color_map(
+                          np.linspace(0.001, 0.01, drawn), dark_mode).values()}
+            assert pg.mkColor(MODEL_COLOR).name() not in drives

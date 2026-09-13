@@ -143,27 +143,15 @@ def test_a_multisweep_through_periscope_is_the_file_a_script_writes(
     store.set_created_by("periscope")
     from_periscope = _multisweep_through_periscope(crs, catalog, qt_app)
 
+    script = store.load(from_script)
+    periscope = store.load(from_periscope)
     assert from_script != from_periscope
-    assert _differences(_without_provenance(store.load(from_script)),
-                        _without_provenance(store.load(from_periscope))) == []
+    assert _differences(_without_provenance(script),
+                        _without_provenance(periscope)) == []
 
-
-def test_the_two_multisweep_files_say_who_wrote_them(
-        quiet_board, qt_app, output_directory):
-    """The two fields that are meant to differ, and do."""
-    loop, crs, catalog = quiet_board
-
-    store.set_created_by("script")
-    headless = loop.run_until_complete(
-        crs.multisweep(catalog=catalog, save=False, **MULTISWEEP))
-    script_metadata = store.load(
-        store.save(headless, "multisweep"))[list(headless)[0]]["file_metadata"]
-
-    store.set_created_by("periscope")
-    periscope_metadata = store.load(
-        _multisweep_through_periscope(crs, catalog, qt_app)
-    )[list(headless)[0]]["file_metadata"]
-
+    module_id = next(iter(headless))
+    script_metadata = script[module_id]["file_metadata"]
+    periscope_metadata = periscope[module_id]["file_metadata"]
     assert script_metadata["created_by"] == "script"
     assert periscope_metadata["created_by"] == "periscope"
     assert script_metadata["path"] != periscope_metadata["path"]

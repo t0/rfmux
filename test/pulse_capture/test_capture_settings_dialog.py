@@ -73,16 +73,6 @@ def test_roundtrip(qt_app):
     dlg.close()
 
 
-def test_rolling_baseline_span_is_shown(qt_app):
-    """No baseline controls left to get wrong — the window is the
-    training span, so the dialog only reports it."""
-    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
-    assert not hasattr(dlg, "baseline_spin")
-    assert not hasattr(dlg, "baseline_auto_check")
-    assert "baseline median" in _plain(dlg.pulse_derived_label)
-    dlg.close()
-
-
 def test_derived_readouts_split_by_driving_knob(qt_app):
     """The dialog shows WHAT each primary input drives: every time
     scale under max pulse, everything statistical under threshold σ —

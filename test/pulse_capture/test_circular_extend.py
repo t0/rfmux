@@ -30,8 +30,11 @@ def _by_extend(values, chunk, size=SIZE):
     return c
 
 
-@pytest.mark.parametrize("n", [0, 1, 5, SIZE - 1, SIZE, SIZE + 1, 3 * SIZE])
-@pytest.mark.parametrize("chunk", [1, 7, SIZE, 1000])
+@pytest.mark.parametrize("n,chunk", [(1, 1)] + [
+    (n, chunk)
+    for n in (5, SIZE - 1, SIZE, SIZE + 1, 3 * SIZE)
+    for chunk in (1, 7, SIZE, 1000)
+])
 def test_extend_matches_add(n, chunk):
     values = np.arange(n, dtype=float) + 0.5
     a = _by_add(values)

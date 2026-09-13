@@ -1433,22 +1433,20 @@ def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
     assert panel._models_fitted() == ["skewed"]
 
 
-def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app):
+def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app, swept_container):
     """The data keeps the line it has on the other tabs -- coloured by its
     drive -- and the model is a thinner black or white line over it, so the
     measurement is still visible where the two agree."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
-    assert errors == []
-    _run_fits(panel, qt_app, models=("skewed",))
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, choice=0, models=("skewed",))
 
-    measured, fit = _grid_curves(panel, tab_idx=2)[0]
+    measured, fit = _grid_curves(panel, tab_idx=2)[0][:2]
     assert fit.opts["pen"].color().name() == "#000000"      # light mode
     assert measured.opts["pen"].color().name() == TABLEAU10_COLORS[0]
     assert fit.opts["pen"].width() < measured.opts["pen"].width()
 
     panel.dark_mode = True
-    _measured, fit = _grid_curves(panel, tab_idx=2)[0]
+    _measured, fit = _grid_curves(panel, tab_idx=2)[0][:2]
     assert fit.opts["pen"].color().name() == "#ffffff"
 
 
@@ -1630,12 +1628,10 @@ def test_a_finished_fit_says_so_in_green_and_then_stops_saying_it(board, qt_app)
     assert panel.fit_status_label.text() == ""
 
 
-def test_the_progress_report_is_not_cleared_under_the_fit(board, qt_app):
+def test_the_progress_report_is_not_cleared_under_the_fit(qt_app):
     """A timer that fired mid-fit would leave a dead button with nothing beside
     it, which reads as a hang."""
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
-    assert errors == []
+    panel = MultisweepPanel(target_module=1, initial_params={}, dac_scales={})
 
     panel._fits_progress(3, 8)
 
@@ -2094,27 +2090,14 @@ def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app, swept_contai
     assert panel.run_fit_btn.isEnabled()
 
 
-def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app):
-    """A routine outcome on the status line, not a dialog, and not left on
-    screen once it has been read.
-
-    Several resonators of the standard array bifurcate at the quietest step of
-    any schedule short enough to sweep here, so a clean report is made by
-    keeping the findings that came back good -- every one of them the library's
-    own, off these sweeps.
-    """
-    _, crs, catalog = board
-    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs, **BIFURCATING)
-    assert errors == []
+def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app, swept_container):
+    """A clean report is acknowledged, then the status line clears itself."""
+    panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
-    good = panel.bias_report.good
-    assert good, "the schedule bracketed nothing, so there is no clean case here"
+    report = _with_the_flags_cleared(panel)
+    panel._bias_found(report)
 
-    panel._bias_found(BiasReport(catalog=panel.bias_report.catalog,
-                                 findings=good,
-                                 settings=panel.bias_report.settings))
-
-    assert panel.bias_status_label.text() == f"Bias found (0 of {len(good)} flagged)"
+    assert panel.bias_status_label.text() == f"Bias found (0 of {len(report.good)} flagged)"
     assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
     assert panel._bias_status_timer.isActive()
     panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
@@ -2786,5 +2769,3 @@ def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_conta
         panel._amplitudes_drawn(), panel.dark_mode).values()}
 
     assert not drives & {pg.mkColor(c).name() for c in DERIVATIVE_COLORS.values()}
-
-

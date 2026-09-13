@@ -312,7 +312,6 @@ and from the merge decisions of 2026-09-08.
 `df_calibration.py`, `_legacy.py`, and `test/algorithms/test_bias_kids_fits.py`,
 `test_df_calibration*.py`, `test_find_resonances.py` (the eleven shim tests;
 their behaviour is pinned in `test/tuning/test_find_resonances.py`),
-`test_nonlinear_fit_on_mock.py` (restated in the flow test),
 `test_measurement_flow.py` with `simplified_tuning_flow.{md,py}` (rewritten
 later against a `tune_resonators` front door, per the design doc §11 step 5).
 The re-exported model functions `s21_skewed`, `nonlinear_iq`,

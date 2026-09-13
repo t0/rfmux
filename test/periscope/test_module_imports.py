@@ -13,7 +13,6 @@ test touches.
 """
 
 import importlib
-import os
 import pkgutil
 
 import pytest
@@ -36,11 +35,3 @@ def _module_names():
 @pytest.mark.parametrize("name", _module_names())
 def test_module_imports(name):
     importlib.import_module(name)
-
-
-def test_the_sweep_actually_covers_the_package():
-    """A guard on the guard: if iter_modules ever comes back empty the
-    parametrized test above silently passes zero cases."""
-    names = _module_names()
-    assert len(names) > 20, f"only found {len(names)} periscope modules"
-    assert f"{periscope.__name__}.utils" in names

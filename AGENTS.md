@@ -232,14 +232,17 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1731 tests, ~7 min
-pytest --tier=portable              # No CRS, no GUI: 661 tests, ~9 s
-pytest --tier=full                  # All 1767 that run without a board, including demos
-pytest --tier=acquisition           # MockCRS server + real UDP: 36 tests, including demos (inside full)
+pytest --tier=quick                 # Edit loop: 1715 tests
+pytest --tier=portable              # No CRS, no GUI: 658 tests
+pytest --tier=full                  # All 1750 that run without a board, including demos
+pytest --tier=acquisition           # MockCRS server + real UDP: 35 tests, including demos (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope
 ```
+
+Counts exclude scratch notebooks and the unavailable `rfmux.fastrx` file-format
+tests; see `test/README.md` for the collection environment.
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
 but `hardware`/`all` excludes the board tests; on Linux with fastrx built and

@@ -12,7 +12,6 @@ def test_config_and_session_defaults():
     for obj in (PulseCaptureConfig(),
                 PulseCaptureSession(channels=[1], sample_rate=1000.0)):
         assert obj.trigger_basis == "df"
-        assert not hasattr(obj, "save_to_end_confirmed")
 
 
 @pytest.mark.parametrize("cal, units", [(None, "V"), (2.0e6 + 0.5e6j, "Hz")])

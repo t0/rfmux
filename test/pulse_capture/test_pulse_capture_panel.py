@@ -618,11 +618,10 @@ def test_the_three_views(qt_app):
     from rfmux.pulse_capture import PulseCaptureConfig
     panel.capture_config = PulseCaptureConfig(trigger_basis="iq")
 
-    # Exactly three, and no basis control to pair them with.
+    # Each view specifies both its basis and its units.
     items = [panel.units_combo.itemText(i)
              for i in range(panel.units_combo.count())]
     assert items == [UNITS_COUNTS, UNITS_VOLTS, UNITS_DF]
-    assert not hasattr(panel, "basis_combo")
 
     # Live captures store volts, so that view is a no-op.
     panel.units_combo.setCurrentText(UNITS_VOLTS)

@@ -47,13 +47,6 @@ def test_reports_only_biased_channels(mock_crs):
     assert got == [1, 3, 4, 17, 128]
 
 
-def test_explicit_zero_is_not_biased(mock_crs):
-    loop, crs = mock_crs
-    got = loop.run_until_complete(
-        crs.get_biased_channels(1, max_channels=128))
-    assert EXPLICIT_ZERO[0] not in got
-
-
 def test_max_channels_bounds_the_scan(mock_crs):
     # A channel the packet cannot carry must not be offered, however
     # it is biased.

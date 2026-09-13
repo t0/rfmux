@@ -2,20 +2,21 @@
 
 ## Running
 
-Ask for a tier by name. Counts and times are from a warm checkout on a
-developer laptop. Counts include expected failures; optional dependency skips
-can reduce the collected set. Local scratch notebooks are excluded from
-these counts. Acquisition includes full demo notebooks, so its runtime
-depends strongly on their measurement parameters.
+Ask for a tier by name. Counts include expected failures and exclude local
+scratch notebooks. This collection has the test group installed but lacks
+`rfmux.fastrx`, so its file-format tests are not included. Optional dependencies
+and compiled extensions can change the collected set. Measure local runtime
+with `--durations=20`; acquisition includes full demo notebooks and depends
+strongly on their measurement parameters.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 644 | ~12 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1606 | ~7 min | Default while editing. |
+| `pytest --tier=portable` | 658 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1715 | varies | Default while editing. |
 | `pytest --tier=acquisition` | 35 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1642 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 1750 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 1717 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 1825 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -56,6 +57,21 @@ fail: a CI runner missing it goes green having not run them.
 
 A test marked `portable` that needs PyQt6 or a board does not fail there, it
 *skips*, so the matrix goes green having tested nothing.
+
+## Coverage boundaries
+
+Presentation tests should reuse measured sweeps or prepared reports; keep real
+acquisition and fitting in the tests of those operations. File parity and
+provenance can be checked on the same pair of saved measurements. The
+standard-array flow tests cover resonance pull and increasing nonlinearity;
+the deprecated bias API retains its own fitting and calibration tests.
+
+Crate slots are unsupported by tuber-client. The strict expected failure in
+`core/test_schema.py::test_hardware_map_with_crate_slots_indexed_by_list` tracks
+that limitation. Before enabling crate slots, verify one-based list indexing,
+explicit dictionary slot numbers, the `crate001_slot3` board-index fallback,
+and CSV channel mappings by both board serial and crate/slot. The standalone
+board and wafer/resonator CSV tests cover the supported paths.
 
 ## The standard simulated array
 

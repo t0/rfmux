@@ -95,30 +95,6 @@ def test_index_falls_back_to_hostname(hostname, expected):
     assert "None" not in d.index()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="A CRS in a crate slot cannot be constructed at all — the same "
-           "tuber-client limitation the crate tests below are marked for. So "
-           "index()'s crate/slot fallback, which mirrors tuber_hostname's, is "
-           "unreachable for now. strict=True so that fixing the crate "
-           "limitation fails here and prompts someone to check this form "
-           "too, rather than becoming an XPASS nobody notices.")
-@pytest.mark.portable
-def test_index_falls_back_to_crate_and_slot():
-    s = rfmux.load_session(
-        """
-        !HardwareMap
-        - !Crate
-          serial: "001"
-          slots:
-            3: !CRS { hostname: "10.0.0.7" }
-        """
-    )
-    d = s.query(rfmux.CRS).one()
-
-    assert d.index() == "crate001_slot3"
-
-
 @pytest.mark.portable
 def test_hardware_map_with_single_crate():
     s = rfmux.load_session(
@@ -174,38 +150,6 @@ def test_hardware_map_with_crate_slots_indexed_by_list():
     assert {c.serial, d1.crate.serial, d2.crate.serial, d3.crate.serial} == {"001"}
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Crate slot indexing is unsupported. "
-           "SimpleTuberObject.__getattr__ in the tuber-client package "
-           "intercepts _items, so len() and "
-           "iteration on a Dfmux proxy raise instead of reaching the "
-           "mapping. A settled limitation, not a flake — strict=True so "
-           "that fixing it fails here instead of quietly becoming an XPASS "
-           "nobody notices.")
-@pytest.mark.portable
-def test_hardware_map_with_crate_slots_indexed_by_dictionary():
-    s = rfmux.load_session(
-        """
-        !HardwareMap
-        - !Crate
-          serial: "001"
-          slots:
-            1: !CRS { serial: "0024" }
-            2: !CRS { serial: "0025" }
-            3: !CRS { serial: "0026" }
-        """
-    )
-
-    c = s.query(rfmux.Crate).one()
-    assert c.serial == "001"
-
-    # Here, slots are explicitly given their indices and should match
-    assert c.slot[1].serial == "0024"
-    assert c.slot[2].serial == "0025"
-    assert c.slot[3].serial == "0026"
-
-
 @pytest.mark.portable
 def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     csvfile = tmp_path / "test.csv"
@@ -245,87 +189,6 @@ def test_hardware_map_with_wafer_and_resonator_csv(tmp_path):
     assert r2.bias_freq == 101e6
     assert r2.bias_amplitude == 0.2
     assert r2.wafer.name == "some_wafer"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="Crate slot indexing is unsupported. "
-           "SimpleTuberObject.__getattr__ in the tuber-client package "
-           "intercepts _items, so len() and "
-           "iteration on a Dfmux proxy raise instead of reaching the "
-           "mapping. A settled limitation, not a flake — strict=True so "
-           "that fixing it fails here instead of quietly becoming an XPASS "
-           "nobody notices.")
-@pytest.mark.portable
-def test_hardware_map_with_channel_mappings(tmp_path):
-
-    # Create a CSV file describing a few Resonators. We'll load this below in
-    # the HWM.
-    mapping = tmp_path / "channel_mapping.csv"
-    mapping.write_text(
-        textwrap.dedent(
-            f"""
-                hwm_resonator\treadout_channel
-                some_wafer/steve\t0024/1/1
-                some_wafer/nancy\t0025/1/1
-                some_wafer/george\t003/1/1/2
-                some_wafer/georgina\t003/2/1/2
-            """
-        ).strip()
-    )
-
-    # Create a CSV file describing a few Resonators. We'll load this below in
-    # the HWM.
-    resonators = tmp_path / "resonators.csv"
-    resonators.write_text(
-        textwrap.dedent(
-            f"""
-                name\tbias_freq\tbias_amplitude
-                steve\t100e6\t0.1
-                nancy\t101e6\t0.2
-                george\t102e6\t0.3
-                georgina\t103e6\t0.4
-            """
-        ).strip()
-    )
-
-    s = rfmux.load_session(
-        f"""
-        !HardwareMap
-        - !Crate
-          serial: "003"
-          slots:
-            1: !CRS {{ serial: "0024" }}
-            2: !CRS {{ serial: "0025" }}
-
-        - !Wafer
-          name: some_wafer
-          hwm_resonators: !HWMResonators "{resonators.as_posix()}"
-
-        - !ChannelMappings "{str(mapping)}"
-        """
-    )
-
-    # Query the resonators, sorted by bias amplitude.
-    r1, r2, r3, r4 = (
-        s.query(rfmux.HWMResonator).order_by(rfmux.HWMResonator.bias_amplitude).all()
-    )
-
-    assert r1.name == "steve"
-    assert r1.readout_channel.module.crs.serial == "0024"
-    assert r1.readout_channel.channel == 1
-
-    assert r2.name == "nancy"
-    assert r2.readout_channel.module.crs.serial == "0025"
-    assert r2.readout_channel.channel == 1
-
-    assert r3.name == "george"
-    assert r3.readout_channel.module.crs.serial == "0024"
-    assert r3.readout_channel.channel == 2
-
-    assert r4.name == "georgina"
-    assert r4.readout_channel.module.crs.serial == "0025"
-    assert r4.readout_channel.channel == 2
 
 
 if __name__ == "__main__":

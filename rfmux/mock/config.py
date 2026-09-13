@@ -122,9 +122,14 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # A tone's nearest resonator resumes the branch it was on under
     # that tone; a tone that moved is followed in sub-steps this fine
     # (0: one step), up to this many (further is a new tone, started
-    # at rest).
+    # at rest), where one step from where it sat jumps branch.
     "branch_substep_hz": 1000.0,
     "branch_max_substeps": 64,
+    # Currents of one resonator further apart than this fraction are on
+    # different branches (the branches differ by ten times): a cached
+    # state is reused only on the tone's branch, and a step whose
+    # current jumps by more is retaken in sub-steps.
+    "branch_current_tolerance": 0.3,
 
     # -------------------------------------------------------------------------
     # Automatic KID biasing parameters
@@ -231,7 +236,7 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         "pulse_random_tau_min", "pulse_random_tau_max",
         "pulse_random_tau_logmean", "pulse_random_tau_logsigma",
         "cache_freq_step", "cache_amp_step", "cache_qp_step",
-        "branch_substep_hz",
+        "branch_substep_hz", "branch_current_tolerance",
         "tls_fractional_rms", "tls_alpha", "tls_corner_hz"
     ):
         if k in cfg and isinstance(cfg[k], str):

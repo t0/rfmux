@@ -1020,6 +1020,21 @@ class MockResonatorModel:
             self._branch_memory[self._branch_key(tone, nearest)] = (
                 float(frequency), nearest, complex(current))
 
+    def _phys(self):
+        phys = getattr(self.mock_crs, '_physics_config', {})
+        return phys if isinstance(phys, dict) else {}
+
+    def _branches_apart(self, a, b):
+        """Whether two currents of one resonator are on different
+        branches: the branches differ by ten times, adjacent points on
+        one by a fraction (branch_current_tolerance).  Currents are a
+        small fraction of Istar, so the test is relative."""
+        tol = float(self._phys().get('branch_current_tolerance', 0.3))
+        big = max(abs(a), abs(b))
+        # Under 1e-3 Istar a current changes Lk by 1e-6, the resonance
+        # by a hundredth of a linewidth: at rest, whatever the ratio.
+        return big > 1e-3 * self.Istar and abs(a - b) > tol * big
+
     def _same_branch(self, cached, tone, nearest):
         """Whether a cached state (its converged current) is on the
         branch the tone's resonator is on now.  A bifurcated resonance
@@ -1032,30 +1047,36 @@ class MockResonatorModel:
             return True
         if prev is None or prev[1] != nearest:
             return False
-        # Relative: the currents that shift a resonance by its width
-        # are a small fraction of Istar, and the branches differ by
-        # ten times, not by a fraction.
-        return abs(prev[2] - have) <= 0.3 * max(abs(have), abs(prev[2]))
+        return not self._branches_apart(prev[2], have)
 
     def _converge(self, frequency, amplitude, L, R, C, Cc, base_Lk, base_Lg,
                   tolerance, max_iterations, tone=None):
         """Converge every resonator for *tone* at *frequency*, from the
         branch the nearest one is on under it: its current when the
-        tone was last evaluated, followed from where the tone sat in
-        sub-steps of branch_substep_hz (a move of more than
-        branch_max_substeps of them is a new tone, started at rest).
-        Every other resonator starts at rest.  Returns (L, R, currents,
-        iterations) and remembers the branch."""
+        tone was last evaluated (a move of more than branch_max_substeps
+        sub-steps of branch_substep_hz is a new tone, started at rest).
+        One step from there is the answer where the current moves by a
+        fraction; where it jumps branch, the branch may have ended
+        between the two points, and only following the tone in
+        sub-steps from where it sat says where, so the step is retaken
+        that way.  Every other resonator starts at rest.  Returns (L, R,
+        currents, iterations) and remembers the branch."""
         n = len(L)
         nearest = self._cache_keys_for(frequency)[1]
-        phys = getattr(self.mock_crs, '_physics_config', {})
-        if not isinstance(phys, dict):
-            phys = {}
+        phys = self._phys()
         substep = float(phys.get('branch_substep_hz', 1000.0) or 0.0)
         max_sub = max(1, int(phys.get('branch_max_substeps', 64) or 1))
         k0 = self.mr_lekids[0]
-        currents = np.zeros(n, dtype=np.complex128)
-        points = [float(frequency)]
+
+        def solve(f, L, R, currents):
+            return jit_physics.converged_lekid_parameters(
+                float(f), amplitude, L, R, C, Cc, base_Lk, base_Lg,
+                self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
+                self.Istar, tolerance, max_iterations,
+                initial_currents=currents)
+
+        seed = np.zeros(n, dtype=np.complex128)
+        points = []
         key = self._branch_key(tone, nearest)
         prev = self._branch_memory.get(key)
         if prev is not None and prev[1] == nearest and 0 <= nearest < n:
@@ -1063,17 +1084,16 @@ class MockResonatorModel:
             steps = (int(np.ceil(abs(frequency - f_prev) / substep))
                      if substep > 0 else 1)
             if steps <= max_sub:
-                currents[nearest] = i_prev
+                seed[nearest] = i_prev
                 if steps > 1:
                     points = list(f_prev + (frequency - f_prev)
                                   * np.arange(1, steps + 1) / steps)
-        its = 0
-        for f in points:
-            L, R, currents, its = jit_physics.converged_lekid_parameters(
-                float(f), amplitude, L, R, C, Cc, base_Lk, base_Lg,
-                self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
-                self.Istar, tolerance, max_iterations,
-                initial_currents=currents)
+        L1, R1, currents, its = solve(frequency, L, R, seed.copy())
+        if points and self._branches_apart(currents[nearest], seed[nearest]):
+            currents = seed.copy()
+            for f in points:
+                L1, R1, currents, its = solve(f, L, R, currents)
+        L, R = L1, R1
         if 0 <= nearest < n:
             self._branch_memory[key] = (float(frequency), nearest,
                                         complex(currents[nearest]))

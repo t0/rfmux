@@ -99,6 +99,30 @@ def test_each_module_keeps_its_own_branches():
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
+def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_branch(monkeypatch):
+    """One seeded solve per point where the current moves smoothly (a
+    netanal, a dip search); the sub-steps only where one step from the
+    previous point lands on the other branch."""
+    m, f0 = _model()
+    calls = []
+    real = jp.converged_lekid_parameters
+
+    def counting(*a, **k):
+        calls.append(a[0])
+        return real(*a, **k)
+    monkeypatch.setattr(jp, "converged_lekid_parameters", counting)
+    far = f0 + 3e6
+    _sweep(m, [far, far + 1e4], 0.01)            # a netanal's 10 kHz step
+    assert len(calls) == 2
+    calls.clear()
+    _sweep(m, np.arange(f0 + 1e5, f0 - 1.95e5 - 1, -5e3), 0.01)
+    n_ride = len(calls)
+    calls.clear()
+    _sweep(m, [f0 - 2.1e5], 0.01)                # across the fold at -204.9 kHz
+    assert len(calls) > 1
+    assert n_ride < 2 * 60                        # 60 points, few retaken
+
+
 def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     """Inside the bistable region a tone that arrived from above is on
     the deep branch; switched off and back on at the same frequency it

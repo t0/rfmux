@@ -527,9 +527,16 @@ def converged_lekid_parameters(frequency, amplitude, L_array, *args,
           else _converged_lekid_parameters_ser)
     if initial_currents is None:
         initial_currents = np.zeros(len(L_array), dtype=np.complex128)
+    # Every argument positional: a call that leaves a defaulted one out
+    # takes numba's Python dispatch path, ten times the call.
+    damp = kwargs.pop('damp', 0.1)
+    damp_min = kwargs.pop('damp_min', 0.02)
+    damp_max = kwargs.pop('damp_max', 0.5)
+    if kwargs:
+        raise TypeError(f"unexpected arguments {sorted(kwargs)}")
     return fn(frequency, amplitude, L_array, *args,
               np.ascontiguousarray(initial_currents, dtype=np.complex128),
-              **kwargs)
+              float(damp), float(damp_min), float(damp_max))
 
 
 # ============================================================================

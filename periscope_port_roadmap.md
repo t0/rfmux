@@ -199,6 +199,32 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   opens it there. It reads the block, the fits and the bias report and
   measures nothing.
 
+* **The tuning record.** `rfmux/tuning/tuning_record.py` is both
+  directions: `tuning_rows(catalog)` builds a capture's `{channel: row}`
+  from the bias points, and `catalog_from_tuning` /
+  `multisweep_from_tuning` read them back as the catalog and the multisweep
+  they came from, through the same packer a measurement uses. The file
+  layer needed nothing: `pulse_capture/hdf5.py` types a row by value and
+  never reads a field name, and `analysis.calibration_of` reads only
+  `df_calibration`.
+
+  So Apply Bias publishes the rows and a capture taken after it records the
+  catalog's own numbers with the one sweep behind each of them; the pulse
+  list's Tuning item opens those sweeps in a read-only multisweep panel off
+  the catalog rather than off a fabricated `results_by_detector`
+  (`df_calibration.tuning_export` is gone); and
+  `record_streams.biased_channels` reads the session's newest multisweep
+  through `store.load` rather than a bare `pickle.load` of a `bias_kids`
+  export. The round trip -- catalog, rows, HDF5, rows, catalog -- is pinned
+  in `test_flow_on_standard_array.py` over sweeps measured on the standard
+  array.
+
+  The NCO is the one thing a sweep file cannot answer for: a multisweep
+  retunes it as it walks a wide array, and a catalog holds none on purpose.
+  Both paths take it from the board at the moment it matters -- the
+  recorder stamps it per module as the capture starts (`_with_board_nco`),
+  and `ApplyBiasTask` reads it back after `apply_bias` has set it.
+
 The noise lane still runs on `_prepare_export_data`'s payload and is untouched
 until it is rebuilt on the catalog; the deprecated library modules go in
 stage 5.
@@ -1048,46 +1074,17 @@ Not part of enabling the basic flow, listed so they are not lost.
   Rotated IQ display mode reads it by channel, fixing the code/channel
   mismatch by construction.
 
-* **The tuning record on the catalog, the rest of it.** `rfmux/tuning/
-  tuning_record.py` builds a capture's `{channel: row}` from the catalog's
-  bias points, and Apply Bias publishes it, so a capture taken after biasing
-  in Periscope already records the catalog's own numbers. The file layer
-  needs nothing: `pulse_capture/hdf5.py` types a row by value and never
-  reads a field name, and `analysis.calibration_of` reads only
-  `df_calibration`. What is left is the two readers that still speak the
-  `bias_kids` export:
-
-  - `catalog_from_tuning(rows, module)`, the inverse, so a capture's
-    `tuning` group opens as a `ResonatorCatalog` plus a multisweep
-    container. `app_runtime.open_tuning_window` is stubbed to say it cannot
-    yet -- it wants a container, and `pack_multisweep` needs an `nsamps` the
-    capture file does not record, so this is a small design question rather
-    than a transcription. That deletes `df_calibration.tuning_export`, whose
-    35 lines fabricate a `results_by_detector` payload, and restores the
-    pulse list's Tuning item (the four tests removed from
-    `test/pulse_capture/test_tuning_window.py` come back with it).
-  - `record_streams.biased_channels`, which does a bare `pickle.load` and
-    reads `export["bias_kids_output"]`; it becomes `store.load` plus
-    `ResonatorCatalog.from_dict(block["call_params"]["catalog"])`.
-
-  Two functions are called `tuning_rows` until that lands:
-  `rfmux.tuning.tuning_rows` takes a catalog, and
-  `df_calibration.tuning_rows` takes a `bias_kids` export. The second is the
-  one that goes.
-
-  Both are what gate stage 5's deletion of `bias_kids.py` and
-  `df_calibration.py`: main's 100G recorder imports `tuning_rows` from one
-  and `dac_scale_dbm` from the other, so those modules are no longer dead
-  ends. A round-trip test -- catalog, rows, HDF5, rows, catalog -- is the
-  contract.
-
 * **`DAC_SCALE_LABEL_OFFSET_DB`** (`algorithms/measurement/bias_kids.py`)
   arrived from main as 1.5 dB, subtracted from the board's DAC scale before
   any amplitude is labelled in dBm. No physical motivation for it is
   recorded anywhere. It is **0.0** here, so a label is the board's own
   number; if the 1.5 dB turns out to mean something, it goes back with the
   reason beside it. `BiasPoint.power_dbm` applies no offset, so the two
-  agree while it is zero.
+  agree while it is zero. It travels with the last importer of a deprecated
+  module outside those modules themselves: `tasks.DACScaleFetcher` calls
+  `bias_kids.dac_scale_dbm`, which reads the board's scale and applies the
+  offset. Move that beside `power_dbm`, which does the same arithmetic, and
+  stage 5 is free to delete `bias_kids.py` and `df_calibration.py`.
 * **`tune_resonators` front door** and a Tune button that runs the whole
   sequence with one progress bar; `simplified_tuning_flow` rewritten against
   it and run in CI.

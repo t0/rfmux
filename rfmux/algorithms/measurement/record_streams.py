@@ -33,7 +33,6 @@ import dataclasses
 import datetime
 import importlib.util
 import os
-import pickle
 import shutil
 import signal
 import sys
@@ -52,7 +51,8 @@ from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
 from ...pulse_capture.channel_keys import (describe, keys_by_module,
                                            pair_keys)
-from .df_calibration import tuning_rows
+from ...core.resonators import ResonatorCatalog
+from ...tuning import store, tuning_rows
 
 PARSER_EXIT_S = 10.0
 
@@ -91,17 +91,29 @@ PARSER_CHILD = ("import sys; from rfmux.tools import parser; "
 # ── The session folder ─────────────────────────────────────────────
 
 def latest_bias_export(session: Path, module: int) -> Optional[Path]:
-    """The newest Bias KIDs export for *module* the session lists."""
-    return latest_export(session, "bias", f"module{module}")
+    """The newest multisweep for *module* the session lists.
+
+    A multisweep is where a module's bias points live: Find Bias writes its
+    report back into the sweeps it read, so the newest one carries the
+    catalog the board was last tuned to.
+    """
+    return latest_export(session, "multisweep", f"module{module}")
 
 
 def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
-    """The channels a bias_kids export biased, and the tuning row of each
-    (``tuning_rows`` of the export, with its NCO frequency)."""
-    with open(bias_path, "rb") as f:
-        export = pickle.load(f)
-    rows = tuning_rows(export.get("bias_kids_output"),
-                       export.get("nco_frequency_hz"))
+    """The channels a multisweep's catalog is biased on, and the tuning row
+    of each.
+
+    The rows are ``tuning_rows`` of the catalog in the file. There is no NCO
+    among them: a catalog holds none on purpose, and the board is not read
+    here, so the capture's tuning record says what the sweep says and no
+    more.
+    """
+    container = store.load(bias_path)
+    block = next(iter(container.values()))
+    catalog = ResonatorCatalog.from_dict(block["call_params"]["catalog"])
+    rows = tuning_rows(catalog,
+                       nsamps=block["call_params"].get("nsamps"))
     return sorted(rows), rows
 
 
@@ -153,6 +165,32 @@ def resolve_channels(modules: List[int], spec: Optional[str],
             notes.append(f"{bias_path.name}: {len(biased)} channels, "
                          f"{calibrated(rows)} calibrated")
     return wanted, tuning, notes
+
+
+async def _with_board_nco(crs, tuning, module) -> Optional[Dict[Any, dict]]:
+    """*tuning* with each row carrying the NCO its module is playing.
+
+    The sweeps the rows come from say nothing about it -- a multisweep
+    retunes the NCO as it walks a wide array, and a catalog holds no NCO --
+    so the number is the board's, read at the moment the tones are on the
+    air for these pulses. A module that will not answer leaves its rows as
+    they are rather than failing the run.
+    """
+    if not tuning:
+        return tuning
+    stamped = {k: dict(row) if isinstance(row, dict) else row
+               for k, row in tuning.items()}
+    for m, pairs in keys_by_module(tuning, module).items():
+        try:
+            nco = await crs.get_nco_frequency(module=m)
+        except Exception:
+            continue
+        if nco is None:
+            continue
+        for _, key in pairs:
+            if isinstance(stamped.get(key), dict):
+                stamped[key]["nco_frequency_hz"] = float(nco)
+    return stamped
 
 
 def calibrated(tuning: Dict[Any, dict]) -> int:
@@ -319,6 +357,8 @@ async def record_streams(
             result.warnings.append(
                 f"{free / 1e9:.0f} GB free in {session} for a recording "
                 f"of about {need / 1e9:.0f} GB")
+
+    tuning = await _with_board_nco(crs, tuning, module)
 
     stamp = datetime.datetime.now().strftime("%H%M%S")
     host = streamer.resolve_host(crs.tuber_hostname)

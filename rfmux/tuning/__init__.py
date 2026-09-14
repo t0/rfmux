@@ -93,7 +93,8 @@ from .multisweep_amplitudes import (
     AmplitudeStep,
 )
 from . import store
-from .tuning_record import tuning_rows
+from .tuning_record import (catalog_from_tuning, multisweep_from_tuning,
+                            tuning_rows)
 from .sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
@@ -154,5 +155,7 @@ __all__ = [
     "get_amplitudes_at_iteration",
     "merge_modules",
     "pack_multisweep",
+    "catalog_from_tuning",
+    "multisweep_from_tuning",
     "tuning_rows",
 ]

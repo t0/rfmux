@@ -465,8 +465,8 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     from rfmux.tools import record
     folder = tmp_path / "session_x"
     folder.mkdir()
-    _bias_export(folder / "bias_module2_1.pkl", 2, [1, 2])
-    _bias_export(folder / "bias_module3_1.pkl", 3, [7])
+    _bias_export(folder / "multisweep_2_1.pkl", 2, [1, 2])
+    _bias_export(folder / "multisweep_3_1.pkl", 3, [7])
     seen = {}
 
     async def fake_main(serial, hostname, **kw):
@@ -486,7 +486,7 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     assert seen["module"] is None
     assert seen["channels"] == {2: [1, 2], 3: [5]}
     assert set(seen["tuning"]) == {(2, 1), (2, 2), (3, 7)}
-    assert seen["tuning"][(3, 7)]["nco_frequency_hz"] == 1.0e9
+    assert seen["tuning"][(3, 7)]["df_calibration"] == pytest.approx(7e6 - 1e5j)
     # Several modules with no ranges: each module's newest export.
     record._run(modules=[2, 3], channels=None, **common)
     assert seen["channels"] == {2: [1, 2], 3: [7]}
@@ -512,7 +512,7 @@ def test_the_command_exits_on_a_failed_run_and_after_a_warning(
     from rfmux.tools import record
     folder = tmp_path / "session_x"
     folder.mkdir()
-    _bias_export(folder / "bias_module2_1.pkl", 2, [1])
+    _bias_export(folder / "multisweep_2_1.pkl", 2, [1])
     common = dict(serial="0156", hostname=None, duration=1.0,
                   session=str(folder), session_dir=".", capture=True,
                   parser=False, fastrx=False, parser_interface=None,
@@ -539,7 +539,7 @@ def test_the_command_exits_on_a_failed_run_and_after_a_warning(
     # --bias names one export, so one module.
     with pytest.raises(click.UsageError, match="one module's export"):
         record._run(modules=[2, 3], channels=None,
-                    bias=str(folder / "bias_module2_1.pkl"), **common)
+                    bias=str(folder / "multisweep_2_1.pkl"), **common)
 
 
 def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
@@ -635,30 +635,58 @@ def test_an_existing_session_keeps_its_metadata(tmp_path):
     assert [e["filename"] for e in meta["exports"]] == ["x", "pulse_module2_1.h5"]
 
 
-def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):
+def test_newest_multisweep_for_the_module_gives_channels_and_tuning(tmp_path):
     # Written newest first: a copied folder keeps no file times, so the
     # listing's timestamp decides; a file the listing lacks is not an
     # export.
-    _bias_export(tmp_path / "bias_module2_120000.pkl", 2, [4, 5], calibrated=False,
+    _bias_export(tmp_path / "multisweep_120000.pkl", 2, [4, 5], calibrated=False,
                  timestamp="2026-09-09T12:00:00")
-    _bias_export(tmp_path / "bias_module1_110000.pkl", 1, [7],
+    _bias_export(tmp_path / "multisweep_110000.pkl", 1, [7],
                  timestamp="2026-09-09T11:00:00")
-    _bias_export(tmp_path / "bias_module2_100000.pkl", 2, [1, 2, 3],
+    _bias_export(tmp_path / "multisweep_100000.pkl", 2, [1, 2, 3],
                  timestamp="2026-09-09T10:00:00")
 
     newest = rs.latest_bias_export(tmp_path, 2)
-    assert newest.name == "bias_module2_120000.pkl"
+    assert newest.name == "multisweep_120000.pkl"
     chans, rows = rs.biased_channels(newest)
     assert chans == [4, 5] and set(rows) == {4, 5} and rs.calibrated(rows) == 0
-    chans, rows = rs.biased_channels(tmp_path / "bias_module2_100000.pkl")
+    chans, rows = rs.biased_channels(tmp_path / "multisweep_100000.pkl")
     assert chans == [1, 2, 3] and rs.calibrated(rows) == 3
-    # The row is the export's entry, keyed by its channel, with the NCO
-    # the tones were placed against.
-    assert rows[2] == {"bias_channel": 2, "df_calibration": 2e6 - 1e5j,
-                       "nco_frequency_hz": 1.0e9}
+    # A row is the bias point of the catalog's resonator on that channel:
+    # where its tone is, what drives it, and what reads it in hertz.
+    assert rows[2]["bias_frequency"] == pytest.approx(1.002e9, abs=1e3)
+    assert rows[2]["amplitude"] == 0.01
+    assert rows[2]["df_calibration"] == pytest.approx(2e6 - 1e5j)
     assert rs.latest_bias_export(tmp_path, 3) is None
-    (tmp_path / "bias_module3_130000.pkl").write_bytes(b"")
+    (tmp_path / "multisweep_130000.pkl").write_bytes(b"")
     assert rs.latest_bias_export(tmp_path, 3) is None
+
+
+@pytest.mark.asyncio
+async def test_the_rows_take_the_nco_from_the_board(tmp_path):
+    """The sweeps a row comes from say nothing about the NCO -- a
+    multisweep retunes it across a wide array, and a catalog holds none --
+    so the capture records the one the board is playing for these pulses."""
+    class _Nco:
+        async def get_nco_frequency(self, module=None):
+            return 1.0e9 + 1e6 * module
+
+    rows = {(2, 1): {"df_calibration": 1 + 0j}, (3, 4): {"df_calibration": None}}
+    out = await rs._with_board_nco(_Nco(), rows, None)
+    assert out[(2, 1)]["nco_frequency_hz"] == 1.002e9
+    assert out[(3, 4)]["nco_frequency_hz"] == 1.003e9
+    # The rows handed in are not edited.
+    assert "nco_frequency_hz" not in rows[(2, 1)]
+
+
+@pytest.mark.asyncio
+async def test_a_module_that_will_not_say_leaves_its_rows_alone():
+    class _Mute:
+        async def get_nco_frequency(self, module=None):
+            raise RuntimeError("no such module")
+
+    out = await rs._with_board_nco(_Mute(), {1: {"df_calibration": 1 + 0j}}, 2)
+    assert out == {1: {"df_calibration": 1 + 0j}}
 
 
 def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch):

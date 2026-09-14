@@ -8,7 +8,7 @@ from PyQt6 import sip
 import numpy as np
 from typing import Optional
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule
+from rfmux.tuning import AmplitudeSchedule, multisweep_from_tuning
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -1502,14 +1502,60 @@ class PeriscopeRuntime:
     def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
         """Browse the sweeps a capture's channels were tuned with.
 
-        Pending: the rows have to become a ``ResonatorCatalog`` and a
-        multisweep container before this panel can draw them, which is the
-        other half of putting the tuning record on the catalog.
+        Read-only: the board is neither consulted nor changed. The rows
+        become the catalog and the multisweep they came from, and the panel
+        draws them the way it draws any other loaded sweep -- one sweep per
+        resonator, at the amplitude it is biased at.
         """
-        self.statusBar().showMessage(
-            f"{name}: a capture's tuning cannot be opened as a multisweep yet",
-            8000)
-        return None
+        try:
+            container = multisweep_from_tuning(
+                tuning, module, module_id=self._tuning_module_id(module))
+        except (ValueError, KeyError, TypeError) as exc:
+            self.statusBar().showMessage(f"{name}: {exc}", 8000)
+            return None
+
+        block = next(iter(container.values()))
+        # The snapshots resolved back into live objects, as a loaded
+        # multisweep does it, so the panel holds the same kinds of thing
+        # however the sweeps reached it.
+        call_params = dict(block['call_params'])
+        call_params['catalog'] = ResonatorCatalog.from_dict(
+            call_params['catalog'])
+        call_params['amp'] = AmplitudeSchedule.from_dict(
+            call_params['amp_schedule'])
+
+        window_id = f"multisweep_window_{self.multisweep_window_count}"
+        self.multisweep_window_count += 1
+        panel = MultisweepPanel(
+            parent=self, target_module=module, initial_params=call_params,
+            dac_scales=dict(getattr(self, 'dac_scales', None) or {}),
+            dark_mode=self.dark_mode, is_loaded_data=True)
+        panel._hide_progress_bars()
+        panel.show_measurement(module, container)
+        panel.mark_capture_tuning()
+
+        dock = self.dock_manager.create_dock(
+            panel, f"Tuning of {name} (module {module})", window_id)
+        self.multisweep_windows[window_id] = {
+            'window': panel, 'dock': dock, 'params': call_params}
+        main_dock = self.dock_manager.get_dock("main_plots")
+        if main_dock:
+            self.tabifyDockWidget(main_dock, dock)
+        dock.show()
+        dock.raise_()
+        return panel
+
+    def _tuning_module_id(self, module: int) -> str:
+        """What to key a capture's tuning container by.
+
+        The board's own identifier when there is one, so the container reads
+        like any other; the module alone when Periscope has no board, which
+        is the review case.
+        """
+        try:
+            return self.crs.module[module].index()
+        except Exception:
+            return f"module{module}"
 
     def _create_multisweep_panel_from_loaded_data(self, load_params: dict) -> tuple:
         """

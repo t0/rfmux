@@ -87,6 +87,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.is_loaded_data = is_loaded_data       # Track if this is from loaded data
         # A file taken on another module: shown, but not something to sweep from.
         self.is_foreign_module = False
+        # A capture's tuning: one sweep per channel, with no schedule behind it.
+        self.is_capture_tuning = False
         self.spectrum_noise_data = {}
 
         self.debug_noise_data = {}
@@ -1147,10 +1149,21 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             periscope.crs, self.catalog, signals)
         self._apply_bias_task.start()
 
-    def _bias_applied(self):
-        """The tones are on the air: publish what reads them in hertz."""
+    def _bias_applied(self, nco_frequency_hz=None):
+        """The tones are on the air: publish the tuning record they make.
+
+        The rows carry the bias point of every resonator and the one sweep it
+        was read off, plus what the board and the sweep say around them -- the
+        NCO the tones went out against, the DAC scale they are labelled by, and
+        the sweep's ``nsamps``. A capture started after this records them.
+        """
         self.apply_bias_btn.setEnabled(True)
-        rows = tuning_rows(self.catalog)
+        rows = tuning_rows(
+            self.catalog,
+            nco_frequency_hz=nco_frequency_hz,
+            dac_scale_dbm=(self.dac_scales or {}).get(self.target_module),
+            nsamps=(self.module_sweeps or {}).get('call_params', {}).get('nsamps'),
+        )
         if rows:
             self.tuning_ready.emit(self.target_module, rows)
         self.bias_data_avail = True
@@ -1267,6 +1280,23 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             f"controls module {self.target_module}.")
         self.current_amp_label.setText(
             f"Module {file_module} measurement, shown but not re-runnable here.")
+
+    def mark_capture_tuning(self) -> None:
+        """Say these sweeps came out of a capture file, and stop offering to
+        re-run them.
+
+        A capture records the one sweep each channel is biased at, so there is
+        no schedule here to sweep again -- a re-run would have to invent the
+        settings the capture does not carry. Everything that reads the sweeps
+        stays: the fits, the grids, the digest.
+        """
+        self.is_capture_tuning = True
+        self.rerun_btn.setEnabled(False)
+        self.rerun_btn.setToolTip(
+            "A capture's tuning holds one sweep per channel, at the amplitude "
+            "it was biased at; re-run from the multisweep it came from.")
+        self.current_amp_label.setText(
+            f"{len(self.catalog.names())} channels, as the capture was tuned.")
 
     def _planned_sweeps_text(self) -> str:
         """How many sweeps the configured call will take, before it starts."""

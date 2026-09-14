@@ -187,12 +187,15 @@ histograms and templates come from the file. A capture still running opens
 its live panel instead. Note -- it can take some time to load a large .hdf5
 record and re-generate the template and histograms.
 
-A capture taken after Bias KIDs carries each channel's tuning: the sweep at
-the chosen amplitude, the fit, the bias point and the df calibration. The
-pulse list shows it as a **Tuning** item, one per module. Double-click it to
-browse those sweeps in a multisweep window, one sweep per resonator, with
-the detector digest a double-click away as usual. The window reads nothing
-from the board and changes nothing on it.
+A capture taken after Apply Bias carries each channel's tuning: the bias
+point off the catalog -- where the tone is, what drives it, the df
+calibration that reads it in hertz -- and the one sweep that calibration
+was read off. The pulse list shows it as a **Tuning** item, one per module.
+Double-click it to browse those sweeps in a multisweep window, one sweep
+per resonator at the amplitude it is biased at, with the detector digest a
+double-click away as usual. The window reads nothing from the board and
+changes nothing on it, and there is nothing to re-run: a capture records
+the sweep each channel is biased at, not the schedule it came from.
 
 ## Fast and dual-stream captures
 

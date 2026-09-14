@@ -1,6 +1,6 @@
 """A capture's tuning is browsed as a multisweep window: the pulse list
 carries a Tuning item per module, live or in review, and the main
-window opens the file's sweeps read-only."""
+window opens the file's sweeps as the catalog they came from."""
 
 from types import SimpleNamespace
 import numpy as np
@@ -9,20 +9,29 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
     PulseCapturePanel)
 from rfmux.tools.periscope.utils import QtWidgets  # noqa: E402
+from rfmux.tuning import tuning_rows  # noqa: E402
 from test.pulse_capture.capture_files import capture_file  # noqa: E402
 from test.qt_helpers import bare_periscope, spin  # noqa: E402
 
 
-def _row(channel, f0, amp=0.01):
+def _row(channel, f0, amp=0.01, direction="upward"):
+    """One row, through the producer a capture's rows come from."""
     f = np.linspace(f0 - 1e5, f0 + 1e5, 9)
-    return {"bias_channel": channel, "bias_frequency": f0, "frequencies": f,
-            "iq_complex": np.exp(1j * np.linspace(0, 1, 9)),
-            "sweep_amplitude": amp, "amplitude": amp, "direction": "upward",
-            "df_calibration": 2.0e6 + 0j, "dac_scale_dbm": -2.0,
-            "nco_frequency_hz": 1.0e9, "is_bifurcated": False}
+    bias = BiasPoint(frequency_hz=f0, amplitude=amp, dI_df=5e-7, dQ_df=0.0,
+                     bias_sweep={"frequencies": f,
+                                 "iq_volts": np.exp(1j * np.linspace(0, 1, 9)),
+                                 "original_center_frequency": f0,
+                                 "sweep_amplitude": amp,
+                                 "sweep_direction": direction})
+    catalog = ResonatorCatalog(
+        [Resonator(name=f"R{channel:04d}", channel=channel, bias=bias)],
+        module=2)
+    return tuning_rows(catalog, nco_frequency_hz=1.0e9,
+                       dac_scale_dbm=-2.0, nsamps=10)[channel]
 
 
 def _file(tmp_path, channels, module, tuning):
@@ -98,8 +107,47 @@ def test_without_a_main_window_the_item_says_so(qt_app, tmp_path, panel):
     assert "main window" in panel.status_label.text()
 
 
-def test_the_main_window_cannot_open_the_sweeps_yet(qt_app, monkeypatch):
-    # Pending: the rows have to become a catalog and a container first.
+def test_the_main_window_opens_the_sweeps_read_only(qt_app, monkeypatch):
     p = bare_periscope(monkeypatch)
-    assert p.open_tuning_window({3: _row(3, 1.0e9)}, 2, "tuned.h5") is None
-    assert "cannot be opened" in p.statusBar().currentMessage()
+    rows = {3: _row(3, 1.0e9), 7: _row(7, 1.1e9, amp=0.02)}
+    panel = p.open_tuning_window(rows, 2, "tuned.h5")
+    try:
+        assert panel is not None and panel.is_loaded_data
+        # The rows came back as the catalog they were built from.
+        assert sorted(r.channel for r in panel.catalog) == [3, 7]
+        assert panel.catalog.module == 2 and panel.target_module == 2
+        biased = {r.channel: r.bias for r in panel.catalog}
+        assert biased[7].amplitude == 0.02
+        assert biased[3].frequency_hz == pytest.approx(1.0e9, abs=1e3)
+        # And as the one sweep each of them is biased at.
+        [(_, by_direction)] = panel.module_sweeps["results"].items()
+        assert sorted(by_direction["upward"]) == ["R0003", "R0007"]
+        # Read-only: nothing to re-run, because there is no schedule here.
+        assert not panel.rerun_btn.isEnabled()
+        assert panel.is_capture_tuning
+        title = p.dock_manager.create_dock.call_args.args[1]
+        assert title == "Tuning of tuned.h5 (module 2)"
+    finally:
+        panel.close()
+        spin(qt_app)
+
+
+def test_a_sweep_taken_downward_is_shown_as_downward(qt_app, monkeypatch):
+    p = bare_periscope(monkeypatch)
+    rows = {3: _row(3, 1.0e9), 7: _row(7, 1.1e9, direction="downward")}
+    panel = p.open_tuning_window(rows, 2, "tuned.h5")
+    try:
+        [(_, by_direction)] = panel.module_sweeps["results"].items()
+        assert list(by_direction["upward"]) == ["R0003"]
+        assert list(by_direction["downward"]) == ["R0007"]
+    finally:
+        panel.close()
+        spin(qt_app)
+
+
+def test_rows_without_a_sweep_open_nothing(qt_app, monkeypatch):
+    p = bare_periscope(monkeypatch)
+    bare = {k: v for k, v in _row(1, 1.0e9).items()
+            if k not in ("frequencies", "iq_volts")}
+    assert p.open_tuning_window({1: bare}, 1, "x.h5") is None
+    assert "no tuning row carries a sweep" in p.statusBar().currentMessage()

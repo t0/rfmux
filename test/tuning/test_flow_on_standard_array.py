@@ -168,3 +168,82 @@ def test_the_pull_is_downward(nonlinear_fits, schedule_sweeps, standard_array_bo
         hard = pull_hz(name, TOP - 1)
         assert hard > 1e3, (name, hard)  # more than a grid step below fr
         assert hard > pull_hz(name, 1), name
+
+
+# --- the tuning record a capture stores ------------------------------------
+
+
+def test_the_tuning_record_round_trips_through_a_capture_file(
+        bias_report, standard_array_board, tmp_path):
+    """A capture stores the catalog's bias points and gives them back.
+
+    The one contract the pulse side rests on: what `tuning_rows` builds from
+    a catalog is what `catalog_from_tuning` reads back, through the file
+    format in between. Every number here was measured on the array.
+    """
+    h5py = pytest.importorskip("h5py")
+    from rfmux.pulse_capture.hdf5 import _store_tuning
+    from rfmux.tuning import catalog_from_tuning, tuning_rows
+
+    catalog = bias_report.catalog
+    rows = tuning_rows(catalog, nco_frequency_hz=1.0e9, dac_scale_dbm=-2.0,
+                       nsamps=10)
+
+    path = tmp_path / "capture.h5"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")        # every field storable as it is
+        with h5py.File(path, "w") as f:
+            for channel in rows:
+                _store_tuning(f.create_group(f"ch{channel:04d}"), rows, channel)
+
+    from rfmux.pulse_capture.hdf5 import TUNING_JSON_FIELDS
+    read_back = {}
+    with h5py.File(path) as f:
+        for channel in rows:
+            grp = f[f"ch{channel:04d}/tuning"]
+            row = {k: v for k, v in grp.attrs.items()
+                   if k != TUNING_JSON_FIELDS}
+            row.update({k: ds[()] for k, ds in grp.items()})
+            read_back[channel] = row
+
+    back = catalog_from_tuning(read_back, module=catalog.module)
+    assert back.names() == catalog.names()
+    for before, after in zip(catalog, back):
+        assert after.channel == before.channel
+        assert after.bias.frequency_hz == pytest.approx(before.bias.frequency_hz)
+        assert after.bias.amplitude == pytest.approx(before.bias.amplitude)
+        assert after.bias.df_calibration == pytest.approx(
+            before.bias.df_calibration)
+        np.testing.assert_allclose(after.bias.bias_sweep["frequencies"],
+                                   before.bias.bias_sweep["frequencies"])
+        np.testing.assert_allclose(after.bias.bias_sweep["iq_volts"],
+                                   before.bias.bias_sweep["iq_volts"])
+        assert (after.bias.bias_sweep["sweep_direction"]
+                == before.bias.bias_sweep["sweep_direction"])
+
+
+def test_a_capture_s_tuning_reads_as_the_multisweep_it_came_from(bias_report):
+    """The sweeps behind the record come back in the shape a multisweep
+    comes in, so a notebook and the GUI read them the same way."""
+    from rfmux.tuning import multisweep_from_tuning, tuning_rows
+
+    catalog = bias_report.catalog
+    rows = tuning_rows(catalog, nsamps=10)
+    container = multisweep_from_tuning(rows, catalog.module,
+                                       module_id="crs0000_rmod1")
+    block = container["crs0000_rmod1"]
+    assert block["measurement"] == "multisweep"
+    assert block["call_params"]["nsamps"] == 10
+
+    # One iteration: each resonator at the amplitude it is biased at, which
+    # is what the entries say rather than a step they share.
+    [(step, by_direction)] = block["results"].items()
+    assert step == 0
+    drawn = {name: entry for entries in by_direction.values()
+             for name, entry in entries.items()}
+    assert set(drawn) == set(catalog.names())
+    for r in catalog:
+        entry = drawn[r.name]
+        assert entry["sweep_amplitude"] == pytest.approx(r.bias.amplitude)
+        np.testing.assert_allclose(entry["iq_volts"],
+                                   r.bias.bias_sweep["iq_volts"])

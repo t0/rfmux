@@ -49,11 +49,15 @@ whether packets are flowing. For typical MKID applications the LOW truncation
 is ideal, since most of the dynamic range is consumed by having many channels
 that are each relatively small individual signals.
 
-**A session with a bias export.** The recorder needs to know about which channels
-are biased, and their tuning information in order to issue a Pulse Capture
-session in df units. It does this by reading from the session's newest Bias KIDs 
-export for each module, and stores each channel's tuning (the sweep at the chosen 
-amplitude, the fit, the bias point, the df calibration) with its pulses.
+**A session with a biased multisweep.** The recorder needs to know about which
+channels are biased, and their tuning information in order to issue a Pulse
+Capture session in df units. It does this by reading the session's newest
+multisweep for each module -- Find Bias writes its report back into the sweeps
+it read, so the catalog in that file says where each tone is and what reads it
+in hertz -- and stores each channel's tuning (the bias point, the df
+calibration, and the one sweep it was read off) with its pulses. The NCO comes
+from the board as the recording starts, because a multisweep retunes it across
+a wide array and a catalog holds none.
 
 Tune in Periscope with a session active, or name channel ranges by hand to bypass this.
 If bypassed the df and tuning fields will be missing, and Pulse Capture triggering will
@@ -175,9 +179,9 @@ channel for a run across modules. Any capture file opens that way with
 session browser.
 
 The pulse list carries a **Tuning** item, one per module, for a capture
-taken after Bias KIDs. Double-click it to browse the sweeps the channels
-were tuned with in a multisweep window, one sweep per resonator with its
-probe amplitude in dBm, the detector digest a double-click away. That
+taken after Apply Bias. Double-click it to browse the sweeps the channels
+were tuned with in a multisweep window, one sweep per resonator at the
+amplitude it is biased at, the detector digest a double-click away. That
 window reads nothing from the board and changes nothing on it.
 
 ## 6. The viewer

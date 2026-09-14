@@ -668,7 +668,7 @@ class FindBiasTask(QtCore.QThread):
 
 
 class ApplyBiasSignals(QObject):
-    completed = pyqtSignal()
+    completed = pyqtSignal(object)      # the NCO the tones went out against
     error = pyqtSignal(str)
 
 
@@ -676,7 +676,9 @@ class ApplyBiasTask(QtCore.QThread):
     """Programs a catalog's bias points onto the board.
 
     One ``crs.apply_bias`` call and nothing else: which NCO to use, and putting
-    the frequencies on the tone grid, are the driver's.
+    the frequencies on the tone grid, are the driver's. The NCO it settled on
+    is read back afterwards, because that is a fact about the board rather
+    than about the catalog and the tuning record wants it.
     """
 
     def __init__(self, crs, catalog, signals: ApplyBiasSignals):
@@ -690,13 +692,16 @@ class ApplyBiasTask(QtCore.QThread):
         asyncio.set_event_loop(loop)
         try:
             loop.run_until_complete(self.crs.apply_bias(self.catalog))
+            nco_hz = loop.run_until_complete(
+                self.crs.get_nco_frequency(module=self.catalog.module))
         except Exception as e:
             traceback.print_exc(file=sys.stderr)
             self.signals.error.emit(f"{type(e).__name__}: {e}")
             return
         finally:
             loop.close()
-        self.signals.completed.emit()
+        self.signals.completed.emit(
+            None if nco_hz is None else float(nco_hz))
 
 
 class CRSInitializeTask(QRunnable):

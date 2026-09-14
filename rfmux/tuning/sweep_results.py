@@ -123,7 +123,10 @@ def _call_params(
         "names": list(names) if names is not None else None,
         "span_hz": float(span_hz),
         "npoints_per_sweep": int(npoints_per_sweep),
-        "nsamps": int(nsamps),
+        # None where the sweep came from somewhere that does not record it --
+        # a capture file's tuning group. Absent, rather than a number nothing
+        # measured.
+        "nsamps": int(nsamps) if nsamps is not None else None,
         "module": requested_module,
     }
 

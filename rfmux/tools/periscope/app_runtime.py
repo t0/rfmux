@@ -12,6 +12,7 @@ from rfmux.tuning import AmplitudeSchedule, multisweep_from_tuning
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
+    convert_dacunits_to_dbm,
 )
 from ... import streamer as _streamer
 from ...pulse_capture.sources import (
@@ -1750,7 +1751,7 @@ class PeriscopeRuntime:
                     if amp is None:
                         amplitudes.append(0)
                     else:
-                        amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
+                        amp_dmb = convert_dacunits_to_dbm(amp, dac_scale_for_module)
                         amplitudes.append(amp_dmb)
     
                     nco = asyncio.run(crs.get_nco_frequency(module = self.module))

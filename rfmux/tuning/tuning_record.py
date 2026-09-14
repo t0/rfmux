@@ -125,9 +125,9 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
     in different directions land in the direction they were measured in.
 
     Goes through the same packer a measurement does, so what comes back is
-    a container and not a shape that resembles one. ``nsamps`` is
-    provenance the file may not carry; it reaches ``call_params`` as
-    whatever the rows say, or None.
+    a container and not a shape that resembles one. ``nsamps`` and
+    ``dac_scale_dbm`` are provenance the file may not carry; they reach the
+    container as whatever the rows say, or None.
 
     Raises:
         ValueError: if no row carries a sweep. There is nothing to draw,
@@ -135,7 +135,7 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
     """
     catalog = catalog_from_tuning(rows, module)
     by_direction: Dict[str, Dict[str, dict]] = {}
-    npoints, nsamps = 0, None
+    npoints, nsamps, dac_scale = 0, None, None
     for r in catalog:
         sweep = r.bias.bias_sweep
         if sweep is None:
@@ -158,7 +158,11 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
         }
         by_direction.setdefault(entry["sweep_direction"], {})[r.name] = entry
         npoints = max(npoints, frequencies.size)
-        nsamps = nsamps or (rows.get(r.channel) or {}).get("nsamps")
+        row = rows.get(r.channel) or {}
+        nsamps = nsamps or row.get("nsamps")
+        # Tested against None rather than truthiness: 0.0 dBm is a scale.
+        if dac_scale is None:
+            dac_scale = row.get("dac_scale_dbm")
 
     if not by_direction:
         raise ValueError("no tuning row carries a sweep to show")
@@ -173,6 +177,7 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
         npoints_per_sweep=npoints,
         nsamps=nsamps,
         catalog=catalog,
+        dac_scale_dbm=dac_scale,
     )
 
 

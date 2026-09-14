@@ -8,11 +8,13 @@ and readers that refuse the container rather than walking it as if it were one
 module's output.
 """
 
+import math
 import pickle
 
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
@@ -186,6 +188,34 @@ def test_a_sweep_of_any_width_is_a_multisweep():
     for result in (swept()[MODULE_ID], packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 3))):
         assert result["measurement"] == "multisweep"
         assert result["schema_version"] == RESULTS_SCHEMA_VERSION
+
+
+# ─── what the drive was measured against ──────────────────────────────────────
+
+
+def test_the_dac_scale_sits_beside_the_module_and_not_in_call_params():
+    """It is a fact about the board at measurement time, not something the
+    caller asked for, and one number per module rather than one per sweep."""
+    result = packed(dac_scale_dbm=-0.5)
+
+    assert result["dac_scale_dbm"] == -0.5
+    assert "dac_scale_dbm" not in result["call_params"]
+
+
+def test_a_scale_the_board_did_not_report_is_recorded_as_none():
+    """Present and None, so a reader finds out that it is not known rather
+    than that the key is missing."""
+    assert packed(dac_scale_dbm=None)["dac_scale_dbm"] is None
+
+
+def test_the_scale_turns_a_recorded_amplitude_into_a_power():
+    """Why it is stored at all: without it an amplitude in a file cannot be
+    stated as a power by anything that reads the file later."""
+    result = packed(dac_scale_dbm=1.0)
+    amplitude = result["results"][0]["upward"]["R0001"]["sweep_amplitude"]
+
+    assert convert_dacunits_to_dbm(amplitude, result["dac_scale_dbm"]) == \
+        pytest.approx(1.0 + 20.0 * math.log10(amplitude))
 
 
 # ─── the module is the outermost key, even when there is one ──────────────────

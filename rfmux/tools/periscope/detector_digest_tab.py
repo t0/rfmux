@@ -27,11 +27,11 @@ from .amplitude_colorbar import AmplitudeColorBar
 from .fit_display_toolbar import FitDisplayToolbar
 from .layouts import FlowLayout, labelled
 from .multisweep_grid_helpers import (
-    MODEL_LINE_WIDTH, iq_axis_labels, magnitude_axis_labels, model_in_counts,
+    MODEL_LINE_WIDTH, model_in_counts,
     plot_iq, plot_magnitude, si)
 from .utils import (
     AMPLITUDE_COLORMAP_THRESHOLD, ClickableViewBox, TABLEAU10_COLORS,
-    UnitConverter, square_axes)
+    UnitConverter, iq_axis_labels, magnitude_axis_labels, square_axes)
 
 #: The model curve's colour on the bias plot. Not the foreground, as the Fit
 #: Results grid draws it: there the model lies over traces of every drive,
@@ -209,7 +209,7 @@ class DetectorDigestTab(QtWidgets.QWidget):
         self._legend(plot_item)
         plot_magnitude(plot_item, self._traces, self._amplitude_to_color,
                        self._foreground(), self._unit_mode, self._normalize,
-                       self._legend_labels(), self._bias)
+                       self._legend_labels(), self._bias, self._dac_scale)
         magnitude_axis_labels(plot_item, self._unit_mode, self._normalize)
 
     def _sweep_title(self) -> str:
@@ -223,8 +223,8 @@ class DetectorDigestTab(QtWidgets.QWidget):
         self._legend(plot_item)
         plot_iq(plot_item, self._traces, self._amplitude_to_color,
                 self._foreground(), self._unit_mode, self._normalize,
-                self._legend_labels(), self._bias)
-        iq_axis_labels(plot_item, self._unit_mode)
+                self._legend_labels(), self._bias, self._dac_scale)
+        iq_axis_labels(plot_item, self._unit_mode, self._normalize)
         square_axes(plot_item)
 
     def _draw_bias_sweep(self, plot, model) -> None:
@@ -246,7 +246,7 @@ class DetectorDigestTab(QtWidgets.QWidget):
         self._legend(plot_item)
         plot_magnitude(plot_item, traces, self._amplitude_to_color,
                        self._foreground(), self._unit_mode, self._normalize,
-                       self._labels_for(traces), self._bias)
+                       self._labels_for(traces), self._bias, self._dac_scale)
         if model is not None:
             label = f"{model.capitalize()} fit"
             for _step, direction, _amplitude, sweep in traces:
@@ -254,7 +254,8 @@ class DetectorDigestTab(QtWidgets.QWidget):
                     offsets, curve = model_in_counts(sweep, model)
                 except (ValueError, KeyError):
                     continue  # no fit of this model, or one that did not converge
-                plot_item.plot(offsets, self._on_measurement_axis(np.abs(curve), sweep),
+                plot_item.plot(offsets,
+                               self._on_sweep_axis(np.abs(curve), sweep),
                                pen=self._model_pen(direction), name=label)
                 # One entry for the model, however many of them are drawn: the
                 # drives are already named, and the model is the other kind of
@@ -262,18 +263,15 @@ class DetectorDigestTab(QtWidgets.QWidget):
                 label = None
         magnitude_axis_labels(plot_item, self._unit_mode, self._normalize)
 
-    def _on_measurement_axis(self, magnitude, sweep):
-        """A model's magnitude, in counts, put on the axis the sweep is drawn on.
+    def _on_sweep_axis(self, magnitude, sweep):
+        """A model's magnitude, in counts, put on the axis its sweep is drawn on.
 
-        Converted with the measurement in front of it, so that a normalized
-        plot divides the model by the measurement's own first point — the
-        reference :func:`plot_magnitude` used — rather than by the model's.
+        The same conversion the measurement got, at the same drive, which is
+        what makes the model land on the trace it was fitted to.
         """
-        counts = np.asarray(sweep['iq_counts'])
-        both = UnitConverter.convert_amplitude(
-            np.concatenate([np.abs(counts), magnitude]), counts,
-            self._unit_mode, normalize=self._normalize)
-        return both[len(counts):]
+        return UnitConverter.convert_amplitude(
+            magnitude, self._unit_mode, normalize=self._normalize,
+            drive=sweep['sweep_amplitude'], dac_scale=self._dac_scale)
 
     def _legend_labels(self):
         """Drive labels for the two plots that draw every sweep.

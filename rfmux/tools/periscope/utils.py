@@ -119,6 +119,13 @@ SWEEP_DIRECTIONS = ("upward", "downward")
 
 # Multisweep defaults
 
+#: Resonators drawn on one grid page, and how many of them share a row. A
+#: batch of 20 in rows of 5 fills a laptop screen without the subplots
+#: becoming too small to read a lineshape off; the panel's Subplots spinner
+#: overrides the first of them.
+DEFAULT_SUBPLOTS = 20
+DEFAULT_SUBPLOT_COLUMNS = 5
+
 # How long a transient status message stays in a panel's toolbar.
 STATUS_MESSAGE_MS = 8000
 
@@ -200,6 +207,8 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     spectrum_from_slow_tod,
     convert_roc_to_volts,
     convert_roc_to_dbm,
+    convert_dacunits_to_dbm,
+    convert_dacunits_to_volts,
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
@@ -406,52 +415,119 @@ def mode_title(mode: str) -> str:
     }
     return mode_titles.get(mode, mode)
 
+# ───────────────────── Magnitude and IQ axis labels ─────────────────────
+
+
+def iq_unit_mode(unit_mode):
+    """The units an IQ loop is drawn in, for a panel showing *unit_mode*.
+
+    A loop in log power is not a loop, so dBm draws the volts that power was
+    computed from. Counts draw counts.
+    """
+    return 'counts' if unit_mode == 'counts' else 'volts'
+
+
+def magnitude_axis_labels(plot_item, unit_mode, normalize, *,
+                          frequency_offset=True):
+    """Label a magnitude-against-frequency plot for what it is drawing.
+
+    Normalized, the quantity is a transmission and not a received power:
+    |S21| against the drive, dimensionless in volts and in dB in dBm. In
+    counts it is counts per unit drive, which is |S21| times a gain nothing
+    here knows -- so the axis says counts, and says what they are over.
+
+    *frequency_offset* labels the bottom axis as the grids draw it, either
+    side of where a sweep was centred. A netanal draws absolute frequency and
+    labels its own.
+    """
+    if normalize:
+        if unit_mode == "dbm":
+            plot_item.setLabel('left', '|S21|', units='dB')
+        elif unit_mode == "volts":
+            plot_item.setLabel('left', '|S21|')
+        else:
+            plot_item.setLabel('left', 'Magnitude', units='Counts / drive')
+    elif unit_mode == "counts":
+        plot_item.setLabel('left', 'Magnitude', units='Counts')
+    elif unit_mode == "dbm":
+        plot_item.setLabel('left', 'Power', units='dBm')
+    elif unit_mode == "volts":
+        plot_item.setLabel('left', 'Magnitude', units='V')
+    if frequency_offset:
+        plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+
+
+def iq_axis_labels(plot_item, unit_mode, normalize=False):
+    """Label an IQ loop plot for what it is drawing.
+
+    dBm has no loop to draw, so the panel's dBm draws volts here and the axis
+    says volts -- see :func:`iq_unit_mode`.
+    """
+    if normalize:
+        i_label, q_label = 'I / drive', 'Q / drive'
+        units = 'Counts / drive' if iq_unit_mode(unit_mode) == 'counts' else None
+    else:
+        i_label, q_label = 'I (Real)', 'Q (Imaginary)'
+        units = 'Counts' if iq_unit_mode(unit_mode) == 'counts' else 'V'
+    plot_item.setLabel('left', q_label, units=units)
+    plot_item.setLabel('bottom', i_label, units=units)
+
+
 # ───────────────────────── Unit Conversion ─────────────────────────
 class UnitConverter:
     """
     Utility class for converting between different units.
     """
     @staticmethod
-    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        if normalized_amplitude <= 0: return -np.inf
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        v_peak = normalized_amplitude * v_peak_max
-        v_rms = v_peak / np.sqrt(2.0)
-        power_w = v_rms**2 / resistance
-        power_mw = power_w * 1000
-        return 10 * np.log10(power_mw)
+    def can_normalize(unit_mode: str, drive: Optional[float],
+                      dac_scale: Optional[float]) -> bool:
+        """Whether a trace driven at *drive* can be stated against its drive.
+
+        The drive itself is always needed. Saying it in volts or in dBm needs
+        the module's DAC scale as well, because a drive is a fraction of full
+        scale and nothing else says what full scale is worth. Counts do not:
+        the drive is already the divisor.
+
+        Asked before the conversion and before the axis is labelled, so that
+        what a plot says it is showing is what it is showing.
+        """
+        if drive is None or not np.isfinite(drive) or drive <= 0:
+            return False
+        return unit_mode == "counts" or dac_scale is not None
 
     @staticmethod
-    def dbm_to_normalize(dbm: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        power_mw = 10**(dbm/10)
-        power_w = power_mw / 1000
-        v_rms = np.sqrt(power_w * resistance)
-        v_peak = v_rms * np.sqrt(2.0)
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        return v_peak / v_peak_max
+    def convert_amplitude(amps: np.ndarray, unit_mode: str = None,
+                          current_mode: str = "counts", *,
+                          normalize: bool = False,
+                          drive: Optional[float] = None,
+                          dac_scale: Optional[float] = None) -> np.ndarray:
+        """A measured magnitude in the units asked for, against its drive.
 
-    @staticmethod
-    def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None, 
-                          current_mode: str = "counts", normalize: bool = False) -> np.ndarray:
-        mode_to_use = unit_mode if unit_mode is not None else current_mode # Renamed mode
-        if mode_to_use == "counts": result = amps.copy()
-        elif mode_to_use == "volts": result = convert_roc_to_volts(amps) # from rfmux.core.transferfunctions
-        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)   # from rfmux.core.transferfunctions
-        else: result = amps.copy()
-            
-        if normalize and len(result) > 0:
-            ref_val = result[0]
-            if mode_to_use == "dbm":
-                if np.isfinite(ref_val): result = result - ref_val
-            else:
-                if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
-        return result
+        Normalizing divides the measurement by what drove it — in dBm,
+        subtracts it — so the trace is a transmission rather than a received
+        power, and sweeps taken at different amplitudes land on one axis
+        instead of stacked by drive.
+
+        *drive* is the tone amplitude in normalized DAC units, as a sweep's
+        ``sweep_amplitude`` gives it, and *dac_scale* the module's full scale
+        in dBm. A request to normalize that :meth:`can_normalize` would refuse
+        is ignored, so a caller that asks both questions the same way cannot
+        draw one thing and label another.
+        """
+        mode_to_use = unit_mode if unit_mode is not None else current_mode
+        if mode_to_use == "volts": result = convert_roc_to_volts(amps)
+        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)
+        else: result = np.asarray(amps).copy()
+
+        if not (normalize and len(result)
+                and UnitConverter.can_normalize(mode_to_use, drive, dac_scale)):
+            return result
+
+        if mode_to_use == "dbm":
+            return result - convert_dacunits_to_dbm(drive, dac_scale)
+        if mode_to_use == "volts":
+            return result / convert_dacunits_to_volts(drive, dac_scale)
+        return result / drive
 
     @staticmethod
     def format_probe_label(amp_value: float, unit_mode: str = "dbm",
@@ -472,17 +548,14 @@ class UnitConverter:
         """
         if unit_mode == "dbm":
             if dac_scale is not None:
-                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
-                return f"{dbm_val:.1f} dBm"
+                dbm = convert_dacunits_to_dbm(amp_value, dac_scale)
+                return f"{dbm:.1f} dBm"
             return f"{amp_value:.2e} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
-                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
-                power_watts = 10 ** ((dbm_val - 30) / 10)
-                voltage_rms = np.sqrt(power_watts * 50.0)
-                voltage_peak = voltage_rms * np.sqrt(2)
-                return UnitConverter._format_si_volts(voltage_peak) + "pk"
+                volts = convert_dacunits_to_volts(amp_value, dac_scale)
+                return UnitConverter._format_si_volts(volts) + "pk"
             return f"{amp_value:.2e} (Norm)"
 
         # counts or anything else

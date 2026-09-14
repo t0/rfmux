@@ -86,7 +86,17 @@ __all__ = [
 #    could only ever be 0 and the direction — two constants a reader had to type
 #    and could get wrong. The direction is still recorded, beside the arrays as
 #    'sweep_direction', where it says what was measured rather than indexes it.
-RESULTS_SCHEMA_VERSION = 7
+#
+# 8: a module's output records the DAC scale the board reported when the
+#    measurement was taken, in 'dac_scale_dbm' beside 'module'. A sweep
+#    amplitude is a fraction of DAC full scale, so without it a recorded
+#    amplitude cannot be stated as a power or a voltage at all -- the reader
+#    had to go back to a board, which is the wrong board or no board by the
+#    time a file is read. Beside 'module' rather than in 'call_params',
+#    because nobody asked for it, and once per module rather than on every
+#    sweep entry, because it is one number per measurement and two copies of
+#    it could disagree. None where the board reported none.
+RESULTS_SCHEMA_VERSION = 8
 
 
 # The directions a sweep can run in. Here rather than in either driver, because
@@ -138,6 +148,7 @@ def _packed(
     results: dict,
     *,
     measurement: str,
+    dac_scale_dbm: float | None,
 ) -> dict:
     """One module's output, in the container every driver returns.
 
@@ -152,12 +163,20 @@ def _packed(
     keys by amplitude iteration, a netanal is the trace — so the readers below
     need a way to tell them apart that is not sniffing ``call_params`` for
     ``span_hz``, which is the kind of test this shape exists to delete.
+
+    *dac_scale_dbm* is what DAC full scale was worth on this module when the
+    measurement was taken. Every amplitude in the output is a fraction of it,
+    so it is what turns one into a power or a voltage — see
+    :func:`rfmux.core.transferfunctions.convert_dacunits_to_dbm`. None
+    when the board reported none, which is an answer rather than a failure.
     """
     return {
         module_id: {
             "schema_version": RESULTS_SCHEMA_VERSION,
             "measurement": measurement,
             "module": int(module),
+            "dac_scale_dbm": (
+                None if dac_scale_dbm is None else float(dac_scale_dbm)),
             "call_params": call_params,
             "results": results,
         }
@@ -178,6 +197,7 @@ def pack_multisweep(
     center_frequencies: Sequence[float] | None = None,
     names: Sequence[str] | None = None,
     requested_module: int | None = None,
+    dac_scale_dbm: float | None = None,
 ) -> dict:
     """Assemble what ``multisweep`` returns.
 
@@ -207,11 +227,14 @@ def pack_multisweep(
             rather than None. Snapshotted with ``to_dict``, which is the whole
             catalog and not a summary of it, so the array a sweep was taken
             from comes back off a file intact.
+        dac_scale_dbm: what DAC full scale was worth on this module, read from
+            the board as the sweep was taken. Every ``sweep_amplitude`` below
+            is a fraction of it.
 
     Returns:
         dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``measurement``, ``module``, ``call_params`` and
-        ``results``.
+        ``schema_version``, ``measurement``, ``module``, ``dac_scale_dbm``,
+        ``call_params`` and ``results``.
 
         ``results`` is keyed by amplitude iteration, numbered from 0 in the
         order measured, and an iteration holds one entry per direction swept
@@ -243,6 +266,7 @@ def pack_multisweep(
         call_params,
         {int(i): dict(by_direction) for i, by_direction in sweeps.items()},
         measurement="multisweep",
+        dac_scale_dbm=dac_scale_dbm,
     )
 
 
@@ -286,6 +310,7 @@ def pack_netanal(
     rotate_phase_to_0: bool,
     sweep_direction: str,
     requested_module=None,
+    dac_scale_dbm: float | None = None,
 ) -> dict:
     """Assemble what ``take_netanal`` returns.
 
@@ -309,11 +334,14 @@ def pack_netanal(
             is the list itself for a call that fanned out over several. Recorded
             as-is, because *call_params* says what was asked for and not what
             was worked out from it.
+        dac_scale_dbm: what DAC full scale was worth on this module, read from
+            the board as the netanal was taken. The trace's ``sweep_amplitude``
+            is a fraction of it.
 
     Returns:
         dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``measurement``, ``module``, ``call_params`` and
-        ``results``.
+        ``schema_version``, ``measurement``, ``module``, ``dac_scale_dbm``,
+        ``call_params`` and ``results``.
     """
     call_params = {
         "amp": float(amp),
@@ -334,6 +362,7 @@ def pack_netanal(
         call_params,
         dict(trace),
         measurement="netanal",
+        dac_scale_dbm=dac_scale_dbm,
     )
 
 

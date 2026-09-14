@@ -41,14 +41,13 @@ from __future__ import annotations
 import copy as _copy
 import csv
 import io
-import math
 from dataclasses import dataclass, field, fields, replace
 
 from collections.abc import Mapping
 from typing import Callable, Iterable, Iterator, Literal, Sequence
 
 from ..resonator_names import syllabic_names
-from .transferfunctions import BASE_FREQUENCY
+from .transferfunctions import BASE_FREQUENCY, convert_dacunits_to_dbm
 
 
 def on_grid(frequency_hz: float) -> float:
@@ -211,7 +210,8 @@ class BiasPoint:
         return 1.0 / d if abs(d) > 0 else None
 
     def power_dbm(self, dac_scale_dbm: float) -> float:
-        return dac_scale_dbm + 20.0 * math.log10(self.amplitude)
+        """What this tone is driven at, against the module's DAC full scale."""
+        return float(convert_dacunits_to_dbm(self.amplitude, dac_scale_dbm))
 
     def quantize(self) -> BiasPoint:
         """Round the frequency onto the hardware tone grid.

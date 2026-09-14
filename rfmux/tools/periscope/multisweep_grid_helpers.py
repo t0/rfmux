@@ -12,7 +12,8 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtCore, QtWidgets
 
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from rfmux.core.transferfunctions import (convert_roc_to_volts,
+                                          convert_dacunits_to_volts)
 from rfmux.tuning.bias import (
     bifurcated_by_derivative, iq_arc_speed, iq_derivatives, normalized_arc_speed)
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
@@ -21,6 +22,8 @@ from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,
     UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
     ClickableViewBox, square_axes, UnitConverter,
+    DEFAULT_SUBPLOT_COLUMNS, iq_axis_labels, iq_unit_mode,
+    magnitude_axis_labels,
 )
 
 
@@ -36,7 +39,8 @@ def sweep_iq(sweep, unit_mode):
     which carries counts and not yet the volts the finished entry also holds --
     draws on the same axes as a finished one.
     """
-    return sweep['iq_counts'] if unit_mode == 'counts' else convert_roc_to_volts(sweep['iq_counts'])
+    return (sweep['iq_counts'] if iq_unit_mode(unit_mode) == 'counts'
+            else convert_roc_to_volts(sweep['iq_counts']))
 
 
 def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, batch_size,
@@ -44,7 +48,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                       prev_btn=None, next_btn=None, batch_label=None, widget_cache=None,
                       dac_scale=None, show_legend=True, fit_model='skewed',
                       bias_by_name=None, bias_settings=None,
-                      on_resonator_double_click=None):
+                      on_resonator_double_click=None,
+                      columns=DEFAULT_SUBPLOT_COLUMNS):
     """
     Update a grid layout with one subplot per resonator.
 
@@ -55,6 +60,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         plot_type: 'magnitude', 'iq', 'fit', 'bias' or 'frequency'
         current_batch: Current batch index (0-based)
         batch_size: Number of resonators per batch
+        columns: Subplots per row
         amplitude_to_color: Dict mapping drive amplitude to colour
         dark_mode: Boolean for theme
         unit_mode: Unit mode for magnitude display ('counts', 'dbm', 'volts')
@@ -90,9 +96,11 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
     if not batch_names:
         return
 
-    # Calculate grid dimensions — use ceil(sqrt(n)) for a balanced grid
+    # A fixed number of columns, so a subplot is the same size whichever page
+    # of a batch is on screen. Narrowed for a batch that does not fill a row,
+    # which would otherwise be one plot beside four gaps.
     num_plots = len(batch_names)
-    ncols = max(1, int(np.ceil(np.sqrt(num_plots))))
+    ncols = max(1, min(columns, num_plots))
     nrows = int(np.ceil(num_plots / ncols))
 
     # Theme colors
@@ -182,7 +190,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
             if plot_type == 'magnitude':
                 plot_magnitude(plot_item, traces, amplitude_to_color,
-                               pen_color, unit_mode, normalize, labels, bias)
+                               pen_color, unit_mode, normalize, labels, bias,
+                               dac_scale)
                 magnitude_axis_labels(plot_item, unit_mode, normalize)
             elif plot_type == 'bias':
                 _plot_bifurcation(plot_item, traces, amplitude_to_color,
@@ -197,12 +206,16 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             elif plot_type == 'fit':
                 _plot_fit(plot_item, traces, amplitude_to_color, pen_color,
                           fit_model, labels)
-                plot_item.setLabel('left', 'Normalized Magnitude')
+                # The fitters' normalization, not the drive's: a fit works on
+                # the trace divided by its own off-resonance level, and this
+                # tab draws measurement and model together in those units.
+                plot_item.setLabel('left', 'Magnitude / off-resonance level')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             else:  # IQ
                 plot_iq(plot_item, traces, amplitude_to_color,
-                        pen_color, unit_mode, normalize, labels, bias)
-                iq_axis_labels(plot_item, unit_mode)
+                        pen_color, unit_mode, normalize, labels, bias,
+                        dac_scale)
+                iq_axis_labels(plot_item, unit_mode, normalize)
                 square_axes(plot_item)
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
@@ -270,27 +283,6 @@ def _named_double_click(view_box, event, callback):
         return
     callback(name)
     event.accept()
-
-
-def magnitude_axis_labels(plot_item, unit_mode, normalize):
-    """Label a magnitude-against-frequency plot for the units it is drawn in."""
-    if normalize:
-        units = 'dB' if unit_mode == "dbm" else ''
-        plot_item.setLabel('left', 'Normalized Magnitude', units=units)
-    elif unit_mode == "counts":
-        plot_item.setLabel('left', 'Magnitude', units='Counts')
-    elif unit_mode == "dbm":
-        plot_item.setLabel('left', 'Power', units='dBm')
-    elif unit_mode == "volts":
-        plot_item.setLabel('left', 'Magnitude', units='V')
-    plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
-
-
-def iq_axis_labels(plot_item, unit_mode):
-    """Label an IQ loop plot for the units it is drawn in."""
-    iq_units = 'Counts' if unit_mode == 'counts' else 'V'
-    plot_item.setLabel('left', 'Q (Imaginary)', units=iq_units)
-    plot_item.setLabel('bottom', 'I (Real)', units=iq_units)
 
 
 def _add_legend(plot_item, pen_color):
@@ -377,7 +369,7 @@ def _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,
 
 def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
                    unit_mode='dbm', normalize=False, legend_labels=None,
-                   bias=None):
+                   bias=None, dac_scale=None):
     """Plot |S21| against frequency offset for one resonator.
 
     Args:
@@ -386,10 +378,13 @@ def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         amplitude_to_color: Dict {amplitude: color}
         pen_color: Fallback pen color
         unit_mode: 'counts', 'dbm', or 'volts'
-        normalize: Whether to normalize traces
+        normalize: Whether to state each sweep against the drive it was taken
+            at, rather than as the power that came back
         legend_labels: Optional {(step, direction, amplitude): label}
         bias: Optional BiasFinding; its step is drawn thick and its frequency
             gets a line
+        dac_scale: the module's DAC full scale in dBm, which normalizing to
+            volts or dB needs and normalizing to counts does not
     """
     # A legend for the bias line even when the colorbar is carrying the drives:
     # the line is the one thing on this plot that is not a measurement, and it
@@ -403,7 +398,8 @@ def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         if len(counts) == 0:
             continue
         magnitude = UnitConverter.convert_amplitude(
-            np.abs(counts), counts, unit_mode, normalize=normalize)
+            np.abs(counts), unit_mode, normalize=normalize,
+            drive=amplitude, dac_scale=dac_scale)
         pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
                          chosen=_biased_at(bias, step))
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
@@ -838,7 +834,8 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
 
 
 def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
-            unit_mode='dbm', normalize=False, legend_labels=None, bias=None):
+            unit_mode='dbm', normalize=False, legend_labels=None, bias=None,
+            dac_scale=None):
     """Plot the IQ loops of one resonator.
 
     Args:
@@ -847,14 +844,22 @@ def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
         amplitude_to_color: Dict {amplitude: color}
         pen_color: Fallback pen color
         unit_mode: 'counts' draws raw IQ, anything else the entry's volts
-        normalize: Whether to normalize IQ by max magnitude
+        normalize: Whether to divide each loop by the drive it was taken at
         legend_labels: Optional {(step, direction, amplitude): label}
         bias: Optional BiasFinding; its step is drawn thick and the point the
             tone sits at is marked on it
+        dac_scale: the module's DAC full scale in dBm, which normalizing volts
+            needs and normalizing counts does not
 
     A loop's axis is I, not frequency, so the bias frequency cannot be a
     vertical line here as it is on the magnitude plot. It is the point of the
     loop the tone will sit on, which is what the marker is.
+
+    Every loop is divided by its own drive, so the loops keep their sizes
+    relative to each other: a resonator driven harder really does return a
+    bigger loop, and dividing each by its own peak -- which is what a plot
+    normalized to itself does -- would throw away the comparison the grid is
+    drawn for.
     """
     if legend_labels:
         _add_legend(plot_item, pen_color)
@@ -865,10 +870,11 @@ def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
             continue
 
         i_vals, q_vals = np.real(iq), np.imag(iq)
-        if normalize:
-            peak = np.max(np.abs(iq))
-            if peak > 0:
-                i_vals, q_vals = i_vals / peak, q_vals / peak
+        if normalize and UnitConverter.can_normalize(
+                iq_unit_mode(unit_mode), amplitude, dac_scale):
+            divisor = (amplitude if iq_unit_mode(unit_mode) == 'counts'
+                       else convert_dacunits_to_volts(amplitude, dac_scale))
+            i_vals, q_vals = i_vals / divisor, q_vals / divisor
 
         chosen = _biased_at(bias, step)
         pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,

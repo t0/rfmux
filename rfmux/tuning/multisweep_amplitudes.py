@@ -65,6 +65,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..core.resonators import ResonatorCatalog
+from ..core.transferfunctions import convert_dacunits_to_dbm
 
 __all__ = [
     "AmplitudeSchedule",
@@ -633,8 +634,10 @@ class AmplitudeSchedule:
             },
         }
         if dac_scale_dbm is not None:
-            described["power_dbm_min"] = dac_scale_dbm + 20.0 * math.log10(min(flat))
-            described["power_dbm_max"] = dac_scale_dbm + 20.0 * math.log10(max(flat))
+            described["power_dbm_min"] = float(
+                convert_dacunits_to_dbm(min(flat), dac_scale_dbm))
+            described["power_dbm_max"] = float(
+                convert_dacunits_to_dbm(max(flat), dac_scale_dbm))
         return described
 
     def validate(

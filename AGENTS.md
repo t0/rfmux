@@ -146,7 +146,7 @@ and call `await my_algorithm(crs, module=1, channels=[1,2])`.
 Every driver returns the same container: `{module_id: block}`, one block per
 module, keyed by the board-and-module identifier `crs.module[m].index()`
 returns. A block carries `schema_version`, `measurement`, `module`,
-`call_params` and `results`.
+`dac_scale_dbm`, `call_params` and `results`.
 
 A multisweep's `results` is `{step: {direction: {name: sweep}}}` — amplitude
 step, sweep direction, resonator name. A sweep is a measurement and nothing
@@ -171,6 +171,13 @@ Resonators are named, and the array a sweep was taken from is in the file:
 `ResonatorCatalog.from_dict(block["call_params"]["catalog"])`. The amplitudes
 it walked are `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
 
+An amplitude is a fraction of DAC full scale, and `block["dac_scale_dbm"]` is
+what full scale was worth on that module when the board was asked, as the
+driver read it. That pair is what states a drive as a power or a voltage —
+`convert_dacunits_to_dbm` / `convert_dacunits_to_volts` in
+`core/transferfunctions.py`, which `BiasPoint.power_dbm` and every label in
+Periscope go through. None where the board reported none.
+
 `results_by_detector` — `{detector_id: {iteration_index: entry}}`, keyed by an
 integer index — was the old GUI's own shape. Nothing produces it; the legacy
 bias and noise paths are its last readers.
@@ -178,7 +185,11 @@ bias and noise paths are its last readers.
 ### Unit Conversion (UnitConverter class)
 - Raw ADC counts ↔ Volts ↔ dBm
 - Use `convert_amplitude()` with `unit_mode` parameter
-- Normalization at display time, preserve raw data
+- Normalization at display time, preserve raw data. Normalizing states a
+  trace against the drive it was taken at — divide by it, subtract it in dBm
+  — so an amplitude ladder lands on one axis. Counts need only the drive;
+  volts and dB need the module's DAC scale as well, so ask
+  `UnitConverter.can_normalize()` for both the data and the axis label
 
 ### Session System
 ```python

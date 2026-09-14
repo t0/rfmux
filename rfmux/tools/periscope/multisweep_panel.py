@@ -16,7 +16,7 @@ from .layouts import FlowLayout, grouped
 from .utils import (
     LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
     AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
-    STATUS_MESSAGE_MS, TABLEAU10_COLORS, ScreenshotMixin
+    STATUS_MESSAGE_MS, TABLEAU10_COLORS, DEFAULT_SUBPLOTS, ScreenshotMixin
 )
 from .noise_spectrum_panel import NoiseSpectrumPanel
 from .noise_spectrum_dialog import NoiseSpectrumDialog
@@ -34,7 +34,8 @@ from .tasks import (
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import (AmplitudeSchedule, BiasReport,
                           collect_amplitude_iterations_for, store, tuning_rows)
-from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+from rfmux.core.transferfunctions import (PFB_SAMPLING_FREQ,
+                                          convert_dacunits_to_dbm)
 # from rfmux.algorithms.measurement import py_get_samples
 
 # A data callback arrives per sweep point; a grid of subplots takes longer to
@@ -116,7 +117,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_amplitude_scale(self.initial_params.get('amp'))
 
         self.unit_mode = "dbm"  # Current unit for magnitude display ("counts", "dbm", "volts")
-        self.normalize_traces = True  # Flag to normalize trace plots (magnitude and phase)
+        # Sweeps are drawn against the drive they were taken at, so an
+        # amplitude ladder lands on one axis instead of stacked by drive.
+        self.normalize_traces = True
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
         
         # Module context for DAC scale lookup (can be different from target_module if needed)
@@ -124,7 +127,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
-        self.batch_size = 8
+        self.batch_size = DEFAULT_SUBPLOTS
         
         # Storage for sweep grid plots - cached to avoid recreating widgets
         self.mag_sweep_plots_cache = []  # List of plot widgets for magnitude tab
@@ -305,14 +308,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.batch_size_label, self.batch_size_spin, self.batch_update_btn)
         toolbar_layout.addWidget(self.subplot_controls)
 
-        # Normalization Checkbox
-        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
-        self.normalize_checkbox.setChecked(self.normalize_traces)
-        self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
-        toolbar_layout.addWidget(self.normalize_checkbox)
-
-        # Show Center Frequencies Checkbox
-
         self._setup_unit_controls(toolbar_layout)
         self._setup_zoom_box_control(toolbar_layout)
 
@@ -325,7 +320,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         layout.addWidget(toolbar)
 
     def _setup_unit_controls(self, toolbar_layout):
-        """Sets up radio buttons for selecting magnitude units."""
+        """The units the magnitudes are drawn in, and what they are drawn against.
+
+        One group, because the checkbox is about the radio buttons: it says
+        what each unit is stated relative to, and which of them it can do at
+        all depends on which one is selected.
+        """
         unit_group = QtWidgets.QWidget() # Group for unit radio buttons
         unit_layout = QtWidgets.QHBoxLayout(unit_group)
         unit_layout.setContentsMargins(0, 0, 0, 0) # Compact layout
@@ -335,11 +335,20 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rb_dbm = QtWidgets.QRadioButton("dBm")
         self.rb_volts = QtWidgets.QRadioButton("Volts")
         self.rb_dbm.setChecked(True) # Default to dBm
-        
+
+        self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
+        self.normalize_checkbox.setChecked(self.normalize_traces)
+        self.normalize_checkbox.setToolTip(
+            "Divide each sweep by the amplitude it was taken at, so an "
+            "amplitude ladder lands on one axis instead of stacked by drive. "
+            "Volts and dB need the module's DAC scale; counts do not.")
+        self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
+
         unit_layout.addWidget(QtWidgets.QLabel("Units:"))
         unit_layout.addWidget(self.rb_counts)
         unit_layout.addWidget(self.rb_dbm)
         unit_layout.addWidget(self.rb_volts)
+        unit_layout.addWidget(self.normalize_checkbox)
         
         # Bound-method slots: a lambda closing over self would make the
         # button own the panel, and a panel in a reference cycle is torn
@@ -505,11 +514,22 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.current_batch += 1
             self._redraw_plots()
 
+    def _dac_scale(self):
+        """What DAC full scale was worth for the sweeps on screen, in dBm.
+
+        The measurement's own number first: a loaded file may have been taken
+        on another board, and the scale that labels its amplitudes is the one
+        it was measured at rather than whatever this session is connected to.
+        The live board's is the fallback, which is what a sweep still arriving
+        has.
+        """
+        recorded = (self.module_sweeps or {}).get('dac_scale_dbm')
+        if recorded is not None:
+            return recorded
+        return self.dac_scales.get(self.active_module_for_dac)
+
     def _toggle_trace_normalization(self, checked):
-        """
-        Slot for the 'Normalize Traces' checkbox.
-        Updates normalization state for both magnitude and phase, and redraws plots.
-        """
+        """Slot for the 'Normalize Traces' checkbox."""
         self.normalize_traces = checked
         self._redraw_plots()
 
@@ -816,7 +836,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             dark_mode=self.dark_mode,
             unit_mode=self.unit_mode,
             normalize=self.normalize_traces,
-            dac_scale=self.dac_scales.get(self.active_module_for_dac))
+            dac_scale=self._dac_scale())
 
     def _show_in_digest(self, name: str) -> None:
         """Open the digest on *name*, which is what a double-click on a grid means.
@@ -848,7 +868,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         amplitude_to_color = create_amplitude_color_map(amplitudes, self.dark_mode)
 
         # Get DAC scale for label formatting
-        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+        dac_scale = self._dac_scale()
 
         has_downward = any(direction == 'downward'
                            for traces in traces_by_name.values()
@@ -969,7 +989,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _step_choices(self) -> list:
         """``[(label, step), ...]`` for the steps this measurement walked."""
-        dac_scale = self.dac_scales.get(self.active_module_for_dac)
+        dac_scale = self._dac_scale()
         return [(f"Step {step}: {self._step_label(step, dac_scale)}", step)
                 for step in sorted(self._step_amplitudes)]
 
@@ -1440,7 +1460,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 num_res = len(self.conceptual_section_frequencies)
     
                 amplitudes = []
-                dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
+                dac_scale_for_module = self._dac_scale()
     
                 pfb_psd_i = []
                 pfb_psd_q = []
@@ -1452,7 +1472,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
                 for i in range(num_res):
                     amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
-                    amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
+                    amp_dmb = convert_dacunits_to_dbm(amp, dac_scale_for_module)
                     amplitudes.append(amp_dmb)
     
                     #### Also running pfb_samples ####

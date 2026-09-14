@@ -53,6 +53,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from ...core.dac_scale import dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import BiasPoint, Resonator, ResonatorCatalog
@@ -709,9 +710,11 @@ async def multisweep(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 7,
+                    "schema_version": 8,
                     "measurement": "multisweep",
                     "module": 2,           # resolved, never None
+                    "dac_scale_dbm": 1.0,  # DAC full scale as the board
+                                           # reported it; None if unread
                     "call_params": {...},  # verbatim, as this macro was called,
                                            # plus the resolved catalog and schedule
                     "results": {
@@ -887,6 +890,12 @@ async def multisweep(
     # Every sweep this call makes comes back under this one key.
     module_id = crs.module[module].index()
 
+    # Read here rather than left to whoever opens the file: every amplitude
+    # this call sweeps at is a fraction of DAC full scale, and the board that
+    # says what full scale is worth is this one, now. Once for the call, since
+    # it is one number per module.
+    dac_scale = await dac_scale_dbm(crs, module)
+
     def packed(sweeps):
         """This measurement, in the shape every sweep comes back in."""
         return pack_multisweep(
@@ -902,6 +911,7 @@ async def multisweep(
             center_frequencies=center_frequencies,
             names=names,
             requested_module=requested_module,
+            dac_scale_dbm=dac_scale,
         )
 
     if not targets:

@@ -1,9 +1,16 @@
 """The DAC scale a module's amplitudes are labelled against."""
 
+import math
+
 import pytest
 
 from rfmux.core.dac_scale import DAC_SCALE_LABEL_OFFSET_DB, dac_scale_dbm
 from rfmux.core.resonators import BiasPoint
+from rfmux.core.transferfunctions import (
+    convert_dacunits_to_dbm,
+    convert_dacunits_to_volts,
+    convert_volts_to_dbm,
+)
 
 
 class _Board:
@@ -56,3 +63,37 @@ async def test_the_scale_labels_an_amplitude_as_a_power():
     scale = await dac_scale_dbm(_Board(0.0), 1)
     assert BiasPoint(frequency_hz=1e9, amplitude=0.1).power_dbm(scale) == \
         pytest.approx(-20.0)
+
+
+# ─── the conversions every label is built from ───────────────────────────────
+
+
+@pytest.mark.parametrize("amplitude", [1.0, 0.5, 0.005, 1e-4])
+def test_dacunits_to_dbm_is_the_scale_plus_twenty_log_amplitude(amplitude):
+    assert convert_dacunits_to_dbm(amplitude, 1.0) == pytest.approx(
+        1.0 + 20.0 * math.log10(amplitude))
+
+
+def test_full_scale_drives_the_scale_itself():
+    """What "DAC full scale" means: amplitude 1.0 is the scale, by definition."""
+    assert convert_dacunits_to_dbm(1.0, -3.25) == pytest.approx(-3.25)
+
+
+def test_a_silent_tone_drives_no_power():
+    assert convert_dacunits_to_dbm(0.0, 1.0) == -math.inf
+
+
+def test_dacunits_to_volts_is_the_dbm_expressed_as_peak_volts():
+    """The two conversions are one quantity in two units, so the volts must
+    come back as the dBm through the package's volts convention."""
+    volts = convert_dacunits_to_volts(0.005, 1.0)
+    assert convert_volts_to_dbm(volts) == pytest.approx(
+        convert_dacunits_to_dbm(0.005, 1.0))
+
+
+def test_the_conversions_are_what_a_bias_point_labels_itself_with():
+    """One definition: a bias point's power is the shared conversion, so a
+    label on screen and a power in a file cannot drift apart."""
+    bias = BiasPoint(frequency_hz=1e9, amplitude=0.017)
+    assert bias.power_dbm(-0.5) == pytest.approx(
+        convert_dacunits_to_dbm(0.017, -0.5))

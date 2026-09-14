@@ -64,6 +64,8 @@ from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
 )
 from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import (  # noqa: E402
+    DEFAULT_SUBPLOTS,
+    DEFAULT_SUBPLOT_COLUMNS,
     TABLEAU10_COLORS,
     UPWARD_SWEEP_STYLE,
     UnitConverter,
@@ -504,6 +506,47 @@ def test_the_grid_draws_a_curve_for_every_sweep_of_every_resonator(board, qt_app
     curves = _grid_curves(panel)
     assert len(curves) == min(len(catalog.names()), panel.batch_size)
     assert all(len(subplot) == 4 for subplot in curves)
+
+
+def _grid_positions(panel, tab_idx=MAGNITUDE_TAB):
+    """The (row, column) each subplot was placed at."""
+    _grid_widgets(panel, tab_idx)          # draws the tab
+    _plot_type, grid, _cache, _colorbar = \
+        panel._sweep_grids[panel.plot_tabs.currentWidget()]
+    return [grid.getItemPosition(i)[:2] for i in range(grid.count())]
+
+
+def test_a_page_of_subplots_is_laid_out_five_to_a_row(
+        board, qt_app, swept_container):
+    """A fixed number of columns, so a subplot is the same size on every page
+    of a batch rather than growing as the last page empties."""
+    panel = _panel_showing(swept_container, board)
+    positions = _grid_positions(panel)
+
+    assert len(positions) == min(panel.batch_size, len(panel._selected_names()))
+    assert max(col for _row, col in positions) == DEFAULT_SUBPLOT_COLUMNS - 1
+    for row in {r for r, _col in positions}:
+        assert sum(1 for r, _col in positions if r == row) <= DEFAULT_SUBPLOT_COLUMNS
+
+
+def test_a_batch_narrower_than_a_row_does_not_leave_the_row_half_empty(
+        board, qt_app, swept_container):
+    """Three plots are three columns, not one beside four gaps."""
+    panel = _panel_showing(swept_container, board)
+    panel.batch_size = 3
+    positions = _grid_positions(panel)
+
+    assert len(positions) == 3
+    assert {col for _row, col in positions} == {0, 1, 2}
+
+
+def test_twenty_subplots_a_page_by_default(board, qt_app, swept_container):
+    """What the panel opens on, and what the Subplots spinner starts at."""
+    panel = _panel_showing(swept_container, board)
+
+    assert DEFAULT_SUBPLOTS == 20
+    assert panel.batch_size == DEFAULT_SUBPLOTS
+    assert panel.batch_size_spin.value() == DEFAULT_SUBPLOTS
 
 
 def test_a_curve_is_the_entry_it_was_read_from(board, qt_app):
@@ -2891,8 +2934,59 @@ def test_a_digest_curve_is_the_sweep_it_was_read_from(board, qt_app, swept_conta
         x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
     counts = np.asarray(sweep["iq_counts"])
     assert np.allclose(y, UnitConverter.convert_amplitude(
-        np.abs(counts), counts, panel.unit_mode,
-        normalize=panel.normalize_traces))
+        np.abs(counts), panel.unit_mode, normalize=panel.normalize_traces,
+        drive=sweep["sweep_amplitude"], dac_scale=panel._dac_scale()))
+
+
+def test_the_panel_reads_the_dac_scale_the_measurement_recorded(
+        swept_container, board):
+    """The file's own number beats the board this session is connected to: a
+    loaded measurement may be from another board, and the scale that labels
+    its amplitudes is the one it was swept at."""
+    _module, container = swept_container
+    panel = _panel_showing(swept_container, board)
+    recorded = next(iter(container.values()))["dac_scale_dbm"]
+
+    assert recorded is not None
+    assert panel.dac_scales != {panel.active_module_for_dac: recorded}
+    assert panel._dac_scale() == recorded
+
+
+def test_a_normalized_grid_curve_is_the_sweep_over_its_own_drive(
+        board, qt_app, swept_container):
+    """Each trace against the amplitude it was taken at, so the ladder lands
+    on one axis."""
+    panel = _panel_showing(swept_container, board)
+    panel.normalize_traces = True
+    panel.unit_mode = "counts"
+    panel._redraw_plots()
+
+    name = panel._selected_names()[0]
+    _step, _direction, _amplitude, sweep = panel._collect_traces([name])[name][0]
+    _x, y = _grid_curves(panel)[0][0].getData()
+
+    assert np.allclose(
+        y, np.abs(sweep["iq_counts"]) / sweep["sweep_amplitude"])
+
+
+def test_an_iq_loop_is_divided_by_its_drive_and_not_its_own_peak(
+        board, qt_app, swept_container):
+    """Dividing each loop by its own peak would make every loop the same size,
+    which is the comparison across drives the grid is drawn for."""
+    panel = _panel_showing(swept_container, board)
+    panel.normalize_traces = True
+    panel.unit_mode = "counts"
+    panel.plot_tabs.setCurrentIndex(IQ_TAB)
+    panel._redraw_plots()
+
+    name = panel._selected_names()[0]
+    _step, _direction, _amplitude, sweep = panel._collect_traces([name])[name][0]
+    i_vals, q_vals = _grid_curves(panel, tab_idx=IQ_TAB)[0][0].getData()
+
+    iq = np.asarray(sweep["iq_counts"]) / sweep["sweep_amplitude"]
+    assert np.allclose(i_vals, np.real(iq))
+    assert np.allclose(q_vals, np.imag(iq))
+    assert not np.isclose(np.max(np.abs(i_vals + 1j * q_vals)), 1.0)
 
 
 def test_the_digest_walks_the_catalogs_own_names(board, qt_app, swept_container):
@@ -3030,9 +3124,10 @@ def test_the_bias_column_carries_the_point_that_was_chosen(
 
     assert rows["Amplitude step"] == str(finding.iteration)
     assert rows["Frequency"] == f"{finding.frequency_hz / 1e6:.6f} MHz"
+    # Against the scale the measurement recorded, which is what the panel
+    # labels every drive with -- not whatever board this session is on.
     assert rows["Drive"] == UnitConverter.format_probe_label(
-        finding.amplitude, panel.unit_mode,
-        panel.dac_scales[panel.active_module_for_dac])
+        finding.amplitude, panel.unit_mode, panel._dac_scale())
 
 
 def test_a_flagged_point_says_so_in_the_bias_column(

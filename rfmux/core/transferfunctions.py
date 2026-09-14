@@ -189,6 +189,83 @@ def convert_volts_to_dbm(volts, termination=50.0):
     return 10.0 * np.log10(watts * 1e3)
 
 
+# ───────────────── The drive side: DAC amplitudes ─────────────────
+#
+# A tone's amplitude is a fraction of DAC full scale, in (0, 1], and the
+# module's DAC scale in dBm says what full scale is worth -- read from the
+# board by rfmux.core.dac_scale.dac_scale_dbm. The pair is what every
+# statement of a drive power is built from: a bias point's power, an
+# amplitude schedule's range, a sweep axis normalized by what drove it. The
+# arithmetic is here so those agree by construction.
+#
+# Volts are peak amplitudes here as everywhere in rfmux.
+
+
+def convert_dbm_to_volts(dbm, termination=TERMINATION):
+    """Log power to signal amplitude in volts -- convert_volts_to_dbm backwards.
+
+    Parameters
+    ----------
+
+    dbm : power in dBm
+
+    termination : the system termination resistance in ohms.
+        Default is 50.
+
+    Returns
+    -------
+
+    (float) peak amplitude in volts
+    """
+
+    watts = 10.0 ** (np.asarray(dbm, dtype=float) / 10.0) / 1e3
+    v_rms = np.sqrt(watts * termination)
+    return v_rms * np.sqrt(2.0)
+
+
+def convert_dacunits_to_dbm(amplitude, dac_scale_dbm):
+    """The power a tone in normalized DAC units drives, in dBm.
+
+    Parameters
+    ----------
+
+    amplitude : tone amplitude as a fraction of DAC full scale, in (0, 1]
+
+    dac_scale_dbm : what full scale is worth on this module, in dBm
+
+    Returns
+    -------
+
+    (float) drive power in dBm; -inf at zero amplitude
+    """
+
+    with np.errstate(divide="ignore"):
+        return dac_scale_dbm + 20.0 * np.log10(np.asarray(amplitude, dtype=float))
+
+
+def convert_dacunits_to_volts(amplitude, dac_scale_dbm, termination=TERMINATION):
+    """The voltage a tone in normalized DAC units drives.
+
+    Parameters
+    ----------
+
+    amplitude : tone amplitude as a fraction of DAC full scale, in (0, 1]
+
+    dac_scale_dbm : what full scale is worth on this module, in dBm
+
+    termination : the system termination resistance in ohms.
+        Default is 50.
+
+    Returns
+    -------
+
+    (float) peak amplitude in volts
+    """
+
+    return convert_dbm_to_volts(
+        convert_dacunits_to_dbm(amplitude, dac_scale_dbm), termination)
+
+
 def decimation_to_sampling(dec_stage):
     """
     Convert decimation stage to sampling rate.

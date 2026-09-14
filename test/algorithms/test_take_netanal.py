@@ -36,7 +36,8 @@ from rfmux.tuning.sweep_results import (
 MODULE = 1
 
 
-def a_netanal(npoints=8, module=MODULE, sweep_direction="upward"):
+def a_netanal(npoints=8, module=MODULE, sweep_direction="upward",
+              dac_scale_dbm=None):
     """One module's netanal, packed the way the driver packs it."""
     frequencies = np.linspace(1.0e9, 1.5e9, npoints)
     if sweep_direction == "downward":
@@ -62,6 +63,7 @@ def a_netanal(npoints=8, module=MODULE, sweep_direction="upward"):
         rotate_phase_to_0=True,
         sweep_direction=sweep_direction,
         requested_module=module,
+        dac_scale_dbm=dac_scale_dbm,
     )
 
 
@@ -74,12 +76,20 @@ class TestPacking:
     def test_it_is_keyed_by_module(self):
         assert list(a_netanal()) == ["crs0000_rmod1"]
 
+    def test_the_dac_scale_sits_beside_the_module(self):
+        """The same place a multisweep records it: one container shape, so a
+        reader turning an amplitude into a power writes one line for both."""
+        module_netanal = a_netanal(dac_scale_dbm=-0.5)["crs0000_rmod1"]
+
+        assert module_netanal["dac_scale_dbm"] == -0.5
+        assert "dac_scale_dbm" not in module_netanal["call_params"]
+
     def test_the_output_says_what_made_it(self):
         module_netanal = a_netanal()["crs0000_rmod1"]
 
         # A literal, not the constant: bumping the version should mean editing
         # a test, because it is a claim about what readers of older files need.
-        assert module_netanal["schema_version"] == 7
+        assert module_netanal["schema_version"] == 8
         assert module_netanal["schema_version"] == RESULTS_SCHEMA_VERSION
         assert module_netanal["measurement"] == "netanal"
         assert module_netanal["module"] == 1

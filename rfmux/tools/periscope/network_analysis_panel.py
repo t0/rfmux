@@ -140,7 +140,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Normalize Magnitudes checkbox
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
-        self.normalize_checkbox.setToolTip("Normalize all magnitude curves to their first data point")
+        self.normalize_checkbox.setToolTip(
+            "Divide the measurement by the amplitude it was swept at, so the "
+            "curve is a transmission rather than a received power. Volts and "
+            "dB need the module's DAC scale; counts do not.")
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
         toolbar_global_layout.addWidget(self.normalize_checkbox)
 
@@ -301,7 +304,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             amp_plot = pg.PlotWidget(viewBox=vb_amp, title=f"Module {module} - Magnitude")
             plot_item_amp = amp_plot.getPlotItem()
             if plot_item_amp:
-                self._update_amplitude_labels(amp_plot) # amp_plot is PlotWidget, _update_amplitude_labels expects PlotWidget
+                self._update_amplitude_labels(amp_plot, module)
                 plot_item_amp.setLabel('bottom', 'Frequency', units='Hz')
                 plot_item_amp.showGrid(x=True, y=True, alpha=0.3)
 
@@ -521,20 +524,19 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             plot_info['amp_legend'].addItem(plot_info['amp_curve'], label)
             plot_info['phase_legend'].addItem(plot_info['phase_curve'], label)
     
-    def _update_amplitude_labels(self, plot):
-        """Update plot labels based on current unit mode and normalization state."""
-        if self.normalize_magnitudes:
-            if self.unit_mode == "dbm":
-                plot.setLabel('left', 'Normalized Power', units='dB') 
-            else:
-                plot.setLabel('left', 'Normalized Magnitude', units='')
-        else:
-            if self.unit_mode == "counts":
-                plot.setLabel('left', 'Magnitude', units='Counts')
-            elif self.unit_mode == "dbm":
-                plot.setLabel('left', 'Power', units='dBm')
-            elif self.unit_mode == "volts":
-                plot.setLabel('left', 'Magnitude', units='V')
+    def _update_amplitude_labels(self, plot, module: int):
+        """Label the magnitude axis for what it is drawing.
+
+        The same labeller the multisweep grids use, so one measurement shown
+        in two panels says the same thing about its own axis.
+        """
+        magnitude_axis_labels(
+            plot, self.unit_mode,
+            self.normalize_magnitudes and UnitConverter.can_normalize(
+                self.unit_mode,
+                (self.netanal_traces.get(module) or {}).get('sweep_amplitude'),
+                self._dac_scale(module)),
+            frequency_offset=False)
 
     def _redraw_all_plots(self):
         """Redraw all plots with current unit mode."""
@@ -633,7 +635,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Ascending, so np.interp works on a downward netanal too.
         order = np.argsort(trace['frequencies'])
         freqs = np.asarray(trace['frequencies'])[order]
-        magnitudes = self._magnitude(np.asarray(trace['iq_counts']))[order]
+        magnitudes = self._magnitude(module, np.asarray(trace['iq_counts']))[order]
 
         x = np.array([c.frequency_hz for c in search.rejected])
         markers.setData(
@@ -794,26 +796,41 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if module in self.plots:
             freqs, iq = trace['frequencies'], trace['iq_counts']
             plot_info = self.plots[module]
-            plot_info['amp_curve'].setData(freqs, self._magnitude(iq))
+            plot_info['amp_curve'].setData(freqs, self._magnitude(module, iq))
             plot_info['phase_curve'].setData(freqs, np.degrees(np.angle(iq)))
             if trace.get('sweep_amplitude') is not None:
                 self._update_legends_for_unit_mode()
         self._update_multisweep_button_state(module)
 
-    def _magnitude(self, iq: np.ndarray) -> np.ndarray:
+    def _dac_scale(self, module: int):
+        """What DAC full scale was worth for *module*'s trace, in dBm.
+
+        The measurement's own number first: a loaded file may have been taken
+        on another board, and the scale that labels its amplitude is the one
+        it was measured at rather than whatever this session is connected to.
+        The live board's is the fallback, which is what a sweep still arriving
+        has.
+        """
+        block = self._module_block(module)
+        if block is not None and block.get('dac_scale_dbm') is not None:
+            return block['dac_scale_dbm']
+        return self.dac_scales.get(module)
+
+    def _magnitude(self, module: int, iq: np.ndarray) -> np.ndarray:
         """|S21| of a measured sweep, in the units the panel is showing."""
-        magnitude = np.abs(iq)
         return UnitConverter.convert_amplitude(
-            magnitude, iq, self.unit_mode, normalize=self.normalize_magnitudes)
+            np.abs(iq), self.unit_mode, normalize=self.normalize_magnitudes,
+            drive=(self.netanal_traces.get(module) or {}).get('sweep_amplitude'),
+            dac_scale=self._dac_scale(module))
 
     def _redraw_magnitudes(self, module_id: int):
         """Redraw one module's magnitude curve, after a units change."""
         plot_info = self.plots[module_id]
-        self._update_amplitude_labels(plot_info['amp_plot'])
+        self._update_amplitude_labels(plot_info['amp_plot'], module_id)
         trace = self.netanal_traces.get(module_id)
         if trace is not None:
             plot_info['amp_curve'].setData(
-                trace['frequencies'], self._magnitude(trace['iq_counts']))
+                trace['frequencies'], self._magnitude(module_id, trace['iq_counts']))
             self._place_rejected(module_id)
         plot_info['amp_plot'].autoRange()
 

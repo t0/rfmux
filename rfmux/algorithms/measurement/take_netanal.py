@@ -13,6 +13,7 @@ sweep has an amplitude iteration per step of its schedule.
 import warnings
 import asyncio
 import numpy as np
+from ...core.dac_scale import dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import CREST_FACTOR, convert_roc_to_volts
@@ -115,9 +116,11 @@ async def take_netanal(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 7,
+                    "schema_version": 8,
                     "measurement": "netanal",
                     "module": 2,           # resolved, never None
+                    "dac_scale_dbm": 1.0,  # DAC full scale as the board
+                                           # reported it; None if unread
                     "call_params": {...},  # verbatim, as this macro was called
                     "results": {           # the trace itself
                         'frequencies': np.ndarray (Hz),
@@ -430,6 +433,10 @@ async def take_netanal(
         rotate_phase_to_0=rotate_phase_to_0,
         sweep_direction=sweep_direction,
         requested_module=requested_module,
+        # Read here rather than left to whoever opens the file: the amplitudes
+        # above are fractions of DAC full scale, and the board that says what
+        # full scale is worth is this one, now.
+        dac_scale_dbm=await dac_scale_dbm(crs, module),
     )
 
     store.maybe_save(netanal, "netanal", save=save, label=label)

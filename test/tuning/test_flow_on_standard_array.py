@@ -20,7 +20,10 @@ import warnings
 import numpy as np
 import pytest
 
+from rfmux.core.dac_scale import dac_scale_dbm
 from rfmux.core.resonators import on_grid
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm
+from rfmux.mock.config import bias_dbm_from_amplitude
 from rfmux.tuning import AmplitudeSchedule, find_bias_points, fit_sweeps
 from rfmux.tuning.fits import BIFURCATION_A
 
@@ -47,6 +50,29 @@ def bias_report(schedule_sweeps):
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
         return find_bias_points(schedule_sweeps, save=False)
+
+
+def test_the_measurement_records_the_boards_own_dac_scale(
+        standard_array_board, schedule_sweeps):
+    """Read from the board as the sweep was taken, so the amplitudes in the
+    file can be stated as powers by something holding only the file."""
+    loop, crs, catalog = standard_array_board
+    from_board = loop.run_until_complete(dac_scale_dbm(crs, catalog.module))
+
+    assert schedule_sweeps["dac_scale_dbm"] == from_board
+    assert from_board is not None
+
+
+def test_the_recorded_scale_labels_the_amplitudes_that_were_swept(
+        schedule_sweeps):
+    """What it is for: the drive of any sweep in the file, as a power, and it
+    agrees with the power the simulator itself thinks it was driven at."""
+    sweep = schedule_sweeps["results"][0]["upward"]
+    amplitude = sweep[next(iter(sweep))]["sweep_amplitude"]
+
+    assert convert_dacunits_to_dbm(
+        amplitude, schedule_sweeps["dac_scale_dbm"]) == pytest.approx(
+            bias_dbm_from_amplitude(amplitude))
 
 
 def _fitted_a(schedule_sweeps, name, step):

@@ -55,20 +55,25 @@ class FakeReadoutModule:
 
 
 class FakeCRS:
-    """A CRS with the two things the loop asks of one, and no measurement.
+    """A CRS with the three things the loop asks of one, and no measurement.
 
     Everything that needs a board lives in ``_measure_sweep``, which the
     ``sweeps`` fixture replaces; what is left up here is the decimation query
-    that bounds the channel count, and ``crs.module[m].index()`` for the key
-    the result comes back under.
+    that bounds the channel count, the DAC scale every amplitude is recorded
+    against, and ``crs.module[m].index()`` for the key the result comes back
+    under.
     """
 
-    def __init__(self, decimation=6):
+    def __init__(self, decimation=6, dac_scale=1.0):
         self._decimation = decimation
+        self._dac_scale = dac_scale
         self.module = {m: FakeReadoutModule(m) for m in range(1, 9)}
 
     async def get_decimation(self):
         return self._decimation
+
+    async def get_dac_scale(self, units='DBM', module=None):
+        return self._dac_scale
 
     async def multisweep(self, **kwargs):
         """The module fan-out re-enters the macro, so a fake has to as well."""
@@ -682,7 +687,7 @@ async def test_the_result_carries_a_schema_version(sweeps):
     result = await drive(FakeCRS(), a_catalog())
     # A literal, not the constant: bumping the version should mean editing a
     # test, because it is a claim that readers of older files need to know.
-    assert result["schema_version"] == 7
+    assert result["schema_version"] == 8
 
 
 @pytest.mark.asyncio

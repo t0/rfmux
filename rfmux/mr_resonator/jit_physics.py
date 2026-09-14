@@ -346,19 +346,29 @@ def _converged_lekid_parameters_par(
     damp=0.1, damp_min=0.02, damp_max=0.5
 ):
     """
-    Self-consistent convergence loop for current-dependent inductance.
+    Steady state of the readout-current nonlinearity.
 
-    The iteration is I <- I + d (F(I) - I), F the current each resonator
-    carries with the inductance its current sets.  It starts from
-    *initial_currents*, the branch each resonator is on, so a
-    bifurcated resonance stays on the branch a sweep pushed it onto
-    until that branch ends.  The step d is 1 / (1 - s), s the real part of the secant
-    slope of F between the last two iterates, clamped to
-    [damp_min, damp_max]: near-linear points converge in a few
-    iterations, the deep branch (slope well below zero) stays stable,
-    and a positive step can never settle on the unstable middle branch,
-    whose slope exceeds one.  The first step, and any whose slope
-    estimate is degenerate, is *damp*.
+    Each resonator's kinetic inductance grows with the current it
+    carries, Lk = Lk0 (1 + |I|^2 / Istar^2), which shifts its resonance
+    and so changes the current the generator drives through it: the
+    steady state is the self-consistent current I = F(I).  This is the
+    Kerr-type detuning x = x0 + E/E* of Rouble et al., arXiv:2607.09178,
+    with the stored energy written as a current.  Below the critical
+    drive (asymmetry parameter a = 4 sqrt(3) / 9) there is one steady
+    state; above it the response is bistable, two stable driven states
+    (high current on the shifted resonance, low current off it) with an
+    unstable one between, and which the resonator is in depends on how
+    it got there, so the response is hysteretic.
+
+    The iteration I <- I + d (F(I) - I) starts from *initial_currents*,
+    the driven state each resonator was last in, so a swept tone keeps
+    its state until that state ceases to exist.  The step d is
+    1 / (1 - s), s the real part of the secant slope of F between the
+    last two iterates, clamped to [damp_min, damp_max]: near-linear
+    points converge in a few iterations, the high-current state (slope
+    well below zero) stays stable, and a positive step can never settle
+    in the unstable state, whose slope exceeds one.  The first step,
+    and any whose slope estimate is degenerate, is *damp*.
     
     Performs the entire convergence calculation in compiled code for
     maximum performance (2-5x speedup over Python loops).
@@ -466,17 +476,32 @@ def _converged_lekid_parameters_par(
             Zpar = 1.0 / (1.0/r3 + 1.0/impedances[i] + 1.0/ZLNA)
             currents_new[i] = Iin * Zpar / impedances[i]
         
-        # Step 3: the adaptive step, from the secant slope of F
+        # Step 3: the step towards self-consistency.  Each resonator's
+        # current I sets its inductance, which sets the current F(I) it
+        # would carry; we want I = F(I), so we move by a fraction d of
+        # the mismatch g = F(I) - I.  A fixed d converges only if the
+        # slope s of F is not too far from 0: the error shrinks by
+        # |1 + d (s - 1)| per iteration.  Choosing d = 1 / (1 - s) makes
+        # that factor zero, Newton's method on the mismatch with s
+        # estimated from the last two iterates (a secant).  s is
+        # complex; we keep the real part so d is a plain damping and
+        # never rotates the step.  The clamp keeps d positive and
+        # bounded: in the unstable driven state s > 1 would make d
+        # negative, and a positive d cannot settle there; at the edge of
+        # bistability s -> 1 and 1 / (1 - s) blows up.  The first
+        # iteration, and any with a degenerate estimate, use the fixed
+        # damp.
         g = currents_new - currents_array
         for i in prange(n):
             steps[i] = damp
             if iteration > 0:
                 dI = currents_array[i] - I_prev[i]
                 if abs(dI) > 1e-300:
-                    den = 1.0 - (1.0 + (g[i] - g_prev[i]) / dI)
+                    s = 1.0 + (g[i] - g_prev[i]) / dI      # F = I + g
+                    den = 1.0 - s
                     if abs(den) > 1e-300:
-                        d = (1.0 / den).real
-                        steps[i] = min(max(d, damp_min), damp_max)
+                        steps[i] = min(max((1.0 / den).real, damp_min),
+                                       damp_max)
             I_prev[i] = currents_array[i]
             g_prev[i] = g[i]
         currents_array = currents_array + steps * g
@@ -519,7 +544,8 @@ _converged_lekid_parameters_ser = _serial_twin(
 
 
 def converged_lekid_parameters(frequency, amplitude, L_array, *args,
-                               initial_currents=None, **kwargs):
+                               initial_currents=None, damp=0.1,
+                               damp_min=0.02, damp_max=0.5):
     """Self-consistent convergence loop for current-dependent inductance,
     from *initial_currents* (every resonator at rest when None)."""
     fn = (_converged_lekid_parameters_par
@@ -527,13 +553,8 @@ def converged_lekid_parameters(frequency, amplitude, L_array, *args,
           else _converged_lekid_parameters_ser)
     if initial_currents is None:
         initial_currents = np.zeros(len(L_array), dtype=np.complex128)
-    # Every argument positional: a call that leaves a defaulted one out
-    # takes numba's Python dispatch path, ten times the call.
-    damp = kwargs.pop('damp', 0.1)
-    damp_min = kwargs.pop('damp_min', 0.02)
-    damp_max = kwargs.pop('damp_max', 0.5)
-    if kwargs:
-        raise TypeError(f"unexpected arguments {sorted(kwargs)}")
+    # Every argument passed: a call that leaves a defaulted one out takes
+    # numba's Python dispatch path, ten times the call.
     return fn(frequency, amplitude, L_array, *args,
               np.ascontiguousarray(initial_currents, dtype=np.complex128),
               float(damp), float(damp_min), float(damp_max))

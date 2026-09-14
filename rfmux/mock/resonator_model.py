@@ -808,13 +808,12 @@ class MockResonatorModel:
                 reason = 'gen_changed'
             elif cached_data.get('lekid_count') != len(self.mr_lekids):
                 reason = 'count_changed'
-            elif not self._same_state(cached_data, tone, nearest_idx):
+            elif not self._same_state(cached_data, tone, frequency):
                 reason = 'state_changed'
             else:
                 skip_convergence = True
                 reason = 'hit'
-                self._remember_state(tone, nearest_idx, frequency,
-                                      cached_data)
+                self._remember_state(tone, frequency, cached_data)
         self._convergence_stats['last_reason'] = reason
         
         # Track cache hit/miss for rolling statistics
@@ -835,7 +834,8 @@ class MockResonatorModel:
         # Update parameters based on convergence decision
         if not skip_convergence:
             # Run full convergence
-            self.update_lekids_for_current(frequency, amplitude, tone)
+            currents = self.update_lekids_for_current(frequency, amplitude,
+                                                      tone)
 
             # Update cache capacity from config if provided
             phys = getattr(self.mock_crs, '_physics_config', {})
@@ -857,7 +857,7 @@ class MockResonatorModel:
                 'nearest_idx': nearest_idx,
                 'gen': getattr(self, '_resonator_gen', 0),
                 'lekid_count': len(self.mr_lekids),
-                'current': self._state_currents(tone, nearest_idx),
+                'current': currents,
             }
 
             # Limit cache size
@@ -1005,23 +1005,18 @@ class MockResonatorModel:
                     system_termination=k0.system_termination))
             return out
 
-    @staticmethod
-    def _state_key(tone, nearest):
-        return ('f', nearest) if tone is None else tone
+    def _state_key(self, tone, frequency):
+        """The tone's (module, channel); a caller without one gets a
+        slot per nearest resonator."""
+        if tone is not None:
+            return tone
+        return ('f', self._cache_keys_for(frequency)[1])
 
-    def _state_currents(self, tone, nearest):
-        """The currents every resonator is remembered with under the
-        tone, all at rest when it has none."""
-        prev = self._state_memory.get(self._state_key(tone, nearest))
-        if prev is None:
-            return np.zeros(len(self.mr_lekids), dtype=np.complex128)
-        return prev[1].copy()
-
-    def _remember_state(self, tone, nearest, frequency, cached):
+    def _remember_state(self, tone, frequency, cached):
         current = cached.get('current')
         if current is not None:
-            self._state_memory[self._state_key(tone, nearest)] = (
-                float(frequency), np.array(current, dtype=np.complex128))
+            self._state_memory[self._state_key(tone, frequency)] = (
+                float(frequency), current)
 
     def _phys(self):
         phys = getattr(self.mock_crs, '_physics_config', {})
@@ -1034,24 +1029,23 @@ class MockResonatorModel:
         fraction (hysteresis_state_fraction).  Currents are a small
         fraction of Istar, so the test is relative."""
         tol = float(self._phys().get('hysteresis_state_fraction', 0.3))
-        a, b = np.asarray(a), np.asarray(b)
         big = np.maximum(np.abs(a), np.abs(b))
         # Under 1e-3 Istar a current changes Lk by 1e-6, the resonance
         # by a hundredth of a linewidth: at rest, whatever the ratio.
         return bool(np.any((big > 1e-3 * self.Istar)
                            & (np.abs(a - b) > tol * big)))
 
-    def _same_state(self, cached, tone, nearest):
+    def _same_state(self, cached, tone, frequency):
         """Whether a cached state (its converged currents) is the one
         the resonators are in under the tone now.  A bifurcated
         resonance has two, far apart in current; a hit must not hand a
         sweep the other direction's, and a tone without a memory is at
         rest, so it solves from there once rather than taking either."""
-        prev = self._state_memory.get(self._state_key(tone, nearest))
+        prev = self._state_memory.get(self._state_key(tone, frequency))
         have = cached.get('current')
         if have is None:
             return True
-        if prev is None or len(prev[1]) != len(have):
+        if prev is None:
             return False
         return not self._states_apart(prev[1], have)
 
@@ -1067,7 +1061,6 @@ class MockResonatorModel:
         from where it sat says where, so the step is retaken that way.  Returns (L, R, currents, iterations) and remembers
         the state."""
         n = len(L)
-        nearest = self._cache_keys_for(frequency)[1]
         phys = self._phys()
         substep = float(phys.get('hysteresis_follow_hz', 1000.0) or 0.0)
         max_sub = max(1, int(phys.get('hysteresis_new_tone_steps', 64) or 1))
@@ -1082,9 +1075,9 @@ class MockResonatorModel:
 
         seed = np.zeros(n, dtype=np.complex128)
         points = []
-        key = self._state_key(tone, nearest)
+        key = self._state_key(tone, frequency)
         prev = self._state_memory.get(key)
-        if prev is not None and len(prev[1]) == n:
+        if prev is not None:
             f_prev, i_prev = prev
             steps = (int(np.ceil(abs(frequency - f_prev) / substep))
                      if substep > 0 else 1)
@@ -1201,6 +1194,7 @@ class MockResonatorModel:
         if not hasattr(self, '_convergence_counter'):
             self._convergence_counter = 0
         self._convergence_counter += 1
+        return currents_converged
 
     def _nqp_sensitivity(self):
         """Fractional response of (Lk, R) to a fractional nqp change.
@@ -2053,12 +2047,11 @@ class MockResonatorModel:
             hit = (cached is not None and cached.get('gen') == gen
                    and cached.get('lekid_count') == n_res
                    and self._same_state(cached, tone['key'],
-                                         tone['nearest_idx']))
+                                        tone['frequency']))
             if hit:
                 state = (cached['L_values'], cached['R_values'],
                          cached['Lk_values'])
-                self._remember_state(tone['key'], tone['nearest_idx'],
-                                      tone['frequency'], cached)
+                self._remember_state(tone['key'], tone['frequency'], cached)
                 last_reason = 'hit'
             else:
                 if k > 0:
@@ -2066,8 +2059,8 @@ class MockResonatorModel:
                 elif s > 0:
                     restore(state_at(len(tones) - 1, s - 1))
                 set_base(s)
-                self.update_lekids_for_current(tone['frequency'],
-                                               tone['amplitude'], tone['key'])
+                currents = self.update_lekids_for_current(
+                    tone['frequency'], tone['amplitude'], tone['key'])
                 state = ([lk.L for lk in self.mr_lekids],
                          [lk.R for lk in self.mr_lekids],
                          [lk.Lk for lk in self.mr_lekids])
@@ -2076,9 +2069,7 @@ class MockResonatorModel:
                     'L_values': state[0], 'frequency': tone['frequency'],
                     'amplitude': tone['amplitude'], 'qp_key': qp_key,
                     'nearest_idx': tone['nearest_idx'], 'gen': gen,
-                    'lekid_count': n_res,
-                    'current': self._state_currents(tone['key'],
-                                                 tone['nearest_idx'])}
+                    'lekid_count': n_res, 'current': currents}
                 self._convergence_stats['full'] += 1
                 misses.add((s, k))
                 last_reason = ('miss' if cached is None

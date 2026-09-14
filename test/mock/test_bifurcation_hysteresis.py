@@ -12,13 +12,14 @@ import pytest
 from rfmux.mr_resonator import jit_physics as jp
 
 
-def _model(n=3):
+def _model(n=3, **band):
+    """Seed 5, noise off, and the low-power dip of resonator 1."""
     from rfmux.mock.crs import ServerMockCRS
     crs = ServerMockCRS("0000")
     with contextlib.redirect_stdout(io.StringIO()):
         asyncio.run(crs.generate_resonators(
             {"num_resonances": n, "resonator_random_seed": 5,
-             "auto_bias_kids": False}))
+             "auto_bias_kids": False, **band}))
     m = crs._resonator_model
     m.nqp_noise_enabled = False
     m._tls_generator = None
@@ -28,8 +29,22 @@ def _model(n=3):
     return m, f0
 
 
-def _sweep(m, points, amp):
-    return np.array([abs(m.s21_lc_response(float(f), amp)) for f in points])
+def _sweep(m, points, amp, tone=None):
+    return np.array([abs(m.s21_lc_response(float(f), amp, tone=tone))
+                     for f in points])
+
+
+def _place(crs, module, channel, frequency, amplitude):
+    crs._nco_frequencies[module] = 0.0
+    crs._frequencies[(module, channel)] = float(frequency)
+    crs._amplitudes[(module, channel)] = amplitude
+    crs._phases[(module, channel)] = 0.0
+
+
+def _response(m, module):
+    fs = 625e6 / 256 / 64
+    return m.calculate_module_response_coupled(
+        module, num_samples=2, sample_rate=fs)
 
 
 def test_up_and_down_agree_below_the_fold():
@@ -83,19 +98,12 @@ def test_each_module_keeps_its_own_states():
     down = _sweep(m, grid[::-1], 0.01)[::-1]
     m._state_memory.clear()
     m._convergence_cache.clear()
-    other = sorted(m.resonator_frequencies)[0]
-    fs = 625e6 / 256 / 64
-    for mod in (1, 2):
-        crs._nco_frequencies[mod] = 0.0
-        crs._amplitudes[(mod, 1)] = 0.01 if mod == 1 else 0.001
-        crs._phases[(mod, 1)] = 0.0
-    crs._frequencies[(2, 1)] = other
+    _place(crs, 2, 1, sorted(m.resonator_frequencies)[0], 0.001)
     seen = []
     for f in grid[::-1]:
-        crs._frequencies[(1, 1)] = f
-        seen.append(m.calculate_module_response_coupled(
-            1, num_samples=2, sample_rate=fs)[1][0])
-        m.calculate_module_response_coupled(2, num_samples=2, sample_rate=fs)
+        _place(crs, 1, 1, f, 0.01)
+        seen.append(_response(m, 1)[1][0])
+        _response(m, 2)
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
@@ -127,16 +135,7 @@ def test_a_collided_pair_keeps_both_resonances_driven():
     """Two resonances 190 kHz apart, swept by one tone: every resonator
     resumes its own state from point to point, not only the one the
     tone is nearest, so the upper resonance is hysteretic too."""
-    from rfmux.mock.crs import ServerMockCRS
-    crs = ServerMockCRS("0000")
-    with contextlib.redirect_stdout(io.StringIO()):
-        asyncio.run(crs.generate_resonators(
-            {"num_resonances": 2, "resonator_random_seed": 5,
-             "freq_start": 1.0e9, "freq_end": 1.0003e9,
-             "auto_bias_kids": False}))
-    m = crs._resonator_model
-    m.nqp_noise_enabled = False
-    m._tls_generator = None
+    m, _ = _model(2, freq_start=1.0e9, freq_end=1.0003e9)
     wide = np.linspace(1.0e9, 1.005e9, 5001)
     low = np.abs(m.s21_sweep(wide, 0.001))
     dip = float(wide[np.argmin(low)])
@@ -144,16 +143,12 @@ def test_a_collided_pair_keeps_both_resonances_driven():
         np.argmin(low[np.abs(wide - dip) > 5e4])])
     upper, dip = max(upper, dip), min(upper, dip)
     grid = np.arange(upper + 2e5, dip - 3e5, -2e3)
-
-    def sweep(points):
-        return np.array([abs(m.s21_lc_response(float(f), 0.01, tone=(1, 1)))
-                         for f in points])
     m._state_memory.clear()
     m._convergence_cache.clear()
-    down = sweep(grid)
+    down = _sweep(m, grid, 0.01, tone=(1, 1))
     m._state_memory.clear()
     m._convergence_cache.clear()
-    up = sweep(grid[::-1])[::-1]
+    up = _sweep(m, grid[::-1], 0.01, tone=(1, 1))[::-1]
     window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
     assert np.abs(up - down)[window].max() > 0.3
 
@@ -164,20 +159,14 @@ def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     finds the resonator at rest, in the low state."""
     m, f0 = _model()
     crs = m.mock_crs
-    fs = 625e6 / 256 / 64
-    crs._nco_frequencies[1] = 0.0
-    crs._phases[(1, 1)] = 0.0
     inside = f0 - 1.5e5                       # bistable at 0.01: -205..-65 kHz
     for f in np.arange(f0 + 1e5, inside - 1, -5e3):
-        crs._frequencies[(1, 1)] = float(f)
-        crs._amplitudes[(1, 1)] = 0.01
-        deep = m.calculate_module_response_coupled(
-            1, num_samples=2, sample_rate=fs)[1][0]
-    crs._amplitudes[(1, 1)] = 0.0
-    m.calculate_module_response_coupled(1, num_samples=2, sample_rate=fs)
-    crs._amplitudes[(1, 1)] = 0.01
-    back = m.calculate_module_response_coupled(
-        1, num_samples=2, sample_rate=fs)[1][0]
+        _place(crs, 1, 1, f, 0.01)
+        deep = _response(m, 1)[1][0]
+    _place(crs, 1, 1, inside, 0.0)
+    _response(m, 1)
+    _place(crs, 1, 1, inside, 0.01)
+    back = _response(m, 1)[1][0]
     m._state_memory.clear()
     m._convergence_cache.clear()
     rest = _sweep(m, [inside], 0.01)[0]
@@ -196,21 +185,21 @@ def test_the_seeded_solver_holds_the_deep_state_and_converges():
     base_Lg = np.array([m.base_lekid_params[i]["Lg"] for i in range(n)])
     k0 = m.mr_lekids[0]
     L, R = m.L_array.copy(), m.R_array.copy()
+
+    def solve(f, L, R, seed=None):
+        return jp.converged_lekid_parameters(
+            float(f), 0.03, L, R, m.C_array, m.Cc_array, base_Lk, base_Lg,
+            m.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA), m.Istar,
+            1e-9, 500, initial_currents=seed)
     I = np.zeros(n, dtype=complex)
     worst = 0
     for f in np.linspace(f0 + 1e5, f0 - 4e5, 251):
-        L, R, I, its = jp.converged_lekid_parameters(
-            float(f), 0.03, L, R, m.C_array, m.Cc_array, base_Lk, base_Lg,
-            m.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA), m.Istar,
-            1e-9, 500, initial_currents=I)
+        L, R, I, its = solve(f, L, R, I)
         worst = max(worst, its)
     assert worst < 100
     # At the last point the seeded solve is still in the deep state,
     # carrying several times the current a solve from rest lands on;
     # both are a small fraction of Istar, a shift of a linewidth
     # needing a 1e-4 change in Lk.
-    _, _, at_rest, _ = jp.converged_lekid_parameters(
-        float(f), 0.03, L, R, m.C_array, m.Cc_array, base_Lk, base_Lg,
-        m.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA), m.Istar,
-        1e-9, 500)
+    _, _, at_rest, _ = solve(f, L, R)
     assert abs(I[1]) > 4 * abs(at_rest[1])

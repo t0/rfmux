@@ -119,10 +119,10 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "log_cache_decisions": False,      # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,         # log every N convergence events
     "convergence_cache_max_size": 10000000,  # max cache entries
-    # A resonance driven past its bifurcation has two states, and the
-    # mock keeps the one a tone left it in, as hardware does: sweeping
-    # down you stay in the deep state until it ends, sweeping up you
-    # jump later.
+    # A resonance driven past its bifurcation is bistable, two stable
+    # driven states, and the mock keeps the one a tone left it in, as
+    # hardware does: sweeping down you stay in the high-current state
+    # until it ceases to exist, sweeping up you jump later.
     "hysteresis_follow_hz": 1000.0,     # When a tone moves, its resonators are
                                         # carried along in steps this fine (0:
                                         # one step), so a state is only lost

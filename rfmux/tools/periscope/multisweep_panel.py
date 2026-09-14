@@ -42,6 +42,14 @@ from rfmux.core.transferfunctions import (PFB_SAMPLING_FREQ,
 # draw than a point takes to measure, so live redraws are coalesced to this.
 LIVE_REDRAW_INTERVAL_MS = 100
 
+# What the bias status line's three outcomes read as: done, worth a look,
+# failed.
+BIAS_STATUS_COLOURS = {
+    "ok": TABLEAU10_COLORS[2],
+    "warn": TABLEAU10_COLORS[1],
+    "error": TABLEAU10_COLORS[3],
+}
+
 
 class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     """
@@ -1102,7 +1110,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _find_bias(self):
         """Choose an operating point for every resonator, off the GUI thread."""
         if self.module_sweeps is None:
-            self._show_bias_status("Nothing swept yet", ok=False)
+            self._show_bias_status("Nothing swept yet", level="error")
             return
 
         span_hz = self.module_sweeps['call_params'].get('span_hz')
@@ -1119,11 +1127,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.module_sweeps, parameters, signals)
         self._find_bias_task.start()
 
-    def _show_bias_status(self, message: str, *, ok: bool = True,
+    def _show_bias_status(self, message: str, *, level: str = "ok",
                           transient: bool = True) -> None:
-        """Say what bias finding is doing, and stop saying it after a while."""
+        """Say what bias finding is doing, and stop saying it after a while.
+
+        Green for done, orange for an outcome worth a look, red for a failure.
+        """
         self.bias_status_label.setText(message)
-        colour = TABLEAU10_COLORS[2] if ok else TABLEAU10_COLORS[3]
+        colour = BIAS_STATUS_COLOURS[level]
         self.bias_status_label.setStyleSheet(f"color: {colour};")
         self._bias_status_timer.stop()
         if transient:
@@ -1149,18 +1160,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             except Exception as e:                      # noqa: BLE001 - reported
                 traceback.print_exc()
                 self._show_bias_status(
-                    f"{message}, but the save failed: {e}", ok=False)
+                    f"{message}, but the save failed: {e}", level="error")
                 self._redraw_plots()
                 return
-        # Red for a run with flags in it, but it fades like any other outcome:
-        # which resonators are flagged, and why, is on their own subplots, so
-        # the status line does not have to hold it.
-        self._show_bias_status(message, ok=not report.flagged)
+        # Orange for a run with flags in it -- a look, not a failure -- and it
+        # fades like any other outcome: which resonators are flagged, and why,
+        # is on their own subplots, so the status line does not have to hold it.
+        self._show_bias_status(
+            message, level="warn" if report.flagged else "ok")
         self._redraw_plots()
 
     def _bias_error(self, message: str):
         self._set_analysis_enabled(True)
-        self._show_bias_status(message, ok=False)
+        self._show_bias_status(message, level="error")
 
     # ── applying it ──────────────────────────────────────────────────────────
 
@@ -1172,11 +1184,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         panel does neither.
         """
         if self.catalog is None or len(self.catalog) == 0:
-            self._show_bias_status("Nothing to bias", ok=False)
+            self._show_bias_status("Nothing to bias", level="error")
             return
         periscope = self._get_periscope_parent()
         if periscope is None or periscope.crs is None:
-            self._show_bias_status("No board to bias", ok=False)
+            self._show_bias_status("No board to bias", level="error")
             return
 
         self.apply_bias_btn.setEnabled(False)
@@ -1213,7 +1225,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _apply_bias_error(self, message: str):
         self.apply_bias_btn.setEnabled(True)
-        self._show_bias_status(message, ok=False)
+        self._show_bias_status(message, level="error")
 
     def _set_analysis_enabled(self, enabled: bool) -> None:
         """Fitting and bias finding both walk every sweep this panel holds, so

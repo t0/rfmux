@@ -77,7 +77,8 @@ from rfmux.tools.periscope.tasks import (  # noqa: E402
     NetworkAnalysisTask,
 )
 from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
-from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
+from rfmux.tools.periscope.multisweep_panel import (  # noqa: E402
+    BIAS_STATUS_COLOURS, MultisweepPanel)
 from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
     NetworkAnalysisPanel,
 )
@@ -2180,6 +2181,10 @@ def test_a_flagged_run_says_how_many_and_then_stops_saying_it(board, qt_app,
     assert panel.bias_report.flagged
     assert status == (f"Bias found ({len(panel.bias_report.flagged)} of "
                       f"{len(panel.bias_report)} flagged)")
+    # Flags are worth a look, not an error: the line calls attention to itself
+    # in orange rather than in the colour a failure reads in.
+    assert BIAS_STATUS_COLOURS["warn"] in panel.bias_status_label.styleSheet()
+    assert BIAS_STATUS_COLOURS["error"] not in panel.bias_status_label.styleSheet()
     # Which resonators are flagged is on their own subplots, so the status
     # line gets out of the way like any other outcome.
     assert panel._bias_status_timer.isActive()

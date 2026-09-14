@@ -176,10 +176,10 @@ class MockResonatorModel:
         self._nqp_const_arrays = None
         self._nqp_tiled_cache = None
         self._cache_key_params = {}
-        #: {tone: (frequency, nearest resonator, its current)}: the
-        #: branch a resonator is on under each tone, keyed by (module,
-        #: channel) where the caller has one, else by the resonator; a
-        #: tone that is switched off is dropped.
+        #: {tone: (frequency, currents)}: the state every resonator is
+        #: in under each tone, keyed by (module, channel) where the
+        #: caller has one, else by the nearest resonator; a tone that is
+        #: switched off is dropped.
         self._branch_memory = {}
 
     # --- MR_Resonator Methods ---
@@ -1010,57 +1010,62 @@ class MockResonatorModel:
         return ('f', nearest) if tone is None else tone
 
     def _branch_current(self, tone, nearest):
-        """The current the tone's resonator is remembered with, 0 at rest."""
+        """The currents every resonator is remembered with under the
+        tone, all at rest when it has none."""
         prev = self._branch_memory.get(self._branch_key(tone, nearest))
-        return 0j if prev is None or prev[1] != nearest else prev[2]
+        if prev is None:
+            return np.zeros(len(self.mr_lekids), dtype=np.complex128)
+        return prev[1].copy()
 
     def _remember_branch(self, tone, nearest, frequency, cached):
         current = cached.get('current')
         if current is not None:
             self._branch_memory[self._branch_key(tone, nearest)] = (
-                float(frequency), nearest, complex(current))
+                float(frequency), np.array(current, dtype=np.complex128))
 
     def _phys(self):
         phys = getattr(self.mock_crs, '_physics_config', {})
         return phys if isinstance(phys, dict) else {}
 
     def _branches_apart(self, a, b):
-        """Whether two currents of one resonator are on different
+        """Whether two sets of currents put any resonator on different
         branches: the branches differ by ten times, adjacent points on
         one by a fraction (branch_current_tolerance).  Currents are a
         small fraction of Istar, so the test is relative."""
         tol = float(self._phys().get('branch_current_tolerance', 0.3))
-        big = max(abs(a), abs(b))
+        a, b = np.asarray(a), np.asarray(b)
+        big = np.maximum(np.abs(a), np.abs(b))
         # Under 1e-3 Istar a current changes Lk by 1e-6, the resonance
         # by a hundredth of a linewidth: at rest, whatever the ratio.
-        return big > 1e-3 * self.Istar and abs(a - b) > tol * big
+        return bool(np.any((big > 1e-3 * self.Istar)
+                           & (np.abs(a - b) > tol * big)))
 
     def _same_branch(self, cached, tone, nearest):
-        """Whether a cached state (its converged current) is on the
-        branch the tone's resonator is on now.  A bifurcated resonance
-        has two, far apart in current; a hit must not hand a sweep the
-        other direction's, and a tone without a memory is at rest, so it
-        solves from there once rather than taking either."""
+        """Whether a cached state (its converged currents) is on the
+        branches the resonators are on under the tone now.  A bifurcated
+        resonance has two, far apart in current; a hit must not hand a
+        sweep the other direction's, and a tone without a memory is at
+        rest, so it solves from there once rather than taking either."""
         prev = self._branch_memory.get(self._branch_key(tone, nearest))
         have = cached.get('current')
         if have is None:
             return True
-        if prev is None or prev[1] != nearest:
+        if prev is None or len(prev[1]) != len(have):
             return False
-        return not self._branches_apart(prev[2], have)
+        return not self._branches_apart(prev[1], have)
 
     def _converge(self, frequency, amplitude, L, R, C, Cc, base_Lk, base_Lg,
                   tolerance, max_iterations, tone=None):
         """Converge every resonator for *tone* at *frequency*, from the
-        branch the nearest one is on under it: its current when the
-        tone was last evaluated (a move of more than branch_max_substeps
-        sub-steps of branch_substep_hz is a new tone, started at rest).
-        One step from there is the answer where the current moves by a
-        fraction; where it jumps branch, the branch may have ended
+        state each was in under it: their currents when the tone was
+        last evaluated (a move of more than branch_max_substeps
+        sub-steps of branch_substep_hz is a new tone, all at rest).
+        One step from there is the answer where the currents move by a
+        fraction; where one jumps branch, that branch may have ended
         between the two points, and only following the tone in
         sub-steps from where it sat says where, so the step is retaken
-        that way.  Every other resonator starts at rest.  Returns (L, R,
-        currents, iterations) and remembers the branch."""
+        that way.  Returns (L, R, currents, iterations) and remembers
+        the state."""
         n = len(L)
         nearest = self._cache_keys_for(frequency)[1]
         phys = self._phys()
@@ -1079,24 +1084,22 @@ class MockResonatorModel:
         points = []
         key = self._branch_key(tone, nearest)
         prev = self._branch_memory.get(key)
-        if prev is not None and prev[1] == nearest and 0 <= nearest < n:
-            f_prev, _, i_prev = prev
+        if prev is not None and len(prev[1]) == n:
+            f_prev, i_prev = prev
             steps = (int(np.ceil(abs(frequency - f_prev) / substep))
                      if substep > 0 else 1)
             if steps <= max_sub:
-                seed[nearest] = i_prev
+                seed = i_prev.copy()
                 if steps > 1:
                     points = list(f_prev + (frequency - f_prev)
                                   * np.arange(1, steps + 1) / steps)
         L1, R1, currents, its = solve(frequency, L, R, seed.copy())
-        if points and self._branches_apart(currents[nearest], seed[nearest]):
+        if points and self._branches_apart(currents, seed):
             currents = seed.copy()
             for f in points:
                 L1, R1, currents, its = solve(f, L, R, currents)
         L, R = L1, R1
-        if 0 <= nearest < n:
-            self._branch_memory[key] = (float(frequency), nearest,
-                                        complex(currents[nearest]))
+        self._branch_memory[key] = (float(frequency), currents.copy())
         return L, R, currents, its
 
     def update_lekids_for_current(self, frequency, amplitude, tone=None):

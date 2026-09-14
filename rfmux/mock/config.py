@@ -119,10 +119,10 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "log_cache_decisions": False,      # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,         # log every N convergence events
     "convergence_cache_max_size": 10000000,  # max cache entries
-    # A tone's nearest resonator resumes the branch it was on under
-    # that tone; a tone that moved is followed in sub-steps this fine
-    # (0: one step), up to this many (further is a new tone, started
-    # at rest), where one step from where it sat jumps branch.
+    # Every resonator resumes the branch it was on under a tone; a tone
+    # that moved is followed in sub-steps this fine (0: one step), up to
+    # this many (further is a new tone, all at rest), where one step
+    # from where it sat jumps branch.
     "branch_substep_hz": 1000.0,
     "branch_max_substeps": 64,
     # Currents of one resonator further apart than this fraction are on

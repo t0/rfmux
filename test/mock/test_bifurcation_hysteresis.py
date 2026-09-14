@@ -123,6 +123,41 @@ def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_branch(monkey
     assert n_ride < 2 * 60                        # 60 points, few retaken
 
 
+def test_a_collided_pair_keeps_both_resonances_driven():
+    """Two resonances 190 kHz apart, swept by one tone: every resonator
+    resumes its own state from point to point, not only the one the
+    tone is nearest, so the upper resonance is hysteretic too."""
+    from rfmux.mock.crs import ServerMockCRS
+    crs = ServerMockCRS("0000")
+    with contextlib.redirect_stdout(io.StringIO()):
+        asyncio.run(crs.generate_resonators(
+            {"num_resonances": 2, "resonator_random_seed": 5,
+             "freq_start": 1.0e9, "freq_end": 1.0003e9,
+             "auto_bias_kids": False}))
+    m = crs._resonator_model
+    m.nqp_noise_enabled = False
+    m._tls_generator = None
+    wide = np.linspace(1.0e9, 1.005e9, 5001)
+    low = np.abs(m.s21_sweep(wide, 0.001))
+    dip = float(wide[np.argmin(low)])
+    upper = float(wide[np.abs(wide - dip) > 5e4][
+        np.argmin(low[np.abs(wide - dip) > 5e4])])
+    upper, dip = max(upper, dip), min(upper, dip)
+    grid = np.arange(upper + 2e5, dip - 3e5, -2e3)
+
+    def sweep(points):
+        return np.array([abs(m.s21_lc_response(float(f), 0.01, tone=(1, 1)))
+                         for f in points])
+    m._branch_memory.clear()
+    m._convergence_cache.clear()
+    down = sweep(grid)
+    m._branch_memory.clear()
+    m._convergence_cache.clear()
+    up = sweep(grid[::-1])[::-1]
+    window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
+    assert np.abs(up - down)[window].max() > 0.3
+
+
 def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     """Inside the bistable region a tone that arrived from above is on
     the deep branch; switched off and back on at the same frequency it

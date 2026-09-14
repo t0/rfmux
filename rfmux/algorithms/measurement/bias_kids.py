@@ -12,6 +12,8 @@ import asyncio
 import warnings
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
+from ...core.dac_scale import (DAC_SCALE_LABEL_OFFSET_DB,  # noqa: F401
+                               dac_scale_dbm)
 from ...core.transferfunctions import BASE_FREQUENCY, convert_roc_to_volts
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
                              ensure_fits, fitted_linewidth, step_slope_correction)
@@ -232,27 +234,6 @@ def _bias_point_from_fit(entry: Dict, fit_method: str) -> None:
     if f_fit is not None and np.isfinite(f_fit):
         entry['bias_frequency'] = float(f_fit)
         entry['bias_frequency_source'] = fit_method
-
-
-#: Subtracted from the board's DAC scale before amplitudes are labelled
-#: against it. Zero: no physical motivation for a non-zero offset has been
-#: recorded, and an unexplained one silently shifts every power a file
-#: reports. It arrived as 1.5 dB; if a reason for that turns up, it belongs
-#: here in a sentence beside the number.
-DAC_SCALE_LABEL_OFFSET_DB = 0.0
-
-
-async def dac_scale_dbm(crs, module: int) -> Optional[float]:
-    """The module's DAC scale in dBm as amplitudes are labelled against
-    it, or None when the board reports none: a module the analog
-    banking does not expose has none."""
-    try:
-        scale = await crs.get_dac_scale('DBM', module=module)
-    except Exception as e:
-        if "Can't access module" in str(e) and "analog banking" in str(e):
-            return None
-        raise
-    return None if scale is None else float(scale) - DAC_SCALE_LABEL_OFFSET_DB
 
 
 @deprecated("rfmux.tuning.find_bias_points on a multisweep over an AmplitudeSchedule, then crs.apply_bias(report.catalog)")

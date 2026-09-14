@@ -395,7 +395,7 @@ class DACScaleFetcher(QtCore.QThread):
         finally: loop.close()
         self.dac_scales_ready.emit(dac_scales)
     def _fetch_all_dac_scales(self, loop, dac_scales):
-        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
+        from rfmux.core.dac_scale import dac_scale_dbm
         for module_idx in range(1, 9): # Renamed module
             try:
                 dac_scales[module_idx] = loop.run_until_complete(

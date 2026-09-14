@@ -225,6 +225,24 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   recorder stamps it per module as the capture starts (`_with_board_nco`),
   and `ApplyBiasTask` reads it back after `apply_bias` has set it.
 
+* **The DAC scale, and one unexplained constant.** `rfmux/core/dac_scale.py`
+  is where the board's DAC scale is read: `dac_scale_dbm(crs, module)`, plus
+  the `DAC_SCALE_LABEL_OFFSET_DB` it applies. Both came from main inside
+  `bias_kids.py`, which was the last thing Periscope still imported from a
+  deprecated module -- **stage 5 is now free to delete `bias_kids.py` and
+  `df_calibration.py`**, which re-export them only so their own code keeps
+  working until they go.
+
+  The offset **arrived as 1.5 dB with no recorded physical motivation and is
+  0.0 here**, so a label is the board's own number. It is flagged loudly on
+  the module and pinned by a test, because every power this package reports
+  -- in files as well as on screen -- moves with it. If the 1.5 dB turns out
+  to mean something (a fixed loss between the DAC and the connector, say) it
+  goes back *with the reason written beside it*, and every recorded power
+  from before that change is off by the difference. The scale is read once
+  and labelled once: `BiasPoint.power_dbm` and
+  `multisweep_amplitudes.describe` both just add it to `20*log10(amplitude)`.
+
 The noise lane still runs on `_prepare_export_data`'s payload and is untouched
 until it is rebuilt on the catalog; the deprecated library modules go in
 stage 5.
@@ -350,7 +368,9 @@ their behaviour is pinned in `test/tuning/test_find_resonances.py`),
 later against a `tune_resonators` front door, per the design doc §11 step 5).
 The re-exported model functions `s21_skewed`, `nonlinear_iq`,
 `fit_nonlinear_iq`, `get_y_nonlinear` need their remaining importers moved to
-`rfmux.tuning.fits` first.
+`rfmux.tuning.fits` first. `dac_scale_dbm` and `DAC_SCALE_LABEL_OFFSET_DB`
+have already moved, to `rfmux/core/dac_scale.py`; `bias_kids.py` re-exports
+them for its own code only, so that import goes with the file.
 
 ### Stays
 
@@ -1074,17 +1094,6 @@ Not part of enabling the basic flow, listed so they are not lost.
   Rotated IQ display mode reads it by channel, fixing the code/channel
   mismatch by construction.
 
-* **`DAC_SCALE_LABEL_OFFSET_DB`** (`algorithms/measurement/bias_kids.py`)
-  arrived from main as 1.5 dB, subtracted from the board's DAC scale before
-  any amplitude is labelled in dBm. No physical motivation for it is
-  recorded anywhere. It is **0.0** here, so a label is the board's own
-  number; if the 1.5 dB turns out to mean something, it goes back with the
-  reason beside it. `BiasPoint.power_dbm` applies no offset, so the two
-  agree while it is zero. It travels with the last importer of a deprecated
-  module outside those modules themselves: `tasks.DACScaleFetcher` calls
-  `bias_kids.dac_scale_dbm`, which reads the board's scale and applies the
-  offset. Move that beside `power_dbm`, which does the same arithmetic, and
-  stage 5 is free to delete `bias_kids.py` and `df_calibration.py`.
 * **`tune_resonators` front door** and a Tune button that runs the whole
   sequence with one progress bar; `simplified_tuning_flow` rewritten against
   it and run in CI.

@@ -118,7 +118,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "cache_qp_step": 0.0001,           # QP quantization as fraction of base QP
     "log_cache_decisions": False,      # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,         # log every N convergence events
-    "convergence_cache_max_size": 10000000,  # max cache entries
+    "convergence_cache_max_size": 10000000,  # converged states kept per tone
     # A resonance driven past its bifurcation is bistable, two stable
     # driven states, and the mock keeps the one a tone left it in, as
     # hardware does: sweeping down you stay in the high-current state

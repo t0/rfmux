@@ -131,7 +131,7 @@ def test_qp_noise_does_not_defeat_the_convergence_cache():
             "auto_bias_kids": True, "bias_amplitude": 0.001,
             "nqp_noise_enabled": True, "nqp_noise_std_factor": noise}))
         m = crs._resonator_model
-        m._convergence_cache.clear()
+        m._tone_states.clear()
         m._convergence_stats = {"full": 0, "skipped": 0,
                                 "last_reason": None}
         for k in range(200):

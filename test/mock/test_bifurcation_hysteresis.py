@@ -83,7 +83,7 @@ def test_the_batched_sweep_takes_the_same_state():
     m, f0 = _model()
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     swept = m.s21_sweep(grid[::-1], 0.01)[::-1]
-    m._state_memory.clear()
+    m._tone_states.clear()
     np.testing.assert_allclose(swept, _sweep(m, grid[::-1], 0.01)[::-1],
                                rtol=1e-9)
 
@@ -96,8 +96,7 @@ def test_each_module_keeps_its_own_states():
     crs = m.mock_crs
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     down = _sweep(m, grid[::-1], 0.01)[::-1]
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     _place(crs, 2, 1, sorted(m.resonator_frequencies)[0], 0.001)
     seen = []
     for f in grid[::-1]:
@@ -143,11 +142,9 @@ def test_a_collided_pair_keeps_both_resonances_driven():
         np.argmin(low[np.abs(wide - dip) > 5e4])])
     upper, dip = max(upper, dip), min(upper, dip)
     grid = np.arange(upper + 2e5, dip - 3e5, -2e3)
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     down = _sweep(m, grid, 0.01, tone=(1, 1))
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     up = _sweep(m, grid[::-1], 0.01, tone=(1, 1))[::-1]
     window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
     assert np.abs(up - down)[window].max() > 0.3
@@ -167,8 +164,7 @@ def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     _response(m, 1)
     _place(crs, 1, 1, inside, 0.01)
     back = _response(m, 1)[1][0]
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     rest = _sweep(m, [inside], 0.01)[0]
     assert abs(deep) / 0.01 < rest - 0.3
     assert abs(back) / 0.01 == pytest.approx(rest, abs=1e-3)

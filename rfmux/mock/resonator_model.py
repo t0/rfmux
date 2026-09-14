@@ -2,7 +2,6 @@
 Mock CRS Device - Resonator Physics Model.
 Encapsulates the logic for resonator physics simulation, including S21 response.
 """
-import heapq
 import numpy as np
 import threading
 
@@ -12,6 +11,20 @@ from ..mr_resonator.mr_complex_resonator import MR_complex_resonator
 # Import JIT-compiled physics functions (numba is required)
 from ..mr_resonator import jit_physics
 from .config import defaults
+
+
+class _ToneState:
+    """What the model keeps for one tone: the state its resonators were
+    last in under it (frequency and currents, the seed of its next
+    solve) and the converged state at every operating point it has
+    visited, by quantised (frequency, amplitude, QP density), as
+    (L, R, Lk, currents).  A tone switched off is forgotten."""
+    __slots__ = ('frequency', 'currents', 'runs')
+
+    def __init__(self):
+        self.frequency = None
+        self.currents = None
+        self.runs = {}
 
 
 class MockResonatorModel:
@@ -108,8 +121,6 @@ class MockResonatorModel:
         self.Cc_array = None
         self.L_junk_array = None
         
-        # Per-operating-point convergence cache from SoT
-        self._convergence_cache = {}
         self._convergence_cache_max_size = default_config['convergence_cache_max_size']
 
         # Statistics tracking
@@ -200,11 +211,9 @@ class MockResonatorModel:
         self.L_array = self.R_array = self.Lk_array = None
         self.base_Lk_array = self.base_R_array = self.base_Lg_array = None
         self._lekids_stale = False
-        #: {tone: (frequency, currents)}: the state every resonator is
-        #: in under each tone, keyed by (module, channel) where the
-        #: caller has one, else by the nearest resonator; a tone that is
-        #: switched off is dropped.
-        self._state_memory = {}
+        #: {tone: _ToneState}, keyed by (module, channel) where the
+        #: caller has one, else by the nearest resonator.
+        self._tone_states = {}
 
     # --- MR_Resonator Methods ---
     def generate_resonators(self, num_resonances=2, config=None,
@@ -325,8 +334,7 @@ class MockResonatorModel:
         
         # Clear convergence state when resonators change
         self._convergence_stats = {'full': 0, 'skipped': 0, 'last_reason': None}
-        # Also clear convergence cache to avoid size mismatches after reconfiguration
-        self._convergence_cache.clear()
+        self._tone_states.clear()
         # Bump generation and clear pulses/schedules
         self._resonator_gen += 1
         self.pulse_events = []
@@ -808,23 +816,18 @@ class MockResonatorModel:
         qp_val = effective_nqp[nearest_idx] if 0 <= nearest_idx < len(effective_nqp) else 0.0
         qp_key = round(qp_val / qp_step) * qp_step
 
-        cache_key = (nearest_idx, freq_key, amp_key, qp_key)
-
-        # Check cache
+        ts = self._tone_state(tone, frequency)
+        run_key = (freq_key, amp_key, qp_key)
+        entry = ts.runs.get(run_key)
         skip_convergence = False
-        cached_data = self._convergence_cache.get(cache_key)
         reason = 'miss'
-        if cached_data is not None:
-            if cached_data.get('gen') != getattr(self, '_resonator_gen', 0):
-                reason = 'gen_changed'
-            elif cached_data.get('lekid_count') != len(self.mr_lekids):
-                reason = 'count_changed'
-            elif not self._same_state(cached_data, tone, frequency):
-                reason = 'state_changed'
-            else:
+        if entry is not None:
+            if self._same_state(ts, entry[3]):
                 skip_convergence = True
                 reason = 'hit'
-                self._remember_state(tone, frequency, cached_data)
+                ts.frequency, ts.currents = float(frequency), entry[3]
+            else:
+                reason = 'state_changed'
         self._convergence_stats['last_reason'] = reason
         
         # Track cache hit/miss for rolling statistics
@@ -844,50 +847,15 @@ class MockResonatorModel:
         
         # Update parameters based on convergence decision
         if not skip_convergence:
-            # Run full convergence
             currents = self.update_lekids_for_current(frequency, amplitude,
                                                       tone)
-
-            # Update cache capacity from config if provided
-            phys = getattr(self.mock_crs, '_physics_config', {})
-            if isinstance(phys, dict):
-                max_size = phys.get('convergence_cache_max_size', self._convergence_cache_max_size)
-            else:
-                max_size = self._convergence_cache_max_size
-            if isinstance(max_size, int) and max_size > 0:
-                self._convergence_cache_max_size = max_size
-
-            # Cache the actual converged values (not factors) for this operating point
-            self._convergence_cache[cache_key] = {
-                'Lk_values': self.Lk_array.copy(),
-                'R_values': self.R_array.copy(),
-                'L_values': self.L_array.copy(),
-                'frequency': frequency,
-                'amplitude': amplitude,
-                'qp_key': qp_key,
-                'nearest_idx': nearest_idx,
-                'gen': getattr(self, '_resonator_gen', 0),
-                'lekid_count': len(self.mr_lekids),
-                'current': currents,
-            }
-
-            # Limit cache size
-            if len(self._convergence_cache) > self._convergence_cache_max_size:
-                oldest_key = next(iter(self._convergence_cache))
-                del self._convergence_cache[oldest_key]
-
-            # Update statistics
+            self._keep_run(ts, run_key, (self.L_array, self.R_array,
+                                         self.Lk_array, currents))
             self._convergence_stats['full'] += 1
-
         else:
-            # Restore cached converged values - apply to ALL resonators
             self._ensure_arrays()
-            self.Lk_array = np.array(cached_data['Lk_values'], dtype=float)
-            self.R_array = np.array(cached_data['R_values'], dtype=float)
-            self.L_array = np.array(cached_data['L_values'], dtype=float)
+            self.L_array, self.R_array, self.Lk_array = entry[:3]
             self._lekids_stale = True
-            
-            # Update statistics
             self._convergence_stats['skipped'] += 1
         
         # Extract parameters for ALL resonators
@@ -999,18 +967,25 @@ class MockResonatorModel:
                     system_termination=k0.system_termination))
             return out
 
-    def _state_key(self, tone, frequency):
-        """The tone's (module, channel); a caller without one gets a
-        slot per nearest resonator."""
-        if tone is not None:
-            return tone
-        return ('f', self._cache_keys_for(frequency)[1])
+    def _tone_state(self, tone, frequency):
+        """The store for *tone*, its (module, channel); a caller without
+        one gets a slot per nearest resonator."""
+        key = tone if tone is not None else ('f', self._cache_keys_for(frequency)[1])
+        ts = self._tone_states.get(key)
+        if ts is None:
+            ts = self._tone_states[key] = _ToneState()
+        return ts
 
-    def _remember_state(self, tone, frequency, cached):
-        current = cached.get('current')
-        if current is not None:
-            self._state_memory[self._state_key(tone, frequency)] = (
-                float(frequency), current)
+    def _keep_run(self, ts, run_key, state):
+        """Keep a converged state for its operating point, the oldest
+        going when the tone holds convergence_cache_max_size of them."""
+        ts.runs[run_key] = state
+        bound = self._phys().get('convergence_cache_max_size',
+                                 self._convergence_cache_max_size)
+        if isinstance(bound, int) and bound > 0:
+            self._convergence_cache_max_size = bound
+        if len(ts.runs) > self._convergence_cache_max_size:
+            del ts.runs[next(iter(ts.runs))]
 
     def _phys(self):
         phys = getattr(self.mock_crs, '_physics_config', {})
@@ -1029,19 +1004,15 @@ class MockResonatorModel:
         return bool(np.any((big > 1e-3 * self.Istar)
                            & (np.abs(a - b) > tol * big)))
 
-    def _same_state(self, cached, tone, frequency):
-        """Whether a cached state (its converged currents) is the one
-        the resonators are in under the tone now.  A bifurcated
-        resonance has two, far apart in current; a hit must not hand a
-        sweep the other direction's, and a tone without a memory is at
-        rest, so it solves from there once rather than taking either."""
-        prev = self._state_memory.get(self._state_key(tone, frequency))
-        have = cached.get('current')
-        if have is None:
-            return True
-        if prev is None:
+    def _same_state(self, ts, currents):
+        """Whether a kept state (its converged currents) is the one the
+        resonators are in under the tone now.  A bifurcated resonance
+        has two, far apart in current; a hit must not hand a sweep the
+        other direction's, and a tone without a memory is at rest, so
+        it solves from there once rather than taking either."""
+        if ts.currents is None:
             return False
-        return not self._states_apart(prev[1], have)
+        return not self._states_apart(ts.currents, currents)
 
     def _converge(self, frequency, amplitude, L, R, C, Cc, base_Lk, base_Lg,
                   tolerance, max_iterations, tone=None):
@@ -1069,10 +1040,9 @@ class MockResonatorModel:
 
         seed = np.zeros(n, dtype=np.complex128)
         points = []
-        key = self._state_key(tone, frequency)
-        prev = self._state_memory.get(key)
-        if prev is not None:
-            f_prev, i_prev = prev
+        ts = self._tone_state(tone, frequency)
+        if ts.currents is not None:
+            f_prev, i_prev = ts.frequency, ts.currents
             steps = (int(np.ceil(abs(frequency - f_prev) / substep))
                      if substep > 0 else 1)
             if steps <= max_sub:
@@ -1086,7 +1056,7 @@ class MockResonatorModel:
             for f in points:
                 L1, R1, currents, its = solve(f, L, R, currents)
         L, R = L1, R1
-        self._state_memory[key] = (float(frequency), currents.copy())
+        ts.frequency, ts.currents = float(frequency), currents.copy()
         return L, R, currents, its
 
     def update_lekids_for_current(self, frequency, amplitude, tone=None):
@@ -1620,9 +1590,9 @@ class MockResonatorModel:
         # forgotten, so a tone switched back on starts from rest.
         on = {(module, ch) for ch, _, _, _ in raw_channel_configs}
         with self._physics_lock:
-            for key in [k for k in self._state_memory
+            for key in [k for k in self._tone_states
                         if k[0] == module and k not in on]:
-                del self._state_memory[key]
+                del self._tone_states[key]
 
         # Process the collected configuration (outside lock where possible, though S21 calculation needs physics lock)
         s21_call_count = 0
@@ -1829,8 +1799,8 @@ class MockResonatorModel:
                                 sample_rate, n_obs, n_tones, tone_keys):
         """The reference loop with everything constant across the batch
         hoisted out of it.  Same arithmetic, same noise draws in the same
-        order, same convergence-cache decisions and the same end state.
-        Assumes _physics_lock held.
+        order, the same kept states and the same end state.  Assumes
+        _physics_lock held.
 
         With pulse_time None every sample shares one instant (the
         reference loop's memo makes them share one QP state and one
@@ -1870,7 +1840,6 @@ class MockResonatorModel:
         y = (self._tls_generator.values_at(t_states)
              if self._tls_generator is not None else None)
 
-        gen = getattr(self, '_resonator_gen', 0)
         phys = getattr(self.mock_crs, '_physics_config', {})
         if not isinstance(phys, dict):
             phys = {}
@@ -1889,17 +1858,15 @@ class MockResonatorModel:
             self.base_Lk_array = np.asarray(Lk_nqp[s], dtype=float).copy()
             self.base_R_array = np.asarray(R_nqp[s], dtype=float).copy()
 
-        def restore(state):
-            L_v, R_v, Lk_v = state
-            self.L_array = np.array(L_v, dtype=float)
-            self.R_array = np.array(R_v, dtype=float)
-            self.Lk_array = np.array(Lk_v, dtype=float)
-            self._lekids_stale = True
 
-        # ── Per tone: cache-key parameters and the runs of one key ────
-        # The key is the quantized QP density; within a run of one key
-        # the reference converges at the first sample and hits that
-        # entry for the rest, so a run is one lookup.
+        # ── Per tone: the runs of one quantised QP density ────────────
+        # Within a run the reference converges at the first sample and
+        # takes that state for the rest, so a run is one lookup.  A
+        # tone's solves depend only on its own frequency, amplitude, QP
+        # state and seed (the state it last left), so the tones are
+        # independent and each is taken through its runs in order.
+        last_reason = self._convergence_stats.get('last_reason')
+        misses = set()
         tones = []
         for j in range(n_tones):
             if not (tone_mag[j] > 0 and observed[j]):
@@ -1912,93 +1879,30 @@ class MockResonatorModel:
                       else np.zeros(S))
             qp_keys = np.round(qp_col / qp_step) * qp_step
             starts = np.flatnonzero(np.r_[True, qp_keys[1:] != qp_keys[:-1]])
-            tones.append({
-                'j': j, 'key': tone_keys[j],
-                'frequency': frequency, 'amplitude': amplitude,
-                'nearest_idx': nearest_idx,
-                'freq_key': round(frequency / freq_step) * freq_step,
-                'amp_key': round(amplitude / amp_step) * amp_step,
-                'qp_keys': qp_keys, 'starts': starts, 'states': []})
-
-        def state_at(k, s):
-            """The state tone k's run covering sample s holds."""
-            tone = tones[k]
-            r = int(np.searchsorted(tone['starts'], s, side='right')) - 1
-            return tone['states'][r]
-
-        # ── Convergence decisions, one per run, in the reference order ──
-        # Samples outer, tones inner: each convergence starts from the
-        # state the step before it left in the lekids, which is the
-        # previous tone's run at this sample or, for the first tone, the
-        # last tone's run at the previous sample.  The cache is a FIFO
-        # of bounded size, so an insertion can evict the entry a run in
-        # progress is hitting; the reference then converges again at
-        # that tone's next step, and so does this, by splitting the run.
-        events = [(int(st), k) for k, tone in enumerate(tones)
-                  for st in tone['starts']]
-        heapq.heapify(events)
-        for tone in tones:
-            tone['starts'] = []
-        live = {}                       # cache key -> tone index of the run using it
-        max_size = phys.get('convergence_cache_max_size',
-                            self._convergence_cache_max_size)
-        if isinstance(max_size, int) and max_size > 0:
-            self._convergence_cache_max_size = max_size
-        last_reason = self._convergence_stats.get('last_reason')
-        misses = set()
-        while events:
-            s, k = heapq.heappop(events)
-            tone = tones[k]
-            if tone['starts'] and tone['starts'][-1] == s:
-                continue                # a split landing on a run start
-            qp_key = float(tone['qp_keys'][s])
-            cache_key = (tone['nearest_idx'], tone['freq_key'],
-                         tone['amp_key'], qp_key)
-            cached = self._convergence_cache.get(cache_key)
-            hit = (cached is not None and cached.get('gen') == gen
-                   and cached.get('lekid_count') == n_res
-                   and self._same_state(cached, tone['key'],
-                                        tone['frequency']))
-            if hit:
-                state = (cached['L_values'], cached['R_values'],
-                         cached['Lk_values'])
-                self._remember_state(tone['key'], tone['frequency'], cached)
-                last_reason = 'hit'
-            else:
-                if k > 0:
-                    restore(state_at(k - 1, s))
-                elif s > 0:
-                    restore(state_at(len(tones) - 1, s - 1))
-                set_base(s)
-                currents = self.update_lekids_for_current(
-                    tone['frequency'], tone['amplitude'], tone['key'])
-                state = (self.L_array.copy(), self.R_array.copy(),
-                         self.Lk_array.copy())
-                self._convergence_cache[cache_key] = {
-                    'Lk_values': state[2], 'R_values': state[1],
-                    'L_values': state[0], 'frequency': tone['frequency'],
-                    'amplitude': tone['amplitude'], 'qp_key': qp_key,
-                    'nearest_idx': tone['nearest_idx'], 'gen': gen,
-                    'lekid_count': n_res, 'current': currents}
-                self._convergence_stats['full'] += 1
-                misses.add((s, k))
-                last_reason = ('miss' if cached is None
-                               else 'gen_changed' if cached.get('gen') != gen
-                               else 'count_changed')
-                if len(self._convergence_cache) > self._convergence_cache_max_size:
-                    evicted = next(iter(self._convergence_cache))
-                    del self._convergence_cache[evicted]
-                    k_ev = live.pop(evicted, None)
-                    if k_ev is not None:
-                        # That tone looks the key up again at its next
-                        # step: this sample if it comes later in the
-                        # tone order, otherwise the next sample.
-                        s_ev = s if k_ev > k else s + 1
-                        if s_ev < S:
-                            heapq.heappush(events, (s_ev, k_ev))
-            tone['starts'].append(s)
-            tone['states'].append(state)
-            live[cache_key] = k
+            freq_key = round(frequency / freq_step) * freq_step
+            amp_key = round(amplitude / amp_step) * amp_step
+            ts = self._tone_state(tone_keys[j], frequency)
+            states = []
+            for s in starts:
+                run_key = (freq_key, amp_key, float(qp_keys[s]))
+                entry = ts.runs.get(run_key)
+                if entry is not None and self._same_state(ts, entry[3]):
+                    ts.frequency, ts.currents = float(frequency), entry[3]
+                    last_reason = 'hit'
+                else:
+                    last_reason = 'miss' if entry is None else 'state_changed'
+                    set_base(s)
+                    currents = self.update_lekids_for_current(
+                        frequency, amplitude, tone_keys[j])
+                    entry = (self.L_array, self.R_array, self.Lk_array,
+                             currents)
+                    self._keep_run(ts, run_key, entry)
+                    self._convergence_stats['full'] += 1
+                    misses.add((int(s), len(tones)))
+                states.append(entry)
+            tones.append({'j': j, 'frequency': frequency,
+                          'amplitude': amplitude, 'starts': starts,
+                          'states': states})
         self._convergence_stats['last_reason'] = last_reason
 
         # The per-step statistics the reference keeps, from the runs: a
@@ -2059,7 +1963,8 @@ class MockResonatorModel:
 
         # ── End state: what the reference leaves after its last sample ──
         if tones:
-            restore(state_at(len(tones) - 1, S - 1))
+            self.L_array, self.R_array, self.Lk_array = tones[-1]['states'][-1][:3]
+            self._lekids_stale = True
         set_base(S - 1)
         self._nqp_state_t = float(t_states[-1])
         self._nqp_state_noise = (eps[-1] if eps is not None else None)

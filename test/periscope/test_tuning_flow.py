@@ -1139,6 +1139,49 @@ def test_the_measurement_name_becomes_the_files_label(qt_app):
     assert dialog.get_parameters()["label"] is None
 
 
+def test_the_dialog_asks_for_one_amplitude_and_one_direction(qt_app):
+    """A netanal measures the band once. The dialog's parameters are the
+    driver's: a scalar ``amp`` and a single ``sweep_direction``, which is
+    upward unless the operator says otherwise."""
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
+    dialog.amp_edit.setText("1/1000")
+
+    params = dialog.get_parameters()
+    assert params["amp"] == 0.001
+    assert params["sweep_direction"] == "upward"
+
+    dialog.direction_combo.setCurrentText("downward")
+    assert dialog.get_parameters()["sweep_direction"] == "downward"
+
+
+def test_an_amplitude_off_the_scale_is_refused(qt_app, monkeypatch):
+    """Normalized amplitude is a fraction of full scale, so above 1.0 there is
+    nothing to measure with."""
+    warned = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *args, **kwargs: warned.append(args[-1]))
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
+    dialog.amp_edit.setText("1.5")
+
+    assert dialog.get_parameters() is None
+    assert warned
+
+
+def test_editing_a_netanals_parameters_opens_on_them(qt_app):
+    """Edit Parameters opens on what the panel measured with rather than on
+    what was last typed into a new-analysis dialog, and offers no import."""
+    dialog = NetworkAnalysisDialog(params={"amp": 0.002, "fmin": 1.2e9,
+                                           "fmax": 1.3e9, "npoints": 321,
+                                           "sweep_direction": "downward"},
+                                   module=1, dac_scales={1: -0.5}, editing=True)
+
+    assert float(dialog.amp_edit.text()) == 0.002
+    assert float(dialog.fmin_edit.text()) == 1200.0
+    assert int(dialog.points_edit.text()) == 321
+    assert dialog.direction_combo.currentText() == "downward"
+    assert not hasattr(dialog, "import_button")
+
+
 def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory):
     """Import reads the file with ``store.load`` and fills the fields in from
     what the driver recorded about the sweep -- the amplitude it probed at and
@@ -1157,6 +1200,7 @@ def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory
         netanal_trace(dialog.loaded_container[module_id])["iq_counts"],
         panel.netanal_traces[catalog.module]["iq_counts"])
     assert float(dialog.amp_edit.text()) == 0.004
+    assert dialog.direction_combo.currentText() == "upward"
     assert dialog.label_edit.text() == "an import"
     assert dialog.load_btn.isEnabled()
 

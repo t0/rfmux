@@ -450,6 +450,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                     'npoints': task_params['npoints'],
                     'max_chans': task_params['max_chans'],
                     'max_span': task_params['max_span'],
+                    'sweep_direction': task_params['sweep_direction'],
                     'module': self.module,
                     'progress_callback': progress_cb,
                     'data_callback': data_cb,
@@ -514,6 +515,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
                 'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
+                'sweep_direction': self.params.get('sweep_direction', DEFAULT_SWEEP_DIRECTION),
                 }
         
     async def _process_network_analysis(self, loop, netanal_params):

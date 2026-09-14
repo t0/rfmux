@@ -1311,10 +1311,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             signals = window_data['signals']
             task_params = params.copy()
             task_params['module'] = module_param
-            # The dialogs still offer a list of amplitudes; take_netanal measures
-            # at one. Resolved here until they are rewritten.
-            task_params['amp'] = params.get(
-                'amps', [params.get('amp', DEFAULT_AMPLITUDE)])[0]
             module_specific_cable_length = params.get('module_cable_lengths', {}).get(module_param)
             if module_specific_cable_length is not None:
                 task_params['cable_length'] = module_specific_cable_length
@@ -1387,22 +1383,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Show the dialog to configure and run multisweep analysis.
         """
-        # Try to get active module
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(netanal_dialog)
         if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
-        
-        # --- Launch dialog even if no resonances yet ---
-        dialog = MultisweepDialog(parent=netanal_dialog,
-                                  dac_scales=netanal_dialog.dac_scales,  # may be {}
+
+        # Full scale is the dialog's to fetch off the board above it when this
+        # session has not read it yet, and it opens without one. A sweep loaded
+        # from a file has no resonances to seed it with either.
+        dialog = MultisweepDialog(parent=self,
+                                  dac_scales=dict(getattr(self, 'dac_scales', None) or {}),
                                   module=self.module,
                                   load_multisweep=True)
 
-        
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
@@ -1512,15 +1504,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
     def _get_channel_noise(self) -> None:
         ''' Open Dialog to get noise spectrum dialog '''
 
-        default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        # NetworkAnalysisDialog from .ui (which imports from .dialogs)
-        dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(dialog)
-        if self.crs is None:
-            self.dac_scales = default_dac_scales.copy()
-        
         from .noise_spectrum_dialog import NoiseSpectrumDialog
         num_res = 0 ### a place holder from the dialog 
         noise_dialog = NoiseSpectrumDialog(self, num_res, self.crs, channel=True)

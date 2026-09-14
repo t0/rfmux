@@ -113,11 +113,9 @@ DEFAULT_MAX_CHANNELS = _NETANAL_DEFAULTS["max_chans"]
 DEFAULT_MAX_SPAN = _NETANAL_DEFAULTS["max_span"]
 DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
-
-# Default linspace settings for amplitude sweeps
-DEFAULT_AMP_START = 0.001  # Default start for amplitude linspace
-DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
-DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
+DEFAULT_SWEEP_DIRECTION = _NETANAL_DEFAULTS["sweep_direction"]
+#: The directions a netanal can be measured in. One per call.
+SWEEP_DIRECTIONS = ("upward", "downward")
 
 # Multisweep defaults
 

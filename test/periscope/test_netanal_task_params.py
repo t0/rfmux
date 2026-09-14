@@ -1,10 +1,9 @@
 """What Periscope hands a NetworkAnalysisTask, and what it takes to start one.
 
-One netanal is one module at one probe amplitude: ``take_netanal`` takes a
-scalar ``amp`` and returns one trace tagged with it.  The netanal dialog still
-offers a list of amplitudes, so the resolution to a single one happens here, in
-the one line that starts the task, and this is the test that says so. The
-module is not the dialog's to offer at all: one Periscope controls one.
+One netanal is one module, at one probe amplitude, in one direction, which is
+what the dialog asks for and what ``take_netanal`` takes. The parameters reach
+the driver as they were entered; the module is not among them, because one
+Periscope controls one.
 
 What is *not* needed to start one is a DAC scale, which only decides whether
 the legend can say dBm.
@@ -14,10 +13,14 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+import numpy as np  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope import app as app_module  # noqa: E402
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from rfmux.tools.periscope.tasks import (  # noqa: E402
+    NetworkAnalysisSignals, NetworkAnalysisTask,
+)
 
 
 class _RecordingTask:
@@ -47,24 +50,17 @@ def periscope_and_tasks(monkeypatch):
     return p, _RecordingTask.started
 
 
-def test_the_task_gets_one_amplitude(periscope_and_tasks):
-    """A dialog's list of amplitudes reaches the task as the single ``amp``
-    take_netanal takes."""
+def test_the_dialogs_parameters_reach_the_task(periscope_and_tasks):
+    """What the dialog returned is what the task is given, with the module it
+    is being started for written in."""
     periscope, started = periscope_and_tasks
 
-    periscope._start_netanal_task(2, {"amps": [0.004, 0.01], "npoints": 100}, "na-1")
-
-    assert [task.params["amp"] for task in started] == [0.004]
-    assert started[0].params["module"] == 2
-
-
-def test_a_single_amp_is_passed_through(periscope_and_tasks):
-    """``amp`` on its own is what the task is given, with no list in sight."""
-    periscope, started = periscope_and_tasks
-
-    periscope._start_netanal_task(1, {"amp": 0.002}, "na-1")
+    periscope._start_netanal_task(
+        2, {"amp": 0.002, "sweep_direction": "downward", "npoints": 100}, "na-1")
 
     assert started[0].params["amp"] == 0.002
+    assert started[0].params["sweep_direction"] == "downward"
+    assert started[0].params["module"] == 2
 
 
 class _StubDockManager:
@@ -123,3 +119,52 @@ def test_the_session_module_is_what_gets_swept(periscope_and_tasks, qt_app, monk
 
     assert [task.module for task in started] == [1]
     assert sorted(periscope.netanal_tasks) == ["netanal_0_1"]
+
+
+class _Module:
+    """One module of a board, for the identifier a container is keyed by."""
+
+    def __init__(self, module):
+        self.module = module
+
+    def index(self):
+        return f"crs0000_rmod{self.module}"
+
+
+class _RecordingCRS:
+    """Enough board to record one ``take_netanal`` call and answer it."""
+
+    def __init__(self):
+        self.calls = []
+        self.module = {m: _Module(m) for m in range(1, 9)}
+
+    async def take_netanal(self, **kwargs):
+        self.calls.append(kwargs)
+        return {self.module[kwargs["module"]].index(): {
+            "results": {"frequencies": np.array([]), "iq_counts": np.array([])}}}
+
+
+def _driver_call(params):
+    """The arguments one NetworkAnalysisTask calls ``take_netanal`` with.
+
+    Waited on rather than spun on: the task runs an asyncio loop of its own in
+    its own thread and needs nothing from the GUI one.
+    """
+    crs = _RecordingCRS()
+    signals = NetworkAnalysisSignals()   # held: the thread emits on it
+    task = NetworkAnalysisTask(crs=crs, module=1, params=params, signals=signals)
+    task.start()
+    assert task.wait(30_000), "task never finished"
+    return crs.calls[0]
+
+
+def test_the_direction_reaches_the_driver(qt_app):
+    """A netanal measured downward is asked for downward."""
+    assert _driver_call({"amp": 0.001, "sweep_direction": "downward"}
+                        )["sweep_direction"] == "downward"
+
+
+def test_a_netanal_is_measured_upward_unless_asked_otherwise(qt_app):
+    """Parameters from before the dialog offered a direction still measure the
+    way ``take_netanal`` does on its own."""
+    assert _driver_call({"amp": 0.001})["sweep_direction"] == "upward"

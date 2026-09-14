@@ -14,8 +14,7 @@ The Periscope application provides a comprehensive suite of visualization and an
   - Dual-sideband Power Spectral Density (DSB PSD)
 
 - **Network Analysis**:
-  - Amplitude and phase vs frequency sweeps
-  - Multi-amplitude sweeps for characterization
+  - Amplitude and phase vs frequency sweeps, upward or downward through the band
   - Cable delay calculation and compensation
   - Resonance frequency identification
   - Export of analysis data in various formats
@@ -93,7 +92,8 @@ await raise_periscope(crs_instance, module=2, channels="3&5")
 The network analysis functionality allows for detailed characterization of resonators:
 
 1. Click "Network Analyzer" to configure and run a frequency sweep
-2. Set frequency range, sweep points, and amplitude parameters
+2. Set the frequency range, the points and averaging, the probe amplitude, and
+   which way through the band to measure
 3. View amplitude and phase response for each module
 4. Use "Find Resonances" to identify resonance dips; the ⚙ beside it sets the
    thresholds, and they stay set between searches and across sessions
@@ -146,7 +146,7 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
 
 - **Network analysis parameter import**
   1. In the *Network Analysis* dialog, select **Import Data** to load a saved configuration from a `.pkl`/`.pickle` file created by an earlier run.
-  2. The dialog non-blockingly opens a file chooser and, once a compatible payload is selected, pre-populates all sweep parameters (modules, amplitudes, frequency span, averaging, cable length, etc.).
+  2. The dialog non-blockingly opens a file chooser and, once a compatible netanal file is selected, fills the fields in with the arguments it was measured with -- amplitude, frequency range, points, averaging, max channels and span, and direction -- along with the name it was saved under. Not the module: one Periscope is one module, and the file is shown on the one it holds.
   3. After the file is validated, the **Load Analysis** button becomes available, allowing you to immediately reuse the imported settings without re-entering them by hand.
   4. If the resonance values are available it will also re-plot the data in the same way as displayed when it was saved.
 

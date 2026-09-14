@@ -19,7 +19,6 @@ from rfmux.algorithms.measurement.multisweep import multisweep
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, store
 
-from .network_analysis_base import NetworkAnalysisDialogBase
 from .utils import DEFAULT_AMPLITUDE
 from .field_memory import remember_fields
 
@@ -60,7 +59,7 @@ def load_multisweep_container(parent: QtWidgets.QWidget, file_path: str):
     return container
 
 
-class MultisweepDialog(NetworkAnalysisDialogBase):
+class MultisweepDialog(QtWidgets.QDialog):
     """Configure one ``crs.multisweep`` call over a :class:`ResonatorCatalog`."""
 
     def __init__(self, parent: QtWidgets.QWidget = None,
@@ -81,8 +80,10 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             initial_params: a previous call's arguments, to seed the fields.
             load_multisweep: offer Import and a Load button rather than a sweep.
         """
-        super().__init__(parent, params=initial_params, dac_scales=dac_scales,
-                         module=catalog.module if catalog is not None else module)
+        super().__init__(parent)
+        self.params = initial_params or {}
+        self.dac_scales = dac_scales or {}
+        self.module = catalog.module if catalog is not None else module
         self.catalog = catalog
         self.load_multisweep = load_multisweep
 
@@ -339,6 +340,12 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         form.addRow("DAC full scale (dBm):", self.dac_scale_info)
 
         return group
+
+    def _update_dac_scale_info(self):
+        """What full scale is on this module, as the board reports it."""
+        scale = self.dac_scales.get(self.module)
+        self.dac_scale_info.setText(
+            f"{scale:+.2f} dBm" if scale is not None else "Unknown")
 
     def _seeded_directions(self) -> tuple[str, ...]:
         seeded = self.params.get("sweep_direction",

@@ -1,12 +1,16 @@
-"""Network analysis parameter dialogs."""
+"""The Network Analysis dialog: a view over ``take_netanal``'s own arguments.
+
+One dialog, opened two ways. From the menu it configures a new analysis and
+offers Import and Load, which show a saved file instead of measuring. From a
+panel's Edit Parameters it opens on the analysis that panel ran, with
+``editing=True``, and hands back the arguments for a re-run.
+"""
 
 from .utils import (
-    QtWidgets, QtCore, QtGui, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
+    QtWidgets, QtCore, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    traceback
+    SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback
 )
-from .tasks import DACScaleFetcher
-from .network_analysis_base import NetworkAnalysisDialogBase
 from ...tuning import store
 from ...tuning.find_resonances import netanal_trace
 from .field_memory import remember_fields
@@ -49,108 +53,145 @@ def load_network_analysis_container(parent: QtWidgets.QWidget, file_path: str | 
     return container
 
 
+class NetworkAnalysisDialog(QtWidgets.QDialog):
+    """Configure one ``crs.take_netanal`` call.
 
-class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
+    A netanal measures the band once, at one amplitude, in one direction, so
+    that is what the dialog asks for. The module is the session's and the
+    dialog says which rather than asking.
     """
-    Dialog for configuring and initiating a new Network Analysis.
-    It allows users to specify parameters like frequency range, amplitude,
-    amplitude, and other analysis settings. The module is the session's.
-    """
-    def __init__(self, parent: QtWidgets.QWidget = None, module: int | None = None,
-                 dac_scales: dict[int, float] = None):
+
+    def __init__(self, parent: QtWidgets.QWidget = None, *, params: dict = None,
+                 module: int | None = None, dac_scales: dict[int, float] = None,
+                 editing: bool = False):
         """
-        Initializes the Network Analysis configuration dialog.
-
         Args:
-            parent: The parent widget.
-            module: the module this Periscope controls.
-            dac_scales: Pre-fetched DAC scales.
+            params: a previous call's arguments, to seed the fields.
+            module: this session's module, which is the one measured.
+            dac_scales: module to full scale in dBm, for the label beside the
+                amplitude. The caller's to fetch; the dialog only shows it.
+            editing: open on *params* to re-run an existing analysis, rather
+                than on a new one with Import and Load.
         """
-        super().__init__(parent, params=None, module=module, dac_scales=dac_scales)
-        self.setWindowTitle("Network Analysis Configuration")
-        self.setModal(False) # Modeless dialog
-        self._setup_ui()
+        super().__init__(parent)
+        self.params = dict(params or {})
+        self.module = module
+        self.dac_scales = dict(dac_scales or {})
+        self.editing = editing
+
         self.load_data_available = False
         self.loaded_container = {}
-        remember_fields(self)
-        
+
+        self.setWindowTitle("Edit Network Analysis Parameters" if editing
+                            else "Network Analysis Configuration")
+        self.setModal(editing)
+        self._setup_ui()
+        self._update_dac_scale_info()
+        # An editing dialog opens on what the panel measured with; those win
+        # over what was typed into the last one, and are still remembered.
+        remember_fields(self, restore=not editing)
+
+    # ── the UI ───────────────────────────────────────────────────────────────
+
     def _setup_ui(self):
-        """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
 
-        self.import_button = QtWidgets.QPushButton("Import Data")
-        self.import_button.clicked.connect(self._load_netanal_data)
-        layout.addWidget(self.import_button, alignment=QtCore.Qt.AlignLeft)
-        
+        if not self.editing:
+            self.import_button = QtWidgets.QPushButton("Import Data")
+            self.import_button.clicked.connect(self._load_netanal_data)
+            layout.addWidget(self.import_button,
+                             alignment=QtCore.Qt.AlignmentFlag.AlignLeft)
+
         param_group = QtWidgets.QGroupBox("Analysis Parameters")
-        param_layout = QtWidgets.QFormLayout(param_group)
-        
-        self.label_edit = QtWidgets.QLineEdit()
+        form = QtWidgets.QFormLayout(param_group)
+
+        self.label_edit = QtWidgets.QLineEdit(self.params.get("label") or "")
         self.label_edit.setToolTip(
             "Your name for this measurement. It goes on the end of the "
             "filename: netanal_YYYYMMDD_HHMMSS_<name>.pkl")
-        param_layout.addRow("Measurement Name:", self.label_edit)
+        form.addRow("Measurement Name:", self.label_edit)
 
         # One Periscope is one module, so this says which rather than asking.
-        param_layout.addRow("Module:", QtWidgets.QLabel(str(self.module)))
-        
-        self.fmin_edit = QtWidgets.QLineEdit(str(DEFAULT_MIN_FREQ / 1e6)) # Default in MHz
-        self.fmax_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_FREQ / 1e6)) # Default in MHz
-        param_layout.addRow("Min Frequency (MHz):", self.fmin_edit)
-        param_layout.addRow("Max Frequency (MHz):", self.fmax_edit)
+        form.addRow("Module:", QtWidgets.QLabel(str(self.module)))
 
-        
-        self.setup_amplitude_group(param_layout) # Add shared amplitude settings
-        
-        self.points_edit = QtWidgets.QLineEdit(str(DEFAULT_NPOINTS))
-        param_layout.addRow("Number of Points:", self.points_edit)
-        
-        self.samples_edit = QtWidgets.QLineEdit(str(DEFAULT_NSAMPLES))
-        param_layout.addRow("Samples to Average:", self.samples_edit)
-        
-        self.max_chans_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_CHANNELS))
-        param_layout.addRow("Max Channels:", self.max_chans_edit)
-        
-        self.max_span_edit = QtWidgets.QLineEdit(str(DEFAULT_MAX_SPAN / 1e6)) # Default in MHz
-        param_layout.addRow("Max Span (MHz):", self.max_span_edit)
-        
-        
+        self.fmin_edit = self._number("fmin", DEFAULT_MIN_FREQ, 1e6)
+        self.fmax_edit = self._number("fmax", DEFAULT_MAX_FREQ, 1e6)
+        form.addRow("Min Frequency (MHz):", self.fmin_edit)
+        form.addRow("Max Frequency (MHz):", self.fmax_edit)
+
+        self.amp_edit = self._number("amp", DEFAULT_AMPLITUDE)
+        self.amp_edit.setToolTip(
+            "One normalized amplitude, per tone. Expressions like '1/1000' "
+            "are allowed.")
+        form.addRow("Normalized Amplitude:", self.amp_edit)
+
+        self.dac_scale_info = QtWidgets.QLabel()
+        self.dac_scale_info.setWordWrap(True)
+        form.addRow("DAC full scale (dBm):", self.dac_scale_info)
+
+        self.points_edit = self._number("npoints", DEFAULT_NPOINTS)
+        form.addRow("Number of Points:", self.points_edit)
+
+        self.samples_edit = self._number("nsamps", DEFAULT_NSAMPLES)
+        form.addRow("Samples to Average:", self.samples_edit)
+
+        self.max_chans_edit = self._number("max_chans", DEFAULT_MAX_CHANNELS)
+        form.addRow("Max Channels:", self.max_chans_edit)
+
+        self.max_span_edit = self._number("max_span", DEFAULT_MAX_SPAN, 1e6)
+        form.addRow("Max Span (MHz):", self.max_span_edit)
+
+        self.direction_combo = QtWidgets.QComboBox()
+        self.direction_combo.addItems(SWEEP_DIRECTIONS)
+        self.direction_combo.setCurrentText(
+            self.params.get("sweep_direction", DEFAULT_SWEEP_DIRECTION))
+        self.direction_combo.setToolTip(
+            "Which way through the band. The trace comes back in the order it "
+            "was measured, so a downward netanal has descending frequencies.")
+        form.addRow("Sweep direction:", self.direction_combo)
+
         layout.addWidget(param_group)
-        
-        # Buttons for starting or canceling the analysis
-        btn_layout = QtWidgets.QHBoxLayout()
-        self.start_btn = QtWidgets.QPushButton("Start Analysis")
-        self.start_btn.setDefault(True)  # Make this the default button (highlighted, triggered by Enter)
-        self.load_btn = QtWidgets.QPushButton("Load Analysis")
-        self.load_btn.setEnabled(False) ### Will enable once file is available.
-        self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        btn_layout.addWidget(self.start_btn)
-        btn_layout.addWidget(self.load_btn)
-        btn_layout.addWidget(self.cancel_btn)
-        layout.addLayout(btn_layout)
-        
-        self.start_btn.clicked.connect(self.accept) # Connect to QDialog's accept slot
 
-        self.load_btn.clicked.connect(self._load_data_avail) 
-        
-        self.cancel_btn.clicked.connect(self.reject) # Connect to QDialog's reject slot
-        
-        # Create keyboard shortcuts for Enter/Return keys to trigger "Start Analysis"
-        # This works regardless of which widget has focus
-        self.enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), self)
-        self.enter_shortcut.activated.connect(self.accept)
-        
-        # Also handle numpad Enter
-        self.numpad_enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), self)
-        self.numpad_enter_shortcut.activated.connect(self.accept)
-        
-        self.setMinimumSize(500, 600) # Set a reasonable minimum size
-        
+        row = QtWidgets.QHBoxLayout()
+        self.start_btn = QtWidgets.QPushButton("OK" if self.editing
+                                               else "Start Analysis")
+        self.start_btn.setDefault(True)
+        self.start_btn.clicked.connect(self.accept)
+        row.addWidget(self.start_btn)
+
+        if not self.editing:
+            self.load_btn = QtWidgets.QPushButton("Load Analysis")
+            self.load_btn.setEnabled(False)  # Until a file has been imported.
+            self.load_btn.setAutoDefault(False)
+            self.load_btn.clicked.connect(self._load_data_avail)
+            row.addWidget(self.load_btn)
+
+        self.cancel_btn = QtWidgets.QPushButton("Cancel")
+        self.cancel_btn.setAutoDefault(False)
+        self.cancel_btn.clicked.connect(self.reject)
+        row.addWidget(self.cancel_btn)
+        layout.addLayout(row)
+
+        self.setMinimumWidth(420)
+
+    def _number(self, key: str, default, scale: float = 1.0) -> QtWidgets.QLineEdit:
+        """A field seeded from *params*, in units *scale* of the argument's."""
+        value = self.params.get(key)
+        value = default if value is None else value
+        return QtWidgets.QLineEdit(f"{float(value) / scale:g}")
+
+    def _update_dac_scale_info(self):
+        """What full scale is on this session's module, as the board reports it."""
+        scale = self.dac_scales.get(self.module)
+        self.dac_scale_info.setText(
+            f"{scale:+.2f} dBm" if scale is not None else "Unknown")
+
+    # ── importing a saved analysis ───────────────────────────────────────────
+
     def _load_data_avail(self):
-        ''' Use loaded file parameters, accept the dialog'''
+        """Use the loaded file rather than measuring, and accept."""
         self.load_data_available = True
         self.accept()
-
 
     def _load_netanal_data(self):
         """
@@ -159,32 +200,30 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         """
         QtCore.QTimer.singleShot(0, self._open_file_dialog_async)
 
-
     def _open_file_dialog_async(self):
         """Open a non-blocking file dialog for selecting a Network Analysis parameter file."""
         if not hasattr(self, "_file_dialog") or self._file_dialog is None:
             self._file_dialog = QtWidgets.QFileDialog(self, "Load Network Analysis Parameters")
             self._file_dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
-    
+
             self._file_dialog.setNameFilters([
                 "Pickle Files (*.pkl *.pickle)",
                 "All Files (*)",
             ])
-    
+
             # Force non-native + non-blocking behavior
             self._file_dialog.setOptions(
                 QtWidgets.QFileDialog.Option.DontUseNativeDialog
                 | QtWidgets.QFileDialog.Option.ReadOnly
             )
             self._file_dialog.setModal(False)
-    
+
             # Connect signals
             self._file_dialog.fileSelected.connect(self._on_file_selected)
             self._file_dialog.rejected.connect(self._on_file_dialog_closed)
-    
+
         # Show the dialog async
         self._file_dialog.open()
-
 
     @QtCore.pyqtSlot(str)
     def _on_file_selected(self, path: str):
@@ -199,204 +238,67 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
         blocks = list(container.values())
         params = blocks[0]["call_params"]
 
-        self.amp_edit.setText(
-            ", ".join(f"{float(block['call_params']['amp']):g}" for block in blocks))
-
         label = blocks[0].get(store.METADATA_KEY, {}).get("label")
         self.label_edit.setText(label or "")
-    
+
         def set_if_present(key, widget, formatter):
             if key in params and params[key] is not None:
                 try:
                     widget.setText(formatter(params[key]))
                 except Exception:
                     widget.setText(str(params[key]))
-    
+
+        set_if_present("amp", self.amp_edit, lambda v: f"{float(v):g}")
         set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("npoints", self.points_edit, lambda v: str(int(float(v))))
         set_if_present("nsamps", self.samples_edit, lambda v: str(int(float(v))))
         set_if_present("max_chans", self.max_chans_edit, lambda v: str(int(float(v))))
         set_if_present("max_span", self.max_span_edit, lambda v: f"{float(v) / 1e6:g}")
-    
-    
-        self._update_dac_scale_info()
+        if params.get("sweep_direction") in SWEEP_DIRECTIONS:
+            self.direction_combo.setCurrentText(params["sweep_direction"])
 
+        self._update_dac_scale_info()
 
     @QtCore.pyqtSlot()
     def _on_file_dialog_closed(self):
         """Handle the event when the file dialog is closed without selection."""
         pass
-        
-    def get_parameters(self) -> dict | None:
-        """
-        Retrieves and validates the network analysis parameters from the UI fields.
 
-        Returns:
-            A dictionary of parameters if valid, otherwise None.
-            Shows an error message on invalid input.
-        """
-        try:
-            amp_text = self.amp_edit.text().strip()
-            # Use parsed amplitude values, or default if input is empty
-            amps_list = self._parse_amplitude_values(amp_text) or [DEFAULT_AMPLITUDE]
-
-            # Construct parameters dictionary
-            # Using eval for frequency and span allows expressions, but ensure inputs are numbers.
-            params_dict = {
-                'amps': amps_list,
-                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # Convert MHz to Hz
-                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # Convert MHz to Hz
-                'npoints': int(self.points_edit.text()),
-                'nsamps': int(self.samples_edit.text()),
-                'max_chans': int(self.max_chans_edit.text()),
-                'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
-                'label': self.label_edit.text().strip() or None,
-            }
-            # Basic validation for frequency range
-            if params_dict['fmin'] >= params_dict['fmax']:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                return None
-            return params_dict
-        except Exception as e:
-            traceback.print_exc() # Log the full traceback for debugging
-            QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
-            return None
-
-
-class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
-    """
-    Dialog for editing existing Network Analysis parameters.
-    This dialog is typically modal and pre-filled with current analysis parameters.
-    It fetches DAC scales asynchronously if a CRS object is available from its parent.
-    """
-    def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None,
-                 module: int | None = None):
-        """
-        Initializes the dialog for editing network analysis parameters.
-
-        Args:
-            parent: The parent widget.
-            params: Dictionary of existing parameters to populate the fields.
-            module: the module this Periscope controls.
-        """
-        super().__init__(parent, params=params, module=module)
-        self.setWindowTitle("Edit Network Analysis Parameters")
-        self.setModal(True) # Modal dialog
-        self._setup_ui()
-
-        # Attempt to fetch DAC scales if CRS is available from the main window hierarchy
-        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
-            # Assuming parent.parent() is the main Periscope window
-            main_periscope_window = parent.parent() 
-            if hasattr(main_periscope_window, 'crs') and main_periscope_window.crs is not None:
-                self._fetch_dac_scales(main_periscope_window.crs)
-        
-    def _fetch_dac_scales(self, crs_obj):
-        """
-        Initiates asynchronous fetching of DAC scales using DACScaleFetcher.
-
-        Args:
-            crs_obj: The CRS (Control and Readout System) object to query for scales.
-        """
-        self.fetcher = DACScaleFetcher(crs_obj)
-        self.fetcher.dac_scales_ready.connect(self._on_dac_scales_ready)
-        self.fetcher.start() # Start the QThread for fetching
-    
-    @QtCore.pyqtSlot(dict)
-    def _on_dac_scales_ready(self, scales_dict: dict[int, float]):
-        """
-        Slot to handle the reception of fetched DAC scales.
-        Updates the internal DAC scales and refreshes relevant UI elements.
-
-        Args:
-            scales_dict: Dictionary mapping module ID to DAC scale (dBm).
-        """
-        self.dac_scales = scales_dict
-        self._update_dac_scale_info() # Update the DAC scale display label
-    
-    def _setup_ui(self):
-        """Sets up the user interface elements for the dialog."""
-        layout = QtWidgets.QVBoxLayout(self)
-        form = QtWidgets.QFormLayout()
-        
-        self.label_edit = QtWidgets.QLineEdit(self.params.get('label') or "")
-        self.label_edit.setToolTip(
-            "Your name for this measurement. It goes on the end of the "
-            "filename: netanal_YYYYMMDD_HHMMSS_<name>.pkl")
-        form.addRow("Measurement Name:", self.label_edit)
-
-        # Populate fields with existing parameters or defaults
-        fmin_mhz = str(self.params.get('fmin', DEFAULT_MIN_FREQ) / 1e6)
-        fmax_mhz = str(self.params.get('fmax', DEFAULT_MAX_FREQ) / 1e6)
-        self.fmin_edit = QtWidgets.QLineEdit(fmin_mhz)
-        self.fmax_edit = QtWidgets.QLineEdit(fmax_mhz)
-        form.addRow("Min Frequency (MHz):", self.fmin_edit)
-        form.addRow("Max Frequency (MHz):", self.fmax_edit)
-        
-        self.setup_amplitude_group(form) # Add shared amplitude settings
-        
-        self.points_edit = QtWidgets.QLineEdit(str(self.params.get('npoints', DEFAULT_NPOINTS)))
-        form.addRow("Number of Points:", self.points_edit)
-        
-        self.samples_edit = QtWidgets.QLineEdit(str(self.params.get('nsamps', DEFAULT_NSAMPLES)))
-        form.addRow("Samples to Average:", self.samples_edit)
-        
-        self.max_chans_edit = QtWidgets.QLineEdit(str(self.params.get('max_chans', DEFAULT_MAX_CHANNELS)))
-        form.addRow("Max Channels:", self.max_chans_edit)
-        
-        max_span_mhz = str(self.params.get('max_span', DEFAULT_MAX_SPAN) / 1e6)
-        self.max_span_edit = QtWidgets.QLineEdit(max_span_mhz)
-        form.addRow("Max Span (MHz):", self.max_span_edit)
-        
-        
-        layout.addLayout(form)
-        
-        # OK and Cancel buttons
-        btn_layout = QtWidgets.QHBoxLayout()
-        self.ok_btn = QtWidgets.QPushButton("OK")
-        self.cancel_btn = QtWidgets.QPushButton("Cancel")
-        btn_layout.addWidget(self.ok_btn)
-        btn_layout.addWidget(self.cancel_btn)
-        layout.addLayout(btn_layout)
-        
-        self.ok_btn.clicked.connect(self.accept)
-        self.cancel_btn.clicked.connect(self.reject)
-        
-        # Initial update of dBm field, especially if DAC scales were passed in constructor
-        # or if _fetch_dac_scales is not called (e.g., no CRS object).
-        self._update_dac_scale_info() # Call this first to set up dac_scale_info label correctly
-        self.setMinimumSize(500, 600)
+    # ── what the driver is called with ───────────────────────────────────────
 
     def get_parameters(self) -> dict | None:
-        """
-        Retrieves and validates the edited network analysis parameters.
+        """``take_netanal``'s arguments, or None with a message about the input.
 
-        Returns:
-            A dictionary of parameters if valid, otherwise None.
-            Shows an error message on invalid input.
+        Fields are evaluated rather than merely parsed, so '1/1000' and '2.4e9'
+        both read as numbers.
         """
         try:
-            amp_text = self.amp_edit.text().strip()
-            amps_list = self._parse_amplitude_values(amp_text) or [self.params.get('amp', DEFAULT_AMPLITUDE)]
-            
-            # Start with a copy of existing params and update with UI values
-            params_dict = self.params.copy() 
+            params_dict = dict(self.params)
             params_dict.update({
-                'amps': amps_list,
-                'amp': amps_list[0] if amps_list else DEFAULT_AMPLITUDE, # Update single 'amp' for compatibility
-                'label': self.label_edit.text().strip() or None,
-                'fmin': float(eval(self.fmin_edit.text())) * 1e6,
-                'fmax': float(eval(self.fmax_edit.text())) * 1e6,
+                'amp': float(eval(self.amp_edit.text())),
+                'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # MHz to Hz
+                'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # MHz to Hz
                 'npoints': int(self.points_edit.text()),
                 'nsamps': int(self.samples_edit.text()),
                 'max_chans': int(self.max_chans_edit.text()),
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
+                'sweep_direction': self.direction_combo.currentText(),
+                'label': self.label_edit.text().strip() or None,
             })
-            # Basic validation for frequency range
-            if params_dict['fmin'] >= params_dict['fmax']:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                return None
-            return params_dict
         except Exception as e:
-            QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
+            traceback.print_exc()  # Log the full traceback for debugging
+            QtWidgets.QMessageBox.critical(
+                self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")
+            return None
+
+        if params_dict['fmin'] >= params_dict['fmax']:
+            QtWidgets.QMessageBox.warning(
+                self, "Input Error", "Min Frequency must be less than Max Frequency.")
+            return None
+        if not 0 < params_dict['amp'] <= 1.0:
+            QtWidgets.QMessageBox.warning(
+                self, "Input Error",
+                "Normalized amplitude must be greater than 0 and at most 1.0.")
+            return None
+        return params_dict

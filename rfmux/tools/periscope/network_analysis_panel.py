@@ -6,7 +6,7 @@ from .layouts import FlowLayout, grouped, labelled
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
-from .dialogs import NetworkAnalysisParamsDialog
+from .dialogs import NetworkAnalysisDialog
 from .find_resonances_settings_panel import FindResonancesSettingsPanel
 from .tasks import FindResonancesSignals, FindResonancesTask
 from ...tuning import netanal_trace, store
@@ -715,7 +715,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         params_for_dialog.pop('module_cable_lengths', None)
         params_for_dialog.pop('cable_length', None) 
 
-        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog, module=self.module)
+        dialog = NetworkAnalysisDialog(self, params=params_for_dialog,
+                                       module=self.module,
+                                       dac_scales=self.dac_scales, editing=True)
         if dialog.exec():
             updated_general_params = dialog.get_parameters() 
             

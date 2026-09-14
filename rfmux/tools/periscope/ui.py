@@ -5,9 +5,7 @@ from .utils import *  # For any base Qt classes or utilities needed by UI compon
 from .tasks import *  # For any task-related signals or enums UI components might need
 
 from .dialogs import ( # Assuming periscope_dialogs.py becomes dialogs.py
-    NetworkAnalysisDialogBase,
     NetworkAnalysisDialog,
-    NetworkAnalysisParamsDialog,
     InitializeCRSDialog,
     MultisweepDialog,
 )
@@ -16,9 +14,7 @@ from .multisweep_panel import MultisweepPanel
 
 __all__ = [
     # From dialogs.py
-    "NetworkAnalysisDialogBase",
     "NetworkAnalysisDialog",
-    "NetworkAnalysisParamsDialog",
     "InitializeCRSDialog",
     "MultisweepDialog",
     

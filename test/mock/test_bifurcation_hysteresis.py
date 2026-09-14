@@ -1,5 +1,5 @@
 """A bifurcated resonance in the mock is hysteretic, as a real one is:
-a sweep down rides the deep branch to the fold, a sweep up jumps at
+a sweep down stays in the deep state to the fold, a sweep up jumps at
 the other fold, and below the fold the two directions agree."""
 
 import asyncio
@@ -55,33 +55,33 @@ def test_a_bifurcated_resonance_is_hysteretic():
     jump_up = grid[np.argmax(np.abs(np.diff(up)))]
     jump_down = grid[np.argmax(np.abs(np.diff(down)))]
     assert jump_down < jump_up - 50e3
-    # The lower fold is at -204.9 kHz: the deep branch is held to it,
+    # The lower fold is at -204.9 kHz: the deep state is held to it,
     # not left a grid step or two early.
     assert jump_down < f0 - 200e3
-    # The cache serves each direction its own branch on a repeat.
+    # The cache serves each direction its own state on a repeat.
     np.testing.assert_allclose(_sweep(m, grid[::-1], 0.01)[::-1], down,
                                atol=1e-6)
     np.testing.assert_allclose(_sweep(m, grid, 0.01), up, atol=1e-6)
 
 
-def test_the_batched_sweep_takes_the_same_branch():
+def test_the_batched_sweep_takes_the_same_state():
     m, f0 = _model()
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     swept = m.s21_sweep(grid[::-1], 0.01)[::-1]
-    m._branch_memory.clear()
+    m._state_memory.clear()
     np.testing.assert_allclose(swept, _sweep(m, grid[::-1], 0.01)[::-1],
                                rtol=1e-9)
 
 
-def test_each_module_keeps_its_own_branches():
+def test_each_module_keeps_its_own_states():
     """Channel 1 of module 1 sweeps down through the bifurcation while
     channel 1 of module 2 sits on another resonator, the modules taking
-    turns as the streamer has them: module 1 keeps its deep branch."""
+    turns as the streamer has them: module 1 keeps its deep state."""
     m, f0 = _model()
     crs = m.mock_crs
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     down = _sweep(m, grid[::-1], 0.01)[::-1]
-    m._branch_memory.clear()
+    m._state_memory.clear()
     m._convergence_cache.clear()
     other = sorted(m.resonator_frequencies)[0]
     fs = 625e6 / 256 / 64
@@ -99,10 +99,10 @@ def test_each_module_keeps_its_own_branches():
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
-def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_branch(monkeypatch):
+def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state(monkeypatch):
     """One seeded solve per point where the current moves smoothly (a
     netanal, a dip search); the sub-steps only where one step from the
-    previous point lands on the other branch."""
+    previous point lands in the other state."""
     m, f0 = _model()
     calls = []
     real = jp.converged_lekid_parameters
@@ -148,10 +148,10 @@ def test_a_collided_pair_keeps_both_resonances_driven():
     def sweep(points):
         return np.array([abs(m.s21_lc_response(float(f), 0.01, tone=(1, 1)))
                          for f in points])
-    m._branch_memory.clear()
+    m._state_memory.clear()
     m._convergence_cache.clear()
     down = sweep(grid)
-    m._branch_memory.clear()
+    m._state_memory.clear()
     m._convergence_cache.clear()
     up = sweep(grid[::-1])[::-1]
     window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
@@ -160,8 +160,8 @@ def test_a_collided_pair_keeps_both_resonances_driven():
 
 def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     """Inside the bistable region a tone that arrived from above is on
-    the deep branch; switched off and back on at the same frequency it
-    finds the resonator at rest, on the low branch."""
+    the deep state; switched off and back on at the same frequency it
+    finds the resonator at rest, in the low state."""
     m, f0 = _model()
     crs = m.mock_crs
     fs = 625e6 / 256 / 64
@@ -178,16 +178,16 @@ def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     crs._amplitudes[(1, 1)] = 0.01
     back = m.calculate_module_response_coupled(
         1, num_samples=2, sample_rate=fs)[1][0]
-    m._branch_memory.clear()
+    m._state_memory.clear()
     m._convergence_cache.clear()
     rest = _sweep(m, [inside], 0.01)[0]
     assert abs(deep) / 0.01 < rest - 0.3
     assert abs(back) / 0.01 == pytest.approx(rest, abs=1e-3)
 
 
-def test_the_seeded_solver_holds_the_deep_branch_and_converges():
+def test_the_seeded_solver_holds_the_deep_state_and_converges():
     """Where the fixed damping ran to its cap: seeded from the previous
-    point, the adaptive step converges on the deep branch in a few
+    point, the adaptive step converges in the deep state in a few
     dozen iterations at most."""
     m, f0 = _model()
     m._extract_param_arrays()
@@ -205,7 +205,7 @@ def test_the_seeded_solver_holds_the_deep_branch_and_converges():
             1e-9, 500, initial_currents=I)
         worst = max(worst, its)
     assert worst < 100
-    # At the last point the seeded solve is still on the deep branch,
+    # At the last point the seeded solve is still in the deep state,
     # carrying several times the current a solve from rest lands on;
     # both are a small fraction of Istar, a shift of a linewidth
     # needing a 1e-4 change in Lk.

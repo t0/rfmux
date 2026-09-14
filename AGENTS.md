@@ -169,7 +169,7 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
 - Single convergence loop: `converged_lekid_parameters()`, seeded with the
-  currents every resonator last had under a tone (the model's branch
+  currents every resonator last had under a tone (the model's state
   memory) and stepped adaptively,
   so a bifurcated resonance is hysteretic: currents are a small fraction
   of Istar (a linewidth of shift is a 1e-4 change in Lk)

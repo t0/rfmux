@@ -138,18 +138,52 @@ class MockResonatorModel:
         n = len(self.mr_lekids)
         self.L_array = np.zeros(n)
         self.R_array = np.zeros(n)
+        self.Lk_array = np.zeros(n)
         self.C_array = np.zeros(n)
         self.Cc_array = np.zeros(n)
         self.L_junk_array = np.zeros(n)
-        
+
         for i, lekid in enumerate(self.mr_lekids):
             self.L_array[i] = lekid.L
             self.R_array[i] = lekid.R
+            self.Lk_array[i] = lekid.Lk
             self.C_array[i] = lekid.C
             self.Cc_array[i] = lekid.Cc
             self.L_junk_array[i] = lekid.L_junk
-        
+
         self._param_arrays_cached = True
+        self._lekids_stale = False
+
+    def _ensure_arrays(self):
+        """The per-resonator arrays are the state while the model
+        evaluates; they are read from the resonator objects once, after
+        a generation, and written back by _sync_lekids."""
+        if getattr(self, 'L_array', None) is None or len(self.L_array) != len(self.mr_lekids):
+            self._extract_param_arrays()
+
+    def _base_arrays(self):
+        """(base_Lk, base_R, base_Lg): the QP-dependent base values as
+        arrays, kept by update_base_params_from_nqp."""
+        if (getattr(self, 'base_Lk_array', None) is None
+                or len(self.base_Lk_array) != len(self.base_lekid_params)):
+            p = self.base_lekid_params
+            self.base_Lk_array = np.array([q['Lk'] for q in p], dtype=float)
+            self.base_R_array = np.array([q['R'] for q in p], dtype=float)
+            self.base_Lg_array = np.array([q['Lg'] for q in p], dtype=float)
+        return self.base_Lk_array, self.base_R_array, self.base_Lg_array
+
+    def _sync_lekids(self):
+        """Write the array state into the resonator objects for the
+        code that reads them between evaluations."""
+        if not getattr(self, '_lekids_stale', False):
+            return
+        for lk, L, R, Lk in zip(self.mr_lekids, self.L_array, self.R_array,
+                                self.Lk_array):
+            lk.L = float(L)
+            lk.R = float(R)
+            lk.Lk = float(Lk)
+            lk.alpha_k = float(Lk / L)
+        self._lekids_stale = False
 
     def _reset_derived_state(self):
         """Drop what depends on the resonator set: the TLS generator is
@@ -163,6 +197,9 @@ class MockResonatorModel:
         self._nqp_const_arrays = None
         self._nqp_tiled_cache = None
         self._cache_key_table = None
+        self.L_array = self.R_array = self.Lk_array = None
+        self.base_Lk_array = self.base_R_array = self.base_Lg_array = None
+        self._lekids_stale = False
         #: {tone: (frequency, currents)}: the state every resonator is
         #: in under each tone, keyed by (module, channel) where the
         #: caller has one, else by the nearest resonator; a tone that is
@@ -584,8 +621,10 @@ class MockResonatorModel:
         # Acquire lock to prevent race conditions with other threads (e.g. Streamer vs get_samples)
         # This is critical because update_lekids_for_current modifies shared state.
         with self._physics_lock:
-            return self._s21_lc_response_internal(frequency, amplitude,
-                                                  pulse_time, tone)
+            out = self._s21_lc_response_internal(frequency, amplitude,
+                                                 pulse_time, tone)
+            self._sync_lekids()
+            return out
 
     def _s21_lc_response_internal(self, frequency, amplitude=1.0,
                                   pulse_time=None, tone=None):
@@ -703,9 +742,17 @@ class MockResonatorModel:
     def _build_cache_key_table(self):
         """Sorted bare resonance frequencies, the resonator index of
         each, and the key steps from the config."""
-        f0 = np.array([1.0 / (2.0 * np.pi * np.sqrt(max(lek.L, 1e-30)
-                                                    * max(lek.C, 1e-30)))
-                       for lek in self.mr_lekids], dtype=float)
+        if self.mr_lekids:
+            self._ensure_arrays()
+            n = len(self.mr_lekids)
+            _, Lk_rest = jit_physics.vectorized_update_params_from_nqp(
+                np.asarray(self.base_nqp_values[:n], dtype=np.float64),
+                *self._nqp_consts()[1:])
+            L_bare = np.maximum(Lk_rest + self._base_arrays()[2]
+                                + self.L_junk_array, 1e-30)
+            f0 = 1.0 / (2.0 * np.pi * np.sqrt(L_bare * np.maximum(self.C_array, 1e-30)))
+        else:
+            f0 = np.zeros(0)
         order = np.argsort(f0, kind="stable")
         phys = self._phys()
 
@@ -812,9 +859,9 @@ class MockResonatorModel:
 
             # Cache the actual converged values (not factors) for this operating point
             self._convergence_cache[cache_key] = {
-                'Lk_values': [lekid.Lk for lekid in self.mr_lekids],
-                'R_values': [lekid.R for lekid in self.mr_lekids],
-                'L_values': [lekid.L for lekid in self.mr_lekids],
+                'Lk_values': self.Lk_array.copy(),
+                'R_values': self.R_array.copy(),
+                'L_values': self.L_array.copy(),
                 'frequency': frequency,
                 'amplitude': amplitude,
                 'qp_key': qp_key,
@@ -834,21 +881,11 @@ class MockResonatorModel:
 
         else:
             # Restore cached converged values - apply to ALL resonators
-            cached_Lk = cached_data.get('Lk_values')
-            cached_R = cached_data.get('R_values')
-            cached_L = cached_data.get('L_values')
-            
-            for i in range(len(self.mr_lekids)):
-                lekid = self.mr_lekids[i]
-                
-                # Restore the exact cached physics state
-                if cached_Lk and i < len(cached_Lk):
-                    lekid.Lk = cached_Lk[i]
-                if cached_R and i < len(cached_R):
-                    lekid.R = cached_R[i]
-                if cached_L and i < len(cached_L):
-                    lekid.L = cached_L[i]
-                    lekid.alpha_k = lekid.Lk / lekid.L
+            self._ensure_arrays()
+            self.Lk_array = np.array(cached_data['Lk_values'], dtype=float)
+            self.R_array = np.array(cached_data['R_values'], dtype=float)
+            self.L_array = np.array(cached_data['L_values'], dtype=float)
+            self._lekids_stale = True
             
             # Update statistics
             self._convergence_stats['skipped'] += 1
@@ -856,17 +893,11 @@ class MockResonatorModel:
         # Extract parameters for ALL resonators
         # Note: L now includes L_junk (L = Lk + Lg + L_junk)
         n_relevant = len(self.mr_lekids)
-        L_subset = np.zeros(n_relevant)
-        C_subset = np.zeros(n_relevant)
-        R_subset = np.zeros(n_relevant)
-        Cc_subset = np.zeros(n_relevant)
-        
-        for i in range(n_relevant):
-            lekid = self.mr_lekids[i]
-            L_subset[i] = lekid.L  # Total inductance (includes L_junk)
-            C_subset[i] = lekid.C
-            R_subset[i] = lekid.R
-            Cc_subset[i] = lekid.Cc
+        self._ensure_arrays()
+        L_subset = self.L_array.copy()   # total inductance, L_junk included
+        C_subset = self.C_array.copy()
+        R_subset = self.R_array.copy()
+        Cc_subset = self.Cc_array.copy()
         
         # ── White QP noise, as a post-cache perturbation ──────────
         # Linearised about the operating point: a fractional nqp
@@ -882,7 +913,7 @@ class MockResonatorModel:
             if m:
                 eps = nqp_noise_frac[:m]
                 alpha_k = np.array(
-                    [self.mr_lekids[i].alpha_k for i in range(m)])
+                    self.Lk_array[:m] / self.L_array[:m])
                 L_subset[:m] = L_subset[:m] * (
                     1.0 + alpha_k * s_Lk[:m] * eps)
                 R_subset[:m] = np.maximum(
@@ -948,10 +979,9 @@ class MockResonatorModel:
             if self._nqp_state_t is None or t != self._nqp_state_t:
                 self._nqp_state_noise = self._compute_nqp_state(t)
                 self._nqp_state_t = t
-            self._extract_param_arrays()
+            self._ensure_arrays()
             n = len(self.mr_lekids)
-            base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
-            base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
+            base_Lk, _, base_Lg = self._base_arrays()
             L, R = self.L_array.copy(), self.R_array.copy()
             C, Cc = self.C_array, self.Cc_array
             k0 = self.mr_lekids[0]
@@ -1080,53 +1110,17 @@ class MockResonatorModel:
         """
         max_iterations = 500
         tolerance = self.mock_crs._physics_config.get('convergence_tolerance', 1e-9)
-        
-        # Update all resonators
-        self._extract_param_arrays()
-        
-        n = len(self.mr_lekids)
-        
-        # Ensure arrays are initialized
-        if self.L_array is None or self.R_array is None:
-            self._extract_param_arrays()
-        
-        # Use full arrays
-        L_work = self.L_array
-        R_work = self.R_array
-        C_work = self.C_array
-        Cc_work = self.Cc_array
-        base_Lk = np.array([self.base_lekid_params[i]['Lk'] for i in range(n)])
-        base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
-        base_L_junk = self.L_junk_array  # L_junk is fixed per resonator
-        
-        # Note: L_work = Lk + Lg + L_junk (total resonator inductance)
-        # base_L_junk is fixed; only Lk changes with current
-        L_converged, R_converged, currents_converged, actual_iterations = \
-            self._converge(frequency, amplitude, L_work, R_work, C_work,
-                           Cc_work, base_Lk, base_Lg, tolerance,
-                           max_iterations, tone)
-        
-        # L_converged = Lk + Lg + L_junk; only Lk moves with the current.
-        Lk_converged = L_converged - base_Lg - base_L_junk
-
-        # Update LEKID objects with converged values (guard against concurrent reconfigure)
-        m = min(n, len(self.mr_lekids))
-        for i in range(m):
-            lekid = self.mr_lekids[i]
-            lekid.Lk = Lk_converged[i]
-            lekid.R = R_converged[i]
-            lekid.L = L_converged[i]
-            lekid.alpha_k = Lk_converged[i] / L_converged[i]
-
-        # Refresh L/R arrays from current objects
-        self.L_array = np.array([lek.L for lek in self.mr_lekids])
-        self.R_array = np.array([lek.R for lek in self.mr_lekids])
-        
-        # Log convergence stats occasionally
-        if not hasattr(self, '_convergence_counter'):
-            self._convergence_counter = 0
-        self._convergence_counter += 1
-        return currents_converged
+        self._ensure_arrays()
+        base_Lk, _, base_Lg = self._base_arrays()
+        L, R, currents, its = self._converge(
+            frequency, amplitude, self.L_array, self.R_array, self.C_array,
+            self.Cc_array, base_Lk, base_Lg, tolerance, max_iterations, tone)
+        # L = Lk + Lg + L_junk; only Lk moves with the current.
+        Lk = L - base_Lg - self.L_junk_array
+        self.L_array, self.R_array, self.Lk_array = L, R, Lk
+        self._lekids_stale = True
+        self._convergence_counter = getattr(self, '_convergence_counter', 0) + 1
+        return currents
 
     def _nqp_sensitivity(self):
         """Fractional response of (Lk, R) to a fractional nqp change.
@@ -1168,20 +1162,9 @@ class MockResonatorModel:
                                 np.nan_to_num(s_R))
         return self._nqp_sens_cache[1:]
 
-    def update_base_params_from_nqp(self, noisy_nqp_values):
-        """
-        Update base Lk and R values using physics calculations.
-        
-        Uses JIT-compiled parallel vectorized calculations for 15-25x speedup.
-        
-        Parameters
-        ----------
-        noisy_nqp_values : list
-            List of noisy nqp values, one per resonator
-        """
-        # The material/geometry arrays below are fixed for a given
-        # resonator set, but this runs once per PFB sample — rebuilding
-        # eight np.full() arrays each time cost more than the physics.
+    def _nqp_consts(self):
+        """(n, readout_f, T, Delta0, N0, sigmaN, thickness, width,
+        length, R_spoiler) as arrays, fixed for a resonator set."""
         n = len(self.mr_complex_resonators)
         const = self._nqp_const_arrays
         if const is None or const[0] != n:
@@ -1200,6 +1183,24 @@ class MockResonatorModel:
                 np.full(n, cr0.R_spoiler, dtype=np.float64),
             )
             self._nqp_const_arrays = const
+        return const
+
+    def update_base_params_from_nqp(self, noisy_nqp_values):
+        """
+        Update base Lk and R values using physics calculations.
+        
+        Uses JIT-compiled parallel vectorized calculations for 15-25x speedup.
+        
+        Parameters
+        ----------
+        noisy_nqp_values : list
+            List of noisy nqp values, one per resonator
+        """
+        # The material/geometry arrays below are fixed for a given
+        # resonator set, but this runs once per PFB sample — rebuilding
+        # eight np.full() arrays each time cost more than the physics.
+        const = self._nqp_consts()
+        n = const[0]
         nqp_array = np.asarray(noisy_nqp_values, dtype=np.float64)
 
         # Call JIT-compiled function - computes ALL resonators in parallel
@@ -1211,6 +1212,10 @@ class MockResonatorModel:
         for i in range(n):
             self.base_lekid_params[i]['R'] = R_array[i]
             self.base_lekid_params[i]['Lk'] = Lk_array[i]
+        self.base_Lk_array = np.asarray(Lk_array, dtype=float).copy()
+        self.base_R_array = np.asarray(R_array, dtype=float).copy()
+        self.base_Lg_array = np.array([q['Lg'] for q in self.base_lekid_params],
+                                      dtype=float)
 
     def set_istar(self, istar):
         """Set the characteristic current for all resonators."""
@@ -1697,6 +1702,7 @@ class MockResonatorModel:
             for i, ch in enumerate(obs_channels):
                 responses[ch] = signals[i]
 
+        self._sync_lekids()
         return responses
 
     @staticmethod
@@ -1880,18 +1886,15 @@ class MockResonatorModel:
             for i in range(n_cr):
                 self.base_lekid_params[i]['R'] = R_nqp[s, i]
                 self.base_lekid_params[i]['Lk'] = Lk_nqp[s, i]
+            self.base_Lk_array = np.asarray(Lk_nqp[s], dtype=float).copy()
+            self.base_R_array = np.asarray(R_nqp[s], dtype=float).copy()
 
         def restore(state):
             L_v, R_v, Lk_v = state
-            for i in range(n_res):
-                lek = self.mr_lekids[i]
-                if i < len(Lk_v):
-                    lek.Lk = Lk_v[i]
-                if i < len(R_v):
-                    lek.R = R_v[i]
-                if i < len(L_v):
-                    lek.L = L_v[i]
-                    lek.alpha_k = lek.Lk / lek.L
+            self.L_array = np.array(L_v, dtype=float)
+            self.R_array = np.array(R_v, dtype=float)
+            self.Lk_array = np.array(Lk_v, dtype=float)
+            self._lekids_stale = True
 
         # ── Per tone: cache-key parameters and the runs of one key ────
         # The key is the quantized QP density; within a run of one key
@@ -1969,9 +1972,8 @@ class MockResonatorModel:
                 set_base(s)
                 currents = self.update_lekids_for_current(
                     tone['frequency'], tone['amplitude'], tone['key'])
-                state = ([lk.L for lk in self.mr_lekids],
-                         [lk.R for lk in self.mr_lekids],
-                         [lk.Lk for lk in self.mr_lekids])
+                state = (self.L_array.copy(), self.R_array.copy(),
+                         self.Lk_array.copy())
                 self._convergence_cache[cache_key] = {
                     'Lk_values': state[2], 'R_values': state[1],
                     'L_values': state[0], 'frequency': tone['frequency'],

@@ -172,3 +172,22 @@ def test_frequency_scatter_handles_uniform_or_missing_qr(qt_app, qr):
         expected = (pg.colormap.get("viridis").map(0.5, mode="qcolor")
                     if qr == qr else pg.mkColor("w" if dark_mode else "k"))
         assert scatter.points()[0].brush().color() == expected
+
+
+def test_frequency_colour_bar_has_a_visible_qr_heading(qt_app):
+    from rfmux.tools.periscope.fit_histograms_tab import FitHistogramsTab
+
+    tab = FitHistogramsTab()
+    tab.resize(900, 600)
+    rows = [{"params": {"fr": 100e6, "Qr": 20000}}]
+    for dark_mode in (False, True):
+        tab._dark_mode = dark_mode
+        tab._lay_out(4)
+        tab._draw_fr(tab._plots[0], rows)
+        tab.show()
+        qt_app.processEvents()
+        heading = tab._qr_colorbar.titleLabel
+        assert heading.text == "Qr"
+        assert heading.isVisible()
+        assert tab._plots[0].sceneRect().contains(heading.sceneBoundingRect())
+    tab.close()

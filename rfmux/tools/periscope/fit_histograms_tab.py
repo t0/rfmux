@@ -156,7 +156,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
         brushes = [pg.mkBrush(self._foreground()) for _ in rows]
         if self._qr_colorbar is None:
             self._qr_colorbar = pg.ColorBarItem(
-                colorMap=cmap, label="Qr", interactive=False, colorMapMenu=False)
+                colorMap=cmap, interactive=False, colorMapMenu=False)
             self._qr_colorbar.setImageItem([], insert_in=plot.getPlotItem())
         self._qr_colorbar.setVisible(bool(finite.any()))
         if finite.any():
@@ -171,7 +171,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
             axis = self._qr_colorbar.getAxis(side)
             axis.setPen(self._foreground())
             axis.setTextPen(self._foreground())
-        self._qr_colorbar.getAxis("left").setLabel("Qr", color=self._foreground())
+        self._qr_colorbar.setTitle("Qr", color=self._foreground())
         plot.addItem(pg.ScatterPlotItem(
             x=np.arange(len(rows)),
             y=[row["params"]["fr"] / 1e6 for row in rows],

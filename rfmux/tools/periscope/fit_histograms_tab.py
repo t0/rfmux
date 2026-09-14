@@ -3,7 +3,7 @@
 The Fit Results tab shows one resonator at a time; this shows all of them at
 once, which is the view that says whether an array is uniform, where its
 outliers are, and what raising the drive did to it. One scatter of ``fr``
-against resonator, and a histogram of each parameter worth binning.
+in ascending frequency order, and a histogram of each parameter worth binning.
 
 Everything drawn comes from :func:`~rfmux.tuning.fits.collect_fit_params`, so
 a notebook makes the same figures from the same rows. The tab holds no data of
@@ -58,6 +58,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._sweeps = None
+        self._qr_colorbar = None
         self._amplitude_to_color = {}
         self._bias_by_name: dict = {}
         #: ``{param: count}`` of fitted values no axis could hold -- a quality
@@ -146,31 +147,47 @@ class FitHistogramsTab(QtWidgets.QWidget):
     # ── the plots ────────────────────────────────────────────────────────────
 
     def _draw_fr(self, plot, rows: list) -> None:
-        """``fr`` against resonator, one point per fit, coloured by drive.
-
-        Against the resonator's place in the catalog rather than against its
-        own value, so a tone that moved between amplitude steps shows up as a
-        column of points rather than as a shifted dot nobody can pair up.
-        """
+        """Frequency span in ascending order, coloured by each fit's Qr."""
         plot.clear()
-        order = {name: i for i, name in
-                 enumerate(sorted({row["name"] for row in rows}))}
-        for amplitude, of_amplitude in self._by_amplitude(rows).items():
-            plot.addItem(pg.ScatterPlotItem(
-                x=[order[row["name"]] for row in of_amplitude],
-                y=[row["params"]["fr"] / 1e6 for row in of_amplitude],
-                pen=None, brush=pg.mkBrush(self._colour(amplitude)), size=6,
-            ))
+        rows = sorted(rows, key=lambda row: row["params"]["fr"])
+        qr = np.asarray([row["params"].get("Qr", np.nan) for row in rows])
+        finite = np.isfinite(qr)
+        cmap = pg.colormap.get("viridis")
+        brushes = [pg.mkBrush(self._foreground()) for _ in rows]
+        if self._qr_colorbar is None:
+            self._qr_colorbar = pg.ColorBarItem(
+                colorMap=cmap, label="Qr", interactive=False, colorMapMenu=False)
+            self._qr_colorbar.setImageItem([], insert_in=plot.getPlotItem())
+        self._qr_colorbar.setVisible(bool(finite.any()))
+        if finite.any():
+            low, high = float(qr[finite].min()), float(qr[finite].max())
+            if low == high:
+                low, high = low - 0.5, high + 0.5
+            self._qr_colorbar.setLevels((low, high))
+            for index in np.flatnonzero(finite):
+                brushes[index] = pg.mkBrush(cmap.map(
+                    (qr[index] - low) / (high - low), mode="qcolor"))
+        for side in ("left", "right", "top", "bottom"):
+            axis = self._qr_colorbar.getAxis(side)
+            axis.setPen(self._foreground())
+            axis.setTextPen(self._foreground())
+        self._qr_colorbar.getAxis("left").setLabel("Qr", color=self._foreground())
+        plot.addItem(pg.ScatterPlotItem(
+            x=np.arange(len(rows)),
+            y=[row["params"]["fr"] / 1e6 for row in rows],
+            pen=None, brush=brushes, size=6,
+        ))
         plot.setTitle("Resonant frequency", color=self._foreground())
-        plot.setLabel("bottom", "Resonator")
+        plot.setLabel("bottom", "Frequency rank")
         plot.setLabel("left", "fr", units="MHz")
+        plot.setToolTip("Sorted fitted frequencies; colour shows Qr on a linear "
+                        "scale. Missing or non-finite Qr uses the foreground colour.")
 
     def _draw_histogram(self, plot, rows: list, param: str, log_edges) -> None:
         """One parameter binned, one outline per drive amplitude.
 
-        Outlines rather than filled bars: a dozen amplitude steps stacked as
-        bars hide each other, and the question this tab answers is what the
-        distribution *did* as the drive rose.
+        At bias, resonators can have different drive amplitudes; each drive
+        retains its colour from the sweep grids.
         """
         logarithmic = param in LOG_PARAMS
         plot.clear()
@@ -270,7 +287,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
 
-        self.toolbar = FitDisplayToolbar(name="histograms")
+        self.toolbar = FitDisplayToolbar(name="histograms", all_amplitudes=False)
         layout.addWidget(self.toolbar)
 
         self._status = QtWidgets.QLabel("No fits to bin yet")

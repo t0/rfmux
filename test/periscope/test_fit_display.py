@@ -98,3 +98,77 @@ def test_the_bias_amplitude_is_offered_only_when_there_is_one(toolbar):
         toolbar.amplitude_combo.findData(BIAS_AMPLITUDE))
 
     assert toolbar.get_amplitude() == BIAS_AMPLITUDE
+
+
+def test_histograms_default_to_bias_then_step_zero(qt_app):
+    toolbar = FitDisplayToolbar(name="histograms", all_amplitudes=False)
+    choices = [("All amplitudes", ALL_AMPLITUDES), ("Step 1", 1), ("Step 0", 0)]
+    toolbar.set_amplitude_choices(choices)
+    assert toolbar.amplitude_combo.findData(ALL_AMPLITUDES) == -1
+    assert toolbar.get_amplitude() == 0
+    toolbar.set_models_fitted(["skewed", "nonlinear"])
+    toolbar.model_combo.setCurrentIndex(1)
+
+    toolbar.set_amplitude_choices(choices + [("At bias amplitude", BIAS_AMPLITUDE)])
+    assert toolbar.get_amplitude() == BIAS_AMPLITUDE
+
+
+def test_histograms_replace_saved_all_amplitudes(qt_app):
+    from rfmux.tools.periscope import settings
+
+    settings.set_fit_display({"amplitude": ALL_AMPLITUDES}, "histograms")
+    toolbar = FitDisplayToolbar(name="histograms", all_amplitudes=False)
+    toolbar.set_amplitude_choices([("All amplitudes", ALL_AMPLITUDES),
+                                   ("At bias amplitude", BIAS_AMPLITUDE),
+                                   ("Step 0", 0)])
+    assert toolbar.get_amplitude() == BIAS_AMPLITUDE
+
+
+def test_histograms_retain_saved_single_step(qt_app):
+    from rfmux.tools.periscope import settings
+
+    settings.set_fit_display({"amplitude": 1}, "histograms")
+    toolbar = FitDisplayToolbar(name="histograms", all_amplitudes=False)
+    toolbar.set_amplitude_choices([("At bias amplitude", BIAS_AMPLITUDE),
+                                   ("Step 0", 0), ("Step 1", 1)])
+    assert toolbar.get_amplitude() == 1
+
+
+def test_frequency_scatter_sorts_and_colours_by_fitted_qr(qt_app):
+    import numpy as np
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.fit_histograms_tab import FitHistogramsTab
+
+    tab = FitHistogramsTab()
+    tab._lay_out(1)
+    rows = [{"name": name, "amplitude": 0.1, "params": {"fr": fr, "Qr": qr}}
+            for name, fr, qr in [("A", 300e6, 20000), ("Z", 100e6, 30000),
+                                 ("B", 200e6, 10000)]]
+    tab._draw_fr(tab._plots[0], rows)
+    scatter = next(item for item in tab._plots[0].getPlotItem().items
+                   if isinstance(item, pg.ScatterPlotItem))
+    np.testing.assert_array_equal(scatter.getData()[0], [0, 1, 2])
+    np.testing.assert_array_equal(scatter.getData()[1], [100, 200, 300])
+    cmap = pg.colormap.get("viridis")
+    assert [point.brush().color() for point in scatter.points()] == [
+        cmap.map(value, mode="qcolor") for value in [1.0, 0.0, 0.5]]
+    assert tab._qr_colorbar.levels() == (10000, 30000)
+
+
+@pytest.mark.parametrize("qr", [20000, float("nan")])
+def test_frequency_scatter_handles_uniform_or_missing_qr(qt_app, qr):
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.fit_histograms_tab import FitHistogramsTab
+
+    tab = FitHistogramsTab()
+    tab._lay_out(1)
+    rows = [{"params": {"fr": 100e6, "Qr": qr}}]
+    for dark_mode in (False, True):
+        tab._dark_mode = dark_mode
+        tab._draw_fr(tab._plots[0], rows)
+        scatter = next(item for item in tab._plots[0].getPlotItem().items
+                       if isinstance(item, pg.ScatterPlotItem))
+        assert len(scatter.points()) == 1
+        expected = (pg.colormap.get("viridis").map(0.5, mode="qcolor")
+                    if qr == qr else pg.mkColor("w" if dark_mode else "k"))
+        assert scatter.points()[0].brush().color() == expected

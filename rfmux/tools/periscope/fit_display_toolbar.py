@@ -17,7 +17,7 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import pyqtSignal
 
 from . import settings as periscope_settings
-from .fit_settings_panel import ALL_AMPLITUDES
+from .fit_settings_panel import ALL_AMPLITUDES, BIAS_AMPLITUDE
 from .layouts import FlowLayout, labelled
 
 
@@ -29,19 +29,23 @@ class FitDisplayToolbar(QtWidgets.QWidget):
     display_changed = pyqtSignal()
 
     def __init__(self, parent=None, *, name: str = "fits",
-                 amplitudes: bool = True):
+                 amplitudes: bool = True, all_amplitudes: bool = True):
         super().__init__(parent)
         self._name = name
         # Whether this tab has a choice of sweeps to make at all: a tab drawing
         # one sweep has none, and a combo offering one would be a control that
         # changes nothing.
         self._amplitudes = amplitudes
+        self._all_amplitudes = all_amplitudes
         # What was last drawn, held apart from the combos: they carry only
         # what the measurement on screen has, and a choice it cannot honour is
         # picked up again by one that can.
         saved = periscope_settings.get_fit_display(name)
         self._wanted_model = saved.get("model")
-        self._wanted_amplitude = saved.get("amplitude", ALL_AMPLITUDES)
+        default = ALL_AMPLITUDES if all_amplitudes else BIAS_AMPLITUDE
+        self._wanted_amplitude = saved.get("amplitude", default)
+        if not all_amplitudes and self._wanted_amplitude == ALL_AMPLITUDES:
+            self._wanted_amplitude = BIAS_AMPLITUDE
         self._setup_ui()
         self.model_combo.currentIndexChanged.connect(self._changed)
         if self.amplitude_combo is not None:
@@ -84,6 +88,11 @@ class FitDisplayToolbar(QtWidgets.QWidget):
         """
         if self.amplitude_combo is None:
             return
+        if not self._all_amplitudes:
+            choices = [(label, value) for label, value in choices
+                       if value != ALL_AMPLITUDES]
+            choices.sort(key=lambda item: (item[1] != BIAS_AMPLITUDE,
+                                           item[1] != 0))
         self._refill(self.amplitude_combo, choices, self._wanted_amplitude)
 
     def _refill(self, combo, choices, wanted) -> None:
@@ -124,12 +133,18 @@ class FitDisplayToolbar(QtWidgets.QWidget):
             "Which sweeps are drawn: all of them, one amplitude step of the "
             "schedule, or -- once a bias has been found -- each resonator at "
             "the step it is biased at")
-        self.amplitude_combo.addItem("All amplitudes", ALL_AMPLITUDES)
+        if self._all_amplitudes:
+            self.amplitude_combo.addItem("All amplitudes", ALL_AMPLITUDES)
+        else:
+            self.amplitude_combo.setToolTip(
+                "One amplitude step, or each resonator at its bias amplitude")
         layout.addWidget(labelled("Amplitude:", self.amplitude_combo))
 
     def _changed(self):
-        self._wanted_model = self.get_model()
-        self._wanted_amplitude = self.get_amplitude()
+        if self.sender() is self.model_combo:
+            self._wanted_model = self.get_model()
+        else:
+            self._wanted_amplitude = self.get_amplitude()
         periscope_settings.set_fit_display(
             {"model": self._wanted_model, "amplitude": self._wanted_amplitude},
             self._name)

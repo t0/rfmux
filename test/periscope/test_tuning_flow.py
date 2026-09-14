@@ -1918,8 +1918,7 @@ def test_a_quality_factor_no_log_axis_can_hold_is_named_on_its_plot(board, qt_ap
 
 
 def test_the_histograms_bin_the_amplitude_step_they_are_asked_for(board, qt_app):
-    """A step selector, so a schedule's steps can be read one at a time as well
-    as overlaid."""
+    """The histogram bins only the selected amplitude step."""
     _, crs, catalog = board
     panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
     assert errors == []

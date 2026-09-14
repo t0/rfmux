@@ -3378,5 +3378,5 @@ def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
     settings.direction.setCurrentIndex(1)
     assert settings.get_parameters() == dict(
         min_separation_hz=20e3, min_prominence_db=1.0,
-        min_dip_spacing_hz=1e3, iteration=3, direction='downward')
+        min_dip_spacing_hz=10.0, iteration=3, direction='downward')
     settings.close()

@@ -50,7 +50,8 @@ class FindResonancesSettingsPanel(AnalysisSettingsPanel):
             "min_dip_depth_db": self.min_dip_depth_spin.value(),
             "min_Q": self.min_q_spin.value() or None,
             "max_Q": self.max_q_spin.value() or None,
-            "min_separation_hz": self.min_separation_spin.value() * 1e3,
+            "min_separation_hz": (None if self.disable_collision_check.isChecked()
+                                  else self.min_separation_spin.value() * 1e3),
             "require_isolation": self.require_isolation_check.isChecked(),
             "expected_resonances": expected or None,
         }
@@ -63,11 +64,19 @@ class FindResonancesSettingsPanel(AnalysisSettingsPanel):
         self.min_dip_depth_spin.setValue(values["min_dip_depth_db"])
         self.min_q_spin.setValue(values["min_Q"] or 0.0)
         self.max_q_spin.setValue(values["max_Q"] or 0.0)
-        self.min_separation_spin.setValue((values["min_separation_hz"] or 0.0) / 1e3)
+        separation = values["min_separation_hz"]
+        self.disable_collision_check.setChecked(separation is None)
+        if separation is not None:
+            self.min_separation_spin.setValue(separation / 1e3)
         self.require_isolation_check.setChecked(bool(values["require_isolation"]))
         self.expected_resonances_spin.setValue(values["expected_resonances"] or 0)
         for widget in self._inputs:
             widget.blockSignals(False)
+        self._update_collision_controls()
+
+    def _update_collision_controls(self) -> None:
+        self.collision_controls.setEnabled(
+            not self.disable_collision_check.isChecked())
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -127,18 +136,34 @@ class FindResonancesSettingsPanel(AnalysisSettingsPanel):
         layout.addWidget(width_group)
 
         collision_group = QtWidgets.QGroupBox("Resonances too close to each other")
-        collision_form = QtWidgets.QFormLayout(collision_group)
+        collision_layout = QtWidgets.QVBoxLayout(collision_group)
+        self.disable_collision_check = QtWidgets.QCheckBox("Disable collision cut")
+        self.disable_collision_check.setToolTip(
+            "Skip the separation check entirely; other resonance filters still apply.")
+        self.disable_collision_check.toggled.connect(self._update_collision_controls)
+        collision_layout.addWidget(self.disable_collision_check)
+        self.collision_controls = QtWidgets.QWidget()
+        collision_form = QtWidgets.QFormLayout(self.collision_controls)
+        collision_form.setContentsMargins(0, 0, 0, 0)
+        collision_layout.addWidget(self.collision_controls)
 
         self.min_separation_spin = QtWidgets.QDoubleSpinBox()
         self.min_separation_spin.setRange(0.0, 1e5)
         self.min_separation_spin.setDecimals(3)
         self.min_separation_spin.setSingleStep(1.0)
         self.min_separation_spin.setSuffix(" kHz")
-        self.min_separation_spin.setSpecialValueText("Off")
         self.min_separation_spin.setToolTip(
-            'Minimum spacing between resonances. Off disables this cut.'
+            "Resonances at this separation or closer collide, including equality. "
+            "To pass, their frequency separation must be greater than this value. "
+            "Zero only cuts identical frequencies; Disable collision cut skips "
+            "the check entirely."
         )
-        collision_form.addRow("Collision cut:", self.min_separation_spin)
+        collision_form.addRow("Collision threshold (kHz):", self.min_separation_spin)
+        explanation = QtWidgets.QLabel(
+            "Resonators collide when their frequency separation is at or below "
+            "the threshold. To pass, separation must be greater.")
+        explanation.setWordWrap(True)
+        collision_form.addRow(explanation)
 
         self.require_isolation_check = QtWidgets.QCheckBox(
             "Cut every member of a colliding group")
@@ -157,6 +182,7 @@ class FindResonancesSettingsPanel(AnalysisSettingsPanel):
             self.min_q_spin,
             self.max_q_spin,
             self.min_separation_spin,
+            self.disable_collision_check,
             self.require_isolation_check,
         )
 

@@ -126,3 +126,43 @@ def test_reset_goes_back_to_the_library(panel):
     settings.apply_button.click()
     assert settings.get_parameters() == DEFAULTS
     assert panel().get_parameters() == DEFAULTS
+
+
+def test_disabling_collision_cut_skips_the_pass_and_greys_controls(panel):
+    settings = panel()
+    settings.min_separation_spin.setValue(20)
+    settings.disable_collision_check.setChecked(True)
+    assert not settings.min_separation_spin.isEnabled()
+    assert not settings.require_isolation_check.isEnabled()
+    settings.apply_button.click()
+    assert settings.get_parameters()['min_separation_hz'] is None
+
+
+def test_reenabling_collision_cut_restores_the_entered_threshold(panel):
+    settings = panel()
+    settings.min_separation_spin.setValue(20)
+    settings.disable_collision_check.setChecked(True)
+    settings.disable_collision_check.setChecked(False)
+    assert settings.min_separation_spin.isEnabled()
+    assert settings.require_isolation_check.isEnabled()
+    settings.apply_button.click()
+    assert settings.get_parameters()['min_separation_hz'] == 20e3
+
+
+def test_disabled_collision_cut_survives_reopening_settings(panel):
+    settings = panel()
+    settings.disable_collision_check.setChecked(True)
+    settings.apply_button.click()
+    restored = panel()
+    assert restored.disable_collision_check.isChecked()
+    assert not restored.min_separation_spin.isEnabled()
+    assert restored.get_parameters()['min_separation_hz'] is None
+
+
+def test_close_discards_unapplied_collision_disable(panel):
+    settings = panel()
+    settings.disable_collision_check.setChecked(True)
+    settings.close()
+    assert not settings.disable_collision_check.isChecked()
+    assert settings.min_separation_spin.isEnabled()
+    assert settings.get_parameters()['min_separation_hz'] == DEFAULTS['min_separation_hz']

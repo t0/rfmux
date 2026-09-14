@@ -1,5 +1,6 @@
 """Settings for the headless multisweep collision check."""
 
+import inspect
 import math
 
 from PyQt6 import QtCore, QtWidgets
@@ -36,15 +37,32 @@ class CollisionSettingsPanel(QtWidgets.QDialog):
         layout = QtWidgets.QFormLayout(self)
         self.separation = QtWidgets.QLineEdit("100")
         self.prominence = QtWidgets.QLineEdit("1.0")
-        self.spacing = QtWidgets.QLineEdit("1.0")
+        spacing_hz = inspect.signature(find_sweeps_with_nearby_resonances).parameters[
+            "min_dip_spacing_hz"].default
+        self.spacing = QtWidgets.QLineEdit(f"{spacing_hz / 1e3:g}")
         self.separation.setToolTip(
-            "Reject a section with two dips this close or closer. "
+            "Flag a resonator's sweep if it contains two detected dips whose "
+            "frequency separation is at or below this threshold, including equality. "
+            "To pass, all detected dip pairs must be farther apart. "
             "Enter inf for any second dip in the window.")
         self.spacing.setToolTip(
-            "Minimum spacing for resolving two dips; keep below the cut.")
-        layout.addRow("Collision separation (kHz):", self.separation)
+            "Minimum spacing between minima detected as separate dips "
+            "(default 0.01 kHz = 10 Hz). A small value preserves closely spaced "
+            "real resonances. Increasing it can prevent noise wiggles or "
+            "shoulders of one resonance from being counted as a second dip "
+            "and falsely flagging the sweep. Too large a value can hide real "
+            "collisions, so keep it well below the collision threshold. "
+            "Prominence separately controls how pronounced a dip must be. "
+            "Spacing is rounded to whole sweep samples, with a minimum of one "
+            "sample; a smaller setting cannot improve the measured resolution.")
+        layout.addRow("Collision threshold (kHz):", self.separation)
+        explanation = QtWidgets.QLabel(
+            "A sweep is flagged when two detected dips are separated by the "
+            "threshold or less. To pass, their separation must be greater.")
+        explanation.setWordWrap(True)
+        layout.addRow(explanation)
         layout.addRow("Minimum dip prominence (dB):", self.prominence)
-        layout.addRow("Minimum dip spacing (kHz):", self.spacing)
+        layout.addRow("Dip detection spacing (kHz):", self.spacing)
         self.iteration = QtWidgets.QComboBox()
         self.direction = QtWidgets.QComboBox()
         self.iteration.setToolTip(

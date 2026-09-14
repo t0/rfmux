@@ -97,7 +97,11 @@ The network analysis functionality allows for detailed characterization of reson
 3. View amplitude and phase response for each module
 4. Use "Find Resonances" to identify resonance dips; "Find Resonances Settings" sets the
    thresholds. Apply saves edits between searches and across sessions; Close
-   discards unapplied edits
+   discards unapplied edits. In the collision group, resonators at or below the
+   frequency-separation threshold collide, including equality. Check **Disable
+   collision cut** to skip this check entirely and grey out its controls. Apply
+   remembers the disabled state. The default 0 kHz threshold only acts on
+   identical frequencies; other resonance filters remain independent.
 5. Rejected candidates are marked with a cross -- hover one for why it went
 6. Use "Unwrap Cable Delay" to compensate for cable length effects
 7. Save writes the measurement, and any search in it, to the session folder
@@ -168,7 +172,7 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
 
 - **Collision Cut**
   1. In a completed or loaded Multisweep panel, open **Collision Cut**, choose the separation in kHz, and press **Run Collision Cut**. The check calls `rfmux.tuning.find_sweeps_with_nearby_resonances`: it finds pairs of dips within each fine sweep, including pairs exactly at the separation threshold. It runs only when requested. The initial separation is 100 kHz; enter `inf` to flag any second detected dip in the window.
-  2. The defaults are 1 dB prominence, 1 kHz minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.
+  2. The defaults are 1 dB prominence, 10 Hz (0.01 kHz) minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.
   3. The **Collisions** tab shows all measured traces of the flagged resonators. **Remove collided resonators from catalog and re-sweep** opens the normal multisweep configuration with a copy of the current catalog containing only survivors. After Find Bias, this copy carries the current bias points. The previous sweep settings seed the dialog.
   4. **Start Multisweep** creates a separate measurement panel. With session auto-export enabled, it saves into the session like any multisweep; otherwise use its Save button. The original panel and saved measurement keep their catalog and data. Collision previews are not saved. Re-sweep is unavailable with no collisions, no survivors, a foreign-module file, or capture tuning.
 

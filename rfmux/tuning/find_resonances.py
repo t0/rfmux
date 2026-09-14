@@ -839,7 +839,7 @@ def find_sweeps_with_nearby_resonances(
     min_separation_hz: float,
     *,
     min_prominence_db: float = 1.0,
-    min_dip_spacing_hz: float = 1e3,
+    min_dip_spacing_hz: float = 10.0,
     iq_key: str = "iq_counts",
     iteration: int | None = None,
     direction: str | None = None,
@@ -876,7 +876,7 @@ def find_sweeps_with_nearby_resonances(
         one dip split into several. This is the finder's resolving power, so it
         also floors what *min_separation_hz* can act on: a pair closer together
         than this is never seen as a pair, and so is never culled. Keep it well
-        below *min_separation_hz*. Default 1e3.
+        below *min_separation_hz*. Default 10 Hz.
     iq_key : str, optional
         Which of the sweep's arrays to read, ``"iq_counts"`` or ``"iq_volts"``.
         Either answers the question — the dB magnitude only shifts by a constant

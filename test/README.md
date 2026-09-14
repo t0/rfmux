@@ -12,11 +12,11 @@ strongly on their measurement parameters.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 690 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1962 | varies | Default while editing. |
+| `pytest --tier=quick` | 1964 | varies | Default while editing. |
 | `pytest --tier=acquisition` | 37 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1999 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 2001 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 2074 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2076 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem

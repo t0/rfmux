@@ -323,9 +323,10 @@ class PSDTask(QRunnable):
                                          scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
                                          input_units=input_units)
 
-        freq_iq = spec_iq["freq_iq"]
-        psd_i = spec_iq["psd_i"]
-        psd_q = spec_iq["psd_q"]
+        # Omit the DC carrier from the display after spectrum normalization.
+        freq_iq = spec_iq["freq_iq"][1:]
+        psd_i = spec_iq["psd_i"][1:]
+        psd_q = spec_iq["psd_q"][1:]
 
         # For magnitude PSD: compute in frequency domain from I and Q PSDs
         # For uncorrelated I and Q noise, magnitude PSD ≈ PSD_I + PSD_Q
@@ -362,6 +363,8 @@ class PSDTask(QRunnable):
                                          input_units=input_units)
         freq_dsb, psd_dsb = spec_iq["freq_dsb"], spec_iq["psd_dual_sideband"]
         order = np.argsort(freq_dsb)
+        # The carrier lies at zero, between the two sorted sidebands.
+        order = order[freq_dsb[order] != 0]
         freq_dsb_sorted = freq_dsb[order]
         psd_dsb_sorted = psd_dsb[order]
 

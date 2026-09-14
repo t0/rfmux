@@ -143,5 +143,6 @@ markers = [
 # A bare `pytest` runs the quick tier plus the hardware skips; `--tier`
 # overrides this. test/README.md lists the tiers with their counts and timings.
 addopts = '-m "not slow_acquisition"'
+faulthandler_timeout = 120
 
 asyncio_default_fixture_loop_scope = "session"

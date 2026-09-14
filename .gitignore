@@ -5,6 +5,7 @@ rfmux.egg-info/
 rfmux/_version.py
 .ipynb_checkpoints/
 .pytest_cache/
+test-timings/
 
 # Virtualenvs. `uv venv` puts one here by default, and README/CLAUDE.md tell
 # you to make one — so without this a `git add -A` commits it.

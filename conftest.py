@@ -1,19 +1,18 @@
-"""Root conftest: command-line options for the whole repo.
+"""Repository-wide pytest options and incremental timing reports.
 
-``pytest_addoption`` is only honoured from an *initial* conftest — one pytest
-loads before parsing arguments, which means the rootdir conftest and the
-conftests along the path of the arguments you passed. It is emphatically not
-honoured from ``test/conftest.py`` when the arguments do not point into
-``test/``: run ``pytest --tier=quick`` from any subdirectory with the options
-declared down there and you get "unrecognized arguments" rather than a test
-run.
-
-So the options live here, where every in-repo invocation sees them. Fixtures
-and collection hooks stay in test/conftest.py, which has no such restriction.
-
-Deliberately dependency-light: this module is imported for every pytest run
-anywhere in the repo, including the QC suite, so it must not import rfmux.
+Options live in the root conftest so pytest parses them even when invoked
+outside test/. Keep this module dependency-light: the QC suite also loads it.
 """
+
+from collections import defaultdict
+from datetime import datetime, timezone
+import json
+import os
+import platform
+import subprocess
+import sys
+import time
+from typing import Iterator
 
 import pytest
 
@@ -40,6 +39,10 @@ TIERS = {
 
 
 def pytest_addoption(parser):
+    parser.addoption(
+        "--no-test-timings", action="store_true",
+        help="Disable the automatic test-timings JSONL log and section summary.",
+    )
     # rfmux/tools/qc/conftest.py also declares --serial and tolerates this one
     # already existing. Be symmetric about it: either conftest may load first
     # depending on which directory you point pytest at.
@@ -72,6 +75,10 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
+    if not config.getoption("no_test_timings"):
+        timings = _TestTimings(config)
+        config.pluginmanager.register(timings, "rfmux-test-timings")
+        config.add_cleanup(timings.close)
     tier = config.getoption("tier", default=None)
     if tier is None:
         return
@@ -86,3 +93,114 @@ def pytest_configure(config):
         )
 
     config.option.markexpr = TIERS[tier]
+
+
+class _TestTimings:
+    def __init__(self, config: pytest.Config) -> None:
+        self.started = time.perf_counter()
+        directory = config.rootpath / "test-timings"
+        directory.mkdir(exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        self.path = directory / f"{stamp}-{os.getpid()}.jsonl"
+        self.stream = self.path.open("x", encoding="utf-8")
+        self.sections = defaultdict(lambda: defaultdict(float))
+        self.tests = defaultdict(float)
+        self.collection_seconds = None
+        try:
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=config.rootpath,
+                capture_output=True, text=True, timeout=2, check=True,
+            ).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            commit = None
+        self._write(
+            "run_start", schema_version=1,
+            args=list(config.invocation_params.args),
+            cwd=str(config.invocation_params.dir),
+            tier=config.getoption("tier"), commit=commit,
+            machine=platform.node(), platform=platform.platform(),
+            python=sys.version, pytest=pytest.__version__, pid=os.getpid(),
+        )
+
+    def _write(self, event: str, **fields: object) -> None:
+        self.stream.write(json.dumps({
+            "event": event,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "elapsed_seconds": time.perf_counter() - self.started,
+            **fields,
+        }) + "\n")
+        # Preserve the last started phase even if pytest is killed or hangs.
+        self.stream.flush()
+
+    def close(self) -> None:
+        self.stream.close()
+
+    def pytest_sessionstart(self, session: pytest.Session) -> None:
+        self._write("session_start", markexpr=session.config.option.markexpr)
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_collection(self, session: pytest.Session) -> Iterator[None]:
+        started = time.perf_counter()
+        self._write("collection_start")
+        yield
+        self.collection_seconds = time.perf_counter() - started
+        self._write("collection_finish", duration_seconds=self.collection_seconds,
+                    selected=len(session.items))
+
+    def pytest_collectstart(self, collector: pytest.Collector) -> None:
+        self._write("collector_start", nodeid=collector.nodeid)
+
+    def pytest_collectreport(self, report: pytest.CollectReport) -> None:
+        self._write("collector_finish", nodeid=report.nodeid,
+                    outcome=report.outcome)
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_setup(self, item: pytest.Item) -> None:
+        self._write("phase_start", nodeid=item.nodeid, phase="setup")
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_call(self, item: pytest.Item) -> None:
+        self._write("phase_start", nodeid=item.nodeid, phase="call")
+
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_teardown(self, item: pytest.Item) -> None:
+        self._write("phase_start", nodeid=item.nodeid, phase="teardown")
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        path = report.nodeid.split("::", 1)[0]
+        parts = path.split("/")
+        section = "/".join(parts[:2]) if len(parts) > 2 else parts[0]
+        self.sections[section][report.when] += report.duration
+        self.tests[report.nodeid] += report.duration
+        self._write("phase_finish", nodeid=report.nodeid, section=section,
+                    phase=report.when, duration_seconds=report.duration,
+                    outcome=report.outcome)
+
+    @pytest.hookimpl(hookwrapper=True, tryfirst=True)
+    def pytest_sessionfinish(self, session: pytest.Session,
+                             exitstatus: int) -> Iterator[None]:
+        self._write("session_finish_start", exitstatus=int(exitstatus))
+        yield
+        self._write("run_finish", exitstatus=int(session.exitstatus),
+                    sections=dict(self.sections),
+                    collection_seconds=self.collection_seconds)
+
+    def pytest_terminal_summary(self, terminalreporter: object) -> None:
+        terminalreporter.write_sep("-", "Test timings (seconds)")
+        terminalreporter.write_line(
+            f"{'Section':30} {'Setup':>9} {'Call':>9} {'Teardown':>9} {'Total':>9}")
+        for section, phases in sorted(
+                self.sections.items(), key=lambda pair: -sum(pair[1].values())):
+            terminalreporter.write_line(
+                f"{section:30} {phases.get('setup', 0):9.3f} "
+                f"{phases.get('call', 0):9.3f} {phases.get('teardown', 0):9.3f} "
+                f"{sum(phases.values()):9.3f}")
+        if self.collection_seconds is not None:
+            terminalreporter.write_line(f"Collection: {self.collection_seconds:.3f}s")
+        terminalreporter.write_line(
+            f"Elapsed through summary: {time.perf_counter() - self.started:.3f}s")
+        terminalreporter.write_line("Slowest tests (setup + call + teardown):")
+        for nodeid, duration in sorted(
+                self.tests.items(), key=lambda pair: -pair[1])[:10]:
+            terminalreporter.write_line(f"  {duration:9.3f}s {nodeid}")
+        terminalreporter.write_line(f"Timing log: {self.path}")

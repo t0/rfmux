@@ -11,12 +11,12 @@ strongly on their measurement parameters.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 658 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1829 | varies | Default while editing. |
-| `pytest --tier=acquisition` | 38 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1867 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 686 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1898 | varies | Default while editing. |
+| `pytest --tier=acquisition` | 37 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 1935 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 1942 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2010 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -29,6 +29,53 @@ an error rather than one overriding the other.
 
 **Without the test group** the notebook and mock-vs-real tests skip rather than
 fail: a CI runner missing it goes green having not run them.
+
+## Timing and stalled runs
+
+Every run writes a unique UTC timestamp/PID file in `test-timings/` at the
+repository root and prints its path with a section timing summary. Files are
+ignored by Git and retained until you remove them. No extra dependency is needed.
+Use `--no-test-timings` to disable the log and summary, for example in a read-only
+checkout or when measuring the logger's overhead.
+
+The JSONL log is flushed after each event, so it can be inspected during a run:
+
+```bash
+tail -f test-timings/<run>.jsonl
+```
+
+Each line includes a UTC timestamp and monotonic elapsed seconds since logger
+initialization. Run metadata includes the invocation arguments, tier, commit
+(when Git is available), machine, platform, Python and pytest versions; the
+session-start event records the resolved marker expression. The commit does not
+identify uncommitted edits. Compare runs with the same selection and environment;
+JIT/cache warm-up can affect timings.
+
+`phase_start` and `phase_finish` identify the test node ID and setup, call or
+teardown phase. Finish events include pytest's duration in seconds and outcome.
+The summary adds those durations by directory (such as `test/pulse_capture`)
+and lists the ten slowest tests including fixtures. Shared fixture costs belong
+to the test that triggers setup or teardown. Per-file totals can be derived from
+the node IDs. Section totals exclude collection and pytest overhead; collection
+and elapsed time through the summary are shown separately.
+
+Collection has its own start/finish events and collector node IDs to help locate
+an import stall. A `session_finish_start` followed by `run_finish` brackets
+pytest's session-finish hooks. The latter records the exit status, section totals
+and elapsed time through those hooks. It does not prove the Python process has
+exited: interpreter shutdown, later plugin cleanup, or surviving threads can
+still delay exit. A forcibly killed run has no final event; its last unmatched
+start event identifies work that had begun, not proof of its cause.
+
+Pytest's fault handler dumps Python thread stacks when a test (including setup
+and teardown) exceeds **120 seconds**, without terminating it. Override with
+`-o faulthandler_timeout=300`, or disable with `-o faulthandler_timeout=0`.
+This watchdog does not cover collection or interpreter shutdown. Availability
+depends on the platform and pytest/Python versions. Notebook/server subprocess
+stacks are not included.
+
+The logger targets the suite's ordinary serial pytest runs. Distributed worker
+logs are separate files; no combined worker timeline is provided.
 
 ## What each tier covers
 

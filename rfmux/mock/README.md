@@ -130,7 +130,12 @@ See `config.py` for the complete list of parameters. Key categories:
 - **Resonator distribution**: num_resonances, freq_start, freq_end
 - **Physics**: T (temperature), Popt (optical power), Lg, Cc
 - **Readout**: Vin, input_atten_dB, system_termination
-- **Convergence**: convergence_tolerance, cache settings
+- **Convergence**: convergence_tolerance, cache settings, and the
+  hysteresis settings (hysteresis_follow_hz, hysteresis_new_tone_steps,
+  hysteresis_state_fraction): a resonance driven past its bifurcation
+  keeps the state a tone left it in, so a sweep down stays in the deep
+  state until it ends, a sweep up jumps later, and a tone switched off
+  leaves its resonator at rest
 - **UDP streaming**: udp_noise_level, scale_factor
 - **Pulses**: pulse_mode, pulse_period, pulse_amplitude, pulse_tau_decay,
   and the per-pulse draws pulse_random_amp_* and pulse_random_tau_*

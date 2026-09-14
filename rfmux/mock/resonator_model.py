@@ -176,6 +176,11 @@ class MockResonatorModel:
         self._nqp_const_arrays = None
         self._nqp_tiled_cache = None
         self._cache_key_params = {}
+        #: {tone: (frequency, currents)}: the state every resonator is
+        #: in under each tone, keyed by (module, channel) where the
+        #: caller has one, else by the nearest resonator; a tone that is
+        #: switched off is dropped.
+        self._state_memory = {}
 
     # --- MR_Resonator Methods ---
     def generate_resonators(self, num_resonances=2, config=None,
@@ -586,7 +591,8 @@ class MockResonatorModel:
 
         self.invalidate_caches()
 
-    def s21_lc_response(self, frequency, amplitude=1.0, pulse_time=None):
+    def s21_lc_response(self, frequency, amplitude=1.0, pulse_time=None,
+                        tone=None):
         """
         Calculate S21 response with optimized convergence.
         
@@ -611,9 +617,11 @@ class MockResonatorModel:
         # Acquire lock to prevent race conditions with other threads (e.g. Streamer vs get_samples)
         # This is critical because update_lekids_for_current modifies shared state.
         with self._physics_lock:
-            return self._s21_lc_response_internal(frequency, amplitude, pulse_time)
+            return self._s21_lc_response_internal(frequency, amplitude,
+                                                  pulse_time, tone)
 
-    def _s21_lc_response_internal(self, frequency, amplitude=1.0, pulse_time=None):
+    def _s21_lc_response_internal(self, frequency, amplitude=1.0,
+                                  pulse_time=None, tone=None):
         """Internal implementation of s21_lc_response (assumes lock held).
 
         Parameters
@@ -650,7 +658,8 @@ class MockResonatorModel:
             self._nqp_state_noise = nqp_noise_frac
 
         return self._s21_from_current_state(
-            frequency, amplitude, t_for_pulses, nqp_noise_frac, t_start)
+            frequency, amplitude, t_for_pulses, nqp_noise_frac, t_start,
+            tone)
 
     def _compute_nqp_state(self, t_for_pulses):
         """Advance QP state (pulses + noise draw) to *t_for_pulses*.
@@ -759,7 +768,7 @@ class MockResonatorModel:
         return nearest_idx, freq_step, amp_step, qp_step
 
     def _s21_from_current_state(self, frequency, amplitude, t_for_pulses,
-                                nqp_noise_frac, t_start):
+                                nqp_noise_frac, t_start, tone=None):
         """Frequency-dependent half: convergence (cached) + S21.
 
         Assumes the QP state for this instant has already been applied
@@ -799,9 +808,12 @@ class MockResonatorModel:
                 reason = 'gen_changed'
             elif cached_data.get('lekid_count') != len(self.mr_lekids):
                 reason = 'count_changed'
+            elif not self._same_state(cached_data, tone, frequency):
+                reason = 'state_changed'
             else:
                 skip_convergence = True
                 reason = 'hit'
+                self._remember_state(tone, frequency, cached_data)
         self._convergence_stats['last_reason'] = reason
         
         # Track cache hit/miss for rolling statistics
@@ -822,7 +834,8 @@ class MockResonatorModel:
         # Update parameters based on convergence decision
         if not skip_convergence:
             # Run full convergence
-            self.update_lekids_for_current(frequency, amplitude)
+            currents = self.update_lekids_for_current(frequency, amplitude,
+                                                      tone)
 
             # Update cache capacity from config if provided
             phys = getattr(self.mock_crs, '_physics_config', {})
@@ -843,7 +856,8 @@ class MockResonatorModel:
                 'qp_key': qp_key,
                 'nearest_idx': nearest_idx,
                 'gen': getattr(self, '_resonator_gen', 0),
-                'lekid_count': len(self.mr_lekids)
+                'lekid_count': len(self.mr_lekids),
+                'current': currents,
             }
 
             # Limit cache size
@@ -953,10 +967,12 @@ class MockResonatorModel:
         list rebuilds), eight times the two kernels it comes down to; and
         the state cannot be converged once for the grid, since a frozen
         state shows a far deeper dip a few linewidths off that moves away
-        as soon as the tone follows it.  Warm-started from the previous
-        point, convergence takes a few iterations.  The lekids keep the
-        Lk/R/L they had; the QP-state memo and the parameter arrays are
-        refreshed the way any single-point call refreshes them.
+        as soon as the tone follows it.  Seeded with the previous point's
+        currents through the state memory, as the single-point path is,
+        convergence takes a few iterations and a bifurcated resonance
+        keeps its state.  The lekids keep the Lk/R/L they had; the
+        QP-state memo and the parameter arrays are refreshed the way any
+        single-point call refreshes them.
         """
         with self._physics_lock:
             if not self.mr_lekids:
@@ -980,10 +996,8 @@ class MockResonatorModel:
             out = np.empty(len(frequencies))
             for i, f in enumerate(frequencies):
                 f = float(f)
-                L, R, _, _ = jit_physics.converged_lekid_parameters(
-                    f, amplitude, L, R, C, Cc, base_Lk, base_Lg,
-                    self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
-                    self.Istar, tolerance, 500, damp=0.1)
+                L, R, _, _ = self._converge(f, amplitude, L, R, C, Cc,
+                                            base_Lk, base_Lg, tolerance, 500)
                 out[i] = abs(jit_physics.compute_s21_parallel(
                     fc=f, Vin=amplitude, L_array=L, C_array=C, R_array=R,
                     Cc_array=Cc, ZLNA=complex(k0.ZLNA), GLNA=k0.GLNA,
@@ -991,7 +1005,97 @@ class MockResonatorModel:
                     system_termination=k0.system_termination))
             return out
 
-    def update_lekids_for_current(self, frequency, amplitude):
+    def _state_key(self, tone, frequency):
+        """The tone's (module, channel); a caller without one gets a
+        slot per nearest resonator."""
+        if tone is not None:
+            return tone
+        return ('f', self._cache_keys_for(frequency)[1])
+
+    def _remember_state(self, tone, frequency, cached):
+        current = cached.get('current')
+        if current is not None:
+            self._state_memory[self._state_key(tone, frequency)] = (
+                float(frequency), current)
+
+    def _phys(self):
+        phys = getattr(self.mock_crs, '_physics_config', {})
+        return phys if isinstance(phys, dict) else {}
+
+    def _states_apart(self, a, b):
+        """Whether two sets of currents put any resonator in different
+        states: the two states of a bifurcated resonance differ by ten
+        times in current, adjacent sweep points in one state by a
+        fraction (hysteresis_state_fraction).  Currents are a small
+        fraction of Istar, so the test is relative."""
+        tol = float(self._phys().get('hysteresis_state_fraction', 0.3))
+        big = np.maximum(np.abs(a), np.abs(b))
+        # Under 1e-3 Istar a current changes Lk by 1e-6, the resonance
+        # by a hundredth of a linewidth: at rest, whatever the ratio.
+        return bool(np.any((big > 1e-3 * self.Istar)
+                           & (np.abs(a - b) > tol * big)))
+
+    def _same_state(self, cached, tone, frequency):
+        """Whether a cached state (its converged currents) is the one
+        the resonators are in under the tone now.  A bifurcated
+        resonance has two, far apart in current; a hit must not hand a
+        sweep the other direction's, and a tone without a memory is at
+        rest, so it solves from there once rather than taking either."""
+        prev = self._state_memory.get(self._state_key(tone, frequency))
+        have = cached.get('current')
+        if have is None:
+            return True
+        if prev is None:
+            return False
+        return not self._states_apart(prev[1], have)
+
+    def _converge(self, frequency, amplitude, L, R, C, Cc, base_Lk, base_Lg,
+                  tolerance, max_iterations, tone=None):
+        """Converge every resonator for *tone* at *frequency*, from the
+        state each was in under it: their currents when the tone was
+        last evaluated (a move of more than hysteresis_new_tone_steps
+        steps of hysteresis_follow_hz is a new tone, all at rest).  One
+        step from there is the answer where the currents move by a
+        fraction; where one jumps state, that state may have ended
+        between the two points, and only following the tone in steps
+        from where it sat says where, so the step is retaken that way.  Returns (L, R, currents, iterations) and remembers
+        the state."""
+        n = len(L)
+        phys = self._phys()
+        substep = float(phys.get('hysteresis_follow_hz', 1000.0) or 0.0)
+        max_sub = max(1, int(phys.get('hysteresis_new_tone_steps', 64) or 1))
+        k0 = self.mr_lekids[0]
+
+        def solve(f, L, R, currents):
+            return jit_physics.converged_lekid_parameters(
+                float(f), amplitude, L, R, C, Cc, base_Lk, base_Lg,
+                self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
+                self.Istar, tolerance, max_iterations,
+                initial_currents=currents)
+
+        seed = np.zeros(n, dtype=np.complex128)
+        points = []
+        key = self._state_key(tone, frequency)
+        prev = self._state_memory.get(key)
+        if prev is not None:
+            f_prev, i_prev = prev
+            steps = (int(np.ceil(abs(frequency - f_prev) / substep))
+                     if substep > 0 else 1)
+            if steps <= max_sub:
+                seed = i_prev.copy()
+                if steps > 1:
+                    points = list(f_prev + (frequency - f_prev)
+                                  * np.arange(1, steps + 1) / steps)
+        L1, R1, currents, its = solve(frequency, L, R, seed.copy())
+        if points and self._states_apart(currents, seed):
+            currents = seed.copy()
+            for f in points:
+                L1, R1, currents, its = solve(f, L, R, currents)
+        L, R = L1, R1
+        self._state_memory[key] = (float(frequency), currents.copy())
+        return L, R, currents, its
+
+    def update_lekids_for_current(self, frequency, amplitude, tone=None):
         """
         Update LEKID parameters based on resonator currents.
         
@@ -1013,9 +1117,6 @@ class MockResonatorModel:
         max_iterations = 500
         tolerance = self.mock_crs._physics_config.get('convergence_tolerance', 1e-9)
         
-        # Get LEKID config from first resonator
-        lekid0 = self.mr_lekids[0]
-        
         # Update all resonators
         self._extract_param_arrays()
         
@@ -1034,17 +1135,12 @@ class MockResonatorModel:
         base_Lg = np.array([self.base_lekid_params[i]['Lg'] for i in range(n)])
         base_L_junk = self.L_junk_array  # L_junk is fixed per resonator
         
-        # Call JIT-compiled convergence loop
         # Note: L_work = Lk + Lg + L_junk (total resonator inductance)
         # base_L_junk is fixed; only Lk changes with current
         L_converged, R_converged, currents_converged, actual_iterations = \
-            jit_physics.converged_lekid_parameters(
-                frequency, amplitude,
-                L_work, R_work, C_work, Cc_work,
-                base_Lk, base_Lg, base_L_junk,
-                lekid0.input_atten_dB, complex(lekid0.ZLNA),
-                self.Istar, tolerance, max_iterations, damp=0.1
-            )
+            self._converge(frequency, amplitude, L_work, R_work, C_work,
+                           Cc_work, base_Lk, base_Lg, tolerance,
+                           max_iterations, tone)
         
         # Extract current factors from converged inductances
         # L_converged = Lk_converged + Lg + L_junk, so Lk_converged = L_converged - Lg - L_junk
@@ -1098,6 +1194,7 @@ class MockResonatorModel:
         if not hasattr(self, '_convergence_counter'):
             self._convergence_counter = 0
         self._convergence_counter += 1
+        return currents_converged
 
     def _nqp_sensitivity(self):
         """Fractional response of (Lk, R) to a fractional nqp change.
@@ -1599,8 +1696,17 @@ class MockResonatorModel:
                     obs_channels.append(ch)
                     obs_freqs.append(freq + nco_freq)
 
+        # A tone that is off leaves its resonator at rest: its state is
+        # forgotten, so a tone switched back on starts from rest.
+        on = {(module, ch) for ch, _, _, _ in raw_channel_configs}
+        with self._physics_lock:
+            for key in [k for k in self._state_memory
+                        if k[0] == module and k not in on]:
+                del self._state_memory[key]
+
         # Process the collected configuration (outside lock where possible, though S21 calculation needs physics lock)
         s21_call_count = 0
+        tone_keys = []
         for ch, freq, amp, phase_deg in raw_channel_configs:
             total_freq = freq + nco_freq
             
@@ -1608,7 +1714,8 @@ class MockResonatorModel:
             if num_samples == 1:
                 # Apply S21 response using FAST path (state already updated for this packet)
                 # Note: s21_lc_response acquires _physics_lock internally
-                s21_complex = self.s21_lc_response(total_freq, amp, pulse_time=pulse_time)
+                s21_complex = self.s21_lc_response(
+                    total_freq, amp, pulse_time=pulse_time, tone=(module, ch))
                 s21_call_count += 1
                 
                 # Combine amplitude, S21 and the ADC phase; the board turns
@@ -1621,6 +1728,7 @@ class MockResonatorModel:
             
             active_tone_freqs.append(total_freq)
             active_tone_amps.append(complex_amplitude)
+            tone_keys.append((module, ch))
         
         t_s21_calc = time.perf_counter()
         
@@ -1669,11 +1777,13 @@ class MockResonatorModel:
                 if mode == 'reference':
                     signals = self._batch_response_reference(
                         active_tone_freqs, tone_mag, tone_phase, pairs,
-                        observed, t, pulse_time, sample_rate, n_obs, n_tones)
+                        observed, t, pulse_time, sample_rate, n_obs, n_tones,
+                        tone_keys)
                 else:
                     signals = self._batch_response_hoisted(
                         active_tone_freqs, tone_mag, tone_phase, pairs,
-                        observed, t, pulse_time, sample_rate, n_obs, n_tones)
+                        observed, t, pulse_time, sample_rate, n_obs, n_tones,
+                        tone_keys)
 
             responses = {}
             for i, ch in enumerate(obs_channels):
@@ -1731,7 +1841,8 @@ class MockResonatorModel:
 
     def _batch_response_reference(self, active_tone_freqs, tone_mag,
                                   tone_phase, pairs, observed, t,
-                                  pulse_time, sample_rate, n_obs, n_tones):
+                                  pulse_time, sample_rate, n_obs, n_tones,
+                                  tone_keys):
         """The per-sample loop: S21 for every (sample, tone), through the
         same path the slow stream uses one sample at a time.  Kept as the
         reference the hoisted path is checked against, and selectable
@@ -1759,7 +1870,7 @@ class MockResonatorModel:
                 if tone_mag[j] > 0 and observed[j]:
                     s21_by_tone[j] = self._s21_lc_response_internal(
                         active_tone_freqs[j], tone_mag[j],
-                        pulse_time=sample_pulse_time)
+                        pulse_time=sample_pulse_time, tone=tone_keys[j])
             tone_amp_fresh = tone_mag * s21_by_tone * tone_phase
             beat = np.where(np.abs(diff) < 0.1, 1.0,
                             np.exp(2j * np.pi * diff * t[sample_idx]))
@@ -1801,7 +1912,7 @@ class MockResonatorModel:
 
     def _batch_response_hoisted(self, active_tone_freqs, tone_mag,
                                 tone_phase, pairs, observed, t, pulse_time,
-                                sample_rate, n_obs, n_tones):
+                                sample_rate, n_obs, n_tones, tone_keys):
         """The reference loop with everything constant across the batch
         hoisted out of it.  Same arithmetic, same noise draws in the same
         order, same convergence-cache decisions and the same end state.
@@ -1891,7 +2002,8 @@ class MockResonatorModel:
             qp_keys = np.round(qp_col / qp_step) * qp_step
             starts = np.flatnonzero(np.r_[True, qp_keys[1:] != qp_keys[:-1]])
             tones.append({
-                'j': j, 'frequency': frequency, 'amplitude': amplitude,
+                'j': j, 'key': tone_keys[j],
+                'frequency': frequency, 'amplitude': amplitude,
                 'nearest_idx': nearest_idx,
                 'freq_key': round(frequency / freq_step) * freq_step,
                 'amp_key': round(amplitude / amp_step) * amp_step,
@@ -1933,10 +2045,13 @@ class MockResonatorModel:
                          tone['amp_key'], qp_key)
             cached = self._convergence_cache.get(cache_key)
             hit = (cached is not None and cached.get('gen') == gen
-                   and cached.get('lekid_count') == n_res)
+                   and cached.get('lekid_count') == n_res
+                   and self._same_state(cached, tone['key'],
+                                        tone['frequency']))
             if hit:
                 state = (cached['L_values'], cached['R_values'],
                          cached['Lk_values'])
+                self._remember_state(tone['key'], tone['frequency'], cached)
                 last_reason = 'hit'
             else:
                 if k > 0:
@@ -1944,8 +2059,8 @@ class MockResonatorModel:
                 elif s > 0:
                     restore(state_at(len(tones) - 1, s - 1))
                 set_base(s)
-                self.update_lekids_for_current(tone['frequency'],
-                                               tone['amplitude'])
+                currents = self.update_lekids_for_current(
+                    tone['frequency'], tone['amplitude'], tone['key'])
                 state = ([lk.L for lk in self.mr_lekids],
                          [lk.R for lk in self.mr_lekids],
                          [lk.Lk for lk in self.mr_lekids])
@@ -1954,7 +2069,7 @@ class MockResonatorModel:
                     'L_values': state[0], 'frequency': tone['frequency'],
                     'amplitude': tone['amplitude'], 'qp_key': qp_key,
                     'nearest_idx': tone['nearest_idx'], 'gen': gen,
-                    'lekid_count': n_res}
+                    'lekid_count': n_res, 'current': currents}
                 self._convergence_stats['full'] += 1
                 misses.add((s, k))
                 last_reason = ('miss' if cached is None

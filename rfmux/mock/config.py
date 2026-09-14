@@ -119,6 +119,24 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "log_cache_decisions": False,      # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,         # log every N convergence events
     "convergence_cache_max_size": 10000000,  # max cache entries
+    # A resonance driven past its bifurcation is bistable, two stable
+    # driven states, and the mock keeps the one a tone left it in, as
+    # hardware does: sweeping down you stay in the high-current state
+    # until it ceases to exist, sweeping up you jump later.
+    "hysteresis_follow_hz": 1000.0,     # When a tone moves, its resonators are
+                                        # carried along in steps this fine (0:
+                                        # one step), so a state is only lost
+                                        # where it really ends.
+    "hysteresis_new_tone_steps": 64,    # A tone that moved further than this
+                                        # many steps at once counts as newly
+                                        # placed: its resonators start at rest.
+    "hysteresis_state_fraction": 0.3,   # Two currents in one resonator closer
+                                        # than this fraction are the same
+                                        # state; further apart, the other one
+                                        # (the two differ by about ten times).
+                                        # Decides when a cached state may be
+                                        # reused and when a move crossed the
+                                        # bifurcation.
 
     # -------------------------------------------------------------------------
     # Automatic KID biasing parameters
@@ -225,6 +243,7 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
         "pulse_random_tau_min", "pulse_random_tau_max",
         "pulse_random_tau_logmean", "pulse_random_tau_logsigma",
         "cache_freq_step", "cache_amp_step", "cache_qp_step",
+        "hysteresis_follow_hz", "hysteresis_state_fraction",
         "tls_fractional_rms", "tls_alpha", "tls_corner_hz"
     ):
         if k in cfg and isinstance(cfg[k], str):
@@ -233,7 +252,8 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
             except ValueError:
                 pass
     
-    for k in ("num_resonances", "cache_log_interval", "convergence_cache_max_size"):
+    for k in ("num_resonances", "cache_log_interval", "convergence_cache_max_size",
+              "hysteresis_new_tone_steps"):
         if k in cfg and isinstance(cfg[k], str):
             try:
                 cfg[k] = int(cfg[k])

@@ -811,7 +811,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                     if freqs_hz is None or iq_complex is None or len(freqs_hz) == 0: continue
                     s21_mag_db = convert_roc_to_dbm(np.abs(iq_complex))
                     if self.normalize_plot3 and len(s21_mag_db) > 0:
-                        ref_val = s21_mag_db[0]
+                        ref_val = s21_mag_db[UnitConverter.sweep_reference(freqs_hz)]
                         if np.isfinite(ref_val): s21_mag_db -= ref_val
                     x_axis_hz_offset = freqs_hz - self.current_plot_offset_hz
                     is_bifurcated = sweep_data.get('is_bifurcated', False)
@@ -963,7 +963,7 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
             if freqs_hz is not None and iq_complex is not None and len(freqs_hz) > 0:
                 s21_mag_db_curve = convert_roc_to_dbm(np.abs(iq_complex))
                 if self.normalize_plot3 and len(s21_mag_db_curve) > 0:
-                    ref_val = s21_mag_db_curve[0]
+                    ref_val = s21_mag_db_curve[UnitConverter.sweep_reference(freqs_hz)]
                     if np.isfinite(ref_val): s21_mag_db_curve -= ref_val
                 
                 x_axis_for_this_curve = freqs_hz - self.current_plot_offset_hz

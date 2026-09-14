@@ -1323,28 +1323,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _start_netanal_task: {e}")
             traceback.print_exc()
 
-    def _rerun_network_analysis(self, params: dict, source_panel=None):
-        """
-        Re-run a network analysis for an existing NetworkAnalysisPanel.
-
-        This method is called from a NetworkAnalysisPanel's _edit_parameters method.
-        It stops any ongoing tasks for that window, clears its data and plots, 
-        updates its parameters, and then restarts the analysis sequence.
-
-        Args:
-            params (dict): The new or updated parameters for the network analysis.
-            source_panel: The NetworkAnalysisPanel requesting the re-run (optional, auto-detected if None)
-        """
+    def _rerun_network_analysis(
+            self, params: dict, source_panel: NetworkAnalysisPanel) -> None:
+        """Sweep the session's module again in the requesting panel."""
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available"); return
-            
-            # Find the panel that's calling this
-            if source_panel is None:
-                # Try to find it from params (fallback)
-                for w_id, w_data in self._live_netanal_windows().items():
-                    if w_data['window'].current_params == params:
-                        source_panel = w_data['window']
-                        break
             
             # Find window_id for this panel
             window_id = None
@@ -1365,16 +1348,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             for mod, pbar in window.progress_bars.items(): 
                 pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
-            selected_module_param = params.get('module') # Renamed
-            if selected_module_param is None: modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list): modules_to_run = selected_module_param
-            else: modules_to_run = [selected_module_param]
             for task_key in list(self.netanal_tasks.keys()):
                 if task_key.startswith(f"{window_id}_"):
                     task = self.netanal_tasks.pop(task_key); task.stop()
             if window.progress_group: window.progress_group.setVisible(True)
-            for mod_iter in modules_to_run: # Renamed
-                self._start_netanal_task(mod_iter, params, window_id)
+            self._start_netanal_task(self.module, params, window_id)
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()

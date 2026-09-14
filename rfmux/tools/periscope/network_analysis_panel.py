@@ -711,7 +711,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
-        """Open dialog to edit parameters. Re-runs analysis using per-module cable lengths."""
+        """Edit the sweep parameters and re-run this panel's analysis."""
         params_for_dialog = self.current_params.copy()
         params_for_dialog.pop('module_cable_lengths', None)
         params_for_dialog.pop('cable_length', None) 
@@ -746,7 +746,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 
                 parent_widget = self._get_periscope_parent()
                 if parent_widget and hasattr(parent_widget, '_rerun_network_analysis'):
-                    parent_widget._rerun_network_analysis(self.current_params) # type: ignore
+                    parent_widget._rerun_network_analysis(
+                        self.current_params, source_panel=self)
 
     def _rerun_analysis(self):
         """Re-run the analysis with potentially updated parameters."""
@@ -758,7 +759,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
             if self.progress_group:
                 self.progress_group.setVisible(True)
-            parent_widget._rerun_network_analysis(params) # type: ignore
+            parent_widget._rerun_network_analysis(params, source_panel=self)
     
     def set_params(self, params):
         """Set parameters for analysis."""

@@ -17,6 +17,7 @@ import numpy as np  # noqa: E402
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope import app as app_module  # noqa: E402
+from rfmux.tools.periscope import network_analysis_panel as panel_module  # noqa: E402
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.tasks import (  # noqa: E402
     NetworkAnalysisSignals, NetworkAnalysisTask,
@@ -33,6 +34,9 @@ class _RecordingTask:
 
     def start(self):
         _RecordingTask.started.append(self)
+
+    def stop(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -67,12 +71,15 @@ class _StubDockManager:
     """The dock manager's part in opening a panel: it hands back a dock."""
 
     def create_dock(self, panel, title, window_id):
-        dock = QtWidgets.QDockWidget(title)
+        dock = QtWidgets.QDockWidget(title, panel.parentWidget())
         dock.setWidget(panel)
         return dock
 
     def get_dock(self, name):
         return None
+
+    def find_dock_for_widget(self, panel):
+        return panel.parentWidget()
 
 
 def test_a_sweep_starts_without_a_dac_scale(periscope_and_tasks, qt_app, monkeypatch):
@@ -119,6 +126,57 @@ def test_the_session_module_is_what_gets_swept(periscope_and_tasks, qt_app, monk
 
     assert [task.module for task in started] == [1]
     assert sorted(periscope.netanal_tasks) == ["netanal_0_1"]
+
+
+@pytest.mark.parametrize("module_params", [{}, {"module": None},
+                                         {"module": 2}, {"module": [1, 2]}])
+@pytest.mark.parametrize("edit", [False, True])
+def test_rerun_sweeps_only_the_session_module_in_the_requesting_panel(
+        periscope_and_tasks, qt_app, monkeypatch, module_params, edit):
+    periscope, started = periscope_and_tasks
+    QtWidgets.QMainWindow.__init__(periscope)
+    periscope.crs = object()
+    periscope.dark_mode = False
+    periscope.netanal_window_count = 0
+    periscope.netanal_windows = {}
+    periscope.module = 3
+    periscope.dock_manager = _StubDockManager()
+    params = {"amp": 0.001, "npoints": 100,
+              "module_cable_lengths": {3: 0.0}, **module_params}
+
+    class AcceptedDialog:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def exec(self) -> bool:
+            return True
+
+        def get_parameters(self) -> dict:
+            return params.copy()
+
+    monkeypatch.setattr(panel_module, "NetworkAnalysisDialog", AcceptedDialog)
+    periscope._start_network_analysis(params)
+    periscope._start_network_analysis(params)
+    first = periscope.netanal_windows["netanal_0"]["window"]
+    second = periscope.netanal_windows["netanal_1"]["window"]
+    first.netanal_container["kept"] = {}
+    second.netanal_container["replaced"] = {}
+    started.clear()
+    try:
+        if edit:
+            second._edit_parameters()
+        else:
+            second._rerun_analysis()
+
+        assert [task.module for task in started] == [3]
+        assert periscope.netanal_tasks["netanal_1_3"] is started[0]
+        assert first.netanal_container == {"kept": {}}
+        assert second.netanal_container == {}
+    finally:
+        for entry in periscope.netanal_windows.values():
+            entry["dock"].close()
+            entry["dock"].deleteLater()
+        periscope.deleteLater()
 
 
 class _Module:

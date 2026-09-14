@@ -156,7 +156,7 @@ def test_custom_frequencies_mint_an_array_of_their_own(qt_app):
     """Typed frequencies become a catalog, which is what multisweep measures;
     it needs an amplitude, and the names are new."""
     dialog = _dialog(qt_app)
-    dialog.custom_frequencies_cb.setChecked(True)
+    dialog.center_source_combo.setCurrentIndex(2)
     dialog.sections_edit.setText("1000.5, 1100.5")
     dialog.custom_amp_edit.setText("0.003")
 
@@ -197,3 +197,86 @@ def test_the_defaults_are_the_drivers_own(qt_app):
     assert params["span_hz"] == defaults["span_hz"].default
     assert params["npoints_per_sweep"] == defaults["npoints_per_sweep"].default
     assert params["nsamps"] == defaults["nsamps"].default
+
+
+def test_previous_centers_preserve_identity_and_current_amplitudes(qt_app):
+    catalog = _catalog()
+    previous = {"results": {
+        0: {"upward": {
+            r.name: {"original_center_frequency": r.bias.frequency_hz}
+            for r in catalog}},
+        1: {"downward": {
+            r.name: {"original_center_frequency": r.bias.frequency_hz + 123.45}
+            for r in catalog}},
+    }}
+    original = [(r.name, r.channel, r.bias) for r in catalog]
+    dialog = MultisweepDialog(catalog=catalog, previous_sweeps=previous,
+                              dac_scales={1: -0.5})
+    assert dialog.get_parameters()["catalog"] is catalog
+    dialog.center_source_combo.setCurrentIndex(1)
+    result = dialog.get_parameters()["catalog"]
+    assert [(r.name, r.channel, r.bias.amplitude) for r in result] == [
+        (name, channel, bias.amplitude) for name, channel, bias in original]
+    assert [r.bias.frequency_hz for r in result] == [
+        bias.frequency_hz + 123.45 for _, _, bias in original]
+    assert [(r.name, r.channel, r.bias) for r in catalog] == original
+
+
+def test_previous_centers_require_a_previous_measurement(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.center_source_combo.setCurrentIndex(1)
+    assert not dialog.start_btn.isEnabled()
+    assert "No previous multisweep centers" in dialog.status_label.text()
+
+
+def test_previous_centers_require_every_selected_resonator(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.previous_sweeps = {"results": {0: {"upward": {}}}}
+    dialog.center_source_combo.setCurrentIndex(1)
+    assert not dialog.start_btn.isEnabled()
+    assert "No previous sweep center for" in dialog.status_label.text()
+
+
+@pytest.mark.parametrize("kind, expected", [
+    ("single", [0.002]),
+    ("list", [0.001, 0.002, 0.004]),
+    ("ramp", [0.001, 0.002, 0.004]),
+])
+def test_custom_frequencies_use_absolute_schedule_without_base(qt_app, kind, expected):
+    dialog = _dialog(qt_app)
+    dialog.center_source_combo.setCurrentIndex(2)
+    dialog.sections_edit.setText("1100, 1000")
+    dialog.custom_amp_edit.setText("")
+    dialog.single_amp_edit.setText("0.002")
+    dialog.ramp_start_edit.setText("0.001")
+    dialog.ramp_stop_edit.setText("0.004")
+    dialog.ramp_steps_edit.setText("3")
+    getattr(dialog, f"{kind}_radio").setChecked(True)
+    assert dialog.start_btn.isEnabled()
+    assert dialog.custom_amp_edit.isHidden()
+    params = dialog.get_parameters()
+    steps = params["amp"].resolve_steps(params["catalog"])
+    assert [next(iter(step.amplitudes.values())) for step in steps] == pytest.approx(expected)
+    assert all(len(set(step.amplitudes.values())) == 1 for step in steps)
+
+
+def test_custom_frequencies_use_base_for_multiplicative_schedule(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.center_source_combo.setCurrentIndex(2)
+    dialog.sections_edit.setText("1000, 1100")
+    dialog.custom_amp_edit.setText("0.003")
+    dialog.multiplicative_radio.setChecked(True)
+    dialog.factor_steps_edit.setText("3")
+    params = dialog.get_parameters()
+    assert not dialog.custom_amp_edit.isHidden()
+    assert [next(iter(step.amplitudes.values())) for step in
+            params["amp"].resolve_steps(params["catalog"])] == pytest.approx(
+                [0.0015, 0.003, 0.006])
+
+
+def test_sections_describe_frequency_span(qt_app):
+    dialog = _dialog(qt_app)
+    frequencies = [r.bias.frequency_hz / 1e6 for r in dialog.catalog]
+    assert dialog.sections_info_label.text() == (
+        f"2 sweep sections, spanning {min(frequencies):.6f} MHz to "
+        f"{max(frequencies):.6f} MHz")

@@ -1367,7 +1367,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         self._collision_dialog = MultisweepDialog(
             parent=self, catalog=catalog, dac_scales=self.dac_scales,
-            initial_params=self.initial_params.copy())
+            initial_params=self.initial_params.copy(),
+            previous_sweeps=self.module_sweeps)
         self._collision_dialog.accepted.connect(self._start_collision_resweep)
         self._collision_dialog.open()
 
@@ -1377,13 +1378,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._get_periscope_parent()._start_multisweep_analysis(params)
 
     def _rerun_multisweep(self):
-        """Sweep the panel's array again, with settings the dialog can change.
-
-        The catalog is the seed: it carries where each resonator is and what it
-        is driven at, so a re-run centres on wherever the array is now without
-        any history of previous sweeps to consult. After Find Bias that catalog
-        is the report's, which is what makes the sweep iterative.
-        """
+        """Choose centers and amplitudes for another sweep of the panel's array."""
         from .dialogs import MultisweepDialog
 
         if self.catalog is None:
@@ -1392,7 +1387,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         dialog = MultisweepDialog(parent=self, catalog=self.catalog,
                                   dac_scales=self.dac_scales,
-                                  initial_params=self.initial_params.copy())
+                                  initial_params=self.initial_params.copy(),
+                                  previous_sweeps=self.module_sweeps)
         if not dialog.exec():
             return
 

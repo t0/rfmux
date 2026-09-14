@@ -220,10 +220,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         unit_layout.addWidget(self.rb_dbm)
         unit_layout.addWidget(self.rb_volts)
         
-        # Connect signals
-        self.rb_counts.toggled.connect(lambda: self._update_unit_mode("counts"))
-        self.rb_dbm.toggled.connect(lambda: self._update_unit_mode("dbm"))
-        self.rb_volts.toggled.connect(lambda: self._update_unit_mode("volts"))
+        # Bound methods avoid a button -> closure -> panel ownership cycle.
+        self._unit_buttons = {self.rb_counts: "counts", self.rb_dbm: "dbm",
+                              self.rb_volts: "volts"}
+        for rb in self._unit_buttons:
+            rb.toggled.connect(self._on_unit_toggled)
         
         # Set fixed size policy to make alignment more predictable
         unit_group.setSizePolicy(QtWidgets.QSizePolicy.Policy.Fixed, 
@@ -232,6 +233,10 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Add the unit controls to the layout
         toolbar_layout.addWidget(unit_group)
         
+    def _on_unit_toggled(self, checked: bool) -> None:
+        if checked:
+            self._update_unit_mode(self._unit_buttons[self.sender()])
+
     def _setup_zoom_box_control(self, toolbar_layout):
         """Set up the zoom box mode control."""
         zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")

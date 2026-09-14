@@ -91,9 +91,7 @@ def test_unset_parent_window_reads_as_none(qt_app):
     assert ClickableViewBox().parent_window is None
 
 
-# Panels whose ViewBoxes exist right after construction. NetworkAnalysisPanel is
-# absent on purpose: it builds its plots per module when data arrives, so a bare
-# instance has none to tear down — the weakref contract above covers it.
+# Panels whose ViewBoxes exist right after construction.
 _TEARDOWN_SCRIPT = textwrap.dedent(
     '''
     import gc, os, sys, weakref
@@ -102,12 +100,14 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
     from PyQt6 import QtWidgets
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
+    from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
     from test.periscope.test_noise_panel_fast_tod_units import _spectrum_data
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     detectors = {1: {"conceptual_freq_hz": 4.0e9},
                  2: {"conceptual_freq_hz": 4.1e9}}
     cases = [
+        (NetworkAnalysisPanel, dict(module=1)),
         (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
                                   all_detectors_data=detectors,
                                   initial_detector_idx=1)),

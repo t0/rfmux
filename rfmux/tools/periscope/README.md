@@ -95,8 +95,9 @@ The network analysis functionality allows for detailed characterization of reson
 2. Set the frequency range, the points and averaging, the probe amplitude, and
    which way through the band to measure
 3. View amplitude and phase response for each module
-4. Use "Find Resonances" to identify resonance dips; the ⚙ beside it sets the
-   thresholds, and they stay set between searches and across sessions
+4. Use "Find Resonances" to identify resonance dips; "Find Resonances Settings" sets the
+   thresholds. Apply saves edits between searches and across sessions; Close
+   discards unapplied edits
 5. Rejected candidates are marked with a cross -- hover one for why it went
 6. Use "Unwrap Cable Delay" to compensate for cable length effects
 7. Save writes the measurement, and any search in it, to the session folder
@@ -109,10 +110,10 @@ For high-resolution analysis around identified resonance frequencies:
 2. Click "Take Multisweep" to configure a detailed sweep around resonances
 3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
    there in green when it finishes — what the fits found, and which of them did
-   not converge, is on the tabs that draw them. The ⚙ holds the settings, which persist
+   not converge, is on the tabs that draw them. "Fit Settings" holds the settings, which persist
    between sessions: which models to fit (skewed, nonlinear, or both) and which
    sweeps -- all of them, each resonator at the amplitude it is biased at, or
-   one amplitude step
+   one amplitude step. Apply saves edits; Close discards unapplied edits.
 4. The Fit Results tab draws each resonator's measurement with one model over
    it. Its own toolbar says which: "Fit" offers the models the sweeps carry
    fits for, and "Amplitude" which sweeps are drawn -- all of them, one
@@ -166,9 +167,9 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
   2. Saving the same panel again overwrites the same file: the container carries the path it was written to. Running the fitters or Find Bias on a measurement that is already on disk re-saves it where it was, since both leave their results in the block.
 
 - **Find Bias**
-  1. **Find Bias** chooses an operating amplitude and frequency for every resonator in the sweeps on screen, in one `find_bias_points` call. The ⚙ beside it opens a settings window grouped by the test each setting belongs to: which bifurcation test decides the amplitude, the thresholds that test reads, where in the chosen sweep the tone goes, and how far from the sweep centre an answer is believed. Settings persist between sessions, and **Reset to Defaults** puts back what the library does when you say nothing.
+  1. **Find Bias** chooses an operating amplitude and frequency for every resonator in the sweeps on screen, in one `find_bias_points` call. **Find Bias Settings** opens a settings window grouped by the test each setting belongs to: which bifurcation test decides the amplitude, the thresholds that test reads, where in the chosen sweep the tone goes, and how far from the sweep centre an answer is believed. Settings persist between sessions, **Apply** saves edits, and **Close** discards unapplied edits. **Reset to Defaults** restores the default values; press **Apply** to save them.
   2. The report becomes the panel's catalog, and the sweeps come back carrying it as `bias_report`. On the sweep grids the amplitude step each resonator is biased at is drawn thick, with a dashed line at its bias frequency — dashed because solid and dotted already mean upward and downward. That line is named in the legend, `f_bias` over the drive it was chosen at in normalized DAC units — what a bias amplitude is, and what goes back into a re-run. On a resonator whose point is a fallback rather than a measurement the row names the flag, `f_bias — freq out of bounds`, and the subplot's tooltip carries the sentence behind it. The words are the library's `FLAG_KINDS`, so a plot and a notebook call a flag the same thing. The status line says `Bias found (2 of 9 flagged)`, then fades like any other outcome — nothing is on the board until Apply Bias, and which resonators are flagged is on the subplots they belong to.
-  3. The **Bias: detect bifurc** tab draws what the derivative test looks at — the point-to-point change in each sweep's normalized arc speed — with every trace divided by the bar that trace faced, so the bar is one pair of lines at ±1 and a quiet step is visible beside a loud one. The band the bar encloses is shaded, because a bar is a region: everything inside it is not a spike, and a trace that stays in the shading is a trace the test passed. For the step a resonator is biased at, the gate that did *not* bind is shaded inside that, so the two shades together say how much of the bar in force is the noise gate and how much the prominence. Its legend names the two bars rather than the traces: the colorbar already says which drive a line is, and nothing else on a subplot says what ±1 is a threshold *of*. It draws before anything has been found, and follows the settings as they change, which is how you choose them.
+  3. The **Bias: detect bifurc** tab draws what the derivative test looks at — the point-to-point change in each sweep's normalized arc speed — with every trace divided by the bar that trace faced, so the bar is one pair of lines at ±1 and a quiet step is visible beside a loud one. The band the bar encloses is shaded, because a bar is a region: everything inside it is not a spike, and a trace that stays in the shading is a trace the test passed. For the step a resonator is biased at, the gate that did *not* bind is shaded inside that, so the two shades together say how much of the bar in force is the noise gate and how much the prominence. Its legend names the two bars rather than the traces: the colorbar already says which drive a line is, and nothing else on a subplot says what ±1 is a threshold *of*. It draws before anything has been found, and redraws when you press **Apply** in **Find Bias Settings**, so you can inspect the chosen thresholds.
   4. The **Bias: frequency** tab draws what chose the frequency: each resonator's IQ arc speed — how far its trace moves per hertz — at the drive it is biased at, which is the quantity the default `iq_derivative` method maximizes. `dI/df` and `dQ/df` are drawn under it as thin green and red lines, because which of them carries the response is the other half of the reading: a speed that is almost all one component is an IQ loop that is not oriented the way it was assumed to be. The line is where the tone will actually go, on the hardware grid, so the gap between the line and the curve's peak is that quantization. Only the step the resonator is biased at is drawn, and the tab is empty until Find Bias has chosen one. With the `minimum` frequency method the line sits at the dip instead and need not be at this curve's peak.
 
 - **Apply Bias**

@@ -1,14 +1,4 @@
-"""Persistent settings for the resonance finder.
-
-A non-modal window over the keyword arguments of
-:func:`rfmux.tuning.find_resonances.find_resonances`, and nothing else: open
-it from the netanal panel's ``⚙`` button, set a threshold, press Find
-Resonances as many times as you like. Values persist across Periscope
-sessions through :mod:`~rfmux.tools.periscope.settings`.
-
-The defaults come out of the finder's own signature, so the boxes cannot
-drift from the library they call.
-"""
+"""Find resonances settings; Apply saves edits for future runs."""
 
 from __future__ import annotations
 
@@ -18,6 +8,7 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
 from . import settings as periscope_settings
+from .analysis_settings_panel import AnalysisSettingsPanel
 from ...tuning.find_resonances import find_resonances
 
 # What the library does when you say nothing. Read once, at import.
@@ -31,7 +22,7 @@ DEFAULTS = {
 _NO_LIMIT = "No limit"
 
 
-class FindResonancesSettingsPanel(QtWidgets.QWidget):
+class FindResonancesSettingsPanel(AnalysisSettingsPanel):
     """The finder's arguments, remembered between searches.
 
     :meth:`get_parameters` returns them ready to splat into
@@ -48,13 +39,11 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         )
         self._setup_ui()
         self.set_parameters(periscope_settings.get_find_resonances_parameters())
-        for widget in self._inputs:
-            signal = getattr(widget, "valueChanged", None) or widget.toggled
-            signal.connect(self._save)
+        self._setup_actions()
 
     # ── the arguments ────────────────────────────────────────────────────────
 
-    def get_parameters(self) -> dict:
+    def _read_parameters(self) -> dict:
         """The finder's keyword arguments, as the boxes have them."""
         expected = self.expected_resonances_spin.value()
         return {
@@ -94,8 +83,8 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         self.min_dip_depth_spin.setSingleStep(0.1)
         self.min_dip_depth_spin.setSuffix(" dB")
         self.min_dip_depth_spin.setToolTip(
-            "Prominence floor, in true dB, for a dip to count.\n"
-            "Lower it to 0.3-0.5 for shallow, overcoupled or low-Q resonators."
+            "Minimum dip prominence in dB. Lower values detect shallower "
+            "dips."
         )
         depth_form.addRow("Min dip depth:", self.min_dip_depth_spin)
 
@@ -103,9 +92,8 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         self.expected_resonances_spin.setRange(0, 10000)
         self.expected_resonances_spin.setSpecialValueText("Auto")
         self.expected_resonances_spin.setToolTip(
-            "How many resonances the array has, if you know.\n"
-            "The deepest this many are kept and the rest rejected; if fewer "
-            "are found, the search says so.\nAuto imposes no count."
+            "Keep up to this many of the deepest resonances. Auto keeps "
+            "all matches."
         )
         depth_form.addRow("Expected resonances:", self.expected_resonances_spin)
 
@@ -120,10 +108,8 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         self.min_q_spin.setSingleStep(1e3)
         self.min_q_spin.setSpecialValueText(_NO_LIMIT)
         self.min_q_spin.setToolTip(
-            "Sets the widest dip accepted, as frequency / Q.\n"
-            "Lower it for broad resonances; no limit leaves dips unbounded above.\n"
-            "This is a screen on frequency / width, not a measurement of Q -- "
-            "fitting a multisweep is what measures Q."
+            "Reject dips wider than frequency / Q. Lower values allow "
+            "broader dips."
         )
         width_form.addRow("Min Q:", self.min_q_spin)
 
@@ -133,10 +119,8 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         self.max_q_spin.setSingleStep(1e5)
         self.max_q_spin.setSpecialValueText(_NO_LIMIT)
         self.max_q_spin.setToolTip(
-            "Sets the narrowest dip accepted, as frequency / Q.\n"
-            "This is what rejects single-sample noise spikes, so removing it "
-            "is rarely what you want.\nAt netanal resolution neither Q bound "
-            "usually bites."
+            "Reject dips narrower than frequency / Q, including narrow "
+            "noise spikes."
         )
         width_form.addRow("Max Q:", self.max_q_spin)
 
@@ -152,30 +136,21 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
         self.min_separation_spin.setSuffix(" kHz")
         self.min_separation_spin.setSpecialValueText("Off")
         self.min_separation_spin.setToolTip(
-            "Separation below which two resonances are treated as colliding.\n"
-            "Off acts only on candidates at identical frequencies, so it "
-            "touches nothing real.\n"
-            "What happens to a close group is the switch below."
+            'Minimum spacing between resonances. Off disables this cut.'
         )
         collision_form.addRow("Collision cut:", self.min_separation_spin)
 
         self.require_isolation_check = QtWidgets.QCheckBox(
             "Cut every member of a colliding group")
         self.require_isolation_check.setToolTip(
-            "On: cut the whole group, so every resonance returned is one "
-            "nothing else is near.\nA tone on either member of a collided "
-            "pair still reads the other, which is why this is the default.\n\n"
-            "Off: keep the deepest member and reject the rest. The list obeys "
-            "the separation, but a survivor can still have a real resonance "
-            "beside it -- the one that was cut.\n\n"
-            "Either way, what was cut is drawn as a rejected candidate with "
-            "its reason."
+            "Checked: reject every resonance in a close group. Unchecked: "
+            "keep the deepest."
         )
         collision_form.addRow("", self.require_isolation_check)
 
         layout.addWidget(collision_group)
 
-        # Every input, for blocking signals and for wiring the auto-save.
+        # Inputs whose signals are blocked while restoring values.
         self._inputs = (
             self.min_dip_depth_spin,
             self.expected_resonances_spin,
@@ -185,18 +160,6 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
             self.require_isolation_check,
         )
 
-        buttons = QtWidgets.QHBoxLayout()
-        reset_btn = QtWidgets.QPushButton("Reset to Defaults")
-        reset_btn.setToolTip("Back to what the library does when you say nothing.")
-        reset_btn.clicked.connect(self._reset)
-        buttons.addWidget(reset_btn)
-        buttons.addStretch(1)
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.hide)
-        close_btn.setDefault(True)
-        buttons.addWidget(close_btn)
-        layout.addLayout(buttons)
-
     # ── persistence ──────────────────────────────────────────────────────────
 
     def _save(self):
@@ -204,10 +167,3 @@ class FindResonancesSettingsPanel(QtWidgets.QWidget):
 
     def _reset(self):
         self.set_parameters(DEFAULTS)
-        self._save()
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.hide()
-        else:
-            super().keyPressEvent(event)

@@ -34,6 +34,7 @@ def test_a_model_can_be_dropped_and_the_other_kept(panel):
     """The checkboxes are independent: this is not a radio button."""
     window, _ = panel
     window.set_parameters({"models": ("nonlinear",)})
+    window.apply_button.click()
     assert window.get_parameters()["models"] == ("nonlinear",)
 
 
@@ -41,6 +42,7 @@ def test_the_settings_are_remembered(panel):
     """A change is written through to where the next session reads it."""
     window, saved = panel
     window._model_checks["skewed"].setChecked(False)
+    window.apply_button.click()
     assert saved["models"] == ("nonlinear",)
 
 
@@ -54,6 +56,7 @@ def test_the_amplitude_choices_are_the_measurement_s(panel):
                                   ("At bias amplitude", BIAS_AMPLITUDE),
                                   ("Step 0: -60.0 dBm", 0)])
     window.set_amplitude_choice(0)
+    window.apply_button.click()
     assert window.get_parameters()["amplitude_choice"] == 0
 
 
@@ -64,6 +67,7 @@ def test_a_step_the_next_measurement_lacks_falls_back(panel):
     window.set_amplitude_choices([("All amplitudes", ALL_AMPLITUDES),
                                   ("Step 0", 0), ("Step 1", 1)])
     window.set_amplitude_choice(1)
+    window.apply_button.click()
 
     window.set_amplitude_choices([("All amplitudes", ALL_AMPLITUDES), ("Step 0", 0)])
 

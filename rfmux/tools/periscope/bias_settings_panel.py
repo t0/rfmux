@@ -1,16 +1,4 @@
-"""Persistent settings for bias finding.
-
-A non-modal window over the keyword arguments of
-:func:`rfmux.tuning.bias.find_bias_points`: open it from the multisweep
-panel's ``⚙`` button, set the thresholds, press Find Bias as many times as you
-like. Values persist across Periscope sessions through
-:mod:`~rfmux.tools.periscope.settings`.
-
-The settings are grouped by the test each one belongs to, so it is clear what
-controls what: a bifurcation method decides an amplitude, and only the group
-that method runs is live. The defaults come out of the finder's own signature,
-which is what Reset to Defaults puts back.
-"""
+"""Bias settings; Apply saves edits for future runs."""
 
 from __future__ import annotations
 
@@ -20,6 +8,7 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
 from . import settings as periscope_settings
+from .analysis_settings_panel import AnalysisSettingsPanel
 from ...tuning.bias import (
     BIFURCATION_METHODS,
     FREQUENCY_METHODS,
@@ -62,7 +51,7 @@ PANEL_DEFAULTS = {
 _AUTOMATIC = "Automatic"
 
 
-class BiasSettingsPanel(QtWidgets.QWidget):
+class BiasSettingsPanel(AnalysisSettingsPanel):
     """Bias finding's arguments, remembered between runs.
 
     :meth:`get_parameters` returns them ready to splat into
@@ -71,7 +60,7 @@ class BiasSettingsPanel(QtWidgets.QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Bias Settings")
+        self.setWindowTitle("Find Bias Settings")
         self.setWindowFlags(
             Qt.WindowType.Window
             | Qt.WindowType.WindowCloseButtonHint
@@ -79,24 +68,11 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         )
         self._setup_ui()
         self.set_parameters(periscope_settings.get_bias_parameters())
-        for widget in self._inputs:
-            signal = (getattr(widget, "valueChanged", None)
-                      or getattr(widget, "currentIndexChanged", None)
-                      or widget.toggled)
-            signal.connect(self._save)
-        self._update_enabled()
+        self._setup_actions()
 
     # ── the arguments ────────────────────────────────────────────────────────
 
-    def get_parameters(self, span_hz: float | None = None) -> dict:
-        """The finder's keyword arguments, as the boxes have them.
-
-        Args:
-            span_hz: the span the sweeps were taken over, which is what a
-                fractional distance guard is a fraction of. Required only when
-                that mode is selected; without it the guard is dropped, since
-                a fraction of an unknown span is not a distance.
-        """
+    def _read_parameters(self) -> dict:
         return {
             "amplitude_method": self.method_combo.currentData(),
             "frequency_method": self.frequency_combo.currentData(),
@@ -105,7 +81,9 @@ class BiasSettingsPanel(QtWidgets.QWidget):
             "noise_gate_factor": self.noise_gate_spin.value(),
             "max_discrepancy": self.discrepancy_spin.value(),
             "compare": self.compare_combo.currentData(),
-            "max_distance_hz": self._max_distance_hz(span_hz),
+            "max_distance_mode": self._distance_mode(),
+            "max_distance_fraction": self.fraction_spin.value(),
+            "max_distance_khz": self.absolute_spin.value(),
         }
 
     def set_parameters(self, parameters: dict) -> None:
@@ -130,16 +108,21 @@ class BiasSettingsPanel(QtWidgets.QWidget):
             mode if mode in DISTANCE_MODES else "none"].setChecked(True)
         for widget in self._inputs:
             widget.blockSignals(False)
+        if not self.method_combo.model().item(self.method_combo.currentIndex()).isEnabled():
+            self._select(self.method_combo, "derivative")
+        if not self.direction_combo.model().item(self.direction_combo.currentIndex()).isEnabled():
+            self._select(self.direction_combo, None)
         self._update_enabled()
 
-    def _max_distance_hz(self, span_hz: float | None) -> float | None:
-        """The guard in hertz, whichever way it was expressed."""
-        mode = self._distance_mode()
-        if mode == "absolute":
-            return self.absolute_spin.value() * 1e3
-        if mode == "fraction" and span_hz:
-            return self.fraction_spin.value() * float(span_hz)
-        return None
+    def get_parameters(self, span_hz: float | None = None) -> dict:
+        parameters = super().get_parameters()
+        mode = parameters.pop("max_distance_mode")
+        fraction = parameters.pop("max_distance_fraction")
+        khz = parameters.pop("max_distance_khz")
+        parameters["max_distance_hz"] = (
+            khz * 1e3 if mode == "absolute" else
+            fraction * span_hz if mode == "fraction" and span_hz else None)
+        return parameters
 
     def _distance_mode(self) -> str:
         for mode, radio in self._distance_radios.items():
@@ -165,7 +148,6 @@ class BiasSettingsPanel(QtWidgets.QWidget):
                 both or method not in NEEDS_BOTH_DIRECTIONS)
         if not both and self.method_combo.currentData() in NEEDS_BOTH_DIRECTIONS:
             self._select(self.method_combo, "derivative")
-            self._save()
 
         for index in range(1, self.direction_combo.count()):  # 0 is Automatic
             self._set_item_enabled(
@@ -174,7 +156,10 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         if (self.direction_combo.currentData() is not None
                 and self.direction_combo.currentData() not in directions):
             self._select(self.direction_combo, None)
-            self._save()
+        if not both and self._applied["amplitude_method"] in NEEDS_BOTH_DIRECTIONS:
+            self._applied["amplitude_method"] = "derivative"
+        if self._applied["direction"] not in directions:
+            self._applied["direction"] = None
         self._update_enabled()
 
     @staticmethod
@@ -195,12 +180,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         for method in BIFURCATION_METHODS:
             self.method_combo.addItem(method.capitalize(), method)
         self.method_combo.setToolTip(
-            "Which test decides that an amplitude step has bifurcated. The\n"
-            "step below the first one that has is the one biased at.\n\n"
-            "Both: either test firing counts, the most sensitive of the three.\n"
-            "Derivative: jumps in one sweep, and the only one a single-direction\n"
-            "measurement can run.\n"
-            "Hysteresis: the two sweep directions disagreeing."
+            "Derivative detects jumps in one sweep. Hysteresis compares "
+            "both directions. Both uses either test."
         )
         self.method_combo.currentIndexChanged.connect(self._update_enabled)
         amplitude_form.addRow("Bifurcation test:", self.method_combo)
@@ -214,10 +195,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         self.prominence_spin.setDecimals(3)
         self.prominence_spin.setSingleStep(0.05)
         self.prominence_spin.setToolTip(
-            "How far a spike must stand out of its neighbourhood, as a\n"
-            "fraction of the whole range of the arc speed. Larger is less\n"
-            "sensitive. This bar alone cannot tell a jump from noise, which\n"
-            "is what the noise gate is for."
+            "Minimum spike prominence as a fraction of the arc-speed "
+            "range. Higher values detect fewer jumps."
         )
         derivative_form.addRow("Spike prominence factor:", self.prominence_spin)
 
@@ -227,10 +206,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         self.noise_gate_spin.setSingleStep(5.0)
         self.noise_gate_spin.setSpecialValueText("Off")
         self.noise_gate_spin.setToolTip(
-            "How far above the sweep's own scatter a spike must stand, in\n"
-            "median absolute deviations. Larger is less sensitive; Off leaves\n"
-            "the prominence bar on its own, which a quiet sweep clears by\n"
-            "construction. Roughly 10 to 150 behaves."
+            "Minimum spike prominence relative to the estimated noise "
+            "floor. Higher values detect fewer jumps."
         )
         derivative_form.addRow("Noise gate factor:", self.noise_gate_spin)
         layout.addWidget(self.derivative_group)
@@ -244,9 +221,9 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         self.discrepancy_spin.setDecimals(3)
         self.discrepancy_spin.setSingleStep(0.01)
         self.discrepancy_spin.setToolTip(
-            "How far apart the upward and downward sweeps may run before the\n"
-            "step counts as bifurcated, as a fraction of the dip depth or the\n"
-            "loop radius. Larger is less sensitive."
+            "Allowed difference between sweep directions, relative to dip "
+            "depth or IQ loop radius. Higher values allow more "
+            "difference."
         )
         hysteresis_form.addRow("Max discrepancy:", self.discrepancy_spin)
 
@@ -254,8 +231,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         for comparison in HYSTERESIS_COMPARISONS:
             self.compare_combo.addItem(comparison.capitalize(), comparison)
         self.compare_combo.setToolTip(
-            "What the two directions are compared in: their |S21| against\n"
-            "frequency, or how far apart they run on the IQ plane."
+            "Compare sweep directions by magnitude or distance in the IQ "
+            "plane."
         )
         hysteresis_form.addRow("Compare in:", self.compare_combo)
         layout.addWidget(self.hysteresis_group)
@@ -268,9 +245,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
                               ("minimum", "Minimum |S21|")):
             self.frequency_combo.addItem(label, method)
         self.frequency_combo.setToolTip(
-            "IQ derivative: where the IQ trace moves fastest per hertz, which\n"
-            "is where a frequency shift reads largest.\n"
-            "Minimum |S21|: the bottom of the dip."
+            "IQ derivative: largest IQ change per hertz. Minimum |S21|: "
+            "bottom of the dip."
         )
         frequency_form.addRow("Frequency method:", self.frequency_combo)
 
@@ -279,9 +255,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         for direction in ("upward", "downward"):
             self.direction_combo.addItem(direction.capitalize(), direction)
         self.direction_combo.setToolTip(
-            "Which direction's sweep the bias frequency and the calibration\n"
-            "are measured on. Automatic takes upward where there is one. The\n"
-            "amplitude search is unaffected: it sees every direction."
+            "Sweep direction used for bias frequency and calibration. "
+            "Automatic prefers upward."
         )
         frequency_form.addRow("Measured on:", self.direction_combo)
         layout.addWidget(frequency_group)
@@ -289,9 +264,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         distance_group = QtWidgets.QGroupBox("How far the tone may move")
         distance_layout = QtWidgets.QGridLayout(distance_group)
         distance_group.setToolTip(
-            "How far from the centre of its sweep a resonance may be found\n"
-            "before the answer is disbelieved. Past it, the tone stays where\n"
-            "the sweep was centred and the finding is flagged."
+            "Beyond this distance from the sweep centre, keep the tone at "
+            "the centre and flag the result."
         )
 
         self._distance_radios = {
@@ -300,8 +274,7 @@ class BiasSettingsPanel(QtWidgets.QWidget):
             "fraction": QtWidgets.QRadioButton("Fraction of span:"),
         }
         self._distance_radios["none"].setToolTip(
-            "Believe anything. The answer is a point of the measured trace, so\n"
-            "it is inside the span whatever happens.")
+            'Allow any bias frequency within the measured sweep.')
 
         self.absolute_spin = QtWidgets.QDoubleSpinBox()
         self.absolute_spin.setRange(0.001, 1e6)
@@ -314,9 +287,8 @@ class BiasSettingsPanel(QtWidgets.QWidget):
         self.fraction_spin.setDecimals(3)
         self.fraction_spin.setSingleStep(0.01)
         self.fraction_spin.setToolTip(
-            "Of the span each sweep covered, resolved when Find Bias is\n"
-            "pressed. A sweep runs half a span either side of its centre, so\n"
-            "0.5 reaches the edge and constrains nothing.")
+            "Distance limit as a fraction of the full sweep span. "
+            "0.25 allows a quarter-span shift.")
 
         distance_layout.addWidget(self._distance_radios["none"], 0, 0, 1, 2)
         distance_layout.addWidget(self._distance_radios["absolute"], 1, 0)
@@ -327,7 +299,7 @@ class BiasSettingsPanel(QtWidgets.QWidget):
             radio.toggled.connect(self._update_enabled)
         layout.addWidget(distance_group)
 
-        # Every input, for blocking signals and for wiring the auto-save.
+        # Inputs whose signals are blocked while restoring values.
         self._inputs = (
             self.method_combo,
             self.prominence_spin,
@@ -340,18 +312,6 @@ class BiasSettingsPanel(QtWidgets.QWidget):
             self.fraction_spin,
             *self._distance_radios.values(),
         )
-
-        buttons = QtWidgets.QHBoxLayout()
-        reset_btn = QtWidgets.QPushButton("Reset to Defaults")
-        reset_btn.setToolTip("Back to what the library does when you say nothing.")
-        reset_btn.clicked.connect(self._reset)
-        buttons.addWidget(reset_btn)
-        buttons.addStretch(1)
-        close_btn = QtWidgets.QPushButton("Close")
-        close_btn.clicked.connect(self.hide)
-        close_btn.setDefault(True)
-        buttons.addWidget(close_btn)
-        layout.addLayout(buttons)
 
     @staticmethod
     def _select(combo, value) -> None:
@@ -371,25 +331,9 @@ class BiasSettingsPanel(QtWidgets.QWidget):
 
     # ── persistence ──────────────────────────────────────────────────────────
 
-    def _saved_form(self) -> dict:
-        """What goes to settings: the library's arguments as chosen, plus how
-        the distance guard was expressed, which hertz alone cannot say."""
-        return {
-            **self.get_parameters(),
-            "max_distance_mode": self._distance_mode(),
-            "max_distance_fraction": self.fraction_spin.value(),
-            "max_distance_khz": self.absolute_spin.value(),
-        }
-
-    def _save(self):
-        periscope_settings.set_bias_parameters(self._saved_form())
+    def _save(self) -> None:
+        periscope_settings.set_bias_parameters(
+            {**self.get_parameters(), **self._applied})
 
     def _reset(self):
         self.set_parameters({**DEFAULTS, **PANEL_DEFAULTS})
-        self._save()
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.hide()
-        else:
-            super().keyPressEvent(event)

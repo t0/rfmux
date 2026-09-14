@@ -75,6 +75,7 @@ def test_no_limit_means_no_limit(panel):
     settings.min_q_spin.setValue(0.0)
     settings.max_q_spin.setValue(0.0)
 
+    settings.apply_button.click()
     parameters = settings.get_parameters()
     assert parameters["min_Q"] is None
     assert parameters["max_Q"] is None
@@ -84,6 +85,7 @@ def test_the_collision_cut_is_typed_in_khz_and_sent_in_hz(panel):
     settings = panel()
     settings.min_separation_spin.setValue(7.5)
 
+    settings.apply_button.click()
     assert settings.get_parameters()["min_separation_hz"] == 7500.0
 
 
@@ -95,6 +97,7 @@ def test_the_isolation_switch_reaches_the_finder(panel):
     assert settings.get_parameters()["require_isolation"] is True
 
     settings.require_isolation_check.setChecked(False)
+    settings.apply_button.click()
     assert settings.get_parameters()["require_isolation"] is False
 
 
@@ -106,6 +109,7 @@ def test_thresholds_outlive_the_panel(panel):
     first.expected_resonances_spin.setValue(64)
     first.require_isolation_check.setChecked(False)
 
+    first.apply_button.click()
     parameters = panel().get_parameters()
     assert parameters["min_dip_depth_db"] == 0.4
     assert parameters["expected_resonances"] == 64
@@ -119,5 +123,6 @@ def test_reset_goes_back_to_the_library(panel):
 
     settings._reset()
 
+    settings.apply_button.click()
     assert settings.get_parameters() == DEFAULTS
     assert panel().get_parameters() == DEFAULTS

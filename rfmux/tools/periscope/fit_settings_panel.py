@@ -1,18 +1,4 @@
-"""Persistent settings for the resonator fitters.
-
-A non-modal window over what :func:`rfmux.tuning.fits.fit_sweeps` is asked
-for -- which models to run, and which of a schedule's amplitudes to run them
-on. Open it from the multisweep panel's ``⚙`` button, set it once, press Run
-Fit as many times as you like. Values persist across Periscope sessions
-through :mod:`~rfmux.tools.periscope.settings`. Which of the results are drawn
-is the Fit Results tab's own toolbar, in
-:mod:`~rfmux.tools.periscope.fit_display_toolbar`.
-
-Everything else the fitters take -- ``approx_Qr``, ``normalize``,
-``fr_limit_hz``, ``n_extrema_points``, ``max_residual`` -- stays at the
-library's default, which is one fewer place for a GUI value to drift from the
-fitters' own. Expose one here when something asks for it.
-"""
+"""Fit settings; Apply saves edits for future runs."""
 
 from __future__ import annotations
 
@@ -20,6 +6,7 @@ from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt
 
 from . import settings as periscope_settings
+from .analysis_settings_panel import AnalysisSettingsPanel
 
 #: The models the fitters are offered, in the order they are listed. The circle
 #: fit is not among them: it fits the IQ loop, so it draws nothing on a
@@ -31,7 +18,7 @@ ALL_AMPLITUDES = None
 BIAS_AMPLITUDE = "bias"
 
 
-class FitSettingsPanel(QtWidgets.QWidget):
+class FitSettingsPanel(AnalysisSettingsPanel):
     """The fitters' settings, remembered between fits.
 
     :meth:`get_parameters` returns ``{"models": (...), "amplitude_choice": ...}``
@@ -51,13 +38,11 @@ class FitSettingsPanel(QtWidgets.QWidget):
         )
         self._setup_ui()
         self.set_parameters(periscope_settings.get_fit_parameters())
-        for box in self._model_checks.values():
-            box.toggled.connect(self._save)
-        self.amplitude_combo.currentIndexChanged.connect(self._save)
+        self._setup_actions()
 
     # ── what the fitters are asked for ───────────────────────────────────────
 
-    def get_parameters(self) -> dict:
+    def _read_parameters(self) -> dict:
         """The settings, as the boxes have them."""
         return {
             "models": tuple(name for name, box in self._model_checks.items()
@@ -93,6 +78,8 @@ class FitSettingsPanel(QtWidgets.QWidget):
         index = self.amplitude_combo.findData(previous)
         self.amplitude_combo.setCurrentIndex(max(0, index))
         self.amplitude_combo.blockSignals(False)
+        if self.amplitude_combo.findData(self._applied["amplitude_choice"]) < 0:
+            self._applied["amplitude_choice"] = self.amplitude_combo.itemData(0)
 
     def set_amplitude_choice(self, value) -> None:
         """Select *value*, or the first choice if this measurement has no such step."""
@@ -115,8 +102,7 @@ class FitSettingsPanel(QtWidgets.QWidget):
         self._model_checks = {}
         for name, tip in (
             ("skewed", "A skewed Lorentzian over |S21|: fr, Qr, Qc, Qi"),
-            ("nonlinear", "The complex trace after the readout gain is removed: "
-                          "resonator parameters and the nonlinearity a"),
+            ("nonlinear", "Fit the complex IQ trace, including nonlinearity."),
         ):
             box = QtWidgets.QCheckBox(name.capitalize())
             box.setToolTip(tip)
@@ -129,8 +115,8 @@ class FitSettingsPanel(QtWidgets.QWidget):
         amplitude_layout = QtWidgets.QVBoxLayout(amplitude_group)
         self.amplitude_combo = QtWidgets.QComboBox()
         self.amplitude_combo.setToolTip(
-            "All of the sweeps, each resonator at the amplitude it is biased "
-            "at, or one amplitude step of the schedule")
+            "Fit all amplitudes, each resonator at its bias amplitude, "
+            "or one sweep step.")
         self.amplitude_combo.addItem("All amplitudes", ALL_AMPLITUDES)
         amplitude_layout.addWidget(self.amplitude_combo)
         layout.addWidget(amplitude_group)

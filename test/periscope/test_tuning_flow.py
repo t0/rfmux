@@ -803,13 +803,13 @@ EVERYTHING_COLLIDES_KHZ = 20_000.0
 
 
 def test_the_settings_panel_is_what_the_search_runs_with(board, qt_app):
-    """The thresholds are the settings panel's, not a dialog's: change one
-    between searches and the next search obeys it, with nothing to fill in."""
+    """Apply a threshold change, and the next search uses it."""
     _, crs, catalog = board
     panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
 
     panel.find_resonances_settings.min_separation_spin.setValue(
         EVERYTHING_COLLIDES_KHZ)
+    panel.find_resonances_settings.apply_button.click()
     search = _search_on(panel, catalog.module, qt_app)
 
     assert len(search.candidates) == 1
@@ -825,6 +825,7 @@ def test_rejected_candidates_are_drawn_with_their_reason(board, qt_app):
 
     panel.find_resonances_settings.min_separation_spin.setValue(
         EVERYTHING_COLLIDES_KHZ)
+    panel.find_resonances_settings.apply_button.click()
     search = _search_on(panel, catalog.module, qt_app)
 
     markers = panel.plots[catalog.module]["rejected_markers"]
@@ -1358,6 +1359,7 @@ def _run_fits(panel, qt_app, choice=None, models=("skewed", "nonlinear")):
     """Press Run Fit with one set of settings; return the panel's status text."""
     panel.fit_settings.set_parameters({"models": models})
     panel.fit_settings.set_amplitude_choice(choice)
+    panel.fit_settings.apply_button.click()
     assert panel.fit_settings.get_parameters() == {
         "models": tuple(models), "amplitude_choice": choice}, \
         f"the settings window does not offer {choice!r}"
@@ -1446,6 +1448,7 @@ def test_the_button_is_dead_while_the_fits_run(board, qt_app):
     assert errors == []
 
     panel.fit_settings.set_parameters({"models": ("skewed",)})
+    panel.fit_settings.apply_button.click()
     panel._run_fits()
     assert not panel.run_fit_btn.isEnabled()
     assert panel.fit_status_label.text().startswith("Fitting")
@@ -1689,6 +1692,7 @@ def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
     panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
     assert errors == []
     panel.fit_settings.set_parameters({"models": ()})
+    panel.fit_settings.apply_button.click()
 
     panel._run_fits()
 
@@ -2022,6 +2026,7 @@ def _find_bias(panel, qt_app, **settings):
     """Press Find Bias with one set of settings; return the status text."""
     if settings:
         panel.bias_settings.set_parameters(settings)
+        panel.bias_settings.apply_button.click()
     panel._find_bias()
     assert spin_until(qt_app, panel._find_bias_task.isFinished, timeout=180), \
         "the bias task never finished"
@@ -2107,6 +2112,7 @@ def test_a_fractional_distance_guard_is_resolved_against_the_span_swept(
 
     panel.bias_settings._distance_radios["fraction"].setChecked(True)
     panel.bias_settings.fraction_spin.setValue(0.25)
+    panel.bias_settings.apply_button.click()
     _find_bias(panel, qt_app)
 
     assert panel.bias_report.settings["max_distance_hz"] == 0.25 * span_hz
@@ -2176,6 +2182,7 @@ def test_a_flagged_run_says_how_many_and_then_stops_saying_it(board, qt_app,
     # test needs and the only one a healthy schedule can be made to produce.
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
     status = _find_bias(panel, qt_app)
 
     assert panel.bias_report.flagged
@@ -2345,6 +2352,7 @@ def _all_flagged(panel, qt_app):
     """
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
     _find_bias(panel, qt_app)
     assert panel.bias_report.flagged, "a guard of a millihertz flagged nothing"
     return panel
@@ -2431,6 +2439,7 @@ def test_the_reason_a_point_is_flagged_stays_off_the_canvas(board, qt_app,
 
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)     # flags everything
+    panel.bias_settings.apply_button.click()
     _find_bias(panel, qt_app)
     assert panel.bias_report.flagged
 
@@ -2450,6 +2459,7 @@ def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_contain
 
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
     _find_bias(panel, qt_app)
 
     assert len(_infinite_lines(panel)[0]) == 1
@@ -2556,7 +2566,7 @@ def test_the_bars_follow_the_settings(board, qt_app, swept_container):
     before = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
 
     panel.bias_settings.noise_gate_spin.setValue(0.0)
-    panel._redraw_plots()
+    panel.bias_settings.apply_button.click()
 
     after = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
     assert not np.allclose(before, after)

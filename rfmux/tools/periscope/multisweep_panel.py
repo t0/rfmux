@@ -167,6 +167,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # concluded. The report's catalog becomes this panel's, so what is
         # applied and what is re-swept are one thing.
         self.bias_settings = BiasSettingsPanel(self)
+        self.bias_settings.applied.connect(self._redraw_plots)
         self.bias_report = None
 
         self._fit_status_timer = QtCore.QTimer(self)
@@ -224,11 +225,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Fitting: the button, its settings, and what it is doing.
         self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
         self.run_fit_btn.setToolTip(
-            "Fit resonator models to these sweeps, as the fit settings ask")
+            'Fit the models and amplitudes chosen in Fit Settings.')
         self.run_fit_btn.clicked.connect(self._run_fits)
-        fit_settings_btn = QtWidgets.QPushButton("⚙")
-        fit_settings_btn.setMaximumWidth(30)
-        fit_settings_btn.setToolTip("Which models to fit, and which sweeps")
+        fit_settings_btn = QtWidgets.QPushButton("Fit Settings")
+        fit_settings_btn.setToolTip('Choose models and amplitudes to fit.')
         fit_settings_btn.clicked.connect(self._show_fit_settings)
         self.fit_status_label = QtWidgets.QLabel("")
         self.fit_status_label.setMinimumWidth(110)
@@ -249,13 +249,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # gesture over a different call.
         self.find_bias_btn = QtWidgets.QPushButton("Find Bias")
         self.find_bias_btn.setToolTip(
-            "Choose an operating amplitude and frequency for every resonator "
-            "in these sweeps, as the bias settings ask")
+            'Choose an operating amplitude and frequency for each resonator.')
         self.find_bias_btn.clicked.connect(self._find_bias)
-        bias_settings_btn = QtWidgets.QPushButton("\u2699")
-        bias_settings_btn.setMaximumWidth(30)
+        bias_settings_btn = QtWidgets.QPushButton("Find Bias Settings")
         bias_settings_btn.setToolTip(
-            "Which bifurcation test, and where in a sweep the tone goes")
+            'Choose bias tests, thresholds, and frequency limits.')
         bias_settings_btn.clicked.connect(self._show_bias_settings)
         self.bias_status_label = QtWidgets.QLabel("")
         self.bias_status_label.setMinimumWidth(110)
@@ -263,8 +261,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._bias_status_timer.timeout.connect(self.bias_status_label.clear)
         self.apply_bias_btn = QtWidgets.QPushButton("Apply Bias")
         self.apply_bias_btn.setToolTip(
-            "Park a tone on every resonator, at the frequency and amplitude "
-            "this panel's catalog carries")
+            'Set the board’s tones to the catalog’s bias frequencies and amplitudes.')
         self.apply_bias_btn.clicked.connect(self._apply_bias)
         self.bias_controls = grouped(
             self.find_bias_btn, bias_settings_btn, self.apply_bias_btn,
@@ -276,7 +273,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.noise_spectrum_btn.setEnabled(True)
         else:
             self.noise_spectrum_btn.setEnabled(False)
-        self.noise_spectrum_btn.setToolTip("Open a dialog to configure and get the noise spectrum, will only work if KIDS is biased.")
+        self.noise_spectrum_btn.setToolTip('Configure and measure noise after applying bias.')
         self.noise_spectrum_btn.clicked.connect(self._open_noise_spectrum_dialog)
         toolbar_layout.addWidget(self.noise_spectrum_btn)
         
@@ -321,7 +318,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Screenshot button
         screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.setToolTip('Save a screenshot of this panel.')
         screenshot_btn.clicked.connect(self._export_screenshot)
         toolbar_layout.addWidget(screenshot_btn)
 

@@ -156,7 +156,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
         # Screenshot button
         screenshot_btn = QtWidgets.QPushButton("📷")
-        screenshot_btn.setToolTip("Export a screenshot of this panel to the session folder (or choose location)")
+        screenshot_btn.setToolTip('Save a screenshot of this panel.')
         screenshot_btn.clicked.connect(self._export_screenshot)
         toolbar_global_layout.addWidget(screenshot_btn)
         
@@ -185,17 +185,16 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.find_res_btn = QtWidgets.QPushButton("Find Resonances")
         self.find_res_btn.setToolTip("Search the active module's trace for resonance dips.")
         self.find_res_btn.clicked.connect(self._find_resonances_action)
-        find_res_settings_btn = QtWidgets.QPushButton("⚙")
+        find_res_settings_btn = QtWidgets.QPushButton("Find Resonances Settings")
         find_res_settings_btn.setToolTip(
-            "Thresholds for Find Resonances. They stay set between searches "
-            "and across sessions.")
+            'Set dip depth, width, and spacing limits.')
         find_res_settings_btn.clicked.connect(self._show_find_resonances_settings)
         toolbar_module_layout.addWidget(
             grouped(self.find_res_btn, find_res_settings_btn))
 
         # Take Multisweep button
         self.take_multisweep_btn = QtWidgets.QPushButton("Take Multisweep")
-        self.take_multisweep_btn.setToolTip("Perform a multisweep using identified resonance frequencies for the active module.")
+        self.take_multisweep_btn.setToolTip('Sweep around the active module’s identified resonances.')
         self.take_multisweep_btn.clicked.connect(self._show_multisweep_dialog)
         self.take_multisweep_btn.setEnabled(False) # Initially disabled
         toolbar_module_layout.addWidget(self.take_multisweep_btn)
@@ -244,7 +243,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """Set up the zoom box mode control."""
         zoom_box_cb = QtWidgets.QCheckBox("Zoom Box Mode")
         zoom_box_cb.setChecked(self.zoom_box_mode)
-        zoom_box_cb.setToolTip("When enabled, left-click drag creates a zoom box. When disabled, left-click drag pans.")
+        zoom_box_cb.setToolTip('Drag to zoom when checked; drag to pan when unchecked.')
         zoom_box_cb.toggled.connect(self._toggle_zoom_box)
         
         # Store reference to the checkbox

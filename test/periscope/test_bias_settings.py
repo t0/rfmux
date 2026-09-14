@@ -44,6 +44,7 @@ def test_reset_puts_the_library_s_defaults_back(panel):
     window.noise_gate_spin.setValue(20.0)
     window._select(window.method_combo, "hysteresis")
     window._reset()
+    window.apply_button.click()
     assert window.get_parameters() == DEFAULTS
 
 
@@ -51,6 +52,7 @@ def test_a_changed_setting_is_remembered(panel):
     """A change is written through to where the next session reads it."""
     window, saved = panel
     window.prominence_spin.setValue(0.8)
+    window.apply_button.click()
     assert saved["spike_prominence_factor"] == 0.8
 
 
@@ -71,6 +73,7 @@ def test_a_distance_guard_in_hertz_is_the_number_typed(panel):
     window, _ = panel
     window._distance_radios["absolute"].setChecked(True)
     window.absolute_spin.setValue(12.5)
+    window.apply_button.click()
     assert window.get_parameters()["max_distance_hz"] == 12.5e3
 
 
@@ -80,6 +83,7 @@ def test_a_fractional_guard_is_a_fraction_of_the_span_swept(panel):
     window, _ = panel
     window._distance_radios["fraction"].setChecked(True)
     window.fraction_spin.setValue(0.25)
+    window.apply_button.click()
     assert window.get_parameters(span_hz=70e3)["max_distance_hz"] == 17.5e3
     assert window.get_parameters(span_hz=200e3)["max_distance_hz"] == 50e3
 
@@ -89,6 +93,7 @@ def test_a_fraction_with_no_span_to_measure_is_no_guard(panel):
     off as one."""
     window, _ = panel
     window._distance_radios["fraction"].setChecked(True)
+    window.apply_button.click()
     assert window.get_parameters(span_hz=None)["max_distance_hz"] is None
 
 
@@ -98,6 +103,7 @@ def test_no_limit_is_how_the_guard_is_switched_off(panel):
     window, _ = panel
     window._distance_radios["absolute"].setChecked(True)
     window._distance_radios["none"].setChecked(True)
+    window.apply_button.click()
     assert window.get_parameters(span_hz=70e3)["max_distance_hz"] is None
 
 
@@ -107,6 +113,7 @@ def test_which_distance_field_was_meant_survives_a_session(panel):
     window, saved = panel
     window._distance_radios["fraction"].setChecked(True)
     window.fraction_spin.setValue(0.3)
+    window.apply_button.click()
     assert saved["max_distance_mode"] == "fraction"
     assert saved["max_distance_fraction"] == 0.3
 

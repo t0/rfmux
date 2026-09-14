@@ -162,7 +162,7 @@ class MockResonatorModel:
         self._nqp_state_values = []
         self._nqp_const_arrays = None
         self._nqp_tiled_cache = None
-        self._cache_key_params = {}
+        self._cache_key_table = None
         #: {tone: (frequency, currents)}: the state every resonator is
         #: in under each tone, keyed by (module, channel) where the
         #: caller has one, else by the nearest resonator; a tone that is
@@ -681,36 +681,33 @@ class MockResonatorModel:
                 phys.get('cache_qp_step'))
 
     def _cache_keys_for(self, frequency):
-        """The cache-key parameters for a tone frequency, memoised per
-        frequency and refreshed when the resonators or the config
-        change; the memo is bounded."""
-        keys = self._cache_key_params.get(frequency)
-        if keys is None or keys[0] != self._cache_key_gen():
-            keys = ((self._cache_key_gen(),)
-                    + self._compute_cache_key_params(frequency))
-            if len(self._cache_key_params) > 4096:
-                self._cache_key_params.clear()
-            self._cache_key_params[frequency] = keys
-        return keys
+        """(gen, nearest_idx, freq_step, amp_step, qp_step) for a tone:
+        the resonator nearest it by bare resonance frequency and the
+        key steps, from a table built once per resonator generation."""
+        gen = self._cache_key_gen()
+        table = getattr(self, "_cache_key_table", None)
+        if table is None or table[0] != gen:
+            self._cache_key_table = (gen,) + self._build_cache_key_table()
+        _, f0s, order, steps = self._cache_key_table
+        if len(f0s) == 0:
+            return (gen, 0) + steps
+        k = int(np.searchsorted(f0s, frequency))
+        if k == len(f0s) or (k > 0 and frequency - f0s[k - 1] <= f0s[k] - frequency):
+            k -= 1
+        return (gen, int(order[k])) + steps
 
     def _compute_cache_key_params(self, frequency):
         """(nearest_idx, freq_step, amp_step, qp_step) for a tone."""
-        f0_list = []
-        for lek in self.mr_lekids:
-            try:
-                L_eff = max(lek.L, 1e-30)
-                C_eff = max(lek.C, 1e-30)
-                f0_list.append(1.0 / (2.0 * np.pi * np.sqrt(L_eff * C_eff)))
-            except Exception:
-                f0_list.append(0.0)
-        if f0_list:
-            nearest_idx = int(np.argmin(np.abs(np.array(f0_list) - frequency)))
-        else:
-            nearest_idx = 0
+        return self._cache_keys_for(frequency)[1:]
 
-        phys = getattr(self.mock_crs, '_physics_config', {})
-        if not isinstance(phys, dict):
-            phys = {}
+    def _build_cache_key_table(self):
+        """Sorted bare resonance frequencies, the resonator index of
+        each, and the key steps from the config."""
+        f0 = np.array([1.0 / (2.0 * np.pi * np.sqrt(max(lek.L, 1e-30)
+                                                    * max(lek.C, 1e-30)))
+                       for lek in self.mr_lekids], dtype=float)
+        order = np.argsort(f0, kind="stable")
+        phys = self._phys()
 
         freq_step = phys.get('cache_freq_step', 0.0001)  # Default 0.0001 Hz
         if not freq_step or freq_step <= 0:
@@ -732,7 +729,7 @@ class MockResonatorModel:
         else:
             qp_step = 1e-6  # Fallback
 
-        return nearest_idx, freq_step, amp_step, qp_step
+        return f0[order], order, (freq_step, amp_step, qp_step)
 
     def _s21_from_current_state(self, frequency, amplitude, t_for_pulses,
                                 nqp_noise_frac, t_start, tone=None):

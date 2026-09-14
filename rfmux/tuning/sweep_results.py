@@ -96,7 +96,8 @@ __all__ = [
 #    because nobody asked for it, and once per module rather than on every
 #    sweep entry, because it is one number per measurement and two copies of
 #    it could disagree. None where the board reported none.
-RESULTS_SCHEMA_VERSION = 8
+# 9: center_frequencies may be a name-to-center mapping beside a catalog.
+RESULTS_SCHEMA_VERSION = 9
 
 
 # The directions a sweep can run in. Here rather than in either driver, because
@@ -126,6 +127,8 @@ def _call_params(
     return {
         "catalog": catalog.to_dict(),
         "center_frequencies": (
+            {name: float(f) for name, f in center_frequencies.items()}
+            if isinstance(center_frequencies, Mapping) else
             [float(f) for f in center_frequencies]
             if center_frequencies is not None
             else None
@@ -194,7 +197,7 @@ def pack_multisweep(
     npoints_per_sweep: int,
     nsamps: int,
     catalog,
-    center_frequencies: Sequence[float] | None = None,
+    center_frequencies: Sequence[float] | Mapping[str, float] | None = None,
     names: Sequence[str] | None = None,
     requested_module: int | None = None,
     dac_scale_dbm: float | None = None,

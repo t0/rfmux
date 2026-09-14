@@ -310,3 +310,24 @@ def test_supplied_names_become_the_target_names():
     ]
     # Channels are still positional, independent of what the sections are called.
     assert [t.channel for t in targets] == [1, 2]
+
+
+@pytest.mark.parametrize("change", ["missing", "extra", "nan", "inf", "zero", "negative"])
+def test_named_centers_require_complete_positive_finite_values(change):
+    catalog = a_catalog()
+    centers = {r.name: r.bias.frequency_hz for r in catalog}
+    name = catalog.names()[0]
+    if change == "missing":
+        del centers[name]
+    elif change == "extra":
+        centers["unknown"] = 1e9
+    else:
+        centers[name] = {"nan": float("nan"), "inf": float("inf"),
+                         "zero": 0, "negative": -1}[change]
+    with pytest.raises(ValueError):
+        _resolve_sweep_targets(catalog, centers, None)
+
+
+def test_named_centers_require_a_catalog():
+    with pytest.raises(ValueError, match="require a catalog"):
+        _resolve_sweep_targets(None, {"R0001": 1e9}, None)

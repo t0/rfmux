@@ -116,32 +116,36 @@ def _resolve_section_names(
     return names
 
 
-def _require_one_input(
+def _check_sweep_input(
     catalog: ResonatorCatalog | None,
-    center_frequencies: list[float] | None,
+    center_frequencies: list[float] | Mapping[str, float] | None,
 ) -> None:
-    """Exactly one of the two ways to say what to sweep.
+    """A catalog with optional named centers, or a bare frequency list.
 
     Checked at the very top of the macro as well as here, because everything
     after it — the module, the amplitudes, the channels — is a question about
     an input that may not exist, and "module is required" is a poor answer to
     a call that named nothing to sweep.
     """
+    if catalog is not None and isinstance(center_frequencies, Mapping):
+        return
+    if catalog is None and isinstance(center_frequencies, Mapping):
+        raise ValueError("Named center_frequencies require a catalog.")
     if (catalog is None) == (center_frequencies is None):
         raise ValueError(
             "Pass a ResonatorCatalog or center_frequencies — exactly one of "
-            "the two."
+            "the two, or a catalog with a mapping of names to sweep centers."
         )
 
 
 def _resolve_sweep_targets(
     catalog: ResonatorCatalog | None,
-    center_frequencies: list[float] | None,
+    center_frequencies: list[float] | Mapping[str, float] | None,
     names: list[str] | None,
 ) -> list[_SweepTarget]:
     """Normalize the catalog and bare-frequency-list forms into one list."""
 
-    _require_one_input(catalog, center_frequencies)
+    _check_sweep_input(catalog, center_frequencies)
 
     if catalog is not None:
         if names is not None:
@@ -150,6 +154,15 @@ def _resolve_sweep_targets(
                 "resonators are already named. Rename them in the catalog if "
                 "that is what you meant."
             )
+        if center_frequencies is not None:
+            if set(center_frequencies) != set(catalog.names()):
+                raise ValueError(
+                    "center_frequencies must name every catalog resonator "
+                    "exactly once, with no extra names."
+                )
+            if any(not np.isfinite(f) or f <= 0
+                   for f in center_frequencies.values()):
+                raise ValueError("Sweep centers must be positive finite frequencies.")
         # Sections come out in bias-frequency order, matching catalog iteration
         # and `names()`, so a sweep result tabulates the same way the array
         # does. The channel each one is measured on rides along on the target.
@@ -157,7 +170,10 @@ def _resolve_sweep_targets(
             _SweepTarget(
                 name=r.name,
                 channel=r.channel,
-                center_frequency_hz=float(r.bias.frequency_hz),
+                center_frequency_hz=float(
+                    r.bias.frequency_hz if center_frequencies is None
+                    else center_frequencies[r.name]
+                ),
             )
             for r in catalog.resonators(order="frequency")
         ]
@@ -507,7 +523,7 @@ async def multisweep(
     amp: float | list[float] | Mapping[str, float] | AmplitudeSchedule | None = None,
     nsamps: int = 10,
     sweep_direction: str | Sequence[str] = "upward",
-    center_frequencies: list[float] | None = None,
+    center_frequencies: list[float] | Mapping[str, float] | None = None,
     names: list[str] | None = None,
     module=None,
     progress_callback=None,
@@ -645,11 +661,21 @@ async def multisweep(
               rather than a ``"both"`` flag, so each sweep is labelled with
               both of its coordinates. Order is honoured: it is the order the
               sweeps are measured in.
-        center_frequencies (list[float], optional): A bare list of sweep
+        center_frequencies (list[float] or Mapping[str, float], optional):
+            With a catalog, an optional ``{resonator_name: center_hz}`` mapping
+            covering every resonator exactly once. Centers change only where
+            measurements are taken; catalog bias points and calibrations are
+            preserved. Without it, centers are the catalog bias frequencies.
+            For example, ``await crs.multisweep(catalog,
+            center_frequencies={r.name: r.bias.frequency_hz + 1000
+            for r in catalog})`` measures 1 kHz above each bias frequency.
+
+            Without a catalog, a bare list of sweep
             centres, for sweeping frequencies that are not a tuned array — no
             resonances found yet, or a system that has none. Hardware channels
-            are 1-based positions in this list. Pass this or *catalog*, not
-            both. A catalog is generated from the list and recorded in
+            are 1-based positions in this list. A list cannot accompany a
+            catalog; use the named mapping for that. A catalog is generated
+            from the list and recorded in
             ``call_params["catalog"]``, the same way one amplitude is recorded
             as a one-step schedule, so what comes back is the same result a
             catalog would have produced and every analysis downstream works on
@@ -710,7 +736,7 @@ async def multisweep(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 8,
+                    "schema_version": 9,
                     "measurement": "multisweep",
                     "module": 2,           # resolved, never None
                     "dac_scale_dbm": 1.0,  # DAC full scale as the board
@@ -791,7 +817,7 @@ async def multisweep(
     # the list branch below rewrites it into the module actually swept.
     requested_module = module
 
-    _require_one_input(catalog, center_frequencies)
+    _check_sweep_input(catalog, center_frequencies)
     directions = _resolve_directions(sweep_direction)
 
     # --- Resolve module ------------------------------------------------------

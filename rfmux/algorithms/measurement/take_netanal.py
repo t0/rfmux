@@ -116,7 +116,7 @@ async def take_netanal(
 
             {
                 "crs0042_rmod2": {
-                    "schema_version": 8,
+                    "schema_version": 9,
                     "measurement": "netanal",
                     "module": 2,           # resolved, never None
                     "dac_scale_dbm": 1.0,  # DAC full scale as the board

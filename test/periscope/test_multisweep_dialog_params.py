@@ -155,7 +155,7 @@ def test_the_measurement_name_is_the_files_label(qt_app):
 def test_custom_frequencies_mint_an_array_of_their_own(qt_app):
     """Typed frequencies become a catalog, which is what multisweep measures;
     it needs an amplitude, and the names are new."""
-    dialog = _dialog(qt_app)
+    dialog = MultisweepDialog(module=1, dac_scales={1: -0.5})
     dialog.center_source_combo.setCurrentIndex(2)
     dialog.sections_edit.setText("1000.5, 1100.5")
     dialog.custom_amp_edit.setText("0.003")
@@ -201,6 +201,8 @@ def test_the_defaults_are_the_drivers_own(qt_app):
 
 def test_previous_centers_preserve_identity_and_current_amplitudes(qt_app):
     catalog = _catalog()
+    for resonator in catalog:
+        resonator.update_bias_point(bifurcated_at=0.01, dI_df=1e-9, dQ_df=2e-9)
     previous = {"results": {
         0: {"upward": {
             r.name: {"original_center_frequency": r.bias.frequency_hz}
@@ -214,11 +216,13 @@ def test_previous_centers_preserve_identity_and_current_amplitudes(qt_app):
                               dac_scales={1: -0.5})
     assert dialog.get_parameters()["catalog"] is catalog
     dialog.center_source_combo.setCurrentIndex(1)
-    result = dialog.get_parameters()["catalog"]
+    params = dialog.get_parameters()
+    result = params["catalog"]
     assert [(r.name, r.channel, r.bias.amplitude) for r in result] == [
         (name, channel, bias.amplitude) for name, channel, bias in original]
-    assert [r.bias.frequency_hz for r in result] == [
-        bias.frequency_hz + 123.45 for _, _, bias in original]
+    assert [(r.name, r.channel, r.bias) for r in result] == original
+    assert params["center_frequencies"] == {
+        name: bias.frequency_hz + 123.45 for name, _, bias in original}
     assert [(r.name, r.channel, r.bias) for r in catalog] == original
 
 
@@ -243,7 +247,7 @@ def test_previous_centers_require_every_selected_resonator(qt_app):
     ("ramp", [0.001, 0.002, 0.004]),
 ])
 def test_custom_frequencies_use_absolute_schedule_without_base(qt_app, kind, expected):
-    dialog = _dialog(qt_app)
+    dialog = MultisweepDialog(module=1, dac_scales={1: -0.5})
     dialog.center_source_combo.setCurrentIndex(2)
     dialog.sections_edit.setText("1100, 1000")
     dialog.custom_amp_edit.setText("")
@@ -261,7 +265,7 @@ def test_custom_frequencies_use_absolute_schedule_without_base(qt_app, kind, exp
 
 
 def test_custom_frequencies_use_base_for_multiplicative_schedule(qt_app):
-    dialog = _dialog(qt_app)
+    dialog = MultisweepDialog(module=1, dac_scales={1: -0.5})
     dialog.center_source_combo.setCurrentIndex(2)
     dialog.sections_edit.setText("1000, 1100")
     dialog.custom_amp_edit.setText("0.003")
@@ -280,3 +284,53 @@ def test_sections_describe_frequency_span(qt_app):
     assert dialog.sections_info_label.text() == (
         f"2 sweep sections, spanning {min(frequencies):.6f} MHz to "
         f"{max(frequencies):.6f} MHz")
+
+
+def test_custom_centers_preserve_the_active_catalog(qt_app):
+    dialog = _dialog(qt_app)
+    catalog = dialog.catalog
+    for resonator in catalog:
+        resonator.update_bias_point(bifurcated_at=0.01, dI_df=1e-9, dQ_df=2e-9)
+    before = catalog.to_dict()
+    dialog.center_source_combo.setCurrentIndex(2)
+    dialog.sections_edit.setText("1100.12345, 1000.54321")
+    params = dialog.get_parameters()
+    assert params["catalog"].to_dict() == before
+    assert params["center_frequencies"] == dict(zip(
+        catalog.names(), [1100.12345e6, 1000.54321e6]))
+
+
+def test_custom_centers_require_one_frequency_per_resonator(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.center_source_combo.setCurrentIndex(2)
+    dialog.sections_edit.setText("1000")
+    assert not dialog.start_btn.isEnabled()
+    assert "one center per resonator" in dialog.status_label.text()
+
+
+def test_worker_passes_selected_centers_without_changing_catalog(qt_app):
+    from rfmux.tools.periscope.tasks import MultisweepTask, MultisweepSignals
+
+    dialog = _dialog(qt_app)
+    dialog.center_source_combo.setCurrentIndex(2)
+    dialog.sections_edit.setText("1000.5, 1100.5")
+    params = dialog.get_parameters()
+    task = MultisweepTask(None, params, MultisweepSignals())
+    forwarded = task._multisweep_params()
+    assert forwarded["center_frequencies"] == params["center_frequencies"]
+    assert forwarded["catalog"].to_dict() == dialog.catalog.to_dict()
+
+
+def test_loading_sweep_settings_uses_the_tuned_catalog(qt_app, monkeypatch):
+    from test.tuning.test_bias import a_schedule
+    from rfmux.tuning import find_bias_points
+    from rfmux.tools.periscope import multisweep_dialog
+
+    block = a_schedule()
+    report = find_bias_points(block, save=False)
+    monkeypatch.setattr(multisweep_dialog, "load_multisweep_container",
+                        lambda *args: {"module": block})
+    dialog = _dialog(qt_app)
+    dialog._on_file_selected("sweep.pkl")
+    assert dialog.catalog["R0001"].bias.bifurcated_at == pytest.approx(0.004)
+    assert dialog.catalog["R0001"].bias.amplitude == report.catalog["R0001"].bias.amplitude

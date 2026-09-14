@@ -1422,8 +1422,8 @@ def test_bias_only_refinement_retains_bifurcation_in_catalog():
         assert resonator.bias.amplitude == catalog[resonator.name].bias.amplitude
         finding = report[resonator.name]
         assert finding.bifurcated_at is None
-        assert finding.flagged_kind == FLAG_NEVER_BIFURCATED
-        assert "No bifurcation observed in this run" in finding.flagged_because
+        assert finding.good
+        assert finding.flagged_because is None
     assert catalog.to_dict() == before
     assert sweeps["call_params"]["catalog"] == before
     restored = BiasReport.from_dict(report.to_dict())
@@ -1441,3 +1441,30 @@ def test_new_bifurcation_observation_supersedes_catalog(previous):
     for resonator in report.catalog:
         assert resonator.bias.bifurcated_at == pytest.approx(4e-3)
         assert report[resonator.name].bifurcated_at == pytest.approx(4e-3)
+
+
+@pytest.mark.parametrize("amplitude", [4e-3, 8e-3])
+def test_retained_bifurcation_does_not_unflag_equal_or_higher_drive(amplitude):
+    catalog = find_bias_points(a_schedule(), save=False).catalog
+    report = find_bias_points(a_schedule(
+        (0.0,), catalog=catalog,
+        schedule=AmplitudeSchedule.explicit([amplitude]),
+    ), save=False)
+    assert all(not finding.good for finding in report.findings)
+
+
+def test_retained_bifurcation_does_not_hide_a_new_detection():
+    catalog = find_bias_points(a_schedule(), save=False).catalog
+    report = find_bias_points(a_schedule(
+        (JUMPED,), catalog=catalog, schedule=AmplitudeSchedule(),
+    ), save=False)
+    assert all(f.flagged_kind == FLAG_BIFURCATED_AT_QUIETEST
+               for f in report.findings)
+
+
+def test_retained_bifurcation_does_not_hide_an_off_center_frequency():
+    catalog = find_bias_points(a_schedule(), save=False).catalog
+    sweeps = a_schedule((0.0,), catalog=catalog, schedule=AmplitudeSchedule())
+    with_the_sweep_centre_moved(sweeps, "R0001", -20e3)
+    report = find_bias_points(sweeps, max_distance_hz=5e3, save=False)
+    assert report["R0001"].flagged_kind == FLAG_OFF_CENTRE

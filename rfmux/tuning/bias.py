@@ -67,8 +67,8 @@ detector, and it raises rather than being absorbed into a per-resonator result.
 
 What does happen is that an answer turns out to be a **default rather than a
 measurement**. The quietest amplitude measured was already bifurcated, so there
-was nothing below it to fall back to; or nothing bifurcated at all, so the
-loudest amplitude measured is the answer only because it is the loudest; or the
+was nothing below it to fall back to; or neither this run nor the catalog
+establishes a bifurcation amplitude above the chosen drive; or the
 resonance came out so far from the sweep centre that the tone was left where it
 already was instead. Those bias points are usable and are the best the
 measurement supports — but they are not the operating point the analysis set
@@ -326,8 +326,9 @@ class BiasFinding:
     there is no unbiased outcome to represent.
 
     ``flagged_because`` is a sentence or ``None``. It is set when the answer is
-    a *default* rather than something the amplitude steps actually established:
-    usable, the best available, and not what the analysis set out to find.
+    a *default* rather than an operating point supported by the current
+    sweeps and the catalog's retained bifurcation observation. Checks and
+    ``bifurcated_at`` describe only this run; flagging also consults the catalog.
     ``flagged_kind`` is the same thing in a few words, one of
     :data:`FLAG_KINDS`, for a label or a tally that has no room for the
     sentence.
@@ -435,11 +436,7 @@ class BiasReport:
 
     @property
     def flagged(self) -> list[BiasFinding]:
-        """The bias points that are defaults rather than measurements.
-
-        The list to read before applying anything: each of these is a
-        resonator whose amplitude steps did not bracket its bifurcation point.
-        """
+        """Bias points needing review before applying them."""
         return [f for f in self.findings if not f.good]
 
     @property
@@ -521,8 +518,10 @@ def find_bias_points(
     For each one: search the amplitude steps for the one below bifurcation,
     place the tone inside that step's sweep, and measure the IQ derivatives
     there. The catalog retains its last observed bifurcation amplitude when
-    this run detects none; findings describe only this run. Clear the catalog
-    with ``catalog.clear_bifurcations()`` before taking new sweeps to reset it.
+    this run detects none. A clean sweep below that retained amplitude is
+    not flagged for missing bifurcation; frequency bounds still apply.
+    Findings record this run's observations and the resulting flags. Reset
+    with ``catalog.clear_bifurcations()`` before taking new sweeps.
     Every resonator gets a bias point; see the module docstring for what
     ``flagged_because`` means and why there is no unbiased outcome.
 
@@ -739,6 +738,7 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
     #    default we fell back to? _concern is the one place that decides.
     flagged_kind, flagged_because = _concern(
         choice,
+        known_bifurcation=resonator.bias.bifurcated_at,
         measured_hz=measured_hz,
         centre_hz=centre_hz,
         max_distance_hz=max_distance_hz,
@@ -760,6 +760,7 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
 def _concern(
     choice: AmplitudeChoice,
     *,
+    known_bifurcation: float | None = None,
     measured_hz: float,
     centre_hz: float,
     max_distance_hz: float | None,
@@ -769,8 +770,8 @@ def _concern(
 
     One place, so that "good bias point" means one thing across the module and
     a reader can see the whole standard at once. Ordered worst first, and only
-    the first concern is reported: a resonator whose sweeps never bifurcated
-    has a bigger problem than one whose tone landed a little off centre.
+    the first concern is reported. A clean sweep below a known bifurcation
+    amplitude passes the amplitude check, even without a new detection.
 
     Every one of these still produces a usable bias point. What they have in
     common is that the measurement did not establish the answer, so it is a
@@ -785,7 +786,9 @@ def _concern(
             f"the quietest amplitude measured ({choice.amplitude:g}) was already "
             f"bifurcated, so there was nothing below it to fall back to"
         )
-    if choice.bifurcated_at is None:
+    if choice.bifurcated_at is None and (
+        known_bifurcation is None or choice.amplitude >= known_bifurcation
+    ):
         return FLAG_NEVER_BIFURCATED, (
             f"No bifurcation observed in this run up to {choice.amplitude:g}, "
             f"the loudest amplitude measured"

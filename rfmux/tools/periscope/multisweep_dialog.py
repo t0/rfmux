@@ -8,6 +8,7 @@ is the keyword arguments the driver takes, and nothing else.
 """
 
 import inspect
+import math
 import traceback
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -16,8 +17,9 @@ from PyQt6.QtGui import QDoubleValidator, QIntValidator
 
 from rfmux.algorithms.measurement.multisweep import multisweep
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import (AmplitudeSchedule, collect_amplitude_iterations_for,
-                         store)
+from rfmux.tuning import (
+    AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for, store,
+)
 
 from .utils import DEFAULT_AMPLITUDE
 from .field_memory import remember_fields
@@ -101,7 +103,8 @@ class MultisweepDialog(QtWidgets.QDialog):
         if self.crs_for_dac_scales() is not None and not self.dac_scales:
             self._fetch_dac_scales_for_dialog(self.crs_for_dac_scales())
         self._update_dac_scale_info()
-        remember_fields(self, restore=not self.params)
+        remember_fields(self, restore=not self.params,
+                        skip=("custom_order_edit",))
         self._refresh()
 
     # ── the board, for the DAC scale only ────────────────────────────────────
@@ -173,7 +176,8 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.center_source_combo.setToolTip(
             "Catalog: bias frequencies from the active array or Find Resonances.\n"
             "Previous: the last recorded sweep center for each resonator.\n"
-            "Custom: a new array from frequencies entered below.\n"
+            "Custom: one center per resonator in the displayed order, or a new\n"
+            "array when no catalog is loaded. Bias points are preserved.\n"
             "All sources use the amplitude schedule.")
         self.center_source_combo.currentIndexChanged.connect(self._refresh)
         form.addWidget(self.center_source_combo)
@@ -186,6 +190,9 @@ class MultisweepDialog(QtWidgets.QDialog):
             "Sweep centres (MHz, comma separated)")
         self.sections_edit.textChanged.connect(self._refresh)
         custom_form.addRow("Frequencies (MHz):", self.sections_edit)
+        self.custom_order_edit = QtWidgets.QLineEdit()
+        self.custom_order_edit.setReadOnly(True)
+        custom_form.addRow("Resonator order:", self.custom_order_edit)
         self.custom_amp_edit = QtWidgets.QLineEdit(str(DEFAULT_AMPLITUDE))
         self.custom_amp_edit.setValidator(QDoubleValidator(0.0, 1.0, 9, self))
         self.custom_amp_edit.textChanged.connect(self._refresh)
@@ -435,26 +442,13 @@ class MultisweepDialog(QtWidgets.QDialog):
 
     def sweep_catalog(self) -> ResonatorCatalog | None:
         """Build the selected sweep input without changing the active catalog."""
-        source = self.center_source_combo.currentData()
-        if source == "catalog":
+        if self.catalog is not None:
+            self.sweep_centers()
             return self.catalog
-        if source == "previous":
-            if self.catalog is None or self.previous_sweeps is None:
-                raise ValueError("No previous multisweep centers available.")
-            catalog = self.catalog.copy()
-            for resonator in catalog:
-                try:
-                    iterations = collect_amplitude_iterations_for(
-                        self.previous_sweeps, resonator.name)
-                except KeyError:
-                    raise ValueError(
-                        f"No previous sweep center for {resonator.name}.") from None
-                directions = next(reversed(iterations.values()))
-                sweep = next(reversed(directions.values()))
-                resonator.update_bias_point(
-                    frequency_hz=sweep["original_center_frequency"],
-                    bias_frequency_quantized=False)
-            return catalog
+        if self.center_source_combo.currentData() == "previous":
+            raise ValueError("No previous multisweep centers available.")
+        if self.center_source_combo.currentData() == "catalog":
+            return None
         frequencies = [f * 1e6 for f in self._numbers(self.sections_edit.text())]
         if not frequencies or self.module is None:
             return None
@@ -467,6 +461,35 @@ class MultisweepDialog(QtWidgets.QDialog):
             amplitude = schedule.steps[0]
         return ResonatorCatalog.from_frequencies(
             frequencies, module=self.module, amplitude=amplitude)
+
+    def sweep_centers(self) -> dict[str, float] | None:
+        """Selected measurement centers, independent of catalog bias points."""
+        source = self.center_source_combo.currentData()
+        if source == "catalog" or self.catalog is None:
+            return None
+        if source == "previous":
+            if self.previous_sweeps is None:
+                raise ValueError("No previous multisweep centers available.")
+            centers = {}
+            for name in self.catalog.names():
+                try:
+                    iterations = collect_amplitude_iterations_for(
+                        self.previous_sweeps, name)
+                except KeyError:
+                    raise ValueError(
+                        f"No previous sweep center for {name}.") from None
+                directions = next(reversed(iterations.values()))
+                sweep = next(reversed(directions.values()))
+                centers[name] = float(sweep["original_center_frequency"])
+        else:
+            frequencies = [f * 1e6 for f in self._numbers(self.sections_edit.text())]
+            if len(frequencies) != len(self.catalog):
+                raise ValueError(
+                    "Enter one center per resonator, in the displayed order.")
+            centers = dict(zip(self.catalog.names(), frequencies))
+        if any(not math.isfinite(f) or f <= 0 for f in centers.values()):
+            raise ValueError("Sweep centers must be positive finite frequencies.")
+        return centers
 
     # ── the live preview ─────────────────────────────────────────────────────
 
@@ -483,8 +506,11 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.custom_widget.setVisible(
             self.center_source_combo.currentData() == "custom")
         relative = self._schedule_kind() in ("catalog", "multiplicative")
-        self.custom_amp_edit.setVisible(relative)
-        self.custom_amp_label.setVisible(relative)
+        self.custom_amp_edit.setVisible(relative and self.catalog is None)
+        self.custom_amp_label.setVisible(relative and self.catalog is None)
+        self.custom_order_edit.setText(
+            ", ".join(self.catalog.names())
+            if self.catalog is not None else "Creates a new array.")
         for kind, holder in self._schedule_fields.items():
             holder.setEnabled(kind == self._schedule_kind())
 
@@ -497,11 +523,14 @@ class MultisweepDialog(QtWidgets.QDialog):
 
         if catalog is None and not issues:
             issues.append(("error", "No resonators to sweep."))
+        centers = (self.sweep_centers() or {
+            r.name: r.bias.frequency_hz for r in catalog
+        }) if catalog is not None and not issues else {}
         self.sections_info_label.setText(
             f"{len(catalog)} sweep sections, spanning "
-            f"{min(r.bias.frequency_hz for r in catalog) / 1e6:.6f} MHz to "
-            f"{max(r.bias.frequency_hz for r in catalog) / 1e6:.6f} MHz"
-            if catalog is not None and catalog.names() else "No array loaded.")
+            f"{min(centers.values()) / 1e6:.6f} MHz to "
+            f"{max(centers.values()) / 1e6:.6f} MHz"
+            if centers else "No valid sweep centers.")
 
         directions = self.directions()
         if not directions:
@@ -619,7 +648,11 @@ class MultisweepDialog(QtWidgets.QDialog):
         block = next(iter(container.values()))
         self.previous_sweeps = block
         call_params = block["call_params"]
-        self.catalog = ResonatorCatalog.from_dict(call_params["catalog"])
+        self.catalog = (
+            BiasReport.from_dict(block["bias_report"]).catalog
+            if block.get("bias_report") is not None
+            else ResonatorCatalog.from_dict(call_params["catalog"])
+        )
         self.module = self.catalog.module
 
         self.span_khz_edit.setText(f"{call_params['span_hz'] / 1e3:g}")
@@ -645,6 +678,7 @@ class MultisweepDialog(QtWidgets.QDialog):
                 return None
             return {
                 "catalog": catalog,
+                "center_frequencies": self.sweep_centers(),
                 "amp": self.schedule(),
                 "span_hz": float(self.span_khz_edit.text()) * 1e3,
                 "npoints_per_sweep": int(self.npoints_edit.text()),

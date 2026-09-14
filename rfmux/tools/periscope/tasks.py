@@ -830,6 +830,7 @@ class MultisweepTask(QtCore.QThread):
     def _multisweep_params(self):
         return {
             'catalog': self.catalog,
+            'center_frequencies': self.params.get('center_frequencies'),
             'span_hz': self.params['span_hz'],
             'npoints_per_sweep': self.params['npoints_per_sweep'],
             'nsamps': self.params['nsamps'],

@@ -687,7 +687,7 @@ async def test_the_result_carries_a_schema_version(sweeps):
     result = await drive(FakeCRS(), a_catalog())
     # A literal, not the constant: bumping the version should mean editing a
     # test, because it is a claim that readers of older files need to know.
-    assert result["schema_version"] == 8
+    assert result["schema_version"] == 9
 
 
 @pytest.mark.asyncio
@@ -964,3 +964,62 @@ async def test_a_single_sweep_reads_the_same_way_a_schedule_does(sweeps):
     collected = collect_amplitude_iterations_for(result, "R0002")
     assert list(collected) == [0]
     assert collected[0]["upward"]["sweep_amplitude"] == pytest.approx(0.002)
+
+
+@pytest.mark.asyncio
+async def test_named_centers_preserve_catalog_bias_and_calibration(monkeypatch):
+    catalog = a_catalog()
+    for resonator in catalog:
+        resonator.update_bias_point(bifurcated_at=0.008, dI_df=1e-9, dQ_df=2e-9)
+    before = catalog.to_dict()
+    centers = {r.name: r.bias.frequency_hz + 123.45 for r in catalog}
+
+    async def measure(crs, targets, amplitudes, **kwargs):
+        return {t.name: {
+            "original_center_frequency": t.center_frequency_hz,
+            "sweep_amplitude": amplitudes[t.name],
+            "sweep_direction": kwargs["sweep_direction"],
+        } for t in targets}
+
+    monkeypatch.setattr(multisweep_module, "_measure_sweep", measure)
+    container = await drive_macro(FakeCRS(), catalog,
+                                  center_frequencies=centers, save=False)
+    block = next(iter(container.values()))
+    assert catalog.to_dict() == before
+    assert block["call_params"]["catalog"] == before
+    assert block["call_params"]["center_frequencies"] == centers
+    assert {name: entry["original_center_frequency"] for name, entry in
+            block["results"][0]["upward"].items()} == centers
+
+
+@pytest.mark.asyncio
+async def test_offset_center_refinement_keeps_history_through_saved_sweeps(monkeypatch, tmp_path):
+    from test.tuning.test_bias import a_schedule, a_sweep, FR
+    from rfmux.tuning import find_bias_points, store
+
+    catalog = find_bias_points(a_schedule(), save=False).catalog
+    before = catalog.to_dict()
+    centers = {r.name: r.bias.frequency_hz + 123.45 for r in catalog}
+
+    async def measure(crs, targets, amplitudes, **kwargs):
+        entries = {}
+        for target in targets:
+            entry = a_sweep(a=0.0, amplitude=amplitudes[target.name],
+                            fr=FR if target.name == "R0001" else FR + 1e6,
+                            direction=kwargs["sweep_direction"])
+            entry["original_center_frequency"] = target.center_frequency_hz
+            entries[target.name] = entry
+        return entries
+
+    monkeypatch.setattr(multisweep_module, "_measure_sweep", measure)
+    container = await drive_macro(FakeCRS(), catalog, center_frequencies=centers,
+                                  sweep_direction=("upward", "downward"), save=False)
+    loaded = store.load(store.save(container, "multisweep", directory=tmp_path))
+    block = next(iter(loaded.values()))
+    report = find_bias_points(block, save=False)
+
+    np.testing.assert_equal(block["call_params"]["catalog"], before)
+    assert report.flagged == []
+    for resonator in report.catalog:
+        assert resonator.bias.bifurcated_at == pytest.approx(0.004)
+        assert report[resonator.name].bifurcated_at is None

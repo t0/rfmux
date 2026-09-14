@@ -350,8 +350,9 @@ class DetectorDigestTab(QtWidgets.QWidget):
                  "How fast Q moves with frequency at the bias point"),
             _Row("|dIQ/df|", f"{np.hypot(bias.dI_df, bias.dQ_df):.4g} V/Hz",
                  "The responsivity the frequency search maximized"),
-            _Row("Bifurcated at", self._bifurcated_at(),
-                 "The quietest drive at which the bifurcation test fired"),
+            _Row("Bifurcation this run", self._bifurcated_at(),
+                 "The first bifurcation detected in these sweeps; the catalog "
+                 "may retain an observation from an earlier run"),
         ]
         if not bias.good:
             rows.append(_Row("Flagged", f"{bias.flagged_kind}: {bias.flagged_because}",

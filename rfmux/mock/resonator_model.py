@@ -948,18 +948,13 @@ class MockResonatorModel:
                 self._nqp_state_noise = self._compute_nqp_state(t)
                 self._nqp_state_t = t
             self._ensure_arrays()
-            n = len(self.mr_lekids)
-            base_Lk, _, base_Lg = self._base_arrays()
-            L, R = self.L_array.copy(), self.R_array.copy()
+            base_Lk = self._base_arrays()[0]
             C, Cc = self.C_array, self.Cc_array
             k0 = self.mr_lekids[0]
-            tolerance = self.mock_crs._physics_config.get(
-                'convergence_tolerance', 1e-9)
             out = np.empty(len(frequencies))
             for i, f in enumerate(frequencies):
                 f = float(f)
-                L, R, _, _ = self._converge(f, amplitude, L, R, C, Cc,
-                                            base_Lk, base_Lg, tolerance, 500)
+                L, R, _ = self._converge(f, amplitude, base_Lk)
                 out[i] = abs(jit_physics.compute_s21_parallel(
                     fc=f, Vin=amplitude, L_array=L, C_array=C, R_array=R,
                     Cc_array=Cc, ZLNA=complex(k0.ZLNA), GLNA=k0.GLNA,
@@ -992,17 +987,10 @@ class MockResonatorModel:
         return phys if isinstance(phys, dict) else {}
 
     def _states_apart(self, a, b):
-        """Whether two sets of currents put any resonator in different
-        states: the two states of a bifurcated resonance differ by ten
-        times in current, adjacent sweep points in one state by a
-        fraction (hysteresis_state_fraction).  Currents are a small
-        fraction of Istar, so the test is relative."""
-        tol = float(self._phys().get('hysteresis_state_fraction', 0.3))
-        big = np.maximum(np.abs(a), np.abs(b))
-        # Under 1e-3 Istar a current changes Lk by 1e-6, the resonance
-        # by a hundredth of a linewidth: at rest, whatever the ratio.
-        return bool(np.any((big > 1e-3 * self.Istar)
-                           & (np.abs(a - b) > tol * big)))
+        return jit_physics.states_apart(
+            np.asarray(a, dtype=np.complex128),
+            np.asarray(b, dtype=np.complex128), float(self.Istar),
+            float(self._phys().get('hysteresis_state_fraction', 0.3)))
 
     def _same_state(self, ts, currents):
         """Whether a kept state (its converged currents) is the one the
@@ -1014,50 +1002,43 @@ class MockResonatorModel:
             return False
         return not self._states_apart(ts.currents, currents)
 
-    def _converge(self, frequency, amplitude, L, R, C, Cc, base_Lk, base_Lg,
-                  tolerance, max_iterations, tone=None):
-        """Converge every resonator for *tone* at *frequency*, from the
-        state each was in under it: their currents when the tone was
-        last evaluated (a move of more than hysteresis_new_tone_steps
-        steps of hysteresis_follow_hz is a new tone, all at rest).  One
-        step from there is the answer where the currents move by a
-        fraction; where one jumps state, that state may have ended
-        between the two points, and only following the tone in steps
-        from where it sat says where, so the step is retaken that way.  Returns (L, R, currents, iterations) and remembers
-        the state."""
-        n = len(L)
+    def _solve_runs(self, freqs, amps, tone_states, base_Lk_runs, run_start):
+        """converge_tones for the tones at *freqs* and *amps*, tone k's
+        QP states being run_start[k]:run_start[k+1] of *base_Lk_runs*,
+        each seeded from the state its _ToneState holds and leaving it
+        at its last run's.  Returns (L, currents), one row per run."""
+        self._ensure_arrays()
+        n = len(self.mr_lekids)
+        T = len(freqs)
+        seeds = np.zeros((T, n), dtype=np.complex128)
+        seed_f = np.zeros(T)
+        has_seed = np.zeros(T, dtype=bool)
+        for k, ts in enumerate(tone_states):
+            if ts.currents is not None:
+                seeds[k], seed_f[k], has_seed[k] = ts.currents, ts.frequency, True
         phys = self._phys()
-        substep = float(phys.get('hysteresis_follow_hz', 1000.0) or 0.0)
-        max_sub = max(1, int(phys.get('hysteresis_new_tone_steps', 64) or 1))
         k0 = self.mr_lekids[0]
+        L, I, passes = jit_physics.converge_tones(
+            freqs, amps, has_seed, seed_f, seeds, run_start, base_Lk_runs,
+            self.R_array, self.C_array, self.Cc_array, self._base_arrays()[2],
+            self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
+            self.Istar, phys.get('convergence_tolerance', 1e-9), 500,
+            phys.get('hysteresis_follow_hz', 1000.0) or 0.0,
+            max(1, int(phys.get('hysteresis_new_tone_steps', 64) or 1)),
+            phys.get('hysteresis_state_fraction', 0.3))
+        for k, ts in enumerate(tone_states):
+            ts.frequency, ts.currents = float(freqs[k]), I[run_start[k + 1] - 1]
+        self._convergence_counter = getattr(self, '_convergence_counter', 0) + len(passes)
+        self._solver_passes = getattr(self, '_solver_passes', 0) + int(passes.sum())
+        return L, I
 
-        def solve(f, L, R, currents):
-            return jit_physics.converged_lekid_parameters(
-                float(f), amplitude, L, R, C, Cc, base_Lk, base_Lg,
-                self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
-                self.Istar, tolerance, max_iterations,
-                initial_currents=currents)
-
-        seed = np.zeros(n, dtype=np.complex128)
-        points = []
+    def _converge(self, frequency, amplitude, base_Lk, tone=None):
+        """One tone at one QP state: converge_tones with a single run.
+        Returns (L, R, currents)."""
         ts = self._tone_state(tone, frequency)
-        if ts.currents is not None:
-            f_prev, i_prev = ts.frequency, ts.currents
-            steps = (int(np.ceil(abs(frequency - f_prev) / substep))
-                     if substep > 0 else 1)
-            if steps <= max_sub:
-                seed = i_prev.copy()
-                if steps > 1:
-                    points = list(f_prev + (frequency - f_prev)
-                                  * np.arange(1, steps + 1) / steps)
-        L1, R1, currents, its = solve(frequency, L, R, seed.copy())
-        if points and self._states_apart(currents, seed):
-            currents = seed.copy()
-            for f in points:
-                L1, R1, currents, its = solve(f, L, R, currents)
-        L, R = L1, R1
-        ts.frequency, ts.currents = float(frequency), currents.copy()
-        return L, R, currents, its
+        L, I = self._solve_runs([frequency], [amplitude], [ts],
+                                np.asarray(base_Lk)[None, :], [0, 1])
+        return L[0], self.R_array, I[0]
 
     def update_lekids_for_current(self, frequency, amplitude, tone=None):
         """
@@ -1078,18 +1059,13 @@ class MockResonatorModel:
         - 1e-5: Balanced
         - 1e-3: Ultra fast (for many channels)
         """
-        max_iterations = 500
-        tolerance = self.mock_crs._physics_config.get('convergence_tolerance', 1e-9)
         self._ensure_arrays()
         base_Lk, _, base_Lg = self._base_arrays()
-        L, R, currents, its = self._converge(
-            frequency, amplitude, self.L_array, self.R_array, self.C_array,
-            self.Cc_array, base_Lk, base_Lg, tolerance, max_iterations, tone)
+        L, R, currents = self._converge(frequency, amplitude, base_Lk, tone)
         # L = Lk + Lg + L_junk; only Lk moves with the current.
         Lk = L - base_Lg - self.L_junk_array
         self.L_array, self.R_array, self.Lk_array = L, R, Lk
         self._lekids_stale = True
-        self._convergence_counter = getattr(self, '_convergence_counter', 0) + 1
         return currents
 
     def _nqp_sensitivity(self):
@@ -1245,8 +1221,8 @@ class MockResonatorModel:
         This is the first pulse's whole cost, paid here instead: one
         convergence of the array per tone per distinct quasiparticle
         key along the decay, so it scales with tones times decay
-        length: 2,700 of them (2 s) at 100 tones with the default 5 ms
-        decay, 36,500 (28 s) at 0.1 s.  *progress* is called per block
+        length: 2,700 of them (0.1 s) at 100 tones with the default 5 ms
+        decay, 36,500 (0.9 s) at 0.1 s.  *progress* is called per block
         as ``progress(done, total)``.
         """
         if not self.mr_lekids:
@@ -1858,14 +1834,17 @@ class MockResonatorModel:
             self.base_Lk_array = np.asarray(Lk_nqp[s], dtype=float).copy()
             self.base_R_array = np.asarray(R_nqp[s], dtype=float).copy()
 
-
         # ── Per tone: the runs of one quantised QP density ────────────
         # Within a run the reference converges at the first sample and
         # takes that state for the rest, so a run is one lookup.  A
         # tone's solves depend only on its own frequency, amplitude, QP
         # state and seed (the state it last left), so the tones are
-        # independent and each is taken through its runs in order.
-        last_reason = self._convergence_stats.get('last_reason')
+        # independent: each tone's next chain of runs without a kept
+        # state (or with one from the other state) goes into one
+        # converge_tones call for all tones, and a kept state is checked
+        # against the state the chain before it left.
+        self._ensure_arrays()
+        base_Lg = self._base_arrays()[2]
         misses = set()
         tones = []
         for j in range(n_tones):
@@ -1881,29 +1860,60 @@ class MockResonatorModel:
             starts = np.flatnonzero(np.r_[True, qp_keys[1:] != qp_keys[:-1]])
             freq_key = round(frequency / freq_step) * freq_step
             amp_key = round(amplitude / amp_step) * amp_step
-            ts = self._tone_state(tone_keys[j], frequency)
-            states = []
-            for s in starts:
-                run_key = (freq_key, amp_key, float(qp_keys[s]))
-                entry = ts.runs.get(run_key)
-                if entry is not None and self._same_state(ts, entry[3]):
-                    ts.frequency, ts.currents = float(frequency), entry[3]
-                    last_reason = 'hit'
-                else:
-                    last_reason = 'miss' if entry is None else 'state_changed'
-                    set_base(s)
-                    currents = self.update_lekids_for_current(
-                        frequency, amplitude, tone_keys[j])
-                    entry = (self.L_array, self.R_array, self.Lk_array,
-                             currents)
-                    self._keep_run(ts, run_key, entry)
-                    self._convergence_stats['full'] += 1
-                    misses.add((int(s), len(tones)))
-                states.append(entry)
-            tones.append({'j': j, 'frequency': frequency,
-                          'amplitude': amplitude, 'starts': starts,
-                          'states': states})
-        self._convergence_stats['last_reason'] = last_reason
+            tones.append({
+                'j': j, 'frequency': frequency, 'amplitude': amplitude,
+                'ts': self._tone_state(tone_keys[j], frequency),
+                'starts': starts, 'states': [], 'reason': None,
+                'run_keys': [(freq_key, amp_key, float(qp_keys[s]))
+                             for s in starts]})
+        pending = list(range(len(tones)))
+        while pending:
+            chains = []                 # (tone, first run, count) to solve
+            for k in pending:
+                tone = tones[k]
+                ts, states = tone['ts'], tone['states']
+                first = r = len(states)
+                while r < len(tone['starts']):
+                    entry = ts.runs.get(tone['run_keys'][r])
+                    if entry is not None:
+                        if r > first:
+                            break       # checked once the chain is solved
+                        if self._same_state(ts, entry[3]):
+                            ts.frequency = float(tone['frequency'])
+                            ts.currents = entry[3]
+                            states.append(entry)
+                            tone['reason'] = 'hit'
+                            first = r = r + 1
+                            continue
+                        tone['reason'] = 'state_changed'
+                    else:
+                        tone['reason'] = 'miss'
+                    r += 1
+                if r > first:
+                    chains.append((k, first, r - first))
+            if not chains:
+                break
+            run_start = np.cumsum([0] + [c for _, _, c in chains])
+            L_runs, I_runs = self._solve_runs(
+                [tones[k]['frequency'] for k, _, _ in chains],
+                [tones[k]['amplitude'] for k, _, _ in chains],
+                [tones[k]['ts'] for k, _, _ in chains],
+                np.concatenate([Lk_nqp[tones[k]['starts'][a:a + c]]
+                                for k, a, c in chains]), run_start)
+            for (k, a, c), r0 in zip(chains, run_start[:-1]):
+                tone = tones[k]
+                for i in range(c):
+                    L = L_runs[r0 + i]
+                    entry = (L, self.R_array, L - base_Lg - self.L_junk_array,
+                             I_runs[r0 + i])
+                    self._keep_run(tone['ts'], tone['run_keys'][a + i], entry)
+                    tone['states'].append(entry)
+                    misses.add((int(tone['starts'][a + i]), k))
+                self._convergence_stats['full'] += c
+            pending = [k for k in pending
+                       if len(tones[k]['states']) < len(tones[k]['starts'])]
+        if tones:
+            self._convergence_stats['last_reason'] = tones[-1]['reason']
 
         # The per-step statistics the reference keeps, from the runs: a
         # step is one (sample, tone), a run's first step is a miss when

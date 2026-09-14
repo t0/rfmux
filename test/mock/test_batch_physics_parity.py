@@ -129,3 +129,17 @@ def test_batch_paths_agree_with_many_coupled_channels(pulse_time):
     rel = np.max(np.abs(ra - rb) / np.maximum(np.abs(ra), 1e-300))
     assert rel < 1e-9, f"max relative deviation {rel:.3e}"
     assert stats[0] == stats[1]
+
+
+def test_the_solver_takes_r_as_a_constant_of_the_generation():
+    """The QP state enters a solve through the base Lk alone; R stays
+    at its generation value (QP only perturbs it as noise, after the
+    solve), which is what lets converge_tones take one R for every run.
+    Should R ever follow the QP state, the kernel needs R per run."""
+    crs, m = _model(11, "hoisted", pulses=True)
+    R0 = np.array([lk.R for lk in m.mr_lekids])
+    _run(crs, m, 40, 7)
+    assert np.array_equal(m.R_array, R0)
+    for ts in m._tone_states.values():
+        for _, R, _, _ in ts.runs.values():
+            assert np.array_equal(R, R0)

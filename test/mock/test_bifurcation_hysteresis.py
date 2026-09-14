@@ -106,27 +106,23 @@ def test_each_module_keeps_its_own_states():
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
-def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state(monkeypatch):
+def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state():
     """One seeded solve per point where the current moves smoothly (a
     netanal, a dip search); the sub-steps only where one step from the
     previous point lands in the other state."""
     m, f0 = _model()
-    calls = []
-    real = jp.converged_lekid_parameters
 
-    def counting(*a, **k):
-        calls.append(a[0])
-        return real(*a, **k)
-    monkeypatch.setattr(jp, "converged_lekid_parameters", counting)
+    def passes():
+        n, m._solver_passes = m._solver_passes, 0
+        return n
     far = f0 + 3e6
+    m._solver_passes = 0
     _sweep(m, [far, far + 1e4], 0.01)            # a netanal's 10 kHz step
-    assert len(calls) == 2
-    calls.clear()
+    assert passes() == 2
     _sweep(m, np.arange(f0 + 1e5, f0 - 1.95e5 - 1, -5e3), 0.01)
-    n_ride = len(calls)
-    calls.clear()
+    n_ride = passes()
     _sweep(m, [f0 - 2.1e5], 0.01)                # across the fold at -204.9 kHz
-    assert len(calls) > 1
+    assert passes() > 1
     assert n_ride < 2 * 60                        # 60 points, few retaken
 
 

@@ -560,6 +560,131 @@ def converged_lekid_parameters(frequency, amplitude, L_array, *args,
               float(damp), float(damp_min), float(damp_max))
 
 
+@jit(nopython=True, cache=True)
+def states_apart(a, b, Istar, frac):
+    """Whether two sets of currents put any resonator in different
+    states: the two states of a bifurcated resonance differ by ten
+    times in current, adjacent points in one state by a fraction
+    (frac).  Under 1e-3 Istar a current changes Lk by 1e-6, the
+    resonance by a hundredth of a linewidth: at rest, whatever the
+    ratio."""
+    for i in range(len(a)):
+        big = max(abs(a[i]), abs(b[i]))
+        if big > 1e-3 * Istar and abs(a[i] - b[i]) > frac * big:
+            return True
+    return False
+
+
+@jit(nopython=True, parallel=True, cache=True, fastmath=True)
+def _converge_tones_par(freqs, amps, has_seed, seed_f, seeds, run_start,
+                        base_Lk_runs, R_array, C_array, Cc_array, base_Lg,
+                        base_L_junk, input_atten_dB, ZLNA, Istar, tolerance,
+                        max_iterations, damp, damp_min, damp_max, follow_hz,
+                        max_steps, apart_frac):
+    """converge_tones: each tone on its own thread, through its runs in
+    order with the per-tone solver."""
+    T = len(freqs)
+    M = run_start[T]
+    n = len(R_array)
+    L_out = np.empty((M, n), dtype=np.float64)
+    I_out = np.empty((M, n), dtype=np.complex128)
+    passes = np.zeros(M, dtype=np.int64)
+    for k in prange(T):
+        f = freqs[k]
+        seed = np.zeros(n, dtype=np.complex128)
+        steps = 0
+        if has_seed[k]:
+            steps = 1
+            if follow_hz > 0.0:
+                steps = max(1, int(np.ceil(abs(f - seed_f[k]) / follow_hz)))
+            if steps <= max_steps:
+                seed[:] = seeds[k]
+            else:
+                steps = 0
+        r0 = run_start[k]
+        for r in range(r0, run_start[k + 1]):
+            L, R, I, its = _converged_lekid_parameters_ser(
+                f, amps[k], R_array, R_array, C_array, Cc_array,
+                base_Lk_runs[r], base_Lg, base_L_junk, input_atten_dB,
+                ZLNA, Istar, tolerance, max_iterations, seed.copy(),
+                damp, damp_min, damp_max)
+            passes[r] = 1
+            if r == r0 and steps > 1 and states_apart(I, seed, Istar,
+                                                      apart_frac):
+                I = seed.copy()
+                for j in range(1, steps + 1):
+                    fj = seed_f[k] + (f - seed_f[k]) * j / steps
+                    L, R, I, its = _converged_lekid_parameters_ser(
+                        fj, amps[k], R_array, R_array, C_array, Cc_array,
+                        base_Lk_runs[r], base_Lg, base_L_junk,
+                        input_atten_dB, ZLNA, Istar, tolerance,
+                        max_iterations, I, damp, damp_min, damp_max)
+                passes[r] = 1 + steps
+            L_out[r] = L
+            I_out[r] = I
+            seed = I
+    return L_out, I_out, passes
+
+
+_converge_tones_ser = _serial_twin(_converge_tones_par, "_converge_tones_ser",
+                                   fastmath=True)
+
+PARALLEL_MIN_TONES = 8
+RUN_ELEMENTS_PER_CALL = 2_000_000    # (runs x resonators) per call, 48 MB out
+
+
+def converge_tones(freqs, amps, has_seed, seed_f, seeds, run_start,
+                   base_Lk_runs, *args, damp=0.1, damp_min=0.02, damp_max=0.5):
+    """Converge every resonator for each tone at each of its QP states,
+    the tones in parallel.  Tone k's runs are run_start[k]:run_start[k+1]
+    of base_Lk_runs, in time order; the first is seeded from the state
+    the tone left its resonators in (seeds[k] at seed_f[k]) when it has
+    one (has_seed[k]), else from rest, and each later run from the one
+    before.  One step from the seed is the answer where the currents
+    move by a fraction; where a resonator jumps state, that state may
+    have ended between the two frequencies, and only following the tone
+    in steps of follow_hz from where it sat says where, so the first run
+    is retaken that way.  A move of more than max_steps of them is a
+    new tone, solved from rest.  *args: R, C, Cc, base_Lg, base_L_junk,
+    input_atten_dB, ZLNA, Istar, tolerance, max_iterations, follow_hz,
+    max_steps, apart_frac.  Returns (L, currents, solver passes), one
+    row per run."""
+    freqs = np.ascontiguousarray(freqs, dtype=np.float64)
+    amps = np.ascontiguousarray(amps, dtype=np.float64)
+    has_seed = np.ascontiguousarray(has_seed, dtype=np.bool_)
+    seed_f = np.ascontiguousarray(seed_f, dtype=np.float64)
+    seeds = np.ascontiguousarray(seeds, dtype=np.complex128)
+    run_start = np.ascontiguousarray(run_start, dtype=np.int64)
+    base_Lk_runs = np.ascontiguousarray(base_Lk_runs, dtype=np.float64)
+    (R, C, Cc, base_Lg, base_L_junk, input_atten_dB, ZLNA, Istar, tolerance,
+     max_iterations, follow_hz, max_steps, apart_frac) = args
+    consts = (R, C, Cc, base_Lg, base_L_junk, float(input_atten_dB),
+              complex(ZLNA), float(Istar), float(tolerance),
+              int(max_iterations), float(damp), float(damp_min),
+              float(damp_max), float(follow_hz), int(max_steps),
+              float(apart_frac))
+    n = len(R)
+    T = len(freqs)
+    per_call = max(1, RUN_ELEMENTS_PER_CALL // max(n, 1))
+    out = []
+    k0 = 0
+    while k0 < T:
+        k1 = k0 + 1
+        while k1 < T and run_start[k1 + 1] - run_start[k0] <= per_call:
+            k1 += 1
+        fn = (_converge_tones_par if k1 - k0 >= PARALLEL_MIN_TONES
+              else _converge_tones_ser)
+        r0, r1 = run_start[k0], run_start[k1]
+        out.append(fn(freqs[k0:k1], amps[k0:k1], has_seed[k0:k1],
+                      seed_f[k0:k1], seeds[k0:k1],
+                      np.ascontiguousarray(run_start[k0:k1 + 1] - r0),
+                      base_Lk_runs[r0:r1], *consts))
+        k0 = k1
+    if len(out) == 1:
+        return out[0]
+    return tuple(np.concatenate([o[i] for o in out]) for i in range(3))
+
+
 # ============================================================================
 # S21 Calculation
 # ============================================================================

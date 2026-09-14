@@ -143,3 +143,15 @@ def test_the_solver_takes_r_as_a_constant_of_the_generation():
     for ts in m._tone_states.values():
         for _, R, _, _ in ts.runs.values():
             assert np.array_equal(R, R0)
+
+
+def test_converge_tones_chunks_agree_with_one_call(monkeypatch):
+    """A call whose runs times resonators exceed RUN_ELEMENTS_PER_CALL is
+    split into tone chunks; the split must not change a value."""
+    from rfmux.mr_resonator import jit_physics
+    crs, m = _model(11, "hoisted", pulses=True)
+    whole = _run(crs, m, 40, 7)
+    monkeypatch.setattr(jit_physics, "RUN_ELEMENTS_PER_CALL", 3 * 11)
+    crs, m = _model(11, "hoisted", pulses=True)
+    chunked = _run(crs, m, 40, 7)
+    assert np.array_equal(whole, chunked)

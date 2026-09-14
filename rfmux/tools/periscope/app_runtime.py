@@ -23,26 +23,14 @@ class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
     
     def _convert_iq_data(self, rawI: np.ndarray, rawQ: np.ndarray, ch_val: int) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Convert raw I/Q data based on current unit mode and calibration availability.
-        
-        This method consolidates the unit conversion logic that appears 5 times in the codebase.
-        It fixes a bug where 3 locations didn't fall back to real_units when df calibration
-        was missing (they returned raw counts instead).
-        
-        Behavior:
-        - df mode with calibration: apply df calibration to get freq shift/dissipation
-        - df mode without calibration: fall back to real_units check (BUG FIX)
-        - real_units mode: convert to volts
-        - counts mode: return raw counts
-        
-        Args:
-            rawI: Raw I component data
-            rawQ: Raw Q component data  
-            ch_val: Channel ID (for calibration lookup)
-            
-        Returns:
-            Tuple of (I_data, Q_data) converted according to unit_mode and calibration
+        """One channel's samples in the units the plots are drawn in.
+
+        Every plot converts through here, so no two of them can disagree
+        about what a channel is showing.  df mode gives frequency shift
+        and dissipation, both in hertz, for a channel that carries a
+        calibration; a channel without one keeps whatever the counts or
+        volts modes would have shown, which is why the conversion is per
+        channel and not per row.
         """
         if self.unit_mode == "df" and hasattr(self, 'df_calibrations') and self.module in self.df_calibrations:
             df_cal = self.df_calibrations[self.module].get(ch_val)
@@ -54,7 +42,6 @@ class PeriscopeRuntime:
                     convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ),
                     df_cal)
             else:
-                # No calibration - fall back to real_units check (matches PSD task behavior)
                 return (convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)) if self.real_units else (rawI, rawQ)
         elif self.real_units:
             return convert_roc_to_volts(rawI), convert_roc_to_volts(rawQ)
@@ -178,6 +165,10 @@ class PeriscopeRuntime:
         creates and configures plots and curves for each channel group.
         Restores auto-range settings and applies I/Q/Mag visibility.
         """
+        # Before the modes are read: a channel list that lost its
+        # calibration steps out of df units, and the layout below is then
+        # built in the units it actually has.
+        self._update_df_units_enabled(rebuild=False)
         self._clear_current_layout()
         modes_active = self._get_active_modes() # Renamed modes
         self.plots = []
@@ -309,14 +300,14 @@ class PeriscopeRuntime:
         # Determine axis labels based on unit mode and calibration availability
         if mode_key == "T":
             if self.unit_mode == "df" and all_have_calibration:
-                pw.setLabel("left", "Freq. Shift / Dissipation", units="Hz / unitless")
+                pw.setLabel("left", "Freq. Shift / Dissipation", units="Hz")
             else:
                 pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "IQ":
             pw.getViewBox().setAspectLocked(True)
             if self.unit_mode == "df" and all_have_calibration:
                 pw.setLabel("bottom", "Freq. Shift", units="Hz")
-                pw.setLabel("left", "Dissipation", units="unitless")
+                pw.setLabel("left", "Dissipation", units="Hz")
             else:
                 pw.setLabel("bottom", "I", units="V" if self.real_units else "Counts")
                 pw.setLabel("left",   "Q", units="V" if self.real_units else "Counts")
@@ -324,12 +315,12 @@ class PeriscopeRuntime:
             pw.setLogMode(x=True, y=True)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
-                pw.setLabel("left", "Amplitude", units="Hz or unitless")
+                pw.setLabel("left", "Amplitude", units="Hz")
             else:
                 pw.setLabel("left", "Amplitude", units="V" if self.real_units else "Counts")
         elif mode_key == "H":
             if self.unit_mode == "df" and all_have_calibration:
-                pw.setLabel("bottom", "Amplitude", units="Hz or unitless")
+                pw.setLabel("bottom", "Amplitude", units="Hz")
             else:
                 pw.setLabel("bottom", "Amplitude", units="V" if self.real_units else "Counts")
             pw.setLabel("left", "Bin Count (log)")
@@ -337,8 +328,10 @@ class PeriscopeRuntime:
             pw.setLogMode(x=True, y=not self.real_units)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
-                # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
-                pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
+                # The calibration puts both quadratures in hertz, and
+                # PSDTask returns a linear power density, not an
+                # amplitude one -- no root is taken anywhere.
+                pw.setLabel("left", "PSD (Hz²/Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
                 pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
@@ -346,8 +339,10 @@ class PeriscopeRuntime:
             pw.setLogMode(x=False, y=not self.real_units)
             pw.setLabel("bottom", "Freq", units="Hz")
             if self.unit_mode == "df" and all_have_calibration:
-                # When in df units, PSDs become ASDs (Amplitude Spectral Densities)
-                pw.setLabel("left", "ASD (Hz/√Hz or 1/√Hz)")
+                # The calibration puts both quadratures in hertz, and
+                # PSDTask returns a linear power density, not an
+                # amplitude one -- no root is taken anywhere.
+                pw.setLabel("left", "PSD (Hz²/Hz)")
             else:
                 lbl = "dBm/Hz" if self.psd_absolute else "dBc/Hz"
                 pw.setLabel("left", f"PSD ({lbl})" if self.real_units else "PSD (Counts²/Hz)")
@@ -1975,6 +1970,11 @@ class PeriscopeRuntime:
                 dock = self.dock_manager.create_dock(panel, dock_title, window_id)
                 self.multisweep_windows[window_id] = {
                     'window': panel, 'dock': dock, 'params': call_params}
+
+                # The tuning rows Apply Bias publishes land in the main
+                # window, from a loaded panel as from a measuring one.
+                if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                    panel.tuning_ready.connect(self._handle_tuning_ready)
 
                 if getattr(self, 'session_manager', None) is not None:
                     panel.data_ready.connect(self.session_manager.handle_data_ready)

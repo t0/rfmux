@@ -251,7 +251,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Measure df calibrations from startup, off the GUI thread, so
         # the window is up and streaming while the sweep runs.  Mock
-        # mode only -- see _measure_df_calibrations.  The launcher
+        # mode only -- see _df_calibration_measurement.  The launcher
         # measures them behind its build window for large arrays and
         # hands the rows in instead.
         self._df_cal_task = None
@@ -405,7 +405,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         self.rb_counts.setToolTip("Display raw ADC counts")
         self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
-        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
+        self.rb_df_units.setEnabled(False)
+        self._set_df_units_tooltip(False)
         
         self.unit_group.addButton(self.rb_counts, 0)
         self.unit_group.addButton(self.rb_real_units, 1)
@@ -1641,73 +1642,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.unit_mode = "real"
             self.real_units = True
         elif button_id == 2:  # df Units
+            # Only selectable while every channel on screen has a
+            # calibration -- see _update_df_units_enabled -- so there is
+            # nothing to check for and nothing to measure here.
             self.unit_mode = "df"
-            self.real_units = False  # df units are different from standard real units
-            
-            # Check if calibration data is available
-            if (not self.df_calibrations.get(self.module)
-                    and self._df_calibration_running()):
-                # The startup measurement is still sweeping; a second
-                # sweep would fight it for the same tones.
-                self.statusBar().showMessage(
-                    "df calibration is still being measured; try again in "
-                    "a moment", 5000)
-                self.rb_counts.setChecked(True)
-                self.unit_mode = "counts"
-                self.real_units = False
-                return
-            if not self.df_calibrations.get(self.module):
-                # Normally done at startup; this catches a module tuned
-                # afterwards, and blocks the window for the sweep
-                # (seconds at many tones) when it fires.
-                self._measure_df_calibrations(self.module)
-            if not self.df_calibrations.get(self.module):
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "df Calibration Not Available",
-                    "df calibration data is not available for this module.\n\n"
-                    "To use df units:\n"
-                    "1. Run a multisweep analysis\n"
-                    "2. Click 'Bias KIDs' in the multisweep window\n"
-                    "3. The calibration data will be loaded automatically\n\n"
-                    "In mock mode, enabling auto_bias_kids measures one for "
-                    "each channel it tunes."
-                )
-                # Reset to counts mode
-                self.rb_counts.setChecked(True)
-                self.unit_mode = "counts"
-                self.real_units = False
-                return
-        
+            self.real_units = False
+
         # Rebuild layout to update axis labels
         self._build_layout()
     
-    def _measure_df_calibrations(self, module: int) -> None:
-        """Measure a calibration for every biased channel, in mock mode:
-        ``crs.measure_df_calibrations``, a narrow sweep around each bias
-        point, so a simulated session can use df units without a
-        multisweep first.
-
-        Only in mock mode.  Sweeping moves each channel's frequency and
-        puts it back, which is free against a simulator and not something
-        to do to a tuned array because someone picked a units option; on
-        hardware the calibration comes from Apply Bias.
-        """
-        measure = self._df_calibration_measurement(module)
-        if measure is None:
-            return
-        try:
-            rows = asyncio.run(measure())
-        except Exception as exc:
-            print(f"[Periscope] df calibration failed: {exc}")
-            return
-        if rows:
-            self._handle_tuning_ready(module, dict(rows))
-
     def _df_calibration_measurement(self, module: int):
-        """The coroutine factory both the startup worker and the
-        synchronous fallback run, or None when there is nothing to
-        measure (a board, or no CRS)."""
+        """The coroutine the startup worker runs, or None when there is
+        nothing to measure (a board, or no CRS)."""
         crs = getattr(self, "crs", None)
         if crs is None or not getattr(self, "is_mock_mode", False):
             return None
@@ -1735,10 +1681,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"Measuring df calibrations for module {module} in the "
             "background; df units are available when it finishes")
 
-    def _df_calibration_running(self) -> bool:
-        task = getattr(self, "_df_cal_task", None)
-        return task is not None and task.isRunning()
-
     def _on_df_calibration_measured(self, module: int, rows: dict) -> None:
         if rows:
             self._handle_tuning_ready(module, rows)
@@ -1747,10 +1689,48 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"{module}", 8000)
         self._df_cal_task = None
 
+    def _set_df_units_tooltip(self, available: bool) -> None:
+        self.rb_df_units.setToolTip(
+            "Display frequency shift and dissipation, both in Hz"
+            if available else
+            "Needs a df calibration for every channel on screen.  It is "
+            "measured at the tone a detector is biased at, so it arrives "
+            "with the bias: run a multisweep, then Find Bias and Apply Bias.")
+
+    def _df_units_available(self) -> bool:
+        """Whether every channel on screen carries a df calibration.
+
+        All or nothing.  The conversion is per channel but the axis label
+        is per row, so a row holding one calibrated channel and one
+        without draws hertz and counts on the same axis under a single
+        label.  Offering the units only when nothing is missing keeps
+        that from arising at all.
+        """
+        calibrations = self.df_calibrations.get(self.module) or {}
+        channels = getattr(self, "all_chs", None)
+        return bool(channels) and all(ch in calibrations for ch in channels)
+
+    def _update_df_units_enabled(self, *, rebuild: bool = True) -> None:
+        """Offer df units exactly when they can be drawn, and step out of
+        them when the calibration they were drawn from is gone."""
+        if not hasattr(self, "rb_df_units"):
+            return          # called from __init__, before the controls exist
+        available = self._df_units_available()
+        self.rb_df_units.setEnabled(available)
+        self._set_df_units_tooltip(available)
+        if available or self.unit_mode != "df":
+            return
+        self.rb_counts.setChecked(True)
+        self.unit_mode = "counts"
+        self.real_units = False
+        if rebuild:
+            self._build_layout()
+
     def _handle_tuning_ready(self, module: int, tuning: Dict[int, dict]):
-        """Hold a module's tuning rows, from bias_kids, the mock startup
+        """Hold a module's tuning rows, from Apply Bias, the mock startup
         measurement, or a loaded session: {readout channel: row}.  The
-        plots convert with the df calibration of every row that has one."""
+        plots convert with the df calibration of every row that has one,
+        and offer df units once every channel on screen has one."""
         self.tuning[module] = tuning
         self.df_calibrations[module] = {
             ch: row["df_calibration"] for ch, row in tuning.items()
@@ -1758,6 +1738,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         print(f"[Periscope] tuning loaded for {len(tuning)} detectors on "
               f"module {module}, {len(self.df_calibrations[module])} with a "
               f"df calibration")
+        self._update_df_units_enabled()
 
     def _handle_psd_toggle(self, checked: bool):
         """
@@ -1881,6 +1862,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     # The tuning belongs to the array that is gone.
                     self.tuning.pop(self.module, None)
                     self.df_calibrations.pop(self.module, None)
+                    self._update_df_units_enabled()
                     if cfg.get("auto_bias_kids"):
                         self._start_df_calibration(self.module)
 

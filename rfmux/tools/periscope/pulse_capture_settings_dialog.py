@@ -224,9 +224,9 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             item = self.basis_combo.model().item(1)
             item.setEnabled(False)
             item.setToolTip(
-                "No df calibration for these channels.  Run a multisweep "
-                "and Bias KIDs (or bias_kids headlessly), then reopen "
-                "these settings.")
+                "No df calibration for these channels.  Run a multisweep, "
+                "then Find Bias and Apply Bias (or find_bias_points and "
+                "apply_bias headlessly), then reopen these settings.")
         self.basis_combo.setToolTip(
             "What the threshold is applied to.\n\n"
             "A pulse moves the resonance frequency, so it lies along one "

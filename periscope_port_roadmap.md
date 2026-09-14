@@ -1219,6 +1219,11 @@ Listed so they can be overruled.
    rather than GUI code. Alternative: drop startup calibration and require
    Find Bias in mock mode too. Recommended: the former, because pulse capture
    stores calibrated channels in hertz and the mock demo path relies on it.
+   **Decided (maclean, 2026-09-13):** a df calibration is available only after
+   the bias has been applied, since it describes a biased detector. Apply Bias
+   stays the one door on hardware; the replacement above must publish through
+   the same handler and only for tones that are on the air. Carried in
+   `tuning_revamp_todo.md`.
 4. **Old Periscope pickles do not load.** No converter for
    `results_by_detector` or `bias_kids_output` files. They open on the branch
    that wrote them. Alternative: a one-shot converter in `store`. Recommended:

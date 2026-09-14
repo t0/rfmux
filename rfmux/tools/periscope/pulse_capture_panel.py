@@ -2229,9 +2229,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self, "df Calibration Not Available",
                 "No df calibration for these channels, so frequency and "
                 "dissipation cannot be separated.\n\n"
-                "It comes from bias_kids — run a multisweep and click "
-                "'Bias KIDs'. In mock mode, enabling auto_bias_kids "
-                "measures one for each channel it tunes.\n\n"
+                "It comes with the applied bias — run a multisweep, then "
+                "'Find Bias' and 'Apply Bias'. In mock mode, enabling "
+                "auto_bias_kids measures one for each channel it tunes.\n\n"
                 "A capture already holding one carries it in the file, "
                 "so opening that capture is enough.")
             self.units_combo.blockSignals(True)

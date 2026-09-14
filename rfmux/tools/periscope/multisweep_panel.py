@@ -32,8 +32,8 @@ from .tasks import (
     ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
     RunFitsSignals, RunFitsTask)
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import (AmplitudeSchedule, collect_amplitude_iterations_for,
-                          store, tuning_rows)
+from rfmux.tuning import (AmplitudeSchedule, BiasReport,
+                          collect_amplitude_iterations_for, store, tuning_rows)
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -624,13 +624,34 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._live.clear()
         self._set_amplitude_scale(
             AmplitudeSchedule.from_dict(call_params['amp_schedule']))
-        # Before the choices are rebuilt: a new measurement has no bias, so
-        # the Fit Results tab cannot be offered the step of the last one's.
-        self.bias_report = None
+        # Before the choices are rebuilt: the bias is this measurement's or it
+        # is nothing, so the Fit Results tab is never offered the step of the
+        # last one's.  find_bias_points leaves its report in the block, so a
+        # measurement that was biased arrives biased however old the file is,
+        # and its tuned catalog -- the one carrying the calibrations -- is the
+        # array again.
+        self.bias_report = self._stored_bias_report()
+        if self.bias_report is not None:
+            self.catalog = self.bias_report.catalog
         self._populate_fit_amplitudes()
         self._populate_fit_display()
         self.bias_settings.set_directions_swept(call_params.get('directions'))
         self._redraw_plots()
+
+    def _stored_bias_report(self) -> Optional[BiasReport]:
+        """The report ``find_bias_points`` left in this block, if any.
+
+        A report written by an older schema is not readable and is not worth
+        failing a load over: the sweeps still draw, and Find Bias runs again.
+        """
+        stored = (self.module_sweeps or {}).get('bias_report')
+        if not stored:
+            return None
+        try:
+            return BiasReport.from_dict(stored)
+        except Exception as exc:                        # noqa: BLE001 - reported
+            print(f"[Periscope] stored bias report not read: {exc}")
+            return None
 
     def complete_multisweep(self, module: int, container: dict):
         """The call has returned: hold it, put the progress report away, and

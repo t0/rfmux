@@ -25,7 +25,7 @@ def test_histogram_axis_says_df_units_when_binning_df(qt_app):
     p = _periscope("df", False, {1: {1: 1.0 + 0j}})
     pw = pg.PlotWidget()
     p._configure_plot_axes(pw, "H", [1])
-    assert pw.getAxis("bottom").labelUnits == "Hz or unitless"
+    assert pw.getAxis("bottom").labelUnits == "Hz"
 
 
 def test_histogram_axis_falls_back_to_counts_without_calibration(qt_app):

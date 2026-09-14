@@ -404,17 +404,20 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
 
 
 def test_periscope_takes_the_mocks_df_calibration(mock_crs):
-    """Selecting df units in mock mode measures a calibration.
+    """The mock startup measurement reaches Periscope's tuning.
 
-    Periscope only learned about calibrations through the multisweep
-    panel's bias_kids run, so a simulated session was told none existed.
+    It is the one door in a simulated session: on hardware the
+    calibration comes with the applied bias, and the factory hands back
+    nothing to run.
     """
+    import asyncio
+
     from rfmux.tools.periscope.app import Periscope
 
     loop, crs = mock_crs
 
     class Fake:
-        """Only the parts _measure_df_calibrations touches."""
+        """Only the parts the startup measurement touches."""
         module = 1
         channel_list = [[1, 2]]
 
@@ -424,21 +427,19 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
             self.tuning = {}
             self.df_calibrations = {}
 
-        _measure_df_calibrations = Periscope._measure_df_calibrations
         _df_calibration_measurement = Periscope._df_calibration_measurement
         _handle_tuning_ready = Periscope._handle_tuning_ready
+        _update_df_units_enabled = lambda self, **kw: None
 
     f = Fake(crs)
     assert not f.tuning.get(1), "should start with none"
-    f._measure_df_calibrations(1)
+    f._handle_tuning_ready(1, dict(asyncio.run(f._df_calibration_measurement(1)())))
     rows = f.tuning.get(1) or {}
     assert rows, "the measurement did not reach Periscope"
     cals = f.df_calibrations[1]
     assert set(cals) == set(rows)
     assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
 
-    # Not on hardware: sweeping moves a tuned array, so the calibration
-    # there comes from bias_kids, not from picking a units option.
-    g = Fake(crs, is_mock=False)
-    g._measure_df_calibrations(1)
-    assert g.tuning == {} and g.df_calibrations == {}
+    # Not on hardware: sweeping moves a tuned array, so there is nothing
+    # to run and the calibration comes from Apply Bias.
+    assert Fake(crs, is_mock=False)._df_calibration_measurement(1) is None

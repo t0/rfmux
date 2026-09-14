@@ -461,3 +461,30 @@ slope from measured data, taking the length as an argument and returning
 corrected phase, so a notebook and Periscope get the same correction and the
 board is never touched. `Demos/simplified_tuning_flow.py:258` still calls
 `crs.set_cable_length`; it is on the roadmap's delete-and-rewrite list.
+
+## Mock-mode df units without the legacy tone sweep
+
+Periscope's main window converts its live plots to frequency shift and
+dissipation from `self.df_calibrations`, which `_handle_tuning_ready` derives
+from the tuning rows Apply Bias publishes. That gate is the rule (maclean,
+2026-09-13): a df calibration describes a detector at the tone it is biased at,
+so it is available only once the bias has been applied. Nothing should offer df
+units off a catalog that has not been put on the air — a loaded file, or a
+`find_bias_points` report that was never applied.
+
+Mock mode reaches those units by a different road, and it is the one still to
+replace. `_start_df_calibration` (`app.py`) and the launcher's build window
+(`__main__.py`) call the deprecated `crs.measure_df_calibrations`, which steps
+every tone and puts it back. It stays inside the rule by accident rather than
+by design: `get_biased_channels` is what it measures, so a channel with no tone
+gets no calibration. But it sweeps to find out, instead of reading a catalog
+that already knows.
+
+The replacement, per `periscope_port_roadmap.md` judgement call 3: build the
+catalog from the simulator's playing tones the way `standard_array` does, run a
+one-step multisweep at those amplitudes, read `iq_derivatives_at` at each
+catalog frequency onto the bias points, and publish `tuning_rows` of the
+result. That is a catalog-producing measurement, so it belongs in
+`rfmux/tuning` or `rfmux/mock` as a library function with Periscope calling it,
+not in the GUI. It lands with stage 5, when `df_calibration.py` and the rest of
+the legacy path are deleted.

@@ -27,7 +27,7 @@ from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
-from .collision_settings_panel import CollisionSettingsPanel, CollisionTask
+from .collision_settings_panel import CatalogEditDialog, CollisionTask
 from .bias_settings_panel import BiasSettingsPanel
 from .tasks import (
     ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
@@ -172,8 +172,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_report = None
         self._collision_names = []
         self.collision_tab = None
-        self.collision_settings = CollisionSettingsPanel(self)
-        self.collision_settings.run_requested.connect(self._run_collision_cut)
+        self.catalog_editor = CatalogEditDialog(self)
+        self.catalog_editor.run_requested.connect(self._run_collision_cut)
+        self.catalog_editor.remove_requested.connect(self._resweep_without_names)
 
         self._fit_status_timer = QtCore.QTimer(self)
         self._fit_status_timer.setSingleShot(True)
@@ -226,10 +227,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar_layout.addWidget(self.rerun_btn)
-        self.collision_btn = QtWidgets.QPushButton("Collision Cut")
-        self.collision_btn.clicked.connect(self._show_collision_settings)
+        self.edit_catalog_btn = QtWidgets.QPushButton("Edit catalog")
+        self.edit_catalog_btn.clicked.connect(self._show_catalog_editor)
         self.collision_status = QtWidgets.QLabel("")
-        toolbar_layout.addWidget(grouped(self.collision_btn,
+        toolbar_layout.addWidget(grouped(self.edit_catalog_btn,
                                          self.collision_status))
         
         # Fitting: the button, its settings, and what it is doing.
@@ -654,7 +655,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.multisweep_container = container
         self.module_sweeps = next(
             block for block in container.values() if block['module'] == module)
-        self.collision_settings.set_measurement(self.module_sweeps)
+        self.catalog_editor.set_measurement(self.module_sweeps)
         call_params = self.module_sweeps['call_params']
         self.catalog = ResonatorCatalog.from_dict(call_params['catalog'])
         self._live_redraw_timer.stop()
@@ -1251,8 +1252,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _set_analysis_enabled(self, enabled: bool) -> None:
         """Run one analysis at a time over the measurement the panel holds."""
-        self.collision_btn.setEnabled(enabled)
-        self.collision_settings.run_button.setEnabled(enabled)
+        self.edit_catalog_btn.setEnabled(enabled)
+        self.catalog_editor.run_button.setEnabled(enabled)
+        self.catalog_editor.remove_button.setEnabled(
+            enabled and not (self.is_foreign_module or self.is_capture_tuning))
         self.run_fit_btn.setEnabled(enabled)
         self.find_bias_btn.setEnabled(enabled)
 
@@ -1286,12 +1289,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'noise_data': spectrum_data
         }
     
-    def _show_collision_settings(self) -> None:
+    def _show_catalog_editor(self) -> None:
         if self.module_sweeps is None:
             self.collision_status.setText("Nothing swept yet")
             return
-        self.collision_settings.show()
-        self.collision_settings.raise_()
+        self.catalog_editor.remove_button.setEnabled(
+            not (self.is_foreign_module or self.is_capture_tuning))
+        self.catalog_editor.status.clear()
+        self.catalog_editor.show()
+        self.catalog_editor.raise_()
 
     def _clear_collision_preview(self) -> None:
         self._collision_names = []
@@ -1307,12 +1313,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.module_sweeps is None:
             return
         try:
-            parameters = self.collision_settings.get_parameters()
+            parameters = self.catalog_editor.get_parameters()
         except ValueError as exc:
-            self.collision_status.setText(str(exc))
+            self.catalog_editor.status.setText(str(exc))
             return
         self._clear_collision_preview()
-        self.collision_settings.hide()
+        self.catalog_editor.hide()
         self._set_analysis_enabled(False)
         self.rerun_btn.setEnabled(False)
         self.collision_status.setText("Checking collisions...")
@@ -1351,20 +1357,35 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._redraw_plots()
 
     def _resweep_without_collisions(self) -> None:
+        self._resweep_without_names(self._collision_names)
+
+    def _resweep_without_names(self, names: list[str]) -> None:
         from .multisweep_dialog import MultisweepDialog
 
-        if (not self._collision_names or self.is_foreign_module
+        if (self.catalog is None or self.is_foreign_module
                 or self.is_capture_tuning):
             return
+        if not names:
+            self.catalog_editor.status.setText("Enter at least one resonator name.")
+            return
+        unknown = sorted(set(names) - set(self.catalog.names()))
+        if unknown:
+            self.catalog_editor.status.setText(
+                "Unknown resonator names: " + ", ".join(unknown))
+            return
         catalog = self.catalog.copy()
-        for name in self._collision_names:
+        for name in dict.fromkeys(names):
             catalog.remove(name)
         if not len(catalog):
+            self.catalog_editor.status.setText(
+                "Keep at least one resonator to re-sweep.")
             return
         periscope = self._get_periscope_parent()
         if periscope is None or periscope.crs is None:
             self.collision_status.setText("No board connected to re-sweep")
+            self.catalog_editor.status.setText("No board connected to re-sweep")
             return
+        self.catalog_editor.hide()
         self._collision_dialog = MultisweepDialog(
             parent=self, catalog=catalog, dac_scales=self.dac_scales,
             initial_params=self.initial_params.copy(),

@@ -1,4 +1,4 @@
-"""Settings for the headless multisweep collision check."""
+"""Catalog editing and settings for the multisweep collision check."""
 
 import inspect
 import math
@@ -28,13 +28,28 @@ class CollisionTask(QtCore.QThread):
             self.completed.emit(names)
 
 
-class CollisionSettingsPanel(QtWidgets.QDialog):
+class CatalogEditDialog(QtWidgets.QDialog):
     run_requested = QtCore.pyqtSignal()
+    remove_requested = QtCore.pyqtSignal(list)
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Multisweep Collision Cut")
-        layout = QtWidgets.QFormLayout(self)
+        self.setWindowTitle("Edit catalog")
+        outer = QtWidgets.QVBoxLayout(self)
+        removal = QtWidgets.QGroupBox("Remove resonators by name")
+        removal_layout = QtWidgets.QFormLayout(removal)
+        self.names = QtWidgets.QPlainTextEdit()
+        self.names.setPlaceholderText(
+            "Exact names, one per line or separated by commas")
+        self.names.setMaximumHeight(90)
+        removal_layout.addRow("Resonator names:", self.names)
+        self.remove_button = QtWidgets.QPushButton("Remove names and re-sweep")
+        self.remove_button.clicked.connect(self._request_removal)
+        removal_layout.addRow(self.remove_button)
+        outer.addWidget(removal)
+        collision = QtWidgets.QGroupBox("Collision Cut")
+        layout = QtWidgets.QFormLayout(collision)
+        outer.addWidget(collision)
         self.separation = QtWidgets.QLineEdit("100")
         self.prominence = QtWidgets.QLineEdit("1.0")
         spacing_hz = inspect.signature(find_sweeps_with_nearby_resonances).parameters[
@@ -73,8 +88,24 @@ class CollisionSettingsPanel(QtWidgets.QDialog):
         self.run_button = QtWidgets.QPushButton("Run Collision Cut")
         self.run_button.clicked.connect(self.run_requested)
         layout.addRow(self.run_button)
+        self.status = QtWidgets.QLabel()
+        self.status.setWordWrap(True)
+        outer.addWidget(self.status)
+        close = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close)
+        close.rejected.connect(self.hide)
+        outer.addWidget(close)
+
+    def _request_removal(self) -> None:
+        entries = self.names.toPlainText().replace(",", "\n").splitlines()
+        names = list(dict.fromkeys(
+            name.strip() for name in entries
+            if name.strip()))
+        self.remove_requested.emit(names)
 
     def set_measurement(self, block: dict) -> None:
+        self.names.clear()
+        self.status.clear()
         self.iteration.clear()
         self.iteration.addItem("All amplitudes", None)
         for step in sorted(block['results']):

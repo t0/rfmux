@@ -3260,12 +3260,12 @@ def test_collision_preview_uses_headless_cut_and_preserves_measurement(
                 magnitude -= 0.7 / (1 + ((f - centre - offset) / width)**2)
             sweep['iq_counts'] = magnitude.astype(complex) * 1e6
     before = copy.deepcopy(panel.module_sweeps['call_params']['catalog'])
-    panel.collision_settings.separation.setText('inf')
-    parameters = panel.collision_settings.get_parameters()
+    panel.catalog_editor.separation.setText('inf')
+    parameters = panel.catalog_editor.get_parameters()
     expected = find_sweeps_with_nearby_resonances(panel.module_sweeps, **parameters)
     assert name in expected
     panel._run_collision_cut()
-    spin_until(qt_app, lambda: panel.collision_btn.isEnabled())
+    spin_until(qt_app, lambda: panel.edit_catalog_btn.isEnabled())
     assert panel._collision_names == expected
     assert panel.plot_tabs.currentWidget() is panel.collision_tab
     assert panel._grid_names() == expected
@@ -3369,8 +3369,8 @@ def test_collision_resweep_respects_measurement_restrictions(
 
 
 def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
-    from rfmux.tools.periscope.collision_settings_panel import CollisionSettingsPanel
-    settings = CollisionSettingsPanel()
+    from rfmux.tools.periscope.collision_settings_panel import CatalogEditDialog
+    settings = CatalogEditDialog()
     settings.set_measurement({'results': {3: {'downward': {}}}})
     settings.separation.setText('20')
     settings.iteration.setCurrentIndex(1)
@@ -3379,3 +3379,77 @@ def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
         min_separation_hz=20e3, min_prominence_db=1.0,
         min_dip_spacing_hz=10.0, iteration=3, direction='downward')
     settings.close()
+
+
+def test_edit_catalog_removes_exact_names_for_a_new_sweep(
+        board, qt_app, swept_container, monkeypatch):
+    from types import SimpleNamespace
+
+    panel = _panel_showing(swept_container, board)
+    original = copy.deepcopy(panel.module_sweeps)
+    catalog = panel.catalog.to_dict()
+    names = panel.catalog.names()
+    started = []
+    parent = SimpleNamespace(crs=board[1],
+                             _start_multisweep_analysis=started.append)
+    monkeypatch.setattr(panel, '_get_periscope_parent', lambda: parent)
+    assert panel.edit_catalog_btn.text() == 'Edit catalog'
+    panel.edit_catalog_btn.click()
+    editor = panel.catalog_editor
+    assert editor.isVisible()
+    assert editor.run_button.isVisible()
+    editor.names.setPlainText(f' {names[0]},\n{names[1]}\n{names[0]} ')
+    editor.remove_button.click()
+    dialog = panel._collision_dialog
+    assert dialog.catalog.names() == [n for n in names if n not in names[:2]]
+    dialog.accept()
+    assert len(started) == 1
+    assert started[0]['catalog'].names() == dialog.catalog.names()
+    assert panel.catalog.to_dict() == catalog
+    assert panel.module_sweeps['call_params'] == original['call_params']
+    panel.close()
+
+
+@pytest.mark.parametrize('entry, message', [
+    ('', 'Enter at least one resonator name.'),
+    ('unknown', 'Unknown resonator names: unknown'),
+    ('all', 'Keep at least one resonator to re-sweep.'),
+])
+def test_edit_catalog_rejects_invalid_removals(
+        board, qt_app, swept_container, entry, message):
+    panel = _panel_showing(swept_container, board)
+    original = panel.catalog.to_dict()
+    panel.edit_catalog_btn.click()
+    names = panel.catalog.names()
+    text = '\n'.join(names) if entry == 'all' else entry
+    if entry == 'unknown':
+        text += ',' + names[0]
+    panel.catalog_editor.names.setPlainText(text)
+    panel.catalog_editor.remove_button.click()
+    assert panel.catalog_editor.status.text() == message
+    assert panel.catalog_editor.isVisible()
+    assert not hasattr(panel, '_collision_dialog')
+    assert panel.catalog.to_dict() == original
+    panel.close()
+
+
+@pytest.mark.parametrize('restriction', ['is_foreign_module', 'is_capture_tuning'])
+def test_edit_catalog_disables_manual_resweep_for_read_only_measurements(
+        board, qt_app, swept_container, restriction):
+    panel = _panel_showing(swept_container, board)
+    setattr(panel, restriction, True)
+    panel.edit_catalog_btn.click()
+    assert not panel.catalog_editor.remove_button.isEnabled()
+    panel.close()
+
+
+def test_edit_catalog_disables_removal_during_analysis(
+        board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    panel.edit_catalog_btn.click()
+    panel._set_analysis_enabled(False)
+    assert not panel.catalog_editor.remove_button.isEnabled()
+    assert not panel.catalog_editor.run_button.isEnabled()
+    panel._set_analysis_enabled(True)
+    assert panel.catalog_editor.remove_button.isEnabled()
+    panel.close()

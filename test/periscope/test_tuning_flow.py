@@ -3241,3 +3241,142 @@ def test_the_model_colour_is_not_a_drive_colour(qt_app):
                       for colour in create_amplitude_color_map(
                           np.linspace(0.001, 0.01, drawn), dark_mode).values()}
             assert pg.mkColor(MODEL_COLOR).name() not in drives
+
+
+def test_collision_preview_uses_headless_cut_and_preserves_measurement(
+        board, qt_app, swept_container):
+    from rfmux.tuning import find_sweeps_with_nearby_resonances
+
+    panel = _panel_showing(swept_container, board)
+    # Resolve a pair in one section; leave the other measured traces intact.
+    name = panel.catalog.names()[0]
+    for by_direction in panel.module_sweeps['results'].values():
+        for sections in by_direction.values():
+            sweep = sections[name]
+            f = sweep['frequencies']
+            centre = np.mean(f)
+            width = np.ptp(f) / 40
+            magnitude = np.ones(len(f))
+            for offset in (-np.ptp(f) / 6, np.ptp(f) / 6):
+                magnitude -= 0.7 / (1 + ((f - centre - offset) / width)**2)
+            sweep['iq_counts'] = magnitude.astype(complex) * 1e6
+    before = copy.deepcopy(panel.module_sweeps['call_params']['catalog'])
+    panel.collision_settings.separation.setText('inf')
+    parameters = panel.collision_settings.get_parameters()
+    expected = find_sweeps_with_nearby_resonances(panel.module_sweeps, **parameters)
+    assert name in expected
+    panel._run_collision_cut()
+    spin_until(qt_app, lambda: panel.collision_btn.isEnabled())
+    assert panel._collision_names == expected
+    assert panel.plot_tabs.currentWidget() is panel.collision_tab
+    assert panel._grid_names() == expected
+    assert panel.module_sweeps['call_params']['catalog'] == before
+    panel.close()
+
+
+def test_collision_resweep_starts_new_measurement_with_copied_catalog(
+        board, qt_app, swept_container, monkeypatch):
+    from types import SimpleNamespace
+
+    panel = _panel_showing(swept_container, board)
+    original = panel.catalog.to_dict()
+    container = panel.multisweep_container
+    removed = panel.catalog.names()[0]
+    panel._collisions_found([removed])
+    started = []
+    parent = SimpleNamespace(crs=board[1],
+                             _start_multisweep_analysis=started.append)
+    monkeypatch.setattr(panel, '_get_periscope_parent', lambda: parent)
+    panel._resweep_without_collisions()
+    dialog = panel._collision_dialog
+    assert removed not in dialog.catalog.names()
+    assert len(dialog.catalog) == len(panel.catalog) - 1
+    dialog.accept()
+    assert len(started) == 1
+    assert started[0]['catalog'].names() == dialog.catalog.names()
+    assert panel.catalog.to_dict() == original
+    assert panel.multisweep_container is container
+    panel.close()
+
+
+@pytest.mark.parametrize('all_collided', [False, True])
+def test_collision_resweep_requires_collisions_and_survivors(
+        board, qt_app, swept_container, all_collided):
+    panel = _panel_showing(swept_container, board)
+    panel._collisions_found(panel.catalog.names() if all_collided else [])
+    assert not panel.collision_resweep_btn.isEnabled()
+    panel.close()
+
+
+def test_collision_preview_is_cleared_for_another_measurement(
+        board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    panel._collisions_found([panel.catalog.names()[0]])
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
+    assert panel.collision_tab is None
+    assert panel._collision_names == []
+    panel.close()
+
+
+def test_collision_resweep_saves_a_separate_session_measurement(
+        board, qt_app, swept_container, tmp_path, monkeypatch):
+    panel = _panel_showing(swept_container, board)
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), 'collision_session')
+    periscope = _periscope_with(manager)
+    periscope.crs = board[1]
+    try:
+        periscope._save_multisweep_to_session(panel, panel.target_module)
+        original_path = store.saved_path(panel.multisweep_container)
+        original_bytes = original_path.read_bytes()
+        original_names = panel.catalog.names()
+        panel._collisions_found([original_names[0]])
+        monkeypatch.setattr(panel, '_get_periscope_parent', lambda: periscope)
+        panel._resweep_without_collisions()
+        panel._collision_dialog.accept()
+        new_panel = next(iter(periscope.multisweep_windows.values()))['window']
+        spin_until(qt_app, lambda: new_panel.module_sweeps is not None)
+        spin_until(qt_app, lambda: all(not t.isRunning()
+                                     for t in periscope.multisweep_tasks.values()))
+        new_path = store.saved_path(new_panel.multisweep_container)
+        assert new_path is not None and new_path != original_path
+        assert original_path.read_bytes() == original_bytes
+        block = next(iter(store.load(new_path).values()))
+        from rfmux.core.resonators import ResonatorCatalog
+        assert ResonatorCatalog.from_dict(
+            block['call_params']['catalog']).names() == original_names[1:]
+        assert panel.catalog.names() == original_names
+    finally:
+        for task in periscope.multisweep_tasks.values():
+            task.wait()
+        manager.end_session()
+        panel.close()
+
+
+@pytest.mark.parametrize('marker', ['mark_foreign_module', 'mark_capture_tuning'])
+def test_collision_resweep_respects_measurement_restrictions(
+        board, qt_app, swept_container, marker):
+    panel = _panel_showing(swept_container, board)
+    if marker == 'mark_foreign_module':
+        panel.mark_foreign_module(4)
+    else:
+        panel.mark_capture_tuning()
+    panel._collisions_found([panel.catalog.names()[0]])
+    assert not panel.collision_resweep_btn.isEnabled()
+    panel._collision_finished()
+    assert not panel.rerun_btn.isEnabled()
+    panel.close()
+
+
+def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
+    from rfmux.tools.periscope.collision_settings_panel import CollisionSettingsPanel
+    settings = CollisionSettingsPanel()
+    settings.set_measurement({'results': {3: {'downward': {}}}})
+    settings.separation.setText('20')
+    settings.iteration.setCurrentIndex(1)
+    settings.direction.setCurrentIndex(1)
+    assert settings.get_parameters() == dict(
+        min_separation_hz=20e3, min_prominence_db=1.0,
+        min_dip_spacing_hz=1e3, iteration=3, direction='downward')
+    settings.close()

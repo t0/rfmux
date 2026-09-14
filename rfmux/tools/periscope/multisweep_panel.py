@@ -27,6 +27,7 @@ from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
+from .collision_settings_panel import CollisionSettingsPanel, CollisionTask
 from .bias_settings_panel import BiasSettingsPanel
 from .tasks import (
     ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
@@ -169,6 +170,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_settings = BiasSettingsPanel(self)
         self.bias_settings.applied.connect(self._redraw_plots)
         self.bias_report = None
+        self._collision_names = []
+        self.collision_tab = None
+        self.collision_settings = CollisionSettingsPanel(self)
+        self.collision_settings.run_requested.connect(self._run_collision_cut)
 
         self._fit_status_timer = QtCore.QTimer(self)
         self._fit_status_timer.setSingleShot(True)
@@ -221,6 +226,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar_layout.addWidget(self.rerun_btn)
+        self.collision_btn = QtWidgets.QPushButton("Collision Cut")
+        self.collision_btn.clicked.connect(self._show_collision_settings)
+        self.collision_status = QtWidgets.QLabel("")
+        toolbar_layout.addWidget(grouped(self.collision_btn,
+                                         self.collision_status))
         
         # Fitting: the button, its settings, and what it is doing.
         self.run_fit_btn = QtWidgets.QPushButton("Run Fit")
@@ -513,7 +523,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     
     def _next_batch(self):
         """Show next batch."""
-        names = self._selected_names()
+        names = self._grid_names()
         total_batches = max(1, (len(names) + self.batch_size - 1) // self.batch_size)
         if self.current_batch < total_batches - 1:
             self.current_batch += 1
@@ -640,9 +650,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         without being told. One sweep off the board and one off a file reach
         the panel the same way and through here.
         """
+        self._clear_collision_preview()
         self.multisweep_container = container
         self.module_sweeps = next(
             block for block in container.values() if block['module'] == module)
+        self.collision_settings.set_measurement(self.module_sweeps)
         call_params = self.module_sweeps['call_params']
         self.catalog = ResonatorCatalog.from_dict(call_params['catalog'])
         self._live_redraw_timer.stop()
@@ -769,6 +781,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """The resonators the grids draw, in the order they are drawn."""
         return list(self.catalog.names()) if self.catalog is not None else []
 
+    def _grid_names(self) -> list[str]:
+        if (self.collision_tab is not None
+                and self.plot_tabs.currentWidget() is self.collision_tab):
+            return list(self._collision_names)
+        return self._selected_names()
+
     def _collect_traces(self, names) -> dict:
         """``{name: [(step, direction, amplitude, sweep), ...]}`` to draw.
 
@@ -858,7 +876,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         plot_type, grid_layout, widget_cache, colorbar = self._sweep_grids[tab]
 
-        names = self._selected_names()
+        names = self._grid_names()
+        self.current_batch = min(self.current_batch,
+                                 max(0, (len(names) - 1) // self.batch_size))
         traces_by_name = self._collect_traces(names)
         if plot_type == 'fit':
             traces_by_name = {name: self._fit_traces(name, traces_by_name.get(name, []))
@@ -867,6 +887,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             traces_by_name = {name: self._bias_step_traces(name, traces_by_name.get(name, []))
                               for name in names}
         if not traces_by_name:
+            if tab is self.collision_tab:
+                colorbar.hide()
+                self.prev_batch_btn.setEnabled(False)
+                self.next_batch_btn.setEnabled(False)
+                self.batch_info_label.setText("No collisions")
             return
 
         amplitudes = self._amplitudes_drawn()
@@ -1225,8 +1250,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._show_bias_status(message, level="error")
 
     def _set_analysis_enabled(self, enabled: bool) -> None:
-        """Fitting and bias finding both walk every sweep this panel holds, so
-        one runs at a time."""
+        """Run one analysis at a time over the measurement the panel holds."""
+        self.collision_btn.setEnabled(enabled)
+        self.collision_settings.run_button.setEnabled(enabled)
         self.run_fit_btn.setEnabled(enabled)
         self.find_bias_btn.setEnabled(enabled)
 
@@ -1260,6 +1286,96 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             'noise_data': spectrum_data
         }
     
+    def _show_collision_settings(self) -> None:
+        if self.module_sweeps is None:
+            self.collision_status.setText("Nothing swept yet")
+            return
+        self.collision_settings.show()
+        self.collision_settings.raise_()
+
+    def _clear_collision_preview(self) -> None:
+        self._collision_names = []
+        if self.collision_tab is not None:
+            tab = self.collision_tab
+            self.collision_tab = None
+            self.plot_tabs.removeTab(self.plot_tabs.indexOf(tab))
+            self._sweep_grids.pop(tab, None)
+            tab.deleteLater()
+        self.collision_status.clear()
+
+    def _run_collision_cut(self) -> None:
+        if self.module_sweeps is None:
+            return
+        try:
+            parameters = self.collision_settings.get_parameters()
+        except ValueError as exc:
+            self.collision_status.setText(str(exc))
+            return
+        self._clear_collision_preview()
+        self.collision_settings.hide()
+        self._set_analysis_enabled(False)
+        self.rerun_btn.setEnabled(False)
+        self.collision_status.setText("Checking collisions...")
+        self._collision_task = CollisionTask(self.module_sweeps, parameters, self)
+        self._collision_task.completed.connect(self._collisions_found)
+        self._collision_task.error.connect(self.collision_status.setText)
+        self._collision_task.finished.connect(self._collision_finished)
+        self._collision_task.start()
+
+    def _collision_finished(self) -> None:
+        self._set_analysis_enabled(True)
+        self.rerun_btn.setEnabled(not (self.is_foreign_module
+                                      or self.is_capture_tuning))
+
+    def _collisions_found(self, names: list[str]) -> None:
+        self._collision_names = names
+        self.collision_resweep_btn = QtWidgets.QPushButton(
+            "Remove collided resonators from catalog and re-sweep")
+        self.collision_resweep_btn.clicked.connect(self._resweep_without_collisions)
+        kept = len(self.catalog) - len(names)
+        self.collision_resweep_btn.setEnabled(
+            bool(names) and kept > 0
+            and not (self.is_foreign_module or self.is_capture_tuning))
+        self.collision_status.setText(
+            f"{len(names)} collided; {kept} retained"
+            + (" — nothing to re-sweep" if kept == 0 else ""))
+        tab, grid, colorbar = self._create_sweep_tab(
+            toolbar=self.collision_resweep_btn)
+        self.collision_tab = tab
+        self._sweep_grids[tab] = ('magnitude', grid, [], colorbar)
+        self.plot_tabs.addTab(tab, "Collisions")
+        self._tab_tooltip(tab, "All measured traces of resonators flagged by "
+                          "the collision check. The original catalog is unchanged.")
+        self.current_batch = 0
+        self.plot_tabs.setCurrentWidget(tab)
+        self._redraw_plots()
+
+    def _resweep_without_collisions(self) -> None:
+        from .multisweep_dialog import MultisweepDialog
+
+        if (not self._collision_names or self.is_foreign_module
+                or self.is_capture_tuning):
+            return
+        catalog = self.catalog.copy()
+        for name in self._collision_names:
+            catalog.remove(name)
+        if not len(catalog):
+            return
+        periscope = self._get_periscope_parent()
+        if periscope is None or periscope.crs is None:
+            self.collision_status.setText("No board connected to re-sweep")
+            return
+        self._collision_dialog = MultisweepDialog(
+            parent=self, catalog=catalog, dac_scales=self.dac_scales,
+            initial_params=self.initial_params.copy())
+        self._collision_dialog.accepted.connect(self._start_collision_resweep)
+        self._collision_dialog.open()
+
+    def _start_collision_resweep(self) -> None:
+        params = self._collision_dialog.get_parameters()
+        if params:
+            self._get_periscope_parent()._start_multisweep_analysis(params)
+
     def _rerun_multisweep(self):
         """Sweep the panel's array again, with settings the dialog can change.
 
@@ -1297,6 +1413,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.catalog = params['catalog']
         self._set_amplitude_scale(params['amp'])
 
+        self._clear_collision_preview()
         self.multisweep_container = None
         self.module_sweeps = None
         self._live.clear()

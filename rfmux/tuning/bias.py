@@ -50,7 +50,7 @@ One analysis is stored at a time: a second call replaces it, the way re-running
 a fit replaces that model's fit.
 
 Nothing else is modified on the way past: not the catalog that was swept, not
-the sweep entries. A bias point is a claim about one analysis of one set of
+the sweep entries. A finding describes one analysis of one set of
 sweeps, and two of them side by side — one from the derivative method, one from
 hysteresis — is a comparison worth being able to make. The catalog in the file
 is still the catalog that was swept, and merging is
@@ -194,7 +194,7 @@ PREFERRED_DIRECTION = "upward"
 #: says which of the three it was. :func:`_concern` writes both, from one
 #: branch each, so they cannot come to disagree.
 FLAG_BIFURCATED_AT_QUIETEST = "already bifurcated"
-FLAG_NEVER_BIFURCATED = "never bifurcated"
+FLAG_NEVER_BIFURCATED = "No bifurcation observed in this run"
 FLAG_OFF_CENTRE = "freq out of bounds"
 FLAG_KINDS = (FLAG_BIFURCATED_AT_QUIETEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
 
@@ -520,7 +520,10 @@ def find_bias_points(
 
     For each one: search the amplitude steps for the one below bifurcation,
     place the tone inside that step's sweep, and measure the IQ derivatives
-    there. Every resonator gets a bias point; see the module docstring for what
+    there. The catalog retains its last observed bifurcation amplitude when
+    this run detects none; findings describe only this run. Clear the catalog
+    with ``catalog.clear_bifurcations()`` before taking new sweeps to reset it.
+    Every resonator gets a bias point; see the module docstring for what
     ``flagged_because`` means and why there is no unbiased outcome.
 
     The array being biased is the one the sweep recorded — there is no catalog
@@ -724,7 +727,11 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
         bias,
         dI_df=dI_df,
         dQ_df=dQ_df,
-        bifurcated_at=choice.bifurcated_at,
+        bifurcated_at=(
+            choice.bifurcated_at
+            if choice.bifurcated_at is not None
+            else resonator.bias.bifurcated_at
+        ),
         bias_sweep=_stored_sweep(entry),
     )
 
@@ -780,7 +787,7 @@ def _concern(
         )
     if choice.bifurcated_at is None:
         return FLAG_NEVER_BIFURCATED, (
-            f"nothing bifurcated up to {choice.amplitude:g}, "
+            f"No bifurcation observed in this run up to {choice.amplitude:g}, "
             f"the loudest amplitude measured"
         )
     if _too_far(measured_hz, centre_hz, max_distance_hz):

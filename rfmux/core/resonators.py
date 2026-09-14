@@ -116,7 +116,8 @@ class BiasPoint:
     dI_df: float | None = None  # V/Hz at this bias point
     dQ_df: float | None = None
     iq_rotation_deg: float | None = None
-    bifurcated_at: float | None = None  # amplitude where bifurcation first seen
+    # First bifurcated amplitude in the last run that observed bifurcation.
+    bifurcated_at: float | None = None
     bias_sweep: dict | None = None  # the trace dI_df/dQ_df were read off
 
     # Fields that describe *this* tone and are therefore invalidated by moving
@@ -627,6 +628,11 @@ class ResonatorCatalog:
             raise KeyError(
                 f"No resonator named {name!r}. This catalog holds {shown}."
             ) from None
+
+    def clear_bifurcations(self) -> None:
+        """Clear stored bifurcation amplitudes in place, keeping all other fields."""
+        for resonator in self:
+            resonator.update_bias_point(bifurcated_at=None)
 
     def copy(self) -> ResonatorCatalog:
         """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;

@@ -1061,3 +1061,22 @@ def test_repr_shows_counts_and_rows():
     assert "module=2" in text
     assert "3 resonators" in text
     assert "R0001" in text and "R0003" in text
+
+
+def test_clear_bifurcations_preserves_every_other_catalog_field():
+    catalog = a_catalog(name="cooldown")
+    for name, amplitude in [("R0001", 0.02), ("R0002", 0.03)]:
+        catalog[name].update_bias_point(
+            bifurcated_at=amplitude, dI_df=1e-9, dQ_df=2e-9,
+            iq_rotation_deg=15.0,
+        )
+    catalog["R0001"].notes["detector"] = "test"
+    expected = catalog.to_dict()
+    for row in expected["resonators"].values():
+        row["bias"]["bifurcated_at"] = None
+
+    catalog.clear_bifurcations()
+    assert catalog.to_dict() == expected
+    catalog.clear_bifurcations()
+    assert catalog.to_dict() == expected
+    ResonatorCatalog([], module=1).clear_bifurcations()

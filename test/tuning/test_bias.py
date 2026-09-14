@@ -136,6 +136,7 @@ def a_schedule(
     directions=("upward", "downward"),
     catalog=None,
     names=("R0001", "R0002"),
+    schedule=None,
 ):
     """One module's worth of a packed multisweep return, over a schedule
     of amplitude steps.
@@ -144,7 +145,8 @@ def a_schedule(
     macro actually produces. Both resonators get the same series of ``a``.
     """
     catalog = a_catalog() if catalog is None else catalog
-    schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, len(nonlinearities))
+    if schedule is None:
+        schedule = AmplitudeSchedule.ramp(1e-3, 4e-3, len(nonlinearities))
     steps = schedule.resolve_steps(catalog)
     sweeps = {
         step.step: {
@@ -1404,3 +1406,38 @@ def test_bias_finding_saves_into_the_sweeps_own_file(tmp_path):
         ]
     finally:
         store.set_output_directory(None)
+
+
+def test_bias_only_refinement_retains_bifurcation_in_catalog():
+    catalog = find_bias_points(a_schedule(), save=False).catalog
+    sweeps = a_schedule(
+        (0.0,), catalog=catalog,
+        schedule=AmplitudeSchedule.multiplicative(1.0, 1.0, 1),
+    )
+    before = catalog.to_dict()
+    report = find_bias_points(sweeps, save=False)
+
+    for resonator in report.catalog:
+        assert resonator.bias.bifurcated_at == pytest.approx(4e-3)
+        assert resonator.bias.amplitude == catalog[resonator.name].bias.amplitude
+        finding = report[resonator.name]
+        assert finding.bifurcated_at is None
+        assert finding.flagged_kind == FLAG_NEVER_BIFURCATED
+        assert "No bifurcation observed in this run" in finding.flagged_because
+    assert catalog.to_dict() == before
+    assert sweeps["call_params"]["catalog"] == before
+    restored = BiasReport.from_dict(report.to_dict())
+    assert restored.catalog["R0001"].bias.bifurcated_at == pytest.approx(4e-3)
+    assert restored["R0001"].bifurcated_at is None
+
+
+@pytest.mark.parametrize("previous", [2e-3, 8e-3])
+def test_new_bifurcation_observation_supersedes_catalog(previous):
+    catalog = a_catalog()
+    for resonator in catalog:
+        resonator.update_bias_point(bifurcated_at=previous)
+    report = find_bias_points(a_schedule(catalog=catalog), save=False)
+
+    for resonator in report.catalog:
+        assert resonator.bias.bifurcated_at == pytest.approx(4e-3)
+        assert report[resonator.name].bifurcated_at == pytest.approx(4e-3)

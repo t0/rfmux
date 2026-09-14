@@ -1980,6 +1980,10 @@ class PeriscopeRuntime:
                 if getattr(self, 'session_manager', None) is not None:
                     panel.data_ready.connect(self.session_manager.handle_data_ready)
 
+                panel.sweep_finished.connect(
+                    lambda p=panel, m=block['module']:
+                    self._save_multisweep_to_session(p, m))
+
                 main_dock = self.dock_manager.get_dock("main_plots")
                 if main_dock:
                     self.tabifyDockWidget(main_dock, dock)

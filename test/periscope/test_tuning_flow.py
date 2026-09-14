@@ -696,6 +696,40 @@ def test_a_rerun_starts_a_task_on_the_catalogs_module(board, qt_app):
         task.wait(2000)
 
 
+def test_rerunning_a_loaded_multisweep_saves_each_measurement(
+        board, qt_app, swept_container, tmp_path):
+    manager = SessionManager()
+    session = manager.start_session(str(tmp_path), "rerun_session")
+    periscope = _periscope_with(manager)
+    periscope.crs = board[1]
+    try:
+        original = store.save(copy.deepcopy(swept_container[1]), "multisweep")
+        original_bytes = original.read_bytes()
+        periscope._load_multisweep_analysis(store.load(original))
+        panel = next(iter(periscope.multisweep_windows.values()))['window']
+        params = _multisweep_params(panel.catalog)
+        paths = {original}
+        for _ in range(2):
+            periscope._start_multisweep_analysis_for_window(panel, params)
+            task = next(iter(periscope.multisweep_tasks.values()))
+            assert spin_until(qt_app, task.isFinished, timeout=180)
+            spin(qt_app)
+            path = store.saved_path(panel.multisweep_container)
+            assert path is not None
+            assert path not in paths
+            assert path.parent == session
+            assert store.load(path)
+            paths.add(path)
+        assert set(session.glob('*.pkl')) == paths
+        assert manager.export_count == 2
+        assert original.read_bytes() == original_bytes
+    finally:
+        for task in periscope.multisweep_tasks.values():
+            task.stop()
+            task.wait()
+        manager.end_session()
+
+
 def test_stopping_a_sweep_finds_the_task_by_the_catalogs_module(board, qt_app):
     """The stopper keys tasks the same way the starter does, or it silently
     stops nothing."""

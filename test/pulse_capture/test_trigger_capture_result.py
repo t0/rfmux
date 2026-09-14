@@ -71,3 +71,12 @@ def test_both_mode_takes_more_channels_than_the_streamer_carries():
     with pytest.raises(ValueError, match="configure_streamer"):
         asyncio.run(tc.trigger_capture.__wrapped__(
             board, channel=[1, 2, 3, 4, 5], module=1, streamer_mode="both", time_run=0.01))
+
+
+def test_a_capture_across_modules_reads_the_slow_stream_only():
+    board = _StreamerBoard([1])
+    for mode in ("fast", "both"):
+        with pytest.raises(ValueError, match="slow stream only"):
+            asyncio.run(tc.trigger_capture.__wrapped__(
+                board, channel={1: [1], 2: [1]}, streamer_mode=mode,
+                time_run=0.01))

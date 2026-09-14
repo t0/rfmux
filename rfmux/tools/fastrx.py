@@ -9,7 +9,9 @@ per packet.
 
 Subcommands:
 
-  hud     live I/Q + PSD viewer
+  hud              live I/Q + PSD viewer
+  overlay          a capture file's pulses over a recording, by IRIG time
+  overlay-dirfile  a parser dirfile window over a recording
 """
 
 import click
@@ -540,6 +542,214 @@ def hud(channel: int, module: int, depth: int,
     w.resize(1000, 700)
     w.show()
     app.exec()
+
+
+def _open_recording(path):
+    from rfmux.pulse_capture.overlay import Recording
+    rec = Recording(path)
+    if rec.t_first is None:
+        raise click.ClickException(
+            f"{path}: no disciplined timestamp to index by")
+    return rec
+
+
+def _plot_traces(axes, traces, t_ref):
+    """I and Q of each (label, style, tod) on two axes, in ms from
+    *t_ref*; NaN-timed samples are left out."""
+    for ax in axes:
+        ax.cla()
+    for label, style, tod in traces:
+        ok = np.isfinite(tod["times"])
+        t = (tod["times"][ok] - t_ref) * 1e3
+        axes[0].plot(t, tod["I"][ok], style, label=label, lw=0.8, ms=3)
+        axes[1].plot(t, tod["Q"][ok], style, label=label, lw=0.8, ms=3)
+    axes[0].set_ylabel("I")
+    axes[1].set_ylabel("Q")
+    axes[1].set_xlabel("ms from the pulse trigger")
+    axes[0].legend(loc="upper right")
+    for ax in axes:
+        ax.grid(True, alpha=0.3)
+
+
+def show_overlay(capture, recording, *, channel=None, pulse_idx=1,
+                 stream="slow", pad_ms=0.0, dirfile=None, module=None,
+                 save=None):
+    """The overlay viewer: CAPTURE's pulses of *channel* over RECORDING
+    (and a parser *dirfile*), in a matplotlib window stepping through
+    the pulses with n / p; to a file with *save*."""
+    import matplotlib
+    if save:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+    from rfmux.pulse_capture.overlay import pulse_overlay
+
+    from rfmux.pulse_capture.channel_keys import describe, parse_key
+
+    rec = _open_recording(recording)
+    reader = PulseHDF5Reader(capture)
+    if channel is None:
+        if not reader.channels:
+            raise click.ClickException(f"{capture}: no channels")
+        channel = reader.channels[0]
+    elif not isinstance(channel, tuple):
+        channel = parse_key(channel)
+    if reader.multi_module and not isinstance(channel, tuple):
+        raise click.ClickException(
+            f"{capture} spans modules: name the channel as MODULE:CHANNEL")
+    stream_key = stream if reader.dual else None
+    count = reader.pulse_count(channel, stream_key)
+    if count == 0:
+        raise click.ClickException(
+            f"{capture}: no {stream} pulses on {describe(channel)}")
+
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+    state = {"idx": max(1, min(pulse_idx, count))}
+
+    def draw():
+        ov = pulse_overlay(reader, rec, channel, state["idx"], stream,
+                           pad_s=pad_ms * 1e-3, dirfile=dirfile, module=module)
+        t_ref = float(reader.get_pulse_metadata(
+            channel, state["idx"], stream_key).get("trigger_time",
+                                                   ov.pulse["times"][0]))
+        traces = [(f"{stream} stream (capture)", ".-", ov.pulse),
+                  ("fastrx", "-", ov.fastrx)]
+        if ov.fast is not None:
+            traces.insert(1, ("fast stream (capture)", "-", ov.fast))
+        if ov.dirfile is not None:
+            traces.insert(1, ("slow stream (parser)", "x", ov.dirfile))
+        _plot_traces(axes, traces, t_ref)
+        title = (f"{describe(channel)}  pulse {state['idx']}/{count}  "
+                 f"[{ov.units}]")
+        if ov.shift_s:
+            title += f"  slow shifted {ov.shift_s * 1e3:+.3f} ms"
+        if ov.lag_s is not None:
+            title += f"  fastrx lag {ov.lag_s * 1e6:+.1f} us"
+        if ov.seq_gaps or ov.dropouts:
+            title += f"  gaps {ov.seq_gaps} dropouts {ov.dropouts}"
+        axes[0].set_title(title)
+        fig.canvas.draw_idle()
+
+    def on_key(event):
+        if event.key == "n" and state["idx"] < count:
+            state["idx"] += 1
+        elif event.key == "p" and state["idx"] > 1:
+            state["idx"] -= 1
+        else:
+            return
+        draw()
+
+    draw()
+    if save:
+        fig.savefig(save, dpi=120)
+        click.echo(f"wrote {save}")
+        return
+    fig.canvas.mpl_connect("key_press_event", on_key)
+    plt.show()
+
+
+@cli.command(name="overlay")
+@click.argument("capture", type=click.Path(exists=True, dir_okay=False))
+@click.argument("recording", type=click.Path(exists=True, dir_okay=False))
+@click.option("--channel", type=str, default=None,
+              help="channel (1-indexed), or MODULE:CHANNEL of a capture "
+                   "across modules; default: the capture's first")
+@click.option("--pulse", "pulse_idx", type=int, default=1, show_default=True,
+              help="pulse index to start at")
+@click.option("--stream", type=click.Choice(["slow", "fast"]), default="slow",
+              show_default=True, help="which stream's pulses (dual files)")
+@click.option("--pad", type=float, default=0.0, show_default=True,
+              help="ms of recording to show either side of the pulse window")
+@click.option("--dirfile", type=click.Path(exists=True, file_okay=False),
+              default=None,
+              help="a board's parser subdirfile (e.g. run/serial_0042): "
+                   "draw its slow trace over the same window too")
+@click.option("--module", type=int, default=None,
+              help="module of the dirfile fields (default: the capture's)")
+@click.option("--save", type=click.Path(dir_okay=False), default=None,
+              help="write the first figure to this file instead of showing it")
+def overlay(capture, recording, channel, pulse_idx, stream, pad, dirfile,
+            module, save):
+    """Overplot CAPTURE's pulses (a pulse-capture HDF5 file) with the same
+    channel of RECORDING (a fastrx file), and of a parser --dirfile, on
+    one IRIG time axis in the capture's stored units: volts, or hertz on
+    the frequency direction for a channel stored with its df
+    calibration.  Press n / p to step through the pulses.
+
+    The slow stream's CIC delay is already taken out of a capture the
+    session wrote and of a dirfile the parser wrote with dec_stage; an
+    older file is shifted by the delay of its slow rate.  For a slow
+    pulse of a dual file the paired fast pulse is drawn too, with the
+    lag at which the recording best matches it."""
+    show_overlay(capture, recording, channel=channel, pulse_idx=pulse_idx,
+                 stream=stream, pad_ms=pad, dirfile=dirfile, module=module,
+                 save=save)
+
+
+@cli.command(name="merge")
+@click.argument("capture", type=click.Path(exists=True, dir_okay=False))
+@click.argument("recording", type=click.Path(exists=True, dir_okay=False))
+@click.option("-o", "--out", type=click.Path(dir_okay=False), default=None,
+              help="write the merged file here instead of in place")
+def merge(capture, recording, out):
+    """Add RECORDING (a fastrx file) to CAPTURE (a slow-stream pulse
+    capture) as its fast stream.  The file becomes a both-mode file:
+    every slow pulse a slow-triggered pair carrying the recording over
+    its window, in the capture's stored units, as Periscope's pulse
+    capture panel reviews it.  In place unless --out is given."""
+    from rfmux.pulse_capture.overlay import merge_fastrx
+    try:
+        path = merge_fastrx(capture, recording, out)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"wrote {path}")
+
+
+@cli.command(name="overlay-dirfile")
+@click.argument("dirfile", type=click.Path(exists=True, file_okay=False))
+@click.argument("recording", type=click.Path(exists=True, dir_okay=False))
+@click.option("--module", type=int, default=1, show_default=True)
+@click.option("--channel", type=int, default=1, show_default=True,
+              help="channel (1-indexed)")
+@click.option("--t0", type=float, required=True,
+              help="window start, seconds of day (PFB clock)")
+@click.option("--t1", type=float, required=True,
+              help="window end, seconds of day")
+@click.option("--save", type=click.Path(dir_okay=False), default=None,
+              help="write the figure to this file instead of showing it")
+def overlay_dirfile(dirfile, recording, module, channel, t0, t1, save):
+    """Overplot a window of DIRFILE (one board's parser subdirfile, e.g.
+    run/serial_0042) with the same channel of RECORDING, in ADC counts.
+
+    A dirfile the parser wrote with `dec_stage` has the slow stream's CIC
+    delay taken out of its timebase; an older one is shifted here by the
+    delay of the stage its frame spacing implies."""
+    import matplotlib
+    if save:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from rfmux.pulse_capture.overlay import dirfile_window
+
+    rec = _open_recording(recording)
+    slow = dirfile_window(dirfile, module, channel, t0, t1)
+    w = rec.window(t0, t1, channel)
+    fast = {"times": w.times, "I": w.samples.real.astype(np.float64),
+            "Q": w.samples.imag.astype(np.float64)}
+    fig, axes = plt.subplots(2, 1, sharex=True, figsize=(10, 6))
+    _plot_traces(axes, [("slow stream", ".-", slow), ("fastrx", "-", fast)],
+                 t0)
+    axes[1].set_xlabel(f"ms from {t0:.6f} s of day")
+    title = f"module {module} channel {channel}  [counts]"
+    if slow["shift_s"]:
+        title += f"  slow shifted {slow['shift_s'] * 1e3:+.3f} ms"
+    if w.seq_gaps or w.dropouts:
+        title += f"  gaps {w.seq_gaps} dropouts {w.dropouts}"
+    axes[0].set_title(title)
+    if save:
+        fig.savefig(save, dpi=120)
+        click.echo(f"wrote {save}")
+        return
+    plt.show()
 
 
 @cli.command(name="bench")

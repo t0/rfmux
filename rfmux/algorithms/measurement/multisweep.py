@@ -486,6 +486,16 @@ async def _measure_sweep(
     return results
 
 
+def sweep_nco_frequency(center_frequencies, span_hz: float) -> float:
+    """The NCO a sweep of *center_frequencies* with *span_hz* each runs
+    at: the middle of the band the sweep covers.  Placeholders (NaN)
+    in the list are ignored."""
+    cfs = [cf for cf in center_frequencies if np.isfinite(cf)]
+    lo = min(cf - span_hz / 2 for cf in cfs)
+    hi = max(cf + span_hz / 2 for cf in cfs)
+    return (lo + hi) / 2
+
+
 @macro(CRS, register=True)
 async def multisweep(
     crs: CRS,

@@ -17,6 +17,7 @@ The layers, in the order a tuning run uses them::
     sweep_results         pack what a sweep measured, and read it back out
     fits                  fit resonator models to the sweeps that came back
     bias                  choose an operating point per resonator, from those sweeps
+    tuning_record         the per-channel row a capture stores with its pulses
 
 The array bookkeeping those steps pass between each other —
 ``Resonator``, ``BiasPoint``, ``ResonatorCatalog`` — lives in
@@ -92,6 +93,7 @@ from .multisweep_amplitudes import (
     AmplitudeStep,
 )
 from . import store
+from .tuning_record import tuning_rows
 from .sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
@@ -152,4 +154,5 @@ __all__ = [
     "get_amplitudes_at_iteration",
     "merge_modules",
     "pack_multisweep",
+    "tuning_rows",
 ]

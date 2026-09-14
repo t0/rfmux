@@ -19,7 +19,7 @@ def cli(fastrxd_args):
     # Imported here rather than at module scope so this command still
     # registers in a build without fastrx.
     try:
-        from ..streamer import _fastrx
+        from .. import fastrx
     except ImportError:
         raise click.ClickException(
             "this rfmux build does not include fastrxd. It is built "
@@ -27,6 +27,5 @@ def cli(fastrxd_args):
             "present at install time; install them and reinstall rfmux "
             "(e.g. uv pip install -e . --force-reinstall).")
 
-    # fastrxd is a sibling of _fastrx.so, wherever this install put it.
-    exe = os.path.join(os.path.dirname(os.path.abspath(_fastrx.__file__)), "fastrxd")
+    exe = fastrx.daemon_path()
     os.execv(exe, [exe, *fastrxd_args])

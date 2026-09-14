@@ -31,3 +31,28 @@ def spin_until(qt_app, predicate, timeout=8.0):
             return True
         time.sleep(0.01)
     return False
+
+
+def bare_periscope(monkeypatch, *, crs=None):
+    """A main window built without its startup, holding what the
+    multisweep and tuning paths read; a warning dialog fails the
+    test."""
+    from unittest.mock import MagicMock
+
+    import pytest
+
+    from rfmux.tools.periscope.app import Periscope
+    from rfmux.tools.periscope.utils import QtWidgets
+
+    for kind in ("warning", "critical"):
+        monkeypatch.setattr(QtWidgets.QMessageBox, kind,
+                            lambda *a, **k: pytest.fail(f"dialog: {a[2]}"))
+    p = Periscope.__new__(Periscope)
+    QtWidgets.QMainWindow.__init__(p)
+    p.crs, p.host, p.dark_mode = crs, "OFFLINE", False
+    p.multisweep_window_count, p.multisweep_windows = 0, {}
+    p.tuning, p.df_calibrations = {}, {}
+    p.dock_manager = MagicMock()
+    p.dock_manager.get_dock.return_value = None
+    p.tabifyDockWidget = MagicMock()
+    return p

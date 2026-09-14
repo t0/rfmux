@@ -603,19 +603,21 @@ plt.title("Trigger-aligned template"); plt.legend(); plt.show()
 Samples are stored in physical units, not ADC counts: volts, or hertz for a
 channel rotated into the frequency basis.
 
-The calibration comes from `bias_kids`, which returns a complex
-`df_calibration` per detector. Its magnitude is hertz per volt; its phase is
-minus the angle of the frequency direction in the (I, Q) plane, so multiplying
-by it turns that direction onto the real axis. Key the calibrations by readout
-channel and hand them to the session; they are written into the file with the
-pulses:
+The calibration comes from `bias_kids`, whose entry per detector carries a
+complex `df_calibration`. Its magnitude is hertz per volt; its phase is minus
+the angle of the frequency direction in the (I, Q) plane, so multiplying by
+it turns that direction onto the real axis. The capture takes the whole
+entry, the tuning record: `tuning_rows` keys the entries by readout channel,
+and the session stores each channel's row (bias frequency, amplitude, sweep,
+fit parameters, calibration) in the file with its pulses:
+
+    from rfmux.algorithms.measurement.df_calibration import tuning_rows
 
     bias_results = await bias_kids(crs=crs, multisweep_results=...,
                                    module=MODULE)
-    df_cals = {d["bias_channel"]: d["df_calibration"]
-               for d in bias_results.values() if "df_calibration" in d}
+    tuning = tuning_rows(bias_results, await crs.get_nco_frequency(module=MODULE))
 
-    capture_session = PulseCaptureSession(..., df_calibrations=df_cals)
+    capture_session = PulseCaptureSession(..., tuning=tuning)
 
 A calibrated channel is rotated before thresholding by default
 (`trigger_basis="df"`), so a pulse lands on one axis instead of being split
@@ -633,17 +635,18 @@ calls (`get_frequency`, `set_frequency`, `get_samples`), so it runs against a
 board too. On hardware take the calibration from `bias_kids` instead of
 sweeping a tuned array again. With no channel list it measures every channel
 the module reports as biased, which is what Periscope does at startup in mock
-mode.
+mode. It returns rows of the same shape, holding just the calibration:
 
 ```python
-df_cals = await crs.measure_df_calibrations(module=MODULE)
-for ch, cal in sorted(df_cals.items()):
+tuning = await crs.measure_df_calibrations(module=MODULE)
+for ch, row in sorted(tuning.items()):
+    cal = row["df_calibration"]
     print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
           f"{np.degrees(np.angle(cal)):+.1f} deg")
 ```
 
-A capture with these calibrations triggers in the frequency basis and stores
-each calibrated channel in hertz:
+A capture with this tuning triggers in the frequency basis and stores each
+calibrated channel in hertz:
 
 ```python
 reader.close()
@@ -651,7 +654,7 @@ reader.close()
 res = await crs.trigger_capture(
     channel=CHANNELS, module=MODULE, streamer_mode="slow", time_run=2.0,
     threshold_sigma=5.0, end_sigma=1.5,
-    df_calibrations=df_cals,
+    tuning=tuning,
     hdf5_path=str(OUTPUT_DIR / "pulse_capture_calibrated.h5"),
 )
 for ch in res.channels:
@@ -660,7 +663,8 @@ for ch in res.channels:
 ```
 
 Every file records the units per channel, the counts-to-volts constant and
-the calibration. Dual files (section 9) carry the same attributes:
+the tuning row under each channel's `tuning` group, with `df_calibration`
+among its attributes. Dual files (section 9) carry the same:
 
 ```python
 with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_calibrated.h5") as r:
@@ -672,7 +676,8 @@ with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_calibrated.h5") as r:
         first = next(r.iter_pulse_metadata(ch), {})
         peak = first.get("peak_amp", float("nan"))
         note = "uncalibrated" if cal is None else f"|cal| = {abs(cal):.3g} Hz/V"
-        print(f"  ch{ch}: peak {peak:.4g} {units}   ({note})")
+        print(f"  ch{ch}: peak {peak:.4g} {units}   ({note}), "
+              f"tuning fields {sorted(r.tuning(ch))}")
 ```
 
 ## 8. Fast (PFB) capture

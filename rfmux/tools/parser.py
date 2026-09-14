@@ -7,6 +7,10 @@ Receives and processes packets from CRS boards, with options to:
 - Write to GetData dirfiles (for analysis)
 - Filter by serial, module, and channel
 - Collect drop statistics
+
+A readout dirfile's ``timebase`` has the decimated stream's CIC group delay
+taken out, so it reads on the PFB stream's clock; ``ts_sbs``/``ts_ss`` keep
+the stamp as the board sent it and ``dec_stage`` says which delay applied.
 """
 
 # make type annotations lazy in case pygetdata is not present
@@ -33,9 +37,15 @@ from rfmux.streamer import (
     PFBPACKET_NSAMP_MAX,
     SS_PER_SECOND,
 )
+from rfmux.core.transferfunctions import decimated_stream_delay_s
+from rfmux.core import channels as channel_spec
+
+#: Low bits of a readout packet's fir_stage field: the decimation stage.
+#: Bit 3 flags short packets.
+DEC_STAGE_MASK = 0x7
 
 TOTAL_CHANNELS = 1024
-TOTAL_MODULES = 4
+TOTAL_MODULES = channel_spec.MAX_MODULE
 
 
 def resolve_interface(interface_name: str) -> str:
@@ -66,55 +76,29 @@ def resolve_interface(interface_name: str) -> str:
     raise ValueError(f"No IPv4 address found for interface '{interface_name}'")
 
 
+def _zero_indexed_ranges(values: list[int]) -> list[range]:
+    """1-indexed numbers as 0-indexed ranges, consecutive runs merged:
+    [1, 2, 3, 5] -> [range(0, 3), range(4, 5)]."""
+    return [range(a - 1, b) for a, b in channel_spec.channel_runs(values)]
+
+
 def parse_ranges(spec: str, min_val: int, max_val: int, name: str) -> list[range]:
-    """
-    Parse comma-separated ranges like "1,5-10,20-30" into list of range objects.
+    """Comma-separated 1-indexed ranges like "1,5-10,20-30" as 0-indexed
+    range objects: parse_ranges("1,5-10", 1, 100, "channel") is
+    [range(0, 1), range(4, 10)]."""
+    values = channel_spec.parse_channel_spec(
+        spec, name=name, max_value=max_val, wildcard=False)
+    if values[0] < min_val:
+        raise ValueError(f"{name.capitalize()}s run {min_val}-{max_val}, "
+                         f"so {values[0]} is out of range.")
+    return _zero_indexed_ranges(values)
 
-    Args:
-        spec: Comma-separated range specification (1-indexed)
-        min_val: Minimum allowed value (1-indexed)
-        max_val: Maximum allowed value (1-indexed)
-        name: Name for error messages (e.g., "channel", "module")
 
-    Returns:
-        List of range objects (0-indexed, exclusive end as per Python convention)
-
-    Examples:
-        >>> parse_ranges("1,5-10", 1, 100, "channel")
-        [range(0, 1), range(4, 10)]
-    """
-    ranges = []
-    for token in spec.split(","):
-        token = token.strip()
-        if "-" in token:
-            start_str, end_str = token.split("-", 1)
-            start, end = int(start_str), int(end_str)
-        else:
-            start = end = int(token)
-
-        if not (min_val <= start <= end <= max_val):
-            raise ValueError(
-                f"{name.capitalize()} range {start}-{end} out of bounds "
-                f"[{min_val}, {max_val}]"
-            )
-
-        # Convert to 0-indexed range (exclusive end)
-        ranges.append(range(start - 1, end))
-
-    return ranges
-
-def parse_module_channels(specs: list[str]):
-    result = {}
-    for spec in specs:
-        mod_str, _, chan_str = spec.partition(":")
-        if not chan_str:
-            raise ValueError(f"Expected MODULE:CHANNELS, got {spec!r}")
-        module = int(mod_str)
-        if not 1 <= module <= TOTAL_MODULES:
-            raise ValueError(f"MODULE {mod_str} out of bounds [1, {TOTAL_MODULES}]")
-        channels = parse_ranges(chan_str, 1, TOTAL_CHANNELS, "channel")
-        result.setdefault(module - 1, []).extend(channels)
-    return result
+def parse_module_channels(specs: list[str]) -> dict[int, list[range]]:
+    """-c MODULE:CHANNELS specs as {0-indexed module: 0-indexed ranges}."""
+    by_module = channel_spec.parse_module_channels(
+        specs, max_module=TOTAL_MODULES, max_channel=TOTAL_CHANNELS)
+    return {m - 1: _zero_indexed_ranges(chs) for m, chs in by_module.items()}
 
 
 @dataclass
@@ -175,16 +159,26 @@ def setup_dirfile_for_module(
     raw_field = f"m{module+1:02d}_raw32"
     ts_sbs_field = f"m{module+1:02d}_ts_sbs"
     ts_ss_field = f"m{module+1:02d}_ts_ss"
+    dec_stage_field = f"m{module+1:02d}_dec_stage"
+    ts_delay_field = f"m{module+1:02d}_ts_delay"
 
     module_stats.dirfile_fields = {
         "raw": raw_field,
         "ts_sbs": ts_sbs_field,
         "ts_ss": ts_ss_field,
+        "dec_stage": dec_stage_field,
+        "ts_delay": ts_delay_field,
     }
 
     # Add timestamp fields
     df.add(gd.entry(gd.RAW_ENTRY, ts_sbs_field, 0, (gd.INT32, 1)))
     df.add(gd.entry(gd.RAW_ENTRY, ts_ss_field, 0, (gd.INT32, 1)))
+
+    # The decimation stage and its CIC group delay (seconds), per frame:
+    # the board stamps the decimated stream late by that delay.
+    df.add(gd.entry(gd.RAW_ENTRY, dec_stage_field, 0, (gd.UINT8, 1)))
+    df.add(gd.entry(gd.RAW_ENTRY, ts_delay_field, 0, (gd.FLOAT64, 1)))
+    df.hide(ts_delay_field)
 
     # Add raw multiplexed field
     df.add(gd.entry(gd.RAW_ENTRY, raw_field, 0, (gd.INT32, 2 * num_channels)))
@@ -223,19 +217,29 @@ def setup_dirfile_for_module(
 
             ch_offset += 1
 
-    # Add timebase field
+    # Add timebase field: the stamp with the CIC group delay taken out
     timebase_field = f"m{module+1:02d}_timebase"
     df.add(
         gd.entry(
             gd.LINCOM_ENTRY,
             timebase_field,
             0,
-            ((ts_sbs_field, ts_ss_field), (1.0, 1 / SS_PER_SECOND), (0, 0)),
+            ((ts_sbs_field, ts_ss_field, ts_delay_field),
+             (1.0, 1 / SS_PER_SECOND, -1.0), (0, 0, 0)),
         )
     )
 
     # Flush metadata so dirfile can be read immediately
     df.metaflush()
+
+
+def write_dec_stage(df, fields: dict, frame: int, pkt) -> None:
+    """Frame *frame*'s decimation stage and CIC group delay."""
+    stage = pkt.fir_stage & DEC_STAGE_MASK
+    df.putdata(fields["dec_stage"], np.array([stage], dtype=np.uint8),
+               first_frame=frame)
+    df.putdata(fields["ts_delay"], np.array([decimated_stream_delay_s(stage)]),
+               first_frame=frame)
 
 
 def main(*args):
@@ -545,6 +549,7 @@ def main_readout(args, serials, module_channels, interface_ip, board_stats):
                             np.array([ts.ss], dtype=np.int32),
                             first_frame=frame,
                         )
+                        write_dec_stage(df, fields, frame, pkt)
 
                         # Write channel data from raw int32 I/Q pairs.
                         # Each pkt.raw_samples[slice] is a zero-copy view.

@@ -86,6 +86,10 @@ from ._receiver import (
 	SS_PER_SECOND,
 )
 
+#: Bit 31 of a Timestamp's ``c`` field: the stamp is disciplined
+#: (``is_recent`` in include/packets.hpp).
+TIMESTAMP_RECENT = 0x80000000
+
 # Import socket utilities
 from .socket import (
 	get_multicast_socket,
@@ -507,6 +511,7 @@ __all__ = [
 	'SHORT_PACKET_VERSION',
 	'PFBPACKET_NSAMP_MAX',
 	'SS_PER_SECOND',
+	'TIMESTAMP_RECENT',
 
 	# Backwards compatibility
 	'DfmuxPacket',

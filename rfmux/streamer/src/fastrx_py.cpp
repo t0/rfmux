@@ -678,6 +678,13 @@ private:
  * overruns, and visible afterwards as seq gaps in the file). */
 class PacketWriter : public Consumer {
 public:
+	/* Bytes per record of a recording of channels 1..channels: the
+	 * header, 4 bytes per channel, padded to 8. */
+	static uint32_t stride_for(uint16_t channels) {
+		size_t s = sizeof(fastrx_packet_header) + (size_t)channels * 2 * sizeof(int16_t);
+		return (uint32_t)((s + 7) & ~size_t(7));
+	}
+
 	PacketWriter(std::string socket_path,
 			std::string path,
 			std::optional<int> channels,
@@ -897,11 +904,6 @@ private:
 			"record 0 must start on a chunk boundary");
 	static_assert(kChunkMax % kChunkAlign == 0,
 			"chunks are built from whole alignment units");
-
-	static uint32_t stride_for(uint16_t channels) {
-		size_t s = sizeof(fastrx_packet_header) + (size_t)channels * 2 * sizeof(int16_t);
-		return (uint32_t)((s + 7) & ~size_t(7));
-	}
 
 	void fail(std::string msg) {
 		{
@@ -1475,6 +1477,10 @@ PYBIND11_MODULE(_fastrx, m) {
 	/* Directory only: the socket inside it is named for the interface fastrxd
 	 * serves, so callers compose SOCKET_DIR + "/" + ifname. */
 	m.attr("SOCKET_DIR") = FASTRXD_SOCKET_DIR;
+
+	m.def("record_stride", &PacketWriter::stride_for, "channels"_a,
+			"Bytes per record of a recording of channels 1..channels: "
+			"the header, 4 bytes per channel, padded to 8.");
 
 	py::class_<PacketFile>(m, "PacketFile",
 			"Zero-copy reader for PacketWriter recordings.\n\n"

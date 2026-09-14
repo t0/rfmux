@@ -28,7 +28,7 @@ class _FakeCRS:
         return {"stage": "generating", "done": 0, "total": 1}
 
     async def measure_df_calibrations(self, module, progress=None):
-        return {1: 1 + 1j}
+        return {1: {"df_calibration": 1 + 1j}}
 
 
 def _build(config):
@@ -45,7 +45,7 @@ def test_build_returns_the_count_and_the_calibrations(qt_app):
     _, (count, cals) = _build({"num_resonances": 40, "auto_bias_kids": True,
                                "resonator_random_seed": 7})
     assert count == 40
-    assert cals == {1: 1 + 1j}
+    assert cals == {1: {"df_calibration": 1 + 1j}}
 
 
 def test_build_pins_the_seed_it_sent(qt_app):

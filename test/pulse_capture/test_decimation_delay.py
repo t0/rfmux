@@ -1,8 +1,9 @@
 """The decimated stream's timestamps are late by its CIC group delay;
-in "both" mode the dual session pulls them back so the two streams
-share the PFB clock, and the mock stamps its slow packets late the
-same way.  TEMPORARY until the firmware corrects the timestamps — see
-decimated_stream_delay_s in rfmux/core/transferfunctions.py.
+a slow session pulls them back so every slow capture reads on the PFB
+clock, the dual session hands its slow stream the same shift, and the
+mock stamps its slow packets late the same way.  TEMPORARY until the
+firmware corrects the timestamps — see decimated_stream_delay_s in
+rfmux/core/transferfunctions.py.
 """
 import numpy as np
 import pytest
@@ -11,7 +12,7 @@ from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ, decimated_stream_delay_s, decimation_to_sampling,
     sampling_to_decimation)
 from rfmux.pulse_capture.capture_session import (
-    DualPulseCaptureSession, PulseCaptureConfig)
+    DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession)
 
 CIC1_S = 94.5 / PFB_SAMPLING_FREQ          # 3 stages, R=64, at the PFB rate
 
@@ -139,3 +140,41 @@ def test_the_file_says_how_much_was_shifted(tmp_path):
         assert meta["slow_time_offset_s"] == pytest.approx(
             -decimated_stream_delay_s(sampling_to_decimation(fs)) if not kw else 0.0)
         assert d.stats()["slow_time_offset_s"] == meta["slow_time_offset_s"]
+
+
+def test_slow_only_session_defaults_to_the_shift():
+    """A slow-only capture is corrected the same way, so every slow
+    file reads on the PFB clock; a fast session and a session with no
+    rate leave stamps alone."""
+    fs = decimation_to_sampling(6)
+    late = decimated_stream_delay_s(sampling_to_decimation(fs))
+    assert PulseCaptureSession(channels=[1], sample_rate=fs).time_offset_s \
+        == pytest.approx(-late)
+    assert PulseCaptureSession(channels=[1], sample_rate=2.44e6,
+                               streamer_mode="fast").time_offset_s == 0.0
+    assert PulseCaptureSession(channels=[1]).time_offset_s == 0.0
+    assert PulseCaptureSession(channels=[1], sample_rate=fs,
+                               time_offset_s=0.0).time_offset_s == 0.0
+
+
+def test_slow_only_shift_reaches_the_ring_and_the_file(tmp_path):
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+    fs = decimation_to_sampling(6)
+    path = str(tmp_path / "slow.h5")
+    s = PulseCaptureSession(channels=[1], sample_rate=fs, hdf5_path=path,
+                            **PulseCaptureConfig().session_kwargs(fs))
+    off = s.time_offset_s
+    assert off < 0
+    s.start()
+    rng = np.random.default_rng(2)
+    n = s.noise_samples + 10
+    s.feed_block(1, rng.normal(0, 1, n), rng.normal(0, 1, n),
+                 np.arange(n) / fs)
+    s.feed_sample(1, 0.0, 0.0, 100.0)
+    s.feed_block(1, np.zeros(2), np.zeros(2), np.array([101.0, np.nan]))
+    ts = s.pcap.buf[1]["ts"].data()
+    assert ts[-1] == pytest.approx(101.0 + off)
+    assert ts[-2] == pytest.approx(100.0 + off)
+    assert s.stats()["time_offset_s"] == off
+    s.stop()
+    assert PulseHDF5Reader(path).metadata["slow_time_offset_s"] == off

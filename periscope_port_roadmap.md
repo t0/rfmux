@@ -183,7 +183,8 @@ fits, draws, saves and reloads the tuning flow through `rfmux.tuning`.**
   legend naming both bars, and a **Bias: frequency** tab draws what chose the
   frequency -- the IQ arc speed at the biased step, with `dI/df` and `dQ/df`
   under it and the tone's frequency on it. Apply Bias runs `crs.apply_bias(catalog)` and
-  publishes each channel's `df_calibration`. The legacy bias lane is gone.
+  publishes each channel's tuning row, built from the catalog by
+  `rfmux.tuning.tuning_rows`. The legacy bias lane is gone.
 
 * **Histograms.** A Fit Histograms tab reads the same fits over the whole
   array: `fr` as a scatter against the resonator, the quality factors binned on
@@ -971,9 +972,11 @@ from.
 * Apply Bias runs `crs.apply_bias(self.catalog)` in `ApplyBiasTask`. The button
   is dead for the duration and the status line says "Applying bias...", then
   "Bias applied" in green, which fades after `STATUS_MESSAGE_MS` as the fit
-  line does. On success the panel publishes
-  `{r.channel: r.bias.df_calibration}` for df units and enables Get Noise
-  Spectrum. No quantisation or NCO logic in the GUI: `apply_bias_output` and
+  line does. On success the panel publishes `tuning_rows(self.catalog)` --
+  one row per channel, carrying the bias frequency, the amplitude, the
+  `df_calibration` and the sweep it was read off -- and enables Get Noise
+  Spectrum. The main window holds the rows, reads df units off each row's
+  calibration, and hands them to a capture as its tuning record. No quantisation or NCO logic in the GUI: `apply_bias_output` and
   `_set_bias` are deleted, both of which set the NCO by hand and rounded
   frequencies themselves.
 * The legacy bias lane goes with it: `bias_kids_dialog.py`, `BiasKidsTask`,
@@ -1044,6 +1047,47 @@ Not part of enabling the basic flow, listed so they are not lost.
   pure) plus a capture step, recording `iq_rotation_deg` on the `BiasPoint`;
   Rotated IQ display mode reads it by channel, fixing the code/channel
   mismatch by construction.
+
+* **The tuning record on the catalog, the rest of it.** `rfmux/tuning/
+  tuning_record.py` builds a capture's `{channel: row}` from the catalog's
+  bias points, and Apply Bias publishes it, so a capture taken after biasing
+  in Periscope already records the catalog's own numbers. The file layer
+  needs nothing: `pulse_capture/hdf5.py` types a row by value and never
+  reads a field name, and `analysis.calibration_of` reads only
+  `df_calibration`. What is left is the two readers that still speak the
+  `bias_kids` export:
+
+  - `catalog_from_tuning(rows, module)`, the inverse, so a capture's
+    `tuning` group opens as a `ResonatorCatalog` plus a multisweep
+    container. `app_runtime.open_tuning_window` is stubbed to say it cannot
+    yet -- it wants a container, and `pack_multisweep` needs an `nsamps` the
+    capture file does not record, so this is a small design question rather
+    than a transcription. That deletes `df_calibration.tuning_export`, whose
+    35 lines fabricate a `results_by_detector` payload, and restores the
+    pulse list's Tuning item (the four tests removed from
+    `test/pulse_capture/test_tuning_window.py` come back with it).
+  - `record_streams.biased_channels`, which does a bare `pickle.load` and
+    reads `export["bias_kids_output"]`; it becomes `store.load` plus
+    `ResonatorCatalog.from_dict(block["call_params"]["catalog"])`.
+
+  Two functions are called `tuning_rows` until that lands:
+  `rfmux.tuning.tuning_rows` takes a catalog, and
+  `df_calibration.tuning_rows` takes a `bias_kids` export. The second is the
+  one that goes.
+
+  Both are what gate stage 5's deletion of `bias_kids.py` and
+  `df_calibration.py`: main's 100G recorder imports `tuning_rows` from one
+  and `dac_scale_dbm` from the other, so those modules are no longer dead
+  ends. A round-trip test -- catalog, rows, HDF5, rows, catalog -- is the
+  contract.
+
+* **`DAC_SCALE_LABEL_OFFSET_DB`** (`algorithms/measurement/bias_kids.py`)
+  arrived from main as 1.5 dB, subtracted from the board's DAC scale before
+  any amplitude is labelled in dBm. No physical motivation for it is
+  recorded anywhere. It is **0.0** here, so a label is the board's own
+  number; if the 1.5 dB turns out to mean something, it goes back with the
+  reason beside it. `BiasPoint.power_dbm` applies no offset, so the two
+  agree while it is zero.
 * **`tune_resonators` front door** and a Tune button that runs the whole
   sequence with one progress bar; `simplified_tuning_flow` rewritten against
   it and run in CI.

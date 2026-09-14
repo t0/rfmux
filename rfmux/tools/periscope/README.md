@@ -173,7 +173,7 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
 
 - **Apply Bias**
   1. **Apply Bias** parks a tone on every resonator in the panel's catalog, at the frequency and amplitude it carries. Which NCO carries them, and putting the frequencies on the tone grid, are `apply_bias`'s doing.
-  2. On success each channel's `df_calibration` is published to the main window, so the streams can be displayed in hertz.
+  2. On success each channel's tuning row is published to the main window — `rfmux.tuning.tuning_rows` of the catalog, carrying the bias frequency, the amplitude, the `df_calibration` and the sweep it was read off. The main window displays the streams in hertz through each row's calibration, and a pulse capture started afterwards records the rows as its tuning.
 
 - **Detector Digest**
   1. The **Detector Digest** tab is one resonator at the size of the panel, which is the question a grid of subplots cannot answer. Double-click any subplot on any grid tab to open the digest on that resonator; the arrow keys and the combo box walk the catalog from there.

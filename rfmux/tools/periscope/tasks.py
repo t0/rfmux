@@ -208,9 +208,10 @@ class DfCalibrationSignals(QObject):
 class DfCalibrationTask(QtCore.QThread):
     """Runs one df-calibration measurement off the GUI thread.
 
-    *measure* is a callable returning the coroutine to run; the app
-    hands in crs.measure_df_calibrations for the module, tests hand in
-    whatever they like.  Mock mode measures at startup
+    *measure* is a callable returning the coroutine to run, whose
+    result is ``{channel: tuning row}``; the app hands in
+    crs.measure_df_calibrations for the module, tests hand in whatever
+    they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """
 
@@ -223,8 +224,8 @@ class DfCalibrationTask(QtCore.QThread):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            cals = loop.run_until_complete(self.measure())
-            self.signals.completed.emit(self.module, dict(cals or {}))
+            rows = loop.run_until_complete(self.measure())
+            self.signals.completed.emit(self.module, dict(rows or {}))
         except Exception as exc:
             self.signals.error.emit(str(exc))
         finally:
@@ -244,12 +245,12 @@ class IQTask(QRunnable):
         if len(self.I) < 2: self._handle_insufficient_data(); return
         payload = self._compute_density() if self.mode == "density" else self._compute_scatter()
         self.signals.done.emit(self.row, self.mode, payload)
-        
+
     def _handle_insufficient_data(self):
         # DENSITY_GRID from .utils
         empty_payload = (np.zeros((DENSITY_GRID, DENSITY_GRID), np.uint8), (0,1,0,1)) if self.mode == "density" else ([],[],[])
         self.signals.done.emit(self.row, self.mode, empty_payload)
-        
+
     def _compute_density(self):
         # DENSITY_GRID, gaussian_filter, SMOOTH_SIGMA, LOG_COMPRESS, convolve from .utils
         g = DENSITY_GRID; hist = np.zeros((g, g), np.uint32)
@@ -264,7 +265,7 @@ class IQTask(QRunnable):
         if LOG_COMPRESS: hist = np.log1p(hist, out=hist.astype(np.float32))
         if hist.max() > 0: hist = (hist * (255.0 / hist.max())).astype(np.uint8)
         return (hist, (Imin, Imax, Qmin, Qmax))
-        
+
     def _apply_dot_dilation(self, hist, ix, qy, g):
         # convolve from .utils
         r = self.dot_px // 2
@@ -277,7 +278,7 @@ class IQTask(QRunnable):
                     ys, xs = qy + dy, ix + dx
                     mask = ((0 <= ys) & (ys < g) & (0 <= xs) & (xs < g))
                     np.add.at(hist, (ys[mask], xs[mask]), 1)
-                    
+
     def _compute_scatter(self):
         # SCATTER_POINTS, pg from .utils
         N = len(self.I)
@@ -312,20 +313,20 @@ class PSDTask(QRunnable):
     def _handle_insufficient_data(self):
         payload = ([], [], [], [], [], [], 0.0) if self.mode == "SSB" else ([], [])
         self.signals.done.emit(self.row, self.mode, self.ch, payload)
-        
+
     def _compute_ssb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
         # Determine input units based on whether data was already converted to volts
         input_units = "volts" if self.real_units else "adc_counts"
-        
+
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
                                          scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
                                          input_units=input_units)
-        
+
         freq_iq = spec_iq["freq_iq"]
         psd_i = spec_iq["psd_i"]
         psd_q = spec_iq["psd_q"]
-        
+
         # For magnitude PSD: compute in frequency domain from I and Q PSDs
         # For uncorrelated I and Q noise, magnitude PSD ≈ PSD_I + PSD_Q
         # This avoids artifacts from computing PSD of time-domain magnitude
@@ -338,9 +339,9 @@ class PSDTask(QRunnable):
             psd_q_linear = 10**(psd_q / 10)
             psd_m_linear = psd_i_linear + psd_q_linear
             psd_m = 10 * np.log10(psd_m_linear)
-        
+
         freq_m = freq_iq  # Same frequency grid
-        
+
         # Apply exponential binning if enabled
         if self.exp_binning and len(freq_iq) > 1:
             freq_iq_binned, psd_i_binned = exp_bin_noise_data(freq_iq, psd_i, self.nbins)
@@ -348,14 +349,14 @@ class PSDTask(QRunnable):
             freq_m_binned, psd_m_binned = exp_bin_noise_data(freq_m, psd_m, self.nbins)
             return (freq_iq_binned, psd_i_binned, psd_q_binned, psd_m_binned,
                     freq_m_binned, psd_m_binned, float(self.dec_stage))
-        
+
         return (freq_iq, psd_i, psd_q, psd_m, freq_m, psd_m, float(self.dec_stage))
-        
+
     def _compute_dsb_psd(self, ref, nper):
         # spectrum_from_slow_tod from .utils
         # Determine input units based on whether data was already converted to volts
         input_units = "volts" if self.real_units else "adc_counts"
-        
+
         spec_iq = spectrum_from_slow_tod(i_data=self.I, q_data=self.Q, dec_stage=self.dec_stage,
                                          scaling="psd", reference=ref, nperseg=nper, spectrum_cutoff=0.9,
                                          input_units=input_units)
@@ -363,12 +364,12 @@ class PSDTask(QRunnable):
         order = np.argsort(freq_dsb)
         freq_dsb_sorted = freq_dsb[order]
         psd_dsb_sorted = psd_dsb[order]
-        
+
         # Apply exponential binning if enabled
         if self.exp_binning and len(freq_dsb_sorted) > 1:
             freq_dsb_binned, psd_dsb_binned = exp_bin_noise_data(freq_dsb_sorted, psd_dsb_sorted, self.nbins)
             return (freq_dsb_binned, psd_dsb_binned)
-        
+
         return (freq_dsb_sorted, psd_dsb_sorted)
 
 class CRSInitializeSignals(QObject):
@@ -394,19 +395,14 @@ class DACScaleFetcher(QtCore.QThread):
         finally: loop.close()
         self.dac_scales_ready.emit(dac_scales)
     def _fetch_all_dac_scales(self, loop, dac_scales):
+        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
         for module_idx in range(1, 9): # Renamed module
             try:
-                dac_scale = loop.run_until_complete(self.crs.get_dac_scale('DBM', module=module_idx))
-                if dac_scale is not None:
-                    dac_scales[module_idx] = dac_scale - 1.5
-                else:
-                    dac_scales[module_idx] = None
+                dac_scales[module_idx] = loop.run_until_complete(
+                    dac_scale_dbm(self.crs, module_idx))
             except Exception as e:
-                if "Can't access module" in str(e) and "analog banking" in str(e):
-                    dac_scales[module_idx] = None
-                else:
-                    print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
-                    dac_scales[module_idx] = None
+                print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
+                dac_scales[module_idx] = None
 
 class NetworkAnalysisTask(QtCore.QThread):
     """QThread subclass for performing network analysis operations without blocking the GUI."""
@@ -415,12 +411,12 @@ class NetworkAnalysisTask(QtCore.QThread):
         self.crs, self.module, self.params, self.signals = crs, module, params, signals
         self._running = True
         self._task, self._loop = None, None
-        
+
     def stop(self):
         """Stop the network analysis task and cancel any ongoing async operation."""
         self._running = False
         self.requestInterruption()
-    
+
     async def _cleanup_channels(self):
         try:
             # Direct approach to set amplitudes to zero without using async with
@@ -429,13 +425,13 @@ class NetworkAnalysisTask(QtCore.QThread):
         except Exception as e:
             print(f"Error in _cleanup_channels: {e}", file=sys.stderr)
             pass
-    
+
     def run(self):
         """QThread entry point - runs in a separate thread."""
         # Create asyncio loop for this thread
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        
+
         try:
             progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
             task_params = self._extract_parameters()
@@ -463,10 +459,10 @@ class NetworkAnalysisTask(QtCore.QThread):
                     # folder, in a second layout.
                     'save': False,
                 }
-                
+
                 # Process the network analysis asynchronously without blocking
                 result = loop.run_until_complete(self._process_network_analysis(loop, netanal_params))
-                
+
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
                     self.signals.data_update.emit(
@@ -491,7 +487,7 @@ class NetworkAnalysisTask(QtCore.QThread):
             if loop.is_running():
                 loop.stop()
             loop.close()
-            
+
     def _create_progress_callback(self):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
         
@@ -511,7 +507,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 key: value[order] for key, value in partial.items()
             })
         return data_cb
-    
+
     def _extract_parameters(self):
         # Constants from .utils
         return {'amp': self.params.get('amp', DEFAULT_AMPLITUDE),
@@ -522,12 +518,12 @@ class NetworkAnalysisTask(QtCore.QThread):
         
     async def _process_network_analysis(self, loop, netanal_params):
         """Process a single network analysis operation asynchronously.
-        
+
         This method periodically yields control back to the event loop to keep the GUI responsive.
         """
         netanal_coro = self.crs.take_netanal(**netanal_params)
         task = loop.create_task(netanal_coro)
-        
+
         # Check for interruption while the task is running
         while not task.done():
             if self.isInterruptionRequested():
@@ -535,7 +531,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 await asyncio.sleep(0.01)  # Give the cancellation a chance to process
                 return None
             await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop - this is crucial for preventing GUI freezing
-        
+
         # Get the result when the task is done
         if not task.cancelled():
             try:

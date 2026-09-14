@@ -24,6 +24,7 @@ Usage (read)::
 
 from __future__ import annotations
 
+import json
 import time
 import warnings
 
@@ -36,6 +37,8 @@ import h5py
 from .detection import ChannelNoiseStats
 from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
+from .channel_keys import (ChannelKey, channel_group, check_keys,
+                           keys_from_attr, modules_of)
 
 
 
@@ -54,27 +57,65 @@ def _store_units(grp, stored_units, channel) -> None:
         grp.attrs["stored_units"] = str(units)
 
 
-def _store_df_calibration(grp, df_calibrations, channel) -> None:
-    """Stamp *channel*'s df calibration onto *grp*, if there is a usable one.
+#: Attribute on a ``tuning`` group naming the fields stored as JSON.
+TUNING_JSON_FIELDS = "json_fields"
 
-    Expects the flat ``{channel: calibration}`` mapping.  Anything h5py
-    cannot store as an attribute is skipped with a warning rather than
-    raised: the pulses are worth more than the units they are labelled
-    in, and a writer that refuses to open costs the whole capture.
+
+def _json_default(value):
+    if isinstance(value, complex):
+        return [value.real, value.imag]
+    if isinstance(value, np.generic):
+        return _json_default(value.item())
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError(f"{type(value).__name__} is not JSON serializable")
+
+
+def _store_tuning(grp, tuning, channel) -> None:
+    """Write *channel*'s tuning row under ``grp/tuning``.
+
+    A row is a bias_kids entry: its scalars and strings become
+    attributes (``df_calibration`` among them), its numeric arrays
+    datasets, and anything else (``fit_params`` and other mappings, lists
+    of strings) a JSON attribute named in ``json_fields``; a complex
+    number inside JSON is a two-element list.  None is skipped.  A field
+    h5py cannot store, or a row that is not one, is skipped with a
+    warning rather than raised: the pulses are worth more than their
+    labels, and a writer that refuses to open costs the whole capture.
     """
-    if not isinstance(df_calibrations, dict) or not df_calibrations:
+    if not isinstance(tuning, dict) or not tuning:
         return
-    value = df_calibrations.get(channel)
-    if value is None:
+    row = tuning.get(channel)
+    if row is None:
         return
-    if not isinstance(value, (int, float, complex, np.number)):
+    if not isinstance(row, dict) or any(not isinstance(k, str) for k in row):
         warnings.warn(
-            f"ignoring df_calibration for channel {channel}: expected a "
-            f"number, got {type(value).__name__}.  df_calibrations is the "
-            f"flat {{channel: calibration}} mapping, not one keyed by module.",
+            f"ignoring tuning for channel {channel}: expected a row of named "
+            f"fields, got {type(row).__name__}.  tuning is the flat "
+            f"{{channel: row}} mapping, not one keyed by module.",
             stacklevel=3)
         return
-    grp.attrs["df_calibration"] = value
+    tgrp = grp.create_group("tuning")
+    json_fields = []
+    for name, value in row.items():
+        if value is None:
+            continue
+        try:
+            if isinstance(value, (str, bytes, bool, int, float, complex,
+                                  np.generic)):
+                tgrp.attrs[name] = value
+                continue
+            arr = None if isinstance(value, dict) else np.asarray(value)
+            if arr is not None and arr.dtype.kind in "biufc":
+                tgrp.create_dataset(name, data=arr)
+            else:
+                tgrp.attrs[name] = json.dumps(value, default=_json_default)
+                json_fields.append(name)
+        except Exception as exc:
+            warnings.warn(f"tuning field {name!r} of channel {channel} not "
+                          f"stored: {exc}", stacklevel=3)
+    if json_fields:
+        tgrp.attrs[TUNING_JSON_FIELDS] = json_fields
 
 
 # ───────────────────────── Shared writer plumbing ───────────────────
@@ -108,9 +149,10 @@ class _PulseFileWriter:
         (bool, ("enable_pileup",)),
     )
 
-    def __init__(self, path: str | Path, channels: List[int],
+    def __init__(self, path: str | Path, channels: List[ChannelKey],
                  capture_params: Dict[str, Any]):
         self.path = Path(path)
+        channels = check_keys(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
 
@@ -119,12 +161,12 @@ class _PulseFileWriter:
         meta.attrs["format_version"] = 1
         for cast, keys in self._META:
             for k in keys:
-                if k in capture_params:
+                if capture_params.get(k) is not None:
                     meta.attrs[k] = cast(capture_params[k])
-        meta.attrs["channels"] = channels
+        meta.attrs["channels"] = np.asarray(channels, dtype=np.int64)
         if "fast_channels" in capture_params:
-            meta.attrs["fast_channels"] = [
-                int(c) for c in capture_params["fast_channels"]]
+            meta.attrs["fast_channels"] = np.asarray(
+                check_keys(capture_params["fast_channels"]), dtype=np.int64)
 
     # ── Shared helpers ────────────────────────────────────────────
 
@@ -235,9 +277,10 @@ class PulseHDF5Writer(_PulseFileWriter):
         Per-channel noise statistics from the estimation phase.
     capture_params : dict
         Capture configuration (streamer_mode, threshold_sigma, etc.).
-    df_calibrations : dict[int, complex], optional
-        Per-channel complex df calibration as ``measure_df_calibrations``
-        returns it: magnitude in hertz per volt, phase minus the angle of
+    tuning : dict[int, dict], optional
+        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        readout channel; its ``df_calibration`` is the complex factor
+        with magnitude in hertz per volt and phase minus the angle of
         the frequency direction in the (I, Q) plane.
     stored_units : dict[int, str], optional
         Per-channel units of the stored samples (``"Hz"`` or ``"V"``).
@@ -249,19 +292,19 @@ class PulseHDF5Writer(_PulseFileWriter):
         channels: List[int],
         noise_stats: Dict[int, ChannelNoiseStats],
         capture_params: Dict[str, Any],
-        df_calibrations: Optional[Dict[int, complex]] = None,
+        tuning: Optional[Dict[int, dict]] = None,
         stored_units: Optional[Dict[int, str]] = None,
     ):
         super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
 
         # ── Per-channel groups ────────────────────────────────────
-        for ch in channels:
-            grp = self.f.create_group(f"channel_{ch}")
+        for ch in check_keys(channels):
+            grp = self.f.create_group(channel_group(ch))
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             grp.attrs["pulse_count"] = 0
-            _store_df_calibration(grp, df_calibrations, ch)
+            _store_tuning(grp, tuning, ch)
             _store_units(grp, stored_units, ch)
 
         # ── Histogram / template groups (updated periodically) ────
@@ -295,7 +338,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         """
         if noise_stats is None:
             noise_stats = self._noise_stats.get(channel)
-        self._append_pulse_to(f"channel_{channel}", pulse_idx, pulse_data,
+        self._append_pulse_to(channel_group(channel), pulse_idx, pulse_data,
                               noise_stats)
 
     def read_pulse(self, channel: int, pulse_idx: int) -> Optional[dict]:
@@ -307,7 +350,8 @@ class PulseHDF5Writer(_PulseFileWriter):
         involves no file locking.  Must be called from the same thread
         that writes (the h5py single-thread rule).
         """
-        return self._read_pulse_at(f"channel_{channel}/pulse_{pulse_idx:06d}")
+        return self._read_pulse_at(
+            f"{channel_group(channel)}/pulse_{pulse_idx:06d}")
 
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
@@ -318,7 +362,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         group attrs always reflect the most recent estimate.
         """
         self._noise_stats.update(noise_stats)
-        self._set_noise_stats(lambda ch: f"channel_{ch}", noise_stats)
+        self._set_noise_stats(channel_group, noise_stats)
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
         """Overwrite histogram datasets with current running histograms.
@@ -349,13 +393,16 @@ class DualPulseHDF5Writer(_PulseFileWriter):
                                        optional cross-stream TOD datasets)
         histograms/slow/  histograms/fast/
         templates/slow/   templates/fast/
+
+    A (module, channel) key nests as ``module_<M>/channel_<n>`` under
+    each stream (see :mod:`.channel_keys`).
     """
 
     STREAMS = ("slow", "fast")
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
-                 df_calibrations: Optional[Dict[int, complex]] = None,
+                 tuning: Optional[Dict[int, dict]] = None,
                  stored_units: Optional[Dict[int, str]] = None):
         super().__init__(path, channels, capture_params)
         self._noise: Dict[str, Dict[int, ChannelNoiseStats]] = {
@@ -365,36 +412,38 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         self.f["metadata"].attrs["layout"] = "dual"
         self.f["metadata"].attrs["streamer_mode"] = "both"
 
+        channels = check_keys(channels)
         for stream in self.STREAMS:
             sgrp = self.f.create_group(stream)
             for ch in channels:
-                grp = sgrp.create_group(f"channel_{ch}")
+                grp = sgrp.create_group(channel_group(ch))
                 grp.attrs["pulse_count"] = 0
-                _store_df_calibration(grp, df_calibrations, ch)
+                _store_tuning(grp, tuning, ch)
                 _store_units(grp, stored_units, ch)
             self.f.create_group(f"histograms/{stream}")
 
         matched = self.f.create_group("matched")
         for ch in channels:
-            mgrp = matched.create_group(f"channel_{ch}")
+            mgrp = matched.create_group(channel_group(ch))
             mgrp.attrs["pair_count"] = 0
         self.f.flush()
 
     def set_noise_stats(self, stream: str,
                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
         self._noise[stream].update(noise_stats)
-        self._set_noise_stats(lambda ch: f"{stream}/channel_{ch}",
+        self._set_noise_stats(lambda ch: f"{stream}/{channel_group(ch)}",
                               noise_stats)
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
                      pulse_data: dict) -> None:
-        self._append_pulse_to(f"{stream}/channel_{channel}", pulse_idx,
-                              pulse_data, self._noise[stream].get(channel))
+        self._append_pulse_to(f"{stream}/{channel_group(channel)}",
+                              pulse_idx, pulse_data,
+                              self._noise[stream].get(channel))
 
     def append_match(self, channel: int, pair: dict) -> None:
         if not self.is_open:
             return
-        key = f"matched/channel_{channel}"
+        key = f"matched/{channel_group(channel)}"
         if key not in self.f:
             return
         mgrp = self.f[key]
@@ -429,7 +478,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
                    pulse_idx: int) -> Optional[dict]:
         """Live read-back through the open write handle (writer thread)."""
         return self._read_pulse_at(
-            f"{stream}/channel_{channel}/pulse_{pulse_idx:06d}")
+            f"{stream}/{channel_group(channel)}/pulse_{pulse_idx:06d}")
 
     def read_match(self, channel: int,
                    pair_idx: int) -> Optional[Dict[str, Any]]:
@@ -437,7 +486,7 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         viewer whose cache has let it go."""
         if not self.is_open:
             return None
-        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        key = f"matched/{channel_group(channel)}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
         return _pair_from_group(self.f[key], channel, pair_idx)
@@ -473,15 +522,29 @@ class PulseHDF5Reader:
         # Eagerly read metadata
         meta = self.f["metadata"]
         self.metadata: Dict[str, Any] = dict(meta.attrs)
-        self.channels: List[int] = list(self.metadata.get("channels", []))
+        #: Channel numbers, or (module, channel) pairs for a capture
+        #: that spans modules.
+        self.channels: List[ChannelKey] = keys_from_attr(
+            self.metadata.get("channels", []))
+        self.multi_module: bool = any(isinstance(k, tuple)
+                                      for k in self.channels)
         #: True for dual-layout ("both" mode) files
         self.dual: bool = "slow" in self.f and "fast" in self.f
         self.streams: List[str] = ["slow", "fast"] if self.dual else []
 
-    def _ch_key(self, channel: int, stream: Optional[str]) -> str:
+    @property
+    def modules(self) -> List[int]:
+        """The modules captured: from the pair keys, else the one in
+        the metadata."""
+        if self.multi_module:
+            return modules_of(self.channels)
+        return ([int(self.metadata["module"])]
+                if "module" in self.metadata else [])
+
+    def _ch_key(self, channel: ChannelKey, stream: Optional[str]) -> str:
         if self.dual:
-            return f"{stream or 'slow'}/channel_{channel}"
-        return f"channel_{channel}"
+            return f"{stream or 'slow'}/{channel_group(channel)}"
+        return channel_group(channel)
 
     # ── Channel-level queries ─────────────────────────────────────
 
@@ -549,15 +612,35 @@ class PulseHDF5Reader:
             return "iq"
         return str(meta.attrs.get("trigger_basis", "iq"))
 
-    def df_calibration(self, channel: int,
-                       stream: Optional[str] = None) -> Optional[complex]:
-        """Return the df calibration for *channel*, or None."""
+    def _tuning_group(self, channel, stream):
         if self.f is None:
             return None
         grp = self.f.get(self._ch_key(channel, stream))
-        if grp is None:
-            return None
-        return grp.attrs.get("df_calibration")
+        return None if grp is None else grp.get("tuning")
+
+    def tuning(self, channel: int, stream: Optional[str] = None) -> dict:
+        """The tuning row *channel* was captured with, as the writer was
+        handed it; ``{}`` when the file carries none."""
+        tgrp = self._tuning_group(channel, stream)
+        if tgrp is None:
+            return {}
+        json_fields = set(tgrp.attrs.get(TUNING_JSON_FIELDS, ()))
+        row = {}
+        for name, value in tgrp.attrs.items():
+            if name == TUNING_JSON_FIELDS:
+                continue
+            value = _convert_attr(value)
+            row[name] = json.loads(value) if name in json_fields else value
+        for name, ds in tgrp.items():
+            row[name] = ds[()]
+        return row
+
+    def df_calibration(self, channel: int,
+                       stream: Optional[str] = None) -> Optional[complex]:
+        """The df calibration *channel* was captured with, or None."""
+        tgrp = self._tuning_group(channel, stream)
+        value = None if tgrp is None else tgrp.attrs.get("df_calibration")
+        return None if value is None else complex(value)
 
     # ── Pulse-level queries ───────────────────────────────────────
 
@@ -617,7 +700,7 @@ class PulseHDF5Reader:
     # ── Matched pairs (dual files) ────────────────────────────────
 
     def pair_count(self, channel: int) -> int:
-        key = f"matched/channel_{channel}"
+        key = f"matched/{channel_group(channel)}"
         if self.f is not None and key in self.f:
             return int(self.f[key].attrs.get("pair_count", 0))
         return 0
@@ -628,7 +711,7 @@ class PulseHDF5Reader:
         and any stored cross-stream TOD windows."""
         if self.f is None:
             return None
-        key = f"matched/channel_{channel}/pair_{pair_idx:06d}"
+        key = f"matched/{channel_group(channel)}/pair_{pair_idx:06d}"
         if key not in self.f:
             return None
         return _pair_from_group(self.f[key], channel, pair_idx)
@@ -809,6 +892,8 @@ def _convert_attr(val: Any) -> Any:
         return int(val)
     if isinstance(val, (np.floating,)):
         return float(val)
+    if isinstance(val, (np.complexfloating,)):
+        return complex(val)
     if isinstance(val, (np.bool_,)):
         return bool(val)
     if isinstance(val, bytes):

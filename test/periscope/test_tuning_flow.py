@@ -2548,22 +2548,26 @@ def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app, 
 
 
 def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app, swept_container):
-    """df units come off the bias point's own calibration, by channel -- which
-    is what the main window stores and the streams are displayed through."""
+    """The tuning rows come off the catalog's own bias points, by channel --
+    which is what the main window stores, what the streams are displayed
+    through, and what a capture records as its tuning."""
     _, crs, catalog = board
     panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
     published = []
-    panel.df_calibration_ready.connect(
-        lambda module, cals: published.append((module, cals)))
+    panel.tuning_ready.connect(
+        lambda module, rows: published.append((module, rows)))
 
     _apply_bias(panel, qt_app)
 
-    module, calibrations = published[0]
+    module, rows = published[0]
     assert module == catalog.module
-    assert calibrations == {r.channel: r.bias.df_calibration
-                            for r in panel.catalog}
+    assert {ch: row["df_calibration"] for ch, row in rows.items()} == {
+        r.channel: r.bias.df_calibration for r in panel.catalog}
+    # The sweep each calibration was read off travels with it.
+    biased = next(r for r in panel.catalog if r.bias.bias_sweep is not None)
+    assert rows[biased.channel]["sweep_direction"] is not None
 
 
 def test_a_noise_spectrum_needs_a_bias_first(board, qt_app, swept_container):

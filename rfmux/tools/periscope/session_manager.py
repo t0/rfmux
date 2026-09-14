@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import datetime
-import json
 import pickle
 import subprocess
 import sys
@@ -28,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from PyQt6 import QtCore
 
 from ...tuning import store
+from rfmux.core import session_folder as _session
 
 
 class SessionManager(QtCore.QObject):
@@ -158,8 +158,7 @@ class SessionManager(QtCore.QObject):
         
         # Generate folder name if not provided
         if folder_name is None:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            folder_name = f"session_{timestamp}"
+            folder_name = _session.folder_name()
         
         # Create the session folder
         session_path = base / folder_name
@@ -175,13 +174,7 @@ class SessionManager(QtCore.QObject):
         settings.set_last_session_path(str(session_path))
         self._export_count = 0
         self._session_start_time = datetime.datetime.now()
-        self._session_metadata = {
-            'created': self._session_start_time.isoformat(),
-            'folder_name': folder_name,
-            'base_path': str(base),
-            'exports': [],
-            'screenshots':[],
-        }
+        self._session_metadata = _session.new_metadata(session_path)
         
         # Try to capture CRS info from parent
         if self.parent() and hasattr(self.parent(), 'crs'):
@@ -235,14 +228,12 @@ class SessionManager(QtCore.QObject):
         self._session_start_time = datetime.datetime.now()
         
         # Try to load existing metadata
-        metadata_file = path / 'session_metadata.json'
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, 'r') as f:
-                    self._session_metadata = json.load(f)
+        if _session.is_session(path):
+            self._session_metadata = _session.load_metadata(path)
+            if self._session_metadata:
                 self._export_count = len(self._session_metadata.get('exports', []))
-            except Exception as e:
-                print(f"[Session] Warning: Could not load metadata: {e}")
+            else:
+                print("[Session] Warning: Could not load metadata")
                 self._session_metadata = {'loaded': datetime.datetime.now().isoformat()}
                 self._export_count = len(list(path.glob('*.pkl')))
         else:
@@ -352,12 +343,8 @@ class SessionManager(QtCore.QObject):
             
             # Update session state
             self._export_count += 1
-            self._session_metadata.setdefault('exports', []).append({
-                'filename': filename,
-                'data_type': data_type,
-                'identifier': identifier,
-                'timestamp': datetime.datetime.now().isoformat(),
-            })
+            self._session_metadata.setdefault('exports', []).append(
+                _session.export_entry(filename, data_type, identifier))
             self._save_metadata()
             
             # Emit signals
@@ -388,10 +375,7 @@ class SessionManager(QtCore.QObject):
             >>> session_mgr.generate_filename('netanal', 'module1')
             'netanal_module1_092000.pkl'
         """
-        timestamp = datetime.datetime.now().strftime("%H%M%S")
-        # Clean the identifier (replace spaces with underscores)
-        clean_identifier = identifier.replace(' ', '_').replace('/', '_')
-        return f"{data_type}_{clean_identifier}_{timestamp}.pkl"
+        return _session.export_filename(data_type, identifier)
     
     # ─────────────────────────────────────────────────────────────────
     # Session Query Methods
@@ -633,12 +617,8 @@ class SessionManager(QtCore.QObject):
 
         path = Path(filepath)
         self._export_count += 1
-        self._session_metadata.setdefault('exports', []).append({
-            'filename': path.name,
-            'data_type': data_type,
-            'identifier': identifier,
-            'timestamp': datetime.datetime.now().isoformat(),
-        })
+        self._session_metadata.setdefault('exports', []).append(
+            _session.export_entry(path.name, data_type, identifier))
         self._save_metadata()
         self.file_exported.emit(str(path), data_type)
         self.session_updated.emit()
@@ -671,11 +651,8 @@ class SessionManager(QtCore.QObject):
         if not self.is_active or self._session_path is None:
             return
         
-        metadata_file = self._session_path / 'session_metadata.json'
-        
         try:
-            with open(metadata_file, 'w') as f:
-                json.dump(self._session_metadata, f, indent=2)
+            _session.save_metadata(self._session_path, self._session_metadata)
         except Exception as e:
             print(f"[Session] Warning: Could not save metadata: {e}")
     

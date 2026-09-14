@@ -234,6 +234,15 @@ def pulse_summary(
     }
 
 
+def calibration_of(row):
+    """The df calibration a tuning row carries, or None.  A value that is
+    not a row passes through, so ``storage_transform`` can say what it
+    was handed."""
+    if isinstance(row, dict):
+        return row.get("df_calibration")
+    return row
+
+
 def storage_transform(df_calibration, trigger_basis: str = "iq"):
     """How one channel's samples are rotated and scaled for storage.
 
@@ -262,8 +271,8 @@ def storage_transform(df_calibration, trigger_basis: str = "iq"):
     if df_calibration is not None and cal is None:
         warnings.warn(
             "ignoring df_calibration: expected a number, got "
-            f"{type(df_calibration).__name__}.  df_calibrations is the "
-            "flat {channel: calibration} mapping, not one keyed by module.",
+            f"{type(df_calibration).__name__}.  tuning is the flat "
+            "{channel: row} mapping, not one keyed by module.",
             stacklevel=2)
     if trigger_basis == "df" and cal:
         basis, units = "df", "Hz"
@@ -357,39 +366,48 @@ def plot_groups(spec: str, channels) -> list:
     its own, a range ``a-b`` whose channels are combined into one, or
     ``*`` / ``all`` for every channel combined.  An empty spec is one
     series per channel.  Channels absent from *channels* are dropped,
-    and a series that ends up empty is dropped with them.
+    and a series that ends up empty is dropped with them.  For a
+    capture across modules, whose channels are (module, channel) keys,
+    an item may name the module, ``2:1-10``; one that does not takes
+    the channel numbers of every module.
 
     Returns ``[(label, [channels...]), ...]``.  Raises ValueError with
     the offending token, since the caller is a GUI field.
     """
-    present = sorted(int(c) for c in channels)
+    from ..core.channels import (ALL_CHANNELS_TOKENS, parse_channel_spec,
+                                 parse_module_channels)
+    from .channel_keys import short_label
+
+    present = sorted(channels)
+
+    def number(c):
+        return c[1] if isinstance(c, tuple) else c
+
     cleaned = "".join(spec.split())
     if not cleaned:
-        return [(f"Ch{c}", [c]) for c in present]
+        return [(short_label(c), [c]) for c in present]
     out = []
     for token in cleaned.split(","):
         if not token:
             continue
-        if token.lower() in ("*", "all"):
+        if token.lower() in ALL_CHANNELS_TOKENS:
             if present:
                 out.append((f"All {len(present)} ch", list(present)))
             continue
-        lo, sep, hi = token.partition("-")
-        try:
-            start = int(lo)
-            stop = int(hi) if sep else start
-        except ValueError:
-            raise ValueError(
-                f"Could not read {token!r}. Use channels like \"1,2\", "
-                f"ranges like \"2-19\" to combine, or \"*\".") from None
-        if stop < start:
-            raise ValueError(
-                f"Range {token!r} runs backwards -- write "
-                f"\"{stop}-{start}\".")
-        members = [c for c in present if start <= c <= stop]
+        if ":" in token:
+            [(module, numbers)] = parse_module_channels(token).items()
+        else:
+            module, numbers = None, parse_channel_spec(token, wildcard=False)
+        wanted = set(numbers)
+        members = [c for c in present if number(c) in wanted
+                   and (module is None
+                        or (isinstance(c, tuple) and c[0] == module))]
         if not members:
             continue
-        label = f"Ch{start}" if not sep else f"Ch{start}-{stop}"
+        label = (f"Ch{numbers[0]}" if len(numbers) == 1
+                 else f"Ch{numbers[0]}-{numbers[-1]}")
+        if module is not None:
+            label = f"M{module}" + label
         out.append((label, members))
     return out
 

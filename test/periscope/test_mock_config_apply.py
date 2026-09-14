@@ -44,6 +44,7 @@ def _periscope(crs, mock_config, pulse_mode):
     p.mock_config = mock_config
     p.qp_pulse_mode = pulse_mode
     p.btn_qp_pulses = QtWidgets.QPushButton()
+    p.tuning = {1: {1: {"df_calibration": 1.0 + 1.0j}}}
     p.df_calibrations = {1: {1: 1.0 + 1.0j}}
     p.saved = []
     p.session_manager = SimpleNamespace(is_active=True,
@@ -124,7 +125,8 @@ def test_regeneration_records_the_seed_the_server_built_with(regenerated):
     assert p.mock_config["resonator_random_seed"] == seed
 
 
-def test_regeneration_drops_the_previous_array_calibrations(regenerated):
+def test_regeneration_drops_the_previous_array_tuning(regenerated):
+    assert 1 not in regenerated.tuning
     assert 1 not in regenerated.df_calibrations
 
 
@@ -138,7 +140,7 @@ def test_regeneration_without_auto_bias_kids_measures_nothing(qt_app):
     p._apply_mock_configuration(
         _dialog_edit(previous, num_resonances=previous["num_resonances"] + 1),
         previous)
-    assert 1 not in p.df_calibrations
+    assert 1 not in p.tuning
     assert p.calibrations_started == []
 
 
@@ -154,4 +156,4 @@ def test_failed_apply_keeps_the_configuration_in_force(qt_app, monkeypatch):
         _dialog_edit(previous, num_resonances=previous["num_resonances"] + 1),
         previous)
     assert p.mock_config is previous
-    assert p.df_calibrations == {1: {1: 1.0 + 1.0j}}
+    assert p.tuning == {1: {1: {"df_calibration": 1.0 + 1.0j}}}

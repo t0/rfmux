@@ -11,7 +11,7 @@ at the stream rate the capture will actually run at.
 from __future__ import annotations
 
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from .utils import apply_issue_banner
 
@@ -33,18 +33,23 @@ def _rows_html(rows) -> str:
     return f"<table cellspacing='0' cellpadding='1'>{body}</table>"
 
 
-class PulseCaptureSettingsDialog(QtWidgets.QDialog):
-    """Edit a PulseCaptureConfig with live unit conversions."""
+class PulseCaptureSettingsForm(QtWidgets.QWidget):
+    """Edit a PulseCaptureConfig with live unit conversions.
+
+    *gate* is a button enabled only while the settings validate;
+    ``updated`` fires after every recomputation."""
+
+    updated = QtCore.pyqtSignal()
 
     def __init__(self, parent=None, *,
                  config: PulseCaptureConfig | None = None,
                  sample_rate: float = decimation_to_sampling(6),
                  mode: str = "slow",
                  n_channels: int = 2,
-                 df_available: bool = True):
+                 df_available: bool = True,
+                 gate: QtWidgets.QAbstractButton | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Pulse Capture Settings")
-        self.setModal(True)
+        self.gate = gate
         self.sample_rate = float(sample_rate)
         self.mode = mode
         self.n_channels = max(1, n_channels)
@@ -264,20 +269,12 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
         self.status_label.setWordWrap(True)
         form.addRow(self.status_label)
 
-        self.buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
-        self.buttons.accepted.connect(self.accept)
-        self.buttons.rejected.connect(self.reject)
-        form.addRow(self.buttons)
-
         for w in (self.threshold_spin, self.end_spin, self.margin_spin,
                   self.min_pulse_spin, self.max_pulse_spin, self.window_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
         adv_box.toggled.emit(False)
-        self.setMinimumWidth(520)
         self._update_dependent_values()
 
     def get_config(self) -> PulseCaptureConfig:
@@ -356,14 +353,42 @@ class PulseCaptureSettingsDialog(QtWidgets.QDialog):
             ]))
 
             issues = cfg.validate(self.sample_rate)
-            apply_issue_banner(
-                self.status_label,
-                self.buttons.button(
-                    QtWidgets.QDialogButtonBox.StandardButton.Ok),
-                issues)
+            self.valid = apply_issue_banner(self.status_label, self.gate,
+                                            issues)
         finally:
             self._updating = False
+        self.updated.emit()
+
+
+class PulseCaptureSettingsDialog(QtWidgets.QDialog):
+    """The form with OK and Cancel; the form's controls are reachable
+    on the dialog."""
+
+    def __init__(self, parent=None, **form_kwargs):
+        super().__init__(parent)
+        self.setWindowTitle("Pulse Capture Settings")
+        self.setModal(True)
+        self.buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        self.form = PulseCaptureSettingsForm(
+            self, gate=self.buttons.button(
+                QtWidgets.QDialogButtonBox.StandardButton.Ok),
+            **form_kwargs)
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.addWidget(self.form)
+        outer.addWidget(self.buttons)
+        self.form.updated.connect(self._fit_height)
+        self.setMinimumWidth(520)
         self._fit_height()
+
+    def get_config(self) -> PulseCaptureConfig:
+        return self.form.get_config()
+
+    def __getattr__(self, name):
+        return getattr(self.__dict__.get("form"), name)
 
     def _fit_height(self) -> None:
         """Tall enough for the derived tables, which wrap to the width

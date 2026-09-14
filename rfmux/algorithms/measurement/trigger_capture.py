@@ -46,12 +46,13 @@ import time
 import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ... import streamer
 
+from ...pulse_capture.channel_keys import modules_of, pair_keys
 from ...pulse_capture.capture_session import (
     DualPulseCaptureSession,
     PulseCaptureConfig,
@@ -105,8 +106,10 @@ class PulseCaptureResult:
 
     streamer_mode: str
     config: PulseCaptureConfig
-    channels: List[int]
-    module: int
+    #: Channel numbers, or (module, channel) pairs for a capture that
+    #: spans modules, in which case ``module`` is None.
+    channels: List
+    module: Optional[int]
     #: Wall-clock (``time.time()``) at which the source started streaming.
     #: The HDF5 file's ``capture_start`` is stamped when its writer opens:
     #: after noise training for a single-stream file, at session
@@ -117,10 +120,10 @@ class PulseCaptureResult:
     start_time: Optional[float] = None
     slow: Optional[StreamResult] = None
     fast: Optional[StreamResult] = None
-    #: ``"both"`` mode only: seconds added to every slow timestamp
-    #: (pulse ``Time`` arrays and summaries) to put the CIC-delayed slow
-    #: clock on the fast stream's axis.  Subtract it to compare against
-    #: raw packet timestamps.  Same value as the file's
+    #: Seconds added to every slow timestamp (pulse ``Time`` arrays and
+    #: summaries) to put the CIC-delayed slow clock on the PFB stream's
+    #: axis, in ``"slow"`` and ``"both"`` modes.  Subtract it to compare
+    #: against raw packet timestamps.  Same value as the file's
     #: ``slow_time_offset_s`` attribute.
     slow_time_offset_s: Optional[float] = None
     #: ``"both"`` mode only: the captured channels the PFB streamer
@@ -204,8 +207,8 @@ def _training_seconds(config: PulseCaptureConfig, rate: float) -> float:
 @macro(CRS, register=True)
 async def trigger_capture(
     crs: CRS,
-    channel: Union[None, int, List[int]] = None,
-    module: int = 1,
+    channel: Union[None, int, List[int], Dict[int, List[int]]] = None,
+    module: Optional[int] = 1,
     *,
     streamer_mode: str = "slow",
     time_run: float = 10.0,
@@ -214,20 +217,23 @@ async def trigger_capture(
     end_sigma: Optional[float] = None,
     max_pulse_ms: Optional[float] = None,
     hdf5_path: Optional[Union[str, Path]] = None,
-    df_calibrations: Optional[Dict[int, complex]] = None,
+    tuning: Optional[Dict[int, dict]] = None,
     trigger_basis: Optional[str] = None,
+    on_noise: Optional[Callable] = None,
     verbose: bool = True,
 ) -> PulseCaptureResult:
     """Capture threshold-triggered pulses from the slow, fast, or both streams.
 
     Parameters
     ----------
-    channel : int | list[int]
+    channel : int | list[int] | dict[int, list[int]]
         Channel(s) to monitor.  Max 4 for ``"fast"``, the PFB streamer's
         limit; ``"both"`` takes any number and streams the fast side for
-        the channels the PFB streamer carries.
+        the channels the PFB streamer carries.  ``{module: [channels]}``
+        captures the slow stream of several modules at once, keyed by
+        ``(module, channel)`` pairs in the result and the file.
     module : int
-        Module index (1-based).
+        Module index (1-based) of a plain channel list.
     streamer_mode : str
         ``"slow"``, ``"fast"`` (PFB, ~2.44 MHz) or ``"both"``.  In
         ``"both"`` the two streams are detected independently and their
@@ -246,14 +252,17 @@ async def trigger_capture(
         how much of the stream is spent training before detection starts.
     hdf5_path : str | Path, optional
         Write a capture file as well (pulses, histograms, templates).
-    df_calibrations : dict[int, complex], optional
-        ``{channel: calibration}`` from
-        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids`.  Under
-        ``trigger_basis="df"`` (the default) a calibrated channel is
-        rotated into the frequency basis and its samples stored as Δf in
-        hertz; a channel without a calibration, or any channel under
-        ``"iq"``, is stored in volts on the quadratures.  The file
-        records the calibrations and each channel's ``stored_units``.
+    tuning : dict[int, dict], optional
+        ``{channel: row}``, each row a
+        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids` entry
+        keyed by its ``bias_channel`` (``tuning_rows`` builds it from the
+        output, ``measure_df_calibrations`` returns rows with only the
+        calibration).  Under ``trigger_basis="df"`` (the default) a
+        channel whose row has a ``df_calibration`` is rotated into the
+        frequency basis and its samples stored as Δf in hertz; a channel
+        without one, or any channel under ``"iq"``, is stored in volts on
+        the quadratures.  The file records every row under the channel's
+        ``tuning`` group and each channel's ``stored_units``.
         Keyed by readout channel, not detector index -- ``bias_kids``
         reports both, and ``bias_channel`` is the one that matches the
         channels captured here.
@@ -267,6 +276,12 @@ async def trigger_capture(
         calibration: channels without one stay on ``"iq"``.  The samples
         are stored in whichever basis they were triggered in, and the
         file records which.
+    on_noise : callable, optional
+        Called once noise training completes and detection starts: with
+        the noise statistics for ``"slow"`` and ``"fast"``, and with the
+        stream name first for ``"both"``.  A caller that has to start
+        something else at that moment (another recorder of the same
+        stretch) hooks it here.
     verbose : bool
         Print progress.  Set False for scripted use.
 
@@ -276,12 +291,18 @@ async def trigger_capture(
     """
     if channel is None:
         raise ValueError("channel must be specified")
-    channels = list(channel) if isinstance(channel, list) else [channel]
-
     if streamer_mode not in ("slow", "fast", "both"):
         raise ValueError(
             f"streamer_mode must be 'slow', 'fast' or 'both', "
             f"not {streamer_mode!r}")
+    if isinstance(channel, dict):
+        if streamer_mode != "slow":
+            raise ValueError("a capture across modules reads the slow "
+                             "stream only")
+        channels = pair_keys(channel)
+        module = None
+    else:
+        channels = list(channel) if isinstance(channel, list) else [channel]
     if streamer_mode == "fast" and len(channels) > 4:
         raise ValueError(
             f"the PFB streamer carries at most 4 channels, got "
@@ -335,8 +356,10 @@ async def trigger_capture(
 
     if verbose:
         rate_str = ", ".join(f"{k} {v:,.0f} Hz" for k, v in rates.items())
+        where = (f"modules={modules_of(channels)}" if module is None
+                 else f"module={module}")
         print(f"[trigger_capture] mode={streamer_mode}, ch={channels}, "
-              f"module={module}, {rate_str}")
+              f"{where}, {rate_str}")
         print(f"[trigger_capture] {train_s*1e3:.0f} ms noise training "
               f"+ {time_run:.2f} s capture")
 
@@ -366,11 +389,11 @@ async def trigger_capture(
         result.fast_channels = fast_channels
         await _run_dual(result, host, channels, fast_channels, module,
                         slow_rate, duration_s, hdf5_path,
-                        df_calibrations, verbose)
+                        tuning, verbose, on_noise)
     else:
         await _run_single(result, host, channels, module,
                           streamer_mode, slow_rate, duration_s,
-                          hdf5_path, df_calibrations, verbose)
+                          hdf5_path, tuning, verbose, on_noise)
 
     if verbose:
         print(f"[trigger_capture] {result!r}")
@@ -378,8 +401,8 @@ async def trigger_capture(
 
 
 async def _run_single(result, host, channels, module, streamer_mode,
-                      slow_rate, duration_s, hdf5_path, df_calibrations,
-                      verbose) -> None:
+                      slow_rate, duration_s, hdf5_path, tuning,
+                      verbose, on_noise=None) -> None:
     is_fast = streamer_mode == "fast"
     rate = PFB_SAMPLING_FREQ if is_fast else slow_rate
     stream = StreamResult.for_channels(rate, channels)
@@ -387,11 +410,13 @@ async def _run_single(result, host, channels, module, streamer_mode,
     capture_session = PulseCaptureSession(
         channels=channels, module=module, streamer_mode=streamer_mode,
         sample_rate=rate, hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations,
-        on_pulse=_collector(stream),
+        tuning=tuning,
+        on_pulse=_collector(stream), on_noise=on_noise,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
         **result.config.session_kwargs(rate))
+    if not is_fast:
+        result.slow_time_offset_s = capture_session.time_offset_s
     capture_session.start()
     result.start_time = time.time()
     try:
@@ -416,8 +441,8 @@ async def _run_single(result, host, channels, module, streamer_mode,
 
 
 async def _run_dual(result, host, channels, fast_channels, module,
-                    slow_rate, duration_s, hdf5_path, df_calibrations,
-                    verbose) -> None:
+                    slow_rate, duration_s, hdf5_path, tuning,
+                    verbose, on_noise=None) -> None:
     slow = StreamResult.for_channels(slow_rate, channels)
     fast = StreamResult.for_channels(PFB_SAMPLING_FREQ, fast_channels)
     collectors = {"slow": _collector(slow), "fast": _collector(fast)}
@@ -426,10 +451,10 @@ async def _run_dual(result, host, channels, fast_channels, module,
         channels=channels, module=module, slow_rate=slow_rate,
         fast_rate=PFB_SAMPLING_FREQ, config=result.config,
         fast_channels=fast_channels, hdf5_path=hdf5_path,
-        df_calibrations=df_calibrations,
+        tuning=tuning,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),
-        on_pair=result.pairs.append,
+        on_pair=result.pairs.append, on_noise=on_noise,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None)
     result.slow_time_offset_s = capture_session.slow_time_offset_s

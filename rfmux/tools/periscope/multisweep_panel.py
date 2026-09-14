@@ -32,7 +32,8 @@ from .tasks import (
     ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
     RunFitsSignals, RunFitsTask)
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for, store
+from rfmux.tuning import (AmplitudeSchedule, collect_amplitude_iterations_for,
+                          store, tuning_rows)
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 # from rfmux.algorithms.measurement import py_get_samples
 
@@ -51,8 +52,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     Can be docked, floated, or tabbed within the main Periscope window.
     """
     
-    # Emitted once a bias is on the air, so df units have a scale to read by.
-    df_calibration_ready = pyqtSignal(int, dict)  # module, {channel: df_calibration}
+    # Emitted once a bias is on the air: the tuning rows the main window
+    # holds, which give df units a scale to read by and travel into a
+    # capture file as each channel's tuning record.
+    tuning_ready = pyqtSignal(int, dict)  # module, {channel: row}
     
     # Signal for session auto-export
     data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
@@ -1147,10 +1150,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _bias_applied(self):
         """The tones are on the air: publish what reads them in hertz."""
         self.apply_bias_btn.setEnabled(True)
-        calibrations = {r.channel: r.bias.df_calibration for r in self.catalog
-                        if r.bias.df_calibration is not None}
-        if calibrations:
-            self.df_calibration_ready.emit(self.target_module, calibrations)
+        rows = tuning_rows(self.catalog)
+        if rows:
+            self.tuning_ready.emit(self.target_module, rows)
         self.bias_data_avail = True
         self.noise_spectrum_btn.setEnabled(True)
         self._show_bias_status("Bias applied")

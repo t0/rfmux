@@ -1445,9 +1445,9 @@ class PeriscopeRuntime:
             # Store panel reference
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows Apply Bias publishes land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if getattr(self, 'session_manager', None) is not None:
@@ -1490,13 +1490,27 @@ class PeriscopeRuntime:
             loop.quit()
     
         fetcher.dac_scales_ready.connect(on_ready)
-        fetcher.finished.connect(fetcher.deleteLater)
     
         fetcher.start()
-        loop.exec_()   # waits until on_ready() calls loop.quit()
+        loop.exec()    # until on_ready() quits it
+        # run() returns after the emit: the thread must have ended
+        # before the fetcher goes out of scope, or Qt aborts.
+        fetcher.wait()
     
-        return dac_scales    
+        return dac_scales
     
+    def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
+        """Browse the sweeps a capture's channels were tuned with.
+
+        Pending: the rows have to become a ``ResonatorCatalog`` and a
+        multisweep container before this panel can draw them, which is the
+        other half of putting the tuning record on the catalog.
+        """
+        self.statusBar().showMessage(
+            f"{name}: a capture's tuning cannot be opened as a multisweep yet",
+            8000)
+        return None
+
     def _create_multisweep_panel_from_loaded_data(self, load_params: dict) -> tuple:
         """
         Create and display a MultisweepPanel from a noise payload.
@@ -1528,17 +1542,20 @@ class PeriscopeRuntime:
                 QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
                 return None, None, None, None
 
-            try: 
-                dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
-            except:
-                QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
-                return
+            if source_type == "capture":
+                dac_scales_for_panel = dict(load_params.get('dac_scales_used') or {})
+            else:
+                try:
+                    dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
+                except:
+                    QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
+                    return
 
-            dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-            dac_scale_for_board = dac_scales_for_panel[target_module]
+                dac_scale_for_mod = load_params['dac_scales_used'][target_module]
+                dac_scale_for_board = dac_scales_for_panel[target_module]
 
-            if dac_scale_for_mod != dac_scale_for_board:
-                QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
+                if dac_scale_for_mod != dac_scale_for_board:
+                    QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
             
             # Check if noise data exists in the loaded file
             has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
@@ -1561,28 +1578,16 @@ class PeriscopeRuntime:
             
             self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
             
-            # Connect df_calibration_ready signal if the method exists
-            if hasattr(panel, 'df_calibration_ready') and hasattr(self, '_handle_df_calibration_ready'):
-                panel.df_calibration_ready.connect(self._handle_df_calibration_ready)
+            # The tuning rows Apply Bias publishes land in the main window
+            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
+                panel.tuning_ready.connect(self._handle_tuning_ready)
             
             # Connect data_ready signal for session auto-export
             if getattr(self, 'session_manager', None) is not None:
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel._hide_progress_bars()
-            
-            # Set NCO frequency based on resonance frequencies
-            reso_frequencies = params.get('resonance_frequencies', [])
-            
-            if reso_frequencies:
-                span_hz = params.get('span_hz', 0)
-                nco_freq = ((min(reso_frequencies) - span_hz/2) + (max(reso_frequencies) + span_hz/2)) / 2
 
-                # Only set NCO frequency if CRS is available (skip in offline mode)
-                if self.crs is not None:
-                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
-                else:
-                    print(f"[Offline] Skipping NCO frequency setup (would set to {nco_freq/1e9:.6f} GHz)")
 
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")

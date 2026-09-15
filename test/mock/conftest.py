@@ -41,12 +41,13 @@ def kerr_model():
     env = m.envelope_parameters()
     i = int(np.argsort(m.resonator_frequencies)[1])
 
-    def cubic(f, amp):
-        Delta = 2 * np.pi * f - env['omega_r'][i]
-        K, kappa = env['K'][i], env['kappa'][i]
+    def cubic(f, amp, j=None):
+        j = i if j is None else j
+        Delta = 2 * np.pi * f - env['omega_r'][j]
+        K, kappa = env['K'][j], env['kappa'][j]
         roots = np.roots([K ** 2, -2 * K * Delta,
                           (kappa / 2) ** 2 + Delta ** 2,
-                          -abs(env['D'][i] * amp) ** 2])
+                          -abs(env['D'][j] * amp) ** 2])
         real = roots[np.abs(roots.imag) < 1e-6 * np.abs(roots).max()].real
         return np.sqrt(np.sort(real[real > 0]))
 

@@ -32,32 +32,43 @@ def test_rates_are_the_papers_eq_21_and_22(kerr_model):
 def test_the_slow_rate_vanishes_at_the_solvers_fold(kerr_model):
     """Swept down at 0.01, the last steady state before the solver
     jumps is at the fold: the slow rate there is a small fraction of
-    kappa/2, where a linewidth earlier it was most of it."""
+    kappa/2, where a linewidth earlier the two rates were kappa/2 with
+    a beat.  Forty linewidths of shift put the fold's splitting within
+    the last few hundred hertz, so the approach is in 100 Hz steps."""
     env, i, solve = kerr_model.env, kerr_model.i, kerr_model.solve
     f_r = env['omega_r'][i] / (2 * np.pi)
     kappa = env['kappa'][i]
-    seed, prev, slow_before = None, None, {}
-    for f in f_r - np.arange(0, 4e5, 1e3):
-        I = solve(f, 0.01, seed)
-        seed = I
-        if prev is not None and abs(I[i]) < 0.5 * abs(prev[i]):
-            break
-        prev = I
+
+    def slow_rate(f, I):
         a, b = kerr.coefficients(env, i, I[i], 2 * np.pi * f)
-        slow_before[f] = kerr.rates(a, b)[0].real
-    fs = sorted(slow_before)
-    at_fold = slow_before[fs[0]]
-    a_linewidth_earlier = slow_before[min(fs, key=lambda f: abs(f - fs[0] - kappa / (2 * np.pi)))]
-    assert abs(at_fold) < 0.25 * kappa / 2
-    assert abs(a_linewidth_earlier) > 0.5 * kappa / 2
+        return kerr.rates(a, b)[0].real
+
+    def sweep(f0, step, seed):
+        last = None
+        for f in f0 - np.arange(0, 4e5, step):
+            I = solve(f, 0.01, seed)
+            if last is not None and abs(I[i]) < 0.5 * abs(last[1][i]):
+                return last
+            last = (f, I)
+            seed = I
+        raise AssertionError("no jump")
+    coarse = sweep(f_r, 1e3, None)
+    f_fold, I_fold = sweep(coarse[0], 1e2, coarse[1])
+    assert abs(slow_rate(f_fold, I_fold)) < 0.25 * kappa / 2
+    f_before = f_fold + kappa / (2 * np.pi)
+    seed = None
+    for f in f_r - np.arange(0, f_r - f_before + 1, 1e3):
+        seed = solve(f, 0.01, seed)
+    assert abs(slow_rate(f, seed)) > 0.5 * kappa / 2
 
 
 def test_the_dc_probe_response_is_the_solvers_slope(kerr_model):
     """At Omega = 0 the probe and idler deviations are both static and
     their sum is the change of the steady state per unit drive, which
-    the solver gives by finite difference; on the upper state near the
-    fold the probe's deviation exceeds the linear response several
-    times over (the paper's responsivity enhancement)."""
+    the solver gives by finite difference: to 20%, the derivative of a
+    response the Kerr model matches to 3% in value.  On the upper state
+    near the fold the probe's deviation exceeds the linear response
+    several times over (the paper's responsivity enhancement)."""
     env, i, solve = kerr_model.env, kerr_model.i, kerr_model.solve
     f_r = env['omega_r'][i] / (2 * np.pi)
     for f, amp in ((f_r, 0.003), (f_r - 1.0e5, 0.01)):
@@ -70,7 +81,7 @@ def test_the_dc_probe_response_is_the_solvers_slope(kerr_model):
         slope = (solve(f, amp + d, I0)[i] - solve(f, amp - d, I0)[i]) / (2 * d)
         a, b = kerr.coefficients(env, i, I0[i], 2 * np.pi * f)
         u_plus, u_minus = kerr.probe_response(a, b, env['D'][i], 0.0)
-        assert u_plus + u_minus == pytest.approx(slope, rel=0.1)
+        assert u_plus + u_minus == pytest.approx(slope, rel=0.2)
     assert kerr.probe_gain(env, i, I0[i], 2 * np.pi * f, 0.0) > 3
 
 

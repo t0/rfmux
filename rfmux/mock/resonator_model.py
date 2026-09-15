@@ -1123,7 +1123,8 @@ class MockResonatorModel:
                 if m5 < j < len(grid) - m5:
                     break
                 span *= 4
-            fine = grid[j] + np.linspace(-1e3, 1e3, 401)
+            step = grid[1] - grid[0]
+            fine = grid[j] + np.linspace(-step, step, 401)
             res_f = (jit_physics.linear_currents(fine, *args)
                      - np.polyval(pI, fine - f_c))
             jf = int(np.argmax(np.abs(res_f)))

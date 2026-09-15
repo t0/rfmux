@@ -22,30 +22,32 @@ def test_the_solver_current_at_a_negligible_drive_is_the_linear_response(kerr_mo
 
 
 def test_the_kerr_cubic_matches_the_solver_on_resonance_and_at_the_fold(kerr_model):
-    """Below bifurcation the cubic's current on resonance is the
-    solver's to a few percent; above it, the cubic's bistable region
-    ends where the solver, swept down, jumps to the low state."""
+    """For every resonator: below bifurcation the cubic's current on
+    resonance is the solver's to a few percent; above it, the cubic's
+    bistable region ends where the solver, swept down, jumps to the
+    low state."""
     km = kerr_model
-    env, i = km.env, km.i
-    f_r = env['omega_r'][i] / (2 * np.pi)
-    assert env['K'][i] < 0                     # a softening nonlinearity
-    assert 1e4 < env['kappa'][i] / (2 * np.pi) < 1e6
-    for amp in (0.001, 0.003):
-        got = abs(km.solve(f_r, amp)[i])
-        assert km.cubic(f_r, amp).max() == pytest.approx(got, rel=0.03)
-    # The solver's jump, sweeping down at 0.01 in 1 kHz steps.
-    seed, prev, jump = None, None, None
-    for f in f_r - np.arange(0, 4e5, 1e3):
-        I = km.solve(f, 0.01, seed)
-        seed = I
-        if prev is not None and abs(I[i]) < 0.5 * abs(prev):
-            jump = f
-            break
-        prev = I[i]
-    assert jump is not None
-    fs = f_r - np.arange(0, 4e5, 1e2)
-    bistable = [f for f in fs if len(km.cubic(f, 0.01)) == 3]
-    assert min(bistable) == pytest.approx(jump, abs=0.03 * (f_r - jump))
+    env = km.env
+    for j in range(len(km.m.mr_lekids)):
+        f_r = env['omega_r'][j] / (2 * np.pi)
+        assert env['K'][j] < 0                 # a softening nonlinearity
+        assert 1e4 < env['kappa'][j] / (2 * np.pi) < 1e6
+        for amp in (0.001, 0.003):
+            got = abs(km.solve(f_r, amp)[j])
+            assert km.cubic(f_r, amp, j).max() == pytest.approx(got, rel=0.03)
+        # The solver's jump, sweeping down at 0.01 in 1 kHz steps.
+        seed, prev, jump = None, None, None
+        for f in f_r - np.arange(0, 4e5, 1e3):
+            I = km.solve(f, 0.01, seed)
+            seed = I
+            if prev is not None and abs(I[j]) < 0.5 * abs(prev):
+                jump = f
+                break
+            prev = I[j]
+        assert jump is not None
+        fs = f_r - np.arange(0, 4e5, 1e2)
+        bistable = [f for f in fs if len(km.cubic(f, 0.01, j)) == 3]
+        assert min(bistable) == pytest.approx(jump, abs=0.03 * (f_r - jump))
 
 
 def test_the_output_coupling_reproduces_the_dip(kerr_model):

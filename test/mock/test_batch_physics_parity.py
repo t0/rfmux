@@ -131,18 +131,18 @@ def test_batch_paths_agree_with_many_coupled_channels(pulse_time):
     assert stats[0] == stats[1]
 
 
-def test_the_solver_takes_r_as_a_constant_of_the_generation():
-    """The QP state enters a solve through the base Lk alone; R stays
-    at its generation value (QP only perturbs it as noise, after the
-    solve), which is what lets converge_tones take one R for every run.
-    Should R ever follow the QP state, the kernel needs R per run."""
+def test_a_kept_state_carries_the_r_of_its_instant():
+    """A pulse raises the QP density, and with it R as well as Lk: the
+    state kept for each QP key holds the R of that instant, so a pulse
+    moves the dissipation quadrature and not only the frequency."""
     crs, m = _model(11, "hoisted", pulses=True)
     R0 = np.array([lk.R for lk in m.mr_lekids])
     _run(crs, m, 40, 7)
-    assert np.array_equal(m.R_array, R0)
-    for ts in m._tone_states.values():
-        for _, R, _, _ in ts.runs.values():
-            assert np.array_equal(R, R0)
+    seen = {tuple(R) for ts in m._tone_states.values()
+            for _, R, _, _ in ts.runs.values()}
+    assert len(seen) > 1
+    assert all(np.all(np.asarray(R) >= R0) for R in seen)
+    assert any(np.any(np.asarray(R) > R0) for R in seen)
 
 
 def test_converge_tones_chunks_agree_with_one_call(monkeypatch):
@@ -155,3 +155,20 @@ def test_converge_tones_chunks_agree_with_one_call(monkeypatch):
     crs, m = _model(11, "hoisted", pulses=True)
     chunked = _run(crs, m, 40, 7)
     assert np.array_equal(whole, chunked)
+
+
+def test_a_pulse_makes_the_dip_shallower():
+    """More quasiparticles mean more loss: the swept dip of a resonator
+    with a pulse in flight is shallower than at rest, as well as moved
+    down in frequency."""
+    crs, m = _model(3, "hoisted", pulses=False)
+    i = int(np.argsort(m.resonator_frequencies)[1])
+    fgen = float(m.resonator_frequencies[i])
+    grid = np.linspace(fgen - 3e6, fgen + 3e6, 3001)
+    rest = m.s21_sweep(grid, 1e-4)
+    m.add_pulse_event(i, 0.5, amplitude=3.0)
+    m.update_qp_densities_for_time(0.5 + 2e-6)
+    pulsed = m.s21_sweep(grid, 1e-4)
+    assert rest.min() < 0.9, "no dip on the grid"
+    assert pulsed.min() > rest.min() + 0.01
+    assert grid[np.argmin(pulsed)] < grid[np.argmin(rest)]

@@ -948,13 +948,13 @@ class MockResonatorModel:
                 self._nqp_state_noise = self._compute_nqp_state(t)
                 self._nqp_state_t = t
             self._ensure_arrays()
-            base_Lk = self._base_arrays()[0]
+            base_Lk, base_R, _ = self._base_arrays()
             C, Cc = self.C_array, self.Cc_array
             k0 = self.mr_lekids[0]
             out = np.empty(len(frequencies))
             for i, f in enumerate(frequencies):
                 f = float(f)
-                L, R, _ = self._converge(f, amplitude, base_Lk)
+                L, R, _ = self._converge(f, amplitude, base_Lk, base_R)
                 out[i] = abs(jit_physics.compute_s21_parallel(
                     fc=f, Vin=amplitude, L_array=L, C_array=C, R_array=R,
                     Cc_array=Cc, ZLNA=complex(k0.ZLNA), GLNA=k0.GLNA,
@@ -1002,11 +1002,13 @@ class MockResonatorModel:
             return False
         return not self._states_apart(ts.currents, currents)
 
-    def _solve_runs(self, freqs, amps, tone_states, base_Lk_runs, run_start):
+    def _solve_runs(self, freqs, amps, tone_states, base_Lk_runs,
+                    base_R_runs, run_start):
         """converge_tones for the tones at *freqs* and *amps*, tone k's
-        QP states being run_start[k]:run_start[k+1] of *base_Lk_runs*,
-        each seeded from the state its _ToneState holds and leaving it
-        at its last run's.  Returns (L, currents), one row per run."""
+        QP states being run_start[k]:run_start[k+1] of *base_Lk_runs*
+        and *base_R_runs*, each seeded from the state its _ToneState
+        holds and leaving it at its last run's.  Returns (L, currents),
+        one row per run."""
         self._ensure_arrays()
         n = len(self.mr_lekids)
         T = len(freqs)
@@ -1020,7 +1022,7 @@ class MockResonatorModel:
         k0 = self.mr_lekids[0]
         L, I, passes = jit_physics.converge_tones(
             freqs, amps, has_seed, seed_f, seeds, run_start, base_Lk_runs,
-            self.R_array, self.C_array, self.Cc_array, self._base_arrays()[2],
+            base_R_runs, self.C_array, self.Cc_array, self._base_arrays()[2],
             self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
             self.Istar, phys.get('convergence_tolerance', 1e-9), 500,
             phys.get('hysteresis_follow_hz', 1000.0) or 0.0,
@@ -1032,13 +1034,15 @@ class MockResonatorModel:
         self._solver_passes = getattr(self, '_solver_passes', 0) + int(passes.sum())
         return L, I
 
-    def _converge(self, frequency, amplitude, base_Lk, tone=None):
+    def _converge(self, frequency, amplitude, base_Lk, base_R, tone=None):
         """One tone at one QP state: converge_tones with a single run.
         Returns (L, R, currents)."""
         ts = self._tone_state(tone, frequency)
+        base_R = np.ascontiguousarray(base_R, dtype=np.float64)
         L, I = self._solve_runs([frequency], [amplitude], [ts],
-                                np.asarray(base_Lk)[None, :], [0, 1])
-        return L[0], self.R_array, I[0]
+                                np.asarray(base_Lk)[None, :],
+                                base_R[None, :], [0, 1])
+        return L[0], base_R, I[0]
 
     def update_lekids_for_current(self, frequency, amplitude, tone=None):
         """
@@ -1060,8 +1064,9 @@ class MockResonatorModel:
         - 1e-3: Ultra fast (for many channels)
         """
         self._ensure_arrays()
-        base_Lk, _, base_Lg = self._base_arrays()
-        L, R, currents = self._converge(frequency, amplitude, base_Lk, tone)
+        base_Lk, base_R, base_Lg = self._base_arrays()
+        L, R, currents = self._converge(frequency, amplitude, base_Lk, base_R,
+                                        tone)
         # L = Lk + Lg + L_junk; only Lk moves with the current.
         Lk = L - base_Lg - self.L_junk_array
         self.L_array, self.R_array, self.Lk_array = L, R, Lk
@@ -1899,13 +1904,15 @@ class MockResonatorModel:
                 [tones[k]['amplitude'] for k, _, _ in chains],
                 [tones[k]['ts'] for k, _, _ in chains],
                 np.concatenate([Lk_nqp[tones[k]['starts'][a:a + c]]
+                                for k, a, c in chains]),
+                np.concatenate([R_nqp[tones[k]['starts'][a:a + c]]
                                 for k, a, c in chains]), run_start)
             for (k, a, c), r0 in zip(chains, run_start[:-1]):
                 tone = tones[k]
                 for i in range(c):
                     L = L_runs[r0 + i]
-                    entry = (L, self.R_array, L - base_Lg - self.L_junk_array,
-                             I_runs[r0 + i])
+                    entry = (L, R_nqp[tones[k]['starts'][a + i]],
+                             L - base_Lg - self.L_junk_array, I_runs[r0 + i])
                     self._keep_run(tone['ts'], tone['run_keys'][a + i], entry)
                     tone['states'].append(entry)
                     misses.add((int(tone['starts'][a + i]), k))

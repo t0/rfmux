@@ -226,6 +226,8 @@ def convert_dbm_to_volts(dbm, termination=TERMINATION):
 def convert_dacunits_to_dbm(amplitude, dac_scale_dbm):
     """The power a tone in normalized DAC units drives, in dBm.
 
+    TODO: Account for carrier-frequency dependence of the DAC output power.
+
     Parameters
     ----------
 
@@ -245,6 +247,8 @@ def convert_dacunits_to_dbm(amplitude, dac_scale_dbm):
 
 def convert_dacunits_to_volts(amplitude, dac_scale_dbm, termination=TERMINATION):
     """The voltage a tone in normalized DAC units drives.
+
+    TODO: Account for carrier-frequency dependence of the DAC output power.
 
     Parameters
     ----------

@@ -1,18 +1,6 @@
-"""The tuning flow, driven end to end against the standard simulated array.
+"""Test multisweep, bias finding, and bias application on the standard mock array.
 
-Everything else in ``test/tuning`` works on synthetic traces. This module is
-where the drivers actually run: one multisweep over an amplitude schedule on the
-standard array (``rfmux.mock.standard_array``), then bias finding on what came
-back, then biasing the board with the result. The array and the schedule are
-built once for the module — the schedule is the expensive step, about half a
-minute on the simulator — and every test reads the same measurement.
-
-These are the contracts the pre-merge ``test/algorithms`` flow tests pinned,
-restated for this branch's shape: a sweep is a measurement and carries no
-verdicts; the bias point, its amplitude and its calibration live on the
-catalog the bias finder returns; and the board plays what the catalog says.
-The nonlinear-fit checks that used to read the simulator's model directly read
-the same sweeps instead.
+The module shares one measured amplitude schedule across its tests.
 """
 
 import warnings

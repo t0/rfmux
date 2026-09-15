@@ -1,15 +1,4 @@
-"""Behaviour of the resonator fitting layer.
-
-Pure — no board, no driver. Synthetic resonators in, fits written beside them.
-The emphasis is on the contract rather than the arithmetic: fits land under
-``fits`` keyed by model, nothing derivable is stored, a fit that fails says
-why, running one model leaves the others alone, and the selection arguments
-pick out the sweeps a caller means.
-
-The arithmetic gets one test each — a resonator planted at a known fr and Qr
-has to come back — because a fitter that recovers nothing is worth catching
-here rather than on a cryostat.
-"""
+"""Test fit storage, selection, failure reporting, and parameter recovery."""
 
 import numpy as np
 import pytest
@@ -210,7 +199,47 @@ def test_the_skewed_fit_recovers_a_planted_resonator():
     assert params["fr"] == pytest.approx(FR, rel=1e-6)
     assert params["Qr"] == pytest.approx(QR, rel=0.05)
     assert params["Qc"] >= params["Qr"]  # or the resonator would be unphysical
-    assert set(errors) == {"fr", "Qr", "Qcre", "Qcim", "A"}
+    assert set(errors) == set(params)
+    assert all(np.isfinite(error) and error > 0 for error in errors.values())
+
+
+@pytest.mark.parametrize("qcim", [0.0, 5000.0, -5000.0])
+def test_skewed_derived_errors_include_parameter_correlations(monkeypatch, qcim):
+    fitted = np.array([FR, QR, 20000.0, qcim, 1.0])
+    factor = np.array([[20., 0., 0.], [10., 30., 0.], [-5., 8., 15.]])
+    covariance = np.eye(5)
+    covariance[1:4, 1:4] = factor @ factor.T
+    monkeypatch.setattr(
+        "rfmux.tuning.fits.curve_fit", lambda *a, **kw: (fitted, covariance)
+    )
+    frequencies, iq = a_resonator()
+    params, errors = fit_skewed(frequencies, iq)
+
+    def derived(qs):
+        qr, real, imag = qs
+        qc = (real**2 + imag**2) / real
+        return np.array([qc, 1 / (1 / qr - 1 / qc)])
+
+    qs = fitted[1:4]
+    jacobian = np.column_stack([
+        (derived(qs + delta) - derived(qs - delta)) / 0.02
+        for delta in np.eye(3) * 0.01
+    ])
+    expected = np.sqrt(np.diag(jacobian @ covariance[1:4, 1:4] @ jacobian.T))
+    assert [params["Qc"], params["Qi"]] == pytest.approx(derived(qs))
+    assert [errors["Qc"], errors["Qi"]] == pytest.approx(expected)
+
+
+def test_skewed_lossless_qi_has_infinite_uncertainty(monkeypatch):
+    monkeypatch.setattr(
+        "rfmux.tuning.fits.curve_fit",
+        lambda *a, **kw: (np.array([FR, QR, QR, 0., 1.]), np.eye(5)),
+    )
+    params, errors = fit_skewed(*a_resonator())
+
+    assert params["Qi"] == np.inf
+    assert errors["Qi"] == np.inf
+    assert errors["Qc"] == pytest.approx(1.0)
 
 
 def test_the_nonlinear_fit_recovers_a_planted_resonator_and_its_nonlinearity():

@@ -1,19 +1,7 @@
-"""Marking the Periscope-era tuning path as deprecated, in one place.
+"""Deprecation warnings for legacy tuning functions.
 
-``bias_kids``, ``fitting``, ``fitting_nonlinear`` and ``df_calibration`` are
-the tuning flow as Periscope still drives it: dict-walking analysis over the
-pre-schema-2 multisweep shape, with verdicts written onto sweep entries. The
-current flow is :mod:`rfmux.tuning` (analysis over saved sweeps, results on a
-:class:`~rfmux.core.resonators.ResonatorCatalog`) and
-:func:`rfmux.algorithms.operation.apply_bias.apply_bias` (the one board
-operation). The old modules stay until Periscope is ported, and every public
-entry point in them is wrapped with :func:`deprecated` so that reaching for
-one — from a port in progress, say — announces itself and names the
-replacement.
-
-The warning is a ``DeprecationWarning``, which Python shows from ``__main__``
-and under pytest and hides from library code, so Periscope's console is not
-flooded while it is still the caller.
+New tuning code uses :mod:`rfmux.tuning` for analysis and ``crs.apply_bias``
+for programming tones.
 """
 
 from __future__ import annotations
@@ -34,19 +22,11 @@ LEGACY_BANNER = (
 
 
 def deprecated(replacement: str, *, note: str | None = None):
-    """Wrap a legacy function so calling it warns and names *replacement*.
+    """Warn on calls to a legacy sync or async function.
 
-    Works on coroutine functions and plain ones. The wrapper keeps the
-    original's name, signature and docstring (with a ``Deprecated.`` line put
-    in front), so ``@macro`` registration, ``help()`` and the tests see the
-    same function they always did.
-
-    Args:
-        replacement: what to use instead, as the reader should type it —
-            ``"rfmux.tuning.find_bias_points + crs.apply_bias"``. Say
-            ``"nothing yet"`` and explain in *note* when there is no
-            replacement by decision.
-        note: one more sentence for the warning and the docstring.
+    Preserves function metadata and prepends a deprecation notice to its
+    docstring. ``replacement`` names the recommended API; ``note`` adds an
+    optional explanation to both the warning and docstring.
     """
 
     def decorate(func):

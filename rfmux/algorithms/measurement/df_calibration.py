@@ -1,26 +1,7 @@
-"""
-**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
-ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
-here warns on call and names its replacement (see ``_legacy.py``).
+"""Compute and measure calibrations for legacy tuning entries.
 
-The df calibration and bias point of a resonance, from the fit its sweep
-carries.
-
-The calibration is the inverse of the fitted resonator model's slope at
-the bias frequency: multiply IQ in volts by it to get frequency shift
-+ j dissipation, in hertz.  ``bias_kids`` works from these helpers: it
-gives every sweep the fit it lacks (``ensure_fits``), reads the bias
-point off the fitted curve (``bias_frequency_from_fit``), corrects its
-stepped-tone measurement for the curve's curvature
-(``step_slope_correction``) and takes the fit's own calibration
-(``df_calibration_for_entry``) as the fallback and the cross-check.
-
-``measure_df_calibrations`` is the standalone measurement: it sweeps a
-narrow span around where each channel is biased, fits the same model
-and inverts its slope, falling back to a spline through the points when
-no fit is usable.  It runs against a board or the simulator with the
-same code; a simulated board has no calibration of its own to hand out.
-Sweeping moves every channel's frequency and puts it back.
+Deprecated: use :mod:`rfmux.tuning` for current sweep results. Public legacy
+entry points warn with their replacements.
 """
 
 import warnings

@@ -1,14 +1,6 @@
-"""What a tab drawing fits draws: which model, and over which sweeps.
+"""Select the fit model and amplitude steps displayed by a tab.
 
-A view control rather than a fit setting, so it sits in the tab it changes
-instead of in the fitters' settings window. The models on offer are the ones
-the sweeps carry fits for and the amplitudes are the steps the measurement
-walked, so the multisweep panel says what both are; the bias step is among
-them once something has chosen one. The Fit Results and Fit Histograms tabs
-each have one, chosen independently and each persisting across Periscope
-sessions under its own *name*, through
-:mod:`~rfmux.tools.periscope.settings`. The Detector Digest has the model
-half alone: that page is about one drive, so it has no drive to choose.
+Each toolbar saves its choices under its own settings name.
 """
 
 from __future__ import annotations

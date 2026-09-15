@@ -1,10 +1,7 @@
-"""
-**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
-ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
-here warns on call and names its replacement (see ``_legacy.py``).
+"""Bias KIDs from legacy multisweep dictionaries.
 
-bias_kids: A measurement algorithm for biasing KIDs at their optimal operating points
-based on multisweep characterization data.
+Deprecated: use :mod:`rfmux.tuning` for current sweep results. Public legacy
+entry points warn with their replacements.
 """
 
 import numpy as np

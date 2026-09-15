@@ -1,10 +1,4 @@
-"""A measurement that was biased arrives biased.
-
-``find_bias_points`` leaves its report in the block, so the file carries
-both the answer and the tuned catalog. Loading it must read them back:
-otherwise Apply Bias on a loaded session parks tones from the untuned
-catalog and publishes rows with no df calibration.
-"""
+"""Test restoration of the tuned catalog and calibration from saved bias reports."""
 
 import numpy as np
 import pytest

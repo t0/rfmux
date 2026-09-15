@@ -1,20 +1,8 @@
-"""The standard simulated array: one reproducible set of resonators for tests
-and notebooks to share.
+"""Build a reproducible simulated array for tests and notebooks.
 
-Every test that drives a measurement against the simulator has to build an
-array first, and every one that builds its own is a test about a different
-array. This module fixes one: a small, seeded array with the simulator's
-default physics and noise except for a warmer bath (Q near 5e4 rather than
-3e5, so the resonances are resolvable on the default sweep grids), biased by
-the simulator itself so a caller can go straight to sweeping. The tests in ``test/tuning/`` and the notebook that
-characterises the array, ``test/notebooks/test_standard_mock_array.md``, all
-use it through :func:`standard_array`; a test that needs something else (noise
-off, a bigger array) passes ``overrides`` and says so in its name.
-
-The configuration is a plain dict so a notebook can print it, and the builder
-is a coroutine because that is what a CRS is driven with. Nothing here streams
-UDP: the array is served over RPC alone, which keeps it in the quick test tier
-(see ``test/README.md``).
+:func:`standard_array` uses a fixed seed and a warmer bath so resonances are
+resolved by the default sweep grids. Pass ``overrides`` to change the config.
+The server uses RPC only; it does not stream UDP.
 """
 
 from __future__ import annotations

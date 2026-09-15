@@ -1,12 +1,4 @@
-"""What the multisweep dialog hands the task.
-
-The dialog is a view over ``crs.multisweep``'s own arguments: the amplitude
-group builds an ``AmplitudeSchedule`` through the constructor each radio names,
-and what the dialog emits is what the driver takes. It emits nothing else -- the
-Bias Frequency Method combo, the Rotate Saved Data checkbox, the two fit
-checkboxes and the fit-frequency option have all gone, because bias frequency
-and fits are analyses run on their own buttons.
-"""
+"""Test that the multisweep dialog emits valid driver arguments and schedules."""
 
 import inspect
 

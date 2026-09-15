@@ -1,13 +1,6 @@
-"""The array's fitted parameters, in aggregate.
+"""Plot fitted frequencies and parameter histograms across the array.
 
-The Fit Results tab shows one resonator at a time; this shows all of them at
-once, which is the view that says whether an array is uniform, where its
-outliers are, and what raising the drive did to it. One scatter of ``fr``
-in ascending frequency order, and a histogram of each parameter worth binning.
-
-Everything drawn comes from :func:`~rfmux.tuning.fits.collect_fit_params`, so
-a notebook makes the same figures from the same rows. The tab holds no data of
-its own -- only which model and which amplitudes it is showing.
+Rows come from ``rfmux.tuning.collect_fit_params``.
 """
 
 from __future__ import annotations

@@ -1,10 +1,4 @@
-"""
-Helper functions for rendering per-resonator grid plots in multisweep panels.
-
-The grids render what ``multisweep`` returned: a trace is one of its sweep
-entries, read here and not copied. The caller says which resonators to draw and
-hands over their sweeps; everything on a subplot comes off the entry.
-"""
+"""Render per-resonator grids from multisweep entries."""
 
 import weakref
 

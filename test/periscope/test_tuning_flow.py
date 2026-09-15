@@ -1,16 +1,6 @@
-"""Periscope's tuning flow, driven against the standard simulated array.
+"""Exercise Periscope tuning tasks and drivers against the standard mock array.
 
-The tasks are the real tasks, the drivers are the real drivers, and the board is
-``rfmux.mock.standard_array`` served over RPC -- nothing on the data path is
-mocked, so a break in Periscope's calls into ``rfmux.tuning`` shows up here as a
-failure rather than as a mock that happily accepts anything.
-
-A step the port has not reached yet is marked ``xfail(strict=True)``: it says
-what is owed, it keeps the suite green until that is delivered, and it turns
-into a failure the moment a stage makes it pass, which is the reminder to drop
-the marker. Each stage of ``periscope_port_roadmap.md`` adds its step here.
-
-The array is served over RPC alone -- no UDP -- so this runs in the quick tier.
+The server uses RPC without UDP, so these tests run in the quick tier.
 """
 
 import asyncio

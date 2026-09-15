@@ -1,10 +1,4 @@
-"""The resonance finder's settings panel: what it sends, and what it keeps.
-
-A parameter the panel offers and the finder does not accept is a TypeError at
-the end of a network analysis. A default that drifts from the library's is a
-GUI that quietly searches differently from a notebook over the same trace.
-Nothing but these tests checks either.
-"""
+"""Keep finder settings, defaults, and emitted arguments aligned with the API."""
 
 import inspect
 

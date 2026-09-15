@@ -1,12 +1,4 @@
-"""Behaviour of the pure half of the multi-amplitude multisweep.
-
-Two ends of one contract: AmplitudeSchedule deciding what each iteration probes
-at, and the packing and readers deciding what comes back. Pure — no board, no
-driver. The emphasis is on what the driver and a Periscope dialog rely on: a
-step is one amplitude, amplitudes come back keyed by name, everything that would
-fail on the hardware fails here instead, and nothing has to be stored twice to
-be readable.
-"""
+"""Test amplitude schedules and result readers without hardware."""
 
 import math
 import pickle

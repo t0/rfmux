@@ -1,27 +1,7 @@
-"""
-**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
-ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
-here warns on call and names its replacement (see ``_legacy.py``).
+"""Fit and analyze legacy multisweep dictionaries.
 
-The legacy dict-walking analysis surface for multisweep data.
-
-The resonance finder and the resonator fitters that used to live here have
-moved to :mod:`rfmux.tuning.find_resonances` and :mod:`rfmux.tuning.fits`.
-They are analysis over two arrays rather than board operations, so they belong
-with the other pure layers, and they are re-exported below so callers reaching
-for ``fitting.s21_skewed`` still find it.
-
-What is left in this module is the old *dict-walking* API — the functions that
-take a whole multisweep return and write their results back into it. Every one
-of them reads the pre-schema-2 contract: ``iq_complex``,
-``original_center_frequency``, integer keys. ``multisweep`` returns
-``iq_counts`` keyed by resonator name and has done since the sweep stopped
-doing anything but measure, so these work on files saved before that change and
-on nothing else.
-
-For sweeps taken since, use :func:`rfmux.tuning.fit_sweeps`, which reads
-``iq_counts`` and writes each model's results into the sweep entry's ``fits``
-subdict rather than flat beside the measurement.
+Deprecated: use :mod:`rfmux.tuning` for current sweep results. Public legacy
+entry points warn with their replacements.
 """
 
 import numpy as np

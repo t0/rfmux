@@ -1,83 +1,12 @@
-"""
-Fit resonator models to sweeps that have already been measured.
+"""Fit skewed, nonlinear, and circle models to measured resonator sweeps.
 
-Fitting is a separate step, run by hand on data that exists::
+:func:`fit_sweeps` takes one module's multisweep result, writes results under
+each entry's ``fits[model]``, and returns a :class:`FitReport`. Use the model
+readers below to reconstruct curves from the stored parameters.
 
-    sweeps = await crs.multisweep(catalog)
-
-    module_sweeps = sweeps[crs.module[2].index()]
-    report = fit_sweeps(module_sweeps)
-    module_sweeps["results"][0]["upward"]["BOTA"]["fits"]["skewed"]["params"]["Qr"]
-
-A sweep result is keyed by module, and everything here takes *one module's*
-value out of it. Stepping into the module you mean is the caller's job: a
-``module=`` argument would put a coordinate in every signature that the data
-structure already carries, and would make the one-module script differ from the
-loop that handles four.
-
-Nothing measures on your behalf and no sweep fits itself on the way past. A
-sweep that quietly fitted would be a sweep whose output nobody can reason
-about — the same argument that emptied ``multisweep`` of its side jobs. If a
-driver should ever fit as it goes, it will do it by calling this module with
-the arguments you would have passed yourself.
-
-Three models, run independently, each named for what it is:
-
-``skewed``
-    A skewed Lorentzian fitted to ``|S21|``. Gives ``fr``, ``Qr``, ``Qc``,
-    ``Qi`` — the numbers you want off a linear resonator.
-``nonlinear``
-    The CITKID-style nonlinear resonator model, fitted to the complex trace
-    after the readout gain is divided out. Adds ``a``, the nonlinearity that
-    says how close to bifurcation the probe tone has driven the resonator.
-``circle``
-    Pratt's circle fit to the IQ loop. Two numbers, a centre and a radius,
-    and the thing every IQ plot wants to subtract.
-
-Where the results go
---------------------
-Into the sweep entry that was fitted, under ``fits``, keyed by model::
-
-    entry["fits"]["skewed"] = {"params": {...}, "errors": {...},
-                               "failed_because": None}
-
-The entry is written in place — the fits belong beside the data they describe,
-and a fit detached from its sweep is a set of numbers about nothing.
-:func:`fit_sweeps` returns a :class:`FitReport` saying what happened, not a
-copy of the data.
-
-Only what was *learned* is stored: parameters, their errors, the nonlinear
-fit's residual and gain. Not the model curves, not the gain-corrected trace,
-not the centred loop — every one of those is a function of the stored numbers
-and the sweep's own arrays, and storing an array that can be recomputed is how
-a file comes to disagree with itself. The readers below rebuild them:
-:func:`skewed_model_magnitude`, :func:`nonlinear_model_iq`,
-:func:`gain_corrected_iq`, :func:`centered_iq`.
-
-Nor are the settings stored per entry: they would be identical on every one of
-a thousand resonators. They come back on the report, and recording them
-alongside the data is the output folder's job.
-
-Failure
--------
-``failed_because`` is a sentence or ``None``, mirroring
-:class:`~rfmux.tuning.find_resonances.ResonanceCandidate`. A fitter that
-returns fewer answers than there are resonators is much harder to debug than
-one that says which resonator it gave up on and why, so nothing here warns
-into the void: the reason travels with the fit.
-
-``params`` are present whenever the fit *converged*, which is not the same as
-succeeding. The nonlinear fit can converge on something that does not describe
-the data; when its residual is above *max_residual* the parameters are kept and
-``failed_because`` says so, because what it converged to is usually the clue.
-
-Attribution
------------
-The nonlinear model and its fitter are adapted from citkid
-(https://github.com/loganfoote/citkid), Apache License 2.0. As in the original
-rfmux port: no Numba, no cable-delay term (rfmux handles delay separately), and
-the gain is estimated from the sweep's own frequency extrema rather than from a
-separate gain scan.
+The nonlinear model and fitter are adapted from citkid
+(https://github.com/loganfoote/citkid), Apache License 2.0. This version omits
+Numba and cable delay, and estimates gain from the sweep's frequency extrema.
 """
 
 from __future__ import annotations
@@ -141,7 +70,7 @@ NONLINEAR_PARAMS = ("fr", "Qr", "amp", "phi", "a", "i0", "q0")
 BIFURCATION_A = 4 * np.sqrt(3) / 9
 
 #: Parameters of the skewed Lorentzian. ``Qc`` and ``Qi`` are derived from the
-#: other three Qs rather than fitted, which is why they have no error below.
+#: other three Qs; their errors propagate the fitted Qs' full covariance.
 SKEWED_PARAMS = ("fr", "Qr", "Qc", "Qi", "Qcre", "Qcim", "A")
 SKEWED_FITTED_PARAMS = ("fr", "Qr", "Qcre", "Qcim", "A")
 
@@ -163,17 +92,10 @@ class FitFailed(Exception):
 
 @contextmanager
 def _quiet_optimizer():
-    """Swallow scipy's ``OptimizeWarning`` for the duration of a batch.
+    """Suppress covariance warnings while a batch runs.
 
-    It fires for an unestimable covariance and for hitting the iteration cap —
-    both things this module already reports, as an error of ``inf``, a
-    residual, or a ``failed_because``. Left alone it warns once per resonator,
-    which on a full array buries the fits that actually went wrong.
-
-    Entered once, in :func:`_fit`, before any worker thread starts, and left
-    after they have all joined. ``warnings`` filters are process-global, so a
-    thread entering this for itself would be racing every other thread's exit;
-    the workers only ever read the filter this sets.
+    Set the process-wide filter before workers start and restore it after
+    they join; per-thread contexts would race when restoring the filters.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", OptimizeWarning)
@@ -338,74 +260,42 @@ def fit_sweeps(
     save=None,
     label=None,
 ) -> FitReport:
-    """Fit resonator models to sweeps that have already been measured.
+    """Fit selected sweeps in one module and write results into each entry.
 
-    Writes each model's results into the sweep entry it fitted, under ``fits``
-    — see the module docstring for what is stored and what is deliberately not.
-    Re-running one model leaves the others' results alone, so fitting the
-    nonlinear model after the skewed one does not throw the skewed one away.
+    Results go under ``entry["fits"][model]`` with ``failed_because`` (None
+    on success). Skewed and nonlinear fits store parameters and errors; circle
+    fits store centre and radius. Nonlinear fits also store gain and residual.
+    A converged fit with excessive residual keeps its parameters
+    and records the failure reason. Rerunning a model replaces only its fits.
 
     Args:
-        sweeps: **one module's** value out of what ``multisweep`` returned —
-            ``sweeps[crs.module[m].index()]``. One amplitude or twenty, the
-            shape is the same, so either is fitted the same way, and the
-            entries are written in place. The whole dict, keyed by module, is
-            refused with a message naming the modules it holds: a report is
-            about one module, and which one is your choice to make.
-        models: which models to run, from :data:`MODELS`. All three by default.
-            ``nonlinear`` is much the most expensive: it is a seven-parameter
-            complex fit run up to three times per sweep, where ``skewed`` is
-            five parameters on the magnitude and ``circle`` is a linear solve.
-            Drop it when you only want Qs.
-        names: which resonators or sections to fit. A single name, an iterable
-            of them, or None for all of them.
-        iterations: which amplitude iterations to fit. A single iteration, an
-            iterable of them, or None for all. A single ``multisweep`` has just
-            iteration 0, so this selects everything or nothing there.
-            :func:`fit_sweeps_at_bias_amplitude` covers the common case of "the
-            iteration where each resonator is actually biased", which is a
-            different iteration per resonator under a relative schedule and so
-            cannot be spelled here.
-        directions: which sweep directions to fit, as for *iterations*.
-        approx_Qr: the skewed fit's initial guess for Qr.
-        normalize: divide each trace by its last point before the skewed fit,
-            so ``A`` comes out near 1 and the model is in units of the
-            off-resonance level. See :func:`skewed_model_magnitude` for what
-            that means when plotting.
-        fr_limit_hz: bound the skewed fit's ``fr`` to within this much of the
-            sweep centre. None (the default) uses 37.5% of the sweep span,
-            which keeps the fit from wandering onto a neighbour that leaked
-            into the edge of the span.
-        fit_nonlinearity: fit the nonlinear model's ``a``. False fixes ``a=0``,
-            i.e. fits a linear resonator with the same seven-parameter machine.
-        n_extrema_points: how many points at each end of the sweep the
-            nonlinear fit averages to estimate the readout gain.
-        max_residual: the nonlinear fit's ceiling for calling a converged fit a
-            good one. Above it the parameters are kept and ``failed_because``
-            says the residual was too high.
-        max_workers: threads to fit on. None uses ``min(4, cpu_count)``. One
-            sweep is one job, so all of its models run on the same thread.
-        progress_callback: called ``(completed, total)`` after each sweep, where
-            *total* counts sweeps and not fits. For a notebook or a GUI that
-            wants a bar; a script can ignore it.
-        save: save the fitted *sweeps* — not the report. The fits went into the
-            sweep entries, so what changed on disk is the sweep, and re-saving
-            it updates the file it was read from rather than leaving a
-            near-identical copy beside it. Sweeps that were never saved get a
-            new file. Defaults to
-            ``rfmux.tuning.store.autosave_enabled()``.
-        label: your name for the file, used only when these sweeps are being
-            written for the first time — a re-save keeps the name the file
-            already has.
+        sweeps: one module's block, ``results[crs.module[m].index()]``.
+        models: model names from :data:`MODELS`; all three by default.
+        names: one resonator name, an iterable, or None for all.
+        iterations: one amplitude-step index, an iterable, or None for all.
+            Use :func:`fit_sweeps_at_bias_amplitude` when each resonator needs
+            a different step.
+        directions: one direction, an iterable, or None for all.
+        approx_Qr: initial Qr estimate for the skewed fit.
+        normalize: divide by the last trace point before the skewed fit.
+            :func:`skewed_model_magnitude` returns this normalized scale.
+        fr_limit_hz: skewed-fit frequency bound around the sweep centre.
+            None uses 37.5% of the sweep span.
+        fit_nonlinearity: fit the nonlinear model's ``a``; False fixes it at 0.
+        n_extrema_points: points at each frequency end used to estimate gain.
+        max_residual: maximum acceptable nonlinear-fit residual.
+        max_workers: worker threads; None uses ``min(4, cpu_count)``.
+        progress_callback: called as ``(completed, total)`` after each sweep.
+        save: save the fitted sweeps to their existing file, or create one.
+            None uses ``store.autosave_enabled()``.
+        label: filename label for a first save; existing filenames are kept.
 
     Returns:
-        FitReport: which fits ran, which worked, and what was asked for.
+        FitReport: fit outcomes and settings. Parameters stay in the sweeps.
 
     Raises:
-        TypeError: for a list of multisweep returns, or a dict that is neither
-            of the two accepted shapes.
-        ValueError: for an unknown model name, or a *names* / *iterations* /
-            *directions* filter that selects nothing.
+        TypeError: input is not a supported module result.
+        ValueError: unknown model or a filter that selects no sweeps.
     """
     sections = _select(
         sweeps, names=names, iterations=iterations, directions=directions
@@ -437,39 +327,25 @@ def fit_sweeps_at_bias_amplitude(
     label=None,
     **settings,
 ) -> FitReport:
-    """Fit each resonator only at the amplitude it is biased at.
+    """Fit each resonator at the measured amplitude nearest its bias amplitude.
 
-    The usual question after a schedule: the other steps were measured to find
-    the operating point, and it is the operating point you want fitted.
-
-    The iteration is resolved per resonator, which is why it cannot be spelled
-    as ``iterations=`` on :func:`fit_sweeps`. A *relative* schedule happens to
-    match every resonator at the same step — the one whose factor is 1.0 — but
-    an absolute one (``ramp``, ``explicit``) over resonators biased at
-    different amplitudes does not, and an explicit *amplitude* parts them
-    either way.
+    Matching is done per resonator using
+    :func:`~rfmux.tuning.sweep_results.find_iteration_matching_amplitude`.
+    There is no maximum matching distance; inspect the chosen amplitudes if
+    closeness matters.
 
     Args:
-        sweeps: what ``multisweep`` returned, for a single module. A call
-            that swept an amplitude schedule, in practice: matching an
-            amplitude means having more than one to choose from.
-        amplitude: the amplitude to match, in normalized DAC units. Defaults to
-            each resonator's own bias amplitude from the catalog snapshot in
-            ``call_params``.
-        names: which resonators to fit, or None for all of them.
-        directions: which sweep directions, or None for all of them.
-        save: save the fitted *sweeps*, as :func:`fit_sweeps`.
-        label: your name for the file, as :func:`fit_sweeps`.
-        **settings: passed to :func:`fit_sweeps` — *models*, *approx_Qr* and
-            the rest.
+        sweeps: one module's multisweep block.
+        amplitude: target amplitude in DAC units, or None for each member's
+            bias amplitude in the recorded catalog.
+        names: resonator names to fit, or None for all.
+        directions: sweep directions to fit, or None for all.
+        save: save the fitted sweeps, as in :func:`fit_sweeps`.
+        label: filename label for a first save.
+        **settings: model and fitter settings, as in :func:`fit_sweeps`.
 
     Returns:
-        FitReport: as :func:`fit_sweeps`.
-
-    Nearest wins, as in
-    :func:`~rfmux.tuning.sweep_results.find_iteration_matching_amplitude`
-    — floats from a schedule rarely compare equal. Check the match with
-    ``get_amplitudes_at_iteration`` if it has to be close.
+        FitReport: outcomes and settings; fits are stored in the sweep entries.
     """
     all_sections = list(_walk(sweeps))
     wanted = _filter_names(names, {s.name for s in all_sections})
@@ -1095,10 +971,10 @@ def fit_skewed(
 
         *params* holds ``fr``, ``Qr``, ``Qc``, ``Qi``, ``Qcre``, ``Qcim`` and
         ``A``. ``Qi`` may be ``inf`` — a lossless resonator is a fit result,
-        not a failure. *errors* holds the five parameters that were actually
-        fitted; ``Qc`` and ``Qi`` are derived from them and propagating an
-        error through that ratio honestly needs a Jacobian, so no number is
-        offered rather than a misleading one.
+        not a failure. *errors* holds one-sigma uncertainties for all seven
+        parameters. ``Qc`` and ``Qi`` use first-order propagation of the full
+        fit covariance, including correlations. The approximation can be poor
+        near vanishing internal loss; ``Qi = inf`` has infinite uncertainty.
 
     Raises:
         FitFailed: if the fit did not converge, or converged on something
@@ -1188,9 +1064,21 @@ def fit_skewed(
         zip(SKEWED_PARAMS, (float(fr), float(Qr), float(Qc), float(Qi),
                             float(Qcre), float(Qcim), float(A)))
     )
-    return params, {
+    errors = {
         name: float(err) for name, err in zip(SKEWED_FITTED_PARAMS, errors)
     }
+    # Qc = Qcre + Qcim**2 / Qcre; Qi = 1 / (1/Qr - 1/Qc).
+    # Gradients are ordered (Qr, Qcre, Qcim), matching the covariance slice.
+    qc_gradient = np.array([0.0, 1 - (Qcim / Qcre)**2, 2 * Qcim / Qcre])
+    q_covariance = covariance[1:4, 1:4]
+    errors["Qc"] = float(np.sqrt(qc_gradient @ q_covariance @ qc_gradient))
+    if np.isinf(Qi):
+        errors["Qi"] = float("inf")
+    else:
+        qi_gradient = -(Qi / Qc)**2 * qc_gradient
+        qi_gradient[0] = (Qi / Qr)**2
+        errors["Qi"] = float(np.sqrt(qi_gradient @ q_covariance @ qi_gradient))
+    return params, errors
 
 
 # ─── The nonlinear resonator model (adapted from citkid) ──────────────────────

@@ -1,9 +1,6 @@
-"""The Network Analysis dialog: a view over ``take_netanal``'s own arguments.
+"""Configure a new network analysis or edit its parameters for a rerun.
 
-One dialog, opened two ways. From the menu it configures a new analysis and
-offers Import and Load, which show a saved file instead of measuring. From a
-panel's Edit Parameters it opens on the analysis that panel ran, with
-``editing=True``, and hands back the arguments for a re-run.
+New-analysis mode also offers Import and Load for existing data.
 """
 
 from .utils import (

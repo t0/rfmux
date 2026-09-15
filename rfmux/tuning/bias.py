@@ -1,125 +1,17 @@
-"""
-Choose an operating point for every resonator, from sweeps already measured.
+"""Choose bias amplitudes, frequencies, and calibrations from measured sweeps.
 
-Bias finding asks two questions about each resonator, in that order:
+:func:`find_bias_points` takes one module's multisweep result and returns a
+:class:`BiasReport` with a new catalog. It also stores the report in the input
+block's ``bias_report`` field. Check ``report.flagged`` before applying the
+catalog with ``crs.apply_bias``.
 
-**Which amplitude?** The one just below where the resonator bifurcates — as
-much probe power as it will take while its sweep still describes a resonance.
-Answering it needs a sweep taken over an ``AmplitudeSchedule``, because "just
-below" is only meaningful against amplitude steps that were actually measured,
-and the answer is one of them.
+The amplitude search selects the measured step below bifurcation. Frequency
+selection and calibration use a sweep at that amplitude. Detector settings
+and fallback rules are documented on the functions below.
 
-**Which frequency, within that sweep?** The sweep centre is only where we
-*looked*; the resonance is wherever it turned out to be, up to half a span
-away.
-
-Each question has more than one defensible method, so each is a small
-dispatch. The amplitude search asks a bifurcation detector about one amplitude
-step at a time and goes back one when it fires; which detector is
-:data:`BIFURCATION_METHODS`. The frequency comes from
-:data:`FREQUENCY_METHODS`. Both work over data — nothing here touches a board,
-so a saved sweep is biased the same way a live one is.
-
-What goes in, what comes out
-----------------------------
-In: **one module's** sweep result, as everything in this package takes it —
-``sweeps[crs.module[m].index()]``, and nothing else. The array being biased is
-the catalog the sweep recorded, because that is the array these sweeps are of;
-there is no argument for a different one, and no way to bias part of what was
-measured. Both would let a report be about a catalog and a set of sweeps that
-were never measured together, which is the one thing a bias point cannot
-survive. To bias a subset, take the subset out of the catalog and sweep it.
-
-A ``multisweep`` that was given no schedule is one amplitude step, which is a
-legitimate thing to bias off if you already know the amplitude; the search then
-has nothing to go back to and says so.
-
-Out: a :class:`BiasReport`, whose ``catalog`` is a **new**
-:class:`~rfmux.core.resonators.ResonatorCatalog` carrying the operating points
-that were found::
-
-    report = find_bias_points(sweeps)
-    report.catalog["BOTA"].bias.frequency_hz
-    await crs.apply_bias(report.catalog)
-
-The report also goes into the sweeps it was found from, as plain builtins,
-under ``sweeps["bias_report"]`` — so an operating point travels with the data
-behind it, and saving updates the sweep's own file rather than leaving a second
-one beside it. ``BiasReport.from_dict(sweeps["bias_report"])`` reads it back.
-One analysis is stored at a time: a second call replaces it, the way re-running
-a fit replaces that model's fit.
-
-Nothing else is modified on the way past: not the catalog that was swept, not
-the sweep entries. A finding describes one analysis of one set of
-sweeps, and two of them side by side — one from the derivative method, one from
-hysteresis — is a comparison worth being able to make. The catalog in the file
-is still the catalog that was swept, and merging is
-the caller's decision.
-
-Every resonator gets a bias point
----------------------------------
-There is no such thing here as a resonator that came back unbiased. The catalog
-and the sweeps go together — they came out of the same file, and the sweeps were
-taken *from* that catalog — so every resonator has the data it needs, and the
-questions above always have an answer. A missing sweep or a missing ``iq_volts``
-means a result that disagrees with itself rather than a property of one
-detector, and it raises rather than being absorbed into a per-resonator result.
-
-What does happen is that an answer turns out to be a **default rather than a
-measurement**. The quietest amplitude measured was already bifurcated, so there
-was nothing below it to fall back to; or neither this run nor the catalog
-establishes a bifurcation amplitude above the chosen drive; or the
-resonance came out so far from the sweep centre that the tone was left where it
-already was instead. Those bias points are usable and are the best the
-measurement supports — but they are not the operating point the analysis set
-out to find, so each one comes back with ``flagged_because`` saying which it
-is. ``report.flagged`` is the list to read before applying anything.
-
-The calibration is measured here too
-------------------------------------
-``dI_df`` and ``dQ_df`` (V/Hz) are evaluated at the chosen frequency, on the
-chosen sweep, in the same step that chooses it — and
-:attr:`~rfmux.core.resonators.BiasPoint.df_calibration`, the Hz/V factor df
-units are read through, derives from them. That is not tidiness: ``BiasPoint``
-is frozen precisely so a tone cannot carry a calibration measured somewhere
-else, so the frequency and its calibration have to arrive together or not at
-all.
-
-The frequency lands on the hardware tone grid on the way in, as every bias
-frequency does, and the derivatives are evaluated *there* rather than at the
-un-quantized peak — the calibration then belongs to the tone that will actually
-be played.
-
-The sweep they were read off goes onto the bias point with them, as
-``bias_sweep`` — the one trace at the chosen amplitude and direction, not the
-schedule around it. It is there so a calibration can be re-derived, checked or
-plotted from the catalog alone, which is what gets carried to the places these
-sweeps do not reach. It is a calibration field like the derivatives are, so
-moving the tone drops it too.
-
-``iq_rotation_deg`` is deliberately left unset. It comes off a timestream
-rather than a sweep, so it is not this module's to measure, and a rotation
-angle measured at the previous tone would not survive the move anyway.
-
-Not ported (yet)
-----------------
-* **The fitted resonance frequency as a bias-frequency method.** The fitting
-  layer next door already produces ``fr``; wiring it in is a fourth entry in
-  :data:`FREQUENCY_METHODS`, which is why the methods take a whole sweep entry
-  rather than two arrays — a fit lives on the entry.
-* **The log-arc-speed variant** of the derivative method, which exists to make
-  a noisy peak stand out. Worth revisiting against real noisy data rather than
-  porting on faith.
-* **The diagnostic arrays** the old implementation wrote onto the selected
-  sweep entry. What is scalar comes back on the report; the arrays are
-  recomputable from the sweep and the settings, and a sweep entry should still
-  read the way it was measured.
-
-Attribution
------------
-The bifurcation-by-derivative test and the max-arc-speed frequency are ported
-from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology), by
-way of ``algorithms/measurement/bias_kids.py``.
+The derivative bifurcation test and max-arc-speed frequency method are adapted
+from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology), via
+``algorithms/measurement/bias_kids.py``.
 """
 
 from __future__ import annotations
@@ -163,16 +55,10 @@ __all__ = [
     "iq_derivatives_at",
 ]
 
-#: How :func:`find_bias_amplitude` decides an amplitude step is bifurcated, and
-#: the default. ``"both"`` runs the other two and takes a step as bifurcated if
-#: either says so, which is the most sensitive of the three and the one to
-#: reach for unless you have a reason not to. It needs both sweep directions,
-#: as ``"hysteresis"`` does; ``"derivative"`` works on one.
+#: "both" detects bifurcation if either detector fires; it needs both directions.
 BIFURCATION_METHODS = ("both", "derivative", "hysteresis")
 
-#: The bifurcation methods that need both sweep directions, because comparing
-#: them is what they do. Checked once per call rather than once per resonator,
-#: and public so a caller can offer only the methods its measurement supports.
+#: Methods requiring upward and downward sweeps.
 NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
 
 #: What :func:`bifurcated_by_hysteresis` compares the two sweep directions in,
@@ -189,25 +75,13 @@ FREQUENCY_METHODS = ("iq_derivative", "minimum")
 #: more than one and the caller did not say.
 PREFERRED_DIRECTION = "upward"
 
-#: What each thing that flags a bias point is called, short enough for a plot
-#: label or a table column. The sentence on a finding says what happened; this
-#: says which of the three it was. :func:`_concern` writes both, from one
-#: branch each, so they cannot come to disagree.
+#: Short flag labels for plots and tables; _concern supplies explanations.
 FLAG_BIFURCATED_AT_QUIETEST = "already bifurcated"
 FLAG_NEVER_BIFURCATED = "No bifurcation observed in this run"
 FLAG_OFF_CENTRE = "freq out of bounds"
 FLAG_KINDS = (FLAG_BIFURCATED_AT_QUIETEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
 
-#: How many samples apart :func:`bifurcated_by_derivative` will accept its
-#: up-spike and down-spike, at most. ``1`` is a jump crossed in a single
-#: frequency bin, which is what a discontinuity looks like when the sweep grid
-#: happens to straddle it cleanly. ``2`` also accepts the case where a sample
-#: landed partway across the jump, so the trace takes two steps to get over it
-#: and the peak in the arc speed is two samples wide instead of one. That is a
-#: property of where the grid fell rather than of the resonator, so refusing it
-#: loses real bifurcations for no reason. Beyond 2 the pattern stops describing
-#: a discontinuity and starts matching the ordinary rise and fall through a
-#: resonance, so this is not a knob.
+#: Allow a jump to cross one or two bins when a sample falls partway across it.
 MAX_SPIKE_SEPARATION = 2
 
 
@@ -215,30 +89,12 @@ MAX_SPIKE_SEPARATION = 2
 
 
 class BifurcationCheck(NamedTuple):
-    """One method's verdict on one amplitude step, and the numbers behind it.
+    """A detector's verdict and the metrics used to reach it.
 
-    Carries what it compared as well as the verdict, because the settings that
-    produce them are knobs a user has to turn against their own array: a
-    detector that only ever says yes or no gives them nothing to turn them by.
-
-    ``metric`` is a dict with one entry per quantity the method examined, each
-    named for what it is. A method that tests more than one thing has more than
-    one entry, so the verdict can be read off the numbers behind it rather than
-    inferred from a single figure standing in for all of them — which is what
-    ``"derivative"``, testing three things, used to do. Which keys appear
-    depends on the method; see the detector for what each means and what units
-    it is in.
-
-    ``threshold`` is the single bar those quantities were held to, in their own
-    units. Clearing it is not on its own a positive verdict: ``"derivative"``
-    reports two prominences and an ``"adjacency"`` flag, and needs all three.
-
-    ``parts`` is empty for a check that came from one test, and holds the
-    constituent checks for one that combined several — ``"both"``, whose
-    ``metric`` is in multiples of each test's own bar so that the two fit on
-    one set of axes. The raw numbers are then in here, each beside the
-    threshold it was actually compared against, which is where to read them
-    from when a threshold is what you are picking.
+    ``metric`` maps quantity names to values; ``threshold`` is their comparison
+    threshold. See each detector for units and conditions. For ``"both"``,
+    metrics are normalized by each detector's threshold and ``parts`` retains
+    the original checks.
     """
 
     method: str
@@ -319,19 +175,11 @@ class AmplitudeChoice(NamedTuple):
 
 @dataclass(frozen=True, slots=True)
 class BiasFinding:
-    """How one resonator's bias point was arrived at.
+    """The selected bias point, checks, and any concern for one resonator.
 
-    The bias point itself is on the report's catalog; this is the working
-    behind it. Every resonator gets one — see the module docstring for why
-    there is no unbiased outcome to represent.
-
-    ``flagged_because`` is a sentence or ``None``. It is set when the answer is
-    a *default* rather than an operating point supported by the current
-    sweeps and the catalog's retained bifurcation observation. Checks and
-    ``bifurcated_at`` describe only this run; flagging also consults the catalog.
-    ``flagged_kind`` is the same thing in a few words, one of
-    :data:`FLAG_KINDS`, for a label or a tally that has no room for the
-    sentence.
+    ``flagged_kind`` groups concerns for plotting; ``flagged_because`` explains
+    the finding. Both are None when no concern was found. Calibration
+    derivatives are in V/Hz at ``frequency_hz``.
     """
 
     name: str
@@ -513,81 +361,46 @@ def find_bias_points(
     save=None,
     label=None,
 ) -> BiasReport:
-    """Find an operating point for every resonator a sweep measured.
+    """Choose a bias point and calibration for each resonator in a multisweep.
 
-    For each one: search the amplitude steps for the one below bifurcation,
-    place the tone inside that step's sweep, and measure the IQ derivatives
-    there. The catalog retains its last observed bifurcation amplitude when
-    this run detects none. A clean sweep below that retained amplitude is
-    not flagged for missing bifurcation; frequency bounds still apply.
-    Findings record this run's observations and the resulting flags. Reset
-    with ``catalog.clear_bifurcations()`` before taking new sweeps.
-    Every resonator gets a bias point; see the module docstring for what
-    ``flagged_because`` means and why there is no unbiased outcome.
+    Reads the catalog recorded in the sweep, leaving it and the measured
+    entries unchanged. Returns a new catalog and stores the report in
+    ``sweeps["bias_report"]``, replacing any previous report.
 
-    The array being biased is the one the sweep recorded — there is no catalog
-    argument. Everything a bias point needs is already in the sweep, the
-    resonators included, and a catalog passed in beside them could only agree
-    with them or disagree.
+    ``report.flagged`` identifies a bifurcated lowest step, a drive with no
+    known bifurcation above it, or a frequency outside ``max_distance_hz``.
+    A prior bifurcation amplitude is retained when this run observes none.
+    Clear it with ``catalog.clear_bifurcations()`` before taking new sweeps.
 
     Args:
-        sweeps: **one module's** value out of what ``multisweep`` returned —
-            ``sweeps[crs.module[m].index()]``. This is the whole input: the
-            resonators to bias are the catalog in its ``call_params``, and
-            everything the new catalog keeps unchanged — names, channels, the
-            module, the separation rule — comes from there.
-            The whole container, keyed by module, is refused: a report is about
-            one module, and which one is your choice to make.
-        amplitude_method: which bifurcation test the amplitude search uses,
-            from :data:`BIFURCATION_METHODS`. The default, ``"both"``, requires
-            the sweeps to have been taken in both directions, and so does
-            ``"hysteresis"`` — a one-direction sweep wants ``"derivative"``,
-            which reads a single trace.
-        frequency_method: where in the chosen sweep the tone goes, from
-            :data:`FREQUENCY_METHODS`.
-        direction: which direction's sweep to measure the bias frequency and
-            the calibration on. None takes ``"upward"`` when it is there, and
-            the only direction there is otherwise. The amplitude search is
-            unaffected — a detector sees every direction of its own step.
+        sweeps: one module's block, ``results[crs.module[m].index()]``.
+        amplitude_method: ``"both"`` (default) and ``"hysteresis"`` require
+            both sweep directions. ``"derivative"`` also works with one.
+        frequency_method: ``"iq_derivative"`` or ``"minimum"``; see
+            :func:`find_bias_frequency`.
+        direction: sweep used for frequency and calibration. None prefers
+            ``"upward"``, otherwise uses the available direction. Amplitude
+            detection still uses all directions required by its method.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
-        noise_gate_factor: passed to :func:`bifurcated_by_derivative` — how far
-            above a sweep's own noise floor a spike has to stand before it
-            counts. Lower it if real bifurcations are being missed on a noisy
-            array; ``0.0`` switches it off, which is what the test did before
-            the gate existed.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
-        compare: passed to :func:`bifurcated_by_hysteresis` — what the two
-            sweep directions are compared in, from
-            :data:`HYSTERESIS_COMPARISONS`.
-        max_distance_hz: how far from the sweep centre a resonance may come
-            out before the answer is disbelieved. Past this, the tone is left
-            where the sweep was centred — the frequency it already had — and
-            the finding is flagged. None, the default, believes anything, which
-            is everything the trace could offer: the answer is a point of the
-            trace, so it is inside the span whatever happens, and this only
-            means something when it is tighter than the span.
-        save: save the *sweeps*, which now carry the report. It goes into
-            ``sweeps["bias_report"]`` either way; this is only whether the file
-            it came from is updated to match. Sweeps that were never saved get
-            a new file. Defaults to
-            ``rfmux.tuning.store.autosave_enabled()``.
-        label: your name for the file, used only when these sweeps are being
-            written for the first time — a re-save keeps the name the file
-            already has.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
+        max_distance_hz: maximum allowed offset from the sweep centre. Beyond
+            it, use the centre and flag the finding. None imposes no limit.
+        save: save the sweeps with the report, updating their existing file
+            or creating one. None uses ``store.autosave_enabled()``.
+        label: filename label for a first save; existing filenames are kept.
 
     Returns:
-        BiasReport: a new catalog carrying the bias points, and one
-        :class:`BiasFinding` per catalog resonator, in bias-frequency order, saying
-        how each was arrived at. The same report, as builtins, is left in
-        ``sweeps["bias_report"]``.
+        BiasReport: new catalog and findings in bias-frequency order. Each
+        bias point carries derivatives in V/Hz at its grid-aligned frequency
+        and the sweep used to compute them. IQ rotation is left unset.
 
     Raises:
-        TypeError: for the whole container rather than one module's result.
-        ValueError: for an unknown method, for ``"hysteresis"`` on a sweep with
-            only one direction, for a *direction* that was not swept, or for a
-            sweep with no catalog recorded in it.
-        KeyError: for a resonator in that catalog the sweeps do not cover,
-            which means a result that disagrees with itself.
+        TypeError: the input is a whole module container.
+        ValueError: a method or direction is invalid, required directions are
+            missing, or the result has no catalog.
+        KeyError: a catalog resonator has no sweep data.
     """
     # Everything the caller could have got wrong about the *whole* call is
     # checked here, once, before a single resonator is analysed. A thousand
@@ -718,10 +531,7 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
     bias = BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude)
     dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
 
-    # Frequency and calibration go on together — BiasPoint is frozen so that a
-    # tone can never carry a calibration measured somewhere else. The trace the
-    # derivatives came off goes on with them, so a catalog carried away from
-    # this file can still show its own calibration's working.
+    # Keep the calibration and its source trace at the quantized tone frequency.
     resonator.bias = replace(
         bias,
         dI_df=dI_df,
@@ -765,21 +575,11 @@ def _concern(
     centre_hz: float,
     max_distance_hz: float | None,
 ) -> tuple[str | None, str | None]:
-    """Why this bias point is worth a second look, or ``(None, None)`` if it
-    looks sound.
+    """Return the first concern as ``(kind, explanation)``, or ``(None, None)``.
 
-    One place, so that "good bias point" means one thing across the module and
-    a reader can see the whole standard at once. Ordered worst first, and only
-    the first concern is reported. A clean sweep below a known bifurcation
-    amplitude passes the amplitude check, even without a new detection.
-
-    Every one of these still produces a usable bias point. What they have in
-    common is that the measurement did not establish the answer, so it is a
-    default that was fallen back to rather than something that was found.
-
-    Returns:
-        tuple: ``(kind, sentence)`` — the kind one of :data:`FLAG_KINDS`, for a
-        label or a tally, and the sentence for a reader.
+    Checks lowest-step bifurcation, missing bifurcation above the chosen
+    amplitude, then frequency bounds. A clean sweep below a retained
+    bifurcation amplitude passes the amplitude check.
     """
     if choice.is_bifurcated_at_bias:
         return FLAG_BIFURCATED_AT_QUIETEST, (
@@ -936,101 +736,32 @@ def bifurcated_by_derivative(
     spike_prominence_factor: float = 0.5,
     noise_gate_factor: float = 50.0,
 ) -> BifurcationCheck:
-    """Is this sweep bifurcated? Ask the jumps in its IQ arc-length speed.
+    """Detect a jump from adjacent positive and negative IQ-speed spikes.
 
-    A bifurcated resonance does not trace a smooth loop: the state jumps, so
-    the IQ trace crosses a gap between one sweep point and the next. Differentiate
-    the arc-length speed along the trace and that shows up as a positive spike
-    with a negative spike immediately after it — up onto the jump, back down off
-    it — which is what this looks for. Two spikes side by side, in that order.
-
-    Working in the *speed* rather than in the trace makes the test insensitive
-    to how deep or how large the loop is; I and Q are each normalized by their
-    own range first, and each difference by the frequency spacing it spans, so
-    what remains is shape.
-
-    A spike has to clear **two** bars, and they ask different questions.
-
-    *spike_prominence_factor* asks whether the spike is large compared to the
-    sweep: it must stand out from its surroundings — scipy's *prominence* — by
-    more than this fraction of the span of the arc-length speed. The factor
-    multiplies, so it reads the way it behaves: the default of 0.5 asks a spike
-    to stand half of the speed's whole range out of its own neighbourhood, and
-    raising it asks for more, which is less sensitive.
-
-    That bar alone cannot tell a jump from noise, because on a sweep with no
-    visible resonance the span *is* noise. The largest excursion of a noisy
-    trace and the range of that trace are both order statistics of the same
-    scatter, so their ratio lands in the same place — around 0.3 to 0.6 for a
-    hundred-point sweep — no matter how quiet the drive was. A bar set as a
-    fraction of the span is a bar that noise clears by construction, which is
-    why the quiet end of an amplitude schedule used to produce false positives
-    that no choice of factor could remove.
-
-    *noise_gate_factor* asks the other question: is this spike bigger than what
-    this trace scatters by anyway? The scatter is measured as the median
-    absolute deviation of the differences, scaled to read like a standard
-    deviation. Median absolute deviation rather than a standard deviation on
-    purpose — a jump puts two large samples into the trace and inflates a
-    standard deviation by so much that the ratio barely moves, whereas a median
-    is untroubled by two outliers among a hundred and goes on describing the
-    noise floor rather than the noise floor plus the signal.
-
-    The default of 50 is where the two populations separate most cleanly on the
-    array this was calibrated against: the largest excursion of a noise-only
-    sweep there stood under 10 median-absolute-deviations, and the weakest real
-    jump stood at 152. Anything from roughly 10 to 150 behaves; below that the
-    quiet steps start returning, and above it real jumps start being missed,
-    which is the more expensive error. Pass ``0.0`` to switch the gate off and
-    get the span bar on its own.
-
-    A trace with no scatter at all — quantized, or constant — has a noise floor
-    of zero, which switches the gate off for that trace rather than dividing by
-    it. There is nothing there for a gate to measure against.
+    I and Q are normalized by their ranges. Point-to-point distance divided
+    by frequency spacing gives the arc speed; its differences reveal jumps.
+    A positive spike must be followed by a negative one within
+    ``MAX_SPIKE_SEPARATION`` samples, with both prominences meeting the
+    threshold. Any usable direction can trigger the verdict.
 
     Args:
-        entries: one amplitude step, ``{direction: entry}``. Every direction
-            present is tested and the step counts as bifurcated if any of them
-            says so — a bifurcated resonator jumps whichever way the sweep
-            runs, so needing both to agree would only lose the one that
-            happened to catch it.
-        spike_prominence_factor: the bar a spike has to clear, as a multiple
-            of the span of the arc-length speed. Larger is less sensitive.
-        noise_gate_factor: the second bar, as a multiple of the trace's own
-            noise floor. Larger is less sensitive; ``0.0`` disables it.
+        entries: one amplitude step, ``{direction: sweep_entry}``.
+        spike_prominence_factor: threshold as a fraction of the arc-speed
+            range. Larger values are less sensitive.
+        noise_gate_factor: threshold as a multiple of the robust noise floor
+            of the speed differences. Larger values are less sensitive;
+            zero disables this gate. See :func:`_noise_floor`.
 
     Returns:
-        BifurcationCheck: with ``threshold`` the bar the spikes had to clear —
-        **the higher of the two**, since both are prominences in the same units
-        and clearing both is clearing the larger — and ``metric`` the three
-        things this test asks about, from one direction:
-
-        ``"positive_spike_prominence"``
-            how far the tallest up-spike stands out of its own neighbourhood.
-            ``0.0`` if the trace has no up-spike at all.
-        ``"negative_spike_prominence"``
-            the same for the tallest down-spike.
-        ``"adjacency"``
-            whether a spike that cleared the bar was followed within
-            :data:`MAX_SPIKE_SEPARATION` samples by a down-spike that also
-            cleared it. Its own condition, with no threshold to compare against.
-
-        The verdict is ``True`` when both prominences clear ``threshold`` *and*
-        ``"adjacency"``, so the three entries say which of those failed. A
-        prominence just under the bar is a factor to lower; two prominences
-        well over it with ``"adjacency"`` false is a jump the pattern-matching
-        missed, which is a different problem. To find out *which* bar was
-        binding, run it again with ``noise_gate_factor=0.0`` and compare the
-        thresholds — or plot them, which is what
-        ``Demos/example_plotting_bias.plot_bifurcation_verdict_map`` is for.
-
-        The direction reported is the one that came closest to bifurcating —
-        one that fired if any did, and otherwise the one that spiked hardest —
-        so the numbers sit beside a verdict they belong to. Every direction is
-        still tested.
+        BifurcationCheck: ``threshold`` is the larger of the range and noise
+        thresholds. Metrics are ``positive_spike_prominence``,
+        ``negative_spike_prominence`` (both in inverse Hz), and ``adjacency``
+        (whether a qualifying pair exists). Missing spikes have prominence
+        zero. Metrics describe a triggering direction if any, otherwise the
+        direction with the largest spike prominence.
 
     Raises:
-        ValueError: if none of the directions holds a usable sweep.
+        ValueError: no direction contains a usable sweep.
     """
     verdict = False
     reported = None  # (rank, metric, threshold) of the closest direction so far
@@ -1041,19 +772,13 @@ def bifurcated_by_derivative(
             continue
 
         jumps = np.diff(speed)
-        # Both bars measure the same thing — a prominence, in the units of
-        # `jumps` — so requiring a spike to clear both is requiring it to clear
-        # whichever is higher, and one number describes the bar it faced.
+        # Both thresholds are prominences in inverse Hz; require the larger.
         prominence_threshold = max(
             float(spike_prominence_factor * (speed.max() - speed.min())),
             float(noise_gate_factor * _noise_floor(jumps)),
         )
 
-        # Every spike with its prominence, then the bar applied as a filter,
-        # rather than asking find_peaks for only the spikes that clear it. The
-        # two select identically, and this way a spike that just missed still
-        # has a prominence to report — which is the number the factor gets
-        # turned by, so it is the one worth having when the answer was no.
+        # Retain below-threshold spikes too, so a missed detection is inspectable.
         up, up_prominence = _spikes(jumps)
         down, down_prominence = _spikes(-jumps)
         cleared_up = up[up_prominence >= prominence_threshold]
@@ -1098,79 +823,24 @@ def bifurcated_by_hysteresis(
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
 ) -> BifurcationCheck:
-    """Is this sweep bifurcated? Ask whether up and down agree.
-
-    A resonator below bifurcation does not care which way it was swept: the
-    upward and downward traces lie on top of each other. Above it, the state
-    jumps at a different frequency going up than coming down, and the two
-    traces part company in between. So the amplitude where they *begin* to
-    differ is the amplitude where bifurcation set in, and this is the test that
-    finds it — no assumption about what a jump looks like, just whether the two
-    passes agree.
-
-    The measure is the largest separation between the two traces anywhere in
-    the sweep, in units of the trace's own scale, so it means the same thing
-    for a deep resonator and a shallow one. Below bifurcation it is a noise
-    figure. Above it, the traces are a good fraction of a resonance apart.
-
-    *compare* is what "apart" is measured in, and the two answer slightly
-    different questions:
-
-    ``"magnitude"`` (the default)
-        The difference between the two ``|S21|`` curves against frequency, in
-        units of the upward sweep's own dip depth. Deliberately blind to phase:
-        a rotation or a delay drift between the passes moves both curves
-        nowhere, so what is left is whether the *depth and position of the dip*
-        depended on which way the sweep ran. That is the thing bifurcation
-        actually does — the two branches carry different transmission — and it
-        is a narrower question than the IQ distance asks. On a real array it is
-        the better-behaved of the two: the branch switch shows up as a narrow
-        spike two to three orders of magnitude above an otherwise flat trace,
-        so the quiet steps sit further below the bar than they do in IQ.
-    ``"iq"``
-        The distance between the two traces on the IQ plane, at matched
-        frequency, in units of the loop's own radius. It sees every way the two
-        passes can differ — which is its strength and its weakness, because
-        phase is the fastest-varying thing across a resonance. A small
-        frequency mis-registration between the passes, or a bit of cable-delay
-        drift between them, slides one trace along the loop and reads as a
-        large separation with no bifurcation anywhere in sight. This was the
-        original comparison.
+    """Detect bifurcation from disagreement between upward and downward sweeps.
 
     Args:
-        entries: one amplitude step, ``{direction: entry}``. Both directions
-            are required — this test *is* the comparison.
-        max_discrepancy: how far apart the traces may be, in the units
-            *compare* measures in, before the step is called bifurcated. The
-            default is a starting point rather than a measured number: on a
-            real array it sits several times above what two agreeing passes
-            leave behind, and an order of magnitude below a resonator that has
-            plainly jumped, which is room enough to be wrong in
-            without changing any confident answer. A *marginal* resonator can
-            still fall under it. Pick it against your own array by reading
-            ``"max_separation"`` across the amplitude steps of a resonator that
-            is known to bifurcate, which is what it is reported for — and note
-            that the two comparisons are not on the same scale, so a value
-            tuned for one does not carry to the other.
-        compare: what to measure the separation in, from
-            :data:`HYSTERESIS_COMPARISONS`.
+        entries: one amplitude step with ``"upward"`` and ``"downward"``.
+        max_discrepancy: largest allowed normalized separation. Tune against
+            known sweeps; magnitude and IQ comparisons use different scales.
+        compare: ``"magnitude"`` compares |S21| in units of the upward trace's
+            dip depth, ignoring phase. ``"iq"`` compares complex IQ distance
+            in loop radii and is sensitive to phase or frequency drift too.
 
     Returns:
-        BifurcationCheck: with ``threshold`` the *max_discrepancy* and
-        ``metric`` the one quantity this test asks about:
-
-        ``"max_separation"``
-            the largest separation between the two traces — in dip depths for
-            ``compare="magnitude"``, in loop radii for ``compare="iq"``.
-
-        A dict for one number, so that a caller reading a check does not have
-        to know which method produced it to know what shape it is in. The
-        verdict here really is the comparison — unlike ``"derivative"``, this
-        test has only the one condition.
+        BifurcationCheck: ``metric["max_separation"]`` is the largest
+        normalized separation. Bifurcation means it exceeds
+        ``threshold=max_discrepancy``.
 
     Raises:
-        ValueError: for an unknown *compare*, if either direction is missing or
-            unusable, or if the two sweeps do not cover the same frequencies.
+        ValueError: unknown comparison, missing or unusable direction, or
+            frequency ranges that do not overlap.
     """
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
 
@@ -1211,72 +881,27 @@ def bifurcated_by_either(
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
 ) -> BifurcationCheck:
-    """Is this sweep bifurcated? Ask both tests, and believe whichever says yes.
+    """Run both detectors and report bifurcation if either detects it.
 
-    The two detectors look for different evidence of the same thing —
-    :func:`bifurcated_by_derivative` for the jump inside one trace,
-    :func:`bifurcated_by_hysteresis` for the disagreement between the two
-    directions — and on a real array they do not fail on the same resonators.
-    A resonator that jumps at nearly the same frequency going up as coming down
-    is invisible to the hysteresis test and obvious to the derivative one; a
-    resonator whose branch switch is spread over enough sweep points to look
-    smooth is the other way around. So this asks both and takes a step as
-    bifurcated if *either* fires, which is a more sensitive test than either
-    alone — deliberately. The cost is the same asymmetry run the other way: a
-    false positive from either test is now a false positive here, and it lands
-    as a bias amplitude one step quieter than the resonator needed.
-
-    That is usually the trade you want — biasing one step too quiet costs
-    responsivity, while biasing one step too loud puts the tone on a resonance
-    that is not there any more — and it is why this is the default.
-
-    Both tests run on every step, and both have to be *able* to run: this needs
-    the two sweep directions, as the hysteresis test does.
+    Both sweep directions are required. This catches either kind of evidence,
+    but also accepts false positives from either detector.
 
     Args:
-        entries: one amplitude step, ``{direction: entry}``, with both
-            ``"upward"`` and ``"downward"`` present.
+        entries: one amplitude step with ``"upward"`` and ``"downward"``.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
         compare: passed to :func:`bifurcated_by_hysteresis`.
 
     Returns:
-        BifurcationCheck: with ``bifurcated`` the disjunction of the two
-        verdicts, and ``parts`` the two checks that produced them, keyed
-        ``"derivative"`` and ``"hysteresis"`` — each exactly what its own
-        detector returned, raw numbers and own threshold.
-
-        Its own ``metric`` is those numbers **in multiples of the bar each was
-        held to**, one entry per quantity, named for the test it came from:
-
-        ``"derivative_positive_spike_prominence"``
-            the up-spike's prominence over the prominence it needed.
-        ``"derivative_negative_spike_prominence"``
-            the same for the down-spike.
-        ``"derivative_adjacency"``
-            the flag, carried through as it stands — a condition rather than a
-            measurement, so there is nothing to divide.
-        ``"hysteresis_max_separation"``
-            the separation between the directions over *max_discrepancy*.
-
-        With ``threshold`` then ``1.0`` for all of them. Two tests in units of
-        their own thresholds are the one form in which they are comparable —
-        it is what makes a single number tell you how close each came, and it
-        puts prominences, dip depths and loop radii on one set of axes. A
-        quantity over 1.0 met its condition; the verdict is still each test's
-        own combination of its own conditions, which is why the checks that
-        made it are kept.
-
-        The exception is a test whose bar was zero — a completely flat
-        arc-length speed, or a *spike_prominence_factor* of zero. Nothing can
-        be a multiple of nothing, so a quantity that cleared such a bar is
-        reported as ``inf`` and one that did not as ``0.0``.
+        BifurcationCheck: ``parts`` contains both original checks.
+        ``metric`` prefixes each quantity with its method and divides numeric
+        values by that method's threshold; boolean adjacency is unchanged.
+        The combined threshold is 1.0. For a zero source threshold, positive
+        values become infinity and other values become zero.
 
     Raises:
-        ValueError: for an unknown *compare*, or for anything either test
-            refuses — a missing direction, two directions that do not overlap
-            in frequency, a degenerate trace.
+        ValueError: either detector rejects the input or settings.
     """
     parts = {
         "derivative": bifurcated_by_derivative(
@@ -1304,13 +929,9 @@ def bifurcated_by_either(
 
 
 def _in_thresholds(value, threshold: float):
-    """*value* as a multiple of the bar it was held to — the unit a combined
-    check reports in. A flag passes through: it has no bar to be a multiple of.
+    """Divide a metric by its threshold, preserving boolean conditions.
 
-    A bar of zero has no multiples either, so clearing it is reported as
-    ``inf`` rather than as a division that raises or returns a nan. That is the
-    honest reading — anything at all stands out further than nothing — and it
-    keeps the entry a number that plots and compares against 1.0.
+    A zero threshold gives infinity for positive values and zero otherwise.
     """
     if isinstance(value, bool):
         return value
@@ -1375,47 +996,25 @@ def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 def _tallest(prominences: np.ndarray) -> float:
-    """The most prominent spike, or ``0.0`` where the trace has no spike at all.
-
-    Zero rather than ``None`` because it is the honest answer — nothing stood
-    out — and because it keeps the entry a number that can be compared against
-    the threshold and plotted across amplitude steps like any other.
-    """
+    """Return the largest prominence, or zero if there are no spikes."""
     return float(prominences.max()) if len(prominences) else 0.0
 
 
 def _noise_floor(values: np.ndarray) -> float:
-    """How much *values* scatters, without the jump being allowed to say.
+    """Estimate Gaussian-equivalent noise with median absolute deviation × 1.4826.
 
-    The median absolute deviation, scaled by 1.4826 so that it reads as a
-    standard deviation would on Gaussian noise. That scaling is what lets
-    ``noise_gate_factor`` be thought of in sigmas.
-
-    Robust is the whole point. A bifurcated sweep puts two samples of order the
-    whole span into a hundred-sample trace, which lifts a standard deviation
-    far enough that a jump measured against it comes out barely above where
-    noise does. A median does not move for two samples out of a hundred, so
-    what comes back is the floor the jump stands on rather than the floor plus
-    the jump.
-
-    ``0.0`` for a trace that does not scatter at all, which disables the gate
-    rather than dividing by it.
+    This limits the influence of jump outliers on the noise estimate.
+    A constant trace returns zero, disabling the noise gate for that trace.
     """
     return float(np.median(np.abs(values - np.median(values))) * 1.4826)
 
 
 def _paired(up: np.ndarray, down: np.ndarray) -> bool:
-    """Did an up-spike get followed closely by a down-spike? Up first.
+    """Find any positive spike followed within ``MAX_SPIKE_SEPARATION`` samples
+    by a negative spike.
 
-    *Any* such pair, not the first spike of each list. Filtering by prominence
-    can only ever add spikes as the bar comes down, so asking whether any pair
-    exists makes the verdict monotone in the bar — lowering a threshold cannot
-    take a detection away. Comparing only ``up[0]`` against ``down[0]`` does not
-    have that property: admitting one more spike at a lower index displaces the
-    first, and a pair that was matching stops matching.
-
-    Within :data:`MAX_SPIKE_SEPARATION` samples rather than exactly one, so a
-    jump that a sample landed partway across is still recognized.
+    Checking all pairs ensures that lowering the prominence threshold cannot
+    remove a detection by admitting an earlier, unrelated spike.
     """
     if not (len(up) and len(down)):
         return False
@@ -1427,93 +1026,35 @@ def _paired(up: np.ndarray, down: np.ndarray) -> bool:
 
 
 def find_bias_frequency(entry: Mapping, *, method: str = "iq_derivative") -> float:
-    """Where in this sweep the tone belongs.
+    """Return a bias frequency in Hz from one sweep's measured grid.
 
-    The sweep centre is where we looked; this is where the resonance turned out
-    to be. Both methods return a point of the measured grid — the tone is
-    quantized onto the hardware grid afterwards, by ``BiasPoint``, and that
-    grid is finer than any sweep worth taking.
+    ``"iq_derivative"`` selects the maximum spline-derived IQ speed;
+    ``"minimum"`` selects the minimum |S21|. This function does not quantize
+    the result or check its distance from the sweep centre; ``find_bias_points``
+    handles those steps.
 
-    ``"iq_derivative"`` (the default)
-        The frequency of maximum ``|dI/df + j·dQ/df|`` — where the IQ trace
-        moves fastest per hertz, which is where a small shift in the resonance
-        makes the largest signal. That is the point you want to sit on, and it
-        is measured off the trace itself without asking a fit to converge.
-    ``"minimum"``
-        The frequency of minimum ``|S21|`` — the bottom of the dip. Says
-        nothing about responsivity but survives traces the derivative method
-        finds noisy, and is the one to reach for when a sweep is coarse.
-
-    Both take a whole sweep entry rather than two arrays, which is what leaves
-    room for the fitted ``fr`` to join them: that method reads the entry's
-    ``fits``, not its trace.
-
-    Whether the answer is *plausible* is not asked here — the answer is always
-    a point of the trace, and judging it needs the sweep centre and a tolerance.
-    :func:`find_bias_points` does that, through its ``max_distance_hz``. By hand
-    it is one subtraction: ``frequency_hz - entry["original_center_frequency"]``.
-
-    Args:
-        entry: one sweep, as ``multisweep`` returns it.
-        method: from :data:`FREQUENCY_METHODS`.
-
-    Returns:
-        float: the frequency in Hz, un-quantized.
-
-    Raises:
-        ValueError: for an unknown *method*, or an entry without a usable trace.
+    Raises ValueError for an unknown method or an unusable trace.
     """
     _check_method("method", method, FREQUENCY_METHODS)
     return float(_FREQUENCY[method](entry))
 
 
 def iq_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
-    """``|dI/df + j·dQ/df|`` along one sweep — what ``"iq_derivative"`` maximizes.
+    """Return ``(frequencies, |dI/df + j*dQ/df|)`` in Hz and counts/Hz.
 
-    A reader, in the sense :mod:`rfmux.tuning.fits` uses the word: nothing
-    stores this, because it is a function of the trace, and a plot of what a
-    method looked at should be the thing the method looked at rather than a
-    re-derivation of it that might differ.
-
-    Off the same splines the calibration comes from, evaluated on the sweep's
-    own frequencies, in the units of ``iq_counts`` per hertz.
-
-    Args:
-        entry: one sweep, as ``multisweep`` returns it.
-
-    Returns:
-        tuple: ``(frequencies, speed)``, both ascending in frequency — which is
-        the reverse of a downward sweep's own order.
-
-    Raises:
-        ValueError: for a trace too short or too degenerate to differentiate.
+    Uses :func:`iq_derivatives`; both arrays follow ascending frequency.
+    Raises ValueError if the trace cannot be differentiated.
     """
     frequencies, dI_df, dQ_df = iq_derivatives(entry)
     return frequencies, np.abs(dI_df + 1j * dQ_df)
 
 
 def iq_derivatives(entry: Mapping) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """``dI/df`` and ``dQ/df`` along one sweep, in counts per hertz.
+    """Return ``(frequencies, dI_df, dQ_df)`` in ascending frequency order.
 
-    The two components :func:`iq_arc_speed` takes the magnitude of. Which of
-    them carries the response is worth seeing on its own: a resonance the tone
-    sits on moves mostly in one of I or Q, and a trace whose speed comes almost
-    entirely from one component is a trace whose IQ loop is not where it was
-    assumed to be.
-
-    Counts per hertz, as :func:`iq_arc_speed` is. The volts-per-hertz pair a
-    bias point is calibrated with is :func:`iq_derivatives_at`, at one
-    frequency.
-
-    Args:
-        entry: one sweep, as ``multisweep`` returns it.
-
-    Returns:
-        tuple: ``(frequencies, dI_df, dQ_df)``, all ascending in frequency —
-        which is the reverse of a downward sweep's own order.
-
-    Raises:
-        ValueError: for a trace too short or too degenerate to differentiate.
+    Derivatives are evaluated from splines through ``iq_counts`` and are in
+    counts/Hz. For calibration in V/Hz, use :func:`iq_derivatives_at`.
+    Raises ValueError if the trace cannot be differentiated.
     """
     frequencies, iq = _sorted_trace(entry, "iq_counts")
     try:
@@ -1526,26 +1067,12 @@ def iq_derivatives(entry: Mapping) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def normalized_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
-    """How far the IQ trace moves per hertz, point to point, in units of itself.
+    """Return normalized point-to-point IQ speed for the derivative detector.
 
-    What :func:`bifurcated_by_derivative` differentiates and looks for spikes
-    in, so plotting this — and ``np.diff`` of it — is how you see what that test
-    saw, and how you pick its factor.
-
-    One pair of sweep points at a time rather than off a spline, and with I and
-    Q each divided by their own range first. See the detector for why both of
-    those matter.
-
-    Args:
-        entry: one sweep, as ``multisweep`` returns it.
-
-    Returns:
-        tuple: ``(frequencies, speed)``, one shorter than the sweep. The
-        frequencies are the midpoints of the point pairs, because that is where
-        a difference between two points belongs.
-
-    Raises:
-        ValueError: for a trace too short or too degenerate to difference.
+    I and Q are each divided by their range before differencing. Returns
+    ``(frequencies, speed)`` at ascending pair midpoints, one element shorter
+    than the sweep, with speed in inverse Hz. Raises ValueError for an
+    unusable trace.
     """
     frequencies, iq = _sorted_trace(entry, "iq_counts")
     speed = _point_to_point_speed(frequencies, iq)
@@ -1616,29 +1143,13 @@ def iq_derivative_splines(frequencies: np.ndarray, iq: np.ndarray):
 
 
 def iq_derivatives_at(entry: Mapping, frequency_hz: float) -> tuple[float, float]:
-    """``(dI_df, dQ_df)`` in V/Hz, at one frequency of one sweep.
+    """Evaluate ``(dI_df, dQ_df)`` in V/Hz at ``frequency_hz``.
 
-    The calibration a bias point carries:
-    :attr:`~rfmux.core.resonators.BiasPoint.df_calibration` is
-    ``1/(dI_df + j·dQ_df)``, the Hz/V factor that turns a measured voltage
-    excursion into a frequency shift, and it derives from these rather than
-    being stored beside them.
+    Splines use the entry's ``iq_volts``. Pass the quantized bias frequency to
+    calibrate the tone that will be applied. ``BiasPoint.df_calibration`` is
+    the reciprocal complex derivative, in Hz/V.
 
-    Reads ``iq_volts`` and nothing else. The units are the whole point here —
-    counts per hertz would be a number of the right magnitude and the wrong
-    meaning, and downstream has no way to tell the two apart.
-
-    Args:
-        entry: one sweep, as ``multisweep`` returns it.
-        frequency_hz: where to evaluate. Normally the bias frequency *after*
-            quantization, so the calibration belongs to the tone that will be
-            played.
-
-    Returns:
-        tuple: ``(dI_df, dQ_df)`` in V/Hz.
-
-    Raises:
-        ValueError: if the entry has no ``iq_volts``, or no interpolable trace.
+    Raises ValueError for missing volts or a trace that cannot be interpolated.
     """
     if entry.get("iq_volts") is None:
         raise ValueError(
@@ -1652,27 +1163,10 @@ def iq_derivatives_at(entry: Mapping, frequency_hz: float) -> tuple[float, float
 
 
 def _stored_sweep(entry: Mapping) -> dict:
-    """What of one sweep entry goes onto the bias point it calibrated.
+    """Keep the calibration trace and context listed in ``BiasPoint.BIAS_SWEEP_KEYS``.
 
-    The pair to :func:`iq_derivatives_at`: that one reads a calibration off an
-    entry, this one keeps the part of the entry the calibration was read from,
-    so a catalog can show its own working somewhere the sweeps file is not.
-
-    A subset of the entry's own keys, under their own names, so what comes back
-    is still a sweep entry as far as every reader here is concerned —
-    ``iq_derivatives_at(resonator.bias.bias_sweep, f)`` is the same call as on
-    the sweeps. What it leaves behind is the schedule this trace was one step of,
-    ``iq_counts`` (see :class:`~rfmux.core.resonators.BiasPoint`), and
-    ``channel``, which the resonator already carries and should not be able to
-    disagree with.
-
-    The arrays are referenced, not copied. They are measurement data that
-    nothing mutates, and the sweeps dict outlives this call in the caller's
-    hands anyway. It also keeps the report cheap where it is written: pickle
-    memoizes a shared array, so the ``bias_report`` that goes back into the
-    sweeps file costs its scalars and not a second copy of every trace. The
-    duplication only appears once the catalog is saved *away* from these
-    sweeps, which is the case the stored sweep exists for.
+    Arrays are shared with the input, so a report saved alongside its sweeps
+    can reuse them through pickle's memoization.
     """
     return {k: entry[k] for k in BiasPoint.BIAS_SWEEP_KEYS if k in entry}
 

@@ -1,63 +1,9 @@
-"""
-Locate resonances in a swept magnitude trace.
+"""Find resonance dips and report rejected candidates with their reasons.
 
-Two entry points, and the split between them is the point of the module:
-
-``find_resonances(frequencies, s21, ...)``
-    The search itself. Two arrays in, a :class:`ResonanceSearch` out. It knows
-    nothing about netanal, the CRS, or files, so it runs equally well on a live
-    sweep, a sweep loaded from disk, a simulated trace, or data from another
-    instrument.
-
-``find_resonances_in_netanal(module_netanal, ...)``
-    A convenience wrapper over the above: it unpacks one module's output out of
-    what ``crs.take_netanal()`` returned — ``netanal[module_id]``, one module at
-    a time as everywhere else in this package — and searches the trace in it,
-    either direction. It also writes the search into that output, beside the
-    trace it searched, so saving is an update to the netanal file rather than a
-    second file to keep in step with it.
-
-A third function comes at the same question from the other end, once the array
-has been swept properly:
-
-``find_sweeps_with_nearby_resonances(module_sweeps, min_separation_hz)``
-    Which multisweep sections turned out to hold more than one dip. A netanal
-    search can only separate what one coarse trace resolved; the finer sweep
-    around each candidate is where a collided pair hiding inside a single dip
-    finally comes apart, and this names the ones to cull.
-
-The search is a dip finder. Convert ``|S21|`` to dB, give the inverted trace to
-:func:`scipy.signal.find_peaks` with a prominence floor and Q-derived width
-limits, then run the optional rejection passes. Every rejected candidate is
-kept, with the reason, in ``ResonanceSearch.rejected``: a finder that quietly
-returns fewer resonances than the array has is much harder to debug than one
-that says what it dropped and why.
-
-Nothing here imports Qt, the CRS, or matplotlib. This is analysis — Periscope
-and the notebooks are callers, and plotting belongs to them.
-
-On the reported numbers
-----------------------
-``depth_db`` is a prominence in dB and means what it says. ``width_hz`` is the
-width at half that prominence *on the dB trace*, which is not a half-power
-width, so ``q_estimate = frequency / width`` is the rough figure the ``min_Q`` /
-``max_Q`` window screens on and not a measurement. Fitting the resonance is what
-gives you Q, and that is multisweep's business.
-
-Departures from the previous implementation (``algorithms/measurement/fitting.py``)
-----------------------------------------------------------------------------------
-* **No ``distance=`` handed to** :func:`~scipy.signal.find_peaks`. See
-  :func:`_separation_pass` for what replaced it and why.
-* Width limits track frequency sample by sample (``frequencies / min_Q``)
-  instead of being derived once from the median frequency, so a sweep spanning
-  an octave no longer applies the wrong width window at its ends.
-* Bad input raises instead of warning and returning empty lists.
-* No ``data_exponent``. Raising ``|S21|`` to a power is a *multiplier* in dB, so
-  it scaled dips and noise together; with the prominence threshold scaled to
-  match, and half-prominence crossings being scale-invariant, it could not
-  change a single candidate, width or depth. It was inert, and inert knobs
-  invite tuning. The previous implementation left the threshold unscaled, which
-  made the exponent a disguised way of dividing ``min_dip_depth_db`` by it.
+Use :func:`find_resonances` for frequency and S21 arrays, or
+:func:`find_resonances_in_netanal` to search and annotate one module's network
+analysis result. :func:`find_sweeps_with_nearby_resonances` checks finer
+multisweeps for nearby dips that a coarse network analysis may not resolve.
 """
 
 from __future__ import annotations
@@ -89,18 +35,18 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True)
 class ResonanceCandidate:
-    """One dip found in the trace.
+    """A detected dip and its optional rejection reason.
 
-    Frozen: a candidate records what the finder measured at one place in one
-    sweep. The rejection passes build amended copies rather than mutating it,
-    so a candidate can never be half-updated.
+    Width is measured at half prominence on the dB trace, not at half power.
+    ``q_estimate`` is frequency divided by that width, for screening only;
+    fit the resonance to measure Q.
     """
 
     frequency_hz: float
     index: int  # index into the searched trace, for plotting and slicing
     depth_db: float  # prominence in dB against the local baseline
     width_hz: float  # width at half that prominence, on the dB trace
-    q_estimate: float  # frequency_hz / width_hz — rough; see module docstring
+    q_estimate: float  # frequency_hz / width_hz; screening estimate, not fitted Q
     rejected_because: str | None = None
 
     # The three measured fields are ``nan`` on a candidate someone accepted by
@@ -681,24 +627,10 @@ def _count_pass(candidates, expected: int, who: str):
 
 
 def netanal_trace(module_netanal) -> dict:
-    """The one trace inside one module's netanal output.
+    """Return the trace dict inside one module's network analysis block.
 
-    A netanal measures the band once, so its arrays are ``results`` itself. The
-    index is trivial; what this is for is the error when the output is not a
-    netanal's. A sweep's ``results`` is a dict at the same place, keyed by
-    amplitude iteration, so indexing it directly finds no ``frequencies`` and
-    says nothing about why.
-
-    The dict returned is the one inside *module_netanal*, not a copy — writing
-    to it, as :func:`find_resonances_in_netanal` does with ``resonance_search``,
-    writes into the netanal.
-
-    Args:
-        module_netanal: one module's netanal output, ``netanal[module_id]``.
-
-    Returns:
-        dict: ``frequencies``, ``iq_counts``, ``iq_volts``, ``sweep_amplitude``
-        and ``sweep_direction``.
+    The result is a reference, so edits change ``module_netanal["results"]``.
+    Raises TypeError for a container or a block that is not a network analysis.
     """
     _refuse_container(module_netanal, what="netanal", variable="netanal")
 
@@ -732,65 +664,19 @@ def netanal_trace(module_netanal) -> dict:
 def find_resonances_in_netanal(
     module_netanal, *, label: str | None = None, save=None, **kwargs
 ) -> ResonanceSearch:
-    """Run :func:`find_resonances` on **one module's** netanal output.
+    """Search one module's netanal and store the search alongside its trace.
 
-    ::
+    Replaces ``module_netanal["results"]["resonance_search"]`` and returns a
+    :class:`ResonanceSearch`. Restore a saved search with
+    ``ResonanceSearch.from_dict(netanal_trace(block)["resonance_search"])``.
 
-        netanal = await crs.take_netanal(module=2, amp=0.001)
-        module_netanal = netanal[crs.module[2].index()]   # "crs0042_rmod2"
+    Descending traces are reversed for searching. Candidate indices refer to
+    ``search.frequencies_hz``, not the original descending trace.
 
-        search = find_resonances_in_netanal(module_netanal, min_dip_depth_db=0.5)
-        catalog = search.to_catalog(module=2, amplitude=0.001)
-
-    One module at a time, as :func:`~rfmux.tuning.fits.fit_sweeps` and
-    :func:`~rfmux.tuning.bias.find_bias_points` take one module at a time; the
-    whole dict keyed by module is refused with a message naming the modules it
-    holds. How deep a dip has to be and how wide it may get are properties of
-    the band a module looks at and the resonators sitting in it, so eight
-    modules are eight decisions. Making the caller write the loop is what keeps
-    those decisions visible::
-
-        searches = {
-            module_id: find_resonances_in_netanal(m, min_dip_depth_db=1.0)
-            for module_id, m in netanal.items()
-        }
-
-    The search also goes *into* that module's output, beside the trace it
-    searched, as ``resonance_search`` — the same move
-    :func:`~rfmux.tuning.fits.fit_sweeps` makes with its fits, and for the same
-    reason: a search is about one trace, so it belongs with that trace rather
-    than in a file of its own that has to be kept paired with it. A trace has
-    one search, so searching the same netanal again replaces what the last call
-    left. Reading it back is an index and a ``from_dict``, the same as any
-    stored class::
-
-        trace = netanal_trace(module_netanal)
-        search = ResonanceSearch.from_dict(trace["resonance_search"])
-
-    A downward netanal is searched too. Its trace comes back descending, which
-    is the order it was measured in and the opposite of what a peak finder
-    reads, so it is flipped on the way in. The search then carries the ascending
-    grid it actually searched — ``search.frequencies_hz`` — and
-    ``candidate.index`` indexes *that*, not the descending array beside it in
-    the netanal. Plot a candidate against the search's own arrays and the two
-    directions look alike; index the netanal's with it and they do not.
-
-    ``label`` names the trace in warnings, and defaults to the module this
-    output came from, so a script working through eight of them says which one
-    complained. It is also the name a *first* save puts on the file — a netanal
-    that has been saved already keeps the name it has, and the derived module
-    label is never written to a file, only used in messages.
-
-    ``save`` writes the netanal back out. What changed on disk is the netanal,
-    so this updates the file it came from — the whole file, other modules
-    included, when this output was saved as part of a container. A netanal that
-    was never saved gets a new file. Defaults to
-    ``rfmux.tuning.store.autosave_enabled()``.
-
-    Remaining keyword arguments go straight through to :func:`find_resonances`.
-
-    The search itself does not need this wrapper — it is here so the common case
-    is one call, while the algorithm stays free of any measurement format.
+    ``save`` updates the netanal's file, preserving other modules, or creates
+    a new file. None uses ``store.autosave_enabled()``. ``label`` names the
+    search in messages and labels a first save; existing filenames are kept.
+    Remaining keywords are passed to :func:`find_resonances`.
     """
     # Every shape but one module's netanal is refused in here, container first.
     trace = netanal_trace(module_netanal)
@@ -810,19 +696,7 @@ def find_resonances_in_netanal(
         label=label or (f"module {module}" if module is not None else None),
         **kwargs,
     )
-    # In place, before the save: the netanal is what gets written, and the
-    # search is now part of it.
-    #
-    # The whole to_dict, searched trace included, so what goes into the netanal
-    # is a complete ResonanceSearch dict that ResonanceSearch.from_dict reads
-    # with no help. It looks like it duplicates the arrays beside it and for an
-    # upward netanal mostly does not: the search's frequencies *are* the trace's
-    # array, which pickle stores once and restores shared, so the file grows by
-    # the dB copy of the magnitudes and nothing else. A downward netanal was
-    # flipped above, and a reversed view pickles as a copy, so its file also
-    # carries a second frequency array. Cheap enough either way not to trade for
-    # a block that only means something to a reader who knows to put the arrays
-    # back.
+    # Store the complete search, including its ascending grid, before saving.
     trace["resonance_search"] = search.to_dict()
     # label, not the derived one: a module number belongs in a warning, not in
     # the name of a file that may hold seven other modules. No module= either —
@@ -844,63 +718,27 @@ def find_sweeps_with_nearby_resonances(
     iteration: int | None = None,
     direction: str | None = None,
 ) -> list[str]:
-    """Which multisweep sections swept a second resonance alongside their own.
+    """List multisweep sections containing a pair of nearby resonance dips.
 
-    The netanal search this module starts with resolves only what one coarse
-    trace could. A pair that sat inside a single dip there gets its own fine
-    sweep afterwards, and comes apart in it — so this is the same collision cut
-    as :func:`_separation_pass`, run again on better data.
+    Args:
+        module_sweeps: one module's multisweep block.
+        min_separation_hz: flag pairs separated by this distance or less.
+            Infinity flags any second dip in the window.
+        min_prominence_db: minimum dip prominence, in dB.
+        min_dip_spacing_hz: minimum spacing for detecting distinct minima.
+            Keep below ``min_separation_hz``; unresolved pairs cannot be flagged.
+        iq_key: ``"iq_counts"`` or ``"iq_volts"``.
+        iteration: amplitude step to inspect, or None for all. A bifurcated
+            high-amplitude sweep may produce extra minima; select a quieter
+            step if needed.
+        direction: sweep direction to inspect, or None for all.
 
-    A section holding two dips is a section whose fit, bias frequency and bias
-    amplitude are all answering the wrong question, so what to do with the names
-    it returns is drop them: ``for name in culled: catalog.remove(name)``. As
-    there, both members of a collided pair go — parking a tone on either one
-    still reads the other.
+    Returns:
+        list[str]: names in sweep order, each flagged once if any selected
+        sweep contains a qualifying pair. The input is not modified.
 
-    Parameters
-    ----------
-    module_sweeps : dict
-        One module's sweep result — ``sweeps[module_id]``, what ``multisweep``
-        returned for a single module.
-    min_separation_hz : float
-        The separation two dips have to clear to be allowed as distinct
-        resonances; anything closer is a collision and the section is culled.
-        Comparison is inclusive, as in :func:`_separation_pass`: a pair exactly
-        this far apart is cut. Pass ``float("inf")`` for "any second dip
-        anywhere in the sweep window disqualifies the section".
-    min_prominence_db : float, optional
-        Prominence floor, in dB, for a dip to count as a dip at all. Raise it to
-        stop noise wiggles counting. Default 1.0.
-    min_dip_spacing_hz : float, optional
-        How close two minima may be and still be found as two dips, rather than
-        one dip split into several. This is the finder's resolving power, so it
-        also floors what *min_separation_hz* can act on: a pair closer together
-        than this is never seen as a pair, and so is never culled. Keep it well
-        below *min_separation_hz*. Default 10 Hz.
-    iq_key : str, optional
-        Which of the sweep's arrays to read, ``"iq_counts"`` or ``"iq_volts"``.
-        Either answers the question — the dB magnitude only shifts by a constant
-        between them. Default ``"iq_counts"``.
-    iteration : int or None, optional
-        Look only at this amplitude iteration. The default, ``None``, looks at
-        all of them and culls a name if *any* amplitude shows the collision. A
-        bifurcated sweep at the top of an amplitude schedule can occasionally
-        split into two minima, so pass ``0`` if that turns up as a false hit.
-    direction : str or None, optional
-        Look only at this sweep direction. Default ``None``, both.
-
-    Returns
-    -------
-    list of str
-        The section names to cull, in the order they were swept. Empty if
-        nothing collided.
-
-    Raises
-    ------
-    ValueError
-        On out-of-range parameters, or if *iteration* or *direction* selected
-        nothing — a typo there would otherwise report an array with no
-        collisions in it, which is the dangerous direction to be wrong in.
+    Raises:
+        ValueError: invalid parameters or selection matching no sweeps.
     """
     # -- validate ------------------------------------------------------------
     if min_separation_hz < 0:

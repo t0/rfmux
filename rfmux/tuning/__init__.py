@@ -1,47 +1,20 @@
-"""
-Tuning: turning sweeps into a tuned array, in plain Python.
+"""Analyze measured sweeps, fit resonators, and choose bias points.
 
-This is analysis, not a measurement.  Nothing in here talks to a board,
-registers a ``@macro`` or imports :class:`~rfmux.core.schema.CRS` — each
-module takes data in and hands data back, so every step can be run on a
-saved sweep as easily as on a live one.  The operations that *drive* the
-board stay in ``rfmux.algorithms.measurement`` (``crs.take_netanal(...)``,
-``crs.multisweep(...)``), and Periscope is a third caller.  That is why
-the package sits beside :mod:`rfmux.pulse_capture` rather than under
-``algorithms``.
+Analysis functions take one module's result, selected from the container
+returned by ``crs.take_netanal`` or ``crs.multisweep``::
 
-The layers, in the order a tuning run uses them::
-
-    find_resonances       locate the dips in a network-analysis sweep
-    multisweep_amplitudes decide the amplitude steps of a multi-amplitude sweep
-    sweep_results         pack what a sweep measured, and read it back out
-    fits                  fit resonator models to the sweeps that came back
-    bias                  choose an operating point per resonator, from those sweeps
-    tuning_record         the per-channel row a capture stores with its pulses
-
-The array bookkeeping those steps pass between each other —
-``Resonator``, ``BiasPoint``, ``ResonatorCatalog`` — lives in
-:mod:`rfmux.core.resonators`, because a typed resonator is useful well
-beyond tuning.
-
-Typical headless use::
-
-    from rfmux.tuning import find_resonances_in_netanal, fit_sweeps
+    from rfmux.tuning import find_resonances_in_netanal, find_bias_points
 
     netanal = await crs.take_netanal(module=2, amp=0.001, fmin=1e9, fmax=2e9)
-    module_netanal = netanal[crs.module[2].index()]
-    search = find_resonances_in_netanal(module_netanal, min_dip_depth_db=1.0)
-    # ^ writes the search into the netanal, beside the trace it searched
+    search = find_resonances_in_netanal(netanal[crs.module[2].index()])
     catalog = search.to_catalog(module=2, amplitude=0.001)
-
     sweeps = await crs.multisweep(catalog)
-    module_sweeps = sweeps[crs.module[2].index()]
-    fit_sweeps(module_sweeps)   # writes each sweep's fits alongside the sweep
+    report = find_bias_points(
+        sweeps[crs.module[2].index()], amplitude_method="derivative")
 
-    report = find_bias_points(module_sweeps)   # a new catalog, tuned
-
-See ``tuning_refactor_design.md`` in the repository root for the plan this
-package is being built out against.
+``report.catalog`` contains the chosen bias points; ``report.flagged`` lists
+points needing review. Apply them with ``await crs.apply_bias(report.catalog)``.
+See the reference notebooks for amplitude schedules and fitting examples.
 """
 
 from .bias import (
@@ -145,9 +118,7 @@ __all__ = [
     "skewed_model_magnitude",
     "AmplitudeSchedule",
     "AmplitudeStep",
-    # The module, not its functions: `store.save(...)` and `store.load(...)`
-    # say which save and which load, where a bare `load` in a namespace of
-    # fit_sweeps and find_bias_points would not.
+    # Keep file operations namespaced as store.save() and store.load().
     "store",
     "RESULTS_SCHEMA_VERSION",
     "collect_amplitude_iterations_for",

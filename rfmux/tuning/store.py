@@ -1,43 +1,12 @@
-"""The output folder: where a measurement goes, and how it finds its way back.
+"""Save measurements and update the files they came from.
 
-A measurement that only exists in a notebook variable is one kernel restart away
-from being a measurement that never happened. So the drivers save by default:
-:func:`~rfmux.algorithms.measurement.multisweep.multisweep` and its neighbours
-take ``save=`` and hand what they produced to :func:`maybe_save` on the way out.
+By default, new measurements go into ``~/rfmux_data/ipy_session_YYYYMMDD``.
+Use ``set_output_directory(path)`` to save directly in a chosen folder for
+this Python session; ``set_output_directory(None)`` restores the dated layout.
 
-**By default the folder is keyed by date.** Periscope makes one folder per
-session because clicking *New Session* is an unambiguous moment. From a notebook
-there is no such moment — you open a kernel on Monday and are still in it on
-Wednesday — so rfmux makes one ``ipy_session_YYYYMMDD`` folder per day inside
-your output directory and puts the date and time in the filename instead::
-
-    ~/rfmux_data/ipy_session_20260904/multisweep_20260904_142231_cooldown3.pkl
-
-Call ``set_output_directory("~/rfmux_data/cooldown7")`` to put new outputs
-directly in that folder for this Python session, without a dated subfolder.
-``set_output_directory(None)`` restores the default dated layout.
-
-That is also why the names look different from Periscope's
-``multisweep_module1_142231.pkl``: two tools writing two layouts should be
-telling you apart at a glance, not almost-matching.
-
-**Files know where they live.** Every saved payload carries a ``file_metadata``
-block recording the path it was written to, so an analysis that modifies data in
-place — :func:`~rfmux.tuning.fits.fit_sweeps` writing fits into the sweep entries
-— can save it back over the file it came from without anyone passing a path
-around. It is stamped inside each module's block rather than at the top of the
-file, so you reach it wherever you were already working:
-``sweeps["crs0042_rmod2"]["file_metadata"]``.
-
-**Files outlive rfmux.** The payload is builtins and ndarrays: ``pickle.load``
-gets you a usable result on a machine with no rfmux installed, and
-``file_metadata`` is an ordinary key that every existing reader ignores. Classes
-go in through their ``to_dict()`` — never pickled directly, because that records
-the class's import path and skips ``__init__`` on the way back, so a renamed
-class orphans old files and a malformed one restores into a state the class
-would have refused to build.
-
-Nothing here needs a board or a GUI.
+Saved blocks carry their path in ``file_metadata``, so fitting or bias finding
+can update the same file. Payloads contain builtins and NumPy arrays; convert
+rfmux objects with ``to_dict()`` before saving.
 """
 
 from __future__ import annotations
@@ -79,9 +48,7 @@ METADATA_KEY = "file_metadata"
 
 SESSION_PREFIX = "ipy_session_"
 
-# Used when there is no config file and no environment override. Deliberately
-# somewhere you will trip over it — data you cannot find is data you do not
-# have, which is the argument against ~/.local/share for this one.
+# Fallback when neither config nor environment specifies an output root.
 DEFAULT_DIRECTORY = "~/rfmux_data"
 
 

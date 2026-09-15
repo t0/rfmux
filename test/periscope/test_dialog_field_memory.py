@@ -1,11 +1,4 @@
-"""The dialogs that remember, and the two that deliberately do not.
-
-One test per dialog, each asserting the same contract from the operator's
-side: what was entered and accepted is what the next dialog opens on. The
-helper's own behaviour is pinned in ``test_field_memory.py``; these pin that
-each dialog is actually wired to it, and that the fields read off the board
-are not.
-"""
+"""Test remembered dialog fields and exclusions for board- or caller-supplied values."""
 
 import pytest
 

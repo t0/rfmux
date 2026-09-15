@@ -1,59 +1,11 @@
-"""Sweeping one array at several amplitudes: at what amplitude, on which pass.
+"""Define the probe amplitude for each resonator at each multisweep step.
 
-:class:`AmplitudeSchedule` answers one question — *at what amplitude is each
-resonator swept, on each pass?* — and answers it with no board in sight.  The
-loop that acts on it is ``rfmux.algorithms.measurement.multisweep``, which takes
-a schedule as its ``amp``; the shape the answers come back in is
-:mod:`rfmux.tuning.sweep_results`, which reads a schedule's ``to_dict()`` out of
-the dict it packs.
+Pass an :class:`AmplitudeSchedule` as ``crs.multisweep(catalog, amp=schedule)``.
+The plain constructor gives one step; ``multiplicative``, ``ramp``, and
+``explicit`` build sequences. Amplitudes are fractions of DAC full scale.
 
-Everything in this module can be built, printed, validated and unit-tested with
-no hardware and no GUI in sight.
-
-**A step is one amplitude.**  Steps are numbered from 0 in the order they are
-measured.  A step may be swept twice — once per frequency direction — but
-direction is not this module's business: it is an axis the driver adds *beneath*
-a step, never fused into the step index.  So ``len(schedule)`` is a count of
-amplitudes, not of sweeps.
-
-Two fields decide every step: a **base** amplitude per resonator, and the steps
-applied to it.  The base is the catalog's own ``bias.amplitude`` by default, or
-one number for everything, or one per resonator by name.  Steps are either
-**relative** — multiplying the base, so every resonator keeps its own scale — or
-**absolute**, which *are* the amplitude and apply to all of them equally.
-
-Which is why the absolute forms take no base: there would be nothing left for a
-base to contribute.  Per-resonator *absolute* sequences are deliberately not
-representable — the proportional case, which is what a bifurcation walk wants, is
-``multiplicative(base={...})``, and non-proportional ones have yet to find a use
-that justifies the extra state.
-
-No iteration — one pass — is the plain constructor::
-
-    AmplitudeSchedule()                        # each resonator's own amplitude
-    AmplitudeSchedule(0.005)                   # one amplitude for all
-    AmplitudeSchedule({"BOTA": 0.004, ...})   # per resonator
-
-and the iterating forms are classmethods::
-
-    AmplitudeSchedule.multiplicative(0.5, 2.0, 5)              # × each resonator's own
-    AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base=0.004)  # × a base you chose
-    AmplitudeSchedule.ramp(1e-3, 1e-2, 6)                      # absolute, log-spaced
-    AmplitudeSchedule.explicit([1e-3, 3e-3, 1e-2])             # absolute, arbitrary
-
-A schedule is handed to ``multisweep`` as its ``amp``, which is the whole of
-how one is used::
-
-    sweeps = await crs.multisweep(catalog, amp=schedule)
-
-Inspect the configured values with ``schedule.steps``. To resolve amplitudes
-for each resonator::
-
-    for step in schedule.resolve_steps(catalog):
-        print(step.step, step.amplitudes)
-
-``resolve_steps`` returns amplitudes keyed by resonator **name**, so callers
-do not need to match the catalog's iteration order.
+Steps are numbered from zero. Each step can be swept in one or both frequency
+directions; direction is chosen by the driver, independently of the schedule.
 """
 
 from __future__ import annotations

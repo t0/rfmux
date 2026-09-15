@@ -1,60 +1,6 @@
-"""
-apply_bias: put a catalog's tones on the air.
+"""Program a catalog's bias frequencies and amplitudes on its module.
 
-Bias finding decides where each resonator's tone belongs; this is the step that
-plays it.  One call programs one module: every resonator in the catalog gets
-its bias frequency and its bias amplitude, on its own channel, in a single
-tuber context.
-
-Registered as a macro, so it is available as::
-
-    report = find_bias_points(sweeps)
-    await crs.apply_bias(report.catalog)
-
-Nothing comes back.  An operation either put the board into the state you asked
-for or raised saying why it could not, and there is no third outcome worth
-returning a value to describe.
-
-What it deliberately does not do
---------------------------------
-* **It does not clear the channels the catalog leaves out.**  A tone parked by
-  hand or by another algorithm survives the call — the same rule multisweep
-  follows, for the same reason: zeroing the whole module would be tidier for us
-  and destructive for them.  The corollary is the caller's job.  Applying a
-  bias does not leave the module otherwise quiet, so a run that needs silence
-  arranges it with ``crs.clear_channels(module=...)`` first.
-* **It does not rotate.**  :attr:`~rfmux.core.resonators.BiasPoint.iq_rotation_deg`
-  exists and this never reads it.  The angle comes from a timestream, so
-  programming it belongs with the step that measures it.
-* **It does not re-quantize.**  A bias point's frequency landed on the tone
-  grid when the point was constructed.  Rounding it again here would be a
-  second opinion about a settled number.
-
-The NCO is this operation's business
-------------------------------------
-A module has one NCO and every channel's frequency is programmed as an offset
-from it, which makes the NCO part of applying a bias whether we want it to be
-or not.  Two things have to be true of it.
-
-**It has to reach every tone.**  Each bias frequency must sit within half of
-``ALLOWED_NCO_BANDWIDTH_HZ`` of the NCO.  A catalog whose bias frequencies span
-more than that cannot be applied at all — not by choosing a cleverer NCO, and
-not in two passes, because one module plays one NCO at a time and these tones
-would have to be on the air together.  That raises, and the fix is a catalog
-that fits rather than an argument to this call.
-
-**It has to be on the tone grid.**  The grid applies to the offset that gets
-programmed, not to the absolute frequency, so an off-grid NCO puts every tone
-off-grid however carefully the bias point was quantized.  When we choose the
-NCO we snap it, and a catalog's tones then land exactly where the catalog says.
-
-If the current NCO already satisfies both, it is left alone: moving it would
-disturb every other channel on the module, including ones this catalog does not
-own.  Otherwise it is reset to the quantized midpoint of the catalog's
-frequencies — unless ``allow_nco_reset=False``, which turns both conditions
-into errors instead.  Note that an off-grid NCO is one of them: a board whose
-NCO is not on the grid cannot apply a catalog faithfully, and with the reset
-forbidden there is nothing this call can do about it but say so.
+Call ``await crs.apply_bias(report.catalog)`` after bias finding.
 """
 
 from __future__ import annotations
@@ -76,16 +22,7 @@ def _unreachable(nco_hz: float, resonators: list) -> list:
 
 
 def _aligned(nco_hz: float) -> bool:
-    """Is this NCO on the tone grid?
-
-    Compared at the DDS's own resolution, ``FREQ_QUANTUM`` — the smallest
-    difference between two frequencies the synthesizer can hold, and so the
-    finest sense in which two frequencies are the same one. The tone grid is an
-    exact multiple of it (both divide ``COMB_SAMPLING_FREQ / 256``, by 2**12 and
-    2**32), so a grid point is always a frequency the DDS can land on exactly
-    and any remainder below one quantum is arithmetic left over from computing
-    it, not a setting the board could act on.
-    """
+    """Check tone-grid alignment to within one DDS frequency quantum."""
     return abs(nco_hz - on_grid(nco_hz)) < FREQ_QUANTUM
 
 
@@ -114,26 +51,24 @@ async def apply_bias(
     *,
     allow_nco_reset: bool = True,
 ):
-    """Program every resonator in ``catalog`` onto its channel.
+    """Program each catalog member's bias frequency and amplitude.
+
+    Other channels are not cleared, and IQ rotation is not applied. To start
+    with a quiet module, call ``crs.clear_channels(module=...)`` first.
+    The catalog is read without modification. Returns None.
 
     Args:
-        catalog: the resonators to bias.  Its ``module`` says where; each
-            resonator's ``channel`` and ``bias`` say what.  Read, never written.
-            The NCO this call settles on is not recorded there — the catalog
-            does not carry one, deliberately — so a caller who needs to know it
-            afterwards asks the board: ``await crs.get_nco_frequency(module=...)``.
-        allow_nco_reset: may this call move the module's NCO?  The default
-            moves it when, and only when, the current one cannot carry the
-            catalog.  ``False`` forbids it outright: the NCO in place is used
-            as it is, or the call raises.
+        catalog: resonators to program, with their module and channel bindings.
+        allow_nco_reset: if True, move an unreachable or off-grid NCO to the
+            catalog's grid-aligned midpoint. A usable NCO is left unchanged.
+            Moving the NCO also shifts tones on channels outside the catalog.
 
     Raises:
-        ValueError: the catalog is empty; or its bias frequencies span more
-            than ``ALLOWED_NCO_BANDWIDTH_HZ``, which no single NCO can carry;
-            or ``allow_nco_reset=False`` and the NCO in place is unusable.
-            Nothing has been programmed in any of these cases.
-        RuntimeError: the NCO was set and read back as something that still
-            will not do.  The NCO has moved; no tones were applied.
+        ValueError: the catalog is empty, spans more than
+            ``ALLOWED_NCO_BANDWIDTH_HZ``, or needs a forbidden NCO reset.
+            No settings have been programmed in these cases.
+        RuntimeError: the NCO readback remains unreachable or off-grid after
+            a reset. The NCO has moved, but no tones have been applied.
     """
     if not isinstance(catalog, ResonatorCatalog):
         # Overwhelmingly this is a BiasReport passed whole. Say so, rather than
@@ -153,7 +88,7 @@ async def apply_bias(
         )
 
     module = catalog.module
-    resonators = list(catalog)  # channel order, per ResonatorCatalog
+    resonators = list(catalog)  # bias-frequency order
 
     lowest = min(resonators, key=lambda r: r.bias.frequency_hz)
     highest = max(resonators, key=lambda r: r.bias.frequency_hz)

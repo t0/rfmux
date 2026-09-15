@@ -1,10 +1,4 @@
-"""The main window builds.
-
-MainPlotPanel lays out the action buttons the Periscope window owns, so a
-button removed from app.py but left in that layout is an AttributeError at
-startup and nothing else catches it: every other Periscope test builds a
-panel or a stand-in, never the window.
-"""
+"""Construct the main window to catch mismatches between actions and layouts."""
 
 import pytest
 

@@ -1,13 +1,6 @@
-"""The same measurement, made through Periscope and made headlessly.
+"""Compare saved measurements from Periscope and headless calls.
 
-Periscope is a caller of ``rfmux.tuning`` like a notebook is, so a sweep it
-takes and a sweep a script takes with the same arguments should differ in two
-things and nothing else: who wrote the file, and when. Anything else that
-differs is a shape Periscope grew on the way, which is what this catches --
-about the artefact a user actually keeps, not about what is on screen.
-
-The array here is the standard one with its noise turned off, so the two runs
-compare value for value; one array per test module, as everywhere else.
+The standard mock array has noise disabled for reproducible comparisons.
 """
 
 import asyncio

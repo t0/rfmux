@@ -1,39 +1,9 @@
-"""
-Typed resonator model, and a typed collection of resonator objects.
+"""Named resonators and their bias points, grouped by module.
 
-Three types, outermost first::
-
-    ResonatorCatalog    one per module; holds N Resonators
-    └── Resonator       one per detector; holds exactly one BiasPoint
-        └── BiasPoint   one tone: frequency, amplitude, and the calibration
-                        measured at that tone
-
-``BiasPoint`` is frozen and the other two are not, which is a statement about
-where each one's guarantees hold. A bias point validated at construction stays
-valid for as long as it exists, so a tone can never be carrying a calibration
-that was measured somewhere else. A resonator's guarantee is narrower: its
-identity is meant to be permanent, but its operating point moves
-all through tuning, and ``update_bias_point`` keeps calibration from outliving
-the tone it belongs to. A catalog checks its members as they
-join and does
-not re-check them afterwards.
-
-The catalog holds identity, the operating point, the calibrations downstream
-measurements need, and — for a bias point that has one — the single sweep its
-calibration was read off. The sweeps themselves are *not* stored here: analysis
-reduces a schedule of amplitudes and directions to the handful of scalars that
-belong on a ``BiasPoint``, plus the one trace behind them, and everything else
-stays with the caller. That trace is a few kB per resonator, so a catalog for a
-large array is a few MB rather than the handful of bytes it used to be. It is
-carried because a calibration you cannot re-derive or plot is a number you have
-to take on faith, and the catalog is what travels to the places the sweeps file
-does not.
-
-``reference-notebooks/Demos/resonator_catalogs.md`` works through all of this
-against a catalog seeded from a recorded network analysis, including what the
-frozen bias point means the first time you retune a detector and find its
-calibration gone. Read that before relying on the invariants here.
-
+A :class:`ResonatorCatalog` holds :class:`Resonator` objects, each with a name,
+hardware channel, and :class:`BiasPoint`. Bias points hold the tone frequency,
+amplitude, and optional calibration. Use ``Resonator.update_bias_point`` to
+retune and clear calibration fields that depend on the tone.
 """
 
 from __future__ import annotations
@@ -66,52 +36,21 @@ def on_grid(frequency_hz: float) -> float:
 
 @dataclass(frozen=True, slots=True)
 class BiasPoint:
-    """A tone parked on a resonator + the calibration valid at that tone.
+    """A bias frequency and amplitude with optional calibration at that tone.
 
-    Frozen on purpose: the bias tone and its calibration are one fact. To move
-    the tone you build a new ``BiasPoint``; calibration fields you don't pass
-    are ``None``. A frequency carrying some *other* tone's calibration is
-    unrepresentable.
+    Frequency is snapped to the hardware tone grid unless
+    ``bias_frequency_quantized=False``. Amplitude is a fraction of DAC full
+    scale in (0, 1]. The object is frozen; retune with
+    ``Resonator.update_bias_point`` to clear calibration fields automatically.
 
-    The frequency is quantized onto the hardware tone grid at construction, so
-    ``frequency_hz`` is what the hardware will actually play. Requested,
-    recorded and set are then the same number, and no later reader has to
-    wonder which of the three it is holding. ``bias_frequency_quantized=False``
-    opts out for the caller who needs the exact number they asked for — a sweep
-    centre they are doing arithmetic on, say — and nothing downstream
-    re-quantizes for them.
-
-    ``bias_sweep`` is the one trace ``dI_df`` and ``dQ_df`` were read off, and
-    it is a calibration field like they are: moving the tone drops it, because
-    a trace taken at another amplitude is not the trace behind this
-    calibration. It is a plain dict rather than a type of its own, holding a
-    subset of the keys ``multisweep`` puts on a sweep entry, so every reader
-    that takes an entry takes this too —
-    :func:`~rfmux.tuning.bias.iq_derivatives_at` recomputes the calibration off
-    a bias point exactly as it did off the sweeps::
-
-        {
-            "frequencies": ndarray,             # Hz
-            "iq_volts": ndarray,                # complex, at the board input
-            "original_center_frequency": float, # where the sweep was centred
-            "sweep_amplitude": float,           # what this trace was probed at
-            "sweep_direction": str,             # which direction it came from
-        }
-
-    The entry's ``iq_counts`` is deliberately not kept: nothing in the
-    calibration path reads it, and it is ``iq_volts`` divided by
-    ``transferfunctions.VOLTS_PER_ROC``, a module constant, so it is
-    recoverable. That reasoning holds only while the conversion *is* one
-    constant — if ``VOLTS_PER_ROC`` becomes per-board, per-module or
-    per-frequency, a trace stored in volts can no longer be turned back into
-    the counts that were measured, and this decision has to be made again. See
-    the note beside it in ``core/transferfunctions.py``.
+    ``bias_sweep`` holds the trace used for calibration: frequency in Hz,
+    complex IQ in volts, sweep centre, amplitude, and direction. Its keys are
+    listed in ``BIAS_SWEEP_KEYS``.
     """
 
     frequency_hz: float
     amplitude: float  # normalized DAC units, (0, 1]
-    # Snap frequency_hz onto the tone grid, always. Named for the field it
-    # governs so it does not read as a past tense of `quantize()`.
+    # Disable only when an exact, unquantized frequency is needed.
     bias_frequency_quantized: bool = True
     dI_df: float | None = None  # V/Hz at this bias point
     dQ_df: float | None = None
@@ -130,10 +69,8 @@ class BiasPoint:
         "bias_sweep",
     )
 
-    # Which keys of a multisweep entry a bias_sweep keeps, in one place, so
-    # that the writer (rfmux.tuning.bias) and the shape documented above are
-    # the same fact. Everything else on an entry is either recoverable or
-    # already known to the resonator holding this point.
+    # Keep the calibration trace and its measurement context. Counts can be
+    # recovered from volts only while VOLTS_PER_ROC is a shared constant.
     BIAS_SWEEP_KEYS = (
         "frequencies",
         "iq_volts",
@@ -248,24 +185,10 @@ def _bias_dict(bias: BiasPoint) -> dict:
 
 @dataclass(slots=True, eq=False)
 class Resonator:
-    """Identity, hardware binding and tuning state for one resonator.
+    """A named resonator with a hardware channel and a required bias point.
 
-    There is exactly one frequency per resonator and it lives on ``bias``: the
-    current best estimate of where this resonator's tone belongs. It is seeded
-    from ``find_resonances`` and refined by multisweep and by bias finding; at
-    every one of those steps it lands on the hardware tone grid immediately,
-    because that is where the tone will go. There is deliberately no separate
-    sweep-centre field — the sweep centre is multisweep's business, and a second
-    frequency is a second thing to keep in agreement.
-
-    ``bias`` is required. A resonator we cannot say a frequency for is not a
-    resonator we know about, so there is no unbiased state to test for, clear
-    to, or round-trip. Seeding a catalog from ``find_resonances`` gives every
-    member an operating point immediately; everything after that moves it.
-
-    Note this is distinct from ``rfmux.core.schema.HWMResonator``, which is the
-    hardware-map ORM row. This one is a plain value object that measurement
-    code passes around.
+    Measurement and analysis code pass this object between tuning steps.
+    ``rfmux.core.schema.HWMResonator`` is the separate hardware-map ORM type.
     """
 
     name: str
@@ -274,16 +197,11 @@ class Resonator:
     notes: dict = field(default_factory=dict)  # explicitly the junk drawer
 
     def update_bias_point(self, **changes) -> BiasPoint:
-        """Amend this resonator's ``BiasPoint``.
+        """Replace the bias point with the supplied changes and return it.
 
-        Moving the tone (``frequency_hz`` or ``amplitude``) drops calibration
-        fields unless new values are passed explicitly, so stale calibration
-        stays structurally impossible even through this convenience path.
-        Changing only calibration leaves the tone alone.
-
-        A new ``frequency_hz`` is quantized on the way in like any other, so
-        what you read back is what the hardware will play, not what you asked
-        for.
+        Passing ``frequency_hz`` or ``amplitude`` clears calibration fields
+        unless replacements are supplied. Frequency quantization follows the
+        new point's ``bias_frequency_quantized`` setting.
         """
         if "frequency_hz" in changes or "amplitude" in changes:
             for f in BiasPoint._CAL_FIELDS:
@@ -296,52 +214,18 @@ class Resonator:
 
 
 class ResonatorCatalog:
-    """Per-module, ordered, dict-like collection of Resonators.
+    """A collection of named resonators on one module.
 
-    The object algorithms accept and return::
+    Look up members by name; iteration defaults to bias-frequency order.
+    ``name`` labels the catalog and defaults to ``"module <module>"``.
 
-        catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
-        sweeps = await crs.multisweep(catalog)
-        report = find_bias_points(sweeps[crs.module[2].index()])
-        await crs.apply_bias(report.catalog)
+    ``min_separation_hz`` optionally rejects nearby bias frequencies when
+    adding members. It defaults to None (no spacing check); retuning a member
+    does not recheck spacing. ``from_dict`` restores the saved rule unless
+    overridden.
 
-    ``name`` names the catalog itself — the array, the wafer, the cooldown —
-    and travels with it through ``to_dict``, so a file that turns up later says
-    which array it holds instead of leaving you to recognize the frequencies.
-    It defaults to ``"module <module>"``, the only thing a catalog knows about
-    itself at construction; pass your own as soon as two of them could be
-    confused. Nothing keys off it, and it need not be unique. Note the
-    neighbours: ``catalog.name`` is the catalog, ``catalog.names()`` is the
-    resonators in it.
-
-    Lookup is by name. Iteration is in bias-frequency order — the members
-    themselves are an unordered collection, so ``resonators()`` and ``names()``
-    take the order you want to pull them out in.
-
-    Frequency collisions are checked when a resonator joins the catalog, if you
-    ask for the check: ``min_separation_hz`` says how close is too close, and
-    defaults to ``None``, which lets any spacing through, including none at all.
-    A duplicate out of ``find_resonances`` is what this catches, and the
-    separation cut there is the first place to make it — pass a threshold here
-    when you want the catalog to hold the line as well. Every constructor takes
-    it, so ``from_frequencies``, ``from_dict`` and ``from_csv`` can each be
-    given one. ``from_dict`` defaults to the rule recorded in the file rather
-    than to ``None``: a catalog read back is the catalog that was written.
-
-    Retuning through ``Resonator.update_bias_point`` is not re-checked — two
-    tones can be walked onto one frequency after the fact. Worth a
-    ``validate()`` pass once there is a caller that retunes in bulk.
-
-    There is deliberately no NCO frequency here. A catalog is free to span more
-    frequency than one NCO can carry — multisweep already re-tunes the NCO as it
-    walks across such an array — so a single number recorded on the catalog
-    would be a fact about one moment of one operation rather than about the
-    array. The NCO in force is the board's to answer for
-    (``crs.get_nco_frequency(module=...)``), and ``crs.apply_bias`` sets it from
-    the frequencies it is applying. Worth adding back the day a caller turns up
-    that has to record which NCO a set of measurements was taken against — but
-    it should arrive with that caller, and probably alongside the measurements
-    rather than on the catalog.
+    Catalogs may span several NCO bands. ``crs.multisweep`` measures them in
+    groups; ``crs.apply_bias`` requires all tones to fit within one band.
     """
 
     # Stamped into to_dict output and checked by from_dict, so a file written by
@@ -575,20 +459,10 @@ class ResonatorCatalog:
     def resonators(
         self, order: Literal["frequency", "channel"] = "frequency"
     ) -> list[Resonator]:
-        """The members as a list, low bias frequency first.
+        """Return members sorted by bias frequency or hardware channel.
 
-        A catalog is a collection, not a sequence — the resonators in it have
-        no inherent order, and nothing is stored in one. What this does is
-        *extract* them in an order you name.
-
-        Frequency order is the array as you'd plot or tabulate it, and it is
-        what iterating the catalog gives you. Channel order is what you want
-        when the members have to line up with per-channel data coming back from
-        the board.
-
-        The two agree for a catalog straight out of ``from_frequencies``, which
-        assigns channels 1..N in frequency order, and drift apart as soon as
-        resonators are retuned or dropped.
+        Frequency order is the default. Channels keep their assigned numbers
+        when resonators are retuned or removed, so the orders may differ.
         """
         if order == "frequency":
             key = lambda r: r.bias.frequency_hz  # noqa: E731
@@ -603,19 +477,9 @@ class ResonatorCatalog:
         return [r.name for r in self.resonators(order)]
 
     def remove(self, name: str) -> Resonator:
-        """Drop a resonator and return it. Channels are left alone.
+        """Remove and return a named resonator, preserving other channel bindings.
 
-        Removing channel 3 from 1..5 leaves 1, 2, 4, 5 — a hole, deliberately.
-        Every surviving resonator keeps the channel it was measured on, so
-        per-channel data you are already holding stays valid, and so does
-        anything the board has been told. Nothing here requires channels to be
-        contiguous. Repacking them to 1..N-1 is a separate decision and a
-        separate pass; do it by rebuilding the catalog if you want it.
-
-        The freed channel is available again — a later resonator may take it.
-
-        Raises:
-            KeyError: if no resonator goes by that name.
+        The freed channel can be reused. Raises KeyError for an unknown name.
         """
         try:
             return self._by_name.pop(name)

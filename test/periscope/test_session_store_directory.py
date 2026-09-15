@@ -1,9 +1,4 @@
-"""A Periscope session is where the library writes.
-
-``store`` is what saves a measurement, in Periscope as in a notebook, so a
-session folder has to be its output directory for as long as the session lasts
--- flat, with none of the dated ``ipy_session_`` folder a notebook gets.
-"""
+"""Test that Periscope saves measurements directly in the active session folder."""
 
 import pytest
 

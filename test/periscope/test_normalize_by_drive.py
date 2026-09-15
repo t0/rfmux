@@ -1,11 +1,4 @@
-"""Normalizing a trace states it against the drive it was taken at.
-
-A sweep's magnitude is a received power, which moves with the amplitude the
-tone was driven at. Dividing by the drive -- subtracting it, in dBm -- makes
-it a transmission instead, so an amplitude ladder lands on one axis. What
-that division needs differs by unit, and a plot that cannot do it says so on
-its axis rather than drawing one thing and labelling another.
-"""
+"""Test drive-normalized traces and axis labels in each supported unit."""
 
 import numpy as np
 import pytest

@@ -1,49 +1,9 @@
-"""
-multisweep: A measurement algorithm for performing simultaneous, targeted,
-high-resolution frequency sweeps around multiple specified center frequencies.
+"""Measure targeted frequency sweeps for a catalog or a list of centres.
 
-One call is one *measurement*, which may be one sweep or many. The narrow case —
-one amplitude, one direction — is a call that said nothing about either. The
-wide case walks a schedule of probe amplitudes, in one or both frequency
-directions, and returns every sweep it took in one dict.
-
-That is one macro rather than two because a schedule is not a different kind of
-measurement from a sweep; it is more of one. The two used to be ``multisweep``
-and ``multiamp_multisweep``, whose arguments were near-identical and whose
-outputs were identical — ``results[step][direction][name]`` either way, with a
-single sweep sitting at ``results[0]["upward"]`` because that is genuinely what
-it is. Two entry points onto that shape asserted a distinction the shape denies.
-
-So the amplitude axis is ``amp``, which takes a number, a list, a mapping *or*
-an :class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule`; and the
-direction axis is ``sweep_direction``, which takes one direction or a sequence
-of them. A caller who does not want to iterate says nothing and gets one sweep.
-
-It measures and it returns what it measured. It does not fit, rotate,
-calibrate, or move a sweep centre onto the dip it found — those are analyses,
-they belong to the code that does them, and a sweep that quietly did one of
-them on the way past would be a sweep whose output nobody can reason about.
-
-There are two ways to say what to sweep, identical once the measurement starts:
-
-* a :class:`~rfmux.core.resonators.ResonatorCatalog`, which supplies each
-  resonator's sweep centre (``bias.frequency_hz``), its probe amplitude
-  (``bias.amplitude``, overridable per call) and its permanent hardware
-  channel.  Results come back keyed by resonator name.
-* a bare list of ``center_frequencies`` plus an ``amp``, for sweeping
-  frequencies that are not a tuned array — before resonances have been found,
-  or on a system that has none.  Results come back keyed by section name,
-  ``S0001…`` unless ``names`` says otherwise.
-
-The second form is resolved into the first before anything is measured, the way
-a bare ``amp`` is resolved into an ``AmplitudeSchedule``: the catalog recorded
-in ``call_params`` is the one that was swept whichever way the call was
-spelled, so a reader downstream — bias finding, above all — has one thing to
-look at and never a sweep with no resonators in it.
-
-Either way multisweep reads its input and never modifies it. Updating a catalog
-from what a sweep reveals belongs to the analysis that learns it — fitting,
-bias finding — not here.
+``amp`` chooses one probe amplitude or an amplitude schedule;
+``sweep_direction`` chooses one or both frequency directions. Results are
+keyed by module, then ``results[step][direction][name]``. Fitting and bias
+finding are separate analysis steps in :mod:`rfmux.tuning`.
 """
 
 import numpy as np
@@ -198,22 +158,10 @@ def _resolve_catalog(
     amplitudes: Mapping[str, float],
     module: int,
 ) -> ResonatorCatalog:
-    """The catalog this sweep is of, whichever way it was asked for.
+    """Return the input catalog, or build one for bare sweep targets.
 
-    A bare ``center_frequencies`` list becomes one here, and what
-    ``call_params`` records is this rather than the ``None`` it used to: a
-    sweep then always carries the array it measured, and the analysis that
-    reads it back — ``find_bias_points`` in particular — needs nothing from the
-    caller that the measurement did not already hold.
-
-    Everything but the amplitude is already decided, because it is the target:
-    the name each section comes back under, the channel it was measured on, and
-    the frequency it was centred on. Centres are kept exactly as passed rather
-    than quantized — a centre is a number the caller may be doing arithmetic
-    with, and it agrees with each entry's ``original_center_frequency`` this
-    way. *amplitudes* is step 0's, which is the amplitude the first pass
-    actually used; a schedule has no one amplitude, and the amplitude for each later
-    step is on its own sweeps.
+    Generated bias points keep the exact sweep centres and step-zero
+    amplitudes. Later amplitudes are recorded on their sweep entries.
     """
     if catalog is not None:
         return catalog
@@ -236,13 +184,7 @@ def _resolve_catalog(
 
 
 def _resolve_directions(sweep_direction) -> tuple[str, ...]:
-    """Check the direction axis and freeze it.
-
-    One direction is a string, because that is what one direction is. Several
-    are a sequence, and an explicit one rather than the magic string ``"both"``,
-    so the product below is honestly a product and each sweep is labelled with
-    both of its coordinates.
-    """
+    """Validate a direction string or sequence and return a tuple."""
     if isinstance(sweep_direction, str):
         if sweep_direction not in DIRECTIONS:
             raise ValueError(
@@ -466,15 +408,7 @@ async def _measure_sweep(
                     for t in region_targets
                 }, step, sweep_direction)
 
-    # --- Format final results for each resonance ---
-    #
-    # NOTE: re-centring is deliberately absent. A schedule of amplitudes wants the
-    # sweep centre to follow a resonance that moves between steps, and that will
-    # come back — as an adjustment to the *sweep centre* the next step is taken
-    # at, made by whatever analysis found the dip. It was previously spelled
-    # "recalculate the bias frequency", which conflated two different things:
-    # where to point the next sweep, and where the resonator is biased. The bias
-    # frequency lives in the catalog and is not a sweep's to report.
+    # Record each trace at its measured centre, without analysis or re-centring.
     results = {}
     for t in targets:
         data_entry = resonance_data[t.name]
@@ -532,285 +466,70 @@ async def multisweep(
     save=None,
     label=None,
 ):
-    """
-    Perform simultaneous, high-resolution frequency sweeps around many center
-    frequencies at once.
+    """Measure targeted sweeps at one or more probe amplitudes.
 
-    This algorithm dedicates one channel per resonance and sweeps all resonances
-    in parallel. The NCO is re-tuned for different groups of resonances (NCO
-    regions) if their combined span exceeds the NCO's instantaneous bandwidth.
-    No phase stitching is performed between data collected from different NCO
-    regions.
+    Resonators within an NCO band are swept together. Wider catalogs are
+    measured in groups, without phase stitching between NCO settings.
+    The input catalog and its bias points are not modified.
 
-    One call is one measurement, of as many sweeps as its two iterating axes
-    ask for: an amplitude schedule in *amp*, and one or both frequency
-    directions in *sweep_direction*. Say nothing about either and you get one
-    sweep, at one amplitude, upward.
-
-    The input is read, never written — a sweep on its own has not learned
-    anything yet, and the analyses that do (fitting, bias finding) update the
-    catalog themselves.
-
-    Only the channels this sweep puts a tone on are silenced, on the way in and
-    on the way out. A tone the caller parked elsewhere on the module — by hand,
-    or by another algorithm — survives the call. The corollary is that
-    multisweep does not guarantee a quiet module: if a foreign tone would
-    intermodulate with the sweep or sit inside a span, clear it first with
-    ``crs.clear_channels(module=...)``.
-
-    Two ways to say what to sweep, identical once the measurement starts.
-    With a catalog, which brings its own frequencies, amplitudes and channels::
-
-        catalog = ResonatorCatalog.from_frequencies(found, module=2, amplitude=1e-3)
-        sweeps = await crs.multisweep(catalog)
-
-        module_sweeps = sweeps[crs.module[2].index()]
-        module_sweeps["results"][0]["upward"]["BOTA"]["iq_counts"]
-
-    Or with a bare list of frequencies, for anything that is not a tuned array
-    yet::
-
-        sweeps = await crs.multisweep(
-            center_frequencies=[1.0e9, 1.1e9],
-            amp=1e-3,                 # or [1e-3, 2e-3], one per frequency
-            names=["low", "high"],    # optional; default is S0001, S0002
-            span_hz=200e3, npoints_per_sweep=101, module=2,
-        )
-        sweeps[crs.module[2].index()]["results"][0]["upward"]["low"]["iq_counts"]
-
-    To iterate over amplitude, hand *amp* a schedule instead of a number. Every
-    step is swept in every requested direction, and every sweep comes back in
-    the one result::
+    Example::
 
         from rfmux.tuning import AmplitudeSchedule
 
         sweeps = await crs.multisweep(
-            catalog,
-            amp=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
-            sweep_direction=("upward", "downward"),
-        )
-
-        module_sweeps = sweeps[crs.module[2].index()]
-        module_sweeps["results"][3]["downward"]["BOTA"]["iq_counts"]
-
-    which is what bias finding reads, because "the loudest amplitude that has
-    not bifurcated yet" is only meaningful against amplitudes that were
-    actually measured. An up-and-down pair at the catalog's own amplitudes —
-    enough for the hysteresis check — is the degenerate form of the same call::
-
-        sweeps = await crs.multisweep(
-            catalog, sweep_direction=("upward", "downward"),
-        )
+            catalog, amp=AmplitudeSchedule.ramp(1e-3, 1e-2, 6),
+            sweep_direction=("upward", "downward"))
+        block = sweeps[crs.module[catalog.module].index()]
+        trace = block["results"][0]["upward"][catalog.names()[0]]
 
     Args:
-        crs (CRS): The CRS object (injected by macro).
-        catalog (ResonatorCatalog, optional): What to sweep. Each resonator
-            contributes its ``bias.frequency_hz`` as the sweep centre, its
-            ``channel`` as the hardware channel, and — unless *amp* overrides
-            it — its ``bias.amplitude`` as the probe amplitude. Sections come
-            back in bias-frequency order, matching ``catalog.names()``. Pass
-            this or *center_frequencies*, not both.
-        span_hz (float, optional): Total frequency width (Hz) of each sweep.
-            The same for every sweep in the call. Defaults to 100 kHz.
-        npoints_per_sweep (int, optional): Number of points to measure within
-            each sweep's span. Defaults to 101.
-        amp (float | list[float] | Mapping[str, float] | AmplitudeSchedule | None, optional):
-            Probe amplitude, in normalized DAC units, for one sweep — or an
-            :class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` for
-            a schedule of them.
-
-            One amplitude, with a *catalog*:
-
-            - ``None`` (default): use each resonator's own ``bias.amplitude``.
-            - a number: use it for every resonator.
-            - a ``{resonator_name: amplitude}`` mapping: per-resonator, and it
-              must name every resonator in the catalog.
-
-            A positional sequence is refused here: a catalog is an unordered
-            collection, so pairing to it by position means knowing which order
-            it was pulled out in.
-
-            One amplitude, with *center_frequencies*, where the ordering is the
-            caller's own:
-
-            - a number: use it for every frequency.
-            - a list: one amplitude per frequency, in the same order.
-            - a ``{section_name: amplitude}`` mapping, as above.
-
-            Required in that case — there is nothing to fall back to.
-
-            Or a schedule, built through ``AmplitudeSchedule.multiplicative``
-            (steps that scale each resonator's own amplitude, so an array
-            biased across a spread walks that spread together), ``.ramp`` or
-            ``.explicit`` (steps that *are* the amplitude). One sweep per step
-            per direction, all in one result. The whole schedule is resolved
-            before the first sweep runs, so a step that overshoots full scale
-            on step 5 is a ``ValueError`` now rather than after four steps of
-            data. A schedule and a bare number are the same argument because
-            they answer the same question — a number is a schedule of one step.
-        nsamps (int, optional): Number of samples to average per frequency
-            point. Defaults to 10.
-        sweep_direction (str | Sequence[str], optional): The direction of the
-            frequency sweep.
-
-            - ``"upward"`` (the default): sweep from lower to higher
-              frequencies.
-            - ``"downward"``: sweep from higher to lower frequencies.
-            - a sequence of both: sweep each amplitude step in each direction,
-              which is what a hysteresis comparison needs. An explicit sequence
-              rather than a ``"both"`` flag, so each sweep is labelled with
-              both of its coordinates. Order is honoured: it is the order the
-              sweeps are measured in.
-        center_frequencies (list[float] or Mapping[str, float], optional):
-            With a catalog, an optional ``{resonator_name: center_hz}`` mapping
-            covering every resonator exactly once. Centers change only where
-            measurements are taken; catalog bias points and calibrations are
-            preserved. Without it, centers are the catalog bias frequencies.
-            For example, ``await crs.multisweep(catalog,
-            center_frequencies={r.name: r.bias.frequency_hz + 1000
-            for r in catalog})`` measures 1 kHz above each bias frequency.
-
-            Without a catalog, a bare list of sweep
-            centres, for sweeping frequencies that are not a tuned array — no
-            resonances found yet, or a system that has none. Hardware channels
-            are 1-based positions in this list. A list cannot accompany a
-            catalog; use the named mapping for that. A catalog is generated
-            from the list and recorded in
-            ``call_params["catalog"]``, the same way one amplitude is recorded
-            as a one-step schedule, so what comes back is the same result a
-            catalog would have produced and every analysis downstream works on
-            it unchanged. Each section's bias amplitude there is step 0's.
-        names (list[str], optional): Names for the *center_frequencies*, one
-            each, in the same order — these are the keys the sweeps come back
-            under. Defaults to ``S0001…`` (S for section), which is visibly not
-            a catalog's drawn names, so a result dict says which of the two
-            produced it. Rejected alongside a *catalog*, whose resonators are
-            already named.
-        module (int | list[int], optional): The target readout module. Defaults
-            to the catalog's own ``module``, and must agree with it when both
-            are given; required when sweeping *center_frequencies*. A list of
-            modules is only accepted with *center_frequencies* — a catalog
-            belongs to one module, so sweeping several means one call per
-            module. Each module runs the whole schedule, concurrently, and the
-            results merge into one dict keyed by module.
-        progress_callback (callable, optional): ``(module, pct)`` — progress
-            across the whole call, so a schedule of six steps in two directions
-            reaches 100 only once, after the twelfth sweep. For *which* sweep
-            is being taken, use *sweep_callback*.
-        data_callback (callable, optional): ``(module, partial_results, step,
-            direction)`` during acquisition, carrying the current NCO region's
-            resonators sliced to the points measured so far, plus the two
-            coordinates saying which sweep the points belong to.
-
-            .. note::
-               The last two arguments are new. Without them a consumer plotting
-               live has no way to tell which amplitude step and direction the
-               points belong to, and a single sweep's ``(0, "upward")`` is a
-               fact about it rather than padding. Callers written against the
-               two-argument form need updating.
-        sweep_callback (callable, optional): ``(record)``, called once per
-            completed sweep — not once per amplitude step — with a dict of
-            ``step``, ``direction``, ``amplitudes``, ``factor``, ``completed``,
-            ``total`` and ``data``. A script ignores it, a notebook prints from
-            it, Periscope re-emits it as signals. It is also the reason this
-            macro does not need to return partial results on failure: every
-            sweep that finished has already been handed over.
-
-            ``data`` is the bare ``{name: entry}`` for that one sweep, not the
-            dict this macro returns — the module, the span and the rest are the
-            same for every sweep in the call, and a hand-over is not a result.
-            The coordinates that *do* vary are the record's own ``step`` and
-            ``direction``.
-        save (bool, optional): Write the result to the output folder when the
-            whole measurement finishes. Defaults to whatever
-            ``rfmux.tuning.store.autosave_enabled()`` says, which is on unless
-            your config file or ``$RFMUX_AUTOSAVE`` turns it off. One file per
-            call — a schedule's steps are one measurement, and a list of modules
-            produces one file covering all of them.
-        label (str, optional): Your name for this sweep, appended to the
-            filename. Ignored when nothing is being saved.
+        crs: CRS instance, supplied by the macro.
+        catalog: resonators to sweep, with channel bindings and default
+            centres and amplitudes from their bias points.
+        span_hz: full sweep width for each resonator, in Hz.
+        npoints_per_sweep: frequency points per sweep.
+        amp: amplitude in DAC full-scale units, or an ``AmplitudeSchedule``.
+            With a catalog, None uses its bias amplitudes; a scalar applies
+            to all members and a name mapping must cover every member.
+            Without a catalog, supply a scalar, a list matching the centres,
+            a name mapping, or a schedule. Lists are rejected with a catalog.
+            The entire schedule is validated before measurement starts.
+        nsamps: samples averaged per frequency point.
+        sweep_direction: ``"upward"``, ``"downward"``, or a sequence of both
+            in acquisition order. Every amplitude step uses each direction.
+        center_frequencies: with a catalog, an optional name-to-Hz mapping
+            covering every member; this overrides sweep centres only.
+            Without a catalog, a list of centres in Hz. Channels are assigned
+            in list order, starting at 1, and a catalog is recorded using
+            these centres and the first step's amplitudes.
+        names: names for a bare centre list, defaulting to ``S0001…``.
+            Rejected with a catalog, which supplies its own names.
+        module: defaults to the catalog's module and must match if supplied.
+            Required without a catalog; a list runs modules concurrently.
+            Multiple modules require bare centre lists and one analog bank
+            (1–4 or 5–8).
+        progress_callback: ``(module, percent)`` across the whole schedule.
+        data_callback: ``(module, partial_results, step, direction)`` during
+            acquisition. Partial results contain the current NCO region's
+            resonators, sliced to the points measured so far.
+        sweep_callback: ``(record)`` after each completed direction of a step.
+            The record holds ``step``, ``direction``, ``amplitudes``, ``factor``,
+            ``completed``, ``total``, and ``data`` (``{name: entry}``).
+        save: save one file for the completed call, including all modules.
+            None uses ``store.autosave_enabled()``.
+        label: label appended to the filename when saving.
 
     Returns:
-        dict: keyed by module identifier — ``crs.module[m].index()``, e.g.
-        ``crs0042_rmod2`` — with one entry per module swept::
-
-            {
-                "crs0042_rmod2": {
-                    "schema_version": 9,
-                    "measurement": "multisweep",
-                    "module": 2,           # resolved, never None
-                    "dac_scale_dbm": 1.0,  # DAC full scale as the board
-                                           # reported it; None if unread
-                    "call_params": {...},  # verbatim, as this macro was called,
-                                           # plus the resolved catalog and schedule
-                    "results": {
-                        0: {"upward": {"BOTA": {...}, "KOZR": {...}}},
-                        1: {"upward": {...}},
-                    },
-                },
-            }
-
-        Always keyed by module, including for the one module that is the usual
-        case, so a caller who writes ``for module_id, module_sweeps in
-        sweeps.items():`` has written the same code for one module and for four.
-
-        A list of modules sweeps them concurrently and merges the results into
-        one dict of this shape. Each module's output then records its own
-        module in ``call_params["module"]`` rather than the list that was
-        passed: the call that produced it really was a call for that module,
-        and one module's output is meant to stand on its own once lifted out.
-
-        ``results`` is keyed by amplitude step, numbered from 0 in the order
-        measured, and a step holds one entry per direction swept and nothing
-        else. One sweep is one step in one direction — which is what it is, not
-        a padded slot — so nothing downstream has to ask how wide the call was:
-        the readers in :mod:`rfmux.tuning.sweep_results` and the fitters in
-        :mod:`rfmux.tuning.fits` take a one-sweep result and a twenty-sweep one
-        without asking. They take *one module's* value, not the whole dict —
-        ``fit_sweeps(sweeps["crs0042_rmod2"])`` — and say so if handed the
-        container.
-
-        ``call_params`` records the arguments as they were passed, ``None``s
-        and all, beside the two things they were resolved into: ``catalog``,
-        which is there whichever form was asked for, and ``amp_schedule``.
-        Between them a result says what was measured without reference to the
-        call that made it, which is what lets the analysis downstream take a
-        result and nothing else.
-
-        Nothing is duplicated into the step level. What a resonator was probed
-        at is already ``sweep_amplitude`` in its own entry, and the step that
-        produced it is ``call_params["amp_schedule"]["steps"][step]``. The
-        readers beside the packer — ``collect_amplitude_iterations_for``,
-        ``find_iteration_matching_amplitude`` and
-        ``get_amplitudes_at_iteration`` — are the supported way back out, so
-        callers need not walk the nesting by hand.
-
-        Under a direction is one entry per resonator, keyed by resonator name
-        with a catalog or by section name with a bare frequency list::
-
-            {
-                'channel': int,                 # hardware channel swept on
-                'frequencies': np.ndarray (Hz), # Sweep frequencies
-                'iq_counts': np.ndarray (complex),  # Sweep IQ, in readout counts
-                'iq_volts': np.ndarray (complex),   # The same, in volts at the
-                                                    # board input port
-                'original_center_frequency': float, # Sweep centre, as requested
-                'sweep_direction': str, # "upward" or "downward"
-                'sweep_amplitude': float, # Normalized amplitude used in this sweep
-            }
-
-        A sweep does not say what it is *of*: no phase, no fit, no bias
-        frequency, no df calibration. Phase is ``np.angle(iq_counts)`` wherever
-        it is wanted, and calling it phase in here invites reading it as the
-        resonator's rather than the readout chain's. The entry carries no
-        ``name`` either — it is already keyed by one.
+        dict: ``{module_id: block}``, keyed by ``crs.module[m].index()``.
+        Each block holds ``results[step][direction][name]`` and the resolved
+        catalog and amplitude schedule in ``call_params``. Sweep entries
+        contain frequencies (Hz), complex IQ in counts and volts, channel,
+        original centre, amplitude, and direction. See
+        :func:`rfmux.tuning.sweep_results.pack_multisweep` for the format.
 
     Raises:
-        ValueError: for an empty or unknown *sweep_direction*, a module list
-            alongside a catalog, a module that disagrees with the catalog, an
-            amplitude the schedule cannot resolve, or a *center_frequencies*
-            entry that is not a positive frequency — all before the first sweep
-            runs.
+        ValueError: invalid directions, module selection, centres, or
+            amplitudes. These are checked before acquisition.
     """
 
     # What call_params records: the argument as passed, before the catalog or

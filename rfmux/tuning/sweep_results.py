@@ -1,26 +1,10 @@
-"""The shape a sweep comes back in, written and read in one place.
+"""Pack and read network analysis and multisweep results.
 
-``multisweep`` produces the dict :func:`pack_multisweep` assembles; the readers
-under it are the supported way to get things back out. One module owns both
-ends, because a reader resolving ``schedule.steps[iteration]`` has to agree with the
-packer about what a step means, and two files agreeing about one contract is one
-file too many.
+Both measurements return ``{module_id: block}``. Each block records the
+measurement type, module, DAC scale, call parameters, and results. A network
+analysis holds one trace; a multisweep holds ``results[step][direction][name]``.
 
-``take_netanal`` packs through :func:`pack_netanal` into the same container, so
-every driver in the package returns one container shape: keyed by module, each
-module's output recording ``schema_version``, ``measurement``, ``module``,
-``call_params`` and ``results``. What ``results`` holds differs — a sweep has an
-amplitude iteration per step, holding a direction per sweep, holding a section
-per resonator; a netanal has the one trace it measured, directly — which is
-what ``measurement`` is in the output to say.
-
-This lived in :mod:`rfmux.tuning.multisweep_amplitudes` while a schedule was the
-only thing that produced it. It is not the schedule's shape any more — it is every
-sweep's — so it has its own file, and the amplitudes module is back to being
-about amplitudes.
-
-Nothing here needs a board. Everything can be built, printed, validated and
-unit-tested with no hardware and no GUI in sight.
+The readers below take one module's block.
 """
 
 from __future__ import annotations
@@ -42,61 +26,7 @@ __all__ = [
 ]
 
 
-# Bumped when the packed dict changes shape in a way a reader cannot absorb.
-#
-# 2: sweeps stopped rotating, re-centring and df-calibrating themselves. A
-#    section entry lost 'name', 'phase_degrees', 'bias_frequency',
-#    'recalculation_method_applied', 'rotation_tod', 'applied_rotation_degrees',
-#    'df_calibration' and 'calibrated_tod_df'; 'iq_complex'/'iq_complex_volts'
-#    became 'iq_counts'/'iq_volts'; and call_params lost the three arguments
-#    that drove all of it.
-#
-# 3: a plain multisweep returns this shape too, and everything is wrapped in a
-#    dict keyed by module identifier. A single sweep is one iteration in one
-#    direction — which is what it is — so the nesting no longer says which macro
-#    produced it, and the multi-module form is keyed rather than a bare list.
-#
-# 4: take_netanal returns this shape too, and a module's output now says which
-#    driver made it in 'measurement'. A netanal measures one trace rather than a
-#    section per resonator, so under a direction it carries the arrays directly
-#    where a sweep carries {name: section} — the one place the two differ, and
-#    the reason a reader has to be able to tell them apart. The netanal's own
-#    'iq_complex'/'phase_degrees' became 'iq_counts'/'iq_volts' on the way in.
-#
-# 5: multiamp_multisweep was folded into multisweep, which now takes an
-#    AmplitudeSchedule as its 'amp' and a sequence as its 'sweep_direction'. So
-#    'measurement' is 'multisweep' whether one amplitude was swept or twenty,
-#    and call_params records the pair every sweep now has — 'amp_schedule' and
-#    'directions' — in place of the 'amp'/'sweep_direction' a single sweep used
-#    to record. A one-step schedule is the faithful record of amp=0.005; what
-#    each resonator was actually probed at is, as before, 'sweep_amplitude' on
-#    its own entry.
-#
-# 6: call_params always carries a catalog. A bare center_frequencies sweep used
-#    to record None there, and multisweep now generates one from the list, so a
-#    result says what array it is of whichever way it was asked for — which is
-#    what lets find_bias_points work off the sweep alone, and why this is a bump
-#    rather than a field quietly filling in: a reader that needs the catalog
-#    cannot absorb a 5 that has none.
-#
-# 7: a netanal's 'results' is the trace itself. It used to sit under an
-#    iteration and a direction, borrowed from multisweep so that the walk down
-#    to a measurement would be the same for both. But take_netanal has no
-#    amplitude schedule and measures one direction per call, so those two levels
-#    could only ever be 0 and the direction — two constants a reader had to type
-#    and could get wrong. The direction is still recorded, beside the arrays as
-#    'sweep_direction', where it says what was measured rather than indexes it.
-#
-# 8: a module's output records the DAC scale the board reported when the
-#    measurement was taken, in 'dac_scale_dbm' beside 'module'. A sweep
-#    amplitude is a fraction of DAC full scale, so without it a recorded
-#    amplitude cannot be stated as a power or a voltage at all -- the reader
-#    had to go back to a board, which is the wrong board or no board by the
-#    time a file is read. Beside 'module' rather than in 'call_params',
-#    because nobody asked for it, and once per module rather than on every
-#    sweep entry, because it is one number per measurement and two copies of
-#    it could disagree. None where the board reported none.
-# 9: center_frequencies may be a name-to-center mapping beside a catalog.
+# Bump when the saved measurement format changes incompatibly.
 RESULTS_SCHEMA_VERSION = 9
 
 
@@ -115,15 +45,7 @@ def _call_params(
     nsamps,
     requested_module,
 ) -> dict:
-    """The ``call_params`` fields both macros record, recorded identically.
-
-    Verbatim throughout — what was asked for, not what was worked out from it —
-    including the ``None``s, which is why *requested_module* is separate from
-    the module that was actually swept. The catalog is the exception, and for
-    the same reason ``amp_schedule`` is: it is the resolved form of either way
-    of asking, so a bare ``center_frequencies`` sweep records both the list
-    that was passed *and* the catalog it became.
-    """
+    """Record requested sweep settings and a snapshot of the resolved catalog."""
     return {
         "catalog": catalog.to_dict(),
         "center_frequencies": (
@@ -153,25 +75,10 @@ def _packed(
     measurement: str,
     dac_scale_dbm: float | None,
 ) -> dict:
-    """One module's output, in the container every driver returns.
+    """Wrap one module's measurement in ``{module_id: block}``.
 
-    Always a container, even for the one module that is the usual case, so a
-    caller who writes ``for module_id, module_sweeps in sweeps.items():`` has
-    written the same code for one module and for four. A convenience that
-    flattened the single-module case would make the common script differ from
-    the general one.
-
-    *measurement* names the driver: ``"multisweep"`` or ``"netanal"``. The two
-    agree on everything down to ``results`` and part company inside it — a sweep
-    keys by amplitude iteration, a netanal is the trace — so the readers below
-    need a way to tell them apart that is not sniffing ``call_params`` for
-    ``span_hz``, which is the kind of test this shape exists to delete.
-
-    *dac_scale_dbm* is what DAC full scale was worth on this module when the
-    measurement was taken. Every amplitude in the output is a fraction of it,
-    so it is what turns one into a power or a voltage — see
-    :func:`rfmux.core.transferfunctions.convert_dacunits_to_dbm`. None
-    when the board reported none, which is an answer rather than a failure.
+    ``dac_scale_dbm`` is the measured DAC full-scale power, or None if
+    unavailable. It converts the recorded amplitude fractions to power.
     """
     return {
         module_id: {
@@ -202,54 +109,22 @@ def pack_multisweep(
     requested_module: int | None = None,
     dac_scale_dbm: float | None = None,
 ) -> dict:
-    """Assemble what ``multisweep`` returns.
+    """Pack measured sweeps as ``{module_id: block}``.
 
-    One packer for one sweep and for twenty, because they are the same
-    measurement at different extents. A call that swept one amplitude in one
-    direction arrives here as a *sweeps* of one iteration holding one direction
-    — which is what it is, not a padded slot — so reading a result needs no
-    knowledge of how wide the call that made it was.
+    ``sweeps`` is ``{step: {direction: {name: entry}}}``, with steps numbered
+    from zero in acquisition order. It becomes the block's ``results``.
+    The block also holds ``schema_version``, ``measurement``, ``module``,
+    ``dac_scale_dbm``, and ``call_params``.
 
-    Args:
-        sweeps: ``{iteration: {direction: {name: entry}}}``, in the order
-            measured.
-        module_id: the board-and-module identifier this comes back under, from
-            ``crs.module[m].index()``.
-        module: the module actually swept — resolved, never None.
-        amp_schedule: the schedule the amplitudes came from, normalized — a
-            bare ``amp=0.005`` reaches here as the one-step schedule it is.
-            Snapshotted with ``to_dict`` for provenance.
-        directions: the directions swept, in the order measured.
-        requested_module: the ``module`` argument as the caller passed it, which
-            is None whenever it came from the catalog instead, and the list
-            itself for a call that fanned out over several. Recorded as-is,
-            because *call_params* says what was asked for and not what was
-            worked out from it.
-        catalog: the ``ResonatorCatalog`` swept — required, and for a
-            frequency-list sweep the one ``multisweep`` generated from the list
-            rather than None. Snapshotted with ``to_dict``, which is the whole
-            catalog and not a summary of it, so the array a sweep was taken
-            from comes back off a file intact.
-        dac_scale_dbm: what DAC full scale was worth on this module, read from
-            the board as the sweep was taken. Every ``sweep_amplitude`` below
-            is a fraction of it.
+    ``catalog`` and ``amp_schedule`` are the resolved objects and are recorded
+    with ``to_dict()``. Other call parameters record the requested settings,
+    including ``requested_module`` (which may be None or a module list).
+    ``module`` and ``module_id`` identify the module actually measured.
+    ``directions`` records acquisition order. ``dac_scale_dbm`` is the board's
+    DAC full-scale power, or None when unavailable.
 
-    Returns:
-        dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``measurement``, ``module``, ``dac_scale_dbm``,
-        ``call_params`` and ``results``.
-
-        ``results`` is keyed by amplitude iteration, numbered from 0 in the
-        order measured, and an iteration holds one entry per direction swept
-        and nothing else.
-
-        Nothing is duplicated into the iteration level. What a resonator was
-        probed at is already ``sweep_amplitude`` in its own entry — see
-        :func:`get_amplitudes_at_iteration` — and the step that produced it is
-        ``call_params["amp_schedule"]["steps"][iteration]``. Sweep centres are
-        recorded only as passed: a later step may re-centre between amplitudes,
-        at which point a top-level copy would be a lie while each sweep's own
-        ``original_center_frequency`` cannot be.
+    Each sweep entry records its own amplitude and original centre. Use
+    :func:`collect_amplitude_iterations_for` to read a resonator's sweeps.
     """
     call_params = _call_params(
         catalog=catalog,

@@ -1,13 +1,4 @@
-"""What Periscope hands a NetworkAnalysisTask, and what it takes to start one.
-
-One netanal is one module, at one probe amplitude, in one direction, which is
-what the dialog asks for and what ``take_netanal`` takes. The parameters reach
-the driver as they were entered; the module is not among them, because one
-Periscope controls one.
-
-What is *not* needed to start one is a DAC scale, which only decides whether
-the legend can say dBm.
-"""
+"""Test network analysis arguments and prerequisites passed through Periscope."""
 
 import pytest
 

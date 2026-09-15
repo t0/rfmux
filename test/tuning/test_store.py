@@ -1,19 +1,4 @@
-"""Behaviour of the output folder.
-
-Pure — no board, no driver, no GUI. Payload dicts in, files in a tmp_path out.
-
-The emphasis is on the things that lose data if they are wrong: a re-save goes
-back over the file it came from rather than beside it, one module written back
-into a container does not take the other modules down with it, two measurements
-finishing in the same second do not land on top of each other, and a payload
-that cannot be stamped is refused rather than written somewhere nobody can find
-it again.
-
-The rest is the contract the notebooks rely on: what the folder is called, what
-the file is called, where ``file_metadata`` ends up in each of the shapes a
-measurement comes back in, and that stamping one does not break the predicates
-the tuning layer uses to tell those shapes apart.
-"""
+"""Test output naming, metadata, and updates that preserve other modules."""
 
 import datetime
 import pickle

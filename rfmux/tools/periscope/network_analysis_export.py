@@ -1,15 +1,4 @@
-"""
-Save and cable-delay utilities for NetworkAnalysisWindow.
-
-This module defines the NetworkAnalysisExportMixin class, which provides functionality for:
-1. Saving the measurement through rfmux.tuning.store
-2. Managing cable delays and cable length adjustments
-3. Handling resonance-related UI updates
-4. Configuring and launching multisweep analysis
-
-The mixin is designed to be included in the NetworkAnalysisWindow class to add these
-capabilities while maintaining separation of concerns.
-"""
+"""Save network analyses, adjust cable delay, and launch multisweeps."""
 
 from __future__ import annotations
 from pathlib import Path

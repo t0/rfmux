@@ -1,16 +1,4 @@
-"""One resonator, in detail: every drive it was swept at, and the one it is biased at.
-
-The grids answer a question about the array — which resonator looks wrong — and
-cannot answer the next one, because a subplot a couple of hundred pixels wide
-has no room for it. This tab is one resonator at the size of the panel: what it
-did at every drive, what the drive it is biased at looks like with the fitted
-model over it, and every number the fits and the bias search produced for it.
-
-Nothing here is measured. Every number comes off the block the panel already
-holds -- its sweeps, the fits in them and the bias report beside them -- through
-the library's own readers, so a notebook draws the same figures from the same
-numbers.
-"""
+"""Show one resonator's sweeps, fits, and bias findings in detail."""
 
 from __future__ import annotations
 

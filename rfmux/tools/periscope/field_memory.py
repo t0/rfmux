@@ -1,12 +1,7 @@
-"""Remembering what the user typed, dialog by dialog.
+"""Restore dialog fields on creation and save them on acceptance.
 
-A dialog calls :func:`remember_fields` once, at the end of its ``__init__``
-and after its widgets exist. The fields it holds as attributes come back the
-next time it opens, and are saved again whenever it is accepted.
-
-Fields whose value comes from the board or from the caller belong in ``skip``:
-restoring a stale copy over a value that was just read is worse than not
-remembering it at all.
+Call ``remember_fields`` after creating the widgets. Exclude fields supplied
+by the board or caller with ``skip``.
 """
 
 from __future__ import annotations

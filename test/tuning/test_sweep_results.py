@@ -1,12 +1,4 @@
-"""Behaviour of the shape a sweep comes back in.
-
-Packing and reading, with no board and no driver in sight — which is most of
-what a consumer of a sweep ever touches. The emphasis is on the properties the
-rest of the codebase leans on: one shape whatever measured it, a module
-identifier at the top even for one module, nothing stored twice to be readable,
-and readers that refuse the container rather than walking it as if it were one
-module's output.
-"""
+"""Test measurement packing and per-module result readers."""
 
 import math
 import pickle

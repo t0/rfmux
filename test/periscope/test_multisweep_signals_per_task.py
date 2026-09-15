@@ -1,10 +1,4 @@
-"""Two multisweep panels can run at once.
-
-Periscope used to keep one ``MultisweepSignals`` on the main window and, before
-wiring a new panel to it, disconnect every slot already on it -- so starting a
-second sweep left the first panel frozen at whatever progress it had reached.
-Each task now carries signals of its own.
-"""
+"""Test that concurrent multisweep tasks have independent progress signals."""
 
 import pytest
 

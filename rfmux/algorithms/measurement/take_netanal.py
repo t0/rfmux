@@ -1,13 +1,7 @@
-"""
-take_netanal: A measurement algorithm that handles the book-keeping of assigning NCO, frequency, and channel
-pairings in order to measure the complex S21 across a large bandwidth. Often used for finding resonances.
+"""Measure a wideband complex S21 trace by assigning NCOs and channel tones.
 
-It returns the container ``multisweep`` returns — keyed by module, each module's
-output recording how the measurement was called alongside what it measured —
-because a netanal and a sweep being two shapes was costing three separate pieces
-of book-keeping and telling nobody anything. What differs is ``results``: a
-netanal measured one wideband trace, so the trace is what is there, where a
-sweep has an amplitude iteration per step of its schedule.
+Returns ``{module_id: block}``, with the trace in ``block["results"]`` and
+measurement settings in ``block["call_params"]``.
 """
 
 import warnings
@@ -40,126 +34,39 @@ async def take_netanal(
     save=None,
     label=None,
 ):
-    """
-    Perform a network analysis over the frequency range [fmin, fmax].
-    Returns the frequencies measured and the complex S21 at each of them.
-    The sweep is divided into sub-ranges (chunks) whenever the span exceeds `max_span`.
-    Each chunk is associated with a single NCO setting (midpoint of the chunk).
+    """Measure complex S21 across [fmin, fmax] in one sweep direction.
 
-    The chunks partition the frequency grid: every frequency is measured once,
-    by exactly one of them. No phase stitching is performed between chunks, so
-    the phase of the trace is not continuous across an NCO change.
+    Bands wider than ``max_span`` use multiple NCO settings. There is no phase
+    stitching between them. Returned frequencies are monotonic in the sweep
+    direction, although tones within each band are acquired interleaved.
 
-    One direction per call, and the band is measured once in it. Both
-    directions is two calls whose results you keep side by side — unlike
-    ``multisweep``, which takes a sequence and returns a key per direction,
-    because it walks a resonance point by point and a netanal does not.
+    Args:
+        crs: CRS instance, supplied by the macro.
+        amp: per-tone amplitude as a fraction of DAC full scale.
+        fmin: lower frequency limit, Hz.
+        fmax: upper frequency limit, Hz.
+        nsamps: samples averaged per measurement.
+        npoints: total frequency points.
+        max_chans: maximum tones per comb iteration.
+        max_span: maximum bandwidth per NCO setting, Hz.
+        rotate_phase_to_0: rotate the trace so the first point in the sweep
+            direction has zero phase.
+        sweep_direction: ``"upward"`` or ``"downward"``; one per call.
+        module: one module or a list within one analog bank (1–4 or 5–8).
+            Multiple modules are measured concurrently.
+        progress_callback: called with ``(module, percent)``.
+        data_callback: called with ``(module, partial)`` during acquisition;
+            partial data holds ``frequencies`` and ``iq_counts``.
+        save: save one file when the measurement completes. None uses
+            ``store.autosave_enabled()``.
+        label: label appended to the filename when saving.
 
-    Parameters
-    ----------
-    crs : CRS
-        The CRS object used for hardware communication (injected by the macro).
-    amp : float, optional
-        Amplitude to set on each channel frequency, by default 0.001.
-    fmin : float, optional
-        Start frequency in Hz, by default 100e6.
-    fmax : float, optional
-        Stop frequency in Hz, by default 2450e6.
-    nsamps : int, optional
-        Number of samples to acquire (averaged) per measurement, by default 10.
-    npoints : int, optional
-        Number of total points across [fmin, fmax], by default 5000.
-    max_chans : int, optional
-        Maximum number of channels (frequencies) measured per comb iteration,
-        by default 1023.
-    max_span : float, optional
-        Maximum span (Hz) per NCO setting, defaults to the droop-free (non-extended) range of 500MHz.
-    rotate_phase_to_0 : bool, optional
-        If True, applies an arbitrary global phase rotation to make the first
-        point *measured* have zero phase — the lowest frequency of an upward
-        netanal, the highest of a downward one. This makes it easier to compare
-        phase responses across different measurements, by default True.
-    sweep_direction : {'upward', 'downward'}, optional
-        Which way through the band, by default 'upward'. The chunks are visited
-        in that order and the tones within each are programmed in it, and the
-        trace comes back in the order it was measured — so a downward netanal
-        has descending ``frequencies``, the way a downward ``multisweep`` sweep
-        does. One direction per call; a sequence is refused.
-    module : int or list of int
-        - If an integer, run one measurement on that module.
-        - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
-          and return a dict keyed by module number.
-        - Note -- lists must be within a single analog bank (1-4) or (5-8).
-    progress_callback : callable, optional
-        Callback function that receives (module, progress_percentage) updates.
-    data_callback : callable, optional
-        ``(module, partial)`` during acquisition, where *partial* carries the
-        same keys as the finished block -- ``frequencies`` and ``iq_counts``,
-        in acquisition order -- growing as points arrive. A live consumer and a
-        consumer of the return value therefore read the same thing. Magnitude
-        and phase are the reader's to take; see the note on ``phase_degrees``
-        under Returns.
-    save : bool, optional
-        Write the result to the output folder when the measurement finishes.
-        Defaults to whatever ``rfmux.tuning.store.autosave_enabled()`` says,
-        which is on unless your config file or ``$RFMUX_AUTOSAVE`` turns it off.
-        A list of modules produces one file covering all of them.
-    label : str, optional
-        Your name for this measurement, appended to the filename. Ignored when
-        nothing is being saved.
-
-    Returns
-    -------
-    dict
-        Keyed by module identifier — ``crs.module[m].index()``, e.g.
-        ``crs0042_rmod2`` — with one entry per module measured::
-
-            {
-                "crs0042_rmod2": {
-                    "schema_version": 9,
-                    "measurement": "netanal",
-                    "module": 2,           # resolved, never None
-                    "dac_scale_dbm": 1.0,  # DAC full scale as the board
-                                           # reported it; None if unread
-                    "call_params": {...},  # verbatim, as this macro was called
-                    "results": {           # the trace itself
-                        'frequencies': np.ndarray (Hz),
-                        'iq_counts': np.ndarray (complex),  # readout counts
-                        'iq_volts': np.ndarray (complex),   # the same, in volts
-                                                            # at the board input
-                        'sweep_amplitude': float,  # normalized, per tone
-                        'sweep_direction': 'upward',
-                    },
-                },
-            }
-
-        Always keyed by module, including for the one module that is the usual
-        case, so a caller who writes ``for module_id, netanal in
-        result.items():`` has written the same code for one module and for
-        four. A list of modules measures them concurrently and merges the
-        results into one dict of this shape, each module's output recording
-        its own module in ``call_params["module"]``.
-
-        ``frequencies`` is in the order it was measured: ascending for an
-        upward netanal, descending for a downward one. Not acquisition order —
-        the tones within a chunk are measured interleaved, which is a stride
-        pattern every reader would have to undo — but monotonic in the
-        direction that was swept.
-        :func:`rfmux.tuning.netanal_trace` is the accessor, and
-        :func:`rfmux.tuning.find_resonances_in_netanal` searches either
-        direction.
-
-        A sweep result has ``{iteration: {direction: {name: section}}}`` under
-        ``results`` instead, because it has an amplitude schedule and a section
-        per resonator; that is where the two shapes part company, and why the
-        output says which it is. The readers in
-        :mod:`rfmux.tuning.sweep_results` and the fitters in
-        :mod:`rfmux.tuning.fits` want sections and say so rather than walking a
-        netanal into nonsense.
-
-        No ``phase_degrees``: it is ``np.angle(iq_counts)`` wherever it is
-        wanted, and naming it phase in here invites reading it as the
-        resonators' rather than the readout chain's.
+    Returns:
+        dict: ``{module_id: block}``, keyed by ``crs.module[m].index()``.
+        ``block["results"]`` holds ``frequencies`` (Hz), complex ``iq_counts``
+        and ``iq_volts``, ``sweep_amplitude``, and ``sweep_direction``.
+        Use :func:`rfmux.tuning.netanal_trace` to read it or
+        :func:`rfmux.tuning.find_resonances_in_netanal` to search for dips.
     """
     sweep_direction = resolve_direction(sweep_direction)
 

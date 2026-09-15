@@ -1,26 +1,7 @@
-"""
-**DEPRECATED — legacy Periscope tuning path.** Kept only until Periscope is
-ported to :mod:`rfmux.tuning`; do not use in new code. Every public function
-here warns on call and names its replacement (see ``_legacy.py``).
+"""Fit the nonlinear model to legacy multisweep dictionaries.
 
-The legacy dict-walking surface for nonlinear resonator fitting.
-
-The model and its fitter have moved to :mod:`rfmux.tuning.fits` — they are
-analysis over two arrays rather than board operations, so they belong with the
-other pure layers — and are re-exported below so callers reaching for
-``fitting_nonlinear.nonlinear_iq`` still find it. The citkid attribution moved
-with them.
-
-What is left here is :func:`fit_nonlinear_iq_multisweep`, which reads the
-pre-schema-2 multisweep contract — ``iq_complex``,
-``original_center_frequency``, integer keys — and writes its results flat onto
-each entry. ``multisweep`` returns ``iq_counts`` keyed by resonator name and
-has done since the sweep stopped doing anything but measure, so this works on
-files saved before that change and on nothing else.
-
-For sweeps taken since, use :func:`rfmux.tuning.fit_sweeps`, which writes the
-nonlinear fit under the entry's ``fits`` subdict and stores the estimated gain
-rather than a gain-corrected copy of a trace the entry already holds.
+Deprecated: use :mod:`rfmux.tuning` for current sweep results. Public legacy
+entry points warn with their replacements.
 """
 
 import numpy as np

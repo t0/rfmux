@@ -1,18 +1,4 @@
-"""Behaviour of the bias-finding layer.
-
-Pure — no board, no driver. Synthetic amplitude steps in, a new catalog out.
-
-The emphasis is on the contract: the search stops one amplitude below
-bifurcation, nothing that was handed in comes back modified, a resonator that
-could not be placed keeps the operating point it arrived with and says why, and
-the calibration on a bias point belongs to the frequency printed beside it.
-
-The two bifurcation tests get their arithmetic checked as well, because a
-detector that never fires — or always does — is worth catching here rather than
-on a cryostat. The nonlinear model supplies the jumped traces: it leans a
-resonance over exactly the way drive does, so a large ``a`` gives a sweep with a
-real discontinuity in it rather than a spike pasted in by hand.
-"""
+"""Test bias selection, calibration, and flags on synthetic sweeps."""
 
 import numpy as np
 import pytest

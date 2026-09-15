@@ -1,16 +1,8 @@
-"""The tuning record a capture stores beside each channel's pulses.
+"""Convert catalog bias points to per-channel tuning rows for pulse captures.
 
-One row per readout channel, built from the catalog's bias points, and the
-catalog read back out of the rows. The row is what
-:mod:`rfmux.pulse_capture` writes into a capture file's ``tuning`` group:
-the HDF5 layer types a row by value and never looks at a field name, so
-this module is the only place that says what a row holds.
-
-The round trip is the contract. A ``BiasPoint`` already carries the one
-sweep its calibration was read off -- at the amplitude and direction that
-were chosen -- so a capture records the trace behind every number in it,
-and :func:`multisweep_from_tuning` gives those traces back in the shape a
-multisweep comes in, which is how a capture's tuning is browsed.
+The rows include each bias point's calibration sweep. Read them back as a
+catalog with :func:`catalog_from_tuning`, or as a multisweep for plotting with
+:func:`multisweep_from_tuning`.
 """
 
 from __future__ import annotations

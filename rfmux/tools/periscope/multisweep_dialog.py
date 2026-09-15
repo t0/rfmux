@@ -1,10 +1,6 @@
-"""The Multisweep dialog: a view over ``crs.multisweep``'s own arguments.
+"""Build ``crs.multisweep`` arguments from the user's sweep settings.
 
-Nothing here computes what a sweep will do. The amplitude group builds an
-:class:`~rfmux.tuning.multisweep_amplitudes.AmplitudeSchedule` through the
-constructor each radio names, and the schedule's own ``describe`` and
-``validate`` fill the summary line and the status label. What the dialog emits
-is the keyword arguments the driver takes, and nothing else.
+Amplitude previews and validation use ``AmplitudeSchedule``.
 """
 
 import inspect

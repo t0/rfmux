@@ -1,10 +1,4 @@
-"""Behaviour of the resonance finder.
-
-Synthetic sweeps with known resonators, so every assertion is against a truth
-the test set up itself. The emphasis is on the contract callers rely on: the
-dips come back, close pairs are only merged when asked for, and anything the
-finder discards is reported rather than silently dropped.
-"""
+"""Test detected and rejected resonances against known synthetic traces."""
 
 from dataclasses import replace
 

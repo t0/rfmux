@@ -1,18 +1,8 @@
-"""Where rfmux keeps the handful of settings that outlive a Python session.
+"""Read persistent settings from ``rfmux/config.yaml``.
 
-There is one YAML file, and you own it. ``config_template.yaml`` ships with the
-package, documents every setting, and is never read except by :func:`init`,
-which copies it to ``rfmux/config.yaml`` for you to edit. That copy is
-gitignored, so a working directory full of real cryostat paths stays out of
-commits — and because the template is the only tracked copy, an upgrade can add
-a setting without ever overwriting your answer to an old one.
-
-Nothing here decides anything. :func:`get` reports what the file says and
-:mod:`rfmux.tuning.store` decides what to do about it, which is why the
-resolution order — argument, then session override, then environment, then this
-file, then the built-in default — lives there rather than here.
-
-Nothing in this module needs a board, a GUI or a hardware map.
+:func:`init` copies the documented ``config_template.yaml`` to this gitignored
+file for local editing. Output-directory precedence is handled by
+:mod:`rfmux.tuning.store`.
 """
 
 from __future__ import annotations

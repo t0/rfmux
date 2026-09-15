@@ -336,6 +336,49 @@ def vectorized_update_params_from_nqp(nqp_array, *args):
 # Convergence Loop
 # ============================================================================
 
+@jit(nopython=True, cache=True, fastmath=True)
+def _p_attenuator(input_atten_dB, z0):
+    """(r2, r3) of the P-type input attenuator: r2 in series with the
+    generator, r3 shunting the resonator node."""
+    att_factor = 10.0 ** (input_atten_dB / 20.0)
+    r3 = z0 * ((att_factor + 1) / (att_factor - 1))
+    r2 = (z0 / 2.0) * ((10.0 ** (input_atten_dB / 10.0) - 1) / att_factor)
+    return r2, r3
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def _drive_current(w, amplitude, L, R, C, Cc, ZLNA, r2, r3):
+    """The current the generator drives through one resonator of total
+    inductance L (parallel LC with R in the L branch, Cc in series,
+    the LNA across the node): the solver's map F(I) for one element,
+    and the linear response when L is the rest value."""
+    if C > 0:
+        ZC = 1.0 / (1j * w * C)
+        ZL = 1j * w * L
+        Z_parallel = 1.0 / (1.0 / ZC + 1.0 / (ZL + R))
+    else:
+        Z_parallel = 1j * w * L + R
+    Z_res = Z_parallel + 1.0 / (1j * w * Cc)
+    Zsys = 1.0 / (1.0 / Z_res + 1.0 / ZLNA)
+    Zp = 1.0 / (1.0 / Zsys + 1.0 / r3)
+    I2 = amplitude / (r2 + Zp)
+    Iin = I2 * (r3 / (Zsys + r3))
+    Zpar = 1.0 / (1.0 / r3 + 1.0 / Z_res + 1.0 / ZLNA)
+    return Iin * Zpar / Z_res
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def linear_currents(freqs, L, R, C, Cc, input_atten_dB, ZLNA):
+    """The current per unit drive one resonator at rest carries at each
+    of *freqs*: its linear response, as the solver computes it."""
+    r2, r3 = _p_attenuator(input_atten_dB, 50.0)
+    out = np.empty(len(freqs), dtype=np.complex128)
+    for k in range(len(freqs)):
+        out[k] = _drive_current(2.0 * np.pi * freqs[k], 1.0, L, R, C, Cc,
+                                ZLNA, r2, r3)
+    return out
+
+
 @jit(nopython=True, parallel=True, cache=True, fastmath=True)
 def _converged_lekid_parameters_par(
     frequency, amplitude, 
@@ -425,56 +468,20 @@ def _converged_lekid_parameters_par(
     g_prev = np.zeros(n, dtype=np.complex128)
     I_prev = np.zeros(n, dtype=np.complex128)
     
-    # Attenuator values
-    att_factor = 10.0**(input_atten_dB/20.0)
-    z0 = 50.0  # Characteristic impedance
-    r1 = z0 * ((att_factor + 1) / (att_factor - 1))
-    r3 = r1
-    r2 = (z0 / 2.0) * ((10.0**(input_atten_dB/10.0) - 1) / att_factor)
-    
+    r2, r3 = _p_attenuator(input_atten_dB, 50.0)
+
     actual_iterations = 0
-    
+
     # Convergence loop
     for iteration in range(max_iterations):
-        # Step 1: Calculate impedances for all resonators
-        impedances = np.zeros(n, dtype=np.complex128)
-        
-        for i in prange(n):
-            # Parallel RLC impedance
-            # Note: L_work already includes L_junk (total resonator inductance)
-            if C_array[i] > 0:
-                ZC = 1.0 / (1j * w * C_array[i])
-                ZL = 1j * w * L_work[i]
-                Z_parallel_inv = 1.0/ZC + 1.0/(ZL + R_array[i])
-                Z_parallel = 1.0 / Z_parallel_inv
-            else:
-                Z_parallel = 1j * w * L_work[i] + R_array[i]
-            
-            # Series coupling capacitor
-            ZCc = 1.0 / (1j * w * Cc_array[i])
-            
-            # L_junk is now included in L_work, not added separately
-            impedances[i] = Z_parallel + ZCc
-        
-        # Step 2: Calculate currents through resonators
+        # Step 1: the current the generator drives through each
+        # resonator at its present inductance
         currents_new = np.zeros(n, dtype=np.complex128)
         
         for i in prange(n):
-            # System impedance (parallel combination of resonator and LNA)
-            Zsys = 1.0 / (1.0/impedances[i] + 1.0/ZLNA)
-            
-            # P-type attenuator calculation
-            Zp = 1.0 / (1.0/Zsys + 1.0/r3)
-            
-            # Current through r2
-            I2 = amplitude / (r2 + Zp)
-            
-            # Current divider for input current
-            Iin = I2 * (r3 / (Zsys + r3))
-            
-            # Current through resonator (current divider)
-            Zpar = 1.0 / (1.0/r3 + 1.0/impedances[i] + 1.0/ZLNA)
-            currents_new[i] = Iin * Zpar / impedances[i]
+            currents_new[i] = _drive_current(
+                w, amplitude, L_work[i], R_array[i], C_array[i], Cc_array[i],
+                ZLNA, r2, r3)
         
         # Step 3: the step towards self-consistency.  Each resonator's
         # current I sets its inductance, which sets the current F(I) it
@@ -533,8 +540,16 @@ def _converged_lekid_parameters_par(
     
     if actual_iterations == 0:
         actual_iterations = max_iterations
-    
-    # Return converged values
+
+    # The current the converged inductance carries.  The iterate stops
+    # when the inductance stops changing, which at a drive too small to
+    # change it is after the first damped step, a fraction of the way
+    # to F(I); the inductance is right either way, the current is F(I).
+    for i in prange(n):
+        currents_array[i] = _drive_current(
+            w, amplitude, L_work[i], R_array[i], C_array[i], Cc_array[i],
+            ZLNA, r2, r3)
+
     return L_work, R_array, currents_array, actual_iterations
 
 
@@ -804,6 +819,22 @@ def compute_s21_parallel(
     S21 = 2.0 * S21_raw * att_factor * GLNA
     
     return S21
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def s21_of_one(freqs, L, R, C, Cc, ZLNA, GLNA, input_atten_dB,
+               system_termination):
+    """compute_s21_parallel of one resonator alone, at each of *freqs*
+    per unit drive."""
+    L1 = np.array([L])
+    C1 = np.array([C])
+    R1 = np.array([R])
+    Cc1 = np.array([Cc])
+    out = np.empty(len(freqs), dtype=np.complex128)
+    for k in range(len(freqs)):
+        out[k] = compute_s21_parallel(freqs[k], 1.0, L1, C1, R1, Cc1, ZLNA,
+                                      GLNA, input_atten_dB, system_termination)
+    return out
 
 
 @jit(nopython=True, cache=True, fastmath=True)

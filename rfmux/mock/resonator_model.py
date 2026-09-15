@@ -208,6 +208,7 @@ class MockResonatorModel:
         self._nqp_const_arrays = None
         self._nqp_tiled_cache = None
         self._cache_key_table = None
+        self._envelope = None
         self.L_array = self.R_array = self.Lk_array = None
         self.base_Lk_array = self.base_R_array = self.base_Lg_array = None
         self._lekids_stale = False
@@ -1072,6 +1073,86 @@ class MockResonatorModel:
         self.L_array, self.R_array, self.Lk_array = L, R, Lk
         self._lekids_stale = True
         return currents
+
+    def envelope_parameters(self):
+        """Per resonator, the Kerr resonator the circuit is near its
+        resonance, in the current the solver uses (Rouble et al.,
+        arXiv:2607.09178, with the stored energy written as a current):
+        ``omega_r`` and ``kappa`` in rad/s, the resonant part of the
+        current per unit drive ``D / (kappa/2 + i (omega - omega_r))``,
+        the output coupling ``c`` with ``S21 = S21_bg + c (I - I_bg)``
+        at the peak (``S21_bg`` the through transmission there), and
+        ``K`` with ``omega_r(I) = omega_r + K |I|^2``.
+        omega_r, kappa, D and c come from the linear response at the
+        rest QP density, once per generation; K from Lk(I)."""
+        if self._envelope is None:
+            self._envelope = self._extract_envelope()
+        env = dict(self._envelope)
+        # Lk = Lk0 (1 + |I|^2/Istar^2) and omega_r ~ 1/sqrt(L), so
+        # d omega_r / omega_r = -(Lk/L) |I|^2 / (2 Istar^2).
+        env['K'] = -env['omega_r'] * env['alpha_k'] / (2.0 * self.Istar ** 2)
+        return env
+
+    def _extract_envelope(self):
+        self._ensure_arrays()
+        n = len(self.mr_lekids)
+        R0, Lk0 = jit_physics.vectorized_update_params_from_nqp(
+            np.asarray(self.base_nqp_values[:n], dtype=np.float64),
+            *self._nqp_consts()[1:])
+        L0 = Lk0 + self._base_arrays()[2] + self.L_junk_array
+        k0 = self.mr_lekids[0]
+        out = {k: np.zeros(n) for k in ('omega_r', 'kappa', 'alpha_k')}
+        out['D'] = np.zeros(n, dtype=complex)
+        out['c'] = np.zeros(n, dtype=complex)
+        out['S21_bg'] = np.zeros(n, dtype=complex)
+        for i in range(n):
+            args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
+                    k0.input_atten_dB, complex(k0.ZLNA))
+            f_c = float(self.resonator_frequencies[i])
+            span = 2e6
+            for _ in range(4):
+                grid = f_c + np.linspace(-span, span, 4001)
+                I = jit_physics.linear_currents(grid, *args)
+                # The through-current is a smooth background: a line
+                # through the outer fifth of the grid on each side.
+                m5 = len(grid) // 5
+                edge = np.r_[np.arange(m5), np.arange(len(grid) - m5, len(grid))]
+                pI = np.polyfit(grid[edge] - f_c, I[edge], 1)
+                res = I - np.polyval(pI, grid - f_c)
+                j = int(np.argmax(np.abs(res)))
+                if m5 < j < len(grid) - m5:
+                    break
+                span *= 4
+            fine = grid[j] + np.linspace(-1e3, 1e3, 401)
+            res_f = (jit_physics.linear_currents(fine, *args)
+                     - np.polyval(pI, fine - f_c))
+            jf = int(np.argmax(np.abs(res_f)))
+            f_r, peak = fine[jf], res_f[jf]
+            # Half-power width: the coarse crossings, then the fine ones.
+            above = np.flatnonzero(np.abs(res) >= abs(peak) / np.sqrt(2))
+            w0 = max(grid[above[-1]] - grid[above[0]], grid[1] - grid[0])
+            fine = f_r + np.linspace(-1.5 * w0, 1.5 * w0, 4001)
+            a = np.abs(jit_physics.linear_currents(fine, *args)
+                       - np.polyval(pI, fine - f_c)) - abs(peak) / np.sqrt(2)
+            jc = int(np.argmax(a))
+            lo = np.flatnonzero(a[:jc] <= 0)[-1]
+            hi = jc + np.flatnonzero(a[jc:] <= 0)[0]
+            f_lo = fine[lo] - a[lo] * (fine[lo + 1] - fine[lo]) / (a[lo + 1] - a[lo])
+            f_hi = fine[hi - 1] - a[hi - 1] * (fine[hi] - fine[hi - 1]) / (a[hi] - a[hi - 1])
+            kappa = 2.0 * np.pi * (f_hi - f_lo)
+            s_args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
+                      complex(k0.ZLNA), k0.GLNA, k0.input_atten_dB,
+                      k0.system_termination)
+            S_edge = jit_physics.s21_of_one(grid[edge[::40]], *s_args)
+            pS = np.polyfit(grid[edge[::40]] - f_c, S_edge, 1)
+            S_r = jit_physics.s21_of_one(np.array([f_r]), *s_args)[0]
+            out['omega_r'][i] = 2.0 * np.pi * f_r
+            out['kappa'][i] = kappa
+            out['alpha_k'][i] = Lk0[i] / L0[i]
+            out['D'][i] = peak * kappa / 2.0
+            out['S21_bg'][i] = np.polyval(pS, f_r - f_c)
+            out['c'][i] = (S_r - out['S21_bg'][i]) / peak
+        return out
 
     def _nqp_sensitivity(self):
         """Fractional response of (Lk, R) to a fractional nqp change.

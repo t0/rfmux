@@ -180,6 +180,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   response, idler, gain); with `envelope_dynamics` on, a pulsed
   resonator's current rings down to each new steady state and the
   transient reaches the stream (visible at dec 0 and on PFB)
+- Tones sharing a resonance shift each other: each tone's solve adds
+  twice the other tones' |I|^2 per resonator (cross-phase modulation of
+  an instantaneous nonlinearity), from the states they last left
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
@@ -219,9 +222,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1064 tests, ~1 min
+pytest --tier=quick                 # Edit loop: 1067 tests, ~1 min
 pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1086 that run without a board, ~4 min
+pytest --tier=full                  # All 1089 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

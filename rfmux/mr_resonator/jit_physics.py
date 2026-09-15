@@ -385,7 +385,7 @@ def _converged_lekid_parameters_par(
     L_array, R_array, C_array, Cc_array,
     base_Lk, base_Lg, base_L_junk,
     input_atten_dB, ZLNA,
-    Istar, tolerance, max_iterations, initial_currents,
+    Istar, tolerance, max_iterations, initial_currents, n_bg,
     damp=0.1, damp_min=0.02, damp_max=0.5
 ):
     """
@@ -441,6 +441,10 @@ def _converged_lekid_parameters_par(
         Maximum convergence iterations
     initial_currents : ndarray (complex)
         The current each resonator starts from
+    n_bg : ndarray
+        What the other tones add to |I|^2 in each resonator: twice the
+        sum of their |I|^2 there, an instantaneous nonlinearity's
+        cross-phase modulation
     damp, damp_min, damp_max : float
         The first step, and the bounds of the adaptive step
         
@@ -460,7 +464,7 @@ def _converged_lekid_parameters_par(
     
     # Working arrays: the state the seed currents set
     currents_array = initial_currents.copy()
-    current_factors = 1.0 + (np.abs(currents_array)**2 / (Istar * Istar))
+    current_factors = 1.0 + (np.abs(currents_array)**2 + n_bg) / (Istar * Istar)
     L_work = np.empty(n, dtype=np.float64)
     for i in prange(n):
         L_work[i] = base_Lk[i] * current_factors[i] + base_Lg[i] + base_L_junk[i]
@@ -514,7 +518,7 @@ def _converged_lekid_parameters_par(
         currents_array = currents_array + steps * g
         
         # Step 4: Calculate new current factors
-        new_factors = 1.0 + (np.abs(currents_array)**2 / (Istar * Istar))
+        new_factors = 1.0 + (np.abs(currents_array)**2 + n_bg) / (Istar * Istar)
         
         # Step 5: Check convergence
         if iteration > 0:
@@ -559,19 +563,24 @@ _converged_lekid_parameters_ser = _serial_twin(
 
 
 def converged_lekid_parameters(frequency, amplitude, L_array, *args,
-                               initial_currents=None, damp=0.1,
+                               initial_currents=None, n_bg=None, damp=0.1,
                                damp_min=0.02, damp_max=0.5):
     """Self-consistent convergence loop for current-dependent inductance,
-    from *initial_currents* (every resonator at rest when None)."""
+    from *initial_currents* (every resonator at rest when None), with
+    *n_bg* the other tones' share of |I|^2 per resonator (none when
+    None)."""
     fn = (_converged_lekid_parameters_par
           if len(L_array) >= PARALLEL_MIN_N
           else _converged_lekid_parameters_ser)
     if initial_currents is None:
         initial_currents = np.zeros(len(L_array), dtype=np.complex128)
+    if n_bg is None:
+        n_bg = np.zeros(len(L_array))
     # Every argument passed: a call that leaves a defaulted one out takes
     # numba's Python dispatch path, ten times the call.
     return fn(frequency, amplitude, L_array, *args,
               np.ascontiguousarray(initial_currents, dtype=np.complex128),
+              np.ascontiguousarray(n_bg, dtype=np.float64),
               float(damp), float(damp_min), float(damp_max))
 
 
@@ -591,7 +600,7 @@ def states_apart(a, b, Istar, frac):
 
 
 @jit(nopython=True, parallel=True, cache=True, fastmath=True)
-def _converge_tones_par(freqs, amps, has_seed, seed_f, seeds, run_start,
+def _converge_tones_par(freqs, amps, has_seed, seed_f, seeds, n_bg, run_start,
                         base_Lk_runs, base_R_runs, C_array, Cc_array, base_Lg,
                         base_L_junk, input_atten_dB, ZLNA, Istar, tolerance,
                         max_iterations, damp, damp_min, damp_max, follow_hz,
@@ -623,7 +632,7 @@ def _converge_tones_par(freqs, amps, has_seed, seed_f, seeds, run_start,
                 f, amps[k], R_run, R_run, C_array, Cc_array,
                 base_Lk_runs[r], base_Lg, base_L_junk, input_atten_dB,
                 ZLNA, Istar, tolerance, max_iterations, seed.copy(),
-                damp, damp_min, damp_max)
+                n_bg[k], damp, damp_min, damp_max)
             passes[r] = 1
             if r == r0 and steps > 1 and states_apart(I, seed, Istar,
                                                       apart_frac):
@@ -634,7 +643,7 @@ def _converge_tones_par(freqs, amps, has_seed, seed_f, seeds, run_start,
                         fj, amps[k], R_run, R_run, C_array, Cc_array,
                         base_Lk_runs[r], base_Lg, base_L_junk,
                         input_atten_dB, ZLNA, Istar, tolerance,
-                        max_iterations, I, damp, damp_min, damp_max)
+                        max_iterations, I, n_bg[k], damp, damp_min, damp_max)
                 passes[r] = 1 + steps
             L_out[r] = L
             I_out[r] = I
@@ -649,7 +658,7 @@ PARALLEL_MIN_TONES = 8
 RUN_ELEMENTS_PER_CALL = 2_000_000    # (runs x resonators) per call, 48 MB out
 
 
-def converge_tones(freqs, amps, has_seed, seed_f, seeds, run_start,
+def converge_tones(freqs, amps, has_seed, seed_f, seeds, n_bg, run_start,
                    base_Lk_runs, base_R_runs, *args, damp=0.1, damp_min=0.02,
                    damp_max=0.5):
     """Converge every resonator for each tone at each of its QP states,
@@ -659,7 +668,8 @@ def converge_tones(freqs, amps, has_seed, seed_f, seeds, run_start,
     time order; the first is seeded from the state
     the tone left its resonators in (seeds[k] at seed_f[k]) when it has
     one (has_seed[k]), else from rest, and each later run from the one
-    before.  One step from the seed is the answer where the currents
+    before; n_bg[k] is what the other tones add to |I|^2 in each
+    resonator under tone k.  One step from the seed is the answer where the currents
     move by a fraction; where a resonator jumps state, that state may
     have ended between the two frequencies, and only following the tone
     in steps of follow_hz from where it sat says where, so the first run
@@ -673,6 +683,7 @@ def converge_tones(freqs, amps, has_seed, seed_f, seeds, run_start,
     has_seed = np.ascontiguousarray(has_seed, dtype=np.bool_)
     seed_f = np.ascontiguousarray(seed_f, dtype=np.float64)
     seeds = np.ascontiguousarray(seeds, dtype=np.complex128)
+    n_bg = np.ascontiguousarray(n_bg, dtype=np.float64)
     run_start = np.ascontiguousarray(run_start, dtype=np.int64)
     base_Lk_runs = np.ascontiguousarray(base_Lk_runs, dtype=np.float64)
     base_R_runs = np.ascontiguousarray(base_R_runs, dtype=np.float64)
@@ -696,7 +707,7 @@ def converge_tones(freqs, amps, has_seed, seed_f, seeds, run_start,
               else _converge_tones_ser)
         r0, r1 = run_start[k0], run_start[k1]
         out.append(fn(freqs[k0:k1], amps[k0:k1], has_seed[k0:k1],
-                      seed_f[k0:k1], seeds[k0:k1],
+                      seed_f[k0:k1], seeds[k0:k1], n_bg[k0:k1],
                       np.ascontiguousarray(run_start[k0:k1 + 1] - r0),
                       base_Lk_runs[r0:r1], base_R_runs[r0:r1], *consts))
         k0 = k1

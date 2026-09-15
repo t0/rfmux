@@ -39,8 +39,8 @@ def _nqp_args(n):
 @pytest.mark.parametrize("n", [5, 64])
 def test_convergence_builds_agree(n):
     """Serial and parallel builds must be numerically indistinguishable."""
-    par = jp._converged_lekid_parameters_par(*_conv_args(n), _seed(n))
-    ser = jp._converged_lekid_parameters_ser(*_conv_args(n), _seed(n))
+    par = jp._converged_lekid_parameters_par(*_conv_args(n), _seed(n), np.zeros(n))
+    ser = jp._converged_lekid_parameters_ser(*_conv_args(n), _seed(n), np.zeros(n))
     assert par[3] == ser[3], "iteration counts diverged"
     for a, b in zip(par[:3], ser[:3]):
         assert np.allclose(a, b, rtol=1e-12, atol=0)

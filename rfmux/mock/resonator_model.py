@@ -21,9 +21,11 @@ class _ToneState:
     (L, R, Lk, currents).  With envelope dynamics on, also the current
     its nearest resonator carries at the last instant evaluated, in the
     frame of the tone's frequency and amplitude, so a transient carries
-    across evaluations.  A tone switched off is forgotten."""
+    across evaluations.  ``background`` is what the other tones of the
+    module add to |I|^2 in each resonator, set at each evaluation from
+    the states they last left.  A tone switched off is forgotten."""
     __slots__ = ('frequency', 'currents', 'runs', 'field', 't_field',
-                 'frame')
+                 'frame', 'background')
 
     def __init__(self):
         self.frequency = None
@@ -32,6 +34,7 @@ class _ToneState:
         self.field = None
         self.t_field = None
         self.frame = None
+        self.background = None
 
 
 class MockResonatorModel:
@@ -825,7 +828,8 @@ class MockResonatorModel:
         qp_key = round(qp_val / qp_step) * qp_step
 
         ts = self._tone_state(tone, frequency)
-        run_key = (freq_key, amp_key, qp_key)
+        run_key = (freq_key, amp_key, qp_key,
+                   self._background_key(ts, nearest_idx))
         entry = ts.runs.get(run_key)
         skip_convergence = False
         reason = 'miss'
@@ -982,6 +986,33 @@ class MockResonatorModel:
             ts = self._tone_states[key] = _ToneState()
         return ts
 
+    def _set_backgrounds(self, tone_keys):
+        """Each tone's resonators carry the other tones' currents too:
+        with an instantaneous nonlinearity a tone is shifted by twice
+        the others' |I|^2 (cross-phase modulation) on top of its own.
+        The others' currents are the states they last left, so tones
+        sharing a resonance settle over a few evaluations."""
+        states = [ts for ts in (self._tone_states.get(k) for k in tone_keys)
+                  if ts is not None]
+        known = [ts for ts in states if ts.currents is not None]
+        if not known:
+            for ts in states:
+                ts.background = None
+            return
+        sq = np.abs(np.array([ts.currents for ts in known])) ** 2
+        total = sq.sum(axis=0)
+        for ts in states:
+            ts.background = 2.0 * total
+        for ts, s in zip(known, sq):
+            ts.background = 2.0 * (total - s)
+
+    def _background_key(self, ts, i):
+        """The other tones' share of |I|^2 in resonator *i*, quantised
+        to 1e-6 Istar^2 (a hundredth of a linewidth of shift)."""
+        if ts.background is None:
+            return 0
+        return int(round(ts.background[i] / (1e-6 * self.Istar ** 2)))
+
     def _keep_run(self, ts, run_key, state):
         """Keep a converged state for its operating point, the oldest
         going when the tone holds convergence_cache_max_size of them."""
@@ -1026,13 +1057,16 @@ class MockResonatorModel:
         seeds = np.zeros((T, n), dtype=np.complex128)
         seed_f = np.zeros(T)
         has_seed = np.zeros(T, dtype=bool)
+        n_bg = np.zeros((T, n))
         for k, ts in enumerate(tone_states):
             if ts.currents is not None:
                 seeds[k], seed_f[k], has_seed[k] = ts.currents, ts.frequency, True
+            if ts.background is not None:
+                n_bg[k] = ts.background
         phys = self._phys()
         k0 = self.mr_lekids[0]
         L, I, passes = jit_physics.converge_tones(
-            freqs, amps, has_seed, seed_f, seeds, run_start, base_Lk_runs,
+            freqs, amps, has_seed, seed_f, seeds, n_bg, run_start, base_Lk_runs,
             base_R_runs, self.C_array, self.Cc_array, self._base_arrays()[2],
             self.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
             self.Istar, phys.get('convergence_tolerance', 1e-9), 500,
@@ -1716,6 +1750,7 @@ class MockResonatorModel:
             for key in [k for k in self._tone_states
                         if k[0] == module and k not in on]:
                 del self._tone_states[key]
+            self._set_backgrounds([(module, ch) for ch, _, _, _ in raw_channel_configs])
 
         # Process the collected configuration (outside lock where possible, though S21 calculation needs physics lock)
         s21_call_count = 0
@@ -2056,14 +2091,16 @@ class MockResonatorModel:
             qp_col = (nqp[:, nearest_idx] if 0 <= nearest_idx < n_res
                       else np.zeros(S))
             qp_keys = np.round(qp_col / qp_step) * qp_step
-            starts = np.flatnonzero(np.r_[True, qp_keys[1:] != qp_keys[:-1]])
+            starts = np.concatenate(
+                ([0], np.flatnonzero(qp_keys[1:] != qp_keys[:-1]) + 1))
             freq_key = round(frequency / freq_step) * freq_step
             amp_key = round(amplitude / amp_step) * amp_step
+            ts = self._tone_state(tone_keys[j], frequency)
+            bg_key = self._background_key(ts, nearest_idx)
             tones.append({
                 'j': j, 'frequency': frequency, 'amplitude': amplitude,
-                'ts': self._tone_state(tone_keys[j], frequency),
-                'starts': starts, 'states': [], 'reason': None,
-                'run_keys': [(freq_key, amp_key, float(qp_keys[s]))
+                'ts': ts, 'starts': starts, 'states': [], 'reason': None,
+                'run_keys': [(freq_key, amp_key, float(qp_keys[s]), bg_key)
                              for s in starts]})
         pending = list(range(len(tones)))
         while pending:

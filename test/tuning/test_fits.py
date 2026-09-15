@@ -411,6 +411,8 @@ def test_every_fitted_sweep_is_one_row_with_where_and_what_it_was_driven_at():
     row = rows[0]
     assert row["amplitude"] == sweeps["results"][row["iteration"]][row["direction"]][row["name"]]["sweep_amplitude"]
     assert set(FIT_PARAMS["skewed"]) <= set(row["params"])
+    assert set(row["errors"]) == set(row["params"])
+    assert all(np.isfinite(row["errors"][q]) for q in ("Qc", "Qi"))
 
 
 def test_a_sweep_with_no_fit_for_that_model_is_not_a_row():
@@ -689,10 +691,13 @@ def test_fitting_saves_the_sweeps_over_the_file_they_came_from(tmp_path):
         sweeps = a_multisweep()
         first = store.save(sweeps, "multisweep", label="cooldown3")
 
-        fit_sweeps(sweeps, models=("circle",), save=True)
+        fit_sweeps(sweeps, models=("circle", "skewed"), save=True)
 
         assert list(first.parent.glob("*.pkl")) == [first]
         entry = store.load(first)["results"][0]["upward"]["R0001"]
         assert "circle" in entry["fits"]
+        errors = entry["fits"]["skewed"]["errors"]
+        assert errors == sweeps["results"][0]["upward"]["R0001"]["fits"]["skewed"]["errors"]
+        assert all(np.isfinite(errors[q]) for q in ("Qc", "Qi"))
     finally:
         store.set_output_directory(None)

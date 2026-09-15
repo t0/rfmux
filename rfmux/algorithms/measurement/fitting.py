@@ -254,8 +254,7 @@ def _legacy_skewed_params(
     legacy = {}
     for name in names:
         legacy[name] = params[name]
-        # Qc and Qi are derived rather than fitted, so they have no error.
-        legacy[f"{name}_err"] = errors.get(name, "nan")
+        legacy[f"{name}_err"] = errors[name]
     return legacy
 
 
@@ -296,7 +295,7 @@ def fit_skewed_multisweep(
         normalize_fit (bool, optional): Whether to normalize S21 data before fitting in `fit_skewed`.
                                         Defaults to True.
         fr_lim_fit (float | None, optional): Fit fr only within +/- fr_lim Hz of the center frequency
-                                             in `fit_skewed`. Defaults to None (use full range).
+                                             in `fit_skewed`. None uses 37.5% of the sweep span.
 
     Returns:
         dict | list[dict]: The input `multisweep_data` with 'fit_params' and 'iq_centered'

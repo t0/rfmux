@@ -3205,6 +3205,11 @@ def test_a_fit_column_carries_what_the_fitter_wrote(
         # The row is rounded to something readable; the number the fit
         # actually produced is a hover away.
         assert repr(float(fit["params"]["fr"])) in tooltip
+        for param in ("Qc", "Qi"):
+            value, tooltip = rows[f"Skewed fit — {fit['direction']}"][param]
+            assert np.isfinite(fit["errors"][param])
+            assert "±" in value
+            assert repr(float(fit["errors"][param])) in tooltip
 
 
 def test_the_digest_reads_the_measurement_without_touching_it(

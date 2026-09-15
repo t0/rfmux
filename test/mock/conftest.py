@@ -11,6 +11,41 @@ from rfmux.mr_resonator import jit_physics as jp
 
 
 @pytest.fixture
+def batch():
+    """Builders for the batch-path tests: ``model(seed, mode, pulses)``
+    gives (crs, model) with two resonators biased at 0.001 and the
+    physics_batch_mode set, ``run(crs, m, n_batches, seed)`` the
+    stacked block responses at 596 Hz, ten samples a block."""
+    FS, N = 596.0, 10
+
+    def model(seed, mode, pulses=True):
+        from rfmux.mock.crs import ServerMockCRS
+        crs = ServerMockCRS("0000")
+        cfg = {"num_resonances": 2, "resonator_random_seed": seed,
+               "auto_bias_kids": True, "bias_amplitude": 0.001}
+        if pulses:
+            cfg.update({"pulse_mode": "periodic", "pulse_period": 0.0005,
+                        "pulse_tau_rise": 1e-6, "pulse_tau_decay": 1e-4,
+                        "pulse_amplitude": 3.0})
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(crs.generate_resonators(cfg))
+        crs._physics_config["physics_batch_mode"] = mode
+        return crs, crs._resonator_model
+
+    def run(crs, m, n_batches, seed):
+        np.random.seed(seed)
+        out = []
+        for k in range(n_batches):
+            t = k * N / FS
+            r = m.calculate_module_response_coupled(
+                1, num_samples=N, sample_rate=FS, start_time=t, pulse_time=t)
+            out.append(np.stack([r[ch] for ch in sorted(r)]))
+        return np.stack(out)
+
+    return types.SimpleNamespace(model=model, run=run)
+
+
+@pytest.fixture
 def kerr_model():
     """Seed 5, three resonators, noise off, the QP model's rest state
     installed as every evaluation installs it (the generation's base

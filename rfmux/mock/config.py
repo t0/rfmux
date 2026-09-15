@@ -88,6 +88,14 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Noise configuration
     # -------------------------------------------------------------------------
     "nqp_noise_enabled": True,  # Enable noise on quasiparticle density
+    # The current in a resonator with a pulse in flight relaxes toward
+    # each new steady state at the resonator's own rates (a ring-down
+    # of a few 1/linewidth, slower and rotating near a fold) rather
+    # than jumping to it, and the transient shows in the stream.  Off,
+    # the response is quasi-static.  Visible at low decimation and on
+    # the PFB stream; at decimation 6 a sample is far longer than the
+    # ring-down.
+    "envelope_dynamics": True,
     "nqp_noise_std_factor": 0.01,   # Std dev as fraction of base nqp (1%)
 
     # TLS (two-level system) 1/f frequency noise.  Real KIDs show
@@ -382,6 +390,9 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
 
     # ── TLS 1/f frequency noise ───────────────────────────────────
     cfg["tls_noise_enabled"] = bool(cfg["tls_noise_enabled"])
+    v = cfg.get("envelope_dynamics", True)
+    cfg["envelope_dynamics"] = (v.strip().lower() not in ("0", "false", "no", "off")
+                                if isinstance(v, str) else bool(v))
     try:
         tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
     except Exception:

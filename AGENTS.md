@@ -174,6 +174,12 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   memory) and stepped adaptively, so a bifurcated resonance is
   hysteretic: currents are a small fraction of Istar (a linewidth of
   shift is a 1e-4 change in Lk)
+- `envelope_parameters()` gives each resonator's Kerr-resonator
+  parameters (omega_r, kappa, K, D, c) from its linear response;
+  `rfmux/mock/kerr.py` linearises about a driven state (rates, probe
+  response, idler, gain); with `envelope_dynamics` on, a pulsed
+  resonator's current rings down to each new steady state and the
+  transient reaches the stream (visible at dec 0 and on PFB)
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
@@ -213,9 +219,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1059 tests, ~1 min
+pytest --tier=quick                 # Edit loop: 1064 tests, ~1 min
 pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1081 that run without a board, ~4 min
+pytest --tier=full                  # All 1086 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

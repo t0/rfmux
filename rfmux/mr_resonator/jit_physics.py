@@ -822,6 +822,166 @@ def compute_s21_parallel(
 
 
 @jit(nopython=True, cache=True, fastmath=True)
+def kerr_coefficients(omega_g, L, R, Lk, I_ss, Istar, omega_r0, kappa0, L0,
+                      R0, K):
+    """(a, b) of the Kerr resonator about the kept state (L, R, Lk,
+    I_ss) of one resonator under a drive at omega_g (rfmux.mock.kerr):
+    du/dt = a u + b u* for the deviation u of its current from I_ss.
+    The resonance and linewidth follow the QP state through the run's
+    base Lk and R: omega_r0 sqrt(L0 / L_base) and kappa0 + (R - R0) /
+    L0."""
+    n = abs(I_ss) ** 2
+    base_Lk = Lk / (1.0 + n / (Istar * Istar))
+    L_base = L - Lk + base_Lk
+    omega_r = omega_r0 * np.sqrt(L0 / L_base)
+    kappa = kappa0 + (R - R0) / L0
+    a = -kappa / 2.0 - 1j * (omega_g - omega_r - 2.0 * K * n)
+    b = 1j * K * I_ss * I_ss
+    return a, b
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def kerr_output_couplings(omega_g, L, R, C, Cc, input_atten_dB, ZLNA, GLNA,
+                          system_termination):
+    """c per run, with dS21 = c u per unit drive for a deviation u of
+    the resonator's current: the tangent dS21/dI along L at each run's
+    (omega_g, L, R), where the response is not Lorentzian enough for
+    one value to serve everywhere."""
+    M = len(L)
+    out = np.empty(M, dtype=np.complex128)
+    r2, r3 = _p_attenuator(input_atten_dB, 50.0)
+    L1 = np.empty(1)
+    C1 = np.empty(1)
+    R1 = np.empty(1)
+    Cc1 = np.empty(1)
+    for r in range(M):
+        dL = 1e-6 * L[r]
+        I_up = _drive_current(omega_g[r], 1.0, L[r] + dL, R[r], C[r], Cc[r],
+                              ZLNA, r2, r3)
+        I_dn = _drive_current(omega_g[r], 1.0, L[r] - dL, R[r], C[r], Cc[r],
+                              ZLNA, r2, r3)
+        f = omega_g[r] / (2.0 * np.pi)
+        C1[0] = C[r]
+        R1[0] = R[r]
+        Cc1[0] = Cc[r]
+        L1[0] = L[r] + dL
+        S_up = compute_s21_parallel(f, 1.0, L1, C1, R1, Cc1, ZLNA, GLNA,
+                                    input_atten_dB, system_termination)
+        L1[0] = L[r] - dL
+        S_dn = compute_s21_parallel(f, 1.0, L1, C1, R1, Cc1, ZLNA, GLNA,
+                                    input_atten_dB, system_termination)
+        out[r] = (S_up - S_dn) / (I_up - I_dn)
+    return out
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def kerr_step(field, I_ss, a, b, dt):
+    """The current *dt* after *field*, relaxing toward the steady state
+    I_ss at the rates of (a, b): the closed-form exponential of the
+    real 2x2 J = Re(a) I + M, M traceless with M^2 = (|b|^2 - Im(a)^2)
+    I, so it is a cosh/sinh or a cos/sin in the eigenvalue split.  A
+    split larger than kappa/2 would make the slow mode grow, which the
+    linearisation is not to be trusted with past the fold: the split
+    is clamped there (M scaled down, its directions kept), so the slow
+    rate is at worst zero."""
+    u = field - I_ss
+    x = u.real
+    y = u.imag
+    ar = a.real
+    m11 = b.real
+    m12 = b.imag - a.imag
+    m21 = b.imag + a.imag
+    disc = b.real * b.real + b.imag * b.imag - a.imag * a.imag
+    if disc > 0.0:
+        s0 = np.sqrt(disc)
+        s = s0
+        if s > -ar:
+            s = -ar          # M scaled to eigenvalues +-s, same directions
+        if s > 0.0:
+            ch = np.cosh(s * dt)
+            sh = np.sinh(s * dt) / s0
+        else:
+            ch = 1.0
+            sh = dt
+    elif disc < 0.0:
+        s = np.sqrt(-disc)
+        ch = np.cos(s * dt)
+        sh = np.sin(s * dt) / s
+    else:
+        ch = 1.0
+        sh = dt
+    g = np.exp(ar * dt)
+    x2 = g * (ch * x + sh * (m11 * x + m12 * y))
+    y2 = g * (ch * y + sh * (m21 * x - m11 * y))
+    return I_ss + complex(x2, y2)
+
+
+@jit(nopython=True, parallel=True, cache=True, fastmath=True)
+def _kerr_block_par(omega_g, amps, run_start, run_sample, L, R, Lk, I_ss, c,
+                    Istar, omega_r0, kappa0, L0, R0, K, field0, dt0, dt, S):
+    """kerr_block: each tone on its own thread through its runs."""
+    T = len(omega_g)
+    corr = np.empty((T, S), dtype=np.complex128)
+    field_last = np.empty(T, dtype=np.complex128)
+    for k in prange(T):
+        r = run_start[k]
+        r_end = run_start[k + 1]
+        a, b = kerr_coefficients(omega_g[k], L[r], R[r], Lk[r], I_ss[r],
+                                 Istar, omega_r0[k], kappa0[k], L0[k], R0[k],
+                                 K[k])
+        field = field0[k]
+        for s in range(S):
+            while r + 1 < r_end and s >= run_sample[r + 1]:
+                r += 1
+                a, b = kerr_coefficients(omega_g[k], L[r], R[r], Lk[r],
+                                         I_ss[r], Istar, omega_r0[k],
+                                         kappa0[k], L0[k], R0[k], K[k])
+            field = kerr_step(field, I_ss[r], a, b, dt0[k] if s == 0 else dt)
+            corr[k, s] = c[r] * (field - I_ss[r]) / amps[k]
+        field_last[k] = field
+    return corr, field_last
+
+
+_kerr_block_ser = _serial_twin(_kerr_block_par, "_kerr_block_ser",
+                               fastmath=True)
+
+
+def kerr_block(omega_g, amps, run_start, run_sample, L, R, Lk, I_ss, C, Cc,
+               Istar, omega_r0, kappa0, L0, R0, K, input_atten_dB, ZLNA, GLNA,
+               system_termination, field0, dt0, dt, S):
+    """The transient's share of S21 at each of *S* samples *dt* apart for
+    a block of tones, and the current each tone's resonator carries at
+    the last sample.  Tone k's runs are run_start[k]:run_start[k+1] of
+    the per-run arrays (L, R, Lk, I_ss: the kept state of its nearest
+    resonator), run r starting at sample run_sample[r]; per tone, its
+    drive, amplitude, resonator constants and envelope parameters, the
+    current it starts from (field0) and the time since (dt0)."""
+    run_start = np.ascontiguousarray(run_start, dtype=np.int64)
+    L = np.ascontiguousarray(L, dtype=np.float64)
+    R = np.ascontiguousarray(R, dtype=np.float64)
+    omega_g = np.ascontiguousarray(omega_g, dtype=np.float64)
+    C = np.ascontiguousarray(C, dtype=np.float64)
+    Cc = np.ascontiguousarray(Cc, dtype=np.float64)
+    per_run = np.repeat(np.arange(len(omega_g)), np.diff(run_start))
+    c = kerr_output_couplings(omega_g[per_run], L, R, C[per_run], Cc[per_run],
+                              float(input_atten_dB), complex(ZLNA),
+                              float(GLNA), float(system_termination))
+    fn = (_kerr_block_par if len(omega_g) >= PARALLEL_MIN_TONES
+          else _kerr_block_ser)
+    return fn(omega_g, np.ascontiguousarray(amps, dtype=np.float64),
+              run_start, np.ascontiguousarray(run_sample, dtype=np.int64),
+              L, R, np.ascontiguousarray(Lk, dtype=np.float64),
+              np.ascontiguousarray(I_ss, dtype=np.complex128), c, float(Istar),
+              np.ascontiguousarray(omega_r0, dtype=np.float64),
+              np.ascontiguousarray(kappa0, dtype=np.float64),
+              np.ascontiguousarray(L0, dtype=np.float64),
+              np.ascontiguousarray(R0, dtype=np.float64),
+              np.ascontiguousarray(K, dtype=np.float64),
+              np.ascontiguousarray(field0, dtype=np.complex128),
+              np.ascontiguousarray(dt0, dtype=np.float64), float(dt), int(S))
+
+
+@jit(nopython=True, cache=True, fastmath=True)
 def s21_of_one(freqs, L, R, C, Cc, ZLNA, GLNA, input_atten_dB,
                system_termination):
     """compute_s21_parallel of one resonator alone, at each of *freqs*

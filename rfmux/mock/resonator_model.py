@@ -18,13 +18,20 @@ class _ToneState:
     last in under it (frequency and currents, the seed of its next
     solve) and the converged state at every operating point it has
     visited, by quantised (frequency, amplitude, QP density), as
-    (L, R, Lk, currents).  A tone switched off is forgotten."""
-    __slots__ = ('frequency', 'currents', 'runs')
+    (L, R, Lk, currents).  With envelope dynamics on, also the current
+    its nearest resonator carries at the last instant evaluated, in the
+    frame of the tone's frequency and amplitude, so a transient carries
+    across evaluations.  A tone switched off is forgotten."""
+    __slots__ = ('frequency', 'currents', 'runs', 'field', 't_field',
+                 'frame')
 
     def __init__(self):
         self.frequency = None
         self.currents = None
         self.runs = {}
+        self.field = None
+        self.t_field = None
+        self.frame = None
 
 
 class MockResonatorModel:
@@ -856,6 +863,7 @@ class MockResonatorModel:
         else:
             self._ensure_arrays()
             self.L_array, self.R_array, self.Lk_array = entry[:3]
+            currents = entry[3]
             self._lekids_stale = True
             self._convergence_stats['skipped'] += 1
         
@@ -917,8 +925,10 @@ class MockResonatorModel:
             system_termination=lekid0.system_termination
         )
         
-        t_vout = time.perf_counter()
-
+        if self._phys().get('envelope_dynamics', True) and t_for_pulses is not None:
+            s21_total += self._dynamic_s21(ts, (self.L_array, self.R_array,
+                                                self.Lk_array, currents),
+                                           frequency, amplitude, t_for_pulses)
         return s21_total
 
     def s21_sweep(self, frequencies, amplitude):
@@ -1081,17 +1091,65 @@ class MockResonatorModel:
         ``omega_r`` and ``kappa`` in rad/s, the resonant part of the
         current per unit drive ``D / (kappa/2 + i (omega - omega_r))``,
         the output coupling ``c`` with ``S21 = S21_bg + c (I - I_bg)``
-        at the peak (``S21_bg`` the through transmission there), and
-        ``K`` with ``omega_r(I) = omega_r + K |I|^2``.
+        at the peak (``S21_bg`` the through transmission there), ``K``
+        with ``omega_r(I) = omega_r + K |I|^2``, and the rest ``L0`` and
+        ``R0`` the extraction used.
         omega_r, kappa, D and c come from the linear response at the
         rest QP density, once per generation; K from Lk(I)."""
-        if self._envelope is None:
-            self._envelope = self._extract_envelope()
-        env = dict(self._envelope)
-        # Lk = Lk0 (1 + |I|^2/Istar^2) and omega_r ~ 1/sqrt(L), so
-        # d omega_r / omega_r = -(Lk/L) |I|^2 / (2 Istar^2).
-        env['K'] = -env['omega_r'] * env['alpha_k'] / (2.0 * self.Istar ** 2)
+        env = self._envelope
+        if env is None:
+            env = self._envelope = self._extract_envelope()
+        if env.get('Istar') != self.Istar:
+            # Lk = Lk0 (1 + |I|^2/Istar^2) and omega_r ~ 1/sqrt(L), so
+            # d omega_r / omega_r = -(Lk/L) |I|^2 / (2 Istar^2).
+            env['K'] = -env['omega_r'] * env['alpha_k'] / (2.0 * self.Istar ** 2)
+            env['Istar'] = self.Istar
         return env
+
+    def _field_start(self, ts, frequency, amplitude, t, kappa):
+        """Whether the tone's kept current can carry into an evaluation
+        at *t*: same frequency and amplitude (the rotating frame), time
+        advancing, and less than ten ring-downs since the last sample.
+        Otherwise the current starts at the steady state."""
+        return (ts.field is not None and ts.frame == (frequency, amplitude)
+                and ts.t_field is not None and 0.0 < t - ts.t_field
+                and (t - ts.t_field) * kappa < 10.0)
+
+    def _kerr_run(self, i, omega_g, entry):
+        """(a, b, c) of resonator *i* about the kept state *entry*."""
+        env = self.envelope_parameters()
+        k0 = self.mr_lekids[0]
+        L, R, Lk, I = entry
+        a, b = jit_physics.kerr_coefficients(
+            omega_g, float(L[i]), float(R[i]), float(Lk[i]), complex(I[i]),
+            float(self.Istar), float(env['omega_r'][i]),
+            float(env['kappa'][i]), float(env['L0'][i]), float(env['R0'][i]),
+            float(env['K'][i]))
+        c = jit_physics.kerr_output_couplings(
+            np.array([omega_g]), np.array([float(L[i])]),
+            np.array([float(R[i])]), self.C_array[i:i + 1],
+            self.Cc_array[i:i + 1], float(k0.input_atten_dB),
+            complex(k0.ZLNA), float(k0.GLNA), float(k0.system_termination))[0]
+        return a, b, c
+
+    def _dynamic_s21(self, ts, entry, frequency, amplitude, t):
+        """The transient's share of S21 for one sample at *t*: the
+        nearest resonator's current relaxes from where the tone last
+        left it toward the kept state's, and the deviation reaches the
+        output through c.  Keeps the current for the next sample."""
+        i = self._cache_keys_for(frequency)[1]
+        if not (0 <= i < len(self.mr_lekids)):
+            return 0.0
+        omega_g = 2.0 * np.pi * float(frequency)
+        a, b, c = self._kerr_run(i, omega_g, entry)
+        I_ss = complex(entry[3][i])
+        if self._field_start(ts, frequency, amplitude, t,
+                             self.envelope_parameters()['kappa'][i]):
+            field = jit_physics.kerr_step(ts.field, I_ss, a, b, t - ts.t_field)
+        else:
+            field = I_ss
+        ts.field, ts.t_field, ts.frame = field, float(t), (frequency, amplitude)
+        return c * (field - I_ss) / amplitude
 
     def _extract_envelope(self):
         self._ensure_arrays()
@@ -1105,6 +1163,8 @@ class MockResonatorModel:
         out['D'] = np.zeros(n, dtype=complex)
         out['c'] = np.zeros(n, dtype=complex)
         out['S21_bg'] = np.zeros(n, dtype=complex)
+        out['L0'] = np.asarray(L0, dtype=float)
+        out['R0'] = np.asarray(R0, dtype=float)
         for i in range(n):
             args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
                     k0.input_atten_dB, complex(k0.ZLNA))
@@ -1857,6 +1917,56 @@ class MockResonatorModel:
             self._nqp_tiled_cache = cached
         return cached[2]
 
+    def _dynamic_s21_block(self, tones, t_states, dt):
+        """_dynamic_s21 over a block for every tone: one kerr_block call
+        gives the transient's share of S21 per (tone, sample), and
+        leaves each tone's current for the next block."""
+        S = len(t_states)
+        env = self.envelope_parameters()
+        k0 = self.mr_lekids[0]
+        n_res = len(self.mr_lekids)
+        near = [self._cache_keys_for(t['frequency'])[1] for t in tones]
+        live = [k for k, i in enumerate(near) if 0 <= i < n_res]
+        corr = np.zeros((len(tones), S), dtype=complex)
+        if not live:
+            return corr
+        idx = np.array([near[k] for k in live])
+        omega_g = np.array([2.0 * np.pi * float(tones[k]['frequency']) for k in live])
+        amps = np.array([float(tones[k]['amplitude']) for k in live])
+        run_start = np.cumsum([0] + [len(tones[k]['states']) for k in live])
+        run_sample = np.concatenate([tones[k]['starts'] for k in live])
+        M = run_start[-1]
+        L = np.empty(M)
+        R = np.empty(M)
+        Lk = np.empty(M)
+        I_ss = np.empty(M, dtype=complex)
+        field0 = np.empty(len(live), dtype=complex)
+        dt0 = np.zeros(len(live))
+        t0 = float(t_states[0])
+        for kk, k in enumerate(live):
+            tone, i = tones[k], near[k]
+            for r, entry in enumerate(tone['states'], start=int(run_start[kk])):
+                L[r], R[r], Lk[r], I_ss[r] = entry[0][i], entry[1][i], entry[2][i], entry[3][i]
+            ts = tone['ts']
+            if self._field_start(ts, tone['frequency'], tone['amplitude'], t0,
+                                 env['kappa'][i]):
+                field0[kk], dt0[kk] = ts.field, t0 - ts.t_field
+            else:
+                field0[kk] = I_ss[run_start[kk]]
+        out, field_last = jit_physics.kerr_block(
+            omega_g, amps, run_start, run_sample, L, R, Lk, I_ss,
+            self.C_array[idx], self.Cc_array[idx], self.Istar,
+            env['omega_r'][idx], env['kappa'][idx], env['L0'][idx],
+            env['R0'][idx], env['K'][idx], k0.input_atten_dB, complex(k0.ZLNA),
+            k0.GLNA, k0.system_termination, field0, dt0, dt, S)
+        t_last = float(t_states[-1])
+        for kk, k in enumerate(live):
+            ts = tones[k]['ts']
+            ts.field, ts.t_field = field_last[kk], t_last
+            ts.frame = (tones[k]['frequency'], tones[k]['amplitude'])
+            corr[k] = out[kk]
+        return corr
+
     def _batch_response_hoisted(self, active_tone_freqs, tone_mag,
                                 tone_phase, pairs, observed, t, pulse_time,
                                 sample_rate, n_obs, n_tones, tone_keys):
@@ -1909,6 +2019,8 @@ class MockResonatorModel:
         log_enabled = phys.get('log_cache_decisions', False)
         log_every = max(1, int(phys.get('cache_log_interval', 100)))
         lekid0 = self.mr_lekids[0]
+        dynamics = (pulse_time is not None
+                    and phys.get('envelope_dynamics', True))
         C_const = np.array([lk.C for lk in self.mr_lekids])
         Cc_const = np.array([lk.Cc for lk in self.mr_lekids])
         if eps is not None:
@@ -2032,7 +2144,9 @@ class MockResonatorModel:
 
         # ── Per tone, over all instants: noise and TLS perturbations, S21 ──
         s21 = np.zeros((n_tones, S), dtype=complex)
-        for tone in tones:
+        if dynamics and tones:
+            transient = self._dynamic_s21_block(tones, t_states, 1.0 / sample_rate)
+        for k, tone in enumerate(tones):
             L_s = np.empty((S, n_res))
             R_s = np.empty((S, n_res))
             Lk_s = np.empty((S, n_res))
@@ -2059,6 +2173,8 @@ class MockResonatorModel:
                 float(tone['frequency']), float(tone['amplitude']),
                 L_s, C_s, R_s, Cc_const, complex(lekid0.ZLNA), lekid0.GLNA,
                 lekid0.input_atten_dB, lekid0.system_termination)
+            if dynamics:
+                s21[tone['j']] += transient[k]
 
         # ── End state: what the reference leaves after its last sample ──
         if tones:

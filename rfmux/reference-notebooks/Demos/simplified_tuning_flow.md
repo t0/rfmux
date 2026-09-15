@@ -236,8 +236,11 @@ Use `names=catalog.names()[:4]`, `iterations=0`, or `directions="upward"`
 to inspect a subset. `msplots.plot_iq_panels()` accepts the same selections
 for an IQ view; see `example_plotting_multisweep.py` for the full options.
 
-Check that each sweep contains its dip. Adjust the span, point count, or catalog
-centres if necessary before spending time on the amplitude scan.
+Check that each sweep contains its dip. Adjust the span, point count, or
+sweep centers if necessary before spending time on the amplitude scan. Pass
+`center_frequencies={name: absolute_hz}` alongside the catalog to move sweep
+windows without replacing bias points; the mapping must cover every name.
+See `multisweep.md` for a runnable example.
 
 ## 4. Iterate multisweeps over various amplitudes
 
@@ -252,7 +255,7 @@ that resonator's catalog amplitude. Edit `SCHEDULE` and rerun this section to
 extend or refine the range based on the bias report below.
 
 The mock evaluates frequency points independently and does not reproduce
-physical hysteresis. (TODO - this is a bug, and will be fixed!)
+physical hysteresis.
 However, it still demonstrates drive-dependent traces and the analysis
 flags; its detected threshold is not a validation of a real array's limit.
 
@@ -364,8 +367,11 @@ print(bias_report)
 
 Review the flags and selected traces before applying to a real array:
 
-- If nothing bifurcated, the highest measured amplitude is selected and flagged.
-  Extend the range if appropriate; no upper limit was established.
+- With this fresh catalog, if nothing bifurcated, the highest measured amplitude
+  is selected and flagged. On later measurements, a clean selection strictly
+  below a retained `bias.bifurcated_at` is not flagged for missing bifurcation.
+  Pass `bias_report.catalog` into the next multisweep to retain that observation;
+  call `clear_bifurcations()` on it before measuring to reset it.
 - If the lowest amplitude bifurcated, that amplitude is selected and flagged.
   Measure lower levels to find a point below the detected transition.
 - A coarse amplitude schedule only brackets the transition. Rerun section 4
@@ -431,7 +437,7 @@ stream. For hardware or an attached Periscope session, it uses the existing
 readout stream and leaves that sender running. The board must have a valid
 clock/timestamp source and its UDP readout must reach this computer.
 
-`py_get_pfb_samples()` captures through RPC (Remote Procedure Call—the notebook calls a function on the CRS or mock server and receives its result)and applies the PFB spectral
+`py_get_pfb_samples()` captures through RPC (Remote Procedure Call—the notebook calls a function on the CRS or mock server and receives its result) and applies the PFB spectral
 correction; it does not require enabling the PFB UDP streamer. It measures one
 channel at a time. `reset_NCO=False` preserves the tuned NCO and tone settings.
 The **mock RPC PFB capture is uniform synthetic noise**, not the resonator

@@ -148,7 +148,7 @@ print(f"\nlooking at {first_resonator}, {second_resonator} and {third_resonator}
 
 The catalog supplies each resonator's:
 
-- Sweep centre: `bias.frequency_hz`
+- Default sweep centre: `bias.frequency_hz`; override with a named mapping below
 - Probe amplitude: `bias.amplitude`
 - Hardware channel: `channel`
 - Module
@@ -234,6 +234,34 @@ def plot_ms(sections, keys, title):
 
 plot_ms(sweep_sections, list(sweep_sections)[:4], "example multisweep")
 ```
+
+### Move sweep centers without changing bias points
+
+Pass `center_frequencies={name: absolute_hz}` alongside a catalog to move the
+measurement windows. The mapping must contain every catalog name exactly once.
+The catalog keeps its bias frequencies, calibration and bifurcation observations;
+`call_params["center_frequencies"]` records the override, and each section's
+`original_center_frequency` records where that sweep was centered.
+
+```python
+sweep_centers = {r.name: r.bias.frequency_hz + 1e3 for r in catalog}
+original_biases = {r.name: r.bias for r in catalog}
+recentered = await crs.multisweep(
+    catalog, center_frequencies=sweep_centers,
+    span_hz=100e3, npoints_per_sweep=101, nsamps=10,
+)
+recentered_module = recentered[crs.module[MODULE].index()]
+for name, section in recentered_module["results"][0]["upward"].items():
+    assert section["original_center_frequency"] == sweep_centers[name]
+    assert catalog[name].bias is original_biases[name]
+    assert (recentered_module["call_params"]["catalog"]["resonators"][name]
+            ["bias"]["frequency_hz"] == original_biases[name].frequency_hz)
+print("Sweep centers moved by 1 kHz; catalog bias points preserved.")
+```
+
+Use this for another look at a shifted dip. Use `find_bias_points()` on the new
+measurement to choose new operating points, then `crs.apply_bias(report.catalog)`
+to program them. Changing the measurement window alone does neither.
 
 ### Override the amplitude
 
@@ -384,7 +412,7 @@ for section_name, s in named_section_ms[crs.module[MODULE].index()]["results"][0
 <!-- #region -->
 ## 4. Iterate over amplitudes
 
-Pass an `AmplitudeSchedule` as the `amp` argument to iteratively multisweep over several amplitues a single call.
+Pass an `AmplitudeSchedule` as the `amp` argument to sweep several amplitudes in a single call.
 
 
 | Task | Module |
@@ -413,7 +441,7 @@ The first two options give the same results as a single sweep without a schedule
 <!-- #endregion -->
 
 ```python
-from rfmux.tuning import AmplitudeSchedule
+from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for
 
 amplitude_schedule = AmplitudeSchedule.multiplicative(0.5, 4.0, 4)
 print(amplitude_schedule)
@@ -464,7 +492,7 @@ for name, (lo, hi) in list(described["amplitude_range_by_name"].items())[:4]:
     print(f"  {name}  {lo:.5f} → {hi:.5f}")
 ```
 
-Amplitudes use normalized DAC units and must be between 0 and 1.
+Amplitudes use normalized DAC units and must be in `(0, 1]`.
 `validate()` reports values above full scale:
 
 ```python
@@ -539,11 +567,11 @@ output, `multi_amplitude_module_results`.
 ### Get one resonator across every amplitude
 
 ```python
-# results maps amplitude steps to their measured directions.
-for step, by_direction in multi_amplitude_module_results["results"].items():
-    # Each direction maps resonator names to sweep sections.
-    for direction, sections in by_direction.items():
-        section = sections[first_resonator]
+resonator_iterations = collect_amplitude_iterations_for(
+    multi_amplitude_module_results, first_resonator
+)
+for step, entries in resonator_iterations.items():
+    for direction, section in entries.items():
         print(f"step {step}  {direction}  {section['sweep_amplitude']:.5f}")
 ```
 
@@ -847,8 +875,8 @@ except ValueError as e:
   bifurcation in an amplitude sequence and returns a new catalog biased one
   step below it. See `bias_finding.md`.
 - **Fit resonators:** `rfmux.tuning.fit_sweeps` stores model results under `fits`
-  in each fitted sweep section. See `fitting_resonators.md`. Writing fits back
-  to the catalog is still to come.
+  in each fitted sweep section, leaving the catalog unchanged. See
+  `fitting_resonators.md`.
 - **Save data:** multisweep saves results to `~/rfmux_data/ipy_session_<today>/`
   by default. The result records the path under `file_metadata`. Pass
   `save=False` to skip saving, or `label="cooldown3"` to label the file.

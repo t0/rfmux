@@ -76,7 +76,7 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule
+from rfmux.tuning import AmplitudeSchedule, store
 
 MODULE = 1
 ```
@@ -170,9 +170,13 @@ of about `6 * fr / Qr`. The skewed fitter’s default frequency bound is 37.5% o
 the span from the centre, so allow room for the resonance to shift with drive.
 
 We use a 200 kHz span here to cover those shifts. Later, a 40 kHz sweep gives
-more detail in the IQ plots.
+more detail in the IQ plots. This notebook enables autosave to demonstrate
+keeping fitted measurements on disk and checking that comparison fits leave
+them unchanged. `store.session_directory()` shows the destination.
 
 ```python
+store.set_autosave(True)
+print(f"Saving measurements to: {store.session_directory()}")
 amplitude_schedule = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
 print(amplitude_schedule)
 
@@ -766,7 +770,9 @@ plot_circle_fit(fine_multisweep['results'][0]['upward'])
 By default, `fit_sweeps()` fits all sections. For a larger array, select the
 resonators, steps, directions, or models you need.
 
-Copy the results and remove their fits so we can see what each selection adds:
+Copy the results and remove their fits so we can see what each selection adds.
+Use `save=False` for these comparisons: a deep copy still carries the original
+file path in `file_metadata`, so autosaving it would overwrite that measurement.
 
 ```python
 unfitted_results = copy.deepcopy(multi_amplitude_results)
@@ -787,7 +793,7 @@ print(unfitted_results["results"][0]["upward"][first_resonator].keys())
 
 ```python
 one_trace_report = fit_sweeps(
-    unfitted_results,
+    unfitted_results, save=False,
     names=first_resonator,
     iterations=0,
     directions="upward",
@@ -812,11 +818,17 @@ For Q values at moderate or low drive, try the skewed model first. Running anoth
 model adds its results while keeping the existing models’ fits:
 
 ```python
-fit_sweeps(unfitted_results, names=second_resonator, iterations=0, models=("skewed",))
+fit_sweeps(
+    unfitted_results, names=second_resonator, iterations=0,
+    models=("skewed",), save=False,
+)
 sweep_section = unfitted_results["results"][0]["upward"][second_resonator]
 print(f"after skewed:            {list(sweep_section['fits'])}")
 
-fit_sweeps(unfitted_results, names=second_resonator, iterations=0, models=("circle",))
+fit_sweeps(
+    unfitted_results, names=second_resonator, iterations=0,
+    models=("circle",), save=False,
+)
 print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept")
 ```
 
@@ -824,13 +836,16 @@ print(f"after circle:            {list(sweep_section['fits'])}  ← skewed kept"
 
 `fit_sweeps_at_bias_amplitude()` selects the nearest measured amplitude for each
 resonator. By default, it reads bias amplitudes from the catalog snapshot in
-`call_params`. See `bias_finding.md` for choosing operating amplitudes.
+`call_params`. Adding a `bias_report` does not replace that snapshot. To fit
+an amplitude selected by a new report, call `fit_sweeps()` with
+`names=finding.name` and `iterations=finding.iteration` for each finding.
+See `bias_finding.md` for choosing operating amplitudes.
 
 ```python
 from rfmux.tuning import fit_sweeps_at_bias_amplitude
 
 at_bias_report = fit_sweeps_at_bias_amplitude(
-    unfitted_results,
+    unfitted_results, save=False,
     directions="upward",
     models=("skewed",),
 )
@@ -860,7 +875,7 @@ for resonator in catalog:
 
 print()
 fixed_report = fit_sweeps_at_bias_amplitude(
-    unfitted_results,
+    unfitted_results, save=False,
     amplitude=0.002,
     directions="upward",
     models=("circle",),
@@ -1048,7 +1063,7 @@ whose residual exceeds the threshold:
 fussy_results = copy.deepcopy(multi_amplitude_results)
 
 fussy_report = fit_sweeps(
-    fussy_results,
+    fussy_results, save=False,
     iterations=0,
     directions="upward",
     models=("nonlinear",),
@@ -1073,12 +1088,27 @@ print(f"residual        {rejected_fit['residual']:.2e}")
 
 A fit that did not converge has `params=None` and a failure explanation.
 
+The comparison fits must leave the saved measurement unchanged. Reload its
+first sweep’s fits and compare it with the original result:
+
+```python
+saved_path = store.saved_path(multi_amplitude_results)
+saved_results = store.load(saved_path)[crs.module[MODULE].index()]
+np.testing.assert_equal(
+    saved_results["results"][0]["upward"][first_resonator]["fits"],
+    multi_amplitude_results["results"][0]["upward"][first_resonator]["fits"],
+)
+print("Comparison fits left the saved measurement unchanged.")
+```
+
 ## 9. Saving and next steps
 
 - **Save fitted data:** `fit_sweeps()` and `fit_sweeps_at_bias_amplitude()` use
   the configured autosave setting. They save the modified sweeps, updating the
   original file if one exists. Pass `save=False` to skip saving, or `label=`
-  when creating a new file. The `fits` dictionaries are included.
+  when creating a new file. The `fits` dictionaries are included. To keep a
+  separate analysis variant, use `store.save(copy_of_sweeps, "multisweep",
+  new=True)` before fitting it; `directory=` alone does not change a saved path.
 - **Keep fit settings:** settings belong to the report, not each section.
   Use `fit_report.to_dict()` to retain the report separately from the sweeps.
 - **Calibrate frequency shifts:** current df calibration uses IQ derivatives
@@ -1087,6 +1117,5 @@ A fit that did not converge has `params=None` and a failure explanation.
 - **Choose operating amplitudes:** `rfmux.tuning.find_bias_points` uses the
   amplitude sweeps to select bias points and return an updated catalog.
 - **Use fitting in a GUI:** `progress_callback(completed, total)` can drive a
-  progress bar. The original notebook describes moving Periscope’s inline
-  fitting to a separate action on completed sweeps.
+  progress bar while the headless fitter analyzes completed sweeps.
 

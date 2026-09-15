@@ -22,8 +22,9 @@ then estimates calibration at that point. The usual sequence is:
 2. Choose a frequency within that sweep.
 3. Measure IQ slopes to convert later data into frequency shifts.
 
-The functions below return a new `ResonatorCatalog`. They preserve the input
-catalog and measured arrays, and add a `bias_report` to the sweep result.
+`find_bias_points()` returns a `BiasReport` containing a new `ResonatorCatalog`.
+It preserves the input catalog and measured arrays, and adds a `bias_report`
+to the sweep result.
 You can rerun the analysis with different settings and compare the catalogs.
 
 | Task | Module |
@@ -77,7 +78,7 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 from rfmux.core.resonators import BiasPoint, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
-from rfmux.tuning import AmplitudeSchedule
+from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for
 
 MODULE = 1
 ```
@@ -223,11 +224,7 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
     styles = {"upward": "-", "downward": "--"}
 
     for panel, name in zip(panels, resonator_names):
-        iterations = {
-            step: {direction: sections[name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, name)
         amplitudes = [next(iter(e.values()))["sweep_amplitude"] for e in iterations.values()]
         # Use one scale for the whole array, even with different bias amplitudes.
         all_amplitudes = [section["sweep_amplitude"]
@@ -289,11 +286,9 @@ selected by catalog order rather than a hard-coded name:
 ```python
 from rfmux.tuning import find_bias_amplitude
 
-resonator_iterations = {
-            step: {direction: sections[first_resonator]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in multi_amplitude_module_results["results"].items()
-        }
+resonator_iterations = collect_amplitude_iterations_for(
+    multi_amplitude_module_results, first_resonator
+)
 amplitude_choice = find_bias_amplitude(resonator_iterations, method="derivative")
 
 print(f"iteration:              {amplitude_choice.iteration}")
@@ -353,11 +348,7 @@ def plot_derivative_test(results, names):
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = {
-            step: {direction: sections[name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, name)
         all_amplitudes = [section["sweep_amplitude"]
                           for by_direction in results["results"].values()
                           for sections in by_direction.values() for section in sections.values()]
@@ -518,11 +509,7 @@ def plot_prominence_bar(results, names,
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = {
-            step: {direction: sections[name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, name)
         choice = find_bias_amplitude(iterations, method="derivative",
             spike_prominence_factor=spike_prominence_factor,
             noise_gate_factor=noise_gate_factor)
@@ -624,11 +611,7 @@ def plot_magnitude_hysteresis(results, names, max_discrepancy=0.1):
     )
 
     for column, name in enumerate(names):
-        iterations = {
-            step: {direction: sections[name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, name)
         amplitude_step = iterations[max(iterations)]
         top, bottom = axes[0][column], axes[1][column]
 
@@ -756,11 +739,7 @@ def plot_frequency_methods(results, names, direction="upward"):
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = {
-            step: {direction: sections[name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, name)
         choice = find_bias_amplitude(iterations)
         entry = iterations[choice.iteration][direction]
 
@@ -966,7 +945,37 @@ print(BiasReport.from_dict(multi_amplitude_module_results["bias_report"]))
 ```
 
 Rerunning replaces the report in memory. `save` controls whether the measurement
-file is updated too.
+file is updated too. Each run starts from `call_params["catalog"]`, not the
+previous `bias_report`.
+
+### Carry calibration and bifurcation observations into the next measurement
+
+The returned catalog keeps the selected voltage trace in `bias.bias_sweep` so
+its IQ derivatives can be inspected or recomputed without the full sweep file.
+`bias.bifurcated_at` stores the last observed bifurcation amplitude. If the new
+run observes none, an existing value from the input catalog is retained. A clean
+selected amplitude strictly below that value is not flagged for missing
+bifurcation; the frequency-distance check still applies. `BiasFinding.bifurcated_at`
+reports only this run's detection and can therefore be `None` while the catalog
+retains a value.
+
+```python
+for finding in bias_report.findings:
+    bias = bias_report.catalog[finding.name].bias
+    print(f"{finding.name}: this run={finding.bifurcated_at}, "
+          f"retained={bias.bifurcated_at}, trace={bias.bias_sweep is not None}")
+    np.testing.assert_allclose(
+        iq_derivatives_at(bias.bias_sweep, bias.frequency_hz),
+        (bias.dI_df, bias.dQ_df),
+    )
+```
+
+Pass `bias_report.catalog` to the next `crs.multisweep()` to carry these
+observations forward. To reset them, copy the catalog and call
+`catalog.clear_bifurcations()` before measuring. To move only sweep windows,
+pass a named `center_frequencies` mapping alongside the catalog, as shown in
+`multisweep.md`; editing bias frequencies with `update_bias_point()` clears
+calibration and bifurcation fields by default.
 
 ### Inspect the report
 
@@ -1037,11 +1046,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
     panels = axes[0]
 
     for panel, finding in zip(panels, report.findings):
-        iterations = {
-            step: {direction: sections[finding.name]
-                   for direction, sections in by_direction.items()}
-            for step, by_direction in results["results"].items()
-        }
+        iterations = collect_amplitude_iterations_for(results, finding.name)
         all_amplitudes = [section["sweep_amplitude"]
                           for by_direction in results["results"].values()
                           for sections in by_direction.values() for section in sections.values()]

@@ -137,9 +137,10 @@ only one module is measured:
 
 ```text
 netanal[module_id]                  # e.g. "crs0042_rmod1"
-    schema_version                 # measurement schema version (7)
+    schema_version                 # measurement schema version (9)
     measurement                    # "netanal"
     module                         # numeric module
+    dac_scale_dbm                  # DAC full scale reported by the board, or None
     call_params                    # arguments used for the measurement
     results
         frequencies                # Hz
@@ -466,8 +467,7 @@ The catalog is ready for multisweeps, fitting, and bias finding. Continue with
 
 ## 5. Periscope controls
 
-The GUI wiring is being updated; this table maps the controls to the workflow
-shown here, rather than documenting the current internal implementation.
+These controls use the same measurement and analysis APIs as the notebook:
 
 | Periscope control | Workflow API |
 |---|---|

@@ -96,8 +96,9 @@ The catalog has three nested types:
     └── Resonator       one detector; has a name, channel, and BiasPoint
         └── BiasPoint   tone frequency, amplitude, and calibration
 
-The catalog stores a few values per detector. Sweep arrays stay in the measurement
-results, keeping the catalog small and easy to save.
+The catalog stores identity and bias settings per detector. After bias finding,
+`bias.bias_sweep` also holds the selected voltage trace used for calibration.
+The full amplitude schedule and other measured traces stay in the measurement results.
 
 A resonator’s name identifies it across tuning steps and measurement files.
 Keep the name when you retune it; replace its bias point as needed.
@@ -141,7 +142,7 @@ print(f"red at a -30 dBm DAC scale: "
 
 ### Build a catalog from a list of frequencies
 
-If you have a list of frequencies, you can use `from_frequencies()` to make a catalog. This is what the the resonance finder does to auto-generate a catalog based on the list of resonant frequencies it found. You can optionally provide a list of names, in the same order as the frequencies:
+If you have a list of frequencies, you can use `from_frequencies()` to make a catalog. This is what the resonance finder does to auto-generate a catalog based on the list of resonant frequencies it found. You can optionally provide a list of names, in the same order as the frequencies:
 
 ```python
 named_catalog = ResonatorCatalog.from_frequencies(
@@ -308,6 +309,21 @@ print(f"recalibrated: {red_resonator.bias.frequency_hz/1e6:.4f} MHz, "
       f"rotation {red_resonator.bias.iq_rotation_deg}   <- tone untouched")
 ```
 
+### Clear remembered bifurcation amplitudes
+
+`find_bias_points()` retains the last observed bifurcation amplitude on
+`bias.bifurcated_at` when a later measurement detects none. To start a new search
+without those observations, clear them on the catalog before taking new sweeps:
+
+```python
+fresh_search_catalog = catalog.copy()
+fresh_search_catalog.clear_bifurcations()
+assert all(r.bias.bifurcated_at is None for r in fresh_search_catalog)
+```
+
+This clears only `bifurcated_at`; frequencies, amplitudes, calibration and stored
+bias sweeps remain. See `bias_finding.md` for how retained observations affect flags.
+
 ### Remove a resonator
 
 Use `catalog.remove(name)` to remove and return a resonator, or `del catalog[name]`
@@ -375,8 +391,9 @@ Frequency checks depend on `min_separation_hz`:
 - A positive value: reject frequencies that are this close or closer.
 
 All catalog constructors accept this setting, including `from_dict` and `from_csv`.
-Supply it when loading if you want a separation check; the saved setting is only
-a record. Calling a member’s `update_bias_point()` does not rerun the catalog’s separation check.
+`from_dict()` restores and checks the saved rule unless you override it; CSV
+does not store the rule. Calling a member’s `update_bias_point()` does not rerun
+the catalog’s separation check.
 
 These examples catch and print the expected errors so you can keep running the notebook:
 
@@ -422,9 +439,11 @@ bias table, but omits calibration and notes.
 
 ### Dictionaries
 
-`catalog.to_dict()` returns ordinary dictionaries, lists, and scalar values.
-`ResonatorCatalog.from_dict()` rebuilds the catalog from them. This representation
-can be serialized with pickle or JSON, or stored as suitable HDF5 attributes.
+`catalog.to_dict()` preserves all catalog fields, and
+`ResonatorCatalog.from_dict()` rebuilds the catalog from them. A calibrated
+`bias_sweep` contains NumPy arrays, including complex voltage data, so the full
+representation is suitable for pickle but is not directly JSON-serializable.
+The manually constructed catalog below has no stored sweeps.
 
 The `resonators` dictionary is keyed by name. For example,
 `catalog_dict["resonators"]["red"]` contains that resonator’s fields.

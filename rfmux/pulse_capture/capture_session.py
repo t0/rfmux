@@ -1080,7 +1080,7 @@ class PulseCaptureSession(_CallbackHost):
             self.pcap.noise_stats = self.noise_stats
             self.pcap.reset_edge_history()
             self._to_writer("update_noise_stats", self.noise_stats,
-                            what="noise update")
+                            self.noise_data, what="noise update")
             self.pcap.freeze_triggers = False
 
         self.state = CaptureState.CAPTURING
@@ -1123,6 +1123,7 @@ class PulseCaptureSession(_CallbackHost):
                     capture_params,
                     tuning=self.tuning,
                     stored_units=self.stored_units,
+                    noise_data=self.noise_data,
                 )
                 if self.time_origin_epoch is not None:
                     self.writer.set_time_origin(self.time_origin_epoch)
@@ -1673,7 +1674,7 @@ class DualPulseCaptureSession(_CallbackHost):
 
     def _on_stream_noise(self, stream: str, noise_stats: dict) -> None:
         self._to_writer("set_noise_stats", stream, noise_stats,
-                        what="noise write")
+                        getattr(self, stream).noise_data, what="noise write")
         self._sync_capture_start()
         self._callback(self.on_noise, stream, noise_stats)
 

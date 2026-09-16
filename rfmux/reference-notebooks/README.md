@@ -30,8 +30,7 @@ changing its notebook.
 
 - **`Release Notes/`**: the firmware release walkthroughs.
 - **`Guides/`**: the repository's `docs/` folder (guides, release notes,
-  installation), provisioned beside the notebooks when rfmux is installed
-  from a source checkout.
+  installation), provisioned beside the notebooks.
 
 ## Connecting
 

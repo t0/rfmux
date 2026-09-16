@@ -9,9 +9,13 @@ import rfmux
 
 
 _REFERENCE_NOTEBOOKS = Path(__file__).with_name("reference-notebooks")
-#: The repository's docs/ (guides, release notes, installation), beside
-#: the package in a source or editable install; absent from a wheel.
-_DOCS = Path(__file__).resolve().parents[1] / "docs"
+#: The repository's docs/ (guides, release notes, installation): inside
+#: the package in a wheel (the streamer's CMake installs it there),
+#: beside the package in a source or editable install.
+_DOCS = next((d for d in (Path(__file__).with_name("docs"),
+                          Path(__file__).resolve().parents[1] / "docs")
+              if d.is_dir()),
+             Path(__file__).with_name("docs"))
 #: What the docs folder is called among the provisioned notebooks.
 DOCS_FOLDER = "Guides"
 
@@ -43,10 +47,10 @@ def get_reference_notebook_dir() -> Path:
     Each version gets its own directory, so upgrades never collide with
     notebooks that are already open.
 
-    The repository's docs/ folder, when the install has one beside the
-    package, is provisioned alongside as ``Guides`` (the figure scripts
-    left out), so the guides and release notes are in the Jupyter
-    session with the notebooks.
+    The repository's docs/ folder (shipped in the wheel as rfmux/docs,
+    beside the package in a source checkout) is provisioned alongside as
+    ``Guides``, the figure scripts left out, so the guides and release
+    notes are in the Jupyter session with the notebooks.
     """
     dest = get_rfmux_data_dir() / "reference-notebooks" / rfmux.__version__
 

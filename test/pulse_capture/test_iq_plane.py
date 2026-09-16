@@ -95,6 +95,32 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
     spin(qt_app)
 
 
+def test_a_long_pulse_keeps_its_path_and_thins_its_markers(qt_app, tmp_path):
+    """A fast-mode pulse is hundreds of thousands of samples: the line
+    keeps them all, the time-coloured markers are a fixed budget."""
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.pulse_capture_panel import IQ_PLANE_POINTS
+
+    path = tmp_path / "plane.h5"
+    _write_capture(path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    n = 50_000
+    k = np.arange(n, dtype=float)
+    panel._get_waveform = lambda *a, **kw: {
+        "Amp_I": 1e-3 + 1e-5 * np.exp(-k / 8e3), "Amp_Q": np.full(n, -2e-3),
+        "Time": k / 2.44e6, "trigger_index": 100}
+    panel._current_view = (1, 1)
+    panel._render_iq_plane()
+    spin(qt_app)
+    assert len(_named(panel)["pulse"][0]) == n
+    markers = [i for i in panel.iq_plot.getPlotItem().items
+               if isinstance(i, pg.ScatterPlotItem)]
+    assert len(markers) == 1 and len(markers[0].data) == IQ_PLANE_POINTS
+    panel.close()
+    spin(qt_app)
+
+
 def test_without_a_sweep_the_plane_says_so(qt_app, tmp_path):
     path = tmp_path / "bare.h5"
     PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},

@@ -177,6 +177,10 @@ def _channel_color(channel) -> str:
 #: Legend names for the two stored axes, by basis.
 _AXIS_NAMES = {"df": ("df", "diss"), "iq": ("I", "Q")}
 
+#: Most time-coloured markers the IQ plane draws for one pulse; the
+#: path itself keeps every sample.
+IQ_PLANE_POINTS = 4000
+
 _HIST_METRICS = [
     ("snr", "Signal-to-noise (σ)", "peak deviation (σ)"),
     ("amplitude", "Peak amplitude per axis", "amplitude"),
@@ -574,12 +578,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return channel, self._get_waveform(channel, idx)
         if self._both_mode and self._current_pair is not None:
             channel, idx = self._current_pair
-            pair = self._get_pair(channel, idx)
-            wf = pair.get("slow_tod") if pair else None
+            # The triggered slow record carries the trigger marks the
+            # plane draws; the pair's union window does not.
+            meta = self._pair_meta.get((channel, idx)) or {}
+            wf = None
+            if meta.get("slow_idx") is not None:
+                wf = self._get_waveform(channel, meta["slow_idx"], "slow")
             if wf is None:
-                meta = self._pair_meta.get((channel, idx)) or {}
-                if meta.get("slow_idx") is not None:
-                    wf = self._get_waveform(channel, meta["slow_idx"], "slow")
+                pair = self._get_pair(channel, idx)
+                wf = pair.get("slow_tod") if pair else None
             return channel, wf
         return None, None
 
@@ -657,17 +664,28 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.plot(amp_I, amp_Q, pen=pg.mkPen("#9AA4B1", width=0.8),
                       name="pulse")
             # One hue, light to dark with time from the trigger; the
-            # samples before it in grey.
+            # samples before it in grey.  The line keeps every sample;
+            # the markers are a render resolution, since a fast-mode
+            # pulse is hundreds of thousands of samples.
+            if n <= IQ_PLANE_POINTS:
+                shown = np.arange(n)
+            else:
+                shown = np.unique(np.linspace(0, n - 1, IQ_PLANE_POINTS)
+                                  .astype(int))
             base = QtGui.QColor(IQ_COLORS["I"])
-            brushes = [pg.mkBrush("#BBBBBB")] * trig
-            for k in range(n - trig):
-                s = k / max(n - trig - 1, 1)
+            grey = pg.mkBrush("#BBBBBB")
+            brushes = []
+            for k in shown:
+                if k < trig:
+                    brushes.append(grey)
+                    continue
+                s = (k - trig) / max(n - trig - 1, 1)
                 c = QtGui.QColor(base)
                 c.setHsvF(base.hueF(), 0.25 + 0.75 * s,
                           min(1.0, base.valueF() + 0.45 * (1.0 - s)))
                 brushes.append(pg.mkBrush(c))
-            plot.addItem(pg.ScatterPlotItem(amp_I, amp_Q, brush=brushes,
-                                            pen=None, size=6))
+            plot.addItem(pg.ScatterPlotItem(amp_I[shown], amp_Q[shown],
+                                            brush=brushes, pen=None, size=6))
             if "trigger_baseline_I" in wf:
                 bx, by = float(wf["trigger_baseline_I"]), \
                     float(wf["trigger_baseline_Q"])

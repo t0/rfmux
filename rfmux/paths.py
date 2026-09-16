@@ -9,6 +9,11 @@ import rfmux
 
 
 _REFERENCE_NOTEBOOKS = Path(__file__).with_name("reference-notebooks")
+#: The repository's docs/ (guides, release notes, installation), beside
+#: the package in a source or editable install; absent from a wheel.
+_DOCS = Path(__file__).resolve().parents[1] / "docs"
+#: What the docs folder is called among the provisioned notebooks.
+DOCS_FOLDER = "Guides"
 
 
 def get_rfmux_data_dir() -> Path:
@@ -37,6 +42,11 @@ def get_reference_notebook_dir() -> Path:
     Files are made read-only (0o444/0o555) to discourage in-place editing.
     Each version gets its own directory, so upgrades never collide with
     notebooks that are already open.
+
+    The repository's docs/ folder, when the install has one beside the
+    package, is provisioned alongside as ``Guides`` (the figure scripts
+    left out), so the guides and release notes are in the Jupyter
+    session with the notebooks.
     """
     dest = get_rfmux_data_dir() / "reference-notebooks" / rfmux.__version__
 
@@ -44,6 +54,10 @@ def get_reference_notebook_dir() -> Path:
         return dest
 
     shutil.copytree(_REFERENCE_NOTEBOOKS, dest)
+    if _DOCS.is_dir():
+        shutil.copytree(_DOCS, dest / DOCS_FOLDER,
+                        ignore=shutil.ignore_patterns("make_*.py",
+                                                      "__pycache__"))
 
     # Make files read-only to discourage in-place editing
     for root, dirs, files in os.walk(dest):

@@ -41,8 +41,8 @@ class MR_complex_resonator():
     Notes
     -----
     - Units are explicitly called out in method docstrings (Hz, Ω, H, F, K).
-    - Bessel functions K0/I0 are approximated via jit_physics for speed;
-      relative error is typically ~1e-6 for the intended ranges.
+    - Bessel functions K0/I0 are the jit_physics polynomial fits, within
+      2e-7 of scipy for every argument.
     - MockResonatorModel reads attributes like readout_f, T, Delta0, N0,
       sigmaN, thickness, width, length, R_spoiler, and lekid for vectorized
       S21 calculations and convergence.

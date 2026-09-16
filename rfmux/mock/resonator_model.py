@@ -1196,7 +1196,15 @@ class MockResonatorModel:
             args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
                     k0.input_atten_dB, complex(k0.ZLNA))
             f_c = float(self.resonator_frequencies[i])
-            grid = f_c + np.linspace(-2e6, 2e6, 4001)
+            # The grid holds tens of loaded linewidths so its outer
+            # fifths see only the through-current: an over-coupled
+            # resonator (small C at a high frequency) is megahertz wide.
+            omega = 2.0 * np.pi * f_c
+            width = f_c * (R0[i] / (omega * L0[i])
+                           + self.Cc_array[i] ** 2 * omega * 50.0
+                           / (8.0 * self.C_array[i]))
+            half_span = max(2e6, 25.0 * width)
+            grid = f_c + np.linspace(-half_span, half_span, 4001)
             I = jit_physics.linear_currents(grid, *args)
             # The through-current is a smooth background: a line
             # through the outer fifth of the grid on each side.

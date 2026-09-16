@@ -1,49 +1,20 @@
 #!/usr/bin/env python3
-"""Example plots for fitted sweeps: models over data, and parameters over drive.
+"""Plot fitted models and parameters from one module's multisweep.
 
-``fit_sweeps`` writes its results into the sweep entries it fitted, under
-``fits``, keyed by model. These plots read them back out::
+Fits are read from each sweep entry's ``fits`` dict::
 
+    from rfmux.tuning import fit_sweeps
     import example_plotting_fits as fitplots
 
     module_sweeps = sweeps[crs.module[1].index()]
     fit_sweeps(module_sweeps)
-
     fitplots.plot_fit_panels(module_sweeps, model="skewed")
     fitplots.plot_fitted_parameters(module_sweeps, model="skewed")
 
-The first draws each resonator's measured trace as points with the fitted model
-over it as a smooth line — smooth because the model is evaluated on a grid
-``oversample`` times denser than the sweep, so what you see is the model and
-not a polyline joining the same few samples the fit had. Judging a fit by eye
-is what it is for. The second plots fitted parameters against drive amplitude,
-which is where a resonator being driven too hard shows up.
-
-Both resonance models — ``skewed`` and ``nonlinear`` — are drawn against
-frequency, because the dip is where a bad fit shows itself, and because it puts
-the two models on the same axes when you want to compare them. ``circle`` is
-drawn in the IQ plane instead: it has nothing to say about frequency, and the
-IQ plane is the only place a circle looks like a circle.
-
-A fit that did not converge is drawn as its data with no model over it and the
-reason in the panel, rather than being silently skipped. A missing curve you
-can see beats a missing curve you cannot.
-
-Styling follows hidfmux's plotting modules — large type, a grid on every axes,
-compact bracketed axis labels, and generous panels. It lives in ``PLOT_STYLE``
-and is applied per figure, not to your session. Panels are drawn in batches of
-``BATCH_SIZE`` resonators, so pointing these at a whole array gives readable
-figures rather than one that is metres across.
-
-These are meant to be read and copied, and each ``example_plotting_*`` module
-here stands alone: the small amount of layout and style bookkeeping is repeated
-in each rather than shared, so that one file is the whole story and lifting a
-function out of it is a copy-paste.
-
-One deliberate difference from ``example_plotting_multisweep.py``: these take a
-single ``direction``, not a list. A magnitude trace with its fit over it is
-already two lines per amplitude step, and drawing both sweep directions on top
-of that makes a panel nobody can read. Call twice if you want to compare them.
+Skewed and nonlinear models use magnitude versus frequency; circle fits use
+IQ counts. Failed fits show their measured data and failure reason. Each call
+plots one sweep direction. Style is applied per figure; ``batchlen=None``
+puts all resonators in one figure.
 """
 
 import textwrap
@@ -76,14 +47,7 @@ __all__ = [
 ]
 
 
-# Type big enough to read on a projector, and a grid on every axes: these plots
-# get shown to other people, and a fit you cannot read a number off is a fit
-# nobody will argue with. Applied per figure through ``plt.rc_context`` rather
-# than written into ``plt.rcParams`` at import, so importing this module does
-# not quietly restyle the rest of your notebook. If you *want* it everywhere::
-#
-#     plt.rcParams.update(example_plotting_fits.PLOT_STYLE)
-#
+# Applied per figure through plt.rc_context.
 PLOT_STYLE = {
     "font.size": 18,
     "xtick.labelsize": 18,
@@ -97,39 +61,22 @@ PLOT_STYLE = {
     "axes.formatter.limits": (-3, 3),
 }
 
-# Resonators per figure. A panel is sized to be read rather than to fit.
+# Resonators per figure.
 BATCH_SIZE = 50
 
-# gnuplot runs black -> purple -> red -> orange -> yellow, so it stays
-# saturated for most of its length and every trace reads against a white
-# background. The top tenth is the exception: it fades to a pale yellow that
-# vanishes on white, and that is where the loudest drive would land. So the map
-# is truncated before it gets there. Truncating the colormap rather than
-# clamping at the call site keeps the colourbar showing the colours the traces
-# were actually drawn in.
+# Truncate pale yellows to keep traces visible on white.
 AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
     "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
 )
 
-# When only one amplitude step is drawn there is no drive for colour to encode,
-# so it is spent on telling the data from the model instead. With several steps
-# both take the step's colour and are told apart by points versus line, because
-# colour is back to meaning drive.
+# Single-step plots distinguish data and model by colour.
 MEASURED_COLOUR = "0.45"
 FIT_COLOUR = "crimson"
 
-# How each model is drawn. Both resonance models go against frequency, because
-# the dip is where a bad fit shows itself — the nonlinear model is *fitted* to
-# the complex trace, but its magnitude is what you read it off. The circle fit
-# has nothing to say about frequency at all, so it stays in the IQ plane, which
-# is the only place a circle is a circle. Adding a model to fits.py means
-# adding a line here.
+# Plot resonance models against frequency and circle fits in the IQ plane.
 MODEL_PROJECTION = {"skewed": "magnitude", "nonlinear": "magnitude", "circle": "iq"}
 
-# The parameters worth plotting against drive, per model, and how to draw them.
-# ``shift`` subtracts the value at the lowest drive: absolute fr differs by
-# hundreds of MHz between resonators, so the shift is what lands on one axis.
-# ``log`` puts that panel's y-axis on a log scale, which is what a Q wants.
+# Parameter axes: shift subtracts the lowest-drive value; log sets a log y-axis.
 PARAMETER_PANELS = {
     "skewed": (
         {"name": "fr", "label": "$f_r$ shift [kHz]", "scale": 1e-3, "shift": True},
@@ -150,13 +97,7 @@ PARAMETER_PANELS = {
 
 
 def panels_per_row(count, few=5, many=7):
-    """How many panels to put in a row, for a grid of *count* of them.
-
-    A whole array is a lot of panels, and the useful shape is not the same at
-    four resonators as at four hundred: a handful go in one row, a moderate
-    number in rows of five, and a big grid in rows of seven, which is about as
-    wide as stays legible.
-    """
+    """Choose a column count from the number of panels."""
     if count > 30:
         return many
     if count < 10:
@@ -165,16 +106,10 @@ def panels_per_row(count, few=5, many=7):
 
 
 def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
-    """A colour scale graded over *amplitudes*, and the colourbar's handle.
+    """Return a ScalarMappable for drive amplitudes, usable with ``fig.colorbar``.
 
-    Colour a trace with ``mappable.to_rgba(sweep["sweep_amplitude"])`` rather
-    than by its position in the schedule. Under a *multiplicative* amplitude
-    schedule each resonator is driven at its own amplitude on the same step, so
-    step number and drive are not the same thing.
-
-    Log-scaled, because an amplitude schedule is log-spaced by default and a
-    linear scale bunches every quiet step into one shade. A schedule that
-    reaches zero cannot be log-scaled at all, so that one falls back to linear.
+    Use ``.to_rgba(amplitude)`` for each trace. The scale is logarithmic for
+    positive amplitudes and linear otherwise.
     """
     low, high = min(amplitudes), max(amplitudes)
     if high <= low:
@@ -184,25 +119,14 @@ def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
 
 
 def offset_khz(entry, frequencies=None):
-    """Frequencies as kHz either side of where the sweep was centred.
-
-    Pass *frequencies* to convert a grid other than the entry's own — the
-    denser one a model is drawn on, for instance.
-    """
+    """Return frequency offsets from the sweep centre in kHz."""
     if frequencies is None:
         frequencies = entry["frequencies"]
     return (np.asarray(frequencies) - entry["original_center_frequency"]) / 1e3
 
 
 def square_axes(panel):
-    """Equal scale on both axes, so a circle is drawn as a circle.
-
-    ``adjustable="datalim"`` rather than a fixed box: matplotlib's layout
-    engines place fixed-aspect axes after they have finished, so the room
-    reserved for a figure title is taken back and the title lands on top of the
-    panel titles. Fixing the limits instead gives the same guarantee about the
-    data — one unit of I is one unit of Q.
-    """
+    """Use equal data scales for I and Q without fixing the axes box."""
     panel.set_aspect("equal", adjustable="datalim")
     # A square panel is narrower than the default tick count assumes, and at
     # this type size the labels run into each other.
@@ -210,16 +134,7 @@ def square_axes(panel):
 
 
 def model_on_a_finer_grid(reader, entry, oversample=25):
-    """``(frequencies, model)`` from a reader, on a denser axis than was measured.
-
-    The readers in ``rfmux.tuning`` evaluate a model on whatever frequencies
-    the entry carries, which for a 101-point sweep means a 101-point polyline —
-    the same corners the fit saw, which is not what the model looks like. Hand
-    the reader a copy of the entry with a denser grid and it happily obliges.
-
-    Returns the frequencies too, since they are no longer the entry's own and
-    the model has to be plotted against them.
-    """
+    """Return frequencies and model values evaluated on a denser sweep grid."""
     frequencies = np.linspace(
         entry["frequencies"][0],
         entry["frequencies"][-1],
@@ -229,17 +144,7 @@ def model_on_a_finer_grid(reader, entry, oversample=25):
 
 
 def fitted_value(entry, model, parameter):
-    """One number off one fit, or ``None`` if there is not one.
-
-    Looks in the fit's ``params`` first, then at the fit dict itself, because
-    not everything a fit learned is a fitted parameter: the nonlinear fit's
-    ``residual`` and ``gain``, and the circle fit's ``center`` and ``radius``,
-    sit beside ``params`` rather than in it.
-
-    ``None`` rather than an exception, so that a resonator whose fit failed at
-    one amplitude leaves a gap in a curve instead of taking the whole plot
-    down — or worse, being quietly dropped and joining the points either side.
-    """
+    """Read a fit parameter or top-level value; return None for failed or missing fits."""
     fit = (entry.get("fits") or {}).get(model)
     if fit is None or fit.get("failed_because") is not None:
         return None
@@ -269,12 +174,7 @@ def _batches(items, batchlen):
 
 
 def _titled(fig, text):
-    """A figure title that clears the panel titles under it.
-
-    The layout engine sizes the band it leaves for a figure title as a fraction
-    of figure height, which is far too thin for a single row of wide panels —
-    the title lands on top of the panel titles. Reserve a fixed band instead.
-    """
+    """Wrap the figure title and reserve space above the panel titles."""
     # Wrapped to roughly what the figure is wide enough to hold at the title's
     # type size: a one-panel figure is only a few inches across, and an
     # unwrapped title simply runs off both ends of it.
@@ -286,7 +186,7 @@ def _titled(fig, text):
 
 
 def _panel_grid(count, columns, panel_size):
-    """A grid of *columns* columns big enough for *count* panels, panels flat."""
+    """Create a panel grid, hide spare axes, and return figure, axes and panels."""
     nrows = -(-count // columns)  # ceiling division, no import needed
     fig, axes = plt.subplots(
         nrows, columns,
@@ -300,7 +200,7 @@ def _panel_grid(count, columns, panel_size):
 
 
 def _section_names(results):
-    """Every sweep section in one module's results, in the order measured."""
+    """Read section names from the first sweep step; require a single module block."""
     try:
         iterations = results["results"]
     except (TypeError, KeyError):
@@ -396,22 +296,20 @@ def plot_fit_panels(
     Args:
         results: one module's sweep results — the value of ``sweeps[module_id]``
             — after ``fit_sweeps`` has run on it.
-        model: ``"skewed"``, ``"nonlinear"`` or ``"circle"``. Decides both which
-            fit is read and how it is drawn: ``skewed`` against frequency, the
-            other two in the IQ plane.
+        model: "skewed" or "nonlinear" for magnitude versus frequency,
+            normalized to the last measured point; "circle" for IQ counts.
         names: which sweep sections to draw. A name, a list of names, or
             ``None`` for the whole array.
         iterations: which amplitude steps to draw. A step number, a list of
             them, or ``None`` for all of them.
-        direction: which frequency direction to draw. One direction, not a
-            list — see the module docstring.
-        oversample: how many times denser than the sweep to evaluate the model
-            on, so the curve is a curve. 1 draws it on the sweep's own points.
+        direction: the sweep direction to draw.
+        oversample: model grid density relative to the sweep; 1 uses the
+            original point count.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
         panel_size: ``(width, height)`` of one panel, in inches. The default
             depends on the model: square for the IQ projections.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -460,12 +358,7 @@ def plot_fit_panels(
 def _draw_measured_and_model(
     panel, entry, model, projection, colour, fit_colour, oversample
 ):
-    """One amplitude step in one panel: the data, and the model if it converged.
-
-    Returns the reason the fit failed, or ``None``. The caller collects those
-    for the panel note — a fit that did not converge still has data worth
-    looking at, and the reason belongs next to it.
-    """
+    """Draw measured data and a converged model; return the failure reason or None."""
     fit = (entry.get("fits") or {}).get(model)
     if fit is None:
         raise ValueError(
@@ -602,15 +495,9 @@ def plot_fitted_parameters(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """Fitted parameters against drive amplitude, one line per resonator.
+    """Plot fitted parameters against drive amplitude, one line per resonator.
 
-    This is the plot that says whether a resonator is being driven too hard: a
-    Q that falls away and an ``fr`` that walks downwards as the drive comes up
-    are what a resonator does on its way to bifurcating.
-
-    A step whose fit did not converge is a gap in the line, not a joined-up
-    point — :func:`fitted_value` returns ``None`` and matplotlib leaves the
-    break in. A missing point you can see beats an interpolated one you cannot.
+    Failed fits leave gaps in the curves.
 
     Args:
         results: one module's sweep results, after ``fit_sweeps``.
@@ -624,9 +511,7 @@ def plot_fitted_parameters(
         direction: which frequency direction's fits to read.
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. Batched on resonators here rather than
-            panels, since every resonator is a line on shared axes and a
-            hundred of them is not a plot. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         ValueError: for an unknown model with no defaults, or if the selection

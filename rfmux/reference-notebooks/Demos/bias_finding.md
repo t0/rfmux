@@ -1032,7 +1032,8 @@ Now compare the hysteresis-only result. With this simulator, a lack of detected
 hysteresis is expected and may leave the highest amplitude selected as a fallback:
 
 ```python
-print(find_bias_points(multi_amplitude_module_results,
+# Keep the selected report in the original multisweep.
+print(find_bias_points(dict(multi_amplitude_module_results),
                        amplitude_method="hysteresis", save=False))
 ```
 
@@ -1049,8 +1050,9 @@ magnitude so the marker shows the measured operating point.
 ```python
 from rfmux.core.transferfunctions import convert_roc_to_dbm
 
-def plot_bias_points_on_sweeps(results, report, direction="upward"):
-    """Plot all sweeps and mark the selected operating points."""
+def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
+    """Plot sweeps and operating points from the embedded bias report."""
+    report = BiasReport.from_dict(results["bias_report"])
     names = [finding.name for finding in report.findings]
     fig, axes = plt.subplots(
         1, len(names), figsize=(3.2 * len(names), 3.5),
@@ -1106,7 +1108,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
     plt.show()
 
 
-plot_bias_points_on_sweeps(multi_amplitude_module_results, bias_report)
+plot_bias_points_on_sweeps(multi_amplitude_module_results)
 ```
 
 ## 6. Apply the bias points

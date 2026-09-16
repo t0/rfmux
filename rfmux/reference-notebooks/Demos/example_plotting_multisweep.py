@@ -1,50 +1,19 @@
 #!/usr/bin/env python3
-"""Example plots for multisweep data, and a skeleton for your own.
+"""Plot magnitude and IQ traces from one module's multisweep.
 
-Every function here takes what ``crs.multisweep`` returned — one module's value
-out of the dict it is keyed by — and draws the whole array at once, a panel per
-resonator. One amplitude or twenty, the shape is the same, so these plotters do
-not care how wide the call that produced the data was::
-
-    import pickle
     import example_plotting_multisweep as msplots
 
-    with open("my_multisweep.pkl", "rb") as f:
-        sweeps = pickle.load(f)
-    module_sweeps = sweeps[list(sweeps)[0]]
-
+    module_sweeps = sweeps[crs.module[1].index()]
     msplots.plot_magnitude_panels(module_sweeps)
     msplots.plot_iq_panels(module_sweeps)
 
-The two plotters are the same plot in two projections: ``|S21|`` against
-frequency offset, and the IQ loop the sweep traced out. Both stack every
-amplitude step the resonator was measured at, colour-coded by drive, and
-overlay the two frequency directions as solid and dashed. On a simulated array
-the directions lie on top of each other; on real detectors driven hard enough
-to bifurcate they part company, and that gap is the thing you are looking for.
+Each resonator gets a panel, with amplitude steps coloured by drive and sweep
+directions distinguished by line style. Select traces with ``names``,
+``iterations`` and ``directions``. Magnitude defaults to drive-referenced dB;
+IQ defaults to readout counts divided by the drive's DAC fraction.
 
-All four selection arguments — ``names``, ``iterations``, ``directions`` and
-``normalize`` — are there so you can narrow a 100-resonator grid down to the
-one you are arguing about without writing a second function.
-
-Whatever you do not narrow is drawn in batches of ``BATCH_SIZE`` resonators,
-one figure each, sharing a single colour scale so the batches can be compared.
-That is the standing convention for every ``example_plotting_*`` module here,
-and it exists so that pointing one of these at a thousand-resonator array
-gives you twenty readable figures instead of one that is metres across. Pass
-``batchlen=None`` to override it and take the one enormous figure.
-
-Styling follows hidfmux's plotting modules — large type, a grid on every axes,
-compact bracketed axis labels, and generous panels — so that a figure from
-either code base reads the same way and survives being put on a projector. It
-lives in ``PLOT_STYLE`` and is applied per figure, not to your session.
-
-These are meant to be read and copied. They deliberately use nothing but
-matplotlib, numpy and rfmux's readers and unit conversions, so lifting one into
-your own analysis script is a copy-paste and not a dependency. If you want a
-different layout, a log x-axis, or your own colours, start from the body of
-``_plot_panels`` — the selection and colour bookkeeping above it is the part
-that is tedious to get right, and it is shared.
+Style is applied per figure. Batches share a colour scale; ``batchlen=None``
+puts all resonators in one figure.
 """
 
 import textwrap
@@ -73,13 +42,7 @@ __all__ = [
 ]
 
 
-# gnuplot runs black -> purple -> red -> orange -> yellow, so it stays
-# saturated for most of its length and every trace reads against a white
-# background. The top tenth is the exception: it fades to a pale yellow that
-# vanishes on white, and that is where the loudest drive would land. So the map
-# is truncated before it gets there. Truncating the colormap rather than
-# clamping at the call site keeps the colourbar showing the colours the traces
-# were actually drawn in.
+# Truncate pale yellows to keep traces visible on white.
 AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
     "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
 )
@@ -89,57 +52,29 @@ AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
 DIRECTION_LINESTYLES = {"upward": "-", "downward": "--"}
 FALLBACK_LINESTYLE = ":"
 
-# Resonators per figure. A panel is sized to be read rather than to fit, so a
-# kilopixel array in one figure would be metres across and take minutes to
-# render — this splits it into figures that can actually be looked at. Fifty is
-# hidfmux's number, and about as many panels as one figure can carry.
+# Resonators per figure.
 BATCH_SIZE = 50
 
-# Type big enough to read on a projector, and a grid on every axes: these
-# plots get shown to other people, and a resonator plot without a grid is hard
-# to read a number off. Applied per figure through ``plt.rc_context`` rather
-# than written into ``plt.rcParams`` at import, so importing this module does
-# not quietly restyle the rest of your notebook. If you *want* it everywhere::
-#
-#     plt.rcParams.update(example_plotting_multisweep.PLOT_STYLE)
-#
+# Applied per figure through plt.rc_context.
 PLOT_STYLE = {
     "font.size": 18,
     "xtick.labelsize": 18,
     "ytick.labelsize": 18,
     "legend.fontsize": 14,
     "axes.grid": True,
-    # An axis whose ticks all sit near 601.4 MHz otherwise reads "+6.014e8" in
-    # the corner and 0.1, 0.2, … on the ticks, which is unreadable at a glance.
+    # Show absolute tick values.
     "axes.formatter.useoffset": False,
     "axes.formatter.use_mathtext": True,
-    # Anything past a thousand gets a shared exponent rather than six-digit
-    # ticks. Without this the choice is made per axes, so one IQ panel ends up
-    # labelled 600000 and the panel beside it 0.6 with a x10^6 in the corner.
+    # Use a shared exponent for large or small values.
     "axes.formatter.limits": (-3, 3),
 }
 
 
 def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
-    """A colour scale graded over *amplitudes*, and the colourbar's handle.
+    """Return a ScalarMappable for drive amplitudes, usable with ``fig.colorbar``.
 
-    Colour a trace with ``mappable.to_rgba(sweep["sweep_amplitude"])`` rather
-    than by its position in the schedule. Under a *multiplicative* amplitude
-    schedule each resonator is driven at its own amplitude on the same step, so
-    step number and drive are not the same thing, and a colourbar that claims
-    to show drive has to be built from the drives.
-
-    Log-scaled, because an amplitude schedule is log-spaced by default and a
-    linear scale bunches every quiet step into one shade. A schedule that
-    reaches zero cannot be log-scaled at all, so that one falls back to linear.
-
-    Args:
-        amplitudes: every drive amplitude that will be drawn, in any order.
-        cmap: any matplotlib colormap.
-
-    Returns:
-        matplotlib.cm.ScalarMappable: pass it to ``fig.colorbar`` and call
-        ``.to_rgba`` on it per trace.
+    Use ``.to_rgba(amplitude)`` for each trace. The scale is logarithmic for
+    positive amplitudes and linear otherwise.
     """
     low, high = min(amplitudes), max(amplitudes)
     if high <= low:
@@ -151,31 +86,19 @@ def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
 
 
 def offset_khz(sweep):
-    """A sweep's frequencies as kHz either side of where it was centred."""
+    """Return frequency offsets from the sweep centre in kHz."""
     return (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3
 
 
 def sweep_iq(sweep, normalize=True):
-    """Readout counts, optionally divided by the drive's DAC fraction.
-
-    Normalized is usually what you want when several amplitude steps share an
-    axes: it compares the traces by shape, instead of showing you the loudest
-    one sitting on top of the others. This retains the readout-count scale;
-    it is not a voltage transmission. Turn it off to see the raw counts.
-    """
+    """Return readout counts, optionally divided by the drive's DAC fraction."""
     if normalize:
         return sweep["iq_counts"] / sweep["sweep_amplitude"]
     return sweep["iq_counts"]
 
 
 def section_names(results):
-    """Every sweep section in one module's results, in the order measured.
-
-    Raises:
-        TypeError: if handed the dict a sweep macro returns rather than one
-            module's value out of it. That is the easy mistake to make, and it
-            is worth a sentence saying so.
-    """
+    """Read section names from the first sweep step; require a single module block."""
     try:
         iterations = results["results"]
     except (TypeError, KeyError):
@@ -203,13 +126,7 @@ def _as_list(value):
 
 
 def _collect_traces(results, names, iterations, directions):
-    """What was asked for: ``{name: [(iteration, direction, sweep), ...]}``.
-
-    Selection lives here, in one place, so the two plotters cannot drift apart
-    in what they accept. Raises rather than drawing an empty grid when the
-    selection matches nothing — a blank figure is a much worse way to find out
-    you asked for a direction that was never swept.
-    """
+    """Select sweeps as ``{name: [(iteration, direction, sweep), ...]}``."""
     # Always called, even when names were given, so that being handed the
     # whole per-module container is caught here with a sentence about it.
     measured_names = section_names(results)
@@ -248,13 +165,7 @@ def _collect_traces(results, names, iterations, directions):
 
 
 def panels_per_row(count, few=5, many=7):
-    """How many panels to put in a row, for a grid of *count* of them.
-
-    A whole array is a lot of panels, and the useful shape is not the same at
-    four resonators as at four hundred: a handful go in one row, a moderate
-    number in rows of five, and a big grid in rows of seven, which is about as
-    wide as stays legible.
-    """
+    """Choose a column count from the number of panels."""
     if count > 30:
         return many
     if count < 10:
@@ -263,16 +174,7 @@ def panels_per_row(count, few=5, many=7):
 
 
 def square_axes(panel):
-    """Equal scale on both axes, so a circle is drawn as a circle.
-
-    ``adjustable="datalim"`` rather than hidfmux's ``"box"``: fixing the *box*
-    to a square is prettier, but matplotlib's layout engines place fixed-aspect
-    axes after they have finished, so the room reserved for a figure title is
-    taken back and the title lands on top of the panel titles. Fixing the
-    *limits* instead gives the same guarantee about the data — one unit of I is
-    one unit of Q — and leaves the layout alone. Keep ``panel_size`` square and
-    the panel comes out square too.
-    """
+    """Use equal data scales for I and Q without fixing the axes box."""
     panel.set_aspect("equal", adjustable="datalim")
     # A square panel is narrower than the default tick count assumes, and at
     # this type size the labels run into each other.
@@ -287,13 +189,7 @@ def _batches(items, batchlen):
 
 
 def _titled(fig, text):
-    """A figure title that clears the panel titles under it.
-
-    The layout engine sizes the band it leaves for a figure title as a fraction
-    of figure height, which is far too thin for a single row of very wide
-    panels — the title lands on top of the panel titles. Reserve a fixed band
-    instead, so the shape of the grid cannot break it.
-    """
+    """Wrap the figure title and reserve space above the panel titles."""
     # Wrapped to roughly what the figure is wide enough to hold at the title's
     # type size: a one-panel figure is only a few inches across, and an
     # unwrapped title simply runs off both ends of it.
@@ -305,11 +201,7 @@ def _titled(fig, text):
 
 
 def _panel_grid(count, ncols, panel_size):
-    """A grid of *ncols* columns big enough for *count* panels, panels flat.
-
-    Every leftover panel is hidden rather than left as empty axes, which is
-    what lets a short final batch keep the same width as the full ones.
-    """
+    """Create a panel grid, hide spare axes, and return figure, axes and panels."""
     nrows = -(-count // ncols)  # ceiling division, no import needed
     fig, axes = plt.subplots(
         nrows,
@@ -340,12 +232,9 @@ def _plot_panels(
     batchlen=BATCH_SIZE,
     equal_aspect=False,
 ):
-    """The grid both plotters draw; *draw* is the only difference between them.
+    """Draw batched panels using ``draw(panel, sweep, colour, linestyle, normalize)``.
 
-    *draw* is called as ``draw(panel, sweep, colour, linestyle, normalize)``
-    and is the whole of what makes this a magnitude plot or an IQ plot.
-    *equal_aspect* is the other difference: an IQ loop has to be square or it
-    is not a loop, while a magnitude trace has no business being square.
+    Set ``equal_aspect`` for IQ plots.
     """
     traces_by_name = _collect_traces(results, names, iterations, directions)
     every_trace = [
@@ -484,14 +373,9 @@ def plot_magnitude_panels(
             False shows received power in dBm and needs no DAC scale.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick
             from how many there are.
-        panel_size: ``(width, height)`` of one panel, in inches. Generous by
-            default, because the type is sized to be read rather than to fit.
+        panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. More than this and the call draws
-            several figures rather than one unreadably large one, each labelled
-            with which batch it is; every batch shares one colour scale, so
-            they can still be compared. ``None`` puts everything in one figure,
-            however big that turns out to be.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -549,16 +433,11 @@ def plot_iq_panels(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """The IQ loop each sweep traced out, a panel per resonator.
+    """Plot IQ loops with equal axis scales, one panel per resonator.
 
-    Same arguments and same selection as :func:`plot_magnitude_panels` — see
-    there for what each one does. The only difference is the default panel,
-    which is square here: the axes are held to equal scale by
-    :func:`square_axes`, so a circle reads as a circle, which is the whole
-    point of looking at a resonator this way.
-
-    Here normalization divides readout counts by the drive's DAC fraction;
-    the axes retain the count scale and do not require a DAC power scale.
+    Selection and layout arguments match ``plot_magnitude_panels``. Normalization
+    divides readout counts by the drive's DAC fraction and needs no DAC power
+    scale. The default panels are square.
     """
 
     def draw(panel, sweep, colour, linestyle, normalize):

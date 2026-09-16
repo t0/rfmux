@@ -13,8 +13,10 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 import numpy as np
 import pytest
 
+from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
-from rfmux.tuning import collect_amplitude_iterations_for
+from rfmux.tuning import BiasReport, collect_amplitude_iterations_for
+from rfmux.tuning.bias import BiasFinding, BifurcationCheck
 
 pytestmark = pytest.mark.portable
 DEMOS = Path(__file__).parents[2] / "rfmux/reference-notebooks/Demos"
@@ -87,17 +89,73 @@ def test_multisweep_zero_drive_cannot_be_a_reference(plotters):
         plotters.multisweep.plot_magnitude_panels(block)
 
 
-def test_bias_magnitude_is_received_power(plotters):
-    report = SimpleNamespace(findings=[SimpleNamespace(
+def biased_measurement() -> dict:
+    block = measurement()
+    finding = BiasFinding(
         name="R1", iteration=0, amplitude=0.01, frequency_hz=600e6,
-        good=True, bifurcated_at=None,
-    )])
-    plotters.bias.plot_bias_points(report, measurement())
+        dI_df=0.0, dQ_df=0.0, bifurcated_at=0.1,
+        checks={
+            0: BifurcationCheck("hysteresis", False, {"separation": 0.2}, 0.5),
+            1: BifurcationCheck("hysteresis", True, {"separation": 0.8}, 0.5),
+        },
+    )
+    block["bias_report"] = BiasReport(
+        catalog=ResonatorCatalog([], module=1), findings=[finding],
+        settings={"direction": "upward", "amplitude_method": "hysteresis"},
+    ).to_dict()
+    return block
+
+
+def test_bias_magnitude_is_received_power(plotters):
+    plotters.bias.plot_bias_points(biased_measurement())
     panel = plt.gcf().axes[0]
     np.testing.assert_allclose(
         panel.lines[0].get_ydata(), [-46.0206, -52.0412, -46.0206], atol=1e-4,
     )
+    np.testing.assert_allclose(panel.lines[1].get_xdata(), [0, 0])
     assert panel.get_ylabel() == "received power [dBm]"
+
+
+def test_bifurcation_plot_reads_embedded_checks(plotters):
+    plotters.bias.plot_bifurcation_checks(biased_measurement())
+    panel = plt.gcf().axes[0]
+    np.testing.assert_allclose(panel.lines[0].get_xdata(), [0.01, 0.1])
+    np.testing.assert_allclose(panel.lines[0].get_ydata(), [0.2, 0.8])
+    np.testing.assert_allclose(panel.lines[1].get_ydata(), [0.5, 0.5])
+
+
+@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks"])
+def test_bias_plot_requires_embedded_report(plotters, function):
+    with pytest.raises(ValueError, match="run find_bias_points"):
+        getattr(plotters.bias, function)(measurement())
+
+
+@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks"])
+def test_bias_plot_rejects_separate_report(plotters, function):
+    block = biased_measurement()
+    report = BiasReport.from_dict(block["bias_report"])
+    with pytest.raises(TypeError, match="positional argument"):
+        getattr(plotters.bias, function)(report, block)
+
+
+def test_notebook_bias_plot_reads_embedded_report(plotters):
+    namespace = {"np": np, "plt": plt, "BiasReport": BiasReport, "LogNorm": LogNorm,
+                 "AMPLITUDE_CMAP": plotters.bias.AMPLITUDE_CMAP,
+                 "collect_amplitude_iterations_for": collect_amplitude_iterations_for}
+    source = (DEMOS / "bias_finding.md").read_text()
+    for cell in re.findall(r"```python\n(.*?)```", source, re.S):
+        if not any(f"def {name}(" in cell for name in (
+            "amplitude_colours", "plot_bias_points_on_sweeps",
+        )):
+            continue
+        tree = ast.parse(cell)
+        tree.body = [node for node in tree.body if isinstance(
+            node, (ast.FunctionDef, ast.Import, ast.ImportFrom),
+        )]
+        exec(compile(tree, str(DEMOS / "bias_finding.md"), "exec"), namespace)
+    namespace["plot_bias_points_on_sweeps"](biased_measurement())
+    panel = plt.gcf().axes[0]
+    np.testing.assert_allclose(panel.lines[2].get_ydata(), [-52.0412], atol=1e-4)
 
 
 def test_normalized_iq_retains_count_units(plotters):

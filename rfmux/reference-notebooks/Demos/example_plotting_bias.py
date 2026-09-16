@@ -1,50 +1,21 @@
 #!/usr/bin/env python3
-"""Example plots for bias finding: where the tone went, and why.
+"""Plot bias points and bifurcation diagnostics from one module's multisweep.
 
-``find_bias_points`` reads a multi-amplitude sweep and returns a
-:class:`~rfmux.tuning.BiasReport` — a catalog carrying the operating points,
-plus one finding per resonator recording how each was arrived at. These plots
-draw the report against the sweeps it came from::
+Run ``find_bias_points`` to store ``bias_report`` in the module dict::
 
+    from rfmux.tuning import find_bias_points
     import example_plotting_bias as biasplots
 
     module_sweeps = sweeps[crs.module[1].index()]
-    report = find_bias_points(module_sweeps)
+    find_bias_points(module_sweeps)
+    biasplots.plot_bias_points(module_sweeps)
+    biasplots.plot_bifurcation_checks(module_sweeps)
 
-    biasplots.plot_bias_points(report, module_sweeps)        # where the tone sits
-    biasplots.plot_bifurcation_checks(report, module_sweeps) # why that amplitude
-    biasplots.plot_arc_speed_panels(module_sweeps)           # what the tests saw
-    biasplots.plot_bifurcation_verdict_map(module_sweeps)    # how the verdict
-                                                             # depends on the
-                                                             # thresholds
+``plot_arc_speed_panels`` and ``plot_bifurcation_verdict_map`` evaluate the
+sweeps directly and do not require a saved report. Flagged bias points are
+orange, with the reason shown in the panel.
 
-The report carries the conclusions, not the traces, so the first two want the
-sweeps as well as the report.
-
-The middle one is the plot to reach for before trusting either bifurcation
-detector. Both defaults ship uncalibrated against a real array — a
-``BifurcationCheck`` carries its ``metric`` and its ``threshold`` precisely so
-that the margin between them can be read off across the amplitude steps of a
-resonator known to bifurcate, and this draws exactly that.
-
-A bias point that is a *default* rather than a measurement — nothing
-bifurcated, so the loudest step won by being loudest; or the quietest step was
-already bifurcated, so there was nothing to fall back to — is flagged on the
-report, and drawn here in a warning colour with the reason on it. Those points
-are usable and are the best available, but they are not what the analysis set
-out to find, and a plot that drew them like the others would be hiding the one
-thing worth knowing.
-
-Styling follows hidfmux's plotting modules — large type, a grid on every axes,
-compact bracketed axis labels, and generous panels. It lives in ``PLOT_STYLE``
-and is applied per figure, not to your session. Panels are drawn in batches of
-``BATCH_SIZE`` resonators, so pointing these at a whole array gives readable
-figures rather than one that is metres across.
-
-These are meant to be read and copied, and each ``example_plotting_*`` module
-here stands alone: the small amount of layout and style bookkeeping is repeated
-in each rather than shared, so that one file is the whole story and lifting a
-function out of it is a copy-paste.
+Style is applied per figure. Use ``batchlen=None`` for a single figure.
 """
 
 import textwrap
@@ -58,6 +29,7 @@ from matplotlib.patches import Patch
 from rfmux.core.transferfunctions import convert_roc_to_dbm
 
 from rfmux.tuning import (
+    BiasReport,
     bifurcated_by_derivative,
     collect_amplitude_iterations_for,
     iq_arc_speed,
@@ -83,40 +55,23 @@ __all__ = [
 ]
 
 
-# Type big enough to read on a projector, and a grid on every axes: these plots
-# get shown to other people, and the bifurcation plot exists to have a number
-# read off it. Applied per figure through ``plt.rc_context`` rather than
-# written into ``plt.rcParams`` at import, so importing this module does not
-# quietly restyle the rest of your notebook. If you *want* it everywhere::
-#
-#     plt.rcParams.update(example_plotting_bias.PLOT_STYLE)
-#
+# Applied per figure through plt.rc_context.
 PLOT_STYLE = {
     "font.size": 18,
     "xtick.labelsize": 18,
     "ytick.labelsize": 18,
     "legend.fontsize": 14,
     "axes.grid": True,
-    # An axis whose ticks all sit near 601.4 MHz otherwise reads "+6.014e8" in
-    # the corner and 0.1, 0.2, … on the ticks, which is unreadable at a glance.
+    # Show absolute tick values.
     "axes.formatter.useoffset": False,
     "axes.formatter.use_mathtext": True,
-    # Arc speeds run to 1e-7 per hertz and IQ counts to 1e6, so a shared
-    # exponent per axis beats either six digits or six decimal places. Without
-    # it the choice is made per axes and neighbouring panels disagree.
     "axes.formatter.limits": (-3, 3),
 }
 
-# Resonators per figure. A panel is sized to be read rather than to fit.
+# Resonators per figure.
 BATCH_SIZE = 50
 
-# gnuplot runs black -> purple -> red -> orange -> yellow, so it stays
-# saturated for most of its length and every trace reads against a white
-# background. The top tenth is the exception: it fades to a pale yellow that
-# vanishes on white, and that is where the loudest drive would land. So the map
-# is truncated before it gets there. Truncating the colormap rather than
-# clamping at the call site keeps the colourbar showing the colours the traces
-# were actually drawn in.
+# Truncate pale yellows to keep traces visible on white.
 AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
     "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
 )
@@ -124,9 +79,7 @@ AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
 BIAS_COLOUR = "royalblue"  # the chosen operating point
 FLAGGED_COLOUR = "darkorange"  # a bias point that is a default, not a finding
 
-#: Colour and marker per metric curve, taken in the order a check reports its
-#: quantities. Long enough for the methods there are; a method that measured
-#: more things than this would need another entry.
+# Curve styles in reported metric order.
 METRIC_STYLES = (
     ("crimson", "o"),
     ("rebeccapurple", "^"),
@@ -137,10 +90,7 @@ METRIC_STYLES = (
 # frequency is measured on when a step has both and the caller did not say.
 PREFERRED_DIRECTION = "upward"
 
-# What can be drawn against frequency, and what each one is *for*. The point of
-# offering three is that they are what the two methods actually looked at:
-# picking a threshold off a re-derivation of the quantity rather than the
-# quantity itself is how a plot comes to disagree with the code.
+# Frequency-domain diagnostics used by the bias methods.
 ARC_QUANTITIES = {
     "arc_speed": {
         "reader": iq_arc_speed,
@@ -168,13 +118,7 @@ ARC_QUANTITIES = {
 
 
 def panels_per_row(count, few=5, many=7):
-    """How many panels to put in a row, for a grid of *count* of them.
-
-    A whole array is a lot of panels, and the useful shape is not the same at
-    four resonators as at four hundred: a handful go in one row, a moderate
-    number in rows of five, and a big grid in rows of seven, which is about as
-    wide as stays legible.
-    """
+    """Choose a column count from the number of panels."""
     if count > 30:
         return many
     if count < 10:
@@ -183,16 +127,10 @@ def panels_per_row(count, few=5, many=7):
 
 
 def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
-    """A colour scale graded over *amplitudes*, and the colourbar's handle.
+    """Return a ScalarMappable for drive amplitudes, usable with ``fig.colorbar``.
 
-    Colour a trace with ``mappable.to_rgba(sweep["sweep_amplitude"])`` rather
-    than by its position in the schedule. Under a *multiplicative* amplitude
-    schedule each resonator is driven at its own amplitude on the same step, so
-    step number and drive are not the same thing.
-
-    Log-scaled, because an amplitude schedule is log-spaced by default and a
-    linear scale bunches every quiet step into one shade. A schedule that
-    reaches zero cannot be log-scaled at all, so that one falls back to linear.
+    Use ``.to_rgba(amplitude)`` for each trace. The scale is logarithmic for
+    positive amplitudes and linear otherwise.
     """
     low, high = min(amplitudes), max(amplitudes)
     if high <= low:
@@ -202,25 +140,14 @@ def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
 
 
 def offset_khz(entry, frequencies=None):
-    """Frequencies as kHz either side of where the sweep was centred.
-
-    Pass *frequencies* to convert a grid other than the entry's own — the
-    midpoint grid a point-to-point difference lands on, for instance.
-    """
+    """Return frequency offsets from the sweep centre in kHz."""
     if frequencies is None:
         frequencies = entry["frequencies"]
     return (np.asarray(frequencies) - entry["original_center_frequency"]) / 1e3
 
 
 def square_axes(panel):
-    """Equal scale on both axes, so a circle is drawn as a circle.
-
-    ``adjustable="datalim"`` rather than a fixed box: matplotlib's layout
-    engines place fixed-aspect axes after they have finished, so the room
-    reserved for a figure title is taken back and the title lands on top of the
-    panel titles. Fixing the limits instead gives the same guarantee about the
-    data — one unit of I is one unit of Q.
-    """
+    """Use equal data scales for I and Q without fixing the axes box."""
     panel.set_aspect("equal", adjustable="datalim")
     # A square panel is narrower than the default tick count assumes, and at
     # this type size the labels run into each other.
@@ -235,12 +162,7 @@ def _batches(items, batchlen):
 
 
 def _titled(fig, text):
-    """A figure title that clears the panel titles under it.
-
-    The layout engine sizes the band it leaves for a figure title as a fraction
-    of figure height, which is far too thin for a single row of wide panels —
-    the title lands on top of the panel titles. Reserve a fixed band instead.
-    """
+    """Wrap the figure title and reserve space above the panel titles."""
     # Wrapped to roughly what the figure is wide enough to hold at the title's
     # type size: a one-panel figure is only a few inches across, and an
     # unwrapped title simply runs off both ends of it.
@@ -252,7 +174,7 @@ def _titled(fig, text):
 
 
 def _panel_grid(count, columns, panel_size):
-    """A grid of *columns* columns big enough for *count* panels, panels flat."""
+    """Create a panel grid, hide spare axes, and return figure, axes and panels."""
     nrows = -(-count // columns)  # ceiling division, no import needed
     fig, axes = plt.subplots(
         nrows, columns,
@@ -266,13 +188,7 @@ def _panel_grid(count, columns, panel_size):
 
 
 def _outer_labels(axes, xlabel, ylabel):
-    """Axis labels on the outer edge only.
-
-    Repeating them in every panel of a 40-resonator grid costs more room than
-    the panels themselves. The x label goes on the lowest *visible* panel of
-    each column, which is not the bottom row when the count does not fill the
-    grid.
-    """
+    """Label the left edge and lowest visible panel in each column."""
     for column in range(axes.shape[1]):
         visible = [panel for panel in axes[:, column] if panel.get_visible()]
         if visible:
@@ -283,11 +199,7 @@ def _outer_labels(axes, xlabel, ylabel):
 
 
 def _columns_for(batches, ncols):
-    """One column count for every figure, taken from a full batch.
-
-    So that a short final batch is drawn at the same width as the ones before
-    it, rather than stretching a handful of panels across the row.
-    """
+    """Use the first batch to choose a consistent figure width."""
     return min(
         ncols if ncols is not None else panels_per_row(len(batches[0])),
         len(batches[0]),
@@ -304,7 +216,7 @@ def _batch_title(title, what, count, batch_number, batch_count):
 
 
 def _section_names(results):
-    """Every sweep section in one module's results, in the order measured."""
+    """Read section names from the first sweep step; require a single module block."""
     try:
         iterations = results["results"]
     except (TypeError, KeyError):
@@ -331,8 +243,18 @@ def _as_list(value):
     return list(value)
 
 
+def _bias_report(results: dict) -> BiasReport:
+    """Read the bias report embedded in one module's multisweep."""
+    _section_names(results)
+    if "bias_report" not in results:
+        raise ValueError(
+            "Multisweep has no bias_report; run find_bias_points(results) first."
+        )
+    return BiasReport.from_dict(results["bias_report"])
+
+
 def _findings(report, names):
-    """The findings to draw, in the report's own order."""
+    """Select findings in requested-name order, or report order if names is None."""
     wanted = _as_list(names)
     if wanted is None:
         findings = list(report.findings)
@@ -345,13 +267,7 @@ def _findings(report, names):
 
 
 def _direction_for(report, results, direction):
-    """Which sweep direction to draw against.
-
-    The report records the ``direction`` it was given, which is ``None`` when
-    the caller let :func:`find_bias_points` pick — so fall back the same way it
-    does, to the preferred direction if it was swept and to whatever was swept
-    otherwise.
-    """
+    """Use the requested or recorded direction, then prefer upward if available."""
     if direction is not None:
         return direction
     recorded = (getattr(report, "settings", None) or {}).get("direction")
@@ -380,21 +296,13 @@ def _entry_for(results, name, iteration, direction):
 
 
 def _measured_metrics(checks):
-    """The metric keys worth a curve, in the order the detector reports them.
-
-    A check's ``metric`` holds one entry per quantity its method examined. The
-    ones that are numbers belong on these axes; the ones that are flags — the
-    derivative test's ``adjacency`` — do not. A flag is a condition rather than
-    a measurement, with no threshold to be drawn against, so it gets marked on
-    the steps where it was what failed instead.
-    """
+    """Return numeric metric keys, excluding boolean conditions such as adjacency."""
     first = checks[min(checks)].metric
     return [key for key, value in first.items() if not isinstance(value, bool)]
 
 
 def _measured_metrics_of(findings):
-    """:func:`_measured_metrics` for a batch — off the first finding that has
-    checks, since one report is all one method and they carry the same keys."""
+    """Read metric keys from the first finding with checks."""
     for finding in findings:
         if finding.checks:
             return _measured_metrics(finding.checks)
@@ -402,8 +310,8 @@ def _measured_metrics_of(findings):
 
 
 def plot_bias_points(
-    report,
-    results,
+    results: dict,
+    *,
     projection="magnitude",
     names=None,
     direction=None,
@@ -412,24 +320,15 @@ def plot_bias_points(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """The sweep each bias point was chosen from, with the tone marked on it.
+    """Plot the selected sweep and bias point, one panel per resonator.
 
-    One panel per resonator, showing the amplitude step the search settled on
-    and where in it the tone was placed. A resonator whose bias point is a
-    default rather than a measurement is drawn in :data:`FLAGGED_COLOUR` with
-    the reason on the panel.
+    Flagged findings use FLAGGED_COLOUR and include the reason.
 
     Args:
-        report: what :func:`~rfmux.tuning.find_bias_points` returned.
-        results: the same module's sweep results the report was made from —
-            the value of ``sweeps[module_id]``. The report carries the
-            conclusions, not the traces, so both are needed.
-        projection: ``"magnitude"`` draws received power in dBm against
-            frequency with the bias frequency as a vertical line;
-            ``"iq"`` draws the loop with the
-            bias point marked on it. The magnitude view says whether the tone
-            is on the dip; the IQ view says how much loop there is to move
-            along, which is the other half of the question.
+        results: one module's multisweep dict, including the ``bias_report``
+            stored by ``find_bias_points``.
+        projection: "magnitude" for received power in dBm versus frequency,
+            or "iq" for the loop in readout counts. Both mark the bias point.
         names: which resonators to draw. A name, a list of names, or ``None``
             for every finding in the report.
         direction: which sweep direction to draw. ``None`` follows what the
@@ -438,13 +337,12 @@ def plot_bias_points(
         panel_size: ``(width, height)`` of one panel, in inches. The default is
             square for the IQ projection.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name has no finding.
         TypeError: if handed the whole per-module container as *results*.
-        ValueError: for an unknown projection, or if the sweeps passed in are
-            not the ones the report was made from.
+        ValueError: for a missing report, unknown projection or missing bias sweep.
     """
     if projection not in ("magnitude", "iq"):
         raise ValueError(
@@ -453,8 +351,8 @@ def plot_bias_points(
     if panel_size is None:
         panel_size = (6.0, 6.0) if projection == "iq" else (7.0, 5.0)
 
+    report = _bias_report(results)
     findings = _findings(report, names)
-    _section_names(results)  # raises the useful error for the wrong container
     swept_direction = _direction_for(report, results, direction)
 
     batches = _batches(findings, batchlen)
@@ -533,8 +431,8 @@ def plot_bias_points(
 
 
 def plot_bifurcation_checks(
-    report,
-    results,
+    results: dict,
+    *,
     names=None,
     direction=None,
     ncols=None,
@@ -542,61 +440,29 @@ def plot_bifurcation_checks(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """Each bifurcation test's measured quantities against its threshold.
+    """Plot recorded metrics, thresholds and selected amplitudes per resonator.
 
-    One panel per resonator: every quantity the detector measured at every
-    amplitude step it examined, the threshold they were compared against, and a
-    line at the amplitude that was chosen. Where a curve crosses the threshold
-    is where that condition was met, and how far apart they are everywhere else
-    is the margin — which is the number to read off before quoting either
-    detector's defaults as a recommendation.
-
-    How many curves there are is the method's business. ``hysteresis`` measures
-    one thing and draws one. ``derivative`` measures two, the prominence of the
-    up-spike and of the down-spike, and both have to clear the one threshold —
-    so a panel where only one curve is above it is a resonance whose jump was
-    lopsided, not a bifurcation.
-
-    That test also asks a question that is not a measurement: whether the
-    spikes sat next to each other. Steps where every curve cleared the bar and
-    the verdict was still no are marked with a dotted line, because that is the
-    one case where reading the crossings alone would mislead.
-
-    ``both`` draws three — the two prominences and the separation — and its
-    threshold line is flat at 1.0, because a combined check reports each
-    quantity in multiples of the bar its own test held it to. That is what puts
-    two tests measured in different units on one set of axes, and the first
-    curve to cross 1.0 is the test that ended the search. The raw numbers, each
-    beside its own threshold, are in ``check.parts``.
-
-    Every series is in the detector's own units, so they belong on one axes.
-
-    Note that a detector stops examining steps once it fires, so a resonator
-    that bifurcated part-way up the schedule has fewer points here than it has
-    amplitude steps. That is the search being efficient, not data missing. A
-    single-amplitude sweep gives one point per panel, which still answers the
-    only question there is to ask of it — whether that one step was already
-    bifurcated.
+    Only examined steps are shown: the search stops at the first bifurcation.
+    Combined checks express metrics relative to their thresholds. Dotted lines
+    mark steps whose metrics cleared the threshold but were not bifurcated.
 
     Args:
-        report: what :func:`~rfmux.tuning.find_bias_points` returned.
-        results: the same module's sweep results the report was made from. A
-            finding records only the amplitude it *chose*, so the drive each
-            examined step sat at is read back off the sweeps — which is the
-            axis this plot is worth having.
+        results: one module's multisweep dict, including the ``bias_report``
+            stored by ``find_bias_points``.
         names: which resonators to draw. ``None`` for every finding.
         direction: which sweep direction to read amplitudes off. ``None``
             follows what the report was run with.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name has no finding.
         TypeError: if handed the whole per-module container as *results*.
-        ValueError: if no finding has any checks to draw.
+        ValueError: for a missing report or no recorded checks to draw.
     """
+    report = _bias_report(results)
     findings = _findings(report, names)
     if not any(f.checks for f in findings):
         raise ValueError(
@@ -606,7 +472,6 @@ def plot_bifurcation_checks(
             "from an amplitude search."
         )
 
-    _section_names(results)  # raises the useful error for the wrong container
     swept_direction = _direction_for(report, results, direction)
     method = (getattr(report, "settings", None) or {}).get(
         "amplitude_method", "bifurcation"
@@ -710,14 +575,10 @@ def plot_bifurcation_checks(
 
 
 def _verdict_row(entries, factors, noise_gate_factor):
-    """One amplitude step's verdict at every factor, and where the gate binds.
+    """Return verdicts and the factor below which the noise gate dominates.
 
-    Returns ``(verdicts, crossover)``. *crossover* is the factor below which the
-    noise gate is the bar that matters — the span bar and the noise bar are
-    equal there, so to the left of it lowering the factor changes nothing. It is
-    read off the detector itself rather than recomputed here: a threshold with
-    only the noise bar switched on, over one with only the span bar, is that
-    ratio. ``None`` when the sweep is unusable.
+    The crossover is the noise-only threshold divided by the span-only
+    threshold. Unusable sweeps return ``(None, None)``.
     """
     try:
         noise_bar = bifurcated_by_derivative(
@@ -750,60 +611,18 @@ def plot_bifurcation_verdict_map(
     title=None,
     batchlen=8,
 ):
-    """Every amplitude step's bifurcation verdict, across the whole factor axis.
+    """Re-evaluate derivative bifurcation checks across a grid of factors.
 
-    One row per amplitude step, one column of pixels per
-    ``spike_prominence_factor``, black where :func:`bifurcated_by_derivative`
-    says the step is bifurcated. It answers the question a single run cannot:
-    not "is this step bifurcated at my threshold" but "how does that answer
-    depend on my threshold", which is the only way to see whether the setting
-    is sitting in the middle of a wide margin or on the edge of a cliff.
-
-    **What a healthy resonator looks like.** One solid black bar in the top
-    row — the loudest step, the one that really did bifurcate — running from the
-    left edge to a clean right-hand edge, with every quieter row white, and the
-    marked factor comfortably inside the bar. Nothing else.
-
-    **What the failures look like.**
-
-    * *Speckle in the lower rows.* Quiet steps flicking on and off as the factor
-      rises are noise being mistaken for a jump. The span bar is a fraction of a
-      quantity that noise itself sets, so on a sweep with no visible resonance
-      it is clearing a bar made out of itself. Raise *noise_gate_factor* until
-      those rows go white.
-    * *The top row's edge landing near the marked factor.* The setting is on a
-      cliff: the same resonator measured again on a slightly different frequency
-      grid will fall the other side of it. Move the factor, or find out why that
-      resonator's jump is weak.
-    * *A top row that is white, or shorter than its neighbours'.* That
-      resonator's jump is not being seen at all. If the other rows are also
-      white the noise gate is too high for this array.
-
-The tinted part of a row is where the noise gate rather than the span bar is
-    the higher of the two, and so the one deciding — one band per sweep
-    direction, since each has its own noise floor. Across the tint the factor is
-    not in play at all, which is exactly the regime the gate was added to
-    control: a quiet step tinted end to end is one the gate is holding down no
-    matter what the factor is set to. No tint means the factor decided the whole
-    row, which is what the loudest step should look like over most of its
-    length.
-
-    This calls the detector once per resonator, step and factor, so the cost is
-    the product of the three. The default factor grid is coarse enough to keep
-    a full array quick and fine enough to see an edge; pass your own for a
-    closer look at one resonator.
+    Rows are amplitude steps; black pixels indicate bifurcation. Tinted bands
+    mark factors where the noise gate dominates, separately for each direction.
 
     Args:
-        results: one module's sweep results — the value of ``sweeps[module_id]``,
-            the same thing the other plots here take. No report needed: this
-            re-runs the detector rather than reading a recorded verdict, which
-            is what lets it sweep a setting the report was not run with.
+        results: one module's multisweep dict. No bias report is required;
+            the detector is evaluated directly on the sweeps.
         names: which resonators to draw. ``None`` for every one swept.
         factors: the ``spike_prominence_factor`` values to test, or ``None`` for
             80 points from 0.02 to 1.0.
-        noise_gate_factor: held fixed while the factor sweeps, since the point
-            is to see one knob's effect at a time. Run it twice to compare two,
-            which is what ``0.0`` against the default shows.
+        noise_gate_factor: fixed noise threshold multiplier; 0 disables the gate.
         mark_factor: draw a line at this factor — the setting you mean to use.
             ``None`` for no line.
         ncols: panels per row of the figure. One is usually right: these panels
@@ -811,7 +630,7 @@ The tinted part of a row is where the noise gate rather than the span bar is
         panel_size: ``(width, height)`` of one panel, in inches. The height is
             per resonator, and gets multiplied by the number of steps.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name was not swept.
@@ -928,8 +747,7 @@ The tinted part of a row is where the noise gate rather than the span bar is
 
 
 def _amplitude(entries):
-    """The drive one amplitude step sat at. Every direction of a step shares
-    it, so the first that carries one answers for the step."""
+    """Read the step amplitude from the first direction that contains one."""
     for entry in entries.values():
         amplitude = entry.get("sweep_amplitude")
         if amplitude is not None:
@@ -960,46 +778,16 @@ def plot_arc_speed_panels(
     title=None,
     batchlen=BATCH_SIZE,
 ):
-    """What the bias-finding tests looked at, one panel per resonator.
+    """Plot arc speed, normalized speed or its difference per resonator.
 
-    Every amplitude step overlaid and coloured by drive, so that the step where
-    a quantity stops looking like the others is visible as such. This is the
-    plot for choosing ``spike_prominence_factor`` by eye, and for seeing what
-    the frequency method had to pick a maximum from.
+    With ``annotate=True``, arc speed gets a maximum marker and spikes get
+    per-step thresholds from the derivative detector. Solid thresholds indicate
+    bifurcation; dashed thresholds indicate no bifurcation. Normalized speed
+    has no annotation. The detector tests prominence and adjacency, so crossing
+    a threshold line alone does not establish bifurcation.
 
-    What ``annotate`` draws depends on the quantity, because what each one is
-    compared against differs:
-
-    ``arc_speed``
-        A marker at each step's maximum — which is the frequency the
-        ``iq_derivative`` method returns, so this is its answer.
-    ``normalized_speed``
-        Nothing. No threshold applies to this directly; the bars apply to its
-        *difference*, which is ``spikes``.
-    ``spikes``
-        A dashed line at ``±threshold`` per amplitude step, in that step's
-        colour: the bar a spike has to clear for the step to count as
-        bifurcated, which is ``spike_prominence_factor`` times the span of
-        that step's arc speed. It is read straight off
-        :func:`~rfmux.tuning.bifurcated_by_derivative` rather than recomputed
-        here, so the line cannot disagree with the detector. A step whose
-        verdict is positive gets a solid line instead of a dashed one. The bar
-        scales off the sweep, so it moves when the data does, which is why
-        there is one line per step rather than one per panel.
-
-    Two reasons an excursion may poke past a dashed line without the step being
-    called bifurcated, and neither is a disagreement. The detector compares
-    *prominence* — how far a spike stands out of its own neighbourhood — while
-    this draws the curve itself, so a spike sitting on a raised shoulder is
-    shorter than it looks against the line. And the up-spike still has to be
-    followed immediately by a down-spike, on and back off the jump, so a step
-    can clear the bar and be rejected on the pattern.
-
-    Every step drawn is evaluated here, which is not the same set the amplitude
-    search examined — it stops at the first step that fires, so the loud end of
-    the schedule usually has no recorded check. That is the point of doing it
-    again: a threshold is calibrated on the steps past the one that tripped it,
-    and :func:`plot_bifurcation_checks` can only show what was recorded.
+    All selected steps are evaluated, including those beyond the first
+    bifurcation recorded by the amplitude search.
 
     Args:
         results: one module's sweep results — the value of
@@ -1011,16 +799,15 @@ def plot_arc_speed_panels(
             actually looks for spikes in.
         names: which resonators to draw. ``None`` for the whole array.
         iterations: which amplitude steps to draw. ``None`` for all of them.
-        direction: which sweep direction to draw. One direction, not a list:
-            these curves are busy enough with one.
+        direction: the sweep direction to draw.
         annotate: draw the per-quantity marks described above.
         spike_prominence_factor: as :func:`~rfmux.tuning.find_bias_points`
             takes it. Only used to place the ``spikes`` thresholds — pass the
-            factor you are considering and watch the lines move.
+            factor to evaluate.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure. ``None`` for one figure however big.
+        batchlen: resonators per figure; None uses one figure.
 
     Raises:
         KeyError: if a requested name was never swept.

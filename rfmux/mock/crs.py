@@ -343,64 +343,30 @@ class ServerMockCRS:
             traceback.print_exc()
             raise
 
-    #: Locating pass.  The S21 minimum sits above compute_fr's impedance
-    #: resonance by the coupling shift, 0.118% of the frequency with the
-    #: default circuit (1.5 MHz at 1.3 GHz), so the window is centred on
-    #: the shifted frequency and scales with it.  A 50 kHz step still
+    #: Locating pass: the S21 minimum sits within a few kHz of
+    #: compute_fr at low power and moves down by up to a few hundred
+    #: kHz at a bias that drives the resonator hard, so the window is a
+    #: fraction of the frequency either side.  A 50 kHz step still
     #: shows a 6 kHz-wide dip as the minimum of a noise-free sweep.
-    #: Where the S21 dip sits relative to compute_fr for the default
-    #: circuit; _measure_dip_shift replaces it with the built array's own
-    #: value before the resonators are biased.
-    _DIP_SHIFT_FRACTION = 0.00118
-    _DIP_LOCATE_FRACTION = 0.0025
+    _DIP_LOCATE_FRACTION = 0.001
     _DIP_LOCATE_STEP_HZ = 50e3
     #: Refining pass: Periscope's multisweep defaults.
     _DIP_SPAN_HZ = 200e3
     _DIP_POINTS = 101
-
-    @property
-    def _dip_shift_fraction(self):
-        return getattr(self, "_measured_dip_shift", self._DIP_SHIFT_FRACTION)
-
-    def _measure_dip_shift(self, amplitude):
-        """The fraction by which the S21 dip sits above compute_fr for
-        this array's circuit, measured on its most isolated resonator
-        over a window wide enough to hold any coupling shift."""
-        model: MockResonatorModel = self._resonator_model
-        freqs = np.asarray(model.resonator_frequencies, dtype=float)
-        if freqs.size == 0:
-            return
-        if freqs.size == 1:
-            gap = np.inf
-            idx = 0
-        else:
-            ordered = np.sort(freqs)
-            gaps = np.diff(ordered)
-            spacing = np.minimum(np.r_[np.inf, gaps], np.r_[gaps, np.inf])
-            idx = int(np.argmax(spacing))
-            gap = spacing[idx]
-            freqs = ordered
-        f0 = freqs[idx]
-        half = min(0.01 * f0, gap / 2)
-        grid = np.arange(f0 - half, f0 + half, self._DIP_LOCATE_STEP_HZ)
-        dip = grid[np.argmin(model.s21_sweep(grid, amplitude))]
-        self._measured_dip_shift = float((dip - f0) / f0)
 
     def _find_s21_dip_frequency(self, nominal_freq, amplitude):
         """The S21 transmission minimum near ``nominal_freq`` (compute_fr).
 
         As on hardware: a coarse sweep locates the dip, then a sweep at
         Periscope's multisweep span and point count pins it.  Both
-        windows stop halfway to the nearest other resonator, whose dip
-        is shifted by the same fraction, so a dense array cannot bias
-        two channels on one dip.
+        windows stop halfway to the nearest other resonator, so a dense
+        array cannot bias two channels on one dip.
         """
         model: MockResonatorModel = self._resonator_model
         gaps = np.abs(np.asarray(model.resonator_frequencies) - nominal_freq)
         gap = gaps[gaps > 0].min(initial=np.inf)
         half = min(self._DIP_LOCATE_FRACTION * nominal_freq, gap / 2)
-        centre = nominal_freq * (1 + self._dip_shift_fraction)
-        coarse = np.arange(centre - half, centre + half,
+        coarse = np.arange(nominal_freq - half, nominal_freq + half,
                            self._DIP_LOCATE_STEP_HZ)
         guess = coarse[np.argmin(model.s21_sweep(coarse, amplitude))]
         fine_half = min(self._DIP_SPAN_HZ / 2, half)
@@ -434,10 +400,6 @@ class ServerMockCRS:
             print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
             await self.set_nco_frequency(nco_freq, module=module)
             
-            await asyncio.to_thread(self._measure_dip_shift, amplitude)
-            print(f"[MockCRS] S21 dip sits {self._dip_shift_fraction*1e2:+.3f}% "
-                  f"above compute_fr for this circuit")
-
             # One channel per resonator, as many as a packet carries.
             chan_limit = self.channels_per_module()
             to_bias = resonance_frequencies[:chan_limit]

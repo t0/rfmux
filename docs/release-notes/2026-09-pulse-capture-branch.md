@@ -360,8 +360,8 @@ Bugs present on main, with the symptom.
 - White QP noise is applied after the convergence-cache restore through a
   sensitivity linearisation, so the cache still applies.
 - The dip search runs the S21 kernels over a grid (`s21_sweep`), re-converging
-  at each point; the S21 minimum sits above the impedance resonance by the
-  coupling shift, so the coarse pass covers +/-0.25% of the nominal frequency.
+  at each point; the coarse pass covers +/-0.1% of the nominal frequency, the
+  fine pass Periscope's multisweep span.
 - The build runs its CPU-bound parts on a thread, so RPCs answer while it
   runs; `get_build_progress` reports generating, biasing and pulse-cache
   warm-up with counts.

@@ -7,6 +7,7 @@ Notebooks are opened in the system browser and saved to the active session folde
 import subprocess
 import os
 import json
+import secrets
 from pathlib import Path
 from datetime import datetime
 from PyQt6 import QtCore, QtWidgets, QtGui
@@ -20,10 +21,6 @@ import sys
 #: --LabApp.app_settings_dir so the defaults it sets apply on top of, rather
 #: than in place of, whatever the user has configured for themselves.
 _JUPYTER_SETTINGS_DIR = Path(__file__).parent / "jupyter_settings"
-
-#: Token the managed server is started with; every URL Periscope opens
-#: carries it, and the readiness probe only accepts a server that does.
-_TOKEN = "periscope"
 
 
 class JupyterServerManager(QtCore.QObject):
@@ -47,6 +44,7 @@ class JupyterServerManager(QtCore.QObject):
         self.base_url = None  # e.g. http://localhost:8889/, known once ready
         self.notebook_dir = None
         self.port = None
+        self.token = None  # fresh per launch; every URL carries it
 
     def start(self, notebook_dir: str, port: int = 8888, crs=None):
         """
@@ -64,6 +62,7 @@ class JupyterServerManager(QtCore.QObject):
 
         self.notebook_dir = Path(notebook_dir)
         self.notebook_dir.mkdir(parents=True, exist_ok=True)
+        self.token = secrets.token_hex(16)
 
         # Start Jupyter Lab
         cmd = [
@@ -71,7 +70,7 @@ class JupyterServerManager(QtCore.QObject):
             f'--notebook-dir={self.notebook_dir}',
             f'--port={port}',
             '--no-browser',
-            f'--ServerApp.token={_TOKEN}',
+            f'--ServerApp.token={self.token}',
             '--ServerApp.disable_check_xsrf=True',
             '--InteractiveShellApp.extensions=awaitless',
             # Make the shipped .md reference notebooks open as notebooks on
@@ -132,28 +131,28 @@ class JupyterServerManager(QtCore.QObject):
         """The server-info file Jupyter writes once it has bound its port
         (what ``jupyter server list`` reads), or None until it exists.
 
-        A partly written file (Jupyter is mid-write) reads as not ready. One
-        left behind by a dead process that had the same pid is rejected in
-        _check_ready: by its token if it was someone else's server, by the
-        probe if it was an earlier Periscope's.
+        Found by this launch's token, not by pid: on Windows ``jupyter lab``
+        runs the server in a further child, so the pid in the file name is
+        not the one we hold. A partly written file reads as not there yet.
         """
         from jupyter_core.paths import jupyter_runtime_dir
 
-        path = Path(jupyter_runtime_dir()) / f"jpserver-{self.process.pid}.json"
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (OSError, ValueError):
-            return None
+        for path in Path(jupyter_runtime_dir()).glob("jpserver-*.json"):
+            try:
+                with open(path) as f:
+                    info = json.load(f)
+            except (OSError, ValueError):
+                continue
+            if info.get("token") == self.token:
+                return info
+        return None
 
-    @staticmethod
-    def _responds(base_url: str) -> bool:
-        """True when the server at base_url answers with our token. A
-        server started by someone else answers 403 here, never 200."""
+    def _responds(self, base_url: str) -> bool:
+        """True once the server at base_url answers an authenticated request."""
         import urllib.request
         try:
-            with urllib.request.urlopen(f"{base_url}api/status?token={_TOKEN}",
-                                        timeout=1) as resp:
+            with urllib.request.urlopen(
+                    f"{base_url}api/status?token={self.token}", timeout=1) as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -179,10 +178,10 @@ class JupyterServerManager(QtCore.QObject):
 
         info = self._server_info() or {}
         base_url = info.get("url")
-        if base_url and info.get("token") == _TOKEN and self._responds(base_url):
+        if base_url and self._responds(base_url):
             self.base_url = base_url
             self.port = info.get("port")
-            self.url = f"{base_url}lab?token={_TOKEN}"
+            self.url = f"{base_url}lab?token={self.token}"
             self.server_ready.emit(self.url)
             return
         QtCore.QTimer.singleShot(1000, self._check_ready)
@@ -206,7 +205,7 @@ class JupyterServerManager(QtCore.QObject):
             # URL encode the path
             import urllib.parse
             encoded_path = urllib.parse.quote(str(rel_path))
-            return f"{self.base_url}lab/tree/{encoded_path}?token={_TOKEN}"
+            return f"{self.base_url}lab/tree/{encoded_path}?token={self.token}"
         except ValueError:
             # Notebook not in notebook_dir
             return None

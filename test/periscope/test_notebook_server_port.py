@@ -11,7 +11,6 @@ import shutil
 import socket
 import threading
 import urllib.request
-from types import SimpleNamespace
 
 import pytest
 
@@ -51,9 +50,9 @@ def _run_until_ready(qt_app, manager, notebook_dir, port, timeout_s=90) -> dict:
 def _assert_moved_and_reachable(manager, outcome, held_port):
     assert "ready" in outcome, outcome
     assert manager.port != held_port
-    assert manager.url == f"{manager.base_url}lab?token=periscope"
+    assert manager.url == f"{manager.base_url}lab?token={manager.token}"
     with urllib.request.urlopen(
-            f"{manager.base_url}api/status?token=periscope", timeout=5) as resp:
+            f"{manager.base_url}api/status?token={manager.token}", timeout=5) as resp:
         assert resp.status == 200
 
 
@@ -109,44 +108,38 @@ def http_status():
     server.shutdown()
 
 
-def test_probe_rejects_a_server_that_is_not_ours(http_status):
+def test_probe_needs_an_authenticated_200(http_status):
     handler, base_url = http_status
+    manager = JupyterServerManager()
+    manager.token = "abc"
     handler.status = 403  # what Jupyter answers to a wrong token
-    assert JupyterServerManager._responds(base_url) is False
+    assert manager._responds(base_url) is False
     handler.status = 200
-    assert JupyterServerManager._responds(base_url) is True
+    assert manager._responds(base_url) is True
 
 
-def test_ready_needs_our_token_in_the_info_file(qt_app, tmp_path, monkeypatch,
-                                                http_status):
-    # A dead process's pid can be reused by someone else's Jupyter, whose
-    # info file then carries our child's pid. An auth-less server answers
-    # the probe to anyone, so the file's token is checked too.
-    handler, base_url = http_status
+def test_info_file_is_found_by_token_not_pid(tmp_path, monkeypatch):
+    # On Windows the server runs in a grandchild, so the pid in the file
+    # name is not the one Periscope holds; the token is what identifies it.
     monkeypatch.setenv("JUPYTER_RUNTIME_DIR", str(tmp_path))
     manager = JupyterServerManager()
-    manager.process = SimpleNamespace(pid=4242, poll=lambda: None)
-    ready = []
-    manager.server_ready.connect(ready.append)
-    path = tmp_path / "jpserver-4242.json"
-
-    path.write_text(json.dumps({"url": base_url, "port": 1, "token": ""}))
-    manager._check_ready()
-    assert ready == [] and manager.url is None
-
-    path.write_text(json.dumps({"url": base_url, "port": 1, "token": "periscope"}))
-    manager._check_ready()
-    assert ready == [f"{base_url}lab?token=periscope"]
+    manager.token = "abc"
+    (tmp_path / "jpserver-1.json").write_text(
+        json.dumps({"url": "http://localhost:8888/", "token": "someone-else"}))
+    assert manager._server_info() is None
+    (tmp_path / "jpserver-999.json").write_text(
+        json.dumps({"url": "http://localhost:8889/", "token": "abc"}))
+    assert manager._server_info()["url"] == "http://localhost:8889/"
 
 
-def test_half_written_info_file_reads_as_not_ready(tmp_path, monkeypatch):
+def test_half_written_info_file_reads_as_not_there(tmp_path, monkeypatch):
     monkeypatch.setenv("JUPYTER_RUNTIME_DIR", str(tmp_path))
     manager = JupyterServerManager()
-    manager.process = SimpleNamespace(pid=4242)
+    manager.token = "abc"
     path = tmp_path / "jpserver-4242.json"
 
     assert manager._server_info() is None  # not written yet
-    path.write_text("{\n  \"port\": 88")
+    path.write_text("{\n  \"token\": \"ab")
     assert manager._server_info() is None  # Jupyter is mid-write
-    path.write_text(json.dumps({"port": 8889, "url": "http://localhost:8889/"}))
+    path.write_text(json.dumps({"url": "http://localhost:8889/", "token": "abc"}))
     assert manager._server_info()["url"] == "http://localhost:8889/"

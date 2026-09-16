@@ -47,11 +47,10 @@ def batch():
 
 @pytest.fixture
 def kerr_model():
-    """Seed 5, three resonators, noise off, the QP model's rest state
-    installed as every evaluation installs it (the generation's base
-    Lk differs by a few parts in 1e3): the model, its Kerr envelope
-    parameters, the index of the middle resonator, a seeded solver
-    returning the currents, and the Kerr cubic's |I| at a point."""
+    """Seed 5, three resonators, noise off: the model, its Kerr
+    envelope parameters, the index of the middle resonator, a seeded
+    solver returning the currents, and the Kerr cubic's |I| at a
+    point."""
     from rfmux.mock.crs import ServerMockCRS
     crs = ServerMockCRS("0000")
     with contextlib.redirect_stdout(io.StringIO()):
@@ -62,7 +61,6 @@ def kerr_model():
     m.nqp_noise_enabled = False
     m._tls_generator = None
     m._ensure_arrays()
-    m._compute_nqp_state(0.0)
     base_Lk, base_R, base_Lg = m._base_arrays()
     L0 = base_Lk + base_Lg + m.L_junk_array
     k0 = m.mr_lekids[0]

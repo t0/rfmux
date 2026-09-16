@@ -39,6 +39,7 @@ def test_cache_tuning_takes_effect():
     model = MockResonatorModel.__new__(MockResonatorModel)
     model.mr_lekids = []
     model.base_nqp_values = []
+    model.resonator_frequencies = []
     model.mock_crs = types.SimpleNamespace(_physics_config={})
 
     _, _, default_step, _, _ = (0,) + model._compute_cache_key_params(1e9)

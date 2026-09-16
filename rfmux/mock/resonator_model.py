@@ -740,8 +740,8 @@ class MockResonatorModel:
 
     def _cache_keys_for(self, frequency):
         """(gen, nearest_idx, freq_step, amp_step, qp_step) for a tone:
-        the resonator nearest it by bare resonance frequency and the
-        key steps, from a table built once per resonator generation."""
+        the resonator nearest it by resonance frequency and the key
+        steps, from a table built once per resonator generation."""
         gen = self._cache_key_gen()
         table = getattr(self, "_cache_key_table", None)
         if table is None or table[0] != gen:
@@ -759,19 +759,10 @@ class MockResonatorModel:
         return self._cache_keys_for(frequency)[1:]
 
     def _build_cache_key_table(self):
-        """Sorted bare resonance frequencies, the resonator index of
-        each, and the key steps from the config."""
-        if self.mr_lekids:
-            self._ensure_arrays()
-            n = len(self.mr_lekids)
-            _, Lk_rest = jit_physics.vectorized_update_params_from_nqp(
-                np.asarray(self.base_nqp_values[:n], dtype=np.float64),
-                *self._nqp_consts()[1:])
-            L_bare = np.maximum(Lk_rest + self._base_arrays()[2]
-                                + self.L_junk_array, 1e-30)
-            f0 = 1.0 / (2.0 * np.pi * np.sqrt(L_bare * np.maximum(self.C_array, 1e-30)))
-        else:
-            f0 = np.zeros(0)
+        """Sorted resonance frequencies, the resonator index of each,
+        and the key steps from the config."""
+        n = len(self.mr_lekids)
+        f0 = np.asarray(self.resonator_frequencies[:n], dtype=np.float64)
         order = np.argsort(f0, kind="stable")
         phys = self._phys()
 
@@ -1203,20 +1194,15 @@ class MockResonatorModel:
             args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
                     k0.input_atten_dB, complex(k0.ZLNA))
             f_c = float(self.resonator_frequencies[i])
-            span = 2e6
-            for _ in range(4):
-                grid = f_c + np.linspace(-span, span, 4001)
-                I = jit_physics.linear_currents(grid, *args)
-                # The through-current is a smooth background: a line
-                # through the outer fifth of the grid on each side.
-                m5 = len(grid) // 5
-                edge = np.r_[np.arange(m5), np.arange(len(grid) - m5, len(grid))]
-                pI = np.polyfit(grid[edge] - f_c, I[edge], 1)
-                res = I - np.polyval(pI, grid - f_c)
-                j = int(np.argmax(np.abs(res)))
-                if m5 < j < len(grid) - m5:
-                    break
-                span *= 4
+            grid = f_c + np.linspace(-2e6, 2e6, 4001)
+            I = jit_physics.linear_currents(grid, *args)
+            # The through-current is a smooth background: a line
+            # through the outer fifth of the grid on each side.
+            m5 = len(grid) // 5
+            edge = np.r_[np.arange(m5), np.arange(len(grid) - m5, len(grid))]
+            pI = np.polyfit(grid[edge] - f_c, I[edge], 1)
+            res = I - np.polyval(pI, grid - f_c)
+            j = int(np.argmax(np.abs(res)))
             step = grid[1] - grid[0]
             fine = grid[j] + np.linspace(-step, step, 401)
             res_f = (jit_physics.linear_currents(fine, *args)

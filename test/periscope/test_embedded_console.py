@@ -1,14 +1,13 @@
 """
-Regression test for the embedded (in-process) IPython console.
+The embedded (in-process) IPython console executes both plain and
+``await`` cells.
 
-ipykernel 7.x broke the in-process kernel qtconsole uses (do_execute
-dereferences shell_channel_thread.parent_thread, which only exists for
-real ZMQ kernels) — every execute in Periscope's embedded console then
-raised AttributeError + queue.Empty.  pyproject pins ipykernel<7; this
-test fails if the pin is ever relaxed while the breakage persists.
+Periscope's console is used almost entirely for ``await crs.<method>()``,
+so a kernel that runs synchronous cells but fails on asynchronous ones
+(ipykernel 7's in-process kernel, which has no shell channel thread to
+consult) is broken for its purpose.
 """
 
-import os
 import time
 
 import pytest
@@ -17,31 +16,32 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("qtconsole")
 
-from PyQt6 import QtWidgets  # noqa: E402
 
+def _run_cell(qt_app, code, name, timeout_s=5.0):
+    """Execute *code* in a fresh in-process kernel and return user_ns[name]."""
+    from rfmux.tools.periscope.console_kernel import ConsoleKernelManager
 
-
-def test_inprocess_kernel_executes(qt_app):
-    from qtconsole.inprocess import QtInProcessKernelManager
-
-    km = QtInProcessKernelManager()
+    km = ConsoleKernelManager()
     km.start_kernel()
     kc = km.client()
     kc.start_channels()
     try:
-        # This is the call path the embedded console uses; on broken
-        # ipykernel it raises queue.Empty (no reply — handler crashed).
-        kc.execute("_console_probe = 6 * 7", silent=False)
-
-        deadline = time.monotonic() + 5.0
+        kc.execute(code, silent=False)
         ns = km.kernel.shell.user_ns
-        while time.monotonic() < deadline:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline and name not in ns:
             qt_app.processEvents()
-            if ns.get("_console_probe") == 42:
-                break
             time.sleep(0.01)
-        assert ns.get("_console_probe") == 42, \
-            "in-process kernel did not execute code — embedded console broken"
+        return ns.get(name)
     finally:
         kc.stop_channels()
         km.shutdown_kernel()
+
+
+def test_sync_cell_executes(qt_app):
+    assert _run_cell(qt_app, "_probe = 6 * 7", "_probe") == 42
+
+
+def test_await_cell_executes(qt_app):
+    code = "async def _f():\n    return 6 * 7\n_probe = await _f()"
+    assert _run_cell(qt_app, code, "_probe") == 42

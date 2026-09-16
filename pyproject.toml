@@ -20,13 +20,7 @@ dependencies = [
   # default, so this is reached by ordinary use rather than an exotic
   # path.
   "h5py",
-  # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
-  # do_execute dereferences shell_channel_thread.parent_thread, which the
-  # in-process kernel (embedded Periscope console) never creates ->
-  # AttributeError on every execute. Do NOT let dependabot relax this to <8
-  # until the in-process kernel works (see
-  # test/periscope/test_embedded_console.py).
-  "ipykernel<7",
+  "ipykernel",
   "ipython",
   "jupyterlab",
   # Ships jupyterlab_jupytext, which lets JupyterLab open the .md reference

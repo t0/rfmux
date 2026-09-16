@@ -1371,14 +1371,14 @@ class PeriscopeRuntime:
         Toggle the visibility and initialization of the embedded iPython console.
         Initializes the kernel and Jupyter widget on first toggle if not already done.
         """
-        # QTCONSOLE_AVAILABLE, QtInProcessKernelManager, RichJupyterWidget, rfmux, load_awaitless_extension from .utils
+        # QTCONSOLE_AVAILABLE, ConsoleKernelManager, RichJupyterWidget, rfmux, load_awaitless_extension from .utils
         # traceback from .utils
         if not QTCONSOLE_AVAILABLE or self.crs is None: return # Dependencies not met
         if self.console_dock_widget is None: return # Dock widget not created
 
         if self.kernel_manager is None: # First time opening the console
             try:
-                self.kernel_manager = QtInProcessKernelManager()
+                self.kernel_manager = ConsoleKernelManager()
                 self.kernel_manager.start_kernel()
                 kernel = self.kernel_manager.kernel
                 

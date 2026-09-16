@@ -186,7 +186,7 @@ DOWNWARD_SWEEP_STYLE = Qt.PenStyle.DotLine  # Dotted line for downward sweeps
 # Imports for embedded iPython console
 try:
     from qtconsole.rich_jupyter_widget import RichJupyterWidget
-    from qtconsole.inprocess import QtInProcessKernelManager
+    from .console_kernel import ConsoleKernelManager
     QTCONSOLE_AVAILABLE = True
 except ImportError:
     QTCONSOLE_AVAILABLE = False

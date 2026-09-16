@@ -66,7 +66,8 @@ trigger and one hue darkening with time after it. Under it lies the sweep
 the channel was tuned with and, always on top, its bias point as a star.
 The pulse's baseline sits on the bias point when the tuning describes the
 channel. In the df view the whole picture is rotated so a frequency shift
-runs along the horizontal df axis.
+runs along the horizontal df axis. In both mode a selector picks which
+stream's record of the pair is drawn, slow or fast.
 
 **Units** switches the pulse view, IQ plane, histograms and templates
 between counts, volts and df in hertz. df units require a df calibration

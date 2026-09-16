@@ -133,6 +133,33 @@ def test_a_long_pulse_thins_its_markers(qt_app, tmp_path):
     spin(qt_app)
 
 
+def test_in_both_mode_the_selector_picks_the_stream_drawn(qt_app, tmp_path):
+    """A pair holds one record per stream; the plane draws the one the
+    selector names and says which in its note."""
+    from test.pulse_capture.test_pulse_capture_panel import _build_dual_file
+
+    path = _build_dual_file(tmp_path)
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.iq_view)
+    assert panel.iq_stream_combo.isVisibleTo(panel)
+    key = panel._pulse_order[-1]
+    meta = panel._pair_meta[key]
+    lengths = {s: len(panel.reader.get_pulse(1, meta[f"{s}_idx"], s)["Amp_I"])
+               for s in ("slow", "fast")}
+    assert lengths["fast"] > lengths["slow"]
+
+    panel._show_pair(*key)
+    for stream in ("slow", "fast"):
+        panel.iq_stream_combo.setCurrentText(stream)
+        spin(qt_app)
+        [markers] = _markers(panel)
+        assert len(markers.data) == min(lengths[stream], IQ_PLANE_POINTS)
+        assert f"({stream})" in panel.iq_info.toolTip() + panel.iq_info.text()
+    panel.close()
+    spin(qt_app)
+
+
 def test_without_a_sweep_the_plane_says_so(qt_app, tmp_path):
     path = tmp_path / "bare.h5"
     PulseHDF5Writer(path, [1], {1: ChannelNoiseStats()},

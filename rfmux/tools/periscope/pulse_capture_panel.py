@@ -38,6 +38,7 @@ from .utils import (
     TABLEAU10_COLORS,
     LINE_WIDTH,
     find_parent_with_attr,
+    flag_tint,
     theme_colors,
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
@@ -1977,9 +1978,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                      ("pulse", channel, pulse_idx))
         if truncated or pileup:
-            colour = QtGui.QColor(
-                ("#3a2222" if self.dark_mode else "#ffd9d2") if truncated
-                else ("#3a3320" if self.dark_mode else "#fff3c2"))
+            colour = flag_tint(self.pulse_tree,
+                               "#D9482F" if truncated else "#E0A800")
             for col in range(4):
                 item.setBackground(col, colour)
         parent.insertChild(0, item)
@@ -2048,9 +2048,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pair", ch, pair_idx))
             if complement_missing:
+                colour = flag_tint(self.pulse_tree, "#E07B39")
                 for col in range(4):
-                    item.setBackground(col, QtGui.QColor(
-                        "#33251c" if self.dark_mode else "#ffe8d9"))
+                    item.setBackground(col, colour)
             parent.insertChild(0, item)
             parent.setText(0, f"▤ {title_label(ch)} ({self._counts[ch]} pulses)")
             self._autosize_tree()

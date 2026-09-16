@@ -83,6 +83,34 @@ def _pulse_rows(channel_item) -> int:
         for i in range(channel_item.childCount()))
 
 
+def test_flagged_rows_are_tinted_relative_to_the_tree_palette(qt_app):
+    """A truncated or pileup row is a wash of its flag colour over the
+    tree's own base colour, light on a light window theme and dark on
+    a dark one, and the text keeps the palette's colour.  The Dark
+    Mode flag only reaches the plots, so on a desktop with a light
+    window theme a flag-chosen dark row read as grey on black text."""
+    from PyQt6 import QtCore, QtGui
+    panel = PulseCapturePanel(dark_mode=True)
+    panel._reset_results([1])
+    panel._counts = {1: 1}
+
+    def row_after(base):
+        pal = panel.pulse_tree.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(base))
+        panel.pulse_tree.setPalette(pal)
+        panel._add_pulse_row(1, 1, {"truncated": True, "n_samples": 5,
+                                    "snr": 6.0})
+        return panel._channel_items[1].child(0)
+
+    light = row_after("#ffffff").background(0).color()
+    dark = row_after("#000000").background(0).color()
+    assert light.lightness() > 200 and dark.lightness() < 60
+    assert light.red() > light.blue()          # the flag's hue shows
+    assert row_after("#ffffff").data(0, QtCore.Qt.ItemDataRole.ForegroundRole) is None
+    panel.close()
+    spin(qt_app)
+
+
 def _tap1(tap, ch, i, q, t):
     """Feed one sample through the packet-shaped tap.
 

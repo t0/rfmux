@@ -5,7 +5,6 @@ Notebooks are opened in the system browser and saved to the active session folde
 """
 
 import subprocess
-import socket
 import os
 import json
 from pathlib import Path
@@ -22,60 +21,57 @@ import sys
 #: than in place of, whatever the user has configured for themselves.
 _JUPYTER_SETTINGS_DIR = Path(__file__).parent / "jupyter_settings"
 
+#: Token the managed server is started with; every URL Periscope opens
+#: carries it, and the readiness probe only accepts a server that does.
+_TOKEN = "periscope"
+
 
 class JupyterServerManager(QtCore.QObject):
     """
     Manages a local Jupyter notebook server.
-    
+
     Starts a JupyterLab server in a subprocess and monitors its status.
     The server is automatically stopped when the manager is destroyed.
-    
+
     Signals:
         server_ready: Emitted with URL when server is ready to accept connections
         server_error: Emitted with error message on failure
     """
     server_ready = QtCore.pyqtSignal(str)  # url
     server_error = QtCore.pyqtSignal(str)  # error message
-    
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.process = None
         self.url = None
-        self.base_url = None  # Base URL without notebook path
+        self.base_url = None  # e.g. http://localhost:8889/, known once ready
         self.notebook_dir = None
         self.port = None
-        self._check_attempts = 0
-        self._max_check_attempts = 30  # 30 seconds max wait time
-    
+
     def start(self, notebook_dir: str, port: int = 8888, crs=None):
         """
         Start Jupyter Lab server.
-        
+
         Args:
             notebook_dir: Directory for notebooks (will be created if needed)
-            port: Starting port to try (will increment if busy)
+            port: Port Jupyter tries first. If it is busy Jupyter moves to
+                another one (the next few, then random ones nearby); the
+                port it settles on is read back from its server-info file,
+                so the URL Periscope opens is always the right one.
         """
         if self.process:
             return  # Already running
-        
+
         self.notebook_dir = Path(notebook_dir)
         self.notebook_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Find available port
-        actual_port = self._find_available_port(port)
-        if actual_port is None:
-            self.server_error.emit("Could not find available port for Jupyter server")
-            return
-        
-        self.port = actual_port
-        
+
         # Start Jupyter Lab
         cmd = [
             'jupyter', 'lab',
             f'--notebook-dir={self.notebook_dir}',
-            f'--port={actual_port}',
+            f'--port={port}',
             '--no-browser',
-            '--ServerApp.token=periscope',
+            f'--ServerApp.token={_TOKEN}',
             '--ServerApp.disable_check_xsrf=True',
             '--InteractiveShellApp.extensions=awaitless',
             # Make the shipped .md reference notebooks open as notebooks on
@@ -122,11 +118,8 @@ class JupyterServerManager(QtCore.QObject):
                 text=True,
                 **kwargs
             )
-            # Build URL and start checking
-            self.url = f"http://localhost:{actual_port}/lab?token=periscope"
-            self._check_attempts = 0
             QtCore.QTimer.singleShot(1000, self._check_ready)
-            
+
         except FileNotFoundError:
             self.server_error.emit(
                 "Jupyter is not installed.\n"
@@ -134,28 +127,44 @@ class JupyterServerManager(QtCore.QObject):
             )
         except Exception as e:
             self.server_error.emit(f"Failed to start Jupyter: {e}")
-    
-    def _find_available_port(self, start_port: int) -> int | None:
-        """Find an available port starting from start_port."""
-        for port in range(start_port, start_port + 100):
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(('localhost', port))
-                sock.close()
-                return port
-            except OSError:
-                continue
-        return None
-    
-    def _check_ready(self):
-        """Check if server is ready and emit signal."""
+
+    def _server_info(self) -> dict | None:
+        """The server-info file Jupyter writes once it has bound its port
+        (what ``jupyter server list`` reads), or None until it exists.
+
+        A partly written file (Jupyter is mid-write) reads as not ready. One
+        left behind by a dead process that had the same pid is rejected in
+        _check_ready: by its token if it was someone else's server, by the
+        probe if it was an earlier Periscope's.
+        """
+        from jupyter_core.paths import jupyter_runtime_dir
+
+        path = Path(jupyter_runtime_dir()) / f"jpserver-{self.process.pid}.json"
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _responds(base_url: str) -> bool:
+        """True when the server at base_url answers with our token. A
+        server started by someone else answers 403 here, never 200."""
         import urllib.request
-        import urllib.error
-    
-        self._check_attempts += 1
-    
-        # If process exited, fail immediately
-        if self.process and self.process.poll() is not None:
+        try:
+            with urllib.request.urlopen(f"{base_url}api/status?token={_TOKEN}",
+                                        timeout=1) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def _check_ready(self):
+        """Poll once a second until the server answers, or its process
+        exits. Startup takes as long as it takes: there is no cap, so a
+        slow first launch is not reported as a failure."""
+        if self.process is None:
+            return  # stopped while starting
+        if self.process.poll() is not None:
             # Process exited - read error output if available
             if self.process.stdout:
                 output = self.process.stdout.read()
@@ -167,63 +176,41 @@ class JupyterServerManager(QtCore.QObject):
                     "Run 'jupyter lab --no-browser' in a terminal for more details."
                 )
             return
-    
-        # Probe lightweight API endpoint
-        try:
-            if self.url:
-                urllib.request.urlopen(self.url, timeout=1)
-                self.server_ready.emit(self.url)
-    
-        except Exception:
-            # Print full diagnostics
-            # print("[Notebook] Server not ready yet")
-            # print(f"  Attempt: {self._check_attempts}")
-            # print(f"  Exception type: {type(e)}")
-            # print(f"  Exception value: {e}")
-    
-            # if hasattr(e, "reason"):
-            #     print(f"  URLError.reason: {e.reason}")
-            #     print(f"  reason type: {type(e.reason)}")
-    
-            # # if isinstance(e, OSError):
-            #     print(f"  errno: {e.errno}")
-            #     print(f"  winerror: {getattr(e, 'winerror', None)}")
-            ### Keeping it here for debugging ####
-    
-            # Retry or fail
-            if self._check_attempts < self._max_check_attempts:
-                QtCore.QTimer.singleShot(1000, self._check_ready)
-            else:
-                self.server_error.emit(
-                    "Jupyter server did not become ready within 30 seconds.\n"
-                    "See console output for detailed startup errors."
-                )
 
-    
+        info = self._server_info() or {}
+        base_url = info.get("url")
+        if base_url and info.get("token") == _TOKEN and self._responds(base_url):
+            self.base_url = base_url
+            self.port = info.get("port")
+            self.url = f"{base_url}lab?token={_TOKEN}"
+            self.server_ready.emit(self.url)
+            return
+        QtCore.QTimer.singleShot(1000, self._check_ready)
+
     def get_notebook_url(self, notebook_path: str) -> str | None:
         """
         Get the URL to open a specific notebook.
-        
+
         Args:
             notebook_path: Full path to the .ipynb file
-            
+
         Returns:
             URL to open the notebook in JupyterLab, or None if server not ready
         """
-        if not self.port or not self.notebook_dir:
+        if not self.base_url or not self.notebook_dir:
             return None
-        
+
         # Calculate relative path from notebook_dir
         try:
             rel_path = Path(notebook_path).relative_to(self.notebook_dir)
             # URL encode the path
             import urllib.parse
             encoded_path = urllib.parse.quote(str(rel_path))
-            return f"http://localhost:{self.port}/lab/tree/{encoded_path}?token=periscope"
+            return f"{self.base_url}lab/tree/{encoded_path}?token={_TOKEN}"
         except ValueError:
             # Notebook not in notebook_dir
             return None
-    
+
     def stop(self):
         """Stop the Jupyter server."""
         if self.process:
@@ -234,6 +221,8 @@ class JupyterServerManager(QtCore.QObject):
                 self.process.kill()
             self.process = None
             self.url = None
+            self.base_url = None
+            self.port = None
 
 
 class NotebookPanel(QtWidgets.QWidget):
@@ -473,6 +462,8 @@ class NotebookPanel(QtWidgets.QWidget):
         owner = find_parent_with_attr(self, 'crs')
         self.server.start(self.notebook_dir,
                           crs=getattr(owner, 'crs', None))
+        # Startup has no time limit, so the way out is always available.
+        self.shutdown_btn.setEnabled(True)
     
     def _get_parent_app_info(self) -> tuple[str | None, bool]:
         """

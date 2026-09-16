@@ -28,9 +28,12 @@ def _seed(n):
 
 
 def _nqp_args(n):
+    """An aluminium film at 120 mK as the mock builds it: nqp, readout
+    frequency, T, Delta0, N0, sigmaN, thickness, width, length,
+    R_spoiler."""
     return (np.full(n, 52.9),) + tuple(
         np.full(n, v) for v in
-        (1e9, 0.12, 3.5e-23, 1.7e10, 1e7, 20e-9, 2e-6, 1e-3, 0.0))
+        (1e9, 0.12, 2.91456e-23, 1.0737e29, 1.25e7, 30e-9, 2e-6, 9e-3, 0.0))
 
 
 @pytest.mark.parametrize("n", [5, 64])

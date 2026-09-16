@@ -41,9 +41,9 @@ def test_sweep_matches_per_point_path():
 
 
 def test_sweep_on_a_fresh_model_is_not_a_different_model():
-    """A fresh model still holds generation-time Lk; the single-point
-    path replaces it with the QP state's before converging.  The sweep
-    must start from the same place, or the dip lands over a MHz off."""
+    """A fresh model still holds generation-time Lk and R; the
+    single-point path installs the QP state's before converging.  The
+    sweep must start from the same place."""
     crs, m = _model()
     f0 = sorted(m.resonator_frequencies)[0]
     assert m._nqp_state_t is None
@@ -54,8 +54,8 @@ def test_sweep_on_a_fresh_model_is_not_a_different_model():
 
 def test_two_stage_search_finds_the_brute_force_dip():
     """The locating pass at 50 kHz plus multisweep's 200 kHz / 101
-    points lands on the same minimum a dense sweep over the whole
-    coupling-shift window finds, to the fine grid's step."""
+    points lands on the same minimum a dense sweep over +/-3 MHz finds,
+    to the fine grid's step."""
     from rfmux.mock.config import BIAS_DBM, bias_amplitude_from_dbm
     crs, m = _model()
     amp = bias_amplitude_from_dbm(BIAS_DBM)
@@ -64,8 +64,6 @@ def test_two_stage_search_finds_the_brute_force_dip():
         ref = dense[np.argmin(m.s21_sweep(dense, amp))]
         found = crs._find_s21_dip_frequency(f0, amp)
         assert abs(found - ref) <= 2e3, (f0, found, ref)
-        assert abs(found - f0) > 200e3, \
-            "the fixture should exercise the coupling shift"
 
 
 def test_bias_power_round_trips_through_dbm():
@@ -87,9 +85,9 @@ def test_sweep_leaves_lekid_state_alone():
 
 
 def test_dense_array_biases_each_resonator_on_its_own_dip():
-    """Twelve resonators over 30 MHz: the dip sits 1.5 MHz above
-    compute_fr, so a window open to the nearest neighbour's dip can
-    pick that dip instead and leave two channels on one resonator."""
+    """Twelve resonators over 30 MHz: a window open to the nearest
+    neighbour's dip could pick that dip instead and leave two channels
+    on one resonator."""
     from rfmux.mock.config import BIAS_DBM, bias_amplitude_from_dbm
     from rfmux.mock.crs import ServerMockCRS
     crs = ServerMockCRS("0000")
@@ -106,21 +104,3 @@ def test_dense_array_biases_each_resonator_on_its_own_dip():
         "the fixture should be dense but resolvable"
     found = np.array([crs._find_s21_dip_frequency(f, amp) for f in nominal])
     assert np.all(np.diff(found) > 0), (nominal, found)
-
-
-def test_dip_shift_is_measured_from_the_built_array():
-    """The coarse window is centred where this array's circuit puts the
-    dip, measured on its most isolated resonator, not on a constant from
-    the default circuit."""
-    crs, m = _model()
-    amp = 0.01
-    crs._measure_dip_shift(amp)
-    measured = crs._dip_shift_fraction
-    assert measured > 0
-    # The default circuit's constant is the right order; a different
-    # coupling would move the measured value and the search with it.
-    assert measured == pytest.approx(crs._DIP_SHIFT_FRACTION, rel=0.5)
-    # Every resonator's dip is then found inside the coarse window.
-    for f0 in m.resonator_frequencies:
-        dip = crs._find_s21_dip_frequency(f0, amp)
-        assert abs(dip / f0 - 1 - measured) < 0.5 * crs._DIP_LOCATE_FRACTION

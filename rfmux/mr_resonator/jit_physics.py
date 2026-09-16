@@ -54,7 +54,7 @@ def _serial_twin(dispatcher, name, **jit_kwargs):
 # Physical constants
 H = 6.626e-34  # Planck constant
 KB = 1.38e-23  # Boltzmann constant
-MU0 = 8.85e-12  # Permeability (note: this appears to be using permittivity value from original)
+MU0 = 4e-7 * np.pi  # Permeability of free space [H/m]
 
 # ============================================================================
 # Bessel Function Approximations

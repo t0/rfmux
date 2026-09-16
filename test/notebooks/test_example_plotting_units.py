@@ -15,7 +15,10 @@ import pytest
 
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
-from rfmux.tuning import BiasReport, collect_amplitude_iterations_for
+from rfmux.tuning import (
+    BiasReport, bifurcated_by_derivative, collect_amplitude_iterations_for,
+    normalized_arc_speed,
+)
 from rfmux.tuning.bias import BiasFinding, BifurcationCheck
 
 pytestmark = pytest.mark.portable
@@ -116,12 +119,55 @@ def test_bias_magnitude_is_received_power(plotters):
     assert panel.get_ylabel() == "received power [dBm]"
 
 
-def test_bifurcation_plot_reads_embedded_checks(plotters):
+@pytest.mark.parametrize("noise_gate_factor", [0.0, 50.0])
+def test_bifurcation_plot_matches_periscope_quantity(plotters, noise_gate_factor):
+    block = biased_measurement()
+    block["bias_report"]["settings"].update(
+        spike_prominence_factor=0.3, noise_gate_factor=noise_gate_factor,
+    )
+    frequencies = 600e6 + np.arange(8) * 1000
+    iq = np.array([0, 1, 3, 4, 4.4, 4.7, 8, 9]) + 1j * np.array(
+        [0, 0.4, 1, 2, 2.4, 2.6, 3, 4],
+    )
+    # Three steps, including one beyond the report's recorded checks.
+    for step in range(3):
+        block["results"][step] = {}
+        for direction in ("upward", "downward"):
+            order = slice(None) if direction == "upward" else slice(None, None, -1)
+            block["results"][step][direction] = {"R1": {
+                "frequencies": frequencies[order], "iq_counts": iq[order] * (step + 1),
+                "original_center_frequency": 600e6,
+                "sweep_amplitude": 0.01 * (step + 1),
+            }}
+    plotters.bias.plot_bifurcation_checks(block)
+    panel = plt.gcf().axes[0]
+    traces = [line for line in panel.lines if len(line.get_xdata()) == 6]
+    assert len(traces) == 6
+    for line, (step, direction) in zip(traces, (
+        (step, direction) for step in range(3) for direction in ("upward", "downward")
+    )):
+        entry = block["results"][step][direction]["R1"]
+        midpoints, speed = normalized_arc_speed(entry)
+        threshold = bifurcated_by_derivative(
+            {direction: entry}, spike_prominence_factor=0.3,
+            noise_gate_factor=noise_gate_factor,
+        ).threshold
+        np.testing.assert_allclose(line.get_xdata(),
+                                   (0.5 * (midpoints[:-1] + midpoints[1:]) - 600e6) / 1e3)
+        np.testing.assert_allclose(line.get_ydata(), np.diff(speed) / threshold)
+        assert line.get_linestyle() == ("-" if direction == "upward" else "--")
+    assert traces[0].get_linewidth() > traces[2].get_linewidth()
+    bars = [line.get_ydata()[0] for line in panel.lines if len(line.get_xdata()) == 2]
+    assert 1 in bars and -1 in bars
+    assert panel.get_ylabel() == "Δ normalized speed / threshold"
+
+
+def test_bifurcation_plot_skips_unusable_traces(plotters):
+    # Flat Q and fewer than four samples cannot provide derivative thresholds.
     plotters.bias.plot_bifurcation_checks(biased_measurement())
     panel = plt.gcf().axes[0]
-    np.testing.assert_allclose(panel.lines[0].get_xdata(), [0.01, 0.1])
-    np.testing.assert_allclose(panel.lines[0].get_ydata(), [0.2, 0.8])
-    np.testing.assert_allclose(panel.lines[1].get_ydata(), [0.5, 0.5])
+    assert any(text.get_text() == "no usable derivative traces" for text in panel.texts)
+    np.testing.assert_allclose([line.get_ydata()[0] for line in panel.lines], [1, -1])
 
 
 @pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks"])

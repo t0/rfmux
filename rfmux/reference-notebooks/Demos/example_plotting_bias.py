@@ -13,7 +13,10 @@ Run ``find_bias_points`` to store ``bias_report`` in the module dict::
 
 ``plot_arc_speed_panels`` and ``plot_bifurcation_verdict_map`` evaluate the
 sweeps directly and do not require a saved report. Flagged bias points are
-orange, with the reason shown in the panel.
+orange, with the reason shown in the bias-point panel.
+``plot_bifurcation_checks`` shows threshold-normalized arc-speed changes,
+matching Periscope; ``plot_arc_speed_panels(..., quantity="spikes")`` shows
+the changes before threshold normalization.
 
 Style is applied per figure. Use ``batchlen=None`` for a single figure.
 """
@@ -78,13 +81,6 @@ AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
 
 BIAS_COLOUR = "royalblue"  # the chosen operating point
 FLAGGED_COLOUR = "darkorange"  # a bias point that is a default, not a finding
-
-# Curve styles in reported metric order.
-METRIC_STYLES = (
-    ("crimson", "o"),
-    ("rebeccapurple", "^"),
-    ("seagreen", "v"),
-)
 
 # Mirrors ``rfmux.tuning.bias.PREFERRED_DIRECTION``: which direction a bias
 # frequency is measured on when a step has both and the caller did not say.
@@ -295,20 +291,6 @@ def _entry_for(results, name, iteration, direction):
         ) from None
 
 
-def _measured_metrics(checks):
-    """Return numeric metric keys, excluding boolean conditions such as adjacency."""
-    first = checks[min(checks)].metric
-    return [key for key, value in first.items() if not isinstance(value, bool)]
-
-
-def _measured_metrics_of(findings):
-    """Read metric keys from the first finding with checks."""
-    for finding in findings:
-        if finding.checks:
-            return _measured_metrics(finding.checks)
-    return []
-
-
 def plot_bias_points(
     results: dict,
     *,
@@ -433,142 +415,125 @@ def plot_bias_points(
 def plot_bifurcation_checks(
     results: dict,
     *,
-    names=None,
-    direction=None,
-    ncols=None,
-    panel_size=(7.0, 5.0),
-    title=None,
-    batchlen=BATCH_SIZE,
-):
-    """Plot recorded metrics, thresholds and selected amplitudes per resonator.
+    names: str | list[str] | None = None,
+    direction: str | None = None,
+    ncols: int | None = None,
+    panel_size: tuple[float, float] = (7.0, 5.0),
+    title: str | None = None,
+    batchlen: int | None = BATCH_SIZE,
+) -> None:
+    """Plot normalized arc-speed changes in derivative-threshold units.
 
-    Only examined steps are shown: the search stops at the first bifurcation.
-    Combined checks express metrics relative to their thresholds. Dotted lines
-    mark steps whose metrics cleared the threshold but were not bifurcated.
+    Matches Periscope's "Bias: detect bifurc" view: each trace is the
+    point-to-point change in normalized arc speed divided by the larger of
+    its spike-prominence and noise thresholds. The shared threshold is ±1.
+    The detector tests spike prominence and adjacency; crossing a line alone
+    does not establish bifurcation.
 
     Args:
-        results: one module's multisweep dict, including the ``bias_report``
-            stored by ``find_bias_points``.
-        names: which resonators to draw. ``None`` for every finding.
-        direction: which sweep direction to read amplitudes off. ``None``
-            follows what the report was run with.
-        ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
-        panel_size: ``(width, height)`` of one panel, in inches.
-        title: overrides the figure title. The batch marker is still appended.
+        results: one module's multisweep dict with an embedded ``bias_report``.
+            Its saved spike_prominence_factor and noise_gate_factor are used,
+            defaulting to 0.5 and 50.0 when absent.
+        names: resonator name(s), or None for every finding.
+        direction: one sweep direction, or None for all measured directions.
+            Upward traces are solid and downward traces dashed.
+        ncols: panels per row, or None to choose automatically.
+        panel_size: panel width and height in inches.
+        title: figure title; batch numbers are appended.
         batchlen: resonators per figure; None uses one figure.
 
-    Raises:
-        KeyError: if a requested name has no finding.
-        TypeError: if handed the whole per-module container as *results*.
-        ValueError: for a missing report or no recorded checks to draw.
+    All amplitude steps are drawn, including those beyond the recorded checks.
+    The selected step is thicker, with its lower threshold shown faintly.
+    Unusable or zero-threshold traces are skipped, as in Periscope.
     """
     report = _bias_report(results)
     findings = _findings(report, names)
-    if not any(f.checks for f in findings):
-        raise ValueError(
-            "None of these findings recorded a bifurcation check, so there is "
-            "nothing to draw. Every finding from find_bias_points carries at "
-            "least one, so a report whose findings carry none did not come "
-            "from an amplitude search."
-        )
-
-    swept_direction = _direction_for(report, results, direction)
-    method = (getattr(report, "settings", None) or {}).get(
-        "amplitude_method", "bifurcation"
-    )
+    traces = {
+        finding.name: [
+            (step, swept_direction, entry)
+            for step, entries in collect_amplitude_iterations_for(
+                results, finding.name
+            ).items()
+            for swept_direction, entry in entries.items()
+            if direction is None or swept_direction == direction
+        ]
+        for finding in findings
+    }
+    amplitudes = [
+        entry["sweep_amplitude"]
+        for entries in traces.values() for _, _, entry in entries
+    ]
+    if not amplitudes:
+        raise ValueError("No sweeps match the selected names and direction.")
+    mappable = amplitude_mappable(amplitudes)
+    settings = report.settings
     batches = _batches(findings, batchlen)
     columns = _columns_for(batches, ncols)
 
     for batch_number, batch in enumerate(batches, start=1):
         with plt.rc_context(PLOT_STYLE):
             fig, axes, panels = _panel_grid(len(batch), columns, panel_size)
-
             for panel, finding in zip(panels, batch):
-                checks = finding.checks
-                if not checks:
-                    panel.text(0.5, 0.5, "no steps examined", ha="center",
-                               va="center", transform=panel.transAxes,
-                               color=FLAGGED_COLOUR)
-                    panel.set_title(finding.name)
-                    continue
-
-                # The checks are keyed by amplitude step, but the x axis that
-                # means anything is the drive each step actually used.
-                steps = sorted(checks)
-                amplitudes = [
-                    _entry_for(results, finding.name, step, swept_direction)[
-                        "sweep_amplitude"
-                    ]
-                    for step in steps
-                ]
-                # A check reports one entry per quantity its method examined,
-                # so each measured one gets its own curve. Which keys those are
-                # is the method's business, not this function's — read them off
-                # the checks rather than naming them here.
-                measured = _measured_metrics(checks)
-                for key, (colour, marker) in zip(measured, METRIC_STYLES):
-                    panel.plot(amplitudes,
-                               [checks[step].metric[key] for step in steps],
-                               marker=marker, ms=8, lw=2, color=colour)
-
-                thresholds = [checks[step].threshold for step in steps]
-                panel.plot(amplitudes, thresholds, marker="s", ms=8, lw=2,
-                           ls="--", color="0.35")
-
-                # A step can clear every bar and still not be called
-                # bifurcated, because the derivative test also asks that the
-                # spikes sit next to each other. Without this the panel would
-                # show curves crossing where nothing fired and look wrong.
-                for step, amplitude in zip(steps, amplitudes):
-                    check = checks[step]
-                    cleared = all(check.metric[k] >= check.threshold
-                                  for k in measured)
-                    if cleared and not check.bifurcated:
-                        panel.axvline(amplitude, color="0.55", lw=1.2, ls=":")
-
-                # Where it fired, and where the search settled — one step
-                # below, which is the whole point of the search.
-                fired = [step for step in steps if checks[step].bifurcated]
-                if fired:
-                    panel.axvline(amplitudes[steps.index(fired[0])],
-                                  color=FLAGGED_COLOUR, lw=2.5, alpha=0.8)
-                panel.axvline(finding.amplitude, color=BIAS_COLOUR, lw=2.5,
-                              alpha=0.8)
-
-                panel.set_xscale("log")
-                panel.set_yscale("log")
-                colour = FLAGGED_COLOUR if not finding.good else "black"
-                panel.set_title(finding.name, color=colour)
-                if not finding.good:
-                    panel.text(
-                        0.03, 0.03,
-                        "\n".join(textwrap.wrap(finding.flagged_because, 32)),
-                        transform=panel.transAxes, fontsize=11, va="bottom",
-                        color=FLAGGED_COLOUR,
+                unbinding = []
+                binding_kinds = set()
+                for step, swept_direction, entry in traces[finding.name]:
+                    try:
+                        frequencies, changes = _arc_quantity("spikes", entry)
+                        prominence = bifurcated_by_derivative(
+                            {swept_direction: entry},
+                            spike_prominence_factor=settings.get(
+                                "spike_prominence_factor", 0.5),
+                            noise_gate_factor=0.0,
+                        ).threshold
+                        noise = bifurcated_by_derivative(
+                            {swept_direction: entry}, spike_prominence_factor=0.0,
+                            noise_gate_factor=settings.get("noise_gate_factor", 50.0),
+                        ).threshold
+                    except (ValueError, KeyError):
+                        continue
+                    threshold = max(prominence, noise)
+                    if threshold <= 0:
+                        continue
+                    chosen = step == finding.iteration
+                    panel.plot(
+                        offset_khz(entry, frequencies), changes / threshold,
+                        color=mappable.to_rgba(entry["sweep_amplitude"]),
+                        ls={"upward": "-", "downward": "--"}.get(swept_direction, ":"),
+                        lw=2.5 if chosen else 1.0,
                     )
+                    binding_kinds.add("noise gate" if noise >= prominence
+                                      else "spike prominence")
+                    if chosen:
+                        unbinding.append(min(prominence, noise) / threshold)
 
-            # A combined check's quantities are already in multiples of their
-            # own bars, so the axis says so rather than implying units.
-            units = " / own threshold" if method == "both" else ""
-            _outer_labels(axes, "drive amp. [norm.]", f"{method} metric{units}")
+                binding = (next(iter(binding_kinds)) if len(binding_kinds) == 1
+                           else "higher of spike prominence and noise gate")
+                panel.axhspan(-1, 1, color="0.35", alpha=0.08)
+                for sign in (1, -1):
+                    panel.axhline(sign, color="0.35", lw=1,
+                                  label=f"±1: threshold ({binding})" if sign == 1 else None)
+                if unbinding:
+                    panel.axhspan(-min(unbinding), min(unbinding),
+                                  color="0.35", alpha=0.04)
+                    for index, other in enumerate(unbinding):
+                        for sign in (1, -1):
+                            panel.axhline(
+                                sign * other, color="0.35", lw=1, ls="--", alpha=0.4,
+                                label="selected step: lower threshold"
+                                if index == 0 and sign == 1 else None,
+                            )
+                if not binding_kinds:
+                    panel.text(0.5, 0.5, "no usable derivative traces",
+                               ha="center", transform=panel.transAxes)
+                panel.margins(y=0.12)
+                panel.set_title(finding.name)
+                panel.legend(fontsize=10)
 
-            # Built from the keys these checks actually carry, so the legend
-            # names the curves rather than calling all of them "metric".
-            drawn = _measured_metrics_of(batch)
-            handles = [Line2D([], [], color=colour, lw=2, marker=marker)
-                       for _, (colour, marker) in zip(drawn, METRIC_STYLES)]
-            labels = [key.replace("_", " ") for key in drawn]
-            fig.legend(
-                [*handles,
-                 Line2D([], [], color="0.35", lw=2, ls="--", marker="s"),
-                 Line2D([], [], color=BIAS_COLOUR, lw=2.5),
-                 Line2D([], [], color=FLAGGED_COLOUR, lw=2.5),
-                 Line2D([], [], color="0.55", lw=1.2, ls=":")],
-                [*labels, "threshold", "chosen", "bifurcated", "pattern failed"],
-                loc="outside lower center", ncols=4,
-            )
+            _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]",
+                          "Δ normalized speed / threshold")
+            fig.colorbar(mappable, ax=axes, label="drive amp. [norm.]")
             _titled(fig, _batch_title(
-                title, f"{method} bifurcation checks, {swept_direction}",
+                title, "derivative bifurcation checks — selected step in bold",
                 len(findings), batch_number, len(batches),
             ))
             plt.show()

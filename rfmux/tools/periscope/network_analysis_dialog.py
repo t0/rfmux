@@ -8,6 +8,7 @@ from .utils import (
 import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
+from .utils import find_parent_with_attr
 
 
 def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -61,7 +62,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     modules to scan, and other analysis settings.
     """
     def __init__(self, parent: QtWidgets.QWidget = None, modules: list[int] = None,
-                 dac_scales: dict[int, float] = None):
+                 dac_scales: dict[int, float] = None, *,
+                 settings: QtCore.QSettings | None = None):
         """
         Initializes the Network Analysis configuration dialog.
 
@@ -69,14 +71,35 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             parent: The parent widget.
             modules: List of available module numbers.
             dac_scales: Pre-fetched DAC scales for the modules.
+            settings: Where the fields are remembered between opens;
+                the user's Periscope settings by default.
         """
-        super().__init__(parent, params=None, modules=modules, dac_scales=dac_scales)
+        super().__init__(parent, params=None, modules=modules, dac_scales=dac_scales,
+                         settings=settings)
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
+        self._load()
         self.load_data_available = False
         self._load_data = {}
-        
+
+    _KEY = "netanal/"
+
+    def _remembered(self) -> tuple:
+        """Every field but the module entry, which the caller sets to
+        the module in view."""
+        return (("fmin", self.fmin_edit), ("fmax", self.fmax_edit),
+                ("cable_length", self.cable_length_edit),
+                ("amps", self.amp_edit),
+                ("amp_start", self.start_amp_edit),
+                ("amp_stop", self.stop_amp_edit),
+                ("amp_iterations", self.iterations_amp_edit),
+                ("npoints", self.points_edit),
+                ("nsamps", self.samples_edit),
+                ("max_chans", self.max_chans_edit),
+                ("max_span", self.max_span_edit),
+                ("clear_channels", self.clear_channels_cb))
+
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)
@@ -333,25 +356,29 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
     This dialog is typically modal and pre-filled with current analysis parameters.
     It fetches DAC scales asynchronously if a CRS object is available from its parent.
     """
-    def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None):
+    def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None,
+                 dac_scales: dict[int, float] | None = None):
         """
         Initializes the dialog for editing network analysis parameters.
 
         Args:
             parent: The parent widget.
             params: Dictionary of existing parameters to populate the fields.
+            dac_scales: DAC scales already known, shown until the fetch
+                below replaces them.
         """
-        super().__init__(parent, params=params) # Pass params to base class
+        super().__init__(parent, params=params, dac_scales=dac_scales)
         self.setWindowTitle("Edit Network Analysis Parameters")
         self.setModal(True) # Modal dialog
         self._setup_ui()
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
 
-        # Attempt to fetch DAC scales if CRS is available from the main window hierarchy
-        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
-            # Assuming parent.parent() is the main Periscope window
-            main_periscope_window = parent.parent() 
-            if hasattr(main_periscope_window, 'crs') and main_periscope_window.crs is not None:
-                self._fetch_dac_scales(main_periscope_window.crs)
+        # The main window is wherever it is above the panel (a dock, a
+        # floating dock, a splitter), so it is found by its attribute.
+        periscope = find_parent_with_attr(parent, "crs") if parent else None
+        if periscope is not None and periscope.crs is not None:
+            self._fetch_dac_scales(periscope.crs)
         
     def _fetch_dac_scales(self, crs_obj):
         """

@@ -79,10 +79,10 @@ The **Run** tab:
   modules itself.
 - **Duration**, in seconds, after the capture's noise training.
 - **Products**: the pulse capture of the slow stream, the parser dirfile
-  with its 1G interface (found from the board's address by default), and
+  with its interface (found from the board's address by default), and
   the fastrx recording with its 100G interface. The interfaces are listed
-  with their negotiated rates, those under 100 Gb/s for the parser and the
-  100 Gb/s ones for fastrx, a lone 100 Gb/s interface filled in. The
+  with their negotiated rates, every one for the parser and the 100 Gb/s
+  ones for fastrx, a lone 100 Gb/s interface filled in. The
   dialog checks for a running fastrxd on that interface and, when there
   is none, shows the command that starts it, with a button to copy it and
   one to check again. Below that it reports the disk free in the session
@@ -124,8 +124,8 @@ Channel ranges instead of the bias export: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules
 itself; `--bias <file>` names a bias export instead of the newest.
 `--no-capture`, `--no-parser` and `--no-fastrx` leave a product out.
-`--parser-interface` names the 1G interface when the board's address does
-not find it; `--fastrx-interface` names the 100G NIC when several fastrxd
+`--parser-interface` names the parser's interface when the board's address
+does not find it; `--fastrx-interface` names the 100G NIC when several fastrxd
 run. The capture settings are `--threshold-sigma`, `--end-sigma`,
 `--min-pulse-ms`, `--max-pulse-ms`, `--noise-train-ms` and
 `--trigger-basis`.
@@ -224,7 +224,7 @@ The parser, on the interface that receives the board's 1G traffic, writes
 the module and channels of interest to a dirfile; it stops on Ctrl-C:
 
 ```bash
-rfmux parser -i <1G interface> -d ~/data/run.dirfile -c <module>:<channels> --drop-stats
+rfmux parser -i <interface> -d ~/data/run.dirfile -c <module>:<channels> --drop-stats
 ```
 
 It writes one subdirfile per board, `~/data/run.dirfile/serial_<NNNN>`,

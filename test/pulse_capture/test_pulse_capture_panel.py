@@ -64,14 +64,51 @@ def _make_panel(qt_app, tmp_path, runtime):
     panel.channels_edit.setText("1")
     panel.threshold_spin.setValue(5.0)
     panel.end_spin.setValue(1.5)
-    # Training is derived from the pulse length (20x), which at the
-    # default 250 ms would ask for more samples than these tests feed.
-    # Override just the training length: max_pulse_ms is left alone
-    # because it also sets the baseline-tracking floor, and 250 ms is
-    # the right scale for the sample-indexed pulses fed below.
+    # Training is derived from the pulse length (20x), which would ask
+    # for more samples than these tests feed, so the training length is
+    # overridden.  The max pulse is pinned at 250 ms: it sets the hard
+    # stop and the baseline-tracking floor, and 250 ms at the panel's
+    # 596 Hz is the right scale for the sample-indexed pulses fed below.
     panel.capture_config = replace(panel.capture_config,
-                                   noise_train_ms=1.0)
+                                   noise_train_ms=1.0, max_pulse_ms=250.0)
     return panel
+
+
+def _pulse_rows(channel_item) -> int:
+    """Pulse rows under a channel; the noise training row is not one."""
+    from PyQt6 import QtCore
+    return sum(
+        (channel_item.child(i).data(0, QtCore.Qt.ItemDataRole.UserRole)
+         or ("",))[0] in ("pulse", "pair")
+        for i in range(channel_item.childCount()))
+
+
+def test_flagged_rows_are_tinted_relative_to_the_tree_palette(qt_app):
+    """A truncated or pileup row is a wash of its flag colour over the
+    tree's own base colour, light on a light window theme and dark on
+    a dark one, and the text keeps the palette's colour.  The Dark
+    Mode flag only reaches the plots, so on a desktop with a light
+    window theme a flag-chosen dark row read as grey on black text."""
+    from PyQt6 import QtCore, QtGui
+    panel = PulseCapturePanel(dark_mode=True)
+    panel._reset_results([1])
+    panel._counts = {1: 1}
+
+    def row_after(base):
+        pal = panel.pulse_tree.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(base))
+        panel.pulse_tree.setPalette(pal)
+        panel._add_pulse_row(1, 1, {"truncated": True, "n_samples": 5,
+                                    "snr": 6.0})
+        return panel._channel_items[1].child(0)
+
+    light = row_after("#ffffff").background(0).color()
+    dark = row_after("#000000").background(0).color()
+    assert light.lightness() > 200 and dark.lightness() < 60
+    assert light.red() > light.blue()          # the flag's hue shows
+    assert row_after("#ffffff").data(0, QtCore.Qt.ItemDataRole.ForegroundRole) is None
+    panel.close()
+    spin(qt_app)
 
 
 def _tap1(tap, ch, i, q, t):
@@ -126,7 +163,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     # Tree: channel group shows count, newest first
     ch_item = panel._channel_items[1]
     assert "(3)" in ch_item.text(0)
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     assert ch_item.child(0).text(0) == \
         f"\u25c6 #{panel._pulse_order[-1][1]:06d}", "newest first"
 
@@ -249,7 +286,7 @@ def test_review_of_a_merged_file_shows_the_recording_under_each_pulse(
     panel.load_from_hdf5(path)
     assert panel._both_mode
     ch_item = panel._channel_items[1]
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     row = ch_item.child(0)
     assert row.text(0) == "\u25c6 slow only"
     assert row.text(2) == "+fast data"
@@ -270,7 +307,7 @@ def test_review_mode(qt_app, tmp_path):
 
     # Tree populated newest-first
     ch_item = panel._channel_items[1]
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     assert "(3)" in ch_item.text(0)
     assert ch_item.child(0).text(0) == \
         f"\u25c6 #{panel._pulse_order[-1][1]:06d}", "newest first"
@@ -777,11 +814,13 @@ def test_csv_exports(qt_app, tmp_path):
     panel._show_pulse(*panel._pulse_order[-1])
     panel._on_export()
     # Histograms tab
-    panel.viewer_tabs.setCurrentIndex(1)
+    panel.viewer_tabs.setCurrentIndex(2)
+    assert panel.viewer_tabs.tabText(2) == "Histograms"
     panel._on_export()
     # Template tab (needs template data from the file)
     panel._template_data = panel.reader.get_templates()
-    panel.viewer_tabs.setCurrentIndex(2)
+    panel.viewer_tabs.setCurrentIndex(3)
+    assert panel.viewer_tabs.tabText(3) == "Template"
     panel._on_export()
 
     written = sorted(p.name for p in tmp_path.glob("*.csv"))

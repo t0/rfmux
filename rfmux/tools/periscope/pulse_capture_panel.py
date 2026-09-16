@@ -3,10 +3,11 @@ Dockable live pulse-capture panel.
 
 The layout: a toolbar of capture controls, a status strip (state /
 counts / rate + per-channel noise), a pulse tree on the left (newest
-first, pileup flagged), and three tabs on the right — a single-pulse
-I/Q waveform with threshold bands, a 2×2 grid of running histograms
-(SNR, peak amplitude, duration, derived τ), and the trigger-aligned
-template stack.
+first, pileup flagged), and four tabs on the right — a single-pulse
+I/Q waveform with threshold bands, the same pulse as a path in the
+plane over the sweep the channel was tuned with, a 2×2 grid of running
+histograms (SNR, peak amplitude, duration, derived τ), and the
+trigger-aligned template stack.
 
 All capture logic lives in
 :class:`~rfmux.pulse_capture.capture_session.PulseCaptureSession`;
@@ -37,6 +38,7 @@ from .utils import (
     TABLEAU10_COLORS,
     LINE_WIDTH,
     find_parent_with_attr,
+    flag_tint,
     theme_colors,
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
@@ -66,6 +68,7 @@ from ...pulse_capture.analysis import (
     plot_groups,
     storage_transform,
     summary_from_attrs,
+    tuning_sweep,
     window_shortfall,
 )
 
@@ -174,6 +177,27 @@ def _channel_color(channel) -> str:
 #: Legend names for the two stored axes, by basis.
 _AXIS_NAMES = {"df": ("df", "diss"), "iq": ("I", "Q")}
 
+#: Most time-coloured markers the IQ plane draws for one pulse.
+IQ_PLANE_POINTS = 4000
+
+_TIME_RAMP: list = []
+
+
+def _time_ramp() -> list:
+    """Brushes for the IQ plane's markers: grey for the samples before
+    the trigger, then the I colour from light to dark with time, in 32
+    steps, shared by every redraw."""
+    if not _TIME_RAMP:
+        base = QtGui.QColor(IQ_COLORS["I"])
+        _TIME_RAMP.append(pg.mkBrush("#BBBBBB"))
+        for i in range(32):
+            s = i / 31
+            c = QtGui.QColor(base)
+            c.setHsvF(base.hueF(), 0.25 + 0.75 * s,
+                      min(1.0, base.valueF() + 0.45 * (1.0 - s)))
+            _TIME_RAMP.append(pg.mkBrush(c))
+    return _TIME_RAMP
+
 _HIST_METRICS = [
     ("snr", "Signal-to-noise (σ)", "peak deviation (σ)"),
     ("amplitude", "Peak amplitude per axis", "amplitude"),
@@ -226,6 +250,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.task: Optional[PulseCaptureTask] = None
         self.signals: Optional[PulseCaptureSignals] = None
         self.reader: Optional[PulseHDF5Reader] = None
+        self._tuning_rows: Dict[int, dict] = {}
+        self._channel_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
         self._review_mode = False
         self._registered_export = False
         self._tap_registered = False
@@ -484,8 +510,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.viewer_tabs = QtWidgets.QTabWidget()
         self.viewer_tabs.addTab(self._build_pulse_view(), "Pulse View")
+        self.viewer_tabs.addTab(self._build_iq_view(), "IQ Plane")
         self.viewer_tabs.addTab(self._build_histograms_view(), "Histograms")
         self.viewer_tabs.addTab(self._build_template_view(), "Template")
+        # The plane draws only while its tab is up, so catch up on entry.
+        self.viewer_tabs.currentChanged.connect(
+            lambda _i: self._render_iq_plane())
         splitter.addWidget(self.viewer_tabs)
         splitter.setSizes([260, 740])
         layout.addWidget(splitter, stretch=1)
@@ -531,6 +561,151 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         v.addWidget(self.pulse_plot_i, stretch=1)
         v.addWidget(self.pulse_plot_q, stretch=1)
         return w
+
+    # ── IQ plane ──────────────────────────────────────────────────
+
+    def _build_iq_view(self) -> QtWidgets.QWidget:
+        """The selected pulse as a path in the plane, over the sweep the
+        channel was tuned with and its bias point: what the units
+        switch rotates."""
+        w = self.iq_view = QtWidgets.QWidget()
+        v = QtWidgets.QVBoxLayout(w)
+        v.setContentsMargins(4, 4, 4, 4)
+        self.iq_info = ElidedLabel("No pulse selected", max_width=900)
+        v.addWidget(self.iq_info)
+        self.iq_plot = pg.PlotWidget(viewBox=ClickableViewBox())
+        item = self.iq_plot.getPlotItem()
+        item.setAspectLocked(True)
+        item.showGrid(x=True, y=True, alpha=0.3)
+        item.addLegend(offset=(-10, 10))
+        v.addWidget(self.iq_plot, stretch=1)
+        return w
+
+    def _tuning_row(self, channel: int) -> dict:
+        """This channel's tuning row: the file's while one is open (a
+        finished capture keeps its own tuning however the board has
+        been retuned since), else the live capture's.  The file's is
+        read once per capture, since it carries the sweep arrays."""
+        if self.reader is not None:
+            if channel not in self._tuning_rows:
+                try:
+                    self._tuning_rows[channel] = self.reader.tuning(channel)
+                except Exception:
+                    self._tuning_rows[channel] = {}
+            row = self._tuning_rows[channel]
+        else:
+            row = self._flat_tuning().get(channel)
+        return row if isinstance(row, dict) else {}
+
+    def _iq_source(self):
+        """(channel, waveform) drawn in the plane: the pulse on view, or
+        a pair's slow record; (None, None) with nothing selected."""
+        if self._current_view is not None:
+            channel, idx = self._current_view
+            return channel, self._get_waveform(channel, idx)
+        if self._both_mode and self._current_pair is not None:
+            channel, idx = self._current_pair
+            # The triggered slow record carries the trigger marks the
+            # plane draws; the pair's union window does not.
+            meta = self._pair_meta.get((channel, idx)) or {}
+            wf = None
+            if meta.get("slow_idx") is not None:
+                wf = self._get_waveform(channel, meta["slow_idx"], "slow")
+            if wf is None:
+                pair = self._get_pair(channel, idx)
+                wf = pair.get("slow_tod") if pair else None
+            return channel, wf
+        return None, None
+
+    def _render_iq_plane(self) -> None:
+        """Redraw the plane in the current view, when its tab is up: a
+        redraw is 20 ms of GUI thread and the pulse view redraws on
+        every follow tick.  Switching to the tab redraws.
+
+        The pulse takes the view transform its stored samples take; the
+        sweep, counts on the quadratures, takes the one a sample stored
+        in counts would.  Both end in one frame, so the pulse's baseline
+        sits on the bias point when the tuning describes the channel.
+        """
+        if self.viewer_tabs.currentWidget() is not self.iq_view:
+            return
+        plot = self.iq_plot.getPlotItem()
+        plot.clear()
+        channel, wf = self._iq_source()
+        if channel is None:
+            channel = self._label_channel()
+        first, second = self._axis_names(channel)
+        plot.setLabel("bottom", first)
+        plot.setLabel("left", second)
+        view = self._view_coeffs(channel)
+        basis, units = (self._view_state() if view is not None
+                        else self._stored_state(channel))
+        cal = self._channel_cal(channel)
+        notes = []
+
+        row = self._tuning_row(channel)
+        sweep = tuning_sweep(row)
+        to_view = display_transform(cal, "iq", "counts", basis, units)
+        if sweep is not None and to_view is not None:
+            f, iq, point = sweep
+            x, y = apply_iq_conversion(iq.real, iq.imag, to_view[0])
+            plot.plot(x, y, pen=pg.mkPen("#9AA4B1", width=1.2), symbol="o",
+                      symbolSize=4, symbolPen=None, symbolBrush="#9AA4B1",
+                      name="tuning sweep")
+            notes.append(f"sweep {f[0] / 1e6:.4f}–{f[-1] / 1e6:.4f} MHz")
+            if point is not None:
+                px, py = apply_iq_conversion(point.real, point.imag,
+                                             to_view[0])
+                star = plot.plot([px], [py], pen=None, symbol="star",
+                                 symbolSize=14, symbolBrush=IQ_COLORS["Q"],
+                                 symbolPen=None, name="bias point")
+                star.setZValue(10)      # above the pulse, always in view
+                notes.append(f"bias {float(row['bias_frequency']) / 1e6:.6f} MHz")
+            phase = row.get("optimal_phase_degrees") or 0.0
+            if phase:
+                notes.append(f"sweep turned by {-float(phase):g}° "
+                             "(the ADC phase the bias set)")
+        elif sweep is None:
+            notes.append("no sweep in the tuning")
+        else:
+            notes.append("the sweep needs a df calibration for this view")
+
+        if wf is not None:
+            amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
+            amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
+            if view is not None:
+                amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, view[0])
+            n = len(amp_I)
+            trig = wf.get("trigger_index")
+            trig = int(trig) if trig is not None else 0
+            trig = min(max(trig, 0), n)
+            # Points only, one hue light to dark with time from the
+            # trigger, the samples before it in grey.  The markers are
+            # a render resolution: a fast-mode pulse is hundreds of
+            # thousands of samples, and the plane shows where they
+            # sit, not their order.
+            if n <= IQ_PLANE_POINTS:
+                shown = np.arange(n)
+            else:
+                shown = np.unique(np.linspace(0, n - 1, IQ_PLANE_POINTS)
+                                  .astype(int))
+            # Brushes come from one shared ramp: pyqtgraph keeps one
+            # atlas symbol per distinct brush, and a brush per marker
+            # made a redraw five times slower.
+            ramp = _time_ramp()
+            brushes = [ramp[0] if k < trig else
+                       ramp[1 + int((len(ramp) - 2) * (k - trig)
+                                    / max(n - trig - 1, 1))]
+                       for k in shown]
+            plot.addItem(pg.ScatterPlotItem(amp_I[shown], amp_Q[shown],
+                                            brush=brushes, pen=None, size=6,
+                                            name="pulse"))
+            notes.insert(0, f"{title_label(channel)}: {n} samples, "
+                            f"{trig} before the trigger, light to dark "
+                            "with time")
+        else:
+            notes.insert(0, "No pulse selected")
+        self.iq_info.setText(" — ".join(notes))
 
     def _decision_noise(self, wf, ns):
         """The bands a record was decided against: (trigger, end).
@@ -1098,15 +1273,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _on_export(self) -> None:
         """Export what the active tab is showing, as CSV."""
-        tab = self.viewer_tabs.currentIndex()
+        tab = self.viewer_tabs.tabText(self.viewer_tabs.currentIndex())
         stamp = datetime.datetime.now().strftime("%H%M%S")
         try:
-            if tab == 0:
-                rows, name = self._export_waveform_rows(stamp)
-            elif tab == 1:
+            if tab == "Histograms":
                 rows, name = self._export_histogram_rows(stamp)
-            else:
+            elif tab == "Template":
                 rows, name = self._export_template_rows(stamp)
+            else:   # the pulse's samples, which the IQ plane draws too
+                rows, name = self._export_waveform_rows(stamp)
         except Exception as e:
             QtWidgets.QMessageBox.warning(
                 self, "Pulse Capture", f"Nothing to export:\n{e}")
@@ -1517,11 +1692,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_histograms()
         self._template_data = self.reader.get_templates()
         self._render_templates()
+        self._add_noise_rows()
 
         self._enter_review_state(path, f"{sum(self._counts.values())} "
                                        f"pulses")
         if self._pulse_order:
             self._show_pulse(*self._pulse_order[-1])
+        else:
+            self._render_iq_plane()
 
     def _load_dual_review(self, channels: List[int], path) -> None:
         """Populate the pair tree from a dual ('both' mode) file."""
@@ -1562,10 +1740,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self.template_stream_combo.currentText(), {})
         self._render_histograms()
         self._render_templates()
+        for stream in ("slow", "fast"):
+            self._add_noise_rows(stream)
         self._enter_review_state(
             path, f"{sum(self._counts.values())} pulses")
         if self._pulse_order:
             self._show_pair(*self._pulse_order[-1])
+        else:
+            self._render_iq_plane()
 
     def _review_summary(self, channel: int, pair: dict, stream: str):
         """One side's pulse summary from the file, in the live shape;
@@ -1610,6 +1792,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order.clear()
         self._pulse_summaries.clear()
         self._pair_meta.clear()
+        self._tuning_rows = {}     # the file's rows, read once per capture
         self._noise_by_stream = {}
         self._last_stats = {}      # the status line must not show the last run
         self._hist_data_by_stream = {}
@@ -1722,6 +1905,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             print(f"[PulseCapture] Noise estimated ({stream})"
                   f"{self._baseline_summary()}")
             self._refresh_status_line()
+            self._add_noise_rows(stream)
             # Show what the estimator saw for this stream (most recent
             # estimate wins until the first pulse replaces it)
             if self.follow_check.isChecked() or self._current_view is None:
@@ -1733,6 +1917,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         print("[PulseCapture] Noise estimated: " + _noise_line(noise_stats)
               + self._baseline_summary())
         self._refresh_status_line()
+        self._add_noise_rows()
         # Show what the estimator saw (until the first pulse replaces it)
         if self.follow_check.isChecked() or self._current_view is None:
             self._show_noise_segment()
@@ -1793,9 +1978,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                      ("pulse", channel, pulse_idx))
         if truncated or pileup:
-            colour = QtGui.QColor(
-                ("#3a2222" if self.dark_mode else "#ffd9d2") if truncated
-                else ("#3a3320" if self.dark_mode else "#fff3c2"))
+            colour = flag_tint(self.pulse_tree,
+                               "#D9482F" if truncated else "#E0A800")
             for col in range(4):
                 item.setBackground(col, colour)
         parent.insertChild(0, item)
@@ -1864,9 +2048,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
                          ("pair", ch, pair_idx))
             if complement_missing:
+                colour = flag_tint(self.pulse_tree, "#E07B39")
                 for col in range(4):
-                    item.setBackground(col, QtGui.QColor(
-                        "#33251c" if self.dark_mode else "#ffe8d9"))
+                    item.setBackground(col, colour)
             parent.insertChild(0, item)
             parent.setText(0, f"▤ {title_label(ch)} ({self._counts[ch]} pulses)")
             self._autosize_tree()
@@ -2036,13 +2220,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         In review mode there is no Periscope session holding one, so the
         file is the only place it survives a capture.
         """
-        cal = calibration_of(self._flat_tuning().get(channel))
-        if cal is None and self.reader is not None:
-            try:
-                cal = self.reader.df_calibration(channel)
-            except Exception:
-                cal = None
-        return cal
+        return calibration_of(self._tuning_row(channel))
 
     def _stored_state(self, channel: int) -> Tuple[str, str]:
         """(basis, units) the samples for *channel* are held in.
@@ -2120,6 +2298,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._show_pulse(*cur)
             except Exception:
                 pass
+        elif self._both_mode and self._current_pair is not None:
+            self._show_pair(*self._current_pair)
+        else:
+            self._render_iq_plane()
 
     def _label_channel(self) -> int:
         """A channel to take axis labels from when none is selected."""
@@ -2289,30 +2471,30 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._on_error(message)
         QtWidgets.QMessageBox.warning(self, "Pulse Capture", message)
 
-    def _show_noise_segment(self, stream: str | None = None) -> None:
-        """Plot the noise-training segment with the fitted baselines and
-        trigger/end bands — visual confirmation of what the estimator saw.
+    def _show_noise_segment(self, stream: str | None = None,
+                            channel: int | None = None) -> None:
+        """Plot a channel's noise-training segment with the fitted
+        baselines and trigger/end bands — visual confirmation of what
+        the estimator saw.
 
         In "both" mode the dual session holds one training record per
         stream (``session.slow`` / ``session.fast``); *stream* selects
-        which one, and the most recent estimate wins the view."""
-        if self.task is None:
-            return
-        session = self.task.session
+        which one, and the most recent estimate wins the view.  A file
+        under review supplies the record it kept.  Without *channel*,
+        the first channel with a record."""
         stats = self.noise_stats
         tag = ""
         if stream is not None:
-            session = getattr(session, stream, None)
             stats = self._noise_by_stream.get(stream, {})
             tag = f" ({stream})"
-        if session is None:
-            return
-        noise_data = getattr(session, "noise_data", {})
-        channel = next((c for c in sorted(stats)
-                        if c in noise_data and len(noise_data[c])), None)
         if channel is None:
+            channel = next((c for c in sorted(stats)
+                            if self._noise_record_for(c, stream) is not None),
+                           None)
+        arr = (self._noise_record_for(channel, stream)
+               if channel is not None else None)
+        if arr is None or channel not in stats:
             return
-        arr = noise_data[channel]
         ns = stats[channel]
         thr = float(self.threshold_spin.value())
         end = float(self.end_spin.value())
@@ -2322,6 +2504,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         names = ("df", "dissipation") if basis == "df" else ("I", "Q")
 
         self._current_view = None
+        self._current_pair = None
         self.pulse_info.setText(
             f"Noise training segment{tag} — {title_label(channel)} "
             f"({len(arr)} samples)\n"
@@ -2344,6 +2527,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
                       name=f"{name} (training)")
             self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
+        self._render_iq_plane()
 
     def _set_status(self, text: str, color: str) -> None:
         self.status_label.setText(
@@ -2387,6 +2571,38 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                "channels were tuned with")
             self.pulse_tree.addTopLevelItem(item)
 
+    def _noise_record_for(self, channel: int, stream: str | None = None):
+        """The training record of *channel* (on *stream* in both mode):
+        the live session's, else the file's; None without one."""
+        if self.task is not None:
+            session = self.task.session
+            if stream is not None:
+                session = getattr(session, stream, None)
+            arr = getattr(session, "noise_data", {}).get(channel)
+            return arr if arr is not None and len(arr) else None
+        if self.reader is not None:
+            return self.reader.noise_training(channel, stream)
+        return None
+
+    def _add_noise_rows(self, stream: str | None = None) -> None:
+        """A row under each channel whose training record is at hand,
+        live or in the file under review, one per stream in both mode:
+        double-click plots it.  Pulses insert above it as they arrive."""
+        role = QtCore.Qt.ItemDataRole.UserRole
+        for channel, parent in self._channel_items.items():
+            key = ("noise", stream, channel)
+            if self._noise_record_for(channel, stream) is None or any(
+                    parent.child(i).data(0, role) == key
+                    for i in range(parent.childCount())):
+                continue
+            item = QtWidgets.QTreeWidgetItem(
+                [f"◌ noise training{f' ({stream})' if stream else ''}",
+                 "", "", ""])
+            item.setData(0, role, key)
+            item.setToolTip(0, "Double-click to see the samples the noise "
+                               "statistics were fitted to")
+            parent.addChild(item)
+
     def _open_tuning_window(self, module: int) -> None:
         periscope = self.periscope or find_parent_with_attr(
             self, "open_tuning_window")
@@ -2402,6 +2618,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if data and data[0] == "tuning":
             self._open_tuning_window(data[1])
+            return
+        if data and data[0] == "noise":
+            self.follow_check.setChecked(False)
+            self.viewer_tabs.setCurrentIndex(0)
+            self._show_noise_segment(data[1], data[2])
             return
         if not data or data[0] not in ("pulse", "pair"):
             return
@@ -2503,6 +2724,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self.pulse_plot_i.setTitle("loading waveform from file…")
             else:
                 self.pulse_plot_i.setTitle("waveform not available")
+            self._render_iq_plane()
             return
 
         t = np.asarray(wf["Time"], dtype=np.float64)
@@ -2543,6 +2765,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 thr=wf.get("threshold_sigma"), end=wf.get("end_sigma"),
                 end_ns=ns_end)
             self._annotate_decisions(plot, wf, t0, quad)
+        self._render_iq_plane()
 
     def _request_once(self, key: tuple, request) -> bool:
         """Ask the worker for *key* unless this view already has; True
@@ -2726,6 +2949,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 if marks is not None:
                     self._annotate_decisions(plot, marks, t0, quad,
                                              prefix=f"{stream} ")
+        self._render_iq_plane()
 
     # ── Histograms ────────────────────────────────────────────────
 
@@ -2839,7 +3063,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def apply_theme(self, dark_mode: bool) -> None:
         self.dark_mode = dark_mode
         bg_color, pen_color = theme_colors(dark_mode)
-        plots = [self.pulse_plot_i, self.pulse_plot_q,
+        plots = [self.pulse_plot_i, self.pulse_plot_q, self.iq_plot,
                  self.template_plot_i, self.template_plot_q] \
             + list(self.hist_plots.values())
         for plot in plots:
@@ -2851,3 +3075,4 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 ax.setTextPen(pen_color)
         self._render_histograms()
         self._render_templates()
+        self._render_iq_plane()

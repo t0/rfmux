@@ -104,8 +104,8 @@ DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
 
 # Default linspace settings for amplitude sweeps
-DEFAULT_AMP_START = 0.001  # Default start for amplitude linspace
-DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
+DEFAULT_AMP_START = -65.0   # dBm, start of the generated amplitude list
+DEFAULT_AMP_STOP = -40.0    # dBm, end of the generated amplitude list
 DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
 
 # Multisweep defaults
@@ -347,6 +347,21 @@ def find_parent_with_attr(widget: QtWidgets.QWidget, attr_name: str) -> Optional
 # Common theme-dependent colors used across multiple panels.
 LEGEND_TEXT_DARK = '#CCCCCC'   # Legend text colour for dark mode
 LEGEND_TEXT_LIGHT = '#333333'  # Legend text colour for light mode
+
+
+def flag_tint(widget: QtWidgets.QWidget, colour: str,
+              weight: float = 0.25) -> QtGui.QColor:
+    """A background that flags a row or cell of *widget*: its palette's
+    base colour washed with *colour* by *weight*.  Light on a light
+    theme, dark on a dark one, whatever the Dark Mode flag says, and
+    the text keeps the palette's own colour, so it stays readable on
+    a desktop whose window theme the flag does not reach."""
+    base = widget.palette().color(QtGui.QPalette.ColorRole.Base)
+    flag = QtGui.QColor(colour)
+    mix = lambda a, b: int(round(a + (b - a) * weight))
+    return QtGui.QColor(mix(base.red(), flag.red()),
+                        mix(base.green(), flag.green()),
+                        mix(base.blue(), flag.blue()))
 
 
 def theme_colors(dark_mode: bool) -> tuple[str, str]:

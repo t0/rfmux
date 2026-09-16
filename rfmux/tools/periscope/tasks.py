@@ -605,6 +605,37 @@ class MultisweepSignals(QObject):
     all_completed = pyqtSignal()
     error = pyqtSignal(int, float, str)
 
+def fit_frequencies_for(amp: float, fit_by_amp: dict) -> list | None:
+    """The fitted resonance frequencies of the sweep at the amplitude
+    nearest *amp* in *fit_by_amp* (``{amplitude: [f per section]}``),
+    or None when the table is empty."""
+    if not fit_by_amp:
+        return None
+    nearest = min(fit_by_amp, key=lambda a: abs(a - amp))
+    return list(fit_by_amp[nearest])
+
+
+def sweep_centres(amp: float, baseline: list, fit_by_amp: dict | None,
+                  remembered) -> list:
+    """Centre frequencies of one amplitude's sweep, per section.
+
+    A re-run that chose the fitted frequencies centres each section on
+    the fit of the sweep at the nearest amplitude, so every power sits
+    on its own resonance.  Otherwise a section takes the bias point the
+    last sweep at the nearest amplitude found (*remembered(idx, amp)*),
+    and the *baseline* frequency where there is none.
+    """
+    fitted = fit_frequencies_for(amp, fit_by_amp)
+    centres = []
+    for idx, cf in enumerate(baseline):
+        if fitted is not None and idx < len(fitted) and fitted[idx] is not None:
+            centres.append(float(fitted[idx]))
+            continue
+        old = remembered(idx, amp)
+        centres.append(old if old is not None else cf)
+    return centres
+
+
 class MultisweepTask(QtCore.QThread):
     """QThread subclass for performing multisweep operations without blocking the GUI."""
     def __init__(self, crs: "CRS", params: dict, signals: MultisweepSignals, window: Any):
@@ -672,11 +703,11 @@ class MultisweepTask(QtCore.QThread):
                     self.signals.error.emit(module_idx, amp_val, "Conceptual frequencies not available from window.")
                     return
 
-                for idx, conceptual_cf in enumerate(conceptual_frequencies_from_window):
-                    remembered_cf = self.window._get_closest_remembered_cf(idx, amp_val)
-                    chosen_input_cf = remembered_cf if remembered_cf is not None else self.baseline_resonance_frequencies[idx]
-                    current_sweep_cfs_for_this_amp.append(chosen_input_cf)
-                    # conceptual_idx_to_input_cf_map[idx] = chosen_input_cf
+                current_sweep_cfs_for_this_amp = sweep_centres(
+                    amp_val,
+                    self.baseline_resonance_frequencies[:len(conceptual_frequencies_from_window)],
+                    self.params.get('fit_frequencies_by_amp'),
+                    self.window._get_closest_remembered_cf)
 
                 directions_to_sweep = ["upward","downward"] if sweep_direction == "both" else [sweep_direction]
 

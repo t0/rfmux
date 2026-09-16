@@ -1231,24 +1231,30 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
-    def _get_fit_frequencies(self, freqs):
-        """Get fitted resonance frequencies from the first available amplitude data."""
-        ref_freqs = []
-        for det_idx in range(1, len(freqs) + 1):
-            if det_idx not in self.results_by_detector:
-                continue
-            amp_dir_dict = self.results_by_detector[det_idx]
-            if not amp_dir_dict:
-                continue
-            first_entry = next(iter(amp_dir_dict.values()))
-            if first_entry.get('skewed_fit_success'):
-                ref_freqs.append(first_entry['fit_params']['fr'])
-            elif first_entry.get('nonlinear_fit_success'):
-                ref_freqs.append(first_entry['nonlinear_fit_params']['fr'])
-            else:
-                ref_freqs.append(first_entry.get('bias_frequency', first_entry.get('original_center_frequency')))
-        ref_freqs.sort()
-        return ref_freqs
+    def _fit_frequencies_by_amp(self, n_sections: int) -> dict:
+        """``{amplitude: [f per section]}`` from every sweep taken: each
+        power's own fitted resonance frequency per section, else the
+        bias point that sweep chose, else the section's original centre
+        where the power has no sweep of it.  The first direction swept
+        at a power stands for it."""
+        from rfmux.algorithms.measurement.df_calibration import fitted_frequency
+        table: dict[float, list] = {}
+        for idx in range(n_sections):
+            for entry in self.results_by_detector.get(idx + 1, {}).values():
+                amp = entry.get('amplitude')
+                if amp is None:
+                    continue
+                row = table.setdefault(float(amp), [None] * n_sections)
+                if row[idx] is None:
+                    f = fitted_frequency(entry)
+                    if f is None:
+                        f = entry.get('bias_frequency',
+                                      entry.get('original_center_frequency'))
+                    row[idx] = None if f is None else float(f)
+        for amp, row in table.items():
+            table[amp] = [f if f is not None else self.conceptual_section_frequencies[i]
+                          for i, f in enumerate(row)]
+        return table
     
     
     def _rerun_multisweep(self):
@@ -1267,11 +1273,12 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # --- Determine frequencies to seed the dialog ---
         dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
 
-        ##### Getting the fit values for updating in re-run ######
+        # The dialog shows the fitted frequencies of the lowest power
+        # swept, and offers them only when a sweep has been taken.
+        fit_table = self._fit_frequencies_by_amp(len(dialog_seed_frequencies))
+        fit_freqs = list(fit_table[min(fit_table)]) if fit_table else None
 
-        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
 
-        
         if self.current_run_amps: # If there was a previous/current run configuration
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.
@@ -1353,6 +1360,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 else: # Should be caught by the "No amplitudes specified" case, but as a safeguard
                     final_baseline_cfs_for_new_task = section_frequencies_from_dialog if section_frequencies_from_dialog else list(self.conceptual_section_frequencies)
 
+
+            # The fitted frequencies, chosen: every power re-centres on
+            # its own fit, and the history of bias points is bypassed.
+            # None otherwise, so a table from an earlier re-run does not
+            # linger in initial_params.
+            if new_params_from_dialog.get('use_fit_frequencies') and fit_table \
+                    and new_amps_for_this_run:
+                from .tasks import fit_frequencies_for
+                final_baseline_cfs_for_new_task = fit_frequencies_for(
+                    new_amps_for_this_run[0], fit_table)
+                new_params_from_dialog['fit_frequencies_by_amp'] = fit_table
+            else:
+                new_params_from_dialog['fit_frequencies_by_amp'] = None
 
             # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
             new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task

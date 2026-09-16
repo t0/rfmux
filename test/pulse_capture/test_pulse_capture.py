@@ -1391,12 +1391,14 @@ class TestDetectionParamsPlumbing:
             DETECTION_PARAMS,
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
-        # session_kwargs also carries the two sizing quantities, which
-        # are not detection knobs but are needed to build the session,
-        # and trigger_basis, which the session applies on the way in
-        # rather than handing to PulseCapture.
+        # session_kwargs also carries the sizing quantities, which are
+        # not detection knobs but are needed to build the session (the
+        # ring, the training length, the record the file keeps), and
+        # trigger_basis, which the session applies on the way in rather
+        # than handing to PulseCapture.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
                                                    "noise_samples",
+                                                   "noise_record_samples",
                                                    "trigger_basis"}
         # The join that matters: every detection knob still gets there.
         assert set(DETECTION_PARAMS) <= set(kw)

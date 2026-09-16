@@ -341,6 +341,40 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
     return rotation * scale
 
 
+def tuning_sweep(row):
+    """The sweep a tuning row carries, in the frame the channel's
+    samples stream in: ``(frequencies_hz, iq_counts, bias_point)``, or
+    None when the row holds no sweep.
+
+    The sweep was taken at ADC phase zero.  Two turns can separate it
+    from the samples: a multisweep run with "rotate saved data" turned
+    the stored sweep by ``applied_rotation_degrees``, and a bias that
+    set a nonzero ``optimal_phase_degrees`` streams samples the board
+    has turned by minus that phase.  The sweep is turned by minus both
+    to sit under the samples.  *bias_point* is the sweep interpolated
+    at the bias frequency, or None without one.
+    """
+    if not isinstance(row, dict) or "frequencies" not in row \
+            or "iq_complex" not in row:
+        return None
+    f = np.asarray(row["frequencies"], dtype=float)
+    iq = np.asarray(row["iq_complex"], dtype=complex)
+    if f.size < 2 or f.shape != iq.shape:
+        return None
+    turn = float(row.get("optimal_phase_degrees") or 0.0) \
+        + float(row.get("applied_rotation_degrees") or 0.0)
+    if turn:
+        iq = iq * np.exp(-1j * np.radians(turn))
+    order = np.argsort(f)
+    f, iq = f[order], iq[order]
+    bias = row.get("bias_frequency")
+    point = None
+    if bias is not None and f[0] <= float(bias) <= f[-1]:
+        point = complex(np.interp(float(bias), f, iq.real),
+                        np.interp(float(bias), f, iq.imag))
+    return f, iq, point
+
+
 def window_shortfall(times, window, tolerance: float) -> tuple:
     """How much of *window* (t0, t1) the samples at *times* fail to
     cover, as (seconds missing at the start, seconds missing at the

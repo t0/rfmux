@@ -84,7 +84,7 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--fastrx/--no-fastrx", default=True, show_default=True,
               help="fastrx recording of the channel stream")
 @click.option("--parser-interface", default=None,
-              help="1G interface for the parser; default: found from the board address")
+              help="interface the parser listens on; default: found from the board address")
 @click.option("--fastrx-interface", default=None,
               help="100G interface fastrxd runs on; needed when several run")
 @click.option("--fastrx-socket", default=None, help="fastrxd socket path, if not derivable")

@@ -60,6 +60,10 @@ def _store_units(grp, stored_units, channel) -> None:
 #: Attribute on a ``tuning`` group naming the fields stored as JSON.
 TUNING_JSON_FIELDS = "json_fields"
 
+#: Dataset under a channel group: the noise training record, complex
+#: samples in the channel's stored units.
+NOISE_RECORD = "noise_training"
+
 
 def _json_default(value):
     if isinstance(value, complex):
@@ -180,14 +184,19 @@ class _PulseFileWriter:
         grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
 
     def _set_noise_stats(self, key_for,
-                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
-        """Stamp per-channel noise attrs; *key_for* maps channel → group."""
+                         noise_stats: Dict[int, ChannelNoiseStats],
+                         noise_data: Optional[Dict[int, np.ndarray]] = None,
+                         ) -> None:
+        """Stamp per-channel noise attrs and records; *key_for* maps
+        channel → group."""
         if not self.is_open:
             return
         for ch, ns in noise_stats.items():
             key = key_for(ch)
             if key in self.f:
                 self._write_noise_attrs(self.f[key], ns)
+                if noise_data and ch in noise_data:
+                    self._replace_datasets(key, {NOISE_RECORD: noise_data[ch]})
         self.f.flush()
 
     def _append_pulse_to(self, key: str, pulse_idx: int, pulse_data: dict,
@@ -207,11 +216,14 @@ class _PulseFileWriter:
 
     def _replace_datasets(self, group_key: str,
                           data: Dict[str, np.ndarray]) -> None:
-        """Overwrite a group's datasets wholesale (histograms/templates).
+        """Overwrite a group's datasets wholesale (histograms, templates,
+        the noise training record).
 
         Running accumulators are rewritten in full on every flush rather
         than appended to, so the file always holds one self-consistent
-        snapshot however the capture ends.
+        snapshot however the capture ends.  Uncompressed: this runs on
+        the thread that feeds samples, and gzip of a fast channel's
+        training record costs 160 ms for a 4% saving.
         """
         if not self.is_open:
             return
@@ -294,6 +306,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         capture_params: Dict[str, Any],
         tuning: Optional[Dict[int, dict]] = None,
         stored_units: Optional[Dict[int, str]] = None,
+        noise_data: Optional[Dict[int, np.ndarray]] = None,
     ):
         super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
@@ -303,6 +316,9 @@ class PulseHDF5Writer(_PulseFileWriter):
             grp = self.f.create_group(channel_group(ch))
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
+            if noise_data and ch in noise_data:
+                self._replace_datasets(channel_group(ch),
+                                       {NOISE_RECORD: noise_data[ch]})
             grp.attrs["pulse_count"] = 0
             _store_tuning(grp, tuning, ch)
             _store_units(grp, stored_units, ch)
@@ -355,14 +371,16 @@ class PulseHDF5Writer(_PulseFileWriter):
 
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
+        noise_data: Optional[Dict[int, np.ndarray]] = None,
     ) -> None:
-        """Refresh per-channel noise attributes after a re-estimation.
+        """Refresh per-channel noise attributes, and the training
+        records when given, after a re-estimation.
 
         Later pulses' derived attrs use the new statistics; the channel
         group attrs always reflect the most recent estimate.
         """
         self._noise_stats.update(noise_stats)
-        self._set_noise_stats(channel_group, noise_stats)
+        self._set_noise_stats(channel_group, noise_stats, noise_data)
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
         """Overwrite histogram datasets with current running histograms.
@@ -429,10 +447,12 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         self.f.flush()
 
     def set_noise_stats(self, stream: str,
-                        noise_stats: Dict[int, ChannelNoiseStats]) -> None:
+                        noise_stats: Dict[int, ChannelNoiseStats],
+                        noise_data: Optional[Dict[int, np.ndarray]] = None,
+                        ) -> None:
         self._noise[stream].update(noise_stats)
         self._set_noise_stats(lambda ch: f"{stream}/{channel_group(ch)}",
-                              noise_stats)
+                              noise_stats, noise_data)
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
                      pulse_data: dict) -> None:
@@ -572,6 +592,18 @@ class PulseHDF5Reader:
             jump_std_I=float(grp.attrs.get("noise_jump_std_I", 0.0)),
             jump_std_Q=float(grp.attrs.get("noise_jump_std_Q", 0.0)),
         )
+
+    def noise_training(self, channel: int,
+                       stream: Optional[str] = None) -> Optional[np.ndarray]:
+        """The tail of the training record *channel*'s noise statistics
+        were fitted to, as much of it as the session kept, complex
+        samples in the stored units; None when the file carries none."""
+        if self.f is None:
+            return None
+        grp = self.f.get(self._ch_key(channel, stream))
+        if grp is None or NOISE_RECORD not in grp:
+            return None
+        return np.asarray(grp[NOISE_RECORD][()], dtype=np.complex128)
 
     def volts_per_count(self) -> Optional[float]:
         """The counts-to-volts constant *this file* was written with.

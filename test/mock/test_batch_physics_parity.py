@@ -1,8 +1,6 @@
 """The hoisted batch path is the reference loop with the constants
 hoisted: same arithmetic, same noise draws, same cache decisions, same
 end state.  Pinned against the loop on one seed, with pulses in flight."""
-import asyncio
-
 import numpy as np
 import pytest
 
@@ -10,37 +8,12 @@ FS = 2441406.25
 N = 64
 
 
-def _model(seed, mode, pulses=True):
-    from rfmux.mock.crs import ServerMockCRS
-    crs = ServerMockCRS("0000")
-    cfg = {"num_resonances": 2, "resonator_random_seed": seed,
-           "auto_bias_kids": True, "bias_amplitude": 0.001}
-    if pulses:
-        cfg.update({"pulse_mode": "periodic", "pulse_period": 0.0005,
-                    "pulse_tau_rise": 1e-6, "pulse_tau_decay": 1e-4,
-                    "pulse_amplitude": 3.0})
-    asyncio.run(crs.generate_resonators(cfg))
-    crs._physics_config["physics_batch_mode"] = mode
-    return crs, crs._resonator_model
-
-
-def _run(crs, m, n_batches, seed):
-    np.random.seed(seed)
-    out = []
-    for k in range(n_batches):
-        t = k * N / FS
-        r = m.calculate_module_response_coupled(
-            1, num_samples=N, sample_rate=FS, start_time=t, pulse_time=t)
-        out.append(np.stack([r[ch] for ch in sorted(r)]))
-    return np.stack(out)
-
-
 @pytest.mark.parametrize("pulses", [False, True])
-def test_hoisted_matches_reference(pulses):
-    a_crs, a = _model(11, "reference", pulses)
-    b_crs, b = _model(11, "hoisted", pulses)
-    ra = _run(a_crs, a, 40, 7)
-    rb = _run(b_crs, b, 40, 7)
+def test_hoisted_matches_reference(batch, pulses):
+    a_crs, a = batch.model(11, "reference", pulses)
+    b_crs, b = batch.model(11, "hoisted", pulses)
+    ra = batch.run(a_crs, a, 40, 7, fs=FS, n=N)
+    rb = batch.run(b_crs, b, 40, 7, fs=FS, n=N)
     rel = np.max(np.abs(ra - rb) / np.maximum(np.abs(ra), 1e-300))
     assert rel < 1e-9, f"max relative deviation {rel:.3e}"
     # Same end state, so the slow emitter reads the same resonators.
@@ -51,14 +24,14 @@ def test_hoisted_matches_reference(pulses):
     assert a._nqp_state_t == b._nqp_state_t
 
 
-def test_hoisted_dispatches_once_per_batch(monkeypatch):
+def test_hoisted_dispatches_once_per_batch(batch, monkeypatch):
     """The per-sample work is gone: at most two Lk/R kernel dispatches
     per batch, where the loop made one per sample."""
     from rfmux.mr_resonator import jit_physics
-    crs, m = _model(11, "hoisted")
+    crs, m = batch.model(11, "hoisted")
     # One-time work (the noise-sensitivity finite difference) lands in
     # the first batch; the claim is about the per-batch cost after it.
-    _run(crs, m, 1, 7)
+    batch.run(crs, m, 1, 7, fs=FS, n=N)
     calls = {"n": 0}
     real = jit_physics.vectorized_update_params_from_nqp
 
@@ -66,7 +39,7 @@ def test_hoisted_dispatches_once_per_batch(monkeypatch):
         calls["n"] += 1
         return real(*a, **k)
     monkeypatch.setattr(jit_physics, "vectorized_update_params_from_nqp", counting)
-    _run(crs, m, 10, 7)
+    batch.run(crs, m, 10, 7, fs=FS, n=N)
     assert calls["n"] <= 2 * 10, f"{calls['n']} kernel dispatches for 10 batches"
 
 
@@ -108,13 +81,13 @@ def _configure(crs, n_channels, clustered):
 
 
 @pytest.mark.parametrize("pulse_time", [None, 1.0])
-def test_batch_paths_agree_with_many_coupled_channels(pulse_time):
+def test_batch_paths_agree_with_many_coupled_channels(batch, pulse_time):
     """Forty channels, half of them within one bandwidth of another so
     the pair sum has off-diagonal terms, with and without per-sample
     pulse times."""
     outs, stats = [], []
     for mode in ("reference", "hoisted"):
-        crs, m = _model(11, mode, pulses=True)
+        crs, m = batch.model(11, mode, pulses=True)
         _configure(crs, 40, clustered=True)
         crs._fir_stage = 6
         np.random.seed(5)
@@ -129,3 +102,46 @@ def test_batch_paths_agree_with_many_coupled_channels(pulse_time):
     rel = np.max(np.abs(ra - rb) / np.maximum(np.abs(ra), 1e-300))
     assert rel < 1e-9, f"max relative deviation {rel:.3e}"
     assert stats[0] == stats[1]
+
+
+def test_a_kept_state_carries_the_r_of_its_instant(batch):
+    """A pulse raises the QP density, and with it R as well as Lk: the
+    state kept for each QP key holds the R of that instant, so a pulse
+    moves the dissipation quadrature and not only the frequency."""
+    crs, m = batch.model(11, "hoisted", pulses=True)
+    R0 = np.array([lk.R for lk in m.mr_lekids])
+    batch.run(crs, m, 40, 7, fs=FS, n=N)
+    seen = {tuple(R) for ts in m._tone_states.values()
+            for _, R, _, _ in ts.runs.values()}
+    assert len(seen) > 1
+    assert all(np.all(np.asarray(R) >= R0) for R in seen)
+    assert any(np.any(np.asarray(R) > R0) for R in seen)
+
+
+def test_converge_tones_chunks_agree_with_one_call(batch, monkeypatch):
+    """A call whose runs times resonators exceed RUN_ELEMENTS_PER_CALL is
+    split into tone chunks; the split must not change a value."""
+    from rfmux.mr_resonator import jit_physics
+    crs, m = batch.model(11, "hoisted", pulses=True)
+    whole = batch.run(crs, m, 40, 7, fs=FS, n=N)
+    monkeypatch.setattr(jit_physics, "RUN_ELEMENTS_PER_CALL", 3 * 11)
+    crs, m = batch.model(11, "hoisted", pulses=True)
+    chunked = batch.run(crs, m, 40, 7, fs=FS, n=N)
+    assert np.array_equal(whole, chunked)
+
+
+def test_a_pulse_makes_the_dip_shallower(batch):
+    """More quasiparticles mean more loss: the swept dip of a resonator
+    with a pulse in flight is shallower than at rest, as well as moved
+    down in frequency."""
+    crs, m = batch.model(3, "hoisted", pulses=False)
+    i = int(np.argsort(m.resonator_frequencies)[1])
+    fgen = float(m.resonator_frequencies[i])
+    grid = np.linspace(fgen - 3e6, fgen + 3e6, 3001)
+    rest = m.s21_sweep(grid, 1e-4)
+    m.add_pulse_event(i, 0.5, amplitude=3.0)
+    m.update_qp_densities_for_time(0.5 + 2e-6)
+    pulsed = m.s21_sweep(grid, 1e-4)
+    assert rest.min() < 0.9, "no dip on the grid"
+    assert pulsed.min() > rest.min() + 0.01
+    assert grid[np.argmin(pulsed)] < grid[np.argmin(rest)]

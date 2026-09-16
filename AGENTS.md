@@ -168,11 +168,22 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 ### MockCRS Physics
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
-- Single convergence loop: `converged_lekid_parameters()`, seeded with the
-  currents every resonator last had under a tone (the model's state
-  memory) and stepped adaptively,
-  so a bifurcated resonance is hysteretic: currents are a small fraction
-  of Istar (a linewidth of shift is a 1e-4 change in Lk)
+- Single convergence loop: `converged_lekid_parameters()`, run by
+  `converge_tones()` for every tone of an evaluation at once, each seeded
+  with the currents its resonators last had under it (the model's state
+  memory) and stepped adaptively, so a bifurcated resonance is
+  hysteretic: currents are a small fraction of Istar (a linewidth of
+  shift is a 1e-4 change in Lk)
+- `envelope_parameters()` gives each resonator's Kerr-resonator
+  parameters (omega_r, kappa, K, D, c) from its linear response;
+  `rfmux/mock/kerr.py` linearises about a driven state (rates, probe
+  response, idler, gain); with `envelope_dynamics` on, a pulsed
+  resonator's current rings down to each new steady state and the
+  transient reaches the stream (visible at dec 0 and on PFB)
+- Tones sharing a resonator each shift the resonance the others see:
+  each tone's solve adds twice the other tones' |I|^2 per resonator
+  (cross-phase modulation of an instantaneous nonlinearity), from the
+  states they last left
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
@@ -212,9 +223,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1049 tests, ~1 min
+pytest --tier=quick                 # Edit loop: 1066 tests, ~1 min
 pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1071 that run without a board, ~4 min
+pytest --tier=full                  # All 1088 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

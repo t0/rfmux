@@ -142,6 +142,13 @@ def test_stream_counts_are_get_samples_counts():
     consumer reading either path sees the same number on a biased tone."""
     import asyncio
     crs, st = _streamer(6)
+    # The scale, not its noise: eight samples against fifty differ by
+    # a few percent with QP noise drawn from whatever RNG state earlier
+    # tests left, and get_samples evaluates at the time since the mock
+    # started, seconds after a cold JIT compile, where the TLS wander
+    # is not the block's at time zero.
+    crs._resonator_model.nqp_noise_enabled = False
+    crs._resonator_model._tls_generator = None
     seen = []
     st._send_slow_packet = lambda module_num, _dec, samples, t_frame: seen.append(samples[0])
     st._emit_slow_block(1, 0.0, 6, 8)

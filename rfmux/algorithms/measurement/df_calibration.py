@@ -86,7 +86,9 @@ def _fitted_model(entry, fits):
             p = entry["nonlinear_fit_params"]
             args = [float(p[k]) for k in NONLINEAR_PARAMS]
             gain = entry.get("gain_complex") or 1.0
-            model = lambda ff: gain * nonlinear_iq(np.asarray(ff, dtype=np.float64), *args)
+            model = lambda ff: gain * nonlinear_iq(
+                np.asarray(ff, dtype=np.float64), *args,
+                sweep_direction=entry.get("sweep_direction", "upward"))
         elif fit == "skewed" and _has_skewed_fit(entry):
             p = entry["fit_params"]
             model = _skewed_model(*_sorted_sweep(entry), p)
@@ -200,7 +202,9 @@ def _record_fit(entry, fit) -> None:
         p = entry.get("nonlinear_fit_params")
         if entry["nonlinear_fit_success"] and p:
             f = np.asarray(entry["frequencies"], dtype=np.float64)
-            entry["nonlinear_model_iq"] = nonlinear_iq(f, *[float(p[k]) for k in NONLINEAR_PARAMS])
+            entry["nonlinear_model_iq"] = nonlinear_iq(
+                f, *[float(p[k]) for k in NONLINEAR_PARAMS],
+                sweep_direction=entry.get("sweep_direction"))
     else:
         entry["skewed_fit_applied"] = True
         entry["skewed_fit_success"] = _has_skewed_fit(entry)

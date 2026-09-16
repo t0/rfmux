@@ -291,3 +291,13 @@ nonlinear response and are not knobs a user of the array needs.
 
 `periscope MOCK` starts the simulator behind the GUI and enables the Mock
 Configuration dialog.
+
+### Hysteresis and fresh arrays
+
+A driven resonance can keep different states on upward and downward sweeps.
+The mock remembers currents per tone; `hysteresis_follow_hz`,
+`hysteresis_new_tone_steps` and `hysteresis_state_fraction` control following
+frequency moves and reusing cached states. Setting a tone to zero or clearing
+its channel discards its driven history, without requiring a sample read.
+Regenerating an array starts undriven from its configuration and seed; optional
+auto-bias then establishes fresh driven states.

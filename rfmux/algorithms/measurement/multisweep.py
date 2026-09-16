@@ -339,102 +339,105 @@ async def _measure_sweep(
         for region in nco_regions
     ]
 
-    # --- Measurement Loop ---
-    total_nco_regions = len(nco_regions)
-
-    for region_idx, region_targets in enumerate(nco_regions):
-        # --- Set Current NCO Frequency ---
-        current_nco_freq = nco_frequencies[region_idx]
-        await crs.set_nco_frequency(current_nco_freq, module=module)
-
-        # --- Sweep Points within the Region ---
-        active_res_channels = {t.channel for t in region_targets}
-
-        # Loop through sweep points
-        for point_idx in range(npoints_per_sweep):
-            # Configure resonance channels for this sweep point
-            async with crs.tuber_context() as ctx:
-                # Set resonance channels
-                for t in region_targets:
-                    freq = resonance_data[t.name]['frequencies'][point_idx]
-                    freq_rel = freq - current_nco_freq # Use current_nco_freq
-                    ctx.set_frequency(freq_rel, channel=t.channel, module=module)
-                    if not point_idx: # only set amplitude once per sweep
-                        ctx.set_amplitude(
-                            amplitudes[t.name], channel=t.channel, module=module
-                        )
-
-                # Silence this sweep's *other* NCO regions — their tones would
-                # otherwise sit outside the current NCO's band. Only channels
-                # this sweep owns, so a tone the caller parked elsewhere on the
-                # module survives.
-                if not point_idx: # only need to do this once per sweep
-                    for ch in sorted(swept_channels - active_res_channels):
-                        ctx.set_amplitude(0, channel=ch, module=module) # Zeros freq implicitly if amp=0
-                await ctx()
-
-            # Acquire samples for all active resonance channels
-            samples = await crs.get_samples(nsamps, average=True, channel=None, module=module)
-
-            # Process samples for each resonance in this region
-            for t in region_targets:
-                channel_idx = t.channel - 1 # 0-based index
-                # Get raw IQ
-                i_val = samples.mean.i[channel_idx]
-                q_val = samples.mean.q[channel_idx]
-                raw_iq_val = i_val + 1j * q_val
-
-                # Store raw IQ value directly
-                resonance_data[t.name]['iq_counts'][point_idx] = raw_iq_val
-
-            # --- Progress update ---
-            if report_progress:
-                report_progress(
-                    (region_idx + point_idx / npoints_per_sweep) / total_nco_regions
-                )
-
-            # Call data callback with intermediate results if provided
-            if data_callback:
-                # Partial data for the region being swept, up to and including
-                # this point.  Regions already finished are not resent, and
-                # regions not yet started have nothing to send.
-                n = point_idx + 1
-                data_callback(module, {
-                    t.name: {
-                        'frequencies': resonance_data[t.name]['frequencies'][:n],
-                        'iq_counts': resonance_data[t.name]['iq_counts'][:n],
-                        'original_center_frequency': t.center_frequency_hz,
-                    }
-                    for t in region_targets
-                }, step, sweep_direction)
-
-    # Record each trace at its measured centre, without analysis or re-centring.
-    results = {}
-    for t in targets:
-        data_entry = resonance_data[t.name]
-        iq_counts = data_entry['iq_counts']
-
-        results[t.name] = {
-            'channel': t.channel,
-            'frequencies': data_entry['frequencies'],
-            'iq_counts': iq_counts,
-            'iq_volts': convert_roc_to_volts(iq_counts),
-            'original_center_frequency': data_entry['original_center_frequency'],
-            'sweep_direction': sweep_direction,
-            'sweep_amplitude': amplitudes[t.name],  # Amplitude this resonator was swept at
-        }
-
-    # --- Hardware Cleanup ---
-    try:
+    async def silence() -> None:
         async with crs.tuber_context() as ctx:
-            # Only the channels this sweep put a tone on. See swept_channels.
-            for ch in sorted(swept_channels):
-                ctx.set_amplitude(0, channel=ch, module=module)
+            for channel in sorted(swept_channels):
+                ctx.set_amplitude(0, channel=channel, module=module)
             await ctx()
-    except Exception as e:
-        warnings.warn(f"Hardware cleanup failed for module {module}: {e}")
 
-    return results
+    try:
+        await silence()
+        # --- Measurement Loop ---
+        total_nco_regions = len(nco_regions)
+
+        for region_idx, region_targets in enumerate(nco_regions):
+            # --- Set Current NCO Frequency ---
+            current_nco_freq = nco_frequencies[region_idx]
+            await crs.set_nco_frequency(current_nco_freq, module=module)
+
+            # --- Sweep Points within the Region ---
+            active_res_channels = {t.channel for t in region_targets}
+
+            # Loop through sweep points
+            for point_idx in range(npoints_per_sweep):
+                # Configure resonance channels for this sweep point
+                async with crs.tuber_context() as ctx:
+                    # Set resonance channels
+                    for t in region_targets:
+                        freq = resonance_data[t.name]['frequencies'][point_idx]
+                        freq_rel = freq - current_nco_freq # Use current_nco_freq
+                        ctx.set_frequency(freq_rel, channel=t.channel, module=module)
+                        if not point_idx: # only set amplitude once per sweep
+                            ctx.set_amplitude(
+                                amplitudes[t.name], channel=t.channel, module=module
+                            )
+
+                    # Silence this sweep's *other* NCO regions — their tones would
+                    # otherwise sit outside the current NCO's band. Only channels
+                    # this sweep owns, so a tone the caller parked elsewhere on the
+                    # module survives.
+                    if not point_idx: # only need to do this once per sweep
+                        for ch in sorted(swept_channels - active_res_channels):
+                            ctx.set_amplitude(0, channel=ch, module=module)
+                    await ctx()
+
+                # Acquire samples for all active resonance channels
+                samples = await crs.get_samples(nsamps, average=True, channel=None, module=module)
+
+                # Process samples for each resonance in this region
+                for t in region_targets:
+                    channel_idx = t.channel - 1 # 0-based index
+                    # Get raw IQ
+                    i_val = samples.mean.i[channel_idx]
+                    q_val = samples.mean.q[channel_idx]
+                    raw_iq_val = i_val + 1j * q_val
+
+                    # Store raw IQ value directly
+                    resonance_data[t.name]['iq_counts'][point_idx] = raw_iq_val
+
+                # --- Progress update ---
+                if report_progress:
+                    report_progress(
+                        (region_idx + point_idx / npoints_per_sweep) / total_nco_regions
+                    )
+
+                # Call data callback with intermediate results if provided
+                if data_callback:
+                    # Partial data for the region being swept, up to and including
+                    # this point.  Regions already finished are not resent, and
+                    # regions not yet started have nothing to send.
+                    n = point_idx + 1
+                    data_callback(module, {
+                        t.name: {
+                            'frequencies': resonance_data[t.name]['frequencies'][:n],
+                            'iq_counts': resonance_data[t.name]['iq_counts'][:n],
+                            'original_center_frequency': t.center_frequency_hz,
+                        }
+                        for t in region_targets
+                    }, step, sweep_direction)
+
+        # Record each trace at its measured centre, without analysis or re-centring.
+        results = {}
+        for t in targets:
+            data_entry = resonance_data[t.name]
+            iq_counts = data_entry['iq_counts']
+
+            results[t.name] = {
+                'channel': t.channel,
+                'frequencies': data_entry['frequencies'],
+                'iq_counts': iq_counts,
+                'iq_volts': convert_roc_to_volts(iq_counts),
+                'original_center_frequency': data_entry['original_center_frequency'],
+                'sweep_direction': sweep_direction,
+                'sweep_amplitude': amplitudes[t.name],  # Amplitude this resonator was swept at
+            }
+
+        return results
+    finally:
+        try:
+            await silence()
+        except Exception as exc:
+            warnings.warn(f"Hardware cleanup failed for module {module}: {exc}")
 
 
 def sweep_nco_frequency(center_frequencies, span_hz: float) -> float:

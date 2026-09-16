@@ -1,0 +1,205 @@
+"""A bifurcated resonance in the mock is hysteretic, as a real one is:
+a sweep down stays in the deep state to the fold, a sweep up jumps at
+the other fold, and below the fold the two directions agree."""
+
+import asyncio
+import contextlib
+import io
+
+import numpy as np
+import pytest
+
+from rfmux.mr_resonator import jit_physics as jp
+
+
+def _model(n=3, **band):
+    """Seed 5, noise off, and the low-power dip of resonator 1."""
+    from rfmux.mock.crs import ServerMockCRS
+    crs = ServerMockCRS("0000")
+    with contextlib.redirect_stdout(io.StringIO()):
+        asyncio.run(crs.generate_resonators(
+            {"num_resonances": n, "resonator_random_seed": 5,
+             "auto_bias_kids": False, **band}))
+    m = crs._resonator_model
+    m.nqp_noise_enabled = False
+    m._tls_generator = None
+    fgen = sorted(m.resonator_frequencies)[1]
+    wide = np.linspace(fgen - 3e6, fgen + 3e6, 3001)
+    f0 = float(wide[np.argmin(m.s21_sweep(wide, 0.001))])
+    return m, f0
+
+
+def _sweep(m, points, amp, tone=None):
+    return np.array([abs(m.s21_lc_response(float(f), amp, tone=tone))
+                     for f in points])
+
+
+def _place(crs, module, channel, frequency, amplitude):
+    crs._nco_frequencies[module] = 0.0
+    crs._frequencies[(module, channel)] = float(frequency)
+    crs._amplitudes[(module, channel)] = amplitude
+    crs._phases[(module, channel)] = 0.0
+
+
+def _response(m, module):
+    fs = 625e6 / 256 / 64
+    return m.calculate_module_response_coupled(
+        module, num_samples=2, sample_rate=fs)
+
+
+def test_up_and_down_agree_below_the_fold():
+    m, f0 = _model()
+    grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
+    up = _sweep(m, grid, 0.003)
+    down = _sweep(m, grid[::-1], 0.003)[::-1]
+    # To the solver's residual, amplified on the dip's steep side.
+    np.testing.assert_allclose(up, down, atol=1e-3)
+    assert up.min() < 0.5
+
+
+def test_a_bifurcated_resonance_is_hysteretic():
+    """Amplitude 0.01 bifurcates this resonator between about -205 and
+    -65 kHz: the way down keeps the deep dip to the lower fold, the way
+    up sees the shallow side and jumps at the upper one."""
+    m, f0 = _model()
+    grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)          # 5 kHz steps
+    up = _sweep(m, grid, 0.01)
+    down = _sweep(m, grid[::-1], 0.01)[::-1]
+    assert down.min() < up.min() - 0.3
+    assert grid[np.argmin(down)] < grid[np.argmin(up)] - 50e3
+    jump_up = grid[np.argmax(np.abs(np.diff(up)))]
+    jump_down = grid[np.argmax(np.abs(np.diff(down)))]
+    assert jump_down < jump_up - 50e3
+    # The lower fold is at -204.9 kHz: the deep state is held to it,
+    # not left a grid step or two early.
+    assert jump_down < f0 - 200e3
+    # The cache serves each direction its own state on a repeat.
+    np.testing.assert_allclose(_sweep(m, grid[::-1], 0.01)[::-1], down,
+                               atol=1e-6)
+    np.testing.assert_allclose(_sweep(m, grid, 0.01), up, atol=1e-6)
+
+
+def test_the_batched_sweep_takes_the_same_state():
+    m, f0 = _model()
+    grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
+    swept = m.s21_sweep(grid[::-1], 0.01)[::-1]
+    m._state_memory.clear()
+    np.testing.assert_allclose(swept, _sweep(m, grid[::-1], 0.01)[::-1],
+                               rtol=1e-9)
+
+
+def test_each_module_keeps_its_own_states():
+    """Channel 1 of module 1 sweeps down through the bifurcation while
+    channel 1 of module 2 sits on another resonator, the modules taking
+    turns as the streamer has them: module 1 keeps its deep state."""
+    m, f0 = _model()
+    crs = m.mock_crs
+    grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
+    down = _sweep(m, grid[::-1], 0.01)[::-1]
+    m._state_memory.clear()
+    m._convergence_cache.clear()
+    _place(crs, 2, 1, sorted(m.resonator_frequencies)[0], 0.001)
+    seen = []
+    for f in grid[::-1]:
+        _place(crs, 1, 1, f, 0.01)
+        seen.append(_response(m, 1)[1][0])
+        _response(m, 2)
+    np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
+
+
+def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state(monkeypatch):
+    """One seeded solve per point where the current moves smoothly (a
+    netanal, a dip search); the sub-steps only where one step from the
+    previous point lands in the other state."""
+    m, f0 = _model()
+    calls = []
+    real = jp.converged_lekid_parameters
+
+    def counting(*a, **k):
+        calls.append(a[0])
+        return real(*a, **k)
+    monkeypatch.setattr(jp, "converged_lekid_parameters", counting)
+    far = f0 + 3e6
+    _sweep(m, [far, far + 1e4], 0.01)            # a netanal's 10 kHz step
+    assert len(calls) == 2
+    calls.clear()
+    _sweep(m, np.arange(f0 + 1e5, f0 - 1.95e5 - 1, -5e3), 0.01)
+    n_ride = len(calls)
+    calls.clear()
+    _sweep(m, [f0 - 2.1e5], 0.01)                # across the fold at -204.9 kHz
+    assert len(calls) > 1
+    assert n_ride < 2 * 60                        # 60 points, few retaken
+
+
+def test_a_collided_pair_keeps_both_resonances_driven():
+    """Two resonances 190 kHz apart, swept by one tone: every resonator
+    resumes its own state from point to point, not only the one the
+    tone is nearest, so the upper resonance is hysteretic too."""
+    m, _ = _model(2, freq_start=1.0e9, freq_end=1.0003e9)
+    wide = np.linspace(1.0e9, 1.005e9, 5001)
+    low = np.abs(m.s21_sweep(wide, 0.001))
+    dip = float(wide[np.argmin(low)])
+    upper = float(wide[np.abs(wide - dip) > 5e4][
+        np.argmin(low[np.abs(wide - dip) > 5e4])])
+    upper, dip = max(upper, dip), min(upper, dip)
+    grid = np.arange(upper + 2e5, dip - 3e5, -2e3)
+    m._state_memory.clear()
+    m._convergence_cache.clear()
+    down = _sweep(m, grid, 0.01, tone=(1, 1))
+    m._state_memory.clear()
+    m._convergence_cache.clear()
+    up = _sweep(m, grid[::-1], 0.01, tone=(1, 1))[::-1]
+    window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
+    assert np.abs(up - down)[window].max() > 0.3
+
+
+def test_a_tone_switched_off_leaves_its_resonator_at_rest():
+    """Inside the bistable region a tone that arrived from above is on
+    the deep state; switched off and back on at the same frequency it
+    finds the resonator at rest, in the low state."""
+    m, f0 = _model()
+    crs = m.mock_crs
+    inside = f0 - 1.5e5                       # bistable at 0.01: -205..-65 kHz
+    for f in np.arange(f0 + 1e5, inside - 1, -5e3):
+        _place(crs, 1, 1, f, 0.01)
+        deep = _response(m, 1)[1][0]
+    _place(crs, 1, 1, inside, 0.0)
+    _response(m, 1)
+    _place(crs, 1, 1, inside, 0.01)
+    back = _response(m, 1)[1][0]
+    m._state_memory.clear()
+    m._convergence_cache.clear()
+    rest = _sweep(m, [inside], 0.01)[0]
+    assert abs(deep) / 0.01 < rest - 0.3
+    assert abs(back) / 0.01 == pytest.approx(rest, abs=1e-3)
+
+
+def test_the_seeded_solver_holds_the_deep_state_and_converges():
+    """Where the fixed damping ran to its cap: seeded from the previous
+    point, the adaptive step converges in the deep state in a few
+    dozen iterations at most."""
+    m, f0 = _model()
+    m._extract_param_arrays()
+    n = len(m.mr_lekids)
+    base_Lk = np.array([m.base_lekid_params[i]["Lk"] for i in range(n)])
+    base_Lg = np.array([m.base_lekid_params[i]["Lg"] for i in range(n)])
+    k0 = m.mr_lekids[0]
+    L, R = m.L_array.copy(), m.R_array.copy()
+
+    def solve(f, L, R, seed=None):
+        return jp.converged_lekid_parameters(
+            float(f), 0.03, L, R, m.C_array, m.Cc_array, base_Lk, base_Lg,
+            m.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA), m.Istar,
+            1e-9, 500, initial_currents=seed)
+    I = np.zeros(n, dtype=complex)
+    worst = 0
+    for f in np.linspace(f0 + 1e5, f0 - 4e5, 251):
+        L, R, I, its = solve(f, L, R, I)
+        worst = max(worst, its)
+    assert worst < 100
+    # At the last point the seeded solve is still in the deep state,
+    # carrying several times the current a solve from rest lands on;
+    # both are a small fraction of Istar, a shift of a linewidth
+    # needing a 1e-4 change in Lk.
+    _, _, at_rest, _ = solve(f, L, R)
+    assert abs(I[1]) > 4 * abs(at_rest[1])

@@ -19,6 +19,14 @@ Fitting estimates resonator parameters from multisweep traces. Run it after a
 measurement, or on data loaded from disk. You can refit the same traces with
 different settings without taking another sweep.
 
+The nonlinear model uses each trace's `sweep_direction` to select the stable
+branch through bifurcation. When calling `fit_nonlinear_iq` directly, pass
+`sweep_direction="upward"` or `"downward"`; if omitted, it uses the input
+frequency order before sorting. Model reconstruction uses the same direction.
+This assumes a sweep entering from outside the bistable region. A trace that
+starts inside it can depend on its prepared state, which direction alone does
+not describe; inspect the residual and accept that some fits fail.
+
 rfmux provides three independent models:
 
 | Model | Fits | Returns |

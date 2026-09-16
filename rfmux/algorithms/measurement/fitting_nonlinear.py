@@ -85,7 +85,8 @@ def _fit_single_resonance(args: Tuple[Union[int, np.integer], Dict, bool, int]) 
 
         # Step 2: Fit the nonlinear model. Qc and Qi come back derived.
         params, errors, residual = fit_nonlinear_iq(
-            frequencies, iq_corrected, fit_nonlinearity=fit_nonlinearity
+            frequencies, iq_corrected, fit_nonlinearity=fit_nonlinearity,
+            sweep_direction=resonance_data.get("sweep_direction")
         )
     except Exception as e:
         warnings.warn(f"Nonlinear fitting failed for {original_cf*1e-6:.3f} MHz: {e}")

@@ -342,6 +342,8 @@ def test_macro_stores_the_tuning(mock_crs, tmp_path):
     only a real call reaches.
     """
     loop, crs = mock_crs
+    # This slow-only capture owns its streamer setup on the shared board.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=None, module=1))
     path = tmp_path / "headless_cal.h5"
     row = {"df_calibration": 2.5e6, "bias_frequency": 1.2e9,
            "sweep_amplitude": 0.01}

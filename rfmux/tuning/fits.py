@@ -422,6 +422,7 @@ def fit_section(
         fits[model] = _FITTERS[model](
             np.asarray(frequencies, dtype=float),
             np.asarray(iq_counts),
+            sweep_direction=entry.get("sweep_direction"),
             approx_Qr=approx_Qr,
             normalize=normalize,
             fr_limit_hz=fr_limit_hz,
@@ -474,6 +475,7 @@ def nonlinear_model_iq(entry: Mapping) -> np.ndarray:
     model = nonlinear_iq(
         np.asarray(entry["frequencies"], dtype=float),
         *(params[p] for p in NONLINEAR_PARAMS),
+        sweep_direction=entry.get("sweep_direction"),
     )
     return model if gain is None else model * gain
 
@@ -832,7 +834,8 @@ def _skewed_fit(frequencies, iq_counts, *, approx_Qr, normalize, fr_limit_hz, **
 
 
 def _nonlinear_fit(
-    frequencies, iq_counts, *, fit_nonlinearity, n_extrema_points, max_residual, **_
+    frequencies, iq_counts, *, fit_nonlinearity, n_extrema_points, max_residual,
+    sweep_direction=None, **_
 ):
     """Remove the gain, run the nonlinear model, and shape the result."""
     result = {
@@ -853,7 +856,8 @@ def _nonlinear_fit(
     result["gain"] = gain
     try:
         params, errors, residual = fit_nonlinear_iq(
-            frequencies, corrected, fit_nonlinearity=fit_nonlinearity
+            frequencies, corrected, fit_nonlinearity=fit_nonlinearity,
+            sweep_direction=sweep_direction
         )
     except FitFailed as exc:
         result["failed_because"] = str(exc)
@@ -1084,7 +1088,17 @@ def fit_skewed(
 # ─── The nonlinear resonator model (adapted from citkid) ──────────────────────
 
 
-def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
+def _resolve_sweep_direction(frequencies, sweep_direction: str | None) -> str:
+    if sweep_direction is None:
+        f = np.asarray(frequencies).reshape(-1)
+        sweep_direction = "downward" if len(f) > 1 and f[-1] < f[0] else "upward"
+    if sweep_direction not in ("upward", "downward"):
+        raise ValueError("sweep_direction must be upward or downward")
+    return sweep_direction
+
+
+def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0, *,
+                 sweep_direction: str | None = None):
     r"""Transmission through a nonlinear resonator.
 
     .. code-block:: text
@@ -1103,7 +1117,7 @@ def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
     The stored energy pulls the resonance to lower frequency, so the dip sits
     below ``fr`` and a sweep leans that way; for ``a > 4*sqrt(3)/9`` the relation
     is multivalued (bifurcation) and the curve has a step where
-    :func:`get_y_nonlinear` changes branch.
+    :func:`get_y_nonlinear` reaches the end of the selected stable branch.
 
     Cable delay is not in here: rfmux takes it out upstream.
 
@@ -1118,17 +1132,21 @@ def nonlinear_iq(f, fr, Qr, amp, phi, a, i0, q0):
             ``4*sqrt(3)/9 ≈ 0.7698``; a linear resonator sits near 0.
         i0 (float): Real part of the overall gain and phase offset.
         q0 (float): Imaginary part of the same.
+        sweep_direction: Acquisition direction; inferred from frequency order
+            when omitted. Assumes the sweep entered from outside bistability.
+            Direction alone does not specify a state prepared inside it.
 
     Returns:
         np.ndarray: complex S21 at each frequency.
     """
     yg = Qr * (f - fr) / fr
-    y = get_y_nonlinear(yg, a)
+    y = get_y_nonlinear(
+        yg, a, sweep_direction=_resolve_sweep_direction(f, sweep_direction))
     resonator = 1.0 - (amp / np.cos(phi)) * np.exp(1.0j * phi) / (1.0 + 2.0j * y)
     return (i0 + 1.0j * q0) * resonator
 
 
-def get_y_nonlinear(yg, a):
+def get_y_nonlinear(yg, a, *, sweep_direction: str = "upward"):
     """The detuning ``y`` that solves Swenson et al. 2013 eq. 13,
     ``y = yg + a / (1 + 4 y^2)``.
 
@@ -1136,26 +1154,43 @@ def get_y_nonlinear(yg, a):
     ``[yg, yg + a]``. Below bifurcation (``a < 4*sqrt(3)/9``) the equation is
     monotone in ``y`` with one root on that bracket, so bisection always
     converges, and a few Newton steps from the narrowed bracket finish it.
-    Above bifurcation the bracket holds up to three roots and the one found is
-    whichever the bisection lands on: the model curve jumps where the branch
-    changes, and a derivative across the jump is meaningless. ``a == 0`` is the
-    linear case and returns *yg* untouched.
+    Above bifurcation, upward sweeps take the smallest root and downward
+    sweeps the largest. These are the stable branches reached from outside
+    the bistable interval. A derivative across their jumps is meaningless.
+    ``a == 0`` is the linear case and returns *yg* untouched.
 
     Args:
         yg (float | np.ndarray): Generator detuning from the low-power
             resonance, ``Qr * (f - fr) / fr``.
         a (float): Nonlinearity parameter.
+        sweep_direction: "upward" or "downward".
 
     Returns:
         float | np.ndarray: detuning from the power-shifted resonance, in units
         of ``fr / Qr``, matching *yg*'s shape.
     """
+    sweep_direction = _resolve_sweep_direction(yg, sweep_direction)
     if a == 0:
         return yg
     scalar = np.isscalar(yg)
     yg = np.atleast_1d(np.asarray(yg, dtype=np.float64))
     lo = yg.copy()
     hi = yg + a
+    if a > BIFURCATION_A:
+        # P(y) = (y - yg)(1 + 4y²) - a. Its stationary points
+        # bracket the middle root; restrict bisection to the selected outer
+        # root wherever three roots exist.
+        discriminant = yg * yg - 0.75
+        delta = np.sqrt(np.maximum(discriminant, 0))
+        left, right = (yg - delta) / 3, (yg + delta) / 3
+        if sweep_direction == "upward":
+            valid = ((discriminant > 0) & (left > lo) & (left < hi)
+                     & ((left - yg) * (1 + 4 * left * left) >= a))
+            hi = np.where(valid, left, hi)
+        else:
+            valid = ((discriminant > 0) & (right > lo) & (right < hi)
+                     & ((right - yg) * (1 + 4 * right * right) <= a))
+            lo = np.where(valid, right, lo)
     for _ in range(12):
         mid = 0.5 * (lo + hi)
         above = mid - a / (1 + 4 * mid * mid) > yg
@@ -1260,6 +1295,7 @@ def fit_nonlinear_iq(
     bounds=None,
     p0=None,
     max_iterations: int = 3,
+    sweep_direction: str | None = None,
 ) -> tuple[dict, dict, float]:
     """Fit :func:`nonlinear_iq` to one gain-corrected complex trace.
 
@@ -1288,6 +1324,8 @@ def fit_nonlinear_iq(
             the threshold before trusting ``fr`` or the model curve.
         p0 (list | None): Initial guesses. None reads them off the trace with
             :func:`guess_p0_nonlinear`.
+        sweep_direction: Acquisition direction; inferred before sorting if
+            omitted. The model assumes entry from outside bistability.
         max_iterations (int): How many times to re-seed the optimizer from its
             own answer before taking the best result seen.
 
@@ -1312,6 +1350,7 @@ def fit_nonlinear_iq(
             f"these are not the same trace."
         )
 
+    sweep_direction = _resolve_sweep_direction(frequencies, sweep_direction)
     order = np.argsort(frequencies)
     frequencies = frequencies[order]
     z = z[order]
@@ -1335,7 +1374,8 @@ def fit_nonlinear_iq(
 
     def model(f, fr_scaled, Qr_scaled, amp, phi, a, i0, q0):
         modelled = nonlinear_iq(
-            f, fr_scaled / scale[0], Qr_scaled / scale[1], amp, phi, a, i0, q0
+            f, fr_scaled / scale[0], Qr_scaled / scale[1], amp, phi, a, i0, q0,
+            sweep_direction=sweep_direction
         )
         return np.hstack((np.real(modelled), np.imag(modelled)))
 
@@ -1365,7 +1405,8 @@ def fit_nonlinear_iq(
 
         fitted = [p / s for p, s in zip(fitted_scaled, scale)]
         errors = [e / s for e, s in zip(np.sqrt(np.diag(covariance)), scale)]
-        residual = calculate_residuals(z, nonlinear_iq(frequencies, *fitted))
+        residual = calculate_residuals(z, nonlinear_iq(
+            frequencies, *fitted, sweep_direction=sweep_direction))
 
         if residual < best_residual:
             best, best_errors, best_residual = fitted, errors, residual

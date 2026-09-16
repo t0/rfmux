@@ -2365,13 +2365,11 @@ def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_cont
     assert marked == pytest.approx(expected)
 
 
-def _all_flagged(panel, qt_app):
-    """Find bias with a guard no answer can satisfy, so every point is a
-    fallback.
+def _with_flagged_points(panel, qt_app):
+    """Find bias with a tight distance guard to obtain flagged points.
 
-    How many of a real run come back flagged depends on the array, the schedule
-    and what the board was last asked to do, so a test that needs flags asks
-    for them rather than hoping a measurement supplies some.
+    A point exactly at the sweep centre can still pass. Tests of a flagged
+    point select one from the report instead of assuming every point fails.
     """
     panel.bias_settings._distance_radios["absolute"].setChecked(True)
     panel.bias_settings.absolute_spin.setValue(0.001)
@@ -2432,7 +2430,7 @@ def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
     so the plot and a notebook call it the same thing; and a sound point does
     not carry one, or the flag would mean nothing."""
 
-    panel = _all_flagged(_panel_showing(swept_container, board), qt_app)
+    panel = _with_flagged_points(_panel_showing(swept_container, board), qt_app)
     findings = panel._bias_by_name()
 
     named_on_plot = {
@@ -3172,11 +3170,13 @@ def test_a_flagged_point_says_so_in_the_bias_column(
         board, qt_app, swept_container):
     """A flag is a property of the bias point, so it sits with the numbers
     that describe it rather than over the plots."""
-    panel = _all_flagged(_panel_showing(swept_container, board), qt_app)
+    panel = _with_flagged_points(_panel_showing(swept_container, board), qt_app)
     digest = _digest(panel, qt_app)
 
-    finding = panel._bias_by_name()[digest.resonator()]
-    assert not finding.good
+    finding = panel.bias_report.flagged[0]
+    digest.select(finding.name)
+    spin(qt_app)
+    assert digest.resonator() == finding.name
     flagged = _digest_columns(digest)["Bias point"]["Flagged"]
     assert finding.flagged_kind in flagged
     assert finding.flagged_because in flagged

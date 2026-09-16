@@ -203,7 +203,9 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 ### MockCRS Physics
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
-- Single convergence loop: `converged_lekid_parameters()`
+- Single convergence loop: `converged_lekid_parameters()`, seeded with the
+  currents under each tone and stepped adaptively to preserve hysteresis.
+  Tone shutdown and array regeneration discard the corresponding history.
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
@@ -243,9 +245,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 2012 tests
-pytest --tier=portable              # No CRS, no GUI: 726 tests
-pytest --tier=full                  # All 2049 that run without a board, including demos
+pytest --tier=quick                 # Edit loop: 2031 tests
+pytest --tier=portable              # No CRS, no GUI: 734 tests
+pytest --tier=full                  # All 2068 that run without a board, including demos
 pytest --tier=acquisition           # MockCRS server + real UDP: 37 tests, including demos (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
@@ -256,8 +258,8 @@ Counts exclude scratch notebooks and the unavailable `rfmux.fastrx` file-format
 tests; see `test/README.md` for the collection environment.
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
-but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
-the test group installed they report zero skips.
+but `hardware`/`all` excludes the board tests. Optional capture and recording
+checks require the fastrx extension and pygetdata as well as the test group.
 Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus

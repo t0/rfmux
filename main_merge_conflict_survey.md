@@ -1,5 +1,154 @@
 # Merging `main` into `tuning_headless_revamp`: conflict survey
 
+## Active integration plan — 2026-09-16
+
+Target: `8749277` (PR #136), into `b4b457a`; common ancestor `20944a0`.
+The historical survey below describes an earlier integration, not this merge.
+
+Agreed decisions:
+
+- Keep drive normalization and the current Periscope architecture.
+- Add sweep direction to nonlinear fitting, residuals and model reconstruction.
+  Keep branch selection simple; occasional fit failures are acceptable. Defer
+  optimizer robustness and priors. Use a few focused contract tests.
+- Silence only multisweep-owned tones between directions/amplitude steps,
+  initialize them off, and guarantee cleanup on failure. Mock off/clear commands
+  must reset tone history without requiring a response evaluation.
+- Regeneration recreates the configured physical array undriven, with no old
+  current history. Optional auto-bias establishes fresh driven states afterward.
+- Remeasure the standard-array expectations before adjusting them.
+
+Work checklist:
+
+- [x] Record current standard-array results and timing.
+- [x] Merge and resolve normalization, removed panel and documentation conflicts.
+- [x] Repair tone shutdown and regeneration state lifecycle, with regressions.
+- [x] Carry direction through nonlinear fitting and display, with focused tests.
+- [x] Remeasure tuning and review changed expectations.
+- [x] Run focused and full no-board validation; update counts and report limits.
+
+Progress and decisions:
+
+- Initial shell Python lacks project dependencies and `pytest` is not on PATH;
+  used `/home/maclean/miniconda3/envs/rfmux-tuning`. Mock RPC tests require
+  execution outside the socket-restricted sandbox. First attempt: `PermissionError:
+  [Errno 1] Operation not permitted` (13 fixture errors); retried successfully.
+- Baseline: 13 standard-array tests passed in 192.42 s. A separate 80-fit
+  measurement took 185.97 s, with zero failed fits and residuals 0.00447–0.05551.
+  Noise remained enabled; these are observations, not deterministic expectations
+  or a controlled performance benchmark (the two baseline runs overlapped).
+- Retained our plotting code and kept the old digest panel deleted. Adapted the incoming
+  normalization test to drive normalization instead of endpoint normalization.
+- Direction selection uses the smallest/largest stable detuning root for
+  upward/downward sweeps entering from outside bistability. Frequency order
+  supplies direction when metadata is absent, before any sorting. No initial
+  state inference or fitter recovery was added. Three new tests failed before
+  implementation (`unexpected keyword argument 'sweep_direction'`); the
+  fitting selection now passes 58 tests.
+- Initial-tone and callback-failure cleanup regressions both failed before
+  implementation and now pass. Cleanup remains scoped to owned channels.
+- Serialize mock response snapshots with off/clear commands so an in-flight
+  calculation cannot reintroduce discarded state. Regeneration keeps the
+  existing model object, resets its state and clears tones; optional auto-bias
+  runs afterward.
+- Review correction: upstream regeneration already calls `_reset_derived_state`,
+  which initializes `_state_memory` to an empty dict. The preliminary survey
+  missed that indirect reset. Removed the redundant explicit reset and two
+  redundant tests. The real regeneration change is clearing old channel tones
+  and removing the misspelled attribute check that replaced the model.
+- Regression check against unmodified main: off/on and clear/on both returned
+  `0.4037456032892674`, versus fresh-state `0.9893566088509442 ± 0.001`;
+  regeneration without auto-bias left amplitude `0.01`. All three tests fail
+  upstream and pass after the fixes.
+- Focused fitting/cleanup/normalization selection: 82 passed in 4.83 s.
+  Focused physics selection: 28 passed in 48.33 s (including the two
+  subsequently removed redundant tests).
+
+- After integration: 80/80 nonlinear fits accepted; residual min/median/max
+  0.00603 / 0.01245 / 0.05580, versus 0.00447 / 0.01256 / 0.05551 before.
+  All eight selected amplitudes remained 0.000792446596230557. SIGE's detected
+  bifurcation moved from step 1 to 0; MONA's from step 0 to 1. Noise is enabled,
+  so these observations do not justify retuning thresholds. The measurement
+  took 234.34 s, overlapping validation; no speed comparison is claimed.
+- Final collection: portable 734, quick 2031, acquisition 37, full 2068,
+  hardware 75, all 2143. The first full run also collected two subsequently
+  removed redundant regeneration tests.
+- Numerical review: 2,000 direction-selected detuning evaluations over random
+  `a` in [0.77, 3] and generator detuning in [-4, 1] agreed with independent
+  polynomial roots to a maximum absolute error of 5.77e-15.
+- The full-suite tuning/noise demo passed in about 249 s; an earlier saved
+  run recorded 78 s. This is not a controlled comparison; performance work
+  remains outside this merge.
+
+- Notebook validation caught a review-cleanup mistake: `base_L_junk` was still
+  used to extract kinetic inductance. Restored the assignment. Six notebook
+  checks failed with `TuberRemoteError NameError: name 'base_L_junk' is not
+  defined` (the multisweep and pulse demos wrapped it as `Exception Failed to create Mock
+  CRS: NameError: name 'base_L_junk' is not defined`). All six notebooks
+  passed after restoration in 1034.50 s: standard array 174.42 s, bias finding
+  184.01 s, fitting 194.32 s, multisweep 283.27 s, network analysis 22.87 s,
+  pulse capture 171.20 s. No extra test was added; these checks caught it.
+
+- A GUI flag-display test failed in the full run and passed alone (34.66 s).
+  Its helper guaranteed some flagged findings but the assertion inspected the
+  first resonator, which can lie exactly at the centre and pass the distance
+  guard. Select a finding from `report.flagged` explicitly and name/document
+  the helper according to that contract. No bias threshold or GUI behavior
+  is changed. The full traceback confirmed the selected finding was good;
+  the corrected test passed in 35.55 s.
+
+- Three synthetic bias tests assumed identical traces in opposite array orders
+  to isolate derivative detection from hysteresis. Direction-aware evaluation
+  made their fixture physically hysteretic. Compute the synthetic trace once
+  and reverse both arrays for the ordering tests; retain controlled differences
+  for the hysteresis tests. Production detection thresholds remain unchanged.
+  All 108 bias tests pass after the fixture correction (2.92 s).
+
+- Final focused contract checks: 11 passed in 4.75 s (direction, sweep
+  cleanup, mock shutdown/regeneration and drive normalization).
+- First full run: 2054 passed, 11 failed, 7 skipped, 2 expected failures,
+  75 hardware tests deselected, in 1948.28 s. Six failures came from the
+  temporary missing model variable, one from the GUI fixture assumption,
+  three from the synthetic direction fixtures, and one from a slow-stream
+  timeout. This is not a clean full-suite pass; every failed test passed its
+  corrected rerun, as recorded here. The entire suite was not run a second time.
+- The capture macro failed with no slow packets received, then passed alone
+  in 15.01 s with no code changes. Its preceding integration tests share a
+  mock server. In the ordered diagnostic rerun the fast and dual tests passed
+  but the slow-only macro was still running after about 160 s; interrupted
+  that run (2 passed, `KeyboardInterrupt`, 194.39 s total). The preceding
+  tests intentionally leave PFB streaming configured. Explicitly disable PFB
+  when setting up the slow-only test so it does not generate an unused fast
+  stream. Keep the tuning-file assertions and capture driver unchanged;
+  all five module tests passed with this setup in 59.29 s. The slow-only
+  macro completed in 9.33 s, versus over 160 s before interruption with PFB
+  still enabled. Concurrent-stream performance remains outside this merge.
+
+- Validation limits: no real board was used. Missing fastrx and pygetdata
+  skipped optional recording checks; the full run reported seven skips and
+  two expected failures. The remaining documented limitations are arbitrary
+  initial states inside bistability, fitter robustness/priors and concurrent
+  mock-stream performance. No detector thresholds were changed.
+- Review complete: no conflict markers or unmerged index entries; staged
+  whitespace check clean. Commit is gated on the final focused contract run.
+
+Regression/diagnostic failures (verbatim excerpts):
+
+```text
+TypeError: get_y_nonlinear() got an unexpected keyword argument 'sweep_direction'
+TypeError: nonlinear_iq() got an unexpected keyword argument 'sweep_direction'
+E       assert np.float64(0.4037456032892674) == 0.9893566088509442 ± 0.001
+E       assert not (0.01)
+E       assert {1: 0.01, 9: 0.2} == {1: 0.0, 9: 0.2}
+E       assert 0.3 == 0.0
+E         Max absolute difference: 7.16984817166609e-05
+E       assert not True
+E       AssertionError: assert 0 == 1
+E                       ValueError: module(s) [1] sent no slow packets: is the streamer on for them?
+```
+
+---
+
 Written 2026-09-08, against `origin/main` = `efb4407` and
 `tuning_headless_revamp` = `3a26dd2`. Nothing has been merged yet. Every
 claim about conflicts below was checked with a no-touch dry run

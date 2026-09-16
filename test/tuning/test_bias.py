@@ -50,13 +50,15 @@ def a_trace(a=0.0, npoints=201, fr=FR, direction="upward"):
     """A synthetic sweep across one resonator: frequencies and complex IQ.
 
     ``a=0`` is a linear resonator; :data:`JUMPED` leans it far enough over to
-    bifurcate. A downward sweep visits the same frequencies in reverse, which
-    is what the macro does.
+    bifurcate. Reverse the same trace for downward entries: these fixtures
+    isolate array ordering and derivative detection from physical hysteresis.
+    Tests of hysteresis impose their own controlled difference between traces.
     """
     frequencies = np.linspace(fr - SPAN / 2, fr + SPAN / 2, npoints)
+    iq = nonlinear_iq(frequencies, fr, QR, 0.5, 0.1, a, 1.2e5, 0.4e5)
     if direction == "downward":
-        frequencies = frequencies[::-1]
-    return frequencies, nonlinear_iq(frequencies, fr, QR, 0.5, 0.1, a, 1.2e5, 0.4e5)
+        return frequencies[::-1], iq[::-1]
+    return frequencies, iq
 
 
 def a_sweep(amplitude=1e-3, a=0.0, fr=FR, direction="upward", **kwargs):
@@ -437,7 +439,7 @@ def test_one_bifurcated_direction_is_enough_to_call_the_step_bifurcated():
     assert bifurcated_by_derivative(mixed).bifurcated
 
 
-def test_a_downward_sweep_is_read_the_same_way_as_an_upward_one():
+def test_reversing_a_trace_does_not_change_its_derivative_verdict():
     """Entries arrive high-to-low; every difference taken here wants them the
     other way round."""
     up = bifurcated_by_derivative({"upward": a_sweep(a=JUMPED)})

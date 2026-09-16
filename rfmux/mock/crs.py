@@ -300,8 +300,7 @@ class ServerMockCRS:
         answering, get_build_progress in particular.
         """
         try:
-            if not hasattr(self, 'resonator_model') or self._resonator_model is None:
-                self._resonator_model = MockResonatorModel(self)
+            await self.clear_channels()
 
             if config:
                 self._physics_config.update(config)
@@ -508,8 +507,10 @@ class ServerMockCRS:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
         assert channel is not None and isinstance(channel, int)
         assert module is not None and isinstance(module, int)
-        with self._config_lock:
+        with self._resonator_model._physics_lock, self._config_lock:
             self._amplitudes[(module, channel)] = amplitude
+            if amplitude == 0:
+                self._resonator_model.forget_tones(module, channel)
 
     async def get_amplitude(self, channel=None, module=None):
         assert channel is not None and isinstance(channel, int)
@@ -863,8 +864,9 @@ class ServerMockCRS:
         keys_to_delete_amp = []
         keys_to_delete_phase = []
 
-        with self._config_lock:
+        with self._resonator_model._physics_lock, self._config_lock:
             for m in modules_to_clear:
+                self._resonator_model.forget_tones(m)
                 for ch in range(1, 1025):
                     if (m, ch) in self._frequencies:
                         keys_to_delete_freq.append((m, ch))

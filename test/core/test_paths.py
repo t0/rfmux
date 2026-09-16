@@ -24,6 +24,22 @@ def test_provisioning_puts_the_docs_beside_the_notebooks(tmp_path, monkeypatch):
     assert paths.get_reference_notebook_dir() == dest
 
 
+def test_a_version_provisioned_earlier_gains_the_docs(tmp_path, monkeypatch):
+    """An install whose version string was provisioned before the docs
+    came along still gets the Guides folder on the next call."""
+    import rfmux
+    docs = tmp_path / "docs"
+    (docs / "guides").mkdir(parents=True)
+    (docs / "guides" / "g.md").write_text("# g\n")
+    monkeypatch.setattr(paths, "_DOCS", docs)
+    monkeypatch.setattr(paths, "get_rfmux_data_dir", lambda: tmp_path / "data")
+    dest = tmp_path / "data" / "reference-notebooks" / rfmux.__version__
+    (dest / "Demos").mkdir(parents=True)          # as an older rfmux left it
+    assert paths.get_reference_notebook_dir() == dest
+    guide = dest / paths.DOCS_FOLDER / "guides" / "g.md"
+    assert guide.is_file() and not os.access(guide, os.W_OK)
+
+
 def test_without_docs_the_notebooks_alone_are_provisioned(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "_DOCS", tmp_path / "absent")
     monkeypatch.setattr(paths, "get_rfmux_data_dir", lambda: tmp_path / "data")

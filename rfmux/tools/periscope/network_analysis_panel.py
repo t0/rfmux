@@ -863,7 +863,8 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         params_for_dialog.pop('module_cable_lengths', None)
         params_for_dialog.pop('cable_length', None) 
 
-        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog)
+        dialog = NetworkAnalysisParamsDialog(self, params_for_dialog,
+                                             dac_scales=dict(self.dac_scales))
         if dialog.exec():
             updated_general_params = dialog.get_parameters() 
             

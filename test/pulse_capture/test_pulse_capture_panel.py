@@ -74,6 +74,15 @@ def _make_panel(qt_app, tmp_path, runtime):
     return panel
 
 
+def _pulse_rows(channel_item) -> int:
+    """Pulse rows under a channel; the noise training row is not one."""
+    from PyQt6 import QtCore
+    return sum(
+        (channel_item.child(i).data(0, QtCore.Qt.ItemDataRole.UserRole)
+         or ("",))[0] in ("pulse", "pair")
+        for i in range(channel_item.childCount()))
+
+
 def _tap1(tap, ch, i, q, t):
     """Feed one sample through the packet-shaped tap.
 
@@ -126,7 +135,7 @@ def test_live_capture_end_to_end(qt_app, tmp_path):
     # Tree: channel group shows count, newest first
     ch_item = panel._channel_items[1]
     assert "(3)" in ch_item.text(0)
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     assert ch_item.child(0).text(0) == \
         f"\u25c6 #{panel._pulse_order[-1][1]:06d}", "newest first"
 
@@ -249,7 +258,7 @@ def test_review_of_a_merged_file_shows_the_recording_under_each_pulse(
     panel.load_from_hdf5(path)
     assert panel._both_mode
     ch_item = panel._channel_items[1]
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     row = ch_item.child(0)
     assert row.text(0) == "\u25c6 slow only"
     assert row.text(2) == "+fast data"
@@ -270,7 +279,7 @@ def test_review_mode(qt_app, tmp_path):
 
     # Tree populated newest-first
     ch_item = panel._channel_items[1]
-    assert ch_item.childCount() == 3
+    assert _pulse_rows(ch_item) == 3
     assert "(3)" in ch_item.text(0)
     assert ch_item.child(0).text(0) == \
         f"\u25c6 #{panel._pulse_order[-1][1]:06d}", "newest first"
@@ -777,11 +786,13 @@ def test_csv_exports(qt_app, tmp_path):
     panel._show_pulse(*panel._pulse_order[-1])
     panel._on_export()
     # Histograms tab
-    panel.viewer_tabs.setCurrentIndex(1)
+    panel.viewer_tabs.setCurrentIndex(2)
+    assert panel.viewer_tabs.tabText(2) == "Histograms"
     panel._on_export()
     # Template tab (needs template data from the file)
     panel._template_data = panel.reader.get_templates()
-    panel.viewer_tabs.setCurrentIndex(2)
+    panel.viewer_tabs.setCurrentIndex(3)
+    assert panel.viewer_tabs.tabText(3) == "Template"
     panel._on_export()
 
     written = sorted(p.name for p in tmp_path.glob("*.csv"))

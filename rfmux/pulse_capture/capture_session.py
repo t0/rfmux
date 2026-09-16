@@ -247,7 +247,8 @@ class PulseCaptureConfig:
     NOISE_TRAIN_PULSES = 20
     #: The training record the file keeps, as a multiple of the max
     #: pulse length: the tail of the record the statistics were fitted
-    #: to, enough to run the robust sigma estimator again offline.
+    #: to, floored at the training length's own minimum so the sigma
+    #: estimator can be run on it again.
     NOISE_RECORD_PULSES = 5
     #: A 1/f window shorter than this draws a warning.
     MIN_WINDOW_MS = 2000.0
@@ -339,7 +340,8 @@ class PulseCaptureConfig:
 
     def noise_record_samples(self, sample_rate: float) -> int:
         """Samples of the training record the file keeps."""
-        return self.NOISE_RECORD_PULSES * self.max_pulse_samples(sample_rate)
+        return max(self._MIN_NOISE,
+                   self.NOISE_RECORD_PULSES * self.max_pulse_samples(sample_rate))
 
     def edge_lookback_samples(self, sample_rate: float) -> int:
         """Edge-detector lag K: margin_fraction of the max pulse.

@@ -7,13 +7,15 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+import pyqtgraph as pg  # noqa: E402
+
 from test.qt_helpers import spin  # noqa: E402
 
 from rfmux.core.transferfunctions import VOLTS_PER_ROC  # noqa: E402
 from rfmux.pulse_capture.detection import ChannelNoiseStats  # noqa: E402
 from rfmux.pulse_capture.hdf5 import PulseHDF5Writer  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
-    PulseCapturePanel, UNITS_DF, UNITS_VOLTS)
+    IQ_PLANE_POINTS, PulseCapturePanel, UNITS_DF, UNITS_VOLTS)
 
 F0 = 1.0e9
 PHASE = 30.0
@@ -55,19 +57,27 @@ def _write_capture(path):
 
 
 def _named(panel):
+    """The curves and symbol series by legend name; the pulse's markers
+    are a scatter and are not among them."""
     return {item.name(): item.getData()
             for item in panel.iq_plot.getPlotItem().listDataItems()
-            if item.name()}
+            if isinstance(item, pg.PlotDataItem) and item.name()}
+
+
+def _markers(panel):
+    return [i for i in panel.iq_plot.getPlotItem().items
+            if isinstance(i, pg.ScatterPlotItem)]
 
 
 def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
-    """The baseline sits on the bias point whichever view is up, the
-    sweep is turned by minus the phase the bias set, and the frequency
-    direction is the df axis of the df view."""
+    """The pulse's samples sit on the bias point whichever view is up,
+    the sweep is turned by minus the phase the bias set, and in the df
+    view the pulse runs along the df axis."""
     path = tmp_path / "plane.h5"
     turned, base = _write_capture(path)
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up
     spin(qt_app)
 
     panel.units_combo.setCurrentText(UNITS_VOLTS)
@@ -76,18 +86,24 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
     x, y = items["tuning sweep"]
     np.testing.assert_allclose(x + 1j * y, turned * VOLTS_PER_ROC)
     assert items["bias point"][0][0] == pytest.approx(base.real)
-    assert items["trigger baseline"][0][0] == pytest.approx(base.real)
-    assert items["trigger baseline"][1][0] == pytest.approx(base.imag)
+    # Points only, no path between them, and the bias point on top.
+    assert "pulse" not in items
+    [markers] = _markers(panel)
+    assert markers.data["x"][0] == pytest.approx(base.real)
+    bias_item = [i for i in panel.iq_plot.getPlotItem().listDataItems()
+                 if i.name() == "bias point"][0]
+    assert bias_item.zValue() > markers.zValue()
     assert panel.iq_plot.getPlotItem().getAxis("bottom").labelText == "I (V)"
 
     panel.units_combo.setCurrentText(UNITS_DF)
     spin(qt_app)
     items = _named(panel)
     bx, by = items["bias point"]
-    tx, ty = items["trigger baseline"]
-    assert (tx[0], ty[0]) == pytest.approx((bx[0], by[0]))
-    dx, dy = items["frequency direction"]
-    assert dx[1] > dx[0] and dy[1] == pytest.approx(dy[0], abs=1e-6)
+    [markers] = _markers(panel)
+    # Every sample of a pulse along the frequency direction keeps the
+    # bias point's dissipation.
+    np.testing.assert_allclose(markers.data["y"], by[0], atol=1e-6)
+    assert markers.data["x"].max() > bx[0]
     assert panel.iq_plot.getPlotItem().getAxis("left").labelText == \
         "dissipation (Hz)"
     assert "bias 1000.001250 MHz" in panel.iq_info.toolTip() + panel.iq_info.text()
@@ -95,16 +111,14 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
     spin(qt_app)
 
 
-def test_a_long_pulse_keeps_its_path_and_thins_its_markers(qt_app, tmp_path):
-    """A fast-mode pulse is hundreds of thousands of samples: the line
-    keeps them all, the time-coloured markers are a fixed budget."""
-    import pyqtgraph as pg
-    from rfmux.tools.periscope.pulse_capture_panel import IQ_PLANE_POINTS
-
+def test_a_long_pulse_thins_its_markers(qt_app, tmp_path):
+    """A fast-mode pulse is hundreds of thousands of samples: the
+    time-coloured markers are a fixed budget."""
     path = tmp_path / "plane.h5"
     _write_capture(path)
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up
     n = 50_000
     k = np.arange(n, dtype=float)
     panel._get_waveform = lambda *a, **kw: {
@@ -113,10 +127,8 @@ def test_a_long_pulse_keeps_its_path_and_thins_its_markers(qt_app, tmp_path):
     panel._current_view = (1, 1)
     panel._render_iq_plane()
     spin(qt_app)
-    assert len(_named(panel)["pulse"][0]) == n
-    markers = [i for i in panel.iq_plot.getPlotItem().items
-               if isinstance(i, pg.ScatterPlotItem)]
-    assert len(markers) == 1 and len(markers[0].data) == IQ_PLANE_POINTS
+    [markers] = _markers(panel)
+    assert len(markers.data) == IQ_PLANE_POINTS
     panel.close()
     spin(qt_app)
 
@@ -127,6 +139,7 @@ def test_without_a_sweep_the_plane_says_so(qt_app, tmp_path):
                     {"streamer_mode": "slow"}).finalize()
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up
     spin(qt_app)
     assert "no sweep in the tuning" in panel.iq_info.toolTip() + panel.iq_info.text()
     assert not _named(panel)

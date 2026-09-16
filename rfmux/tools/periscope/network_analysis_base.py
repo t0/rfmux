@@ -7,14 +7,23 @@ from .utils import (
 )
 import numpy as np  # For linspace
 
+from PyQt6 import QtCore
+from .settings import APPLICATION, ORGANIZATION
+
+
 class NetworkAnalysisDialogBase(QtWidgets.QDialog):
     """
     Base class for network analysis dialogs, providing shared functionality
     for amplitude input (normalized and dBm), DAC scale handling, and
     parameter parsing.
     """
+    #: QSettings prefix under which a dialog remembers its fields between
+    #: opens; empty for a dialog that does not.
+    _KEY = ""
+
     def __init__(self, parent: QtWidgets.QWidget = None, params: dict = None,
-                 modules: list[int] = None, dac_scales: dict[int, float] = None):
+                 modules: list[int] = None, dac_scales: dict[int, float] = None,
+                 settings: QtCore.QSettings | None = None):
         """
         Initializes the base dialog.
 
@@ -23,6 +32,8 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
             params: Dictionary of existing parameters to populate fields.
             modules: List of module numbers relevant to this dialog.
             dac_scales: Dictionary mapping module numbers to their DAC scales in dBm.
+            settings: Where the fields are remembered between opens; the
+                user's Periscope settings by default.
         """
         super().__init__(parent)
         self.params = params or {}  # Store initial parameters, default to empty dict
@@ -30,7 +41,51 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         # Initialize DAC scales for relevant modules, defaulting to None (unknown)
         self.dac_scales = dac_scales or {module_idx: None for module_idx in self.modules}
         self.currently_updating = False # Flag to prevent recursive updates between amp/dBm fields
-        
+        self.settings = settings or QtCore.QSettings(ORGANIZATION, APPLICATION)
+
+    # ── Remembered fields ────────────────────────────────────────
+
+    def _remembered(self) -> tuple:
+        """(key, widget) for every field the dialog remembers: line
+        edits as typed, so an expression like ``1/1000`` survives the
+        round trip, check boxes and combo boxes by their state."""
+        return ()
+
+    def _load(self) -> None:
+        """The fields as they were on the last accept."""
+        for key, widget in self._remembered():
+            value = self.settings.value(self._KEY + key)
+            if value is None:
+                continue
+            if isinstance(widget, QtWidgets.QCheckBox):
+                widget.setChecked(value in (True, "true"))
+            elif isinstance(widget, QtWidgets.QComboBox):
+                widget.setCurrentText(str(value))
+            else:
+                widget.setText(str(value))
+
+    def _save(self) -> None:
+        for key, widget in self._remembered():
+            if isinstance(widget, QtWidgets.QCheckBox):
+                value = "true" if widget.isChecked() else "false"
+            elif isinstance(widget, QtWidgets.QComboBox):
+                value = widget.currentText()
+            else:
+                value = widget.text()
+            self.settings.setValue(self._KEY + key, value)
+        self.settings.sync()
+
+    def accept(self) -> None:
+        """Start: the fields are remembered only once they parse, and
+        only when they are the user's own, not a loaded file's; a field
+        that does not parse keeps the dialog open with its message."""
+        if self._KEY and not (getattr(self, "load_data_available", False)
+                              or getattr(self, "use_data_from_file", False)):
+            if self.get_parameters() is None:
+                return
+            self._save()
+        super().accept()
+
     def setup_amplitude_group(self, layout: QtWidgets.QFormLayout) -> QtWidgets.QGroupBox:
         """
         Sets up the QGroupBox for amplitude settings (Normalized and dBm).
@@ -70,25 +125,26 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         self.amp_edit.editingFinished.connect(self._validate_normalized_values) # Validate on finishing edit
         self.dbm_edit.editingFinished.connect(self._validate_dbm_values)       # Validate on finishing edit
 
-        # Linspace generator UI
+        # Linspace generator UI.  The defaults are powers in dBm, for the
+        # dBm fill; the normalized fill takes the same fields as-is.
         linspace_group = QtWidgets.QGroupBox("Generate Amplitude List")
         linspace_layout = QtWidgets.QFormLayout(linspace_group)
 
-        self.start_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_START}")
+        self.start_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_START:g}")
         self.start_amp_edit.setValidator(QDoubleValidator(self))
-        self.start_amp_edit.setToolTip("Start value for linspace generation.")
+        self.start_amp_edit.setToolTip("Start value for linspace generation (dBm for the dBm fill).")
         linspace_layout.addRow("Start:", self.start_amp_edit)
 
-        self.stop_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_STOP}")
+        self.stop_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_STOP:g}")
         self.stop_amp_edit.setValidator(QDoubleValidator(self))
-        self.stop_amp_edit.setToolTip("Stop value for linspace generation.")
+        self.stop_amp_edit.setToolTip("Stop value for linspace generation (dBm for the dBm fill).")
         linspace_layout.addRow("Stop:", self.stop_amp_edit)
 
         self.iterations_amp_edit = QtWidgets.QLineEdit(f"{DEFAULT_AMP_ITERATIONS}")
         self.iterations_amp_edit.setValidator(QIntValidator(2, 1000, self)) # Min 2 points for linspace
         self.iterations_amp_edit.setToolTip("Number of points for linspace generation (min 2).")
         linspace_layout.addRow("Iterations:", self.iterations_amp_edit)
-        
+
         button_layout = QtWidgets.QHBoxLayout()
         self.fill_amp_button = QtWidgets.QPushButton("Fill Normalized Amplitude")
         self.fill_amp_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
@@ -99,7 +155,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
         self.fill_dbm_button.setAutoDefault(False)  # Prevent this button from capturing Enter key
         self.fill_dbm_button.clicked.connect(self._on_fill_dbm_clicked)
         button_layout.addWidget(self.fill_dbm_button)
-        
+
         linspace_layout.addRow(button_layout)
         amp_layout.addRow(linspace_group) # Add this subgroup to the main amplitude layout
         
@@ -119,7 +175,7 @@ class NetworkAnalysisDialogBase(QtWidgets.QDialog):
 
             values = np.linspace(start, stop, iterations)
             # Use a general format, good for typical normalized amplitudes
-            self.amp_edit.setText(", ".join([f"{v:.6g}" for v in values])) 
+            self.amp_edit.setText(", ".join([f"{v:.6g}" for v in values]))
         except ValueError:
             QtWidgets.QMessageBox.warning(self, "Input Error", "Invalid input for Start, Stop, or Iterations.")
         except Exception as e:

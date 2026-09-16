@@ -53,21 +53,26 @@ def get_reference_notebook_dir() -> Path:
     notes are in the Jupyter session with the notebooks.
     """
     dest = get_rfmux_data_dir() / "reference-notebooks" / rfmux.__version__
+    docs = dest / DOCS_FOLDER
 
-    if dest.exists():
-        return dest
-
-    shutil.copytree(_REFERENCE_NOTEBOOKS, dest)
-    if _DOCS.is_dir():
-        shutil.copytree(_DOCS, dest / DOCS_FOLDER,
+    if not dest.exists():
+        shutil.copytree(_REFERENCE_NOTEBOOKS, dest)
+        _read_only(dest)
+    # A version provisioned before the docs came along gets them now.
+    if _DOCS.is_dir() and not docs.exists():
+        shutil.copytree(_DOCS, docs,
                         ignore=shutil.ignore_patterns("make_*.py",
                                                       "__pycache__"))
+        _read_only(docs)
+        os.chmod(docs, stat.S_IREAD | stat.S_IEXEC)
+    return dest
 
-    # Make files read-only to discourage in-place editing
+
+def _read_only(dest: Path) -> None:
+    """Files 0o444 and folders 0o500 under *dest*, to discourage
+    in-place editing."""
     for root, dirs, files in os.walk(dest):
         for d in dirs:
             os.chmod(os.path.join(root, d), stat.S_IREAD | stat.S_IEXEC)
         for f in files:
             os.chmod(os.path.join(root, f), stat.S_IREAD)
-
-    return dest

@@ -67,7 +67,9 @@ def test_the_file_keeps_the_tail_of_the_record(tmp_path):
     the capture.  The config sets it to five max-pulse lengths."""
     from rfmux.pulse_capture.capture_session import PulseCaptureConfig
     cfg = PulseCaptureConfig(max_pulse_ms=50.0)
-    assert cfg.session_kwargs(596.0)["noise_record_samples"] == 5 * 30
+    # 5 x 30 samples at 596 Hz is under the training floor, so the floor.
+    assert cfg.session_kwargs(596.0)["noise_record_samples"] == cfg._MIN_NOISE
+    assert cfg.session_kwargs(19073.0)["noise_record_samples"] == 5 * 954
 
     session = PulseCaptureSession(
         channels=[1], threshold_sigma=5.0, end_sigma=1.5, buf_size=4000,
@@ -96,15 +98,16 @@ def test_review_mode_shows_the_record_from_the_file(qt_app, tmp_path):
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
     spin(qt_app)
-    items = [panel.pulse_tree.topLevelItem(i)
-             for i in range(panel.pulse_tree.topLevelItemCount())]
-    noise = [i for i in items
-             if (i.data(0, QtCore.Qt.ItemDataRole.UserRole) or ("",))[0]
-             == "noise"]
+    # A row under the channel, not a top-level item.
+    parent = panel._channel_items[1]
+    rows = [parent.child(i) for i in range(parent.childCount())]
+    noise = [r for r in rows
+             if r.data(0, QtCore.Qt.ItemDataRole.UserRole) == ("noise", None, 1)]
     assert len(noise) == 1
     panel._on_tree_double_click(noise[0], 0)
     spin(qt_app)
     assert "Noise training segment" in panel.pulse_info.text()
+    assert "Channel 1" in panel.pulse_info.text()
     assert f"({len(RECORD)} samples)" in panel.pulse_info.text()
     panel.close()
     spin(qt_app)

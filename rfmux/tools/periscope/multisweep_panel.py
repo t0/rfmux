@@ -1273,9 +1273,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # --- Determine frequencies to seed the dialog ---
         dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
 
-        # The dialog shows the fitted frequencies of the lowest power swept.
+        # The dialog shows the fitted frequencies of the lowest power
+        # swept, and offers them only when a sweep has been taken.
         fit_table = self._fit_frequencies_by_amp(len(dialog_seed_frequencies))
-        fit_freqs = list(fit_table[min(fit_table)]) if fit_table else []
+        fit_freqs = list(fit_table[min(fit_table)]) if fit_table else None
 
 
         if self.current_run_amps: # If there was a previous/current run configuration
@@ -1364,15 +1365,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # its own fit, and the history of bias points is bypassed.
             # None otherwise, so a table from an earlier re-run does not
             # linger in initial_params.
-            fit_table = None
-            if new_params_from_dialog.get('use_fit_frequencies'):
+            if new_params_from_dialog.get('use_fit_frequencies') and fit_table \
+                    and new_amps_for_this_run:
                 from .tasks import fit_frequencies_for
-                fit_table = self._fit_frequencies_by_amp(
-                    len(self.conceptual_section_frequencies)) or None
-                if fit_table and new_amps_for_this_run:
-                    final_baseline_cfs_for_new_task = fit_frequencies_for(
-                        new_amps_for_this_run[0], fit_table)
-            new_params_from_dialog['fit_frequencies_by_amp'] = fit_table
+                final_baseline_cfs_for_new_task = fit_frequencies_for(
+                    new_amps_for_this_run[0], fit_table)
+                new_params_from_dialog['fit_frequencies_by_amp'] = fit_table
+            else:
+                new_params_from_dialog['fit_frequencies_by_amp'] = None
 
             # Update the 'resonance_frequencies' in new_params_from_dialog to be this chosen baseline
             new_params_from_dialog['resonance_frequencies'] = final_baseline_cfs_for_new_task

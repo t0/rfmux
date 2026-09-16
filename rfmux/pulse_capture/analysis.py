@@ -346,11 +346,13 @@ def tuning_sweep(row):
     samples stream in: ``(frequencies_hz, iq_counts, bias_point)``, or
     None when the row holds no sweep.
 
-    The sweep was taken at ADC phase zero.  A row whose bias set a
-    nonzero ``optimal_phase_degrees`` streams samples the board has
-    turned by minus that phase, so the sweep is turned the same way to
-    sit under them.  *bias_point* is the sweep interpolated at the
-    bias frequency, or None without one.
+    The sweep was taken at ADC phase zero.  Two turns can separate it
+    from the samples: a multisweep run with "rotate saved data" turned
+    the stored sweep by ``applied_rotation_degrees``, and a bias that
+    set a nonzero ``optimal_phase_degrees`` streams samples the board
+    has turned by minus that phase.  The sweep is turned by minus both
+    to sit under the samples.  *bias_point* is the sweep interpolated
+    at the bias frequency, or None without one.
     """
     if not isinstance(row, dict) or "frequencies" not in row \
             or "iq_complex" not in row:
@@ -359,9 +361,10 @@ def tuning_sweep(row):
     iq = np.asarray(row["iq_complex"], dtype=complex)
     if f.size < 2 or f.shape != iq.shape:
         return None
-    phase = row.get("optimal_phase_degrees") or 0.0
-    if phase:
-        iq = iq * np.exp(-1j * np.radians(float(phase)))
+    turn = float(row.get("optimal_phase_degrees") or 0.0) \
+        + float(row.get("applied_rotation_degrees") or 0.0)
+    if turn:
+        iq = iq * np.exp(-1j * np.radians(turn))
     order = np.argsort(f)
     f, iq = f[order], iq[order]
     bias = row.get("bias_frequency")
@@ -370,18 +373,6 @@ def tuning_sweep(row):
         point = complex(np.interp(float(bias), f, iq.real),
                         np.interp(float(bias), f, iq.imag))
     return f, iq, point
-
-
-def frequency_direction(df_calibration) -> Optional[complex]:
-    """The direction a frequency shift moves the samples in the I/Q
-    plane, as a unit vector.  A shift of df moves IQ by df / calibration,
-    so this is 1 / calibration normalised; multiplied by the calibration
-    it lands on the +real axis, which is the df axis of the frequency
-    basis.  None without a calibration."""
-    cal = _calibration(df_calibration)
-    if not cal:
-        return None
-    return complex(np.conj(cal) / abs(cal))
 
 
 def window_shortfall(times, window, tolerance: float) -> tuple:

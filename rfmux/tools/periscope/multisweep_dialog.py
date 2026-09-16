@@ -6,6 +6,7 @@ from .utils import (
     MULTISWEEP_DEFAULT_NSAMPLES, traceback
 )
 from .network_analysis_base import NetworkAnalysisDialogBase
+from .utils import find_parent_with_attr
 from .tasks import DACScaleFetcher # Import DACScaleFetcher from tasks.py
 import pickle
 import numpy as np
@@ -68,7 +69,8 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                  section_center_frequencies: list[float] | None = None, 
                  dac_scales: dict[int, float] = None, 
                  current_module: int | None = None, 
-                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None):
+                 initial_params: dict | None = None, load_multisweep = False, fit_frequencies: list[float] = None,
+                 settings: QtCore.QSettings | None = None):
         """
         Initializes the Multisweep configuration dialog.
 
@@ -78,8 +80,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
             dac_scales: Pre-fetched DAC scales.
             current_module: The module ID on which the multisweep will be performed.
             initial_params: Dictionary of initial parameters to populate fields.
+            settings: Where the fields are remembered between opens; the
+                user's Periscope settings by default.
         """
-        super().__init__(parent, params=initial_params, dac_scales=dac_scales)
+        super().__init__(parent, params=initial_params, dac_scales=dac_scales,
+                         settings=settings)
         self.section_center_frequencies = section_center_frequencies or []
         self.current_module = current_module # Store the current module for DAC scale and params
         self.load_multisweep = load_multisweep
@@ -93,24 +98,35 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
         self.setModal(True)
         self.use_raw_frequencies = True
 
-        
-        # if self.load_multisweep:
-        #     self._setup_load_ui()
-        # else:
         self._setup_ui()
-            
-        # Asynchronously fetch DAC scales if not provided and CRS is available
-        # This is similar to NetworkAnalysisParamsDialog logic   
-        
-        if parent and hasattr(parent, 'parent') and parent.parent() is not None:
-            main_periscope_window = parent.parent()
-            if hasattr(main_periscope_window, 'crs') and main_periscope_window.crs is not None:
-                # Only fetch if dac_scales weren't passed in and we have a method to do so
-                if not self.dac_scales and hasattr(self, '_fetch_dac_scales_for_dialog'):
-                    self._fetch_dac_scales_for_dialog(main_periscope_window.crs)
-                elif self.dac_scales: # If scales were provided, update UI
-                    self._update_dac_scale_info()
-                    self._update_dbm_from_normalized()
+        self._load()
+        self._update_dac_scale_info()
+        self._update_dbm_from_normalized()
+
+        # The main window is wherever it is above the panel (a dock, a
+        # floating dock, a splitter), so it is found by its attribute;
+        # its scales are shown until the fetch replaces them.
+        periscope = find_parent_with_attr(parent, "crs") if parent else None
+        if periscope is not None and periscope.crs is not None:
+            self._fetch_dac_scales_for_dialog(periscope.crs)
+
+    _KEY = "multisweep/"
+
+    def _remembered(self) -> tuple:
+        """Every sweep setting; the section frequencies come from the
+        caller each time."""
+        return (("span_khz", self.span_khz_edit),
+                ("npoints", self.npoints_edit),
+                ("nsamps", self.nsamps_edit),
+                ("amps", self.amp_edit),
+                ("amp_start", self.start_amp_edit),
+                ("amp_stop", self.stop_amp_edit),
+                ("amp_iterations", self.iterations_amp_edit),
+                ("bias_frequency_method", self.recalc_cf_combo),
+                ("sweep_direction", self.sweep_direction_combo),
+                ("rotate_saved_data", self.rotate_saved_data_checkbox),
+                ("apply_skewed_fit", self.apply_skewed_fit_checkbox),
+                ("apply_nonlinear_fit", self.apply_nonlinear_fit_checkbox))
 
 
 

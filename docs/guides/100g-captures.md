@@ -224,7 +224,7 @@ The parser, on the interface that receives the board's 1G traffic, writes
 the module and channels of interest to a dirfile; it stops on Ctrl-C:
 
 ```bash
-rfmux parser -i <1G interface> -d ~/data/run.dirfile -c <module>:<channels> --drop-stats
+rfmux parser -i <interface> -d ~/data/run.dirfile -c <module>:<channels> --drop-stats
 ```
 
 It writes one subdirfile per board, `~/data/run.dirfile/serial_<NNNN>`,

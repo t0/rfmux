@@ -5,6 +5,8 @@ import pytest
 pytest.importorskip("PyQt6")
 from PyQt6 import QtCore  # noqa: E402
 
+from test.qt_helpers import spin  # noqa: E402
+
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
     NetworkAnalysisDialog,
 )
@@ -46,3 +48,34 @@ def test_the_dialog_remembers_its_values(qt_app, tmp_path):
     again.fmin_edit.setText("300")
     again.reject()
     assert _dialog(settings).fmin_edit.text() == "200"
+
+
+def test_the_multisweep_dialog_remembers_its_values(qt_app, tmp_path):
+    """Every sweep setting comes back, the amplitude generator's fields
+    included; the defaults of those are powers in dBm."""
+    from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog
+
+    settings = QtCore.QSettings(str(tmp_path / "periscope.ini"),
+                                QtCore.QSettings.Format.IniFormat)
+    make = lambda: MultisweepDialog(
+        section_center_frequencies=[100e6], dac_scales={1: -0.5},
+        current_module=1, initial_params={"amps": [0.01]}, settings=settings)
+    dlg = make()
+    assert (dlg.start_amp_edit.text(), dlg.stop_amp_edit.text()) == ("-65", "-40")
+    dlg.span_khz_edit.setText("50")
+    dlg.npoints_edit.setText("77")
+    dlg.start_amp_edit.setText("-70")
+    dlg.iterations_amp_edit.setText("5")
+    dlg.sweep_direction_combo.setCurrentIndex(1)
+    dlg.apply_nonlinear_fit_checkbox.setChecked(True)
+    dlg.accept()
+
+    again = make()
+    assert again.span_khz_edit.text() == "50"
+    assert again.npoints_edit.text() == "77"
+    assert (again.start_amp_edit.text(), again.iterations_amp_edit.text()) == \
+        ("-70", "5")
+    assert again.sweep_direction_combo.currentIndex() == 1
+    assert again.apply_nonlinear_fit_checkbox.isChecked() is True
+    again.close()
+    spin(qt_app)

@@ -104,8 +104,8 @@ DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
 
 # Default linspace settings for amplitude sweeps
-DEFAULT_AMP_START = 0.001  # Default start for amplitude linspace
-DEFAULT_AMP_STOP = 0.01     # Default stop for amplitude linspace
+DEFAULT_AMP_START = -65.0   # dBm, start of the generated amplitude list
+DEFAULT_AMP_STOP = -40.0    # dBm, end of the generated amplitude list
 DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
 
 # Multisweep defaults

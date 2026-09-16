@@ -601,9 +601,9 @@ class PulseHDF5Reader:
 
     def noise_training(self, channel: int,
                        stream: Optional[str] = None) -> Optional[np.ndarray]:
-        """The training record *channel*'s noise statistics were fitted
-        to, complex samples in the stored units; None when the file
-        carries none."""
+        """The tail of the training record *channel*'s noise statistics
+        were fitted to, as much of it as the session kept, complex
+        samples in the stored units; None when the file carries none."""
         if self.f is None:
             return None
         grp = self.f.get(self._ch_key(channel, stream))

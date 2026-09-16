@@ -64,13 +64,13 @@ def _make_panel(qt_app, tmp_path, runtime):
     panel.channels_edit.setText("1")
     panel.threshold_spin.setValue(5.0)
     panel.end_spin.setValue(1.5)
-    # Training is derived from the pulse length (20x), which at the
-    # default 250 ms would ask for more samples than these tests feed.
-    # Override just the training length: max_pulse_ms is left alone
-    # because it also sets the baseline-tracking floor, and 250 ms is
-    # the right scale for the sample-indexed pulses fed below.
+    # Training is derived from the pulse length (20x), which would ask
+    # for more samples than these tests feed, so the training length is
+    # overridden.  The max pulse is pinned at 250 ms: it sets the hard
+    # stop and the baseline-tracking floor, and 250 ms at the panel's
+    # 596 Hz is the right scale for the sample-indexed pulses fed below.
     panel.capture_config = replace(panel.capture_config,
-                                   noise_train_ms=1.0)
+                                   noise_train_ms=1.0, max_pulse_ms=250.0)
     return panel
 
 

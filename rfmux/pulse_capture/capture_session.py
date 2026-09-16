@@ -201,7 +201,7 @@ class PulseCaptureConfig:
     #: Longest pulse the ring must hold, and the basis for the floor
     #: under the baseline tracking window.  Estimate it generously — a
     #: capture that outlasts the ring loses its rising edge.
-    max_pulse_ms: float = 250.0
+    max_pulse_ms: float = 50.0
     #: The 1/f window, in stream time: the record the noise sigma is
     #: fitted from and the span of the rolling-baseline median.  It has
     #: to be long compared with any pulse and with the 1/f knee, which
@@ -245,6 +245,10 @@ class PulseCaptureConfig:
     #: pulse (so the fit sees baseline, not signal), and that ratio —
     #: not any absolute duration — is the thing that matters.
     NOISE_TRAIN_PULSES = 20
+    #: The training record the file keeps, as a multiple of the max
+    #: pulse length: the tail of the record the statistics were fitted
+    #: to, enough to run the robust sigma estimator again offline.
+    NOISE_RECORD_PULSES = 5
     #: A 1/f window shorter than this draws a warning.
     MIN_WINDOW_MS = 2000.0
     #: Hard stop on a capture, as a multiple of the max pulse length —
@@ -333,6 +337,10 @@ class PulseCaptureConfig:
     def max_pulse_samples(self, sample_rate: float) -> int:
         return max(1, int(round(self.max_pulse_ms * 1e-3 * sample_rate)))
 
+    def noise_record_samples(self, sample_rate: float) -> int:
+        """Samples of the training record the file keeps."""
+        return self.NOISE_RECORD_PULSES * self.max_pulse_samples(sample_rate)
+
     def edge_lookback_samples(self, sample_rate: float) -> int:
         """Edge-detector lag K: margin_fraction of the max pulse.
 
@@ -364,6 +372,7 @@ class PulseCaptureConfig:
             "trigger_basis": self.trigger_basis,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
+            "noise_record_samples": self.noise_record_samples(sample_rate),
             "baseline_window": self.baseline_window_samples(sample_rate),
             "edge_lookback": self.edge_lookback_samples(sample_rate),
             "max_capture_samples": self.max_capture_samples(sample_rate),
@@ -576,6 +585,7 @@ class PulseCaptureSession(_CallbackHost):
         sample_rate: Optional[float] = None,
         time_offset_s: Optional[float] = None,
         noise_samples: int = 1000,
+        noise_record_samples: int = 0,
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
@@ -616,6 +626,8 @@ class PulseCaptureSession(_CallbackHost):
                 if streamer_mode == "slow" and sample_rate else 0.0)
         self.time_offset_s = float(time_offset_s)
         self.noise_samples = int(noise_samples)
+        #: Samples of the training record the file keeps; 0 keeps it all.
+        self.noise_record_samples = int(noise_record_samples)
         self.baseline_window = int(baseline_window)
         # Resolved here (not in the engine) so noise estimation measures
         # the jump-σ at exactly the lag the edge detector will use — but
@@ -1080,7 +1092,7 @@ class PulseCaptureSession(_CallbackHost):
             self.pcap.noise_stats = self.noise_stats
             self.pcap.reset_edge_history()
             self._to_writer("update_noise_stats", self.noise_stats,
-                            self.noise_data, what="noise update")
+                            self._noise_record(), what="noise update")
             self.pcap.freeze_triggers = False
 
         self.state = CaptureState.CAPTURING
@@ -1088,6 +1100,14 @@ class PulseCaptureSession(_CallbackHost):
         # Only now: a listener must hear "noise estimated" before it
         # hears about a pulse found in the samples we held back.
         self._drain_post_noise()
+
+    def _noise_record(self) -> Dict[int, np.ndarray]:
+        """The tail of each channel's training record the file keeps:
+        the samples nearest the capture, ``noise_record_samples`` of
+        them, or the whole record when that is 0."""
+        n = self.noise_record_samples
+        return {ch: (arr[-n:] if n else arr)
+                for ch, arr in self.noise_data.items()}
 
     def _build_engine_and_writer(self) -> None:
         # One dict, two consumers: what the engine runs on is what the
@@ -1123,7 +1143,7 @@ class PulseCaptureSession(_CallbackHost):
                     capture_params,
                     tuning=self.tuning,
                     stored_units=self.stored_units,
-                    noise_data=self.noise_data,
+                    noise_data=self._noise_record(),
                 )
                 if self.time_origin_epoch is not None:
                     self.writer.set_time_origin(self.time_origin_epoch)
@@ -1674,7 +1694,8 @@ class DualPulseCaptureSession(_CallbackHost):
 
     def _on_stream_noise(self, stream: str, noise_stats: dict) -> None:
         self._to_writer("set_noise_stats", stream, noise_stats,
-                        getattr(self, stream).noise_data, what="noise write")
+                        getattr(self, stream)._noise_record(),
+                        what="noise write")
         self._sync_capture_start()
         self._callback(self.on_noise, stream, noise_stats)
 

@@ -62,6 +62,27 @@ def test_a_session_writes_the_samples_it_trained_on(tmp_path):
     np.testing.assert_array_equal(record, trained)
 
 
+def test_the_file_keeps_the_tail_of_the_record(tmp_path):
+    """noise_record_samples bounds what is written: the samples nearest
+    the capture.  The config sets it to five max-pulse lengths."""
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    cfg = PulseCaptureConfig(max_pulse_ms=50.0)
+    assert cfg.session_kwargs(596.0)["noise_record_samples"] == 5 * 30
+
+    session = PulseCaptureSession(
+        channels=[1], threshold_sigma=5.0, end_sigma=1.5, buf_size=4000,
+        sample_rate=38147.0, noise_samples=200, noise_record_samples=50,
+        hdf5_path=tmp_path / "tail.h5")
+    rng = np.random.default_rng(2)
+    session.start()
+    for k in range(200):
+        session.feed_sample(1, rng.normal(), rng.normal(), k / 38147.0)
+    trained = np.array(session.noise_data[1])
+    session.stop()
+    with PulseHDF5Reader(tmp_path / "tail.h5") as r:
+        np.testing.assert_array_equal(r.noise_training(1), trained[-50:])
+
+
 def test_review_mode_shows_the_record_from_the_file(qt_app, tmp_path):
     pytest.importorskip("PyQt6")
     from test.qt_helpers import spin

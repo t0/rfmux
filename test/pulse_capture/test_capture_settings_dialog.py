@@ -102,10 +102,10 @@ def test_derived_readouts_split_by_driving_knob(qt_app):
     dlg.threshold_spin.setValue(10.0)
     assert "14.1σ" in dlg.sigma_derived_label.text()
 
-    # And the time scales follow max pulse: 250 ms → 300 ms hard stop,
-    # 25 ms edge lookback.
-    assert "300 ms" in pulse_txt
-    assert "25 ms" in pulse_txt
+    # And the time scales follow max pulse: 50 ms → 60 ms hard stop,
+    # 5 ms edge lookback (95 samples at 19 kHz reads 4.98 ms).
+    assert "60 ms" in pulse_txt
+    assert "4.98 ms" in pulse_txt
     dlg.max_pulse_spin.setValue(500.0)
     assert "600 ms" in _plain(dlg.pulse_derived_label)
     assert "50 ms" in _plain(dlg.pulse_derived_label)

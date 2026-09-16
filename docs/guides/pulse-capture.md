@@ -122,7 +122,7 @@ toolbar. The **Settings** dialog includes:
 - **Threshold σ** is how significant an event must be. Both trigger tests
   use it: a sample must leave the baseline by this many σ within a narrow window.
   The second test is a difference of raw samples, so baseline drift cannot fake it.
-- **Max pulse (ms)** (250) is the longest pulse you expect. It sizes the
+- **Max pulse (ms)** (50) is the longest pulse you expect. It sizes the
   pulse-scale quantities: the ring buffer at 1.5 times it, the hard stop at
   1.2, and the edge lookback. Estimate it generously. A pulse that outlasts
   the buffer loses its rising edge.
@@ -203,9 +203,10 @@ browse those sweeps in a multisweep window, one sweep per resonator, with
 the detector digest a double-click away as usual. The window reads nothing
 from the board and changes nothing on it.
 
-The file also keeps each channel's noise training record, the samples the
-noise statistics were fitted to, in the channel's stored units (the
-`noise_training` dataset of its group, one per stream in both mode). The
+The file also keeps the tail of each channel's noise training record, the
+last five max-pulse lengths of the samples the noise statistics were
+fitted to, in the channel's stored units (the `noise_training` dataset of
+its group, one per stream in both mode). The
 pulse list shows it as a **Noise training** item; double-click it to see
 the record with its baselines and bands, as the live panel shows it after
 training.

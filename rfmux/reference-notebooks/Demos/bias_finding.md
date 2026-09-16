@@ -188,6 +188,10 @@ lines for downward sweeps. Dividing by the
 drive amplitude makes their shapes easier to compare.
 
 ```python
+from rfmux.core.transferfunctions import (
+    convert_roc_to_dbm, convert_dacunits_to_dbm,
+)
+
 
 for step, by_direction in multi_amplitude_module_results["results"].items():
     for direction, sections in by_direction.items():
@@ -238,8 +242,13 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
                 if directions is not None and direction not in directions:
                     continue
                 # Normalize by drive amplitude to compare trace shapes.
-                iq = sweep["iq_counts"] / sweep["sweep_amplitude"]
-                panel.plot(((sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3), 20 * np.log10(np.abs(iq)),
+                magnitude = (
+                    convert_roc_to_dbm(np.abs(sweep["iq_counts"]))
+                    - convert_dacunits_to_dbm(
+                        sweep["sweep_amplitude"], results["dac_scale_dbm"]
+                    )
+                )
+                panel.plot(((sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3), magnitude,
                            styles[direction],
                         lw=1.0, color=colour)
 
@@ -253,7 +262,7 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
             panels[0].plot([], [], color="0.3", ls=style, label=sweep_direction)
     panels[0].legend(fontsize=7)
 
-    panels[0].set_ylabel("|S21| / drive [dB]", fontsize=8)
+    panels[0].set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
     fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
     plt.show()
 
@@ -695,6 +704,8 @@ Plot `iq_arc_speed()` to see the quantity the derivative method maximizes.
 The vertical lines show the two frequency choices:
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 frequencies, speed = iq_arc_speed(chosen_sweep)
 
 bias_frequency_by_derivative = find_bias_frequency(chosen_sweep)
@@ -704,9 +715,9 @@ fig, axes = plt.subplots(2, 1, figsize=(7.5, 5.5), sharex=True,
                          constrained_layout=True)
 
 axes[0].plot(((chosen_sweep["frequencies"] - chosen_sweep["original_center_frequency"]) / 1e3),
-             20 * np.log10(np.abs(chosen_sweep["iq_counts"])),
+             convert_roc_to_dbm(np.abs(chosen_sweep["iq_counts"])),
              ".-", lw=1.0, ms=3, color="0.2")
-axes[0].set_ylabel("|S21| [dB]")
+axes[0].set_ylabel("received power [dBm]")
 
 axes[1].plot((frequencies - chosen_sweep_centre) / 1e3, speed,
              ".-", lw=1.0, ms=3, color="0.2")
@@ -1036,6 +1047,8 @@ frequency marked on the direction used for calibration. These traces use raw
 magnitude so the marker shows the measured operating point.
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 def plot_bias_points_on_sweeps(results, report, direction="upward"):
     """Plot all sweeps and mark the selected operating points."""
     names = [finding.name for finding in report.findings]
@@ -1055,7 +1068,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
             for sweep_direction, sweep in entries.items():
                 chosen = iteration == finding.iteration
                 panel.plot((sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3,
-                           20 * np.log10(np.abs(sweep["iq_counts"])),
+                           convert_roc_to_dbm(np.abs(sweep["iq_counts"])),
                            lw=2.0 if chosen else 0.8,
                            ls="-" if sweep_direction == "upward" else "--",
                            alpha=1.0 if chosen else 0.55,
@@ -1064,7 +1077,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
         chosen_sweep = iterations[finding.iteration][direction]
         depth_at_bias = np.interp(
             finding.frequency_hz, chosen_sweep["frequencies"],
-            20 * np.log10(np.abs(chosen_sweep["iq_counts"])),
+            convert_roc_to_dbm(np.abs(chosen_sweep["iq_counts"])),
         )
         # Ringed in the flag's colour, so a bias point that is a fallback rather
         # than a finding is visible here and not only in the printed report.
@@ -1086,7 +1099,7 @@ def plot_bias_points_on_sweeps(results, report, direction="upward"):
             panels[0].plot([], [], color="0.3", ls=style, label=sweep_direction)
     panels[0].legend(fontsize=7)
 
-    panels[0].set_ylabel("|S21| [dB]", fontsize=8)
+    panels[0].set_ylabel("received power [dBm]", fontsize=8)
     fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
     fig.suptitle("The bias points for each resonator",
                  fontsize=11)

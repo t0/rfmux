@@ -55,6 +55,8 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 from rfmux.tuning import (
     bifurcated_by_derivative,
     collect_amplitude_iterations_for,
@@ -422,8 +424,9 @@ def plot_bias_points(
         results: the same module's sweep results the report was made from —
             the value of ``sweeps[module_id]``. The report carries the
             conclusions, not the traces, so both are needed.
-        projection: ``"magnitude"`` draws ``|S21|`` against frequency with the
-            bias frequency as a vertical line; ``"iq"`` draws the loop with the
+        projection: ``"magnitude"`` draws received power in dBm against
+            frequency with the bias frequency as a vertical line;
+            ``"iq"`` draws the loop with the
             bias point marked on it. The magnitude view says whether the tone
             is on the dip; the IQ view says how much loop there is to move
             along, which is the other half of the question.
@@ -469,7 +472,7 @@ def plot_bias_points(
                 iq = np.asarray(entry["iq_counts"])
 
                 if projection == "magnitude":
-                    panel.plot(offset_khz(entry), 20 * np.log10(np.abs(iq)),
+                    panel.plot(offset_khz(entry), convert_roc_to_dbm(np.abs(iq)),
                                lw=1.5, color="0.35")
                     panel.axvline(
                         (finding.frequency_hz - entry["original_center_frequency"])
@@ -507,7 +510,7 @@ def plot_bias_points(
                            fontsize=11, va="bottom", color=colour)
 
             if projection == "magnitude":
-                _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", "|S21| [dB]")
+                _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", "received power [dBm]")
             else:
                 _outer_labels(axes, "I [counts]", "Q [counts]")
 

@@ -166,20 +166,24 @@ The search stores frequencies in ascending order; candidate indices refer to
 `resonance_search.frequencies_hz` and `magnitude_db`, including for a downward
 sweep.
 
-Plot magnitude and phase across the band. Magnitude is normalized by its median
-to make the dips easier to compare. These cells show the plotting steps directly;
-reusable versions are in `example_plotting_netanal.py`.
+Plot magnitude and phase across the band. Magnitude is received power minus
+drive power in dBm, using the saved DAC scale and amplitude, as in multisweep.
+This includes the intervening gain and loss. The resonance-search diagnostics
+below retain the finder's median reference. These cells show the plotting steps
+directly; reusable versions are in `example_plotting_netanal.py`.
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm, convert_dacunits_to_dbm
+
 fig, (magnitude_panel, phase_panel) = plt.subplots(
     2, 1, figsize=(11, 6), sharex=True
 )
 
-magnitude_db = 20 * np.log10(
-    np.abs(netanal_iq_counts) / np.median(np.abs(netanal_iq_counts))
+magnitude_db = convert_roc_to_dbm(np.abs(netanal_iq_counts)) - convert_dacunits_to_dbm(
+    netanal_measured["sweep_amplitude"], module_netanal_outputs["dac_scale_dbm"]
 )
 magnitude_panel.plot(netanal_frequencies / 1e6, magnitude_db, lw=0.6)
-magnitude_panel.set_ylabel("|S21| [dB, normalized]")
+magnitude_panel.set_ylabel("|S21| [dB, drive-referenced]")
 
 phase_panel.plot(netanal_frequencies / 1e6,
                  np.degrees(np.angle(netanal_iq_counts)), lw=0.6)
@@ -477,4 +481,3 @@ These controls use the same measurement and analysis APIs as the notebook:
 | Resonance markers | `ResonanceSearch.candidates` |
 | Edit a search by hand | `ResonanceSearch.reject(...)` / `.accept(...)`, then `store.save(...)` |
 | Catalog for multisweep | `ResonanceSearch.to_catalog(...)` |
-

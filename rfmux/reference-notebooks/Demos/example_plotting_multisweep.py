@@ -40,8 +40,8 @@ either code base reads the same way and survives being put on a projector. It
 lives in ``PLOT_STYLE`` and is applied per figure, not to your session.
 
 These are meant to be read and copied. They deliberately use nothing but
-matplotlib, numpy and the readers in ``rfmux.tuning``, so lifting one into your
-own analysis script is a copy-paste and not a dependency. If you want a
+matplotlib, numpy and rfmux's readers and unit conversions, so lifting one into
+your own analysis script is a copy-paste and not a dependency. If you want a
 different layout, a log x-axis, or your own colours, start from the body of
 ``_plot_panels`` — the selection and colour bookkeeping above it is the part
 that is tedious to get right, and it is shared.
@@ -54,6 +54,7 @@ import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm, convert_roc_to_dbm
 from rfmux.tuning import collect_amplitude_iterations_for
 
 __all__ = [
@@ -155,11 +156,12 @@ def offset_khz(sweep):
 
 
 def sweep_iq(sweep, normalize=True):
-    """A sweep's IQ, optionally divided by the drive that produced it.
+    """Readout counts, optionally divided by the drive's DAC fraction.
 
     Normalized is usually what you want when several amplitude steps share an
     axes: it compares the traces by shape, instead of showing you the loudest
-    one sitting on top of the others. Turn it off to see the raw counts.
+    one sitting on top of the others. This retains the readout-count scale;
+    it is not a voltage transmission. Turn it off to see the raw counts.
     """
     if normalize:
         return sweep["iq_counts"] / sweep["sweep_amplitude"]
@@ -475,8 +477,11 @@ def plot_magnitude_panels(
             Pass ``"upward"`` for one direction only. Directions that were not
             swept are skipped, so the default is safe on a single-direction
             sweep.
-        normalize: divide each trace by its own drive amplitude, so the steps
-            are compared by shape rather than by which was loudest.
+        normalize: subtract drive power from received power in dBm, using
+            the module's saved ``dac_scale_dbm``. This gives transmission in
+            dB relative to the board output, including the intervening chain.
+            Like the netanal plot's default, it preserves gain and loss.
+            False shows received power in dBm and needs no DAC scale.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick
             from how many there are.
         panel_size: ``(width, height)`` of one panel, in inches. Generous by
@@ -490,14 +495,27 @@ def plot_magnitude_panels(
 
     Raises:
         KeyError: if a requested name was never swept.
-        ValueError: if the selection matches no sweeps at all.
+        ValueError: if the selection matches no sweeps, or normalization
+            lacks a finite DAC scale or a finite, positive drive amplitude.
     """
+    section_names(results)  # Keep the module/container error explicit.
+    dac_scale = results.get("dac_scale_dbm")
+    if normalize and (dac_scale is None or not np.isfinite(dac_scale)):
+        raise ValueError(
+            "Drive-referenced dB requires a finite dac_scale_dbm; "
+            "use normalize=False to plot received power in dBm."
+        )
 
     def draw(panel, sweep, colour, linestyle, normalize):
-        iq = sweep_iq(sweep, normalize)
+        magnitude = convert_roc_to_dbm(np.abs(sweep["iq_counts"]))
+        if normalize:
+            drive = sweep["sweep_amplitude"]
+            if not np.isfinite(drive) or drive <= 0:
+                raise ValueError("Drive normalization requires a finite, positive amplitude.")
+            magnitude -= convert_dacunits_to_dbm(drive, dac_scale)
         panel.plot(
             offset_khz(sweep),
-            20 * np.log10(np.abs(iq)),
+            magnitude,
             lw=1.5,
             color=colour,
             ls=linestyle,
@@ -507,7 +525,7 @@ def plot_magnitude_panels(
         results,
         draw,
         xlabel="$f - f_\\mathrm{centre}$ [kHz]",
-        ylabel="|S21| [dB, norm.]" if normalize else "|S21| [dB]",
+        ylabel="|S21| [dB, drive-referenced]" if normalize else "received power [dBm]",
         what="magnitude",
         names=names,
         iterations=iterations,
@@ -538,6 +556,9 @@ def plot_iq_panels(
     which is square here: the axes are held to equal scale by
     :func:`square_axes`, so a circle reads as a circle, which is the whole
     point of looking at a resonator this way.
+
+    Here normalization divides readout counts by the drive's DAC fraction;
+    the axes retain the count scale and do not require a DAC power scale.
     """
 
     def draw(panel, sweep, colour, linestyle, normalize):
@@ -547,8 +568,8 @@ def plot_iq_panels(
     _plot_panels(
         results,
         draw,
-        xlabel="I [norm.]" if normalize else "I [counts]",
-        ylabel="Q [norm.]" if normalize else "Q [counts]",
+        xlabel="I [counts / DAC amplitude]" if normalize else "I [counts]",
+        ylabel="Q [counts / DAC amplitude]" if normalize else "Q [counts]",
         what="IQ",
         names=names,
         iterations=iterations,

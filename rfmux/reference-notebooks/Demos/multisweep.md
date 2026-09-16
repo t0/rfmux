@@ -212,6 +212,8 @@ for key, value in entry.items():
 Plot the first four sections in the IQ plane and as magnitude versus frequency:
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 def plot_ms(sections, keys, title):
     fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
     for column, key in enumerate(keys):
@@ -223,11 +225,11 @@ def plot_ms(sections, keys, title):
         axes[0, column].set_aspect("equal", "datalim")
         axes[0, column].set_title(f"{key}\n{centre/1e6:.3f} MHz", fontsize=9)
 
-        axes[1, column].plot(offset_khz, 20 * np.log10(np.abs(s["iq_counts"])), lw=0.9)
+        axes[1, column].plot(offset_khz, convert_roc_to_dbm(np.abs(s["iq_counts"])), lw=0.9)
         axes[1, column].set_xlabel("offset [kHz]", fontsize=8)
 
     axes[0, 0].set_ylabel("Q")
-    axes[1, 0].set_ylabel("|S21| [dB]")
+    axes[1, 0].set_ylabel("received power [dBm]")
     fig.suptitle(title)
     plt.tight_layout()
     plt.show()
@@ -579,9 +581,16 @@ for step, entries in resonator_iterations.items():
 
 The plot below reads sections directly from `results`. Colours show amplitude
 on a logarithmic scale; line styles show direction. Both directions are plotted
-when present. Divide IQ by the sweep amplitude to compare trace shapes.
+when present. The IQ axes show counts divided by DAC amplitude. Magnitude
+uses received power minus drive power in dBm, using the saved
+`dac_scale_dbm`, to show transmission in dB. This includes the intervening
+gain and loss; it does not set the off-resonance baseline to zero.
 
 ```python
+from rfmux.core.transferfunctions import (
+    convert_roc_to_dbm, convert_dacunits_to_dbm,
+)
+
 from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 # Omit the pale end of gnuplot so traces remain visible on white.
@@ -629,20 +638,26 @@ def plot_amplitude_iterations(results, name):
             ) / 1e3
             # Normalize by drive amplitude to compare shapes.
             iq = section["iq_counts"] / section["sweep_amplitude"]
+            magnitude = (
+                convert_roc_to_dbm(np.abs(section["iq_counts"]))
+                - convert_dacunits_to_dbm(
+                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                )
+            )
 
             # Label each direction once, even when it appears at several steps.
             label = direction if direction not in shown_directions else None
-            ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0,
+            ax_mag.plot(offset_khz, magnitude, lw=1.0,
                         color=colour, ls=styles[direction], label=label)
             ax_iq.plot(iq.real, iq.imag, lw=1.0,
                        color=colour, ls=styles[direction])
             shown_directions.add(direction)
 
     ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("|S21| / drive [dB]")
+    ax_mag.set_ylabel("|S21| [dB, drive-referenced]")
     ax_mag.legend(title="frequency direction", fontsize=8)
-    ax_iq.set_xlabel("I / drive")
-    ax_iq.set_ylabel("Q / drive")
+    ax_iq.set_xlabel("I [counts / DAC amplitude]")
+    ax_iq.set_ylabel("Q [counts / DAC amplitude]")
     ax_iq.set_aspect("equal", "datalim")
     fig.colorbar(mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
     fig.suptitle(f"{name}, {len(steps)} amplitude steps")
@@ -668,6 +683,10 @@ Absolute ramp steps give all resonators the same amplitude and colour.
 Each panel includes all available directions, using solid and dashed lines.
 
 ```python
+from rfmux.core.transferfunctions import (
+    convert_roc_to_dbm, convert_dacunits_to_dbm,
+)
+
 def plot_sections_at_iteration(results, iteration, ncols=5):
     """Plot every direction at one step, with one panel per resonator."""
     by_direction = results["results"][iteration]
@@ -699,8 +718,13 @@ def plot_sections_at_iteration(results, iteration, ncols=5):
             offset_khz = (
                 section["frequencies"] - section["original_center_frequency"]
             ) / 1e3
-            iq = section["iq_counts"] / amplitude
-            panel.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0,
+            magnitude = (
+                convert_roc_to_dbm(np.abs(section["iq_counts"]))
+                - convert_dacunits_to_dbm(
+                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                )
+            )
+            panel.plot(offset_khz, magnitude, lw=1.0,
                        color=colour, ls=styles[direction], label=direction)
         panel.set_title(f"{name}\n{sections[name]['sweep_amplitude']:.5f}", fontsize=8)
         panel.tick_params(labelsize=7)
@@ -715,7 +739,7 @@ def plot_sections_at_iteration(results, iteration, ncols=5):
         if panel.get_visible():
             panel.set_xlabel("offset [kHz]", fontsize=8)
     for panel in axes[:, 0]:
-        panel.set_ylabel("|S21| / drive [dB]", fontsize=8)
+        panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
 
     fig.colorbar(mappable, ax=axes, label="sweep amplitude")
     fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")

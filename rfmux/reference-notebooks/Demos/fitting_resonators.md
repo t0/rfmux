@@ -213,6 +213,10 @@ by each section’s drive amplitude to compare shapes. The plotters read the
 `results[step][direction][name]` dictionaries directly.
 
 ```python
+from rfmux.core.transferfunctions import (
+    convert_roc_to_dbm, convert_dacunits_to_dbm,
+)
+
 # Omit the pale end of gnuplot so traces remain visible on white.
 AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
     "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
@@ -263,8 +267,13 @@ def plot_sections_at_iteration(results, iteration, ncols=4):
             offset_khz = (
                 section["frequencies"] - section["original_center_frequency"]
             ) / 1e3
-            iq = section["iq_counts"] / amplitude
-            panel.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0,
+            magnitude = (
+                convert_roc_to_dbm(np.abs(section["iq_counts"]))
+                - convert_dacunits_to_dbm(
+                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                )
+            )
+            panel.plot(offset_khz, magnitude, lw=1.0,
                        color=colour, ls=styles[direction], label=direction)
         panel.set_title(f"{name}\n{sections[name]['sweep_amplitude']:.5f}", fontsize=8)
         panel.tick_params(labelsize=7)
@@ -279,7 +288,7 @@ def plot_sections_at_iteration(results, iteration, ncols=4):
         if panel.get_visible():
             panel.set_xlabel("offset [kHz]", fontsize=8)
     for panel in axes[:, 0]:
-        panel.set_ylabel("|S21| / drive [dB]", fontsize=8)
+        panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
 
     fig.colorbar(mappable, ax=axes, label="sweep amplitude")
     fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
@@ -294,6 +303,10 @@ Now follow one resonator across all five amplitudes. Section 7 will use fitted
 parameters to describe these changes in resonance frequency and shape.
 
 ```python
+from rfmux.core.transferfunctions import (
+    convert_roc_to_dbm, convert_dacunits_to_dbm,
+)
+
 def plot_amplitude_iterations(results, name):
     """Plot every amplitude step and available direction for one resonator."""
     # Keep the step → direction → resonator structure visible as we read it.
@@ -320,20 +333,26 @@ def plot_amplitude_iterations(results, name):
             ) / 1e3
             # Normalize by drive amplitude to compare shapes.
             iq = section["iq_counts"] / section["sweep_amplitude"]
+            magnitude = (
+                convert_roc_to_dbm(np.abs(section["iq_counts"]))
+                - convert_dacunits_to_dbm(
+                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                )
+            )
 
             # Label each direction once, even when it appears at several steps.
             label = direction if direction not in shown_directions else None
-            ax_mag.plot(offset_khz, 20 * np.log10(np.abs(iq)), lw=1.0,
+            ax_mag.plot(offset_khz, magnitude, lw=1.0,
                         color=colour, ls=styles[direction], label=label)
             ax_iq.plot(iq.real, iq.imag, lw=1.0,
                        color=colour, ls=styles[direction])
             shown_directions.add(direction)
 
     ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("|S21| / drive [dB]")
+    ax_mag.set_ylabel("|S21| [dB, drive-referenced]")
     ax_mag.legend(title="frequency direction", fontsize=8)
-    ax_iq.set_xlabel("I / drive")
-    ax_iq.set_ylabel("Q / drive")
+    ax_iq.set_xlabel("I [counts / DAC amplitude]")
+    ax_iq.set_ylabel("Q [counts / DAC amplitude]")
     ax_iq.set_aspect("equal", "datalim")
     fig.colorbar(mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
     fig.suptitle(f"{name}, {len(steps)} amplitude steps")
@@ -364,6 +383,8 @@ Plot the fine sweep in IQ and magnitude. Compare its IQ loops with the wider
 sweep above: the closer frequency spacing traces each loop in more detail.
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 def plot_ms(sections, keys, title):
     """A set of sweep sections: the IQ loop above, the magnitude below."""
     fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
@@ -376,11 +397,11 @@ def plot_ms(sections, keys, title):
         axes[0, column].set_aspect("equal", "datalim")
         axes[0, column].set_title(f"{key}\n{centre/1e6:.3f} MHz", fontsize=9)
 
-        axes[1, column].plot(offset_khz, 20 * np.log10(np.abs(s["iq_counts"])), lw=0.9)
+        axes[1, column].plot(offset_khz, convert_roc_to_dbm(np.abs(s["iq_counts"])), lw=0.9)
         axes[1, column].set_xlabel("offset [kHz]", fontsize=8)
 
     axes[0, 0].set_ylabel("Q")
-    axes[1, 0].set_ylabel("|S21| [dB]")
+    axes[1, 0].set_ylabel("received power [dBm]")
     fig.suptitle(title)
     plt.tight_layout()
     plt.show()
@@ -641,6 +662,8 @@ The middle panel shows the data used by the nonlinear fitter. Divide
 `iq_counts` by the complex gain stored in `fits["nonlinear"]["gain"]`.
 
 ```python
+from rfmux.core.transferfunctions import convert_roc_to_dbm
+
 def plot_nonlinear_fit(sections, name=None):
     """One resonator's nonlinear fit: measured and model, in IQ and in magnitude."""
     name = next(iter(sections)) if name is None else name
@@ -690,12 +713,12 @@ def plot_nonlinear_fit(sections, name=None):
     ax_corrected.set_aspect("equal", "datalim")
     ax_corrected.set_title("what the fitter saw\n(gain divided out)", fontsize=9)
 
-    ax_mag.plot(offset_khz, 20 * np.log10(np.abs(measured)), lw=0, marker=".",
+    ax_mag.plot(offset_khz, convert_roc_to_dbm(np.abs(measured)), lw=0, marker=".",
                 ms=2.5, color="0.45")
-    ax_mag.plot(model_offset_khz, 20 * np.log10(np.abs(model)), lw=1.4,
+    ax_mag.plot(model_offset_khz, convert_roc_to_dbm(np.abs(model)), lw=1.4,
                 color="teal")
     ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("|S21| [dB]")
+    ax_mag.set_ylabel("received power [dBm]")
     ax_mag.set_title("magnitude", fontsize=9)
 
     params = nonlinear_fit["params"]

@@ -42,6 +42,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
 
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm, convert_roc_to_dbm
 from rfmux.tuning import magnitude_db, netanal_trace
 
 __all__ = [
@@ -169,27 +170,54 @@ def _netanal_arrays(module_netanal):
     )
 
 
-def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title=None):
+def plot_netanal(
+    netanal, phase=True, reference=None, figsize=(14.0, 8.0), title=None,
+    *, normalize: bool = True,
+):
     """|S21| and phase against frequency, one figure per trace measured.
 
     Args:
         netanal: what ``crs.take_netanal()`` returned — the dict keyed by
             module identifier, or one module's output out of it. A figure is
             drawn for each module in it.
-        phase: draw the phase in a second panel under the magnitude. Turn it
-            off for magnitude alone, which is what the resonance finder sees.
-        reference: the magnitude that maps to 0 dB. The default is the median
-            of the trace, a robust stand-in for the off-resonance baseline —
-            the same default :func:`rfmux.tuning.magnitude_db` uses, so the dB
-            axis here matches the one the finder searched.
+        phase: draw the phase in a second panel under the magnitude.
+        reference: optional magnitude in readout counts that maps to 0 dB.
+            Overrides drive normalization when supplied. None uses the saved
+            drive power, rather than an off-resonance baseline.
         figsize: ``(width, height)`` of the whole figure, in inches.
         title: overrides the figure title.
+        normalize: subtract drive power from received power in dBm, using
+            each module's saved ``dac_scale_dbm`` and the trace's
+            ``sweep_amplitude``. False shows received power in dBm and needs
+            no DAC scale. An explicit reference takes precedence.
 
     Raises:
         TypeError: if handed something that is not a netanal result.
+        ValueError: if drive normalization lacks a finite DAC scale or a
+            finite, positive drive amplitude.
     """
     for label, module_netanal in labelled_traces(netanal, "sweep").items():
         frequencies, iq = _netanal_arrays(module_netanal)
+        if reference is not None:
+            magnitude = magnitude_db(iq, reference)
+            ylabel = "|S21| [dB, reference-normalized]"
+        else:
+            magnitude = convert_roc_to_dbm(np.abs(iq))
+            ylabel = "received power [dBm]"
+            if normalize:
+                dac_scale = module_netanal.get("dac_scale_dbm")
+                if dac_scale is None or not np.isfinite(dac_scale):
+                    raise ValueError(
+                        "Drive-referenced dB requires a finite dac_scale_dbm; "
+                        "use normalize=False to plot received power in dBm."
+                    )
+                drive = netanal_trace(module_netanal).get("sweep_amplitude")
+                if drive is None or not np.isfinite(drive) or drive <= 0:
+                    raise ValueError(
+                        "Drive normalization requires a finite, positive amplitude."
+                    )
+                magnitude -= convert_dacunits_to_dbm(drive, dac_scale)
+                ylabel = "|S21| [dB, drive-referenced]"
 
         with plt.rc_context(PLOT_STYLE):
             nrows = 2 if phase else 1
@@ -199,8 +227,8 @@ def plot_netanal(netanal, phase=True, reference=None, figsize=(14.0, 8.0), title
             )
             panels = axes[:, 0]
 
-            panels[0].plot(frequencies / 1e6, magnitude_db(iq, reference), lw=1.0)
-            panels[0].set_ylabel("|S21| [dB, norm.]")
+            panels[0].plot(frequencies / 1e6, magnitude, lw=1.0)
+            panels[0].set_ylabel(ylabel)
 
             if nrows == 2:
                 panels[1].plot(frequencies / 1e6, np.degrees(np.angle(iq)), lw=1.0)

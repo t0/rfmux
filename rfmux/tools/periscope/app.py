@@ -204,6 +204,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # --- Display Settings ---
         self.dark_mode: bool = True             # UI theme (dark/light)
+        apply_ui_theme(self.dark_mode)
         self.real_units: bool = False           # Display data in real units (V, dBm) vs. counts
         self.unit_mode: str = "counts"          # Current unit mode: "counts", "real", or "df"
         self.psd_absolute: bool = True          # PSD y-axis scale (absolute dBm/Hz vs. relative dBc/Hz)
@@ -798,8 +799,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "  Short/Long: packet mode (128 or 1024 channels)"
         )
         self.info_text = QtWidgets.QLabel()
-
-        self.default_packet_loss_color = self.packet_loss_label.palette().color(QtGui.QPalette.WindowText).name()
 
         # Add them to the status bar
         self.statusBar().addWidget(self.fps_label)

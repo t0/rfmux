@@ -849,6 +849,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # streams, so marks that land close together stay readable.
         n_marks = sum(isinstance(it, pg.InfiniteLine)
                       for it in plot.getPlotItem().items)
+        # The label box is the plot background, half transparent, so
+        # it hides the trace under the text without showing as a box.
+        fill = (0, 0, 0, 120) if self.dark_mode else (255, 255, 255, 120)
         for idx_key, time_key, color, label in marks:
             label = f"{prefix}{label}"
             x = _t_at(idx_key, time_key)
@@ -864,7 +867,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 # repeating it underneath is noise.
                 label=label if quad == "I" else None,
                 labelOpts={"position": position, "color": color,
-                           "fill": (0, 0, 0, 120), "movable": False}))
+                           "fill": fill, "movable": False}))
 
     def _set_pulse_x_axis(self, label: str, units: str | None = None) -> None:
         """Label BOTH stacked plots the same way.
@@ -3076,3 +3079,5 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_histograms()
         self._render_templates()
         self._render_iq_plane()
+        if self._current_view is not None:
+            self._show_pulse(*self._current_view)

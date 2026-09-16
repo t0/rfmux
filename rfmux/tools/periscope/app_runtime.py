@@ -595,7 +595,9 @@ class PeriscopeRuntime:
 
     def _toggle_dark_mode(self, checked: bool):
         """Toggle dark mode theme and rebuild the layout."""
-        self.dark_mode = checked; self._build_layout()
+        self.dark_mode = checked
+        apply_ui_theme(checked)
+        self._build_layout()
         self._update_dark_mode_in_child_windows()
         
     def _update_dark_mode_in_child_windows(self):
@@ -1150,8 +1152,7 @@ class PeriscopeRuntime:
                         "machine")
                 self.info_text.setStyleSheet("color: red;")
             else:
-                self.packet_loss_label.setStyleSheet(
-                    f"color: {self.default_packet_loss_color};")
+                self.packet_loss_label.setStyleSheet("")
                 self.info_text.clear()
                 self.info_text.setStyleSheet("")
 

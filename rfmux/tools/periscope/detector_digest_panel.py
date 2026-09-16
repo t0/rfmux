@@ -122,8 +122,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         outer_layout.setContentsMargins(0, 0, 0, 0)  # Remove margins for cleaner look
         
         # Set the background color of the dialog based on dark mode
-        bg_color_hex = "#1C1C1C" if self.dark_mode else "#FFFFFF" # Hex for stylesheet
-        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}") # Apply to QWidget base
         
         # Create main splitter for resizable panes
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
@@ -137,8 +135,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         nav_widget = QtWidgets.QWidget()
         nav_layout = QtWidgets.QHBoxLayout(nav_widget)
         nav_layout.setContentsMargins(0, 0, 0, 0)
-        
-        title_color_str = "white" if self.dark_mode else "black"
         
         # Previous button
         self.prev_button = QtWidgets.QPushButton("◀ Previous")
@@ -154,7 +150,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         title_layout.addStretch(1)
         
         det_label = QtWidgets.QLabel("Detector")
-        det_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         title_layout.addWidget(det_label)
         
         self.detector_spinbox = QtWidgets.QSpinBox()
@@ -168,7 +163,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         title_layout.addWidget(self.detector_spinbox)
         
         self.freq_label = QtWidgets.QLabel(f"({self.resonance_frequency_ghz_title*1e3:.6f} MHz)")
-        self.freq_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         title_layout.addWidget(self.freq_label)
         
         title_layout.addStretch(1)
@@ -181,7 +175,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         nav_layout.addWidget(self.next_button)
 
         self.refresh_noise_button = QtWidgets.QPushButton("Check Noise")
-        self.refresh_noise_button.setStyleSheet("background-color: #ffcccc; color: black;")
         self.refresh_noise_button.clicked.connect(self._refresh_noise_samps)
         self.refresh_noise_button.setToolTip("Captures 100 I,Q points for each detector and over-plots them on the I,Q plot in the detector digest windows. Used to conveniently re-assess detector state.")
         self.refresh_noise_button.setEnabled(len(self.detector_indices) > 1)
@@ -198,13 +191,11 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.detector_indices:
             detector_count_text = f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})"
         self.detector_count_label = QtWidgets.QLabel(detector_count_text)
-        self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         nav_layout.addWidget(self.detector_count_label)
         
         # Add trace navigation hint
         trace_hint_text = "↑↓ to switch traces" if self.resonance_data_for_digest and len(self.resonance_data_for_digest) > 1 else ""
         self.trace_hint_label = QtWidgets.QLabel(trace_hint_text)
-        self.trace_hint_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}")
         nav_layout.addWidget(self.trace_hint_label)
 
         top_layout.addWidget(nav_widget)
@@ -254,12 +245,10 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Fitting Information Panel
         self.fitting_info_group = QtWidgets.QGroupBox("Fitting Results")
-        self.fitting_info_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}")
         fitting_info_main_layout = QtWidgets.QHBoxLayout(self.fitting_info_group)
 
         # Column 1: Skewed Fit
         skewed_fit_group = QtWidgets.QGroupBox("Skewed Lorentzian Fit")
-        skewed_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
         skewed_fit_layout = QtWidgets.QVBoxLayout(skewed_fit_group)
         
         # Create table for skewed fit
@@ -291,7 +280,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Column 2: Nonlinear Fit
         nl_fit_group = QtWidgets.QGroupBox("Nonlinear Fit")
-        nl_fit_group.setStyleSheet(f"QGroupBox {{ color: {title_color_str}; border: none;}}")
         nl_fit_layout = QtWidgets.QVBoxLayout(nl_fit_group)
         
         # Create table for nonlinear fit
@@ -987,26 +975,8 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
         """Apply the dark/light theme to all plots and UI elements in this panel."""
         self.dark_mode = dark_mode
         
-        # Apply background and text color to self and all child widgets
-        bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-        fg_color_hex = "#FFFFFF" if dark_mode else "#000000"
-        self.setStyleSheet(
-            f"QWidget {{ background-color: {bg_color_hex}; color: {fg_color_hex}; }}"
-        )
-        
-        title_color_str = "white" if dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
     
-        # ----- Navigation title bar (det_label, spinbox, freq_label) -----
-        label_style = f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-        if hasattr(self, 'det_label'):
-            self.det_label.setStyleSheet(label_style)  # type: ignore[union-attr]
-        if hasattr(self, 'freq_label'):
-            self.freq_label.setStyleSheet(label_style)  # type: ignore[union-attr]
-        if hasattr(self, 'detector_spinbox'):
-            self.detector_spinbox.setStyleSheet(
-                f"QSpinBox {{ color: {fg_color_hex}; background-color: {bg_color_hex}; }}"
-            )
         # ----- Plots -----
         plot_widgets_legends = [
             (self.plot1_sweep_vs_freq, self.plot1_legend, "Sweep"),
@@ -1035,174 +1005,6 @@ class DetectorDigestPanel(QtWidgets.QWidget, ScreenshotMixin):
                         legend_widget.setLabelTextColor(plot_pen_color)
                     except Exception as e:
                         print(f"Error updating legend color for {default_title_text}: {e}")
-    
-        # ----- Fitting info panel -----
-        if hasattr(self, 'fitting_info_group'):
-            self.fitting_info_group.setStyleSheet(
-                f"QGroupBox {{ color: {title_color_str}; border: 1px solid {title_color_str}; margin-top: 0.5em;}} "
-                f"QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 3px 0 3px; }}"
-            )
-            sub_group_style = (
-                f"QGroupBox {{ color: {title_color_str}; border: none; background-color: transparent; }}"
-            )
-            fitting_label_color_style = (
-                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-            )
-            fitting_info_main_layout = self.fitting_info_group.layout()
-            if fitting_info_main_layout:
-                for i in range(fitting_info_main_layout.count()):
-                    item = fitting_info_main_layout.itemAt(i)
-                    if item and item.widget() and isinstance(item.widget(), QtWidgets.QGroupBox):
-                        sub_group_box = item.widget()
-                        sub_group_box.setStyleSheet(sub_group_style)
-                        form_layout = sub_group_box.layout()
-                        if (
-                            form_layout
-                            and isinstance(form_layout, QtWidgets.QFormLayout)
-                        ):
-                            for row in range(form_layout.rowCount()):
-                                label_widget = form_layout.itemAt(
-                                    row, QtWidgets.QFormLayout.ItemRole.LabelRole
-                                ).widget()
-                                if label_widget:
-                                    label_widget.setStyleSheet(fitting_label_color_style)
-                                field_widget = form_layout.itemAt(
-                                    row, QtWidgets.QFormLayout.ItemRole.FieldRole
-                                ).widget()
-                                if field_widget:
-                                    field_widget.setStyleSheet(fitting_label_color_style)
-    
-        # ----- Button styles -----
-        if dark_mode:
-            button_style = """
-                QPushButton {
-                    background-color: #3C3C3C;
-                    color: white;
-                    border: 1px solid #555555;
-                    padding: 5px 10px;
-                    border-radius: 3px;
-                }
-                QPushButton:hover {
-                    background-color: #4C4C4C;
-                }
-                QPushButton:pressed {
-                    background-color: #2C2C2C;
-                }
-                QPushButton:disabled {
-                    background-color: #1C1C1C;
-                    color: #666666;
-                }
-            """
-        else:
-            button_style = """
-                QPushButton {
-                    background-color: #F0F0F0;
-                    color: black;
-                    border: 1px solid #CCCCCC;
-                    padding: 5px 10px;
-                    border-radius: 3px;
-                }
-                QPushButton:hover {
-                    background-color: #E0E0E0;
-                }
-                QPushButton:pressed {
-                    background-color: #D0D0D0;
-                }
-                QPushButton:disabled {
-                    background-color: #F8F8F8;
-                    color: #999999;
-                }
-            """
-    
-        # Style for QTableWidget - use full stylesheet approach for better control
-        if dark_mode:
-            table_style = """
-                QTableWidget {
-                    background-color: #2C2C2C;
-                    alternate-background-color: #353535;
-                    color: #E0E0E0;
-                    gridline-color: #555555;
-                }
-                QTableWidget::item {
-                    color: #E0E0E0;
-                    background-color: #2C2C2C;
-                }
-                QTableWidget::item:alternate {
-                    background-color: #353535;
-                }
-                QHeaderView::section {
-                    background-color: #3C3C3C;
-                    color: #E0E0E0;
-                    border: 1px solid #555555;
-                    padding: 4px;
-                }
-                QTableCornerButton::section {
-                    background-color: #3C3C3C;
-                    border: 1px solid #555555;
-                }
-            """
-        else:
-            table_style = """
-                QTableWidget {
-                    background-color: #FFFFFF;
-                    alternate-background-color: #F9F9F9;
-                    color: #000000;
-                    gridline-color: #CCCCCC;
-                }
-                QTableWidget::item {
-                    color: #000000;
-                    background-color: #FFFFFF;
-                }
-                QTableWidget::item:alternate {
-                    background-color: #F9F9F9;
-                }
-                QHeaderView::section {
-                    background-color: #F0F0F0;
-                    color: #000000;
-                    border: 1px solid #CCCCCC;
-                    padding: 4px;
-                }
-                QTableCornerButton::section {
-                    background-color: #F0F0F0;
-                    border: 1px solid #CCCCCC;
-                }
-            """
-
-        if hasattr(self, 'skewed_table'):
-            self.skewed_table.setStyleSheet(table_style)
-
-        if hasattr(self, 'nl_table'):
-            self.nl_table.setStyleSheet(table_style)
-
-        # Buttons
-        if hasattr(self, 'prev_button'):
-            self.prev_button.setStyleSheet(button_style)
-        if hasattr(self, 'next_button'):
-            self.next_button.setStyleSheet(button_style)
-        if hasattr(self, 'refresh_noise_button'):
-            self.refresh_noise_button.setStyleSheet(button_style)
-    
-        # ----- Splitter -----
-        if hasattr(self, 'main_splitter'):
-            splitter_style = f"""
-            QSplitter::handle {{
-                background-color: {'#555555' if dark_mode else '#CCCCCC'};
-            }}
-            QSplitter::handle:hover {{
-                background-color: {'#777777' if dark_mode else '#AAAAAA'};
-            }}
-            """
-            self.main_splitter.setStyleSheet(splitter_style)
-    
-        # ----- Labels -----
-        if hasattr(self, 'detector_count_label'):
-            self.detector_count_label.setStyleSheet(
-                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-            )
-        if hasattr(self, 'trace_hint_label'):
-            self.trace_hint_label.setStyleSheet(
-                f"QLabel {{ color: {title_color_str}; background-color: transparent; font-size: 10pt; }}"
-            )
     
         # ----- Update plots to reflect new theme -----
         self._update_plots()

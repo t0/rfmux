@@ -258,13 +258,6 @@ class SessionBrowserPanel(QtWidgets.QWidget):
             dark_mode: True for dark theme, False for light theme
         """
         self._dark_mode = dark_mode
-        
-        if dark_mode:
-            self.path_label.setStyleSheet("font-size: 10px; color: #aaaaaa;")
-            self.placeholder_label.setStyleSheet("color: #888888; padding: 20px;")
-        else:
-            self.path_label.setStyleSheet("font-size: 10px; color: gray;")
-            self.placeholder_label.setStyleSheet("color: gray; padding: 20px;")
     
     # ─────────────────────────────────────────────────────────────────
     # Session State Handlers

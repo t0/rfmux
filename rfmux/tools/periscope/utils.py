@@ -386,6 +386,64 @@ def legend_text_color(dark_mode: bool) -> str:
     return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
 
 
+#: Fusion's own light and dark colours, spelled out because the style
+#: only hands back the one matching the desktop's colour scheme.
+_UI_PALETTES = {
+    False: dict(window="#efefef", text="#000000", base="#ffffff",
+                alt_base="#f7f7f7", tooltip="#ffffdc", placeholder="#808080",
+                disabled="#bebebe", link="#0000ff", highlight="#308cc6"),
+    True: dict(window="#323232", text="#f0f0f0", base="#242424",
+               alt_base="#2c2c2c", tooltip="#323232", placeholder="#8a8a8a",
+               disabled="#7f7f7f", link="#5aa9ff", highlight="#308cc6"),
+}
+
+
+def ui_palette(dark_mode: bool) -> QtGui.QPalette:
+    """The palette every widget wears in *dark_mode*.  Built on the
+    window colour so Fusion's bevels derive their shades from it."""
+    c = _UI_PALETTES[dark_mode]
+    P = QtGui.QPalette
+    pal = P(QtGui.QColor(c["window"]))
+    for role, colour in (
+        (P.ColorRole.Window, c["window"]), (P.ColorRole.Button, c["window"]),
+        (P.ColorRole.WindowText, c["text"]), (P.ColorRole.Text, c["text"]),
+        (P.ColorRole.ButtonText, c["text"]), (P.ColorRole.ToolTipText, c["text"]),
+        (P.ColorRole.Base, c["base"]), (P.ColorRole.AlternateBase, c["alt_base"]),
+        (P.ColorRole.ToolTipBase, c["tooltip"]),
+        (P.ColorRole.PlaceholderText, c["placeholder"]),
+        (P.ColorRole.Link, c["link"]), (P.ColorRole.Highlight, c["highlight"]),
+        (P.ColorRole.HighlightedText, "#ffffff"), (P.ColorRole.BrightText, "#ff5555"),
+    ):
+        pal.setColor(role, QtGui.QColor(colour))
+    for role in (P.ColorRole.WindowText, P.ColorRole.Text,
+                 P.ColorRole.ButtonText, P.ColorRole.HighlightedText):
+        pal.setColor(P.ColorGroup.Disabled, role, QtGui.QColor(c["disabled"]))
+    pal.setColor(P.ColorGroup.Disabled, P.ColorRole.Highlight,
+                 QtGui.QColor(c["window"]).darker(120))
+    return pal
+
+
+def apply_ui_theme(dark_mode: bool) -> None:
+    """Dress the whole application for *dark_mode*.
+
+    Fusion is the one style that honours an application palette on
+    every platform (the GTK and macOS styles paint from the system
+    theme).  The colour scheme is set too, where the platform supports
+    it, so menus, tooltips and decorations agree with the palette.
+    Widgets that already exist take the palette on the next event-loop
+    turn.
+    """
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    hints = app.styleHints()
+    if hasattr(hints, "setColorScheme"):  # Qt 6.8+
+        hints.setColorScheme(Qt.ColorScheme.Dark if dark_mode
+                             else Qt.ColorScheme.Light)
+    app.setStyle("Fusion")
+    app.setPalette(ui_palette(dark_mode))
+
+
 def square_axes(plot_item: pg.PlotItem):
     """
     Make the axes have the same scale and equal extent in both directions, so that the

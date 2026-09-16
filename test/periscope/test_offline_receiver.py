@@ -28,7 +28,6 @@ def test_offline_status_bar_tick_reads_a_healthy_empty_stream(qt_app):
     p.prev_missing = p.prev_qdrops = p.prev_receive = 0
     p.frame_cnt = p.pkt_cnt = 0
     p.is_mock_mode = False
-    p.default_packet_loss_color = "black"
     for name in ("fps_label", "pps_label", "packet_loss_label",
                  "info_text", "dropped_label"):
         setattr(p, name, QtWidgets.QLabel())

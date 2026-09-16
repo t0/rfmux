@@ -12,15 +12,13 @@ Original project license: see rfmux/mr_resonator/LICENSE (upstream LICENSE retai
 import numpy as np
 
 # Import Bessel approximations from JIT physics module
-from .jit_physics import bessel_k0 as bessel_k0_approx, bessel_i0 as bessel_i0_approx
+from . import jit_physics
 
 # Import MR_LEKID
 from .mr_lekid import MR_LEKID as MR_LEKID
 
 
-h = 6.626e-34      # Planck's constant [J·s]
 kb = 1.38e-23      # Boltzmann constant [J/K]
-mu0 = 4e-7 * 3.14159265359  # Permeability of free space [H/m] ≈ 1.257e-6
 
 
 class MR_complex_resonator(): 
@@ -191,77 +189,22 @@ class MR_complex_resonator():
 
     
 
-    def calc_Zs(self, f, sigma, thickness=None):#, sigma2=None):
-        """
-        Compute complex surface impedance from complex conductance.
-
-        Parameters
-        ----------
-        f : float
-            Probe frequency [Hz]
-        sigma : complex
-            Complex conductance σ = σ1 - j σ2 [S/m]
-        thickness : float, optional
-            Film thickness [m] (defaults to self.thickness)
-
-        Returns
-        -------
-        complex
-            Surface impedance Zs [Ω]
-        """
-        
+    def calc_Zs(self, f, sigma, thickness=None):
+        """Surface impedance [ohm] of the film at *f* for the complex
+        conductivity *sigma* = sigma1 - j sigma2 (jit_physics.calc_Zs)."""
         if thickness is None:
             thickness = self.thickness
-#         print(thickness)
-        root1 = (1.j*2*np.pi*f*mu0)/sigma
-        cotharg = thickness * np.sqrt(1.j*2*np.pi*f*mu0*sigma)
-        Zs = np.sqrt(root1) * 1./np.tanh(cotharg)
-        return Zs
+        return jit_physics.calc_Zs(f, sigma.real, -sigma.imag, thickness,
+                                   self.width, self.length)
 
 
     def calc_R_L(self, f, Zs):
-        """
-        Convert surface impedance to total series R and kinetic inductance Lk.
-
-        Parameters
-        ----------
-        f : float
-            Probe frequency [Hz]
-        Zs : complex
-            Surface impedance [Ω]
-
-        Returns
-        -------
-        tuple[float, float]
-            (R_total [Ω], Lk_total [H])
-
-        Notes
-        -----
-        Geometry scaling: multiply surface quantities by (length/width).
-        R_spoiler is added as an extra series resistance term.
-        """
-        R = (Zs.real ) * (self.length / self.width) + self.R_spoiler
-        L = (Zs.imag / (2*np.pi*f)) * (self.length / self.width)
-        return R, L
+        """(R [ohm], Lk [H]) of the inductor from its surface impedance
+        (jit_physics.calc_R_L: geometry scaling plus R_spoiler)."""
+        return jit_physics.calc_R_L(f, Zs, self.length, self.width,
+                                    self.R_spoiler)
     
 
-    def zeta(self, f, T):
-        """
-        Dimensionless parameter ζ = h f / (2 k_B T).
-
-        Parameters
-        ----------
-        f : float
-            Frequency [Hz]
-        T : float
-            Temperature [K]
-
-        Returns
-        -------
-        float
-            ζ (dimensionless)
-        """
-        return h * f / (2 * kb * T)
     
     def calc_sigma1(self, f=None, nqp=None, T=None, Popt=None, pb_eff=None, opt_eff=None):
         """
@@ -287,8 +230,7 @@ class MR_complex_resonator():
 
         Notes
         -----
-        Uses fast bessel_k0 approximation from jit_physics; relative error ~1e-6
-        over intended ranges.
+        jit_physics.calc_sigma1, Gao eq. 2.96.
         """
         
         if f is None:
@@ -304,15 +246,9 @@ class MR_complex_resonator():
         if nqp is None:
             nqp = self.calc_nqp(T=T, Popt=Popt, pb_eff=pb_eff, opt_eff=opt_eff)
 
-        zeta = self.zeta(f=f, T=T)
         
-        # Always use fast approximation (JIT-compiled)
-        K0 = bessel_k0_approx(zeta)
-
-        x1 = 2 * self.Delta0/(h*f)
-        x2 = nqp / (self.N0 * np.sqrt(2*np.pi*kb*T*self.Delta0))
-
-        return x1 * x2 * np.sinh(zeta) * K0 * self.sigmaN
+        return jit_physics.calc_sigma1(f, T, nqp, self.Delta0, self.N0,
+                                       self.sigmaN)
 
     
     def calc_sigma2(self, f=None, nqp=None, T=None, Popt=None, pb_eff=None, opt_eff=None):
@@ -339,8 +275,7 @@ class MR_complex_resonator():
 
         Notes
         -----
-        Uses fast bessel_i0 approximation from jit_physics; relative error ~1e-6
-        over intended ranges.
+        jit_physics.calc_sigma2, Gao eq. 2.97.
         """
         
         if f is None:
@@ -355,18 +290,10 @@ class MR_complex_resonator():
             pb_eff = self.pb_eff
         if nqp is None:
             nqp = self.calc_nqp(T=T, Popt=Popt, pb_eff=pb_eff, opt_eff=opt_eff)
-        Delta0 = self.Delta0
         
-        zeta = self.zeta(f=f, T=T)
         
-        # Always use fast approximation (JIT-compiled)
-        I0 = bessel_i0_approx(zeta)
-
-        x1 = np.pi * Delta0 / (h*f)
-        x2 = nqp / (2*self.N0*Delta0)
-        x3 = np.sqrt(2*Delta0/(np.pi*kb*T)) * np.exp(-zeta) * I0
-
-        return x1 * (1 - x2*(1+x3)) * (self.sigmaN)
+        return jit_physics.calc_sigma2(f, T, nqp, self.Delta0, self.N0,
+                                       self.sigmaN)
 
         
     def calc_nqp(self, T=None, Popt=None, opt_eff=None, pb_eff=None):

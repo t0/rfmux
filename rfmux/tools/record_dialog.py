@@ -136,7 +136,7 @@ class RecordDialog(QtWidgets.QDialog):
         self.parser_iface_combo = QtWidgets.QComboBox()
         self.parser_iface_combo.setEditable(True)
         self.parser_iface_combo.setToolTip(
-            "1G interface for the parser; auto finds it from the board "
+            "interface the parser listens on; auto finds it from the board "
             "address")
         self.fastrx_check = QtWidgets.QCheckBox("fastrx recording")
         self.fastrx_iface_combo = QtWidgets.QComboBox()
@@ -166,7 +166,7 @@ class RecordDialog(QtWidgets.QDialog):
         self.show_combo.addItems(["Periscope in review mode",
                                   "the overlay viewer", "nothing"])
         add("Products:", self.capture_check)
-        add("", self._row(self.parser_check, QtWidgets.QLabel("1G interface"),
+        add("", self._row(self.parser_check, QtWidgets.QLabel("interface"),
                           self.parser_iface_combo))
         add("", self._row(self.fastrx_check,
                           QtWidgets.QLabel("100G interface"),
@@ -296,16 +296,16 @@ class RecordDialog(QtWidgets.QDialog):
         return wanted, "\n".join(notes)
 
     def _fill_interfaces(self, running) -> None:
-        """The parser's list: interfaces under 100 Gb/s; fastrx's: the
-        running daemons, then the 100 Gb/s interfaces, the one of them
-        filled in when nothing was chosen.  Each shows its rate."""
+        """The parser's list: every interface, since the board's 1G
+        traffic can arrive on any of them; fastrx's: the running
+        daemons, then the 100 Gb/s interfaces, the one of them filled in
+        when nothing was chosen.  Each shows its rate."""
         speeds = interface_speeds()
-        slow = [n for n, v in speeds.items() if v is None or v < _FAST_MBPS]
         fast = running + [n for n, v in speeds.items()
                           if v is not None and v >= _FAST_MBPS
                           and n not in running]
         for combo, names, extra in (
-                (self.parser_iface_combo, slow, [("auto", "auto")]),
+                (self.parser_iface_combo, list(speeds), [("auto", "auto")]),
                 (self.fastrx_iface_combo, fast, [])):
             current = _combo_value(combo)
             combo.blockSignals(True)

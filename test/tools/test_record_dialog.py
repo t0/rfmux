@@ -100,13 +100,15 @@ def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
 
 def test_interfaces_show_their_rates_and_sort_by_role(
         qt_app, tmp_path, monkeypatch):
-    """The parser chooses among interfaces under 100 Gb/s, fastrx among
-    the 100 Gb/s ones, each labelled with its rate; the one 100 Gb/s
-    interface is filled in when nothing was chosen."""
+    """The parser chooses among every interface, the 100 Gb/s one
+    included, fastrx among the 100 Gb/s ones, each labelled with its
+    rate; the one 100 Gb/s interface is filled in when nothing was
+    chosen."""
     dlg, _ = _dialog(tmp_path, monkeypatch)
     parser = [dlg.parser_iface_combo.itemText(i)
               for i in range(dlg.parser_iface_combo.count())]
-    assert parser == ["auto", "eth0 (1 Gb/s)", "wlan0 (no link)"]
+    assert parser == ["auto", "eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
+                      "wlan0 (no link)"]
     fast = [dlg.fastrx_iface_combo.itemText(i)
             for i in range(dlg.fastrx_iface_combo.count())]
     assert fast == ["enp2s0f0np0 (100 Gb/s)"]

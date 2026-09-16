@@ -1,5 +1,6 @@
-"""Tones sharing a resonance shift each other: an instantaneous
-nonlinearity puts twice the other tones' |I|^2 into a tone's solve."""
+"""Tones sharing a resonator each shift the resonance the others see:
+an instantaneous nonlinearity puts twice the other tones' |I|^2 into a
+tone's solve."""
 import numpy as np
 import pytest
 

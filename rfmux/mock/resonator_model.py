@@ -979,10 +979,11 @@ class MockResonatorModel:
 
     def _set_backgrounds(self, tone_keys):
         """Each tone's resonators carry the other tones' currents too:
-        with an instantaneous nonlinearity a tone is shifted by twice
-        the others' |I|^2 (cross-phase modulation) on top of its own.
-        The others' currents are the states they last left, so tones
-        sharing a resonance settle over a few evaluations."""
+        with an instantaneous nonlinearity the resonance a tone sees is
+        shifted by twice the others' |I|^2 (cross-phase modulation) on
+        top of its own.  The others' currents are the states they last
+        left, so tones sharing a resonator settle over a few
+        evaluations."""
         states = [ts for ts in (self._tone_states.get(k) for k in tone_keys)
                   if ts is not None]
         known = [ts for ts in states if ts.currents is not None]

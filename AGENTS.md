@@ -180,9 +180,10 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   response, idler, gain); with `envelope_dynamics` on, a pulsed
   resonator's current rings down to each new steady state and the
   transient reaches the stream (visible at dec 0 and on PFB)
-- Tones sharing a resonance shift each other: each tone's solve adds
-  twice the other tones' |I|^2 per resonator (cross-phase modulation of
-  an instantaneous nonlinearity), from the states they last left
+- Tones sharing a resonator each shift the resonance the others see:
+  each tone's solve adds twice the other tones' |I|^2 per resonator
+  (cross-phase modulation of an instantaneous nonlinearity), from the
+  states they last left
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming

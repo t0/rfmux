@@ -60,3 +60,30 @@ def test_a_session_writes_the_samples_it_trained_on(tmp_path):
         record = r.noise_training(1)
     assert len(record) == 200
     np.testing.assert_array_equal(record, trained)
+
+
+def test_review_mode_shows_the_record_from_the_file(qt_app, tmp_path):
+    pytest.importorskip("PyQt6")
+    from test.qt_helpers import spin
+    from PyQt6 import QtCore
+    from rfmux.tools.periscope.pulse_capture_panel import PulseCapturePanel
+
+    path = tmp_path / "n.h5"
+    PulseHDF5Writer(path, [1], {1: ChannelNoiseStats(std_I=1.0, std_Q=1.0)},
+                    {"streamer_mode": "slow", "module": 1},
+                    noise_data={1: RECORD}).finalize()
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    spin(qt_app)
+    items = [panel.pulse_tree.topLevelItem(i)
+             for i in range(panel.pulse_tree.topLevelItemCount())]
+    noise = [i for i in items
+             if (i.data(0, QtCore.Qt.ItemDataRole.UserRole) or ("",))[0]
+             == "noise"]
+    assert len(noise) == 1
+    panel._on_tree_double_click(noise[0], 0)
+    spin(qt_app)
+    assert "Noise training segment" in panel.pulse_info.text()
+    assert f"({len(RECORD)} samples)" in panel.pulse_info.text()
+    panel.close()
+    spin(qt_app)

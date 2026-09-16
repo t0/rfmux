@@ -61,8 +61,17 @@ Left and Right move through the pulses, Home and End jump to the first and
 last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
-**Units** switches the pulse view, histograms and templates between counts,
-volts and df in hertz. df units require a df calibration (below).
+**IQ Plane** draws the same pulse as a path in the plane, grey before the
+trigger and one hue darkening with time after it, with a cross at the
+trigger baseline. Under it lies the sweep the channel was tuned with, its
+bias point as a star and a dashed segment from the bias point along the
+direction a frequency shift moves the quadratures. The baseline sits on the
+bias point when the tuning describes the channel. In the df view the
+whole picture is rotated so that segment is the horizontal df axis.
+
+**Units** switches the pulse view, IQ plane, histograms and templates
+between counts, volts and df in hertz. df units require a df calibration
+(below).
 
 ## Selecting the stream
 
@@ -193,6 +202,13 @@ pulse list shows it as a **Tuning** item, one per module. Double-click it to
 browse those sweeps in a multisweep window, one sweep per resonator, with
 the detector digest a double-click away as usual. The window reads nothing
 from the board and changes nothing on it.
+
+The file also keeps each channel's noise training record, the samples the
+noise statistics were fitted to, in the channel's stored units (the
+`noise_training` dataset of its group, one per stream in both mode). The
+pulse list shows it as a **Noise training** item; double-click it to see
+the record with its baselines and bands, as the live panel shows it after
+training.
 
 ## Fast and dual-stream captures
 

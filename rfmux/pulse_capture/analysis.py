@@ -341,6 +341,48 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
     return rotation * scale
 
 
+def tuning_sweep(row):
+    """The sweep a tuning row carries, in the frame the channel's
+    samples stream in: ``(frequencies_hz, iq_counts, bias_point)``, or
+    None when the row holds no sweep.
+
+    The sweep was taken at ADC phase zero.  A row whose bias set a
+    nonzero ``optimal_phase_degrees`` streams samples the board has
+    turned by minus that phase, so the sweep is turned the same way to
+    sit under them.  *bias_point* is the sweep interpolated at the
+    bias frequency, or None without one.
+    """
+    if not isinstance(row, dict) or "frequencies" not in row \
+            or "iq_complex" not in row:
+        return None
+    f = np.asarray(row["frequencies"], dtype=float)
+    iq = np.asarray(row["iq_complex"], dtype=complex)
+    if f.size < 2 or f.shape != iq.shape:
+        return None
+    phase = row.get("optimal_phase_degrees") or 0.0
+    if phase:
+        iq = iq * np.exp(-1j * np.radians(float(phase)))
+    order = np.argsort(f)
+    f, iq = f[order], iq[order]
+    bias = row.get("bias_frequency")
+    point = None
+    if bias is not None and f[0] <= float(bias) <= f[-1]:
+        point = complex(np.interp(float(bias), f, iq.real),
+                        np.interp(float(bias), f, iq.imag))
+    return f, iq, point
+
+
+def frequency_direction(df_calibration) -> Optional[complex]:
+    """Unit vector along which a frequency shift moves the quadratures,
+    in the samples' frame: the calibration's reciprocal, normalised.
+    Multiplied by the calibration it is the +real axis of the frequency
+    basis.  None without a calibration."""
+    cal = _calibration(df_calibration)
+    if not cal:
+        return None
+    return complex(np.conj(cal) / abs(cal))
+
+
 def window_shortfall(times, window, tolerance: float) -> tuple:
     """How much of *window* (t0, t1) the samples at *times* fail to
     cover, as (seconds missing at the start, seconds missing at the

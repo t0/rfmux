@@ -2357,6 +2357,7 @@ class PeriscopeRuntime:
             "module": self.module,
             "apply_skewed_fit": False,
             "apply_nonlinear_fit": False,
+            "use_fit_frequencies": False,
         }
         _assert_param_keys(
             self.multisweep_params,

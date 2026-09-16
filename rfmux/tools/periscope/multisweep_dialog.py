@@ -634,6 +634,14 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                         params_dict['resonance_frequencies'].append(np.float64(f) * 1e6)
                 else:
                     params_dict['resonance_frequencies'] = self.section_center_frequencies
+                # A re-run may centre each section on the fitted resonance
+                # frequency instead of the last sweep's bias point.
+                combo = getattr(self, "section_freq_combo", None)
+                params_dict['use_fit_frequencies'] = bool(
+                    self.fit_frequencies is not None and combo is not None
+                    and "fit" in combo.currentText().lower())
+                if params_dict['use_fit_frequencies']:
+                    params_dict['resonance_frequencies'] = list(self.fit_frequencies)
                 params_dict['module'] = self.current_module
                 
                 # Get fitting parameters

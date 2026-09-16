@@ -529,12 +529,13 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
                     if not amp_dir_dict:
                         continue
                     entry = next(iter(amp_dir_dict.values()))
-                    if params['apply_skewed_fit'] and entry.get('skewed_fit_success') and entry.get('fit_params'):
-                        ref_freqs.append(entry['fit_params']['fr'])
-                    elif params['apply_nonlinear_fit'] and entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
-                        ref_freqs.append(entry['nonlinear_fit_params']['fr'])
-                    else:
-                        ref_freqs.append(entry.get('bias_frequency', entry.get('original_center_frequency')))
+                    from rfmux.algorithms.measurement.df_calibration import fitted_frequency
+                    fits = tuple(name for name, on in (
+                        ("skewed", params['apply_skewed_fit']),
+                        ("nonlinear", params['apply_nonlinear_fit'])) if on)
+                    f = fitted_frequency(entry, fits)
+                    ref_freqs.append(f if f is not None else entry.get(
+                        'bias_frequency', entry.get('original_center_frequency')))
             elif 'results_by_iteration' in payload:
                 # Old iteration-based format (backward compatibility)
                 if params['apply_skewed_fit']:

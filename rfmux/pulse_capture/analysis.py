@@ -373,9 +373,10 @@ def tuning_sweep(row):
 
 
 def frequency_direction(df_calibration) -> Optional[complex]:
-    """Unit vector along which a frequency shift moves the quadratures,
-    in the samples' frame: the calibration's reciprocal, normalised.
-    Multiplied by the calibration it is the +real axis of the frequency
+    """The direction a frequency shift moves the samples in the I/Q
+    plane, as a unit vector.  A shift of df moves IQ by df / calibration,
+    so this is 1 / calibration normalised; multiplied by the calibration
+    it lands on the +real axis, which is the df axis of the frequency
     basis.  None without a calibration."""
     cal = _calibration(df_calibration)
     if not cal:

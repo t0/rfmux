@@ -32,7 +32,8 @@ from .fitting_nonlinear import nonlinear_iq
 
 __all__ = ["measure_df_calibrations", "df_calibration_from_sweep",
            "df_calibration_for_entry", "bias_frequency_from_fit",
-           "ensure_fits", "fits_present", "fitted_linewidth",
+           "ensure_fits", "fits_present", "fitted_frequency",
+           "fitted_linewidth",
            "step_slope_correction", "BIFURCATION_A", "NONLINEAR_PARAMS"]
 
 # fit_nonlinear_iq's parameters, in the order nonlinear_iq takes them.
@@ -141,6 +142,17 @@ def bias_frequency_from_fit(entry, method="max-diq", fit="nonlinear"):
     if method == "min-s21":
         return float(grid[np.argmin(np.abs(z))])
     return float(grid[np.argmax(np.abs(np.gradient(z, grid)))])
+
+
+def fitted_frequency(entry, fits=("skewed", "nonlinear")):
+    """The resonance frequency the first of *fits* ("skewed",
+    "nonlinear") the entry carries found, in hertz; None without one."""
+    for fit in fits:
+        if fit == "skewed" and _has_skewed_fit(entry):
+            return float(entry["fit_params"]["fr"])
+        if fit == "nonlinear" and _has_nonlinear_fit(entry):
+            return float(entry["nonlinear_fit_params"]["fr"])
+    return None
 
 
 def fitted_linewidth(entry, prefer="nonlinear"):

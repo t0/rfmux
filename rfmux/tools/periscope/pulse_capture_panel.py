@@ -233,6 +233,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.task: Optional[PulseCaptureTask] = None
         self.signals: Optional[PulseCaptureSignals] = None
         self.reader: Optional[PulseHDF5Reader] = None
+        self._tuning_rows: Dict[int, dict] = {}
         self._review_mode = False
         self._registered_export = False
         self._tap_registered = False
@@ -561,13 +562,16 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _tuning_row(self, channel: int) -> dict:
         """This channel's tuning row: the live capture's, else the
-        file's."""
+        file's, read once per capture since the file's carries the
+        sweep arrays."""
         row = self._flat_tuning().get(channel)
         if not isinstance(row, dict) and self.reader is not None:
-            try:
-                row = self.reader.tuning(channel)
-            except Exception:
-                row = None
+            if channel not in self._tuning_rows:
+                try:
+                    self._tuning_rows[channel] = self.reader.tuning(channel)
+                except Exception:
+                    self._tuning_rows[channel] = {}
+            row = self._tuning_rows[channel]
         return row if isinstance(row, dict) else {}
 
     def _iq_source(self):
@@ -1791,6 +1795,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._pulse_order.clear()
         self._pulse_summaries.clear()
         self._pair_meta.clear()
+        self._tuning_rows = {}     # the file's rows, read once per capture
         self._noise_by_stream = {}
         self._last_stats = {}      # the status line must not show the last run
         self._hist_data_by_stream = {}
@@ -2217,13 +2222,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         In review mode there is no Periscope session holding one, so the
         file is the only place it survives a capture.
         """
-        cal = calibration_of(self._flat_tuning().get(channel))
-        if cal is None and self.reader is not None:
-            try:
-                cal = self.reader.df_calibration(channel)
-            except Exception:
-                cal = None
-        return cal
+        return calibration_of(self._tuning_row(channel))
 
     def _stored_state(self, channel: int) -> Tuple[str, str]:
         """(basis, units) the samples for *channel* are held in.
@@ -2565,6 +2564,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return {m: {c: rows[key] for c, key in pairs}
                 for m, pairs in keys_by_module(rows, module).items()}
 
+    def _add_tree_item(self, text: str, data: tuple, tooltip: str) -> None:
+        """A top-level entry of the pulse tree that is not a pulse:
+        *data* says what a double-click opens."""
+        item = QtWidgets.QTreeWidgetItem([text, "", "", ""])
+        item.setData(0, QtCore.Qt.ItemDataRole.UserRole, data)
+        item.setToolTip(0, tooltip)
+        self.pulse_tree.addTopLevelItem(item)
+
     def _add_tuning_items(self) -> None:
         """One tree item per module whose channels carry their tuning:
         double-click browses the sweeps as a multisweep window."""
@@ -2572,13 +2579,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for module, rows in sorted(by_module.items()):
             where = f" module {module}" if len(by_module) > 1 else ""
             n = len(rows)
-            item = QtWidgets.QTreeWidgetItem(
-                [f"▦ Tuning{where} ({n} detector{'s' if n != 1 else ''})",
-                 "", "", ""])
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("tuning", module))
-            item.setToolTip(0, "Double-click to browse the sweeps the "
-                               "channels were tuned with")
-            self.pulse_tree.addTopLevelItem(item)
+            self._add_tree_item(
+                f"▦ Tuning{where} ({n} detector{'s' if n != 1 else ''})",
+                ("tuning", module),
+                "Double-click to browse the sweeps the channels were tuned with")
 
     def _add_noise_items(self) -> None:
         """One tree item per training record the file under review
@@ -2586,17 +2590,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.reader is None:
             return
         for stream in (self.reader.streams or [None]):
-            if not any(self.reader.noise_training(c, stream) is not None
-                       for c in self.reader.channels):
-                continue
-            where = f" ({stream})" if stream else ""
-            item = QtWidgets.QTreeWidgetItem(
-                [f"◌ Noise training{where}", "", "", ""])
-            item.setData(0, QtCore.Qt.ItemDataRole.UserRole,
-                         ("noise", stream))
-            item.setToolTip(0, "Double-click to see the samples the "
-                               "noise statistics were fitted to")
-            self.pulse_tree.addTopLevelItem(item)
+            if any(self.reader.noise_training(c, stream) is not None
+                   for c in self.reader.channels):
+                self._add_tree_item(
+                    f"◌ Noise training{f' ({stream})' if stream else ''}",
+                    ("noise", stream),
+                    "Double-click to see the samples the noise statistics "
+                    "were fitted to")
 
     def _open_tuning_window(self, module: int) -> None:
         periscope = self.periscope or find_parent_with_attr(

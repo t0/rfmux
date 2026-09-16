@@ -183,16 +183,6 @@ class _PulseFileWriter:
         grp.attrs["noise_jump_std_I"] = ns.jump_std_I
         grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
 
-    @staticmethod
-    def _write_noise_record(grp, samples) -> None:
-        """The training record the statistics were fitted to, in the
-        channel's stored units; a re-estimation replaces it."""
-        if NOISE_RECORD in grp:
-            del grp[NOISE_RECORD]
-        grp.create_dataset(NOISE_RECORD,
-                           data=np.asarray(samples, dtype=np.complex128),
-                           compression="gzip", compression_opts=1)
-
     def _set_noise_stats(self, key_for,
                          noise_stats: Dict[int, ChannelNoiseStats],
                          noise_data: Optional[Dict[int, np.ndarray]] = None,
@@ -206,7 +196,8 @@ class _PulseFileWriter:
             if key in self.f:
                 self._write_noise_attrs(self.f[key], ns)
                 if noise_data and ch in noise_data:
-                    self._write_noise_record(self.f[key], noise_data[ch])
+                    self._replace_datasets(key, {NOISE_RECORD: noise_data[ch]},
+                                           compress=True)
         self.f.flush()
 
     def _append_pulse_to(self, key: str, pulse_idx: int, pulse_data: dict,
@@ -225,20 +216,24 @@ class _PulseFileWriter:
         return _pulse_dict_from_group(self.f[key])
 
     def _replace_datasets(self, group_key: str,
-                          data: Dict[str, np.ndarray]) -> None:
-        """Overwrite a group's datasets wholesale (histograms/templates).
+                          data: Dict[str, np.ndarray],
+                          compress: bool = False) -> None:
+        """Overwrite a group's datasets wholesale (histograms, templates,
+        the noise training record).
 
         Running accumulators are rewritten in full on every flush rather
         than appended to, so the file always holds one self-consistent
-        snapshot however the capture ends.
+        snapshot however the capture ends.  *compress* gzips the data as
+        the pulse waveforms are.
         """
         if not self.is_open:
             return
         grp = self.f.require_group(group_key)
+        opts = {"compression": "gzip", "compression_opts": 1} if compress else {}
         for key, arr in data.items():
             if key in grp:
                 del grp[key]
-            grp.create_dataset(key, data=np.asarray(arr))
+            grp.create_dataset(key, data=np.asarray(arr), **opts)
         self.f.flush()
 
     # ── Lifecycle ─────────────────────────────────────────────────
@@ -324,7 +319,9 @@ class PulseHDF5Writer(_PulseFileWriter):
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
             if noise_data and ch in noise_data:
-                self._write_noise_record(grp, noise_data[ch])
+                self._replace_datasets(channel_group(ch),
+                                       {NOISE_RECORD: noise_data[ch]},
+                                       compress=True)
             grp.attrs["pulse_count"] = 0
             _store_tuning(grp, tuning, ch)
             _store_units(grp, stored_units, ch)

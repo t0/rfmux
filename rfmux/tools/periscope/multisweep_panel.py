@@ -1231,22 +1231,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Export Error", f"Error exporting data: {str(e)}")
 
-    @staticmethod
-    def _fitted_frequency(entry: dict):
-        """The resonance frequency one sweep's fit found, else the bias
-        point it chose, else its centre; None for an empty entry."""
-        if entry.get('skewed_fit_success') and entry.get('fit_params'):
-            return float(entry['fit_params']['fr'])
-        if entry.get('nonlinear_fit_success') and entry.get('nonlinear_fit_params'):
-            return float(entry['nonlinear_fit_params']['fr'])
-        f = entry.get('bias_frequency', entry.get('original_center_frequency'))
-        return None if f is None else float(f)
-
     def _fit_frequencies_by_amp(self, n_sections: int) -> dict:
         """``{amplitude: [f per section]}`` from every sweep taken: each
-        power's own fitted resonance frequencies, in section order, the
-        section's conceptual frequency where a power has no sweep of it.
-        The first direction swept at a power stands for it."""
+        power's own fitted resonance frequency per section, else the
+        bias point that sweep chose, else the section's original centre
+        where the power has no sweep of it.  The first direction swept
+        at a power stands for it."""
+        from rfmux.algorithms.measurement.df_calibration import fitted_frequency
         table: dict[float, list] = {}
         for idx in range(n_sections):
             for entry in self.results_by_detector.get(idx + 1, {}).values():
@@ -1255,17 +1246,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     continue
                 row = table.setdefault(float(amp), [None] * n_sections)
                 if row[idx] is None:
-                    row[idx] = self._fitted_frequency(entry)
+                    f = fitted_frequency(entry)
+                    if f is None:
+                        f = entry.get('bias_frequency',
+                                      entry.get('original_center_frequency'))
+                    row[idx] = None if f is None else float(f)
         for amp, row in table.items():
             table[amp] = [f if f is not None else self.conceptual_section_frequencies[i]
                           for i, f in enumerate(row)]
         return table
-
-    def _get_fit_frequencies(self, freqs):
-        """The fitted frequencies the dialog shows: those of the lowest
-        amplitude swept, one per section."""
-        table = self._fit_frequencies_by_amp(len(freqs))
-        return list(table[min(table)]) if table else []
     
     
     def _rerun_multisweep(self):
@@ -1284,11 +1273,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # --- Determine frequencies to seed the dialog ---
         dialog_seed_frequencies = list(self.conceptual_section_frequencies) # Start with conceptual
 
-        ##### Getting the fit values for updating in re-run ######
+        # The dialog shows the fitted frequencies of the lowest power swept.
+        fit_table = self._fit_frequencies_by_amp(len(dialog_seed_frequencies))
+        fit_freqs = list(fit_table[min(fit_table)]) if fit_table else []
 
-        fit_freqs = self._get_fit_frequencies(dialog_seed_frequencies)
 
-        
         if self.current_run_amps: # If there was a previous/current run configuration
             # Use a representative amplitude from the current/last run to seed the dialog
             # For simplicity, let's use the first amplitude from the current_run_amps.

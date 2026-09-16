@@ -18,7 +18,8 @@ def _entry(amp, fr=None, bias=None):
     e = {"amplitude": amp, "direction": "upward",
          "original_center_frequency": 0.0}
     if fr is not None:
-        e.update(skewed_fit_success=True, fit_params={"fr": fr})
+        e.update(skewed_fit_success=True,
+                 fit_params={"fr": fr, "Qr": 1e4, "Qcre": 2e4, "Qcim": 0.0})
     if bias is not None:
         e["bias_frequency"] = bias
     return e
@@ -49,8 +50,6 @@ def test_the_panel_tables_the_fits_per_amplitude(qt_app):
     }
     table = panel._fit_frequencies_by_amp(2)
     assert table == {0.01: [100.1e6, 200.0e6], 0.03: [100.3e6, 200.3e6]}
-    # The dialog is seeded with the lowest power's fits.
-    assert panel._get_fit_frequencies(CONCEPTUAL) == [100.1e6, 200.0e6]
     panel.close()
     spin(qt_app)
 

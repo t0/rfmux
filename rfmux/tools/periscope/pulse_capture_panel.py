@@ -571,8 +571,19 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         w = self.iq_view = QtWidgets.QWidget()
         v = QtWidgets.QVBoxLayout(w)
         v.setContentsMargins(4, 4, 4, 4)
+        controls = QtWidgets.QHBoxLayout()
         self.iq_info = ElidedLabel("No pulse selected", max_width=900)
-        v.addWidget(self.iq_info)
+        controls.addWidget(self.iq_info)
+        controls.addStretch(1)
+        self.iq_stream_combo = QtWidgets.QComboBox()
+        self.iq_stream_combo.addItems(["slow", "fast"])
+        self.iq_stream_combo.setToolTip(
+            "Which stream's record of the pair to draw (both mode)")
+        self.iq_stream_combo.currentTextChanged.connect(
+            lambda _s: self._render_iq_plane())
+        self.iq_stream_combo.setVisible(False)  # both-mode only
+        controls.addWidget(self.iq_stream_combo)
+        v.addLayout(controls)
         self.iq_plot = pg.PlotWidget(viewBox=ClickableViewBox())
         item = self.iq_plot.getPlotItem()
         item.setAspectLocked(True)
@@ -599,21 +610,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _iq_source(self):
         """(channel, waveform) drawn in the plane: the pulse on view, or
-        a pair's slow record; (None, None) with nothing selected."""
+        the selected stream's record of the pair on view; (None, None)
+        with nothing selected."""
         if self._current_view is not None:
             channel, idx = self._current_view
             return channel, self._get_waveform(channel, idx)
         if self._both_mode and self._current_pair is not None:
             channel, idx = self._current_pair
-            # The triggered slow record carries the trigger marks the
-            # plane draws; the pair's union window does not.
+            stream = self.iq_stream_combo.currentText()
+            # The stream's triggered record carries the trigger marks
+            # the plane draws; the pair's union window does not.
             meta = self._pair_meta.get((channel, idx)) or {}
             wf = None
-            if meta.get("slow_idx") is not None:
-                wf = self._get_waveform(channel, meta["slow_idx"], "slow")
+            if meta.get(f"{stream}_idx") is not None:
+                wf = self._get_waveform(channel, meta[f"{stream}_idx"], stream)
             if wf is None:
                 pair = self._get_pair(channel, idx)
-                wf = pair.get("slow_tod") if pair else None
+                wf = pair.get(f"{stream}_tod") if pair else None
             return channel, wf
         return None, None
 
@@ -700,7 +713,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.addItem(pg.ScatterPlotItem(amp_I[shown], amp_Q[shown],
                                             brush=brushes, pen=None, size=6,
                                             name="pulse"))
-            notes.insert(0, f"{title_label(channel)}: {n} samples, "
+            stream = (f" ({self.iq_stream_combo.currentText()})"
+                      if self._both_mode else "")
+            notes.insert(0, f"{title_label(channel)}{stream}: {n} samples, "
                             f"{trig} before the trigger, light to dark "
                             "with time")
         else:
@@ -1803,6 +1818,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._template_data_by_stream = {}
         self.hist_stream_combo.setVisible(self._both_mode)
         self.template_stream_combo.setVisible(self._both_mode)
+        self.iq_stream_combo.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}

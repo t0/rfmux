@@ -53,19 +53,42 @@ def get_reference_notebook_dir() -> Path:
     notes are in the Jupyter session with the notebooks.
     """
     dest = get_rfmux_data_dir() / "reference-notebooks" / rfmux.__version__
-    docs = dest / DOCS_FOLDER
+    guides = dest / DOCS_FOLDER
 
     if not dest.exists():
         shutil.copytree(_REFERENCE_NOTEBOOKS, dest)
         _read_only(dest)
-    # A version provisioned before the docs came along gets them now.
-    if _DOCS.is_dir() and not docs.exists():
-        shutil.copytree(_DOCS, docs,
-                        ignore=shutil.ignore_patterns("make_*.py",
-                                                      "__pycache__"))
-        _read_only(docs)
-        os.chmod(docs, stat.S_IREAD | stat.S_IEXEC)
+    # A version provisioned before the docs came along gets them now;
+    # one provisioned as a copy of the whole docs/ tree is redone.
+    if (guides / "guides").is_dir():
+        for root, _dirs, _files in os.walk(guides):
+            os.chmod(root, stat.S_IRWXU)     # folders were made read-only
+        shutil.rmtree(guides)
+    if _DOCS.is_dir() and not guides.exists():
+        _provision_docs(dest)
     return dest
+
+
+def _provision_docs(dest: Path) -> None:
+    """The guides as ``Guides/`` with the installation page beside
+    them, and the release notes into ``Release Notes/`` with the
+    shipped walkthroughs: the tracked pieces of docs/, nothing else the
+    folder may hold."""
+    skip = shutil.ignore_patterns("__pycache__", ".ipynb_checkpoints")
+    guides = dest / DOCS_FOLDER
+    shutil.copytree(_DOCS / "guides", guides, ignore=skip, dirs_exist_ok=True)
+    if (_DOCS / "installation.md").is_file():
+        shutil.copy2(_DOCS / "installation.md", guides / "installation.md")
+    notes = dest / "Release Notes"
+    if (_DOCS / "release-notes").is_dir():
+        if notes.is_dir():
+            os.chmod(notes, stat.S_IREAD | stat.S_IWRITE | stat.S_IEXEC)
+        shutil.copytree(_DOCS / "release-notes", notes, ignore=skip,
+                        dirs_exist_ok=True)
+    for folder in (guides, notes):
+        if folder.is_dir():
+            _read_only(folder)
+            os.chmod(folder, stat.S_IREAD | stat.S_IEXEC)
 
 
 def _read_only(dest: Path) -> None:

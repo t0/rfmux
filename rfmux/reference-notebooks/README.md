@@ -28,9 +28,10 @@ to copy from. Both notebooks and `simplified_tuning_flow.py` run in the
 acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
 changing its notebook.
 
-- **`Release Notes/`**: the firmware release walkthroughs.
-- **`Guides/`**: the repository's `docs/` folder (guides, release notes,
-  installation), provisioned beside the notebooks.
+- **`Guides/`**: the repository's guides and installation page, provisioned
+  beside the notebooks.
+- **`Release Notes/`**: the firmware release walkthroughs and the
+  repository's release notes.
 
 ## Connecting
 

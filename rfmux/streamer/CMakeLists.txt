@@ -68,13 +68,15 @@ endif()
 # Install to rfmux/streamer subdirectory
 install(TARGETS _receiver LIBRARY DESTINATION rfmux/streamer)
 
-# The repository's docs (guides, release notes, installation) ship in the
-# wheel as rfmux/docs, so an install from PyPI has them in the Jupyter
-# session too; rfmux/paths.py finds them there.
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/../../docs/
+# The tracked pieces of the repository's docs (guides, release notes,
+# installation) ship in the wheel as rfmux/docs, so an install from PyPI
+# has them in the Jupyter session too; rfmux/paths.py finds them there.
+set(DOCS ${CMAKE_CURRENT_SOURCE_DIR}/../../docs)
+install(DIRECTORY ${DOCS}/guides ${DOCS}/release-notes
         DESTINATION rfmux/docs
-        PATTERN "make_*.py" EXCLUDE
-        PATTERN "__pycache__" EXCLUDE)
+        PATTERN "__pycache__" EXCLUDE
+        PATTERN ".ipynb_checkpoints" EXCLUDE)
+install(FILES ${DOCS}/installation.md DESTINATION rfmux/docs)
 
 #
 # fastrx: Linux-only, AF_XDP-based receiver fastpath for fancy NICs

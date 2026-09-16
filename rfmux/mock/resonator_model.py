@@ -52,9 +52,6 @@ class MockResonatorModel:
         self.tls_alpha = default_config['tls_alpha']
         self.tls_corner_hz = default_config['tls_corner_hz']
         
-        # Current effects (affects Lk only, applied after physics-based base params)
-        self.lk_current_factors = []  # Lk_total = Lk_base * lk_current_factor
-        
         # Physical constants
         self.Istar = 5e-3  # Characteristic current [A] - This is a physical constant, not a config param
         
@@ -75,10 +72,7 @@ class MockResonatorModel:
             6: 625e6 / 256 / 64 / 128,    # 298 Hz
         }
         
-        # Performance caches
-        self._s21_cache = {}  # Cache S21 responses
         self._cic_cache = {}  # Cache CIC filter responses
-        self._cache_valid = False
         
         # Pulse event tracking for time-dependent QP density - from SoT
         self.pulse_events = []  # List of active pulses
@@ -129,13 +123,6 @@ class MockResonatorModel:
         self._recent_cache_results = []  # List of True/False for cache hits
         self._stats_counter = 0
         
-        # Tolerance settings from SoT - note: these use the old names for backward compat
-        # but will be overridden in generate_resonators with new names
-        self._tolerance_config = {
-            'cache_freq_tolerance': default_config.get('cache_freq_step', 0.0001),
-            'cache_amp_tolerance': default_config.get('cache_amp_step', 1e-8),
-            'qp_change_threshold': default_config.get('cache_qp_step', 0.0001),
-        }
         # Cache/logging controls from SoT
         self._resonator_gen = 0
         self._cache_log_counter = 0
@@ -289,8 +276,6 @@ class MockResonatorModel:
         # Clear layered parameter tracking
         self.base_lekid_params = []
         self.base_nqp_values = []  # Clear base nqp values
-        self.lk_current_factors = []
-        self.resonator_currents = []
         
         # Clear cached parameter arrays - CRITICAL for reconfiguration
         # This fixes the array size mismatch when going from more to fewer resonators
@@ -301,12 +286,7 @@ class MockResonatorModel:
         self.Cc_array = None
         self.L_junk_array = None
         
-        # Also clear the resonator currents array if it exists
-        if hasattr(self, 'resonator_currents_array'):
-            self.resonator_currents_array = None
-        
         # Clear convergence state when resonators change
-        self._last_convergence = {'freq': None, 'amp': None, 'nqp_snapshot': None}
         self._convergence_stats = {'full': 0, 'skipped': 0, 'last_reason': None}
         # Also clear convergence cache to avoid size mismatches after reconfiguration
         self._convergence_cache.clear()
@@ -326,15 +306,6 @@ class MockResonatorModel:
 
         self.nqp_noise_enabled = config['nqp_noise_enabled']
         self.nqp_noise_std_factor = config['nqp_noise_std_factor']
-
-        # Update tolerance settings from config (keep existing if not specified or None)
-        self._tolerance_config['cache_freq_tolerance'] = config.get('cache_freq_tolerance', self._tolerance_config['cache_freq_tolerance'])
-        self._tolerance_config['cache_amp_tolerance'] = config.get('cache_amp_tolerance', self._tolerance_config['cache_amp_tolerance'])
-        self._tolerance_config['qp_change_threshold'] = config.get('qp_change_threshold', self._tolerance_config['qp_change_threshold'])
-        
-        print(f"Tolerance settings: freq={self._tolerance_config['cache_freq_tolerance']} Hz, "
-              f"amp={self._tolerance_config['cache_amp_tolerance']}, "
-              f"QP threshold={self._tolerance_config['qp_change_threshold']*100:.1f}%")
 
         # Every pulse setting, so tau values survive a reconfiguration.
         # pulse_config's keys are the config's pulse_* keys, prefix off.
@@ -549,10 +520,6 @@ class MockResonatorModel:
                     'C': lekid.C,
                     'Cc': lekid.Cc
                 })
-                
-                # Initialize current factors to 1 (no modification)
-                self.lk_current_factors.append(1.0)
-                self.resonator_currents.append(0.)
                 
                 # Store metadata (use actual computed frequency)
                 self.resonator_frequencies.append(actual_freq)
@@ -1142,11 +1109,9 @@ class MockResonatorModel:
                            Cc_work, base_Lk, base_Lg, tolerance,
                            max_iterations, tone)
         
-        # Extract current factors from converged inductances
-        # L_converged = Lk_converged + Lg + L_junk, so Lk_converged = L_converged - Lg - L_junk
+        # L_converged = Lk + Lg + L_junk; only Lk moves with the current.
         Lk_converged = L_converged - base_Lg - base_L_junk
-        current_factors = Lk_converged / base_Lk
-        
+
         # Update LEKID objects with converged values (guard against concurrent reconfigure)
         m = min(n, len(self.mr_lekids))
         for i in range(m):
@@ -1155,36 +1120,6 @@ class MockResonatorModel:
             lekid.R = R_converged[i]
             lekid.L = L_converged[i]
             lekid.alpha_k = Lk_converged[i] / L_converged[i]
-
-        # Update cached data sized to current resonator count
-        mlen = len(self.mr_lekids)
-        try:
-            # Convert numpy array to list
-            factors_array = current_factors[:m]
-            base_factors = [float(x) for x in factors_array]
-        except Exception:
-            base_factors = [1.0] * m
-        
-        # Extend if needed
-        if mlen > m:
-            for _ in range(mlen - m):
-                base_factors.append(1.0)
-        
-        self.lk_current_factors = base_factors
-
-        try:
-            # Ensure a flat list[complex] regardless of the dtype/shape returned by JIT
-            # NOTE: currents_converged contains complex values (phasors).
-            # We preserve them as complex to maintain phase information and correct magnitude calculations.
-            vec = np.asarray(currents_converged, dtype=complex).reshape(-1)
-            curr_list = vec[:m].tolist()
-        except Exception:
-            curr_list = [0j] * m
-        pad_len = mlen - m
-        if pad_len > 0:
-            curr_list = curr_list + [0j] * pad_len
-        self.resonator_currents_array = np.array(curr_list, dtype=complex)
-        self.resonator_currents = curr_list
 
         # Refresh L/R arrays from current objects
         self.L_array = np.array([lek.L for lek in self.mr_lekids])
@@ -1285,26 +1220,9 @@ class MockResonatorModel:
         self.Istar = istar
         self.invalidate_caches()
 
-    def get_parameter_summary(self, lekid_index):
-        """
-        Get a summary of all parameter modifications for debugging.
-        """
-        base = self.base_lekid_params[lekid_index]
-        current = self.mr_lekids[lekid_index]
-        
-        return {
-            'base_Lk': base['Lk'],
-            'base_R': base['R'],
-            'current_factor_Lk': self.lk_current_factors[lekid_index],
-            'final_Lk': current.Lk,
-            'final_R': current.R
-        }
-    
     def invalidate_caches(self):
         """Clear caches when resonator parameters change."""
-        self._s21_cache.clear()
         self._cic_cache.clear()
-        self._cache_valid = False
     
     def update_qp_densities_for_time(self, current_time):
         """Advance every resonator's QP density to *current_time*
@@ -1730,17 +1648,10 @@ class MockResonatorModel:
             active_tone_amps.append(complex_amplitude)
             tone_keys.append((module, ch))
         
-        t_s21_calc = time.perf_counter()
-        
         # If no active tones or observers, return empty
         if not active_tone_freqs or not obs_channels:
             return {}
-        
-        # Diagnostic logging
-        if not hasattr(self, '_packet_timing_counter'):
-            self._packet_timing_counter = 0
-        self._packet_timing_counter += 1
-        
+
         tone_freqs = np.array(active_tone_freqs)
         tone_amps = np.array(active_tone_amps)
         n_obs = len(obs_channels)

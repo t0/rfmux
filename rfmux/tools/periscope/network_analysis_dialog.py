@@ -8,6 +8,10 @@ from .utils import (
 import pickle
 from .tasks import DACScaleFetcher
 from .network_analysis_base import NetworkAnalysisDialogBase
+from .settings import APPLICATION, ORGANIZATION
+
+#: QSettings prefix of the fields the dialog remembers between opens.
+_KEY = "netanal/"
 
 
 def load_network_analysis_payload(parent: QtWidgets.QWidget, file_path: str | None = None):
@@ -61,7 +65,8 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
     modules to scan, and other analysis settings.
     """
     def __init__(self, parent: QtWidgets.QWidget = None, modules: list[int] = None,
-                 dac_scales: dict[int, float] = None):
+                 dac_scales: dict[int, float] = None, *,
+                 settings: QtCore.QSettings | None = None):
         """
         Initializes the Network Analysis configuration dialog.
 
@@ -69,14 +74,58 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
             parent: The parent widget.
             modules: List of available module numbers.
             dac_scales: Pre-fetched DAC scales for the modules.
+            settings: Where the fields are remembered between opens;
+                the user's Periscope settings by default.
         """
         super().__init__(parent, params=None, modules=modules, dac_scales=dac_scales)
+        self.settings = settings or QtCore.QSettings(ORGANIZATION, APPLICATION)
         self.setWindowTitle("Network Analysis Configuration")
         self.setModal(False) # Modeless dialog
         self._setup_ui()
+        self._load()
         self.load_data_available = False
         self._load_data = {}
-        
+
+    # ── Persistence ──────────────────────────────────────────────
+
+    def _fields(self) -> tuple:
+        """(key, line edit) for every field remembered as typed, so an
+        expression like ``1/1000`` survives the round trip."""
+        return (("fmin", self.fmin_edit), ("fmax", self.fmax_edit),
+                ("cable_length", self.cable_length_edit),
+                ("amps", self.amp_edit),
+                ("amp_start", self.start_amp_edit),
+                ("amp_stop", self.stop_amp_edit),
+                ("amp_iterations", self.iterations_amp_edit),
+                ("npoints", self.points_edit),
+                ("nsamps", self.samples_edit),
+                ("max_chans", self.max_chans_edit),
+                ("max_span", self.max_span_edit))
+
+    def _load(self) -> None:
+        """The fields as they were on the last Start; the module entry
+        is not among them, the caller sets it to the module in view."""
+        s = self.settings
+        for key, edit in self._fields():
+            value = s.value(_KEY + key)
+            if value is not None:
+                edit.setText(str(value))
+        clear = s.value(_KEY + "clear_channels")
+        if clear is not None:
+            self.clear_channels_cb.setChecked(clear in (True, "true"))
+
+    def _save(self) -> None:
+        s = self.settings
+        for key, edit in self._fields():
+            s.setValue(_KEY + key, edit.text())
+        s.setValue(_KEY + "clear_channels",
+                   "true" if self.clear_channels_cb.isChecked() else "false")
+        s.sync()
+
+    def accept(self) -> None:
+        self._save()
+        super().accept()
+
     def _setup_ui(self):
         """Sets up the user interface elements for the dialog."""
         layout = QtWidgets.QVBoxLayout(self)

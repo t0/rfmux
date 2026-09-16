@@ -14,9 +14,9 @@ from rfmux.mr_resonator import jit_physics as jp
 def batch():
     """Builders for the batch-path tests: ``model(seed, mode, pulses)``
     gives (crs, model) with two resonators biased at 0.001 and the
-    physics_batch_mode set, ``run(crs, m, n_batches, seed)`` the
-    stacked block responses at 596 Hz, ten samples a block."""
-    FS, N = 596.0, 10
+    physics_batch_mode set; ``run(crs, m, n_batches, seed, fs, n)`` the
+    stacked block responses, n samples a block at fs (ten at 596 Hz
+    unless given)."""
 
     def model(seed, mode, pulses=True):
         from rfmux.mock.crs import ServerMockCRS
@@ -32,13 +32,13 @@ def batch():
         crs._physics_config["physics_batch_mode"] = mode
         return crs, crs._resonator_model
 
-    def run(crs, m, n_batches, seed):
+    def run(crs, m, n_batches, seed, fs=596.0, n=10):
         np.random.seed(seed)
         out = []
         for k in range(n_batches):
-            t = k * N / FS
+            t = k * n / fs
             r = m.calculate_module_response_coupled(
-                1, num_samples=N, sample_rate=FS, start_time=t, pulse_time=t)
+                1, num_samples=n, sample_rate=fs, start_time=t, pulse_time=t)
             out.append(np.stack([r[ch] for ch in sorted(r)]))
         return np.stack(out)
 

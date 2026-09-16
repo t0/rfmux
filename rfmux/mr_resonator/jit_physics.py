@@ -478,8 +478,8 @@ def _converged_lekid_parameters_par(
 
     # Convergence loop
     for iteration in range(max_iterations):
-        # Step 1: the current the generator drives through each
-        # resonator at its present inductance
+        # The current the generator drives through each resonator at
+        # its present inductance
         currents_new = np.zeros(n, dtype=np.complex128)
         
         for i in prange(n):
@@ -487,7 +487,7 @@ def _converged_lekid_parameters_par(
                 w, amplitude, L_work[i], R_array[i], C_array[i], Cc_array[i],
                 ZLNA, r2, r3)
         
-        # Step 3: the step towards self-consistency.  Each resonator's
+        # The step towards self-consistency.  Each resonator's
         # current I sets its inductance, which sets the current F(I) it
         # would carry; we want I = F(I), so we move by a fraction d of
         # the mismatch g = F(I) - I.  A fixed d converges only if the
@@ -517,10 +517,10 @@ def _converged_lekid_parameters_par(
             g_prev[i] = g[i]
         currents_array = currents_array + steps * g
         
-        # Step 4: Calculate new current factors
+        # The new current factors
         new_factors = 1.0 + (np.abs(currents_array)**2 + n_bg) / (Istar * Istar)
         
-        # Step 5: Check convergence
+        # Convergence
         if iteration > 0:
             factor_change = np.max(np.abs(new_factors - current_factors))
             
@@ -534,7 +534,7 @@ def _converged_lekid_parameters_par(
                 actual_iterations = iteration + 1
                 break
         
-        # Step 6: Update factors and inductances
+        # Update factors and inductances
         current_factors = new_factors
         
         # Update L values: Lk changes with current; Lg and L_junk are fixed
@@ -587,11 +587,12 @@ def converged_lekid_parameters(frequency, amplitude, L_array, *args,
 @jit(nopython=True, cache=True)
 def states_apart(a, b, Istar, frac):
     """Whether two sets of currents put any resonator in different
-    states: the two states of a bifurcated resonance differ by ten
-    times in current, adjacent points in one state by a fraction
-    (frac).  Under 1e-3 Istar a current changes Lk by 1e-6, the
-    resonance by a hundredth of a linewidth: at rest, whatever the
-    ratio."""
+    states.  The two states of a bifurcated resonance differ by ten
+    times in current, adjacent points in one state by a fraction, so a
+    change of more than *frac* of the larger current is a change of
+    state.  Currents under 1e-3 Istar count as the same state whatever
+    their ratio: such a current changes Lk by 1e-6, the resonance by a
+    hundredth of a linewidth, which is rest."""
     for i in range(len(a)):
         big = max(abs(a[i]), abs(b[i]))
         if big > 1e-3 * Istar and abs(a[i] - b[i]) > frac * big:
@@ -661,23 +662,27 @@ RUN_ELEMENTS_PER_CALL = 2_000_000    # (runs x resonators) per call, 48 MB out
 def converge_tones(freqs, amps, has_seed, seed_f, seeds, n_bg, run_start,
                    base_Lk_runs, base_R_runs, *args, damp=0.1, damp_min=0.02,
                    damp_max=0.5):
-    """Converge every resonator for each tone at each of its QP states,
-    the tones in parallel.  Tone k's runs are run_start[k]:run_start[k+1]
-    of base_Lk_runs and base_R_runs (the kinetic inductance and the
-    resistance the QP density of each instant gives every resonator), in
-    time order; the first is seeded from the state
-    the tone left its resonators in (seeds[k] at seed_f[k]) when it has
-    one (has_seed[k]), else from rest, and each later run from the one
-    before; n_bg[k] is what the other tones add to |I|^2 in each
-    resonator under tone k.  One step from the seed is the answer where the currents
-    move by a fraction; where a resonator jumps state, that state may
-    have ended between the two frequencies, and only following the tone
-    in steps of follow_hz from where it sat says where, so the first run
-    is retaken that way.  A move of more than max_steps of them is a
-    new tone, solved from rest.  *args: C, Cc, base_Lg, base_L_junk,
-    input_atten_dB, ZLNA, Istar, tolerance, max_iterations, follow_hz,
-    max_steps, apart_frac.  Returns (L, currents, solver passes), one
-    row per run."""
+    """Solve every tone of an evaluation at once: for tone k, the
+    steady state of every resonator at each of its QP states, the tones
+    in parallel.  Returns (L, currents, solver passes), one row per run.
+
+    Tone k's runs are rows run_start[k]:run_start[k+1] of base_Lk_runs
+    and base_R_runs, the kinetic inductance and resistance the QP
+    density of each instant gives every resonator, in time order.  The
+    first run starts from the state the tone last left its resonators
+    in (seeds[k] at seed_f[k], when has_seed[k]), else from rest; each
+    later run starts from the one before.  n_bg[k] is what the other
+    tones add to |I|^2 in each resonator under tone k.
+
+    One step from the seed is the answer where the currents move by a
+    fraction.  Where a resonator jumps state, that state may have ended
+    between the two frequencies, and only following the tone in steps
+    of follow_hz from where it sat says where; the first run is then
+    retaken that way.  A move of more than max_steps of them is a new
+    tone, solved from rest.
+
+    *args: C, Cc, base_Lg, base_L_junk, input_atten_dB, ZLNA, Istar,
+    tolerance, max_iterations, follow_hz, max_steps, apart_frac."""
     freqs = np.ascontiguousarray(freqs, dtype=np.float64)
     amps = np.ascontiguousarray(amps, dtype=np.float64)
     has_seed = np.ascontiguousarray(has_seed, dtype=np.bool_)
@@ -835,9 +840,10 @@ def compute_s21_parallel(
 @jit(nopython=True, cache=True, fastmath=True)
 def kerr_coefficients(omega_g, L, R, Lk, I_ss, Istar, omega_r0, kappa0, L0,
                       R0, K):
-    """(a, b) of the Kerr resonator about the kept state (L, R, Lk,
-    I_ss) of one resonator under a drive at omega_g (rfmux.mock.kerr):
-    du/dt = a u + b u* for the deviation u of its current from I_ss.
+    """(a, b) of du/dt = a u + b u* for the deviation u of one
+    resonator's current from the kept state (L, R, Lk, I_ss) under a
+    drive at omega_g: the Kerr resonator linearised about that state
+    (rfmux.mock.kerr.coefficients calls this at the rest QP density).
     The resonance and linewidth follow the QP state through the run's
     base Lk and R: omega_r0 sqrt(L0 / L_base) and kappa0 + (R - R0) /
     L0."""
@@ -852,6 +858,22 @@ def kerr_coefficients(omega_g, L, R, Lk, I_ss, Istar, omega_r0, kappa0, L0,
 
 
 @jit(nopython=True, cache=True, fastmath=True)
+def s21_of_one(freqs, L, R, C, Cc, ZLNA, GLNA, input_atten_dB,
+               system_termination):
+    """compute_s21_parallel of one resonator alone, at each of *freqs*
+    per unit drive."""
+    L1 = np.array([L])
+    C1 = np.array([C])
+    R1 = np.array([R])
+    Cc1 = np.array([Cc])
+    out = np.empty(len(freqs), dtype=np.complex128)
+    for k in range(len(freqs)):
+        out[k] = compute_s21_parallel(freqs[k], 1.0, L1, C1, R1, Cc1, ZLNA,
+                                      GLNA, input_atten_dB, system_termination)
+    return out
+
+
+@jit(nopython=True, cache=True, fastmath=True)
 def kerr_output_couplings(omega_g, L, R, C, Cc, input_atten_dB, ZLNA, GLNA,
                           system_termination):
     """c per run, with dS21 = c u per unit drive for a deviation u of
@@ -861,40 +883,32 @@ def kerr_output_couplings(omega_g, L, R, C, Cc, input_atten_dB, ZLNA, GLNA,
     M = len(L)
     out = np.empty(M, dtype=np.complex128)
     r2, r3 = _p_attenuator(input_atten_dB, 50.0)
-    L1 = np.empty(1)
-    C1 = np.empty(1)
-    R1 = np.empty(1)
-    Cc1 = np.empty(1)
     for r in range(M):
         dL = 1e-6 * L[r]
         I_up = _drive_current(omega_g[r], 1.0, L[r] + dL, R[r], C[r], Cc[r],
                               ZLNA, r2, r3)
         I_dn = _drive_current(omega_g[r], 1.0, L[r] - dL, R[r], C[r], Cc[r],
                               ZLNA, r2, r3)
-        f = omega_g[r] / (2.0 * np.pi)
-        C1[0] = C[r]
-        R1[0] = R[r]
-        Cc1[0] = Cc[r]
-        L1[0] = L[r] + dL
-        S_up = compute_s21_parallel(f, 1.0, L1, C1, R1, Cc1, ZLNA, GLNA,
-                                    input_atten_dB, system_termination)
-        L1[0] = L[r] - dL
-        S_dn = compute_s21_parallel(f, 1.0, L1, C1, R1, Cc1, ZLNA, GLNA,
-                                    input_atten_dB, system_termination)
+        f = np.array([omega_g[r] / (2.0 * np.pi)])
+        S_up = s21_of_one(f, L[r] + dL, R[r], C[r], Cc[r], ZLNA, GLNA,
+                          input_atten_dB, system_termination)[0]
+        S_dn = s21_of_one(f, L[r] - dL, R[r], C[r], Cc[r], ZLNA, GLNA,
+                          input_atten_dB, system_termination)[0]
         out[r] = (S_up - S_dn) / (I_up - I_dn)
     return out
 
 
 @jit(nopython=True, cache=True, fastmath=True)
 def kerr_step(field, I_ss, a, b, dt):
-    """The current *dt* after *field*, relaxing toward the steady state
-    I_ss at the rates of (a, b): the closed-form exponential of the
-    real 2x2 J = Re(a) I + M, M traceless with M^2 = (|b|^2 - Im(a)^2)
-    I, so it is a cosh/sinh or a cos/sin in the eigenvalue split.  A
-    split larger than kappa/2 would make the slow mode grow, which the
-    linearisation is not to be trusted with past the fold: the split
-    is clamped there (M scaled down, its directions kept), so the slow
-    rate is at worst zero."""
+    """Advance the resonator's current by *dt*: from *field* it relaxes
+    toward the steady state I_ss at the rates of (a, b), in closed
+    form.  The deviation obeys the real 2x2 system J = Re(a) I + M, M
+    traceless with M^2 = (|b|^2 - Im(a)^2) I, so its exponential is a
+    cosh/sinh or a cos/sin in the eigenvalue split.  A split larger
+    than kappa/2 would make the slow mode grow, which the linearisation
+    is not to be trusted with past the fold: the split is clamped there
+    (M scaled down, its directions kept), so the slow rate is at worst
+    zero."""
     u = field - I_ss
     x = u.real
     y = u.imag
@@ -960,13 +974,17 @@ _kerr_block_ser = _serial_twin(_kerr_block_par, "_kerr_block_ser",
 def kerr_block(omega_g, amps, run_start, run_sample, L, R, Lk, I_ss, C, Cc,
                Istar, omega_r0, kappa0, L0, R0, K, input_atten_dB, ZLNA, GLNA,
                system_termination, field0, dt0, dt, S):
-    """The transient's share of S21 at each of *S* samples *dt* apart for
-    a block of tones, and the current each tone's resonator carries at
-    the last sample.  Tone k's runs are run_start[k]:run_start[k+1] of
-    the per-run arrays (L, R, Lk, I_ss: the kept state of its nearest
-    resonator), run r starting at sample run_sample[r]; per tone, its
-    drive, amplitude, resonator constants and envelope parameters, the
-    current it starts from (field0) and the time since (dt0)."""
+    """The transient's share of S21 for a block of tones: at each of
+    *S* samples *dt* apart, what the ringing current adds to S21 per
+    unit drive, and the current each tone's resonator carries at the
+    last sample (its start for the next block).
+
+    Tone k's runs are rows run_start[k]:run_start[k+1] of the per-run
+    arrays (L, R, Lk, I_ss: the kept state of its nearest resonator at
+    each QP state), run r beginning at sample run_sample[r].  Per tone:
+    its drive omega_g, amplitude, resonator constants, envelope
+    parameters, the current it starts from (field0) and the time since
+    that current was set (dt0)."""
     run_start = np.ascontiguousarray(run_start, dtype=np.int64)
     L = np.ascontiguousarray(L, dtype=np.float64)
     R = np.ascontiguousarray(R, dtype=np.float64)
@@ -990,22 +1008,6 @@ def kerr_block(omega_g, amps, run_start, run_sample, L, R, Lk, I_ss, C, Cc,
               np.ascontiguousarray(K, dtype=np.float64),
               np.ascontiguousarray(field0, dtype=np.complex128),
               np.ascontiguousarray(dt0, dtype=np.float64), float(dt), int(S))
-
-
-@jit(nopython=True, cache=True, fastmath=True)
-def s21_of_one(freqs, L, R, C, Cc, ZLNA, GLNA, input_atten_dB,
-               system_termination):
-    """compute_s21_parallel of one resonator alone, at each of *freqs*
-    per unit drive."""
-    L1 = np.array([L])
-    C1 = np.array([C])
-    R1 = np.array([R])
-    Cc1 = np.array([Cc])
-    out = np.empty(len(freqs), dtype=np.complex128)
-    for k in range(len(freqs)):
-        out[k] = compute_s21_parallel(freqs[k], 1.0, L1, C1, R1, Cc1, ZLNA,
-                                      GLNA, input_atten_dB, system_termination)
-    return out
 
 
 @jit(nopython=True, cache=True, fastmath=True)

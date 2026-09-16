@@ -23,15 +23,21 @@ its value without the pump the parametric gain.
 """
 import numpy as np
 
+from rfmux.mr_resonator import jit_physics
+
 
 def coefficients(env, i, I0, omega_g):
     """(a, b) of du/dt = a u + b u* about the steady state *I0* of
-    resonator *i* driven at *omega_g*."""
+    resonator *i* driven at *omega_g*: jit_physics.kerr_coefficients
+    at the rest QP density, the state's inductance built from |I0|^2."""
     n = abs(I0) ** 2
-    a = -env['kappa'][i] / 2 - 1j * (omega_g - env['omega_r'][i]
-                                     - 2.0 * env['K'][i] * n)
-    b = 1j * env['K'][i] * I0 ** 2
-    return a, b
+    L0, R0 = float(env['L0'][i]), float(env['R0'][i])
+    Lk0 = float(env['alpha_k'][i]) * L0
+    Lk = Lk0 * (1.0 + n / env['Istar'] ** 2)
+    return jit_physics.kerr_coefficients(
+        float(omega_g), L0 + Lk - Lk0, R0, Lk, complex(I0),
+        float(env['Istar']), float(env['omega_r'][i]),
+        float(env['kappa'][i]), L0, R0, float(env['K'][i]))
 
 
 def rates(a, b):

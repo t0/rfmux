@@ -1016,10 +1016,13 @@ class MockResonatorModel:
             del ts.runs[next(iter(ts.runs))]
 
     def _phys(self):
+        """The mock's physics config, {} when unset."""
         phys = getattr(self.mock_crs, '_physics_config', {})
         return phys if isinstance(phys, dict) else {}
 
     def _states_apart(self, a, b):
+        """jit_physics.states_apart with the model's Istar and the
+        configured state fraction."""
         return jit_physics.states_apart(
             np.asarray(a, dtype=np.complex128),
             np.asarray(b, dtype=np.complex128), float(self.Istar),
@@ -1081,24 +1084,11 @@ class MockResonatorModel:
         return L[0], base_R, I[0]
 
     def update_lekids_for_current(self, frequency, amplitude, tone=None):
-        """
-        Update LEKID parameters based on resonator currents.
-        
-        Uses JIT-compiled convergence loop for 2-5x speedup.
-        
-        Parameters
-        ----------
-        frequency : float
-            Probe frequency in Hz
-        amplitude : float
-            Probe amplitude  
-            
-        Convergence tolerance can be configured via physics_config:
-        - 1e-9: Ultra high accuracy (default)
-        - 1e-7: High accuracy 
-        - 1e-5: Balanced
-        - 1e-3: Ultra fast (for many channels)
-        """
+        """Converge every resonator under one tone at (frequency,
+        amplitude) from the state the tone last left, and make the
+        result the model's state: the L, R and Lk arrays (the resonator
+        objects follow at the next _sync_lekids).  Returns the
+        converged currents."""
         self._ensure_arrays()
         base_Lk, base_R, base_Lg = self._base_arrays()
         L, R, currents = self._converge(frequency, amplitude, base_Lk, base_R,
@@ -1110,15 +1100,21 @@ class MockResonatorModel:
         return currents
 
     def envelope_parameters(self):
-        """Per resonator, the Kerr resonator the circuit is near its
-        resonance, in the current the solver uses (Rouble et al.,
-        arXiv:2607.09178, with the stored energy written as a current):
-        ``omega_r`` and ``kappa`` in rad/s, the resonant part of the
-        current per unit drive ``D / (kappa/2 + i (omega - omega_r))``,
-        the output coupling ``c`` with ``S21 = S21_bg + c (I - I_bg)``
-        at the peak (``S21_bg`` the through transmission there), ``K``
-        with ``omega_r(I) = omega_r + K |I|^2``, and the rest ``L0`` and
-        ``R0`` the extraction used.
+        """Per resonator, the parameters of the Kerr resonator its
+        circuit behaves as near resonance, in the current the solver
+        uses (Rouble et al., arXiv:2607.09178, with the stored energy
+        written as a current), as a dict of arrays:
+
+        - ``omega_r``, ``kappa``: resonance and linewidth in rad/s;
+        - ``D``: the resonant current per unit drive is
+          ``D / (kappa/2 + i (omega - omega_r))``;
+        - ``K``: the resonance moves with the current,
+          ``omega_r(I) = omega_r + K |I|^2``;
+        - ``c``, ``S21_bg``: at the peak ``S21 = S21_bg + c (I - I_bg)``,
+          ``S21_bg`` the through transmission there;
+        - ``L0``, ``R0``, ``alpha_k``: the rest inductance, resistance
+          and kinetic fraction the extraction used.
+
         omega_r, kappa, D and c come from the linear response at the
         rest QP density, once per generation; K from Lk(I)."""
         env = self._envelope
@@ -1177,6 +1173,11 @@ class MockResonatorModel:
         return c * (field - I_ss) / amplitude
 
     def _extract_envelope(self):
+        """Fit each resonator's Kerr parameters from its linear
+        response at the rest QP density: the peak of the resonant
+        current on a grid about the generation's frequency gives
+        omega_r, its half-power width kappa, its height D, and the
+        S21 there the output coupling c and background S21_bg."""
         self._ensure_arrays()
         n = len(self.mr_lekids)
         R0, Lk0 = jit_physics.vectorized_update_params_from_nqp(
@@ -1907,8 +1908,9 @@ class MockResonatorModel:
         return signals
 
     def _batch_nqp(self, t_arr):
-        """nqp per (instant, resonator) for the current pulse set: the
-        pulse sum of _compute_nqp_state over an array of instants."""
+        """nqp per (instant, resonator): the base density plus what
+        every pulse in flight adds at each of *t_arr*, a rise then an
+        exponential decay.  _compute_nqp_state uses it for one instant."""
         base = np.asarray(self.base_nqp_values, dtype=np.float64)
         eff = np.tile(base, (len(t_arr), 1))
         for pulse in self.pulse_events:
@@ -1927,10 +1929,8 @@ class MockResonatorModel:
     def _nqp_const_tiled(self, S):
         """The per-resonator material arrays repeated S times, so one
         kernel dispatch covers S instants."""
-        n = len(self.mr_complex_resonators)
-        if self._nqp_const_arrays is None:
-            self.update_base_params_from_nqp(self.base_nqp_values[:n])
-        const = self._nqp_const_arrays
+        const = self._nqp_consts()
+        n = const[0]
         cached = self._nqp_tiled_cache
         if cached is None or cached[0] != (S, n) or cached[1] is not const:
             tiled = tuple(np.tile(a, S) for a in const[1:])

@@ -96,6 +96,8 @@ def test_events_round_trip_through_a_dual_file(tmp_path):
                          dump_all_channels=True)
     with PulseHDF5Reader(path) as r:
         assert r.dual and r.event_count == 2
+        assert r.metadata["coincidence_window_s"] == pytest.approx(0.005)
+        assert r.metadata["dump_all_channels"]
         event = r.get_event(1)
         assert [(m["channel"], m["pulse_idx"]) for m in event["members"]] \
             == [(m["channel"], m["pulse_idx"])

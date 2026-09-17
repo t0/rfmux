@@ -1714,6 +1714,10 @@ class DualPulseCaptureSession(_CallbackHost):
             "end_sigma": self.config.end_sigma,
             "pre_pulse_ms": self.config.pre_pulse_ms,
             "post_pulse_ms": self.config.post_pulse_ms,
+            **({"coincidence_window_s":
+                self.config.coincidence_window_ms * 1e-3,
+                "dump_all_channels": self.config.dump_all_channels}
+               if self.events is not None else {}),
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
             "min_pulse_ms": self.config.min_pulse_ms,

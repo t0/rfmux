@@ -2689,7 +2689,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.pulse_plot_i.getPlotItem().setLabel("left", first)
         self.pulse_plot_q.getPlotItem().setLabel("left", second)
         cur = self._current_view
-        if cur is not None:
+        if self._current_dump is not None:
+            self._show_dump(*self._current_dump)
+        elif self._current_event is not None:
+            self._show_event(self._current_event)
+        elif cur is not None:
             try:
                 self._show_pulse(*cur)
             except Exception:

@@ -290,3 +290,32 @@ def test_the_strip_reports_activity_once_there_are_pulses(qt_app, tmp_path):
 def test_the_strip_says_when_coincidence_is_off(qt_app, tmp_path):
     panel = _review(_capture_file(tmp_path))
     assert "coincidence window off" in panel.noise_label.text()
+
+
+def test_a_units_change_redraws_the_event_and_the_no_trigger_views(
+        qt_app, tmp_path):
+    """The traces move with the axis labels, not just the labels."""
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.tools.periscope.pulse_capture_panel import (
+        UNITS_COUNTS, UNITS_VOLTS)
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0,
+                                  dump_all_channels=True), GROUP_EVENTS)
+    panel.units_combo.setCurrentText(UNITS_VOLTS)
+
+    def peak():
+        return max(np.max(np.abs(c.getData()[1]))
+                   for c in panel.pulse_plot_i.getPlotItem().listDataItems())
+
+    panel._show_event(1)
+    volts = peak()
+    panel.units_combo.setCurrentText(UNITS_COUNTS)
+    assert panel._current_event == 1
+    assert peak() == pytest.approx(volts / VOLTS_PER_ROC, rel=1e-6)
+    label = panel.pulse_plot_i.getPlotItem().getAxis("left").labelText
+    assert label == "I (counts) − baseline"
+
+    _double_click(panel, ("dump", 1, 3))
+    panel.units_combo.setCurrentText(UNITS_VOLTS)
+    assert panel._current_dump == (1, 3)
+    assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
+        == "I (V)"

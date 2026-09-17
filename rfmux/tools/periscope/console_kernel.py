@@ -122,7 +122,9 @@ class PeriscopeConsole(RichJupyterWidget):
 
     def run(self, code: str) -> CellFuture:
         """Execute *code* as though typed, after any cell already running.
-        A half-typed line is set aside and put back afterwards."""
+        A half-typed line is set aside and put back afterwards. A cell that
+        does not parse is a bug in whatever built it, and raises here."""
+        compile(code, "<periscope>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
         future = CellFuture(self, code)
         self._queue.append(future)
         self._pump()

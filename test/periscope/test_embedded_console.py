@@ -142,6 +142,14 @@ def test_run_shows_the_cell_like_typed_input_and_records_it(widget, console):
     pump(lambda: re.search(r"In \[\d+\]: $", w._control.toPlainText()))
 
 
+def test_run_rejects_a_cell_that_does_not_parse(widget):
+    w, _ = widget
+    before = w._control.toPlainText()
+    with pytest.raises(SyntaxError):
+        w.run("await crs.take_netanal(amp=")
+    assert w._control.toPlainText() == before
+
+
 def test_run_puts_back_a_half_typed_line(widget):
     w, pump = widget
     w.input_buffer = "half typed"

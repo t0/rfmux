@@ -89,23 +89,42 @@ class MyPanel(QtWidgets.QWidget, ScreenshotMixin):
 QToolBar), so controls wrap on a laptop screen; `grouped`/`labelled` there
 keep a label with its control
 
-**Tasks**: `QThread` subclasses with signal objects:
+**Board work is a session cell.** A panel acts on the board only by
+handing the embedded console a cell, so the console shows every
+operation as the Python that reproduces it, and a user can type the
+same line. `run_python_then(code, comment, done)` in `app_runtime.py`
+runs the cell and calls `done(future)` on the GUI thread; the result is
+read back from `session_namespace()` under the name the cell assigned.
 ```python
-class MyTaskSignals(QObject):
-    progress = pyqtSignal(int, float)
-    completed = pyqtSignal(dict)
-    error = pyqtSignal(str)
-
-class MyTask(QThread):
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        # ... async CRS operations
+self.run_python_then(
+    f"netanal_0[{amp!r}] = await crs.take_netanal(amp={amp!r}, module={bank!r}, "
+    f"**periscope.netanal_hooks({window_id!r}, {amp!r}))",
+    "Network Analysis #1", done)
 ```
+The rules:
+- A cell is flat calls with literal values, written with `repr`. No
+  loops, comprehensions or helper expressions: if a panel needs a loop
+  or a `gather`, that orchestration belongs in the algorithm (as
+  `take_netanal` takes a module list), and the cell stays one call.
+- Values are plain Python where they are produced. A numpy scalar
+  renders as `np.float64(...)` and fails in the cell; convert at the
+  source, not in the f-string.
+- Argument checks live in the algorithm, which raises `ValueError`;
+  the dialog parses text into typed values and does not re-validate.
+- GUI callbacks are passed in the open, as `**periscope.<hooks>(...)`,
+  so the line is what ran; dropping them gives the line a user types.
+- Cells run one at a time on the interpreter thread, so the console is
+  busy during an operation and typed input waits, as in Vivado. The
+  GUI thread is never blocked.
+
+**Tasks**: the remaining `QThread` subclasses (`MultisweepTask`,
+`BiasKidsTask`, `PulseCaptureTask`) hold orchestration that has not yet
+moved into `rfmux/algorithms`; new board work should not add one.
 
 **Thread safety**:
 - UI updates only in GUI thread (via signals)
-- Use `queue.Queue` for GUI → worker thread data
+- Callbacks handed to a cell run on the interpreter thread: emit a
+  `pyqtSignal` from them, never touch a widget
 - Use `pyqtSignal` for worker → GUI thread events
 
 **File dialogs**: Use non-modal `dlg.open()` (not `exec()`) to prevent Linux hangs
@@ -202,8 +221,15 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   (`check_multicast_loopback()` in `rfmux/streamer`)
 
 ### Threading
-- Periscope: Qt event loop + asyncio integration
-- Long operations: `QThread` with own asyncio loop
+- Periscope: Qt event loop on the GUI thread; one interpreter thread
+  with one asyncio loop (`console_kernel.Interpreter`) where every
+  console cell, typed or panel-issued, executes. The console is created
+  at startup and its dock is visible by default.
+- The in-process kernel has no interrupt of its own; `ConsoleKernel`
+  tracks the running `await` cell's task so Ctrl-C and a panel's cancel
+  can cancel it. A typed blocking call (`time.sleep`) cannot be stopped.
+- Raised from IPython or Jupyter, that session is the console: cells run
+  on the interpreter thread in its namespace and are printed.
 - h5py is not thread-safe: write from one thread
 
 ## File Structure

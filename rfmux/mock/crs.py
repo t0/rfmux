@@ -448,11 +448,11 @@ class ServerMockCRS:
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
             raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
         with self._config_lock:
             self._frequencies[(module, channel)] = frequency
 
@@ -465,11 +465,11 @@ class ServerMockCRS:
         assert isinstance(amplitude, (int, float)), "Amplitude must be a number"
         if not (-1.0 <= amplitude <= 1.0):
             raise ValueError("Amplitude must be between -1.0 and +1.0.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int)
-        assert module is not None and isinstance(module, int)
         with self._config_lock:
             self._amplitudes[(module, channel)] = amplitude
 

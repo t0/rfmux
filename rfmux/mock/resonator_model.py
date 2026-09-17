@@ -1683,8 +1683,8 @@ class MockResonatorModel:
         
         t_state_update = time.perf_counter()
         
-        # Get NCO frequency for this module using the proper getter
-        nco_freq = self.mock_crs._nco_frequencies.get(module)
+        # An NCO nobody has set is at 0, as get_nco_frequency reports it.
+        nco_freq = self.mock_crs._nco_frequencies.get(module, 0)
         
         # Get decimation stage for bandwidth calculation
         dec_stage = self.mock_crs._fir_stage  # Note: still called fir_stage in MockCRS for compatibility

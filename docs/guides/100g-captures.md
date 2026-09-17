@@ -77,8 +77,8 @@ The **Run** tab:
   modules itself.
 - **Duration**, in seconds, after the capture's noise training.
 - **Products**: the pulse capture of the slow stream, the parser dirfile
-  with its interface (found from the board's address by default), and
-  the fastrx recording with its 100G interface. The interfaces are listed
+  with the interface the board's 1G stream arrives on, which you choose,
+  and the fastrx recording with its 100G interface. The interfaces are listed
   with their negotiated rates, every one for the parser and the 100 Gb/s
   ones for fastrx, a lone 100 Gb/s interface filled in. The
   dialog checks for a running fastrxd on that interface and, when there

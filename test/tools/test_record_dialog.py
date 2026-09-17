@@ -35,6 +35,7 @@ def _session_with_bias(tmp_path, module=2, channels=(3, 7)):
 
 def test_options_are_the_runners_arguments(qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
+    dlg.parser_iface_combo.setCurrentIndex(0)
     dlg.serial_edit.setText("0156")
     dlg.modules_edit.setText("2")
     folder = _session_with_bias(tmp_path)
@@ -55,6 +56,7 @@ def test_options_are_the_runners_arguments(qt_app, tmp_path, monkeypatch):
 def test_record_waits_for_fastrxd_and_shows_the_start_command(
         qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch, running=[])
+    dlg.parser_iface_combo.setCurrentIndex(0)
     dlg.serial_edit.setText("0156")
     dlg.rb_ranges.setChecked(True)
     dlg.channels_edit.setText("1-4")
@@ -107,7 +109,7 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     dlg, _ = _dialog(tmp_path, monkeypatch)
     parser = [dlg.parser_iface_combo.itemText(i)
               for i in range(dlg.parser_iface_combo.count())]
-    assert parser == ["auto", "eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
+    assert parser == ["eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
                       "wlan0 (no link)"]
     fast = [dlg.fastrx_iface_combo.itemText(i)
             for i in range(dlg.fastrx_iface_combo.count())]
@@ -115,8 +117,29 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     o = dlg.get_options()
     assert o["fastrx_interface"] == "enp2s0f0np0"
     assert o["parser_interface"] is None
-    dlg.parser_iface_combo.setCurrentIndex(1)
+    dlg.parser_iface_combo.setCurrentIndex(0)
     assert dlg.get_options()["parser_interface"] == "eth0"
+
+
+def test_the_parser_interface_has_to_be_chosen(qt_app, tmp_path, monkeypatch):
+    """Nothing is chosen for the user, an "auto" an earlier version
+    saved included, and Record waits for the choice."""
+    _, settings = _dialog(tmp_path, monkeypatch)
+    settings.setValue("parser_interface", "auto")
+    dlg = rd.RecordDialog(settings=settings)
+    dlg.serial_edit.setText("0156")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-4")
+    dlg.fastrx_check.setChecked(False)
+    assert dlg.parser_iface_combo.currentText() == ""
+    assert not dlg.record_btn.isEnabled()
+    assert "interface the parser listens on" in dlg.status_label.text()
+    dlg.parser_iface_combo.setCurrentIndex(1)
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    assert dlg.get_options()["parser_interface"] == "enp2s0f0np0"
+    dlg.parser_iface_combo.setEditText("")
+    dlg.parser_check.setChecked(False)
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
 
 
 def test_the_session_fills_in_with_the_newest_under_the_default_path(
@@ -157,6 +180,7 @@ def test_the_pulse_capture_settings_have_their_own_tab(
 def test_several_modules_take_an_export_each_or_per_module_ranges(
         qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.parser_iface_combo.setCurrentIndex(0)
     dlg.serial_edit.setText("0156")
     folder = _session_with_bias(tmp_path, module=2, channels=(3, 7))
     _session_with_bias(tmp_path, module=3, channels=(1,))

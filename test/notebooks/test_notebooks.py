@@ -75,6 +75,19 @@ DEMOS = pathlib.Path(rfmux.__file__).parent / "reference-notebooks" / "Demos"
 DEMO_NOTEBOOKS = sorted(p.name for p in DEMOS.glob("*.md"))
 
 
+def _printed(notebook, lines: int = 120) -> str:
+    """The tail of what the executed cells printed.  The saved .ipynb is
+    out of reach on a CI runner, and the cell that fails is often not the
+    one that went wrong."""
+    text = "".join(
+        f"--- cell {k}\n{out.get('text', '')}"
+        for k, cell in enumerate(notebook.cells)
+        if cell.cell_type == "code"
+        for out in cell.get("outputs", [])
+        if out.get("output_type") == "stream")
+    return "\n".join(text.splitlines()[-lines:])
+
+
 @pytest.mark.parametrize("notebook_file", NOTEBOOKS)
 def test_jupytext_notebook(request, notebook_file):
     with open(HERE / notebook_file, "r", encoding="utf-8") as f:
@@ -124,7 +137,8 @@ def test_reference_demo_notebook(request, tmp_path, notebook_file):
         client.execute()
     except Exception as e:
         raise AssertionError(
-            f"Reference notebook {notebook_file} failed! See {result}"
+            f"Reference notebook {notebook_file} failed! See {result}\n"
+            f"The cells printed, last lines:\n{_printed(notebook)}"
         ) from e
     finally:
         with open(result, "w", encoding="utf-8") as f:

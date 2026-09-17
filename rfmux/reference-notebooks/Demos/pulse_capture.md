@@ -696,6 +696,7 @@ for ch in res.channels:
           + (f", mean peak {np.mean(peaks):.4g} {units}" if peaks else ""))
 kinds = [e["kind"] for e in res.events]
 print(f"{kinds.count('pulses')} events, {kinds.count('noise')} noise samples")
+assert any(res.summaries[ch] for ch in CHANNELS), "the capture caught no pulses"
 ```
 
 Every file records the units per channel, the counts-to-volts constant and

@@ -13,7 +13,7 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 import numpy as np
 import pytest
 
-from rfmux.core.resonators import ResonatorCatalog
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.tuning import (
     BiasReport, bifurcated_by_derivative, collect_amplitude_iterations_for,
@@ -56,6 +56,22 @@ def measurement(scale: float = 0.0) -> dict:
     return {"results": results, "dac_scale_dbm": scale}
 
 
+def measurement_with_catalog(
+    *, frequency_hz: float = 600.003e6, amplitude: float = 0.01,
+) -> dict:
+    block = measurement()
+    catalog = ResonatorCatalog([
+        Resonator(
+            "R1", 1,
+            BiasPoint(
+                frequency_hz, amplitude, bias_frequency_quantized=False,
+            ),
+        ),
+    ], module=1)
+    block["call_params"] = {"catalog": catalog.to_dict()}
+    return block
+
+
 @pytest.mark.parametrize("scale", [0.0, -12.0])
 def test_multisweep_transmission_uses_drive_power(plotters, scale):
     plotters.multisweep.plot_magnitude_panels(measurement(scale))
@@ -90,6 +106,38 @@ def test_multisweep_zero_drive_cannot_be_a_reference(plotters):
     block["results"][0]["upward"]["R1"]["sweep_amplitude"] = 0.0
     with pytest.raises(ValueError, match="positive"):
         plotters.multisweep.plot_magnitude_panels(block)
+
+
+def test_multisweep_magnitude_marks_catalog_bias_point_and_amplitude(plotters):
+    block = measurement_with_catalog(amplitude=0.01 * (1 + 5e-7))
+    plotters.multisweep.plot_magnitude_panels(block)
+    panel = plt.gcf().axes[0]
+
+    sweep_lines = [line for line in panel.lines if len(line.get_xdata()) == 3]
+    bias_lines = [line for line in panel.lines if len(line.get_xdata()) == 2]
+    assert [line.get_linewidth() for line in sweep_lines] == [3.5, 1.5]
+    assert [line.get_zorder() for line in sweep_lines] == [2, 1]
+    assert len(bias_lines) == 1
+    np.testing.assert_allclose(bias_lines[0].get_xdata(), [3, 3])
+    assert bias_lines[0].get_linestyle() == "--"
+
+
+def test_multisweep_bias_amplitude_requires_a_close_match(plotters):
+    plotters.multisweep.plot_magnitude_panels(
+        measurement_with_catalog(amplitude=0.01 * (1 + 2e-6)),
+    )
+    panel = plt.gcf().axes[0]
+    sweep_lines = [line for line in panel.lines if len(line.get_xdata()) == 3]
+    assert [line.get_linewidth() for line in sweep_lines] == [1.5, 1.5]
+
+
+def test_multisweep_bias_overlay_can_be_disabled(plotters):
+    plotters.multisweep.plot_magnitude_panels(
+        measurement_with_catalog(), overlay_bias=False,
+    )
+    panel = plt.gcf().axes[0]
+    assert len(panel.lines) == 2
+    assert [line.get_linewidth() for line in panel.lines] == [1.5, 1.5]
 
 
 def biased_measurement() -> dict:

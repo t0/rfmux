@@ -9,8 +9,10 @@
 
 Each resonator gets a panel, with amplitude steps coloured by drive and sweep
 directions distinguished by line style. Select traces with ``names``,
-``iterations`` and ``directions``. Magnitude defaults to drive-referenced dB;
-IQ defaults to readout counts divided by the drive's DAC fraction.
+``iterations`` and ``directions``. Magnitude panels mark the starting catalog's
+bias frequency and thicken a trace swept at its bias amplitude. Magnitude
+defaults to drive-referenced dB; IQ defaults to readout counts divided by the
+drive's DAC fraction.
 
 Style is applied per figure. Batches share a colour scale; ``batchlen=None``
 puts all resonators in one figure.
@@ -23,6 +25,7 @@ import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.lines import Line2D
 
+from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import convert_dacunits_to_dbm, convert_roc_to_dbm
 from rfmux.tuning import collect_amplitude_iterations_for
 
@@ -54,6 +57,14 @@ FALLBACK_LINESTYLE = ":"
 
 # Resonators per figure.
 BATCH_SIZE = 50
+
+# Schedule arithmetic can perturb a DAC fraction by a few last-place bits. A
+# relative comparison does not turn that into a large absolute window for the
+# small amplitudes used here.
+BIAS_AMPLITUDE_RTOL = 1e-6
+TRACE_LINEWIDTH = 1.5
+BIAS_TRACE_LINEWIDTH = 3.5
+BIAS_COLOUR = "0.15"
 
 # Applied per figure through plt.rc_context.
 PLOT_STYLE = {
@@ -231,12 +242,15 @@ def _plot_panels(
     title=None,
     batchlen=BATCH_SIZE,
     equal_aspect=False,
+    overlay_bias=False,
 ):
-    """Draw batched panels using ``draw(panel, sweep, colour, linestyle, normalize)``.
+    """Draw panels with the supplied trace callback.
 
+    The callback receives ``panel, sweep, colour, style, normalize, highlight``.
     Set ``equal_aspect`` for IQ plots.
     """
     traces_by_name = _collect_traces(results, names, iterations, directions)
+    bias_points = _catalog_bias_points(results) if overlay_bias else {}
     every_trace = [
         sweep for traces in traces_by_name.values() for _, _, sweep in traces
     ]
@@ -260,11 +274,22 @@ def _plot_panels(
     for batch_number, batch in enumerate(batches, start=1):
         _draw_figure(
             batch, draw, mappable, xlabel, ylabel, normalize, columns, panel_size,
-            equal_aspect,
+            equal_aspect, bias_points,
             title=_figure_title(
                 title, what, len(traces_by_name), steps, batch_number, len(batches)
             ),
         )
+
+
+def _catalog_bias_points(results):
+    """Bias points in the catalog snapshot this multisweep was called with."""
+    catalog = results.get("call_params", {}).get("catalog")
+    if catalog is None:
+        return {}
+    return {
+        resonator.name: resonator.bias
+        for resonator in ResonatorCatalog.from_dict(catalog)
+    }
 
 
 def _figure_title(title, what, section_count, steps, batch_number, batch_count):
@@ -282,7 +307,7 @@ def _figure_title(title, what, section_count, steps, batch_number, batch_count):
 
 def _draw_figure(
     batch, draw, mappable, xlabel, ylabel, normalize, columns, panel_size,
-    equal_aspect, title,
+    equal_aspect, bias_points, title,
 ):
     """One figure, holding one batch of sweep sections."""
     # Every artist below takes its size from the rcParams in force when it is
@@ -291,19 +316,38 @@ def _draw_figure(
         fig, axes, panels = _panel_grid(len(batch), columns, panel_size)
 
         directions_drawn = []
+        bias_trace_drawn = False
+        bias_frequency_drawn = False
         for panel, (name, traces) in zip(panels, batch):
+            bias = bias_points.get(name)
             for iteration, direction, sweep in traces:
+                at_bias_amplitude = bias is not None and np.isclose(
+                    sweep["sweep_amplitude"], bias.amplitude,
+                    rtol=BIAS_AMPLITUDE_RTOL, atol=0.0,
+                )
                 draw(
                     panel,
                     sweep,
                     mappable.to_rgba(sweep["sweep_amplitude"]),
                     DIRECTION_LINESTYLES.get(direction, FALLBACK_LINESTYLE),
                     normalize,
+                    at_bias_amplitude,
                 )
+                bias_trace_drawn |= at_bias_amplitude
                 if direction not in directions_drawn:
                     directions_drawn.append(direction)
 
             centre_mhz = traces[0][2]["original_center_frequency"] / 1e6
+            if bias is not None:
+                panel.axvline(
+                    (bias.frequency_hz - traces[0][2]["original_center_frequency"])
+                    / 1e3,
+                    color=BIAS_COLOUR,
+                    lw=2.0,
+                    ls="--",
+                    zorder=3,
+                )
+                bias_frequency_drawn = True
             panel.set_title(f"{name}  {centre_mhz:.3f} MHz")
             if equal_aspect:
                 square_axes(panel)
@@ -324,14 +368,24 @@ def _draw_figure(
         # when there is a distinction left to make. Outside the panels,
         # because an IQ loop fills its axes and a legend inside would sit on
         # top of the data.
+        handles = []
+        labels = []
         if len(directions_drawn) > 1:
-            handles = [
+            handles.extend([
                 Line2D([], [], color="0.3",
                        ls=DIRECTION_LINESTYLES.get(direction, FALLBACK_LINESTYLE))
                 for direction in directions_drawn
-            ]
+            ])
+            labels.extend(directions_drawn)
+        if bias_frequency_drawn:
+            handles.append(Line2D([], [], color=BIAS_COLOUR, lw=2.0, ls="--"))
+            labels.append("catalog bias frequency")
+        if bias_trace_drawn:
+            handles.append(Line2D([], [], color="0.3", lw=BIAS_TRACE_LINEWIDTH))
+            labels.append("trace at catalog bias amplitude")
+        if handles:
             fig.legend(
-                handles, directions_drawn,
+                handles, labels,
                 loc="outside lower center", ncols=len(handles),
             )
 
@@ -351,6 +405,7 @@ def plot_magnitude_panels(
     panel_size=(7.0, 5.0),
     title=None,
     batchlen=BATCH_SIZE,
+    overlay_bias=True,
 ):
     """|S21| against frequency offset, a panel per resonator.
 
@@ -376,6 +431,10 @@ def plot_magnitude_panels(
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
         batchlen: resonators per figure; None uses one figure.
+        overlay_bias: mark each resonator's bias frequency from the catalog
+            snapshot in ``call_params``. A sweep whose amplitude matches the
+            catalog bias amplitude within a relative tolerance of 1e-6 is
+            drawn thicker. Results without a catalog are drawn unchanged.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -390,7 +449,7 @@ def plot_magnitude_panels(
             "use normalize=False to plot received power in dBm."
         )
 
-    def draw(panel, sweep, colour, linestyle, normalize):
+    def draw(panel, sweep, colour, linestyle, normalize, highlight):
         magnitude = convert_roc_to_dbm(np.abs(sweep["iq_counts"]))
         if normalize:
             drive = sweep["sweep_amplitude"]
@@ -400,9 +459,10 @@ def plot_magnitude_panels(
         panel.plot(
             offset_khz(sweep),
             magnitude,
-            lw=1.5,
+            lw=BIAS_TRACE_LINEWIDTH if highlight else TRACE_LINEWIDTH,
             color=colour,
             ls=linestyle,
+            zorder=2 if highlight else 1,
         )
 
     _plot_panels(
@@ -419,6 +479,7 @@ def plot_magnitude_panels(
         panel_size=panel_size,
         title=title,
         batchlen=batchlen,
+        overlay_bias=overlay_bias,
     )
 
 
@@ -440,9 +501,10 @@ def plot_iq_panels(
     scale. The default panels are square.
     """
 
-    def draw(panel, sweep, colour, linestyle, normalize):
+    def draw(panel, sweep, colour, linestyle, normalize, highlight):
         iq = sweep_iq(sweep, normalize)
-        panel.plot(iq.real, iq.imag, lw=1.5, color=colour, ls=linestyle)
+        panel.plot(iq.real, iq.imag, lw=TRACE_LINEWIDTH,
+                   color=colour, ls=linestyle)
 
     _plot_panels(
         results,

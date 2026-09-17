@@ -206,7 +206,10 @@ The structure is `results[step][direction][resonator_name]`. A section contains
 `frequencies`, `iq_counts`, `iq_volts`, and `sweep_amplitude`.
 
 The standard `plot_magnitude_panels()` from `example_plotting_multisweep.py`
-plots one panel per resonator. Import the examples shipped with this rfmux
+plots one panel per resonator. Its dashed vertical line is the bias frequency
+in the catalog snapshot supplied to that multisweep, and a trace at the
+snapshot's bias amplitude is thicker. Pass `overlay_bias=False` to omit those
+starting-state annotations. Import the examples shipped with this rfmux
 installation so the cell also works when you save the notebook elsewhere.
 If the plotter file is already beside your notebook, a plain
 `import example_plotting_multisweep as msplots` is sufficient.

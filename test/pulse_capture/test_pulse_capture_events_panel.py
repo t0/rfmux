@@ -208,3 +208,85 @@ def test_a_both_mode_event_is_made_of_pairs_and_draws_either_stream(
     panel.event_stream_combo.setCurrentText("slow")
     assert _curve_names(panel) == ["Ch1 slow", "Ch2 slow",
                                    "Ch3 slow (no trigger)"]
+
+
+def _double_click(panel, role):
+    for k in range(panel.pulse_tree.topLevelItemCount()):
+        top = panel.pulse_tree.topLevelItem(k)
+        for j in range(top.childCount()):
+            if tuple(top.child(j).data(0, ROLE)) == role:
+                panel._on_tree_double_click(top.child(j), 0)
+                return
+    raise AssertionError(f"no row {role}")
+
+
+def test_a_no_trigger_row_fills_the_pulse_view_and_the_plane(
+        qt_app, tmp_path):
+    """It is not a pulse, but it is that channel's data for the event,
+    and it is shown the way a pulse is."""
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0,
+                                  dump_all_channels=True), GROUP_EVENTS)
+    saved = panel.reader.get_event(1)["dump"][3]
+    _double_click(panel, ("dump", 1, 3))
+    assert "Channel 3" in panel.pulse_info.text()
+    assert "[no trigger]" in panel.pulse_info.text()
+    for plot, name in ((panel.pulse_plot_i, "Amp_I"),
+                       (panel.pulse_plot_q, "Amp_Q")):
+        curve = max(plot.getPlotItem().listDataItems(),
+                    key=lambda c: len(c.getData()[0]))
+        assert len(curve.getData()[0]) == len(saved[name])
+    assert panel._iq_source()[0] == 3
+    np.testing.assert_array_equal(panel._iq_source()[1]["Amp_I"],
+                                  saved["Amp_I"])
+    # And a pulse row afterwards is a pulse again.
+    _double_click(panel, ("pulse", 1, 1))
+    assert panel._current_dump is None and panel._iq_source()[0] == 1
+
+
+def test_a_both_mode_no_trigger_row_draws_both_streams(qt_app, tmp_path):
+    from test.pulse_capture.test_events_dual import _capture
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0,
+                       dump_all_channels=True)
+    panel = _review(path, GROUP_EVENTS)
+    _double_click(panel, ("dump", 1, 3))
+    names = _curve_names(panel)
+    assert any(n.startswith("fast") for n in names)
+    assert any(n.startswith("slow") for n in names)
+    panel.iq_stream_combo.setCurrentText("fast")
+    fast = panel.reader.get_event(1)["dump"][3]["fast_tod"]
+    assert len(panel._iq_source()[1]["Time"]) == len(fast["Time"])
+
+
+def test_views_name_the_frequency_the_channel_is_biased_at(qt_app, tmp_path):
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0,
+                                  dump_all_channels=True), GROUP_EVENTS)
+    panel._tuning_rows = {1: {"bias_frequency": 1.2345e9}, 2: {}, 3: {}}
+    panel._show_pulse(1, 1)
+    assert "Channel 1 (1234.500000 MHz)" in panel.pulse_info.text()
+    panel._show_pulse(2, 1)                      # no tuning, no claim
+    assert "MHz" not in panel.pulse_info.text()
+    panel._show_event(1)
+    assert "Ch1 (1234.500000 MHz), Ch2" in panel.pulse_info.text()
+
+
+def test_the_strip_reports_activity_once_there_are_pulses(qt_app, tmp_path):
+    """The busiest channel, and coincident against lone pulses; the
+    noise each channel trained to only until a pulse arrives."""
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._reset_results([1, 2, 3])
+    panel._refresh_noise_label()
+    assert panel.noise_label.text().startswith("Noise:")
+
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0))
+    text = panel.noise_label.text()
+    assert "Most active:  Ch" in text and "1 of 3 pulses" in text
+    assert "coincident:  2 in 1 event" in text and "alone:  1" in text
+    assert "Noise" not in text
+    assert "Pulses per channel" in panel.noise_label.toolTip()
+    panel._refresh_noise_label()                 # a view change keeps it
+    assert panel.noise_label.text() == text
+
+
+def test_the_strip_says_when_coincidence_is_off(qt_app, tmp_path):
+    panel = _review(_capture_file(tmp_path))
+    assert "coincidence window off" in panel.noise_label.text()

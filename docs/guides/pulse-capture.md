@@ -248,12 +248,21 @@ can still be grouped by events, in review or live, from the trigger
 times its pulses carry and the window in Settings; only the channels
 that did not trigger need the capture to have saved them.
 
+The line under the status names the most active channel and counts the
+pulses that shared an event with another channel against those that came
+alone; its tooltip ranks the channels. Until the first pulse it shows the
+noise each channel trained to. The pulse and event views name the
+frequency a channel is biased at, when the capture carries its tuning.
+
 Double-click an event to draw its channels together, on one time axis
 from the event's first trigger and each about its own baseline, the
 channels that did not trigger as thin dotted traces. In both mode
 **Event shows** picks the slow samples (points), the fast ones (lines) or
 both. Double-click a pulse
-under it for that pulse alone. **Prev** and **Next** step through events,
+under it for that pulse alone, and a **no trigger** row for that
+channel's samples over the event's window: it fills the Pulse View and
+the IQ Plane the way a pulse does, against the channel's noise bands,
+with both streams in both mode. **Prev** and **Next** step through events,
 and **Follow latest** shows the newest event's pulses as it closes,
 without the channels that did not trigger. An event closes once no pulse
 that belongs to it can still be open, a hard stop after its window, so it

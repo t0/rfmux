@@ -401,6 +401,33 @@ def test_a_merged_file_keeps_the_captures_events(tmp_path):
     assert after["dumped"] == before["dumped"]
 
 
+def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
+    """In a both-mode file the list holds pairs; an event's members are
+    the pairs of the slow pulses it indexes, and its view draws them."""
+    pytest.importorskip("PyQt6")
+    from PyQt6 import QtCore
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    from rfmux.tools.periscope.pulse_capture_panel import (
+        GROUP_EVENTS, PulseCapturePanel)
+    path = _capture(tmp_path, channels=(CHANNEL, CHANNEL + 1),
+                    coincidence_window_ms=1.0)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.group_combo.setCurrentText(GROUP_EVENTS)
+    panel.load_from_hdf5(path)
+    role = QtCore.Qt.ItemDataRole.UserRole
+    top = panel.pulse_tree.topLevelItem(0)
+    assert top.data(0, role) == ("event", 1)
+    assert [top.child(k).data(0, role) for k in range(top.childCount())] \
+        == [("pair", CHANNEL, 1)]
+    panel._show_event(1)
+    assert [c.name() for c in
+            panel.pulse_plot_i.getPlotItem().listDataItems()] \
+        == [f"Ch{CHANNEL}"]
+
+
 def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
     path = _capture(tmp_path)
     fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))

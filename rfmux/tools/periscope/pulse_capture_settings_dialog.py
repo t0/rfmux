@@ -117,6 +117,34 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         form.addRow("Pre-pulse time (ms):", self.pre_pulse_spin)
         form.addRow("Post-pulse time (ms):", self.post_pulse_spin)
 
+        self.coincidence_spin = QtWidgets.QDoubleSpinBox()
+        self.coincidence_spin.setRange(0.0, 60_000.0)
+        self.coincidence_spin.setDecimals(3)
+        self.coincidence_spin.setSpecialValueText("off")
+        self.coincidence_spin.setValue(config.coincidence_window_ms)
+        self.coincidence_spin.setToolTip(
+            "Pulses on any channels that trigger within this of an "
+            "event's first trigger are recorded as one event.  The "
+            "pulses are stored under their channels either way; the "
+            "events index them, and the pulse list can be grouped by "
+            "either.\n\n"
+            "Off records no events.  The pulse list can still group a "
+            "capture by events afterwards, from the trigger times.\n"
+            "Not recorded in both mode, which pairs pulses across the "
+            "two streams instead.")
+        form.addRow("Coincidence window (ms):", self.coincidence_spin)
+        self.dump_check = QtWidgets.QCheckBox(
+            "Save every channel with each event")
+        self.dump_check.setChecked(config.dump_all_channels)
+        self.dump_check.setToolTip(
+            "With each event, also save the same span of every channel "
+            "that did not trigger.  Only a capture can: those samples "
+            "are gone once the ring buffer moves on.\n\n"
+            "With the coincidence window off, each pulse is an event of "
+            "its own.  The file grows by the untriggered channels for "
+            "every event.")
+        form.addRow(self.dump_check)
+
         # The 1/f window is its own time scale, seconds whatever the
         # pulse length: the record fitted for sigma and the span of the
         # rolling baseline median.
@@ -282,11 +310,12 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         form.addRow(self.status_label)
 
         for w in (self.threshold_spin, self.end_spin, self.pre_pulse_spin,
-                  self.post_pulse_spin,
+                  self.post_pulse_spin, self.coincidence_spin,
                   self.min_pulse_spin, self.max_pulse_spin, self.window_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
+        self.dump_check.toggled.connect(self._update_dependent_values)
         adv_box.toggled.emit(False)
         self._update_dependent_values()
 
@@ -296,6 +325,8 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             end_sigma=float(self.end_spin.value()),
             pre_pulse_ms=float(self.pre_pulse_spin.value()),
             post_pulse_ms=float(self.post_pulse_spin.value()),
+            coincidence_window_ms=float(self.coincidence_spin.value()),
+            dump_all_channels=self.dump_check.isChecked(),
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),

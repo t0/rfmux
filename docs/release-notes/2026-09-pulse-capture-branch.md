@@ -189,6 +189,13 @@ Old values are main at the merge base (e46fc41).
   demos trigger CI and changes under `docs/` do not.
 - Networking guide: one `rmem_max` value, 268435456 (256 MB, about three
   seconds of the four-channel PFB stream).
+- Coincident events: `coincidence_window_ms` and `dump_all_channels` on
+  `PulseCaptureConfig` (`coincidence_window_s`, `dump_all_channels` and
+  `on_event` on `PulseCaptureSession`), `rfmux/pulse_capture/events.py` for
+  the grouping, `events/` in the file with `PulseHDF5Reader.event_count`,
+  `get_event` and `iter_events`, `PulseCaptureResult.events`, and
+  **Group by** in the Pulse Capture panel. Pulses stay under their
+  channels; a file without events is laid out as before.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
   trigger to `post_pulse_ms` after the sample the pulse settled on, the first
   of the in-band run the end confirmation then verifies, or to the hard

@@ -74,6 +74,24 @@ def test_roundtrip(qt_app):
     dlg.close()
 
 
+def test_event_settings_round_trip_and_size_the_ring(qt_app):
+    """The coincidence window and the dump reach the config, and the
+    ring the dialog reports grows by what a dump needs."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    cfg = dlg.get_config()
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels) == (0.0, False)
+    assert dlg.coincidence_spin.text() == "off"
+    before = cfg.buf_size(19073.486328125)
+    dlg.coincidence_spin.setValue(2.5)
+    dlg.dump_check.setChecked(True)
+    cfg = dlg.get_config()
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels) == (2.5, True)
+    assert cfg.buf_size(19073.486328125) > before
+    assert f"{cfg.buf_size(19073.486328125):,} samples" in \
+        _plain(dlg.pulse_derived_label)
+    dlg.close()
+
+
 def test_rolling_baseline_span_is_shown(qt_app):
     """No baseline controls left to get wrong — the window is the
     training span, so the dialog only reports it."""

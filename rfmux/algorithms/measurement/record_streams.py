@@ -581,6 +581,12 @@ def pulse_summary_lines(capture) -> List[str]:
              f"best {snr:.1f}\u03c3" for ch, n, snr in rows]
     lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
                  f"{len(stream.summaries)} channels")
+    events = getattr(capture, "events", None) or []
+    if events:
+        shared = sum(len({m["channel"] for m in e["members"]}) > 1
+                     for e in events)
+        lines.append(f"{len(events)} events, {shared} across more than "
+                     "one channel")
     return lines
 
 

@@ -132,6 +132,18 @@ toolbar. The **Settings** dialog includes:
   grows by both and the hard stop by the post-pulse time. The capture is
   released once the post-pulse time has arrived, so the channel cannot
   trigger again inside it, and a pulse arriving there is a pileup.
+- **Coincidence window (ms)** (off) groups pulses into events: every pulse,
+  on any channel, that triggers within this of an event's first trigger.
+  Measuring from the first trigger bounds an event at the window, so a
+  steady rate of unrelated pulses cannot chain into one. Events are
+  recorded by slow and fast captures; both mode pairs pulses across the
+  two streams instead.
+- **Save every channel with each event** (off) also saves, with each event,
+  the same span of every channel that did not trigger. Only a capture can
+  do this, since those samples are gone once the ring buffer moves on. With
+  the coincidence window off, each pulse is then an event of its own. The
+  ring buffer grows by the window and a block of samples so the span is
+  still there when the event closes.
 - **1/f window (ms)** (5000) is the record the noise σ is fitted from and
   the span of the rolling baseline. It has to be long compared with any
   pulse and with the 1/f knee, so it is seconds whatever the pulse length.
@@ -213,6 +225,57 @@ its group, one per stream in both mode). The
 pulse list shows it as a **noise training** row under each channel, one
 per stream in both mode, live and in review; double-click it to see that
 channel's record with its baselines and bands.
+
+## Coincident events
+
+Set a **Coincidence window** in Settings and the capture records events:
+every pulse, on any channel, that triggers within the window of an event's
+first trigger. **Save every channel with each event** adds the same span
+of the channels that did not trigger. A run across modules groups across
+them.
+
+**Group by** above the pulse view switches the pulse list between
+**Channels**, each with its pulses, and **Events**, each with the pulses
+that make it up and a **no trigger** row for every channel saved with it.
+The pulses are the same either way: they are stored once, under their
+channels, and the events index them. A capture that recorded no events
+can still be grouped by events, in review or live, from the trigger
+times its pulses carry and the window in Settings; only the channels
+that did not trigger need the capture to have saved them.
+
+Double-click an event to draw its channels together, on one time axis
+from the event's first trigger and each about its own baseline, the
+channels that did not trigger as thin dotted traces. Double-click a pulse
+under it for that pulse alone. **Prev** and **Next** step through events,
+and **Follow latest** shows the newest event's pulses as it closes,
+without the channels that did not trigger. An event closes once no pulse
+that belongs to it can still be open, a hard stop after its window, so it
+appears that long after its first trigger.
+
+From a script the events are on the result and in the file:
+
+```python
+config = PulseCaptureConfig(coincidence_window_ms=2.0, dump_all_channels=True)
+result = await crs.trigger_capture(channel=[1, 2, 3], module=1,
+                                   config=config, hdf5_path="capture.h5")
+for event in result.events:
+    print(event["event_idx"], [m["channel"] for m in event["members"]],
+          sorted(event["dump"]))
+
+from rfmux.pulse_capture import PulseHDF5Reader, events_of
+with PulseHDF5Reader("capture.h5") as r:
+    event = r.get_event(1)            # members, window, dumped channels
+    pulse = r.get_pulse(event["members"][0]["channel"],
+                        event["members"][0]["pulse_idx"])
+    regrouped = events_of(r, window_s=0.010)   # any file, any window
+```
+
+In the file, `events/event_<k>` holds `members` (rows of channel and pulse
+index, with the module first for a run across modules), their
+`trigger_times`, the window, and `dump/channel_<n>` for each channel saved
+without a trigger. A both-mode capture records no events; a slow capture
+that `rfmux record` merges with its 100G recording keeps them, indexing
+the slow pulses.
 
 ## Fast and dual-stream captures
 

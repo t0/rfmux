@@ -1,6 +1,8 @@
 """Panel class for network analysis results (dockable)."""
 
 # Imports from within the 'periscope' subpackage
+import bisect
+
 from .utils import *
 from .layouts import FlowLayout, labelled
 from .tasks import SetCableLengthSignals # Added import
@@ -455,21 +457,45 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         """Update the show-resonances checkbox label (count removed)."""
         self.show_resonances_cb.setText("Show Resonances")
 
+    def _resonance_lines(self, module: int, freq_hz: float) -> list:
+        """A marker at *freq_hz* on the module's magnitude and phase plots."""
+        pen = pg.mkPen(RESONANCE_LINE_COLOR, style=QtCore.Qt.PenStyle.DashLine)
+        lines = []
+        for key in ('amp_plot', 'phase_plot'):
+            line = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=pen)
+            self.plots[module][key].addItem(line)
+            lines.append(line)
+        return lines
+
+    def _set_resonances(self, module: int, freqs_hz) -> None:
+        """Replace the module's resonances with *freqs_hz*, in frequency
+        order: the order multisweep assigns channels in."""
+        plot_info = self.plots[module]
+        for plot_key, lines_key in (('amp_plot', 'resonance_lines_mag'),
+                                    ('phase_plot', 'resonance_lines_phase')):
+            for line in plot_info.get(lines_key, []):
+                plot_info[plot_key].removeItem(line)
+            plot_info[lines_key] = []
+        self.resonance_freqs[module] = sorted(float(f) for f in freqs_hz)
+        for freq_hz in self.resonance_freqs[module]:
+            line_mag, line_phase = self._resonance_lines(module, freq_hz)
+            plot_info['resonance_lines_mag'].append(line_mag)
+            plot_info['resonance_lines_phase'].append(line_phase)
+
     def _add_resonance(self, module: int, freq_hz: float):
-        """Add a resonance line at the given frequency."""
+        """Add a resonance line at the given frequency, keeping the
+        module's resonances in frequency order."""
         if module not in self.plots:
             return
         plot_info = self.plots[module]
-        line_pen = pg.mkPen(RESONANCE_LINE_COLOR, style=QtCore.Qt.PenStyle.DashLine)
-        line_mag = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
-        line_phase = pg.InfiniteLine(pos=freq_hz, angle=90, movable=False, pen=line_pen)
-        plot_info['amp_plot'].addItem(line_mag)
-        plot_info['phase_plot'].addItem(line_phase)
-        plot_info['resonance_lines_mag'].append(line_mag)
-        plot_info['resonance_lines_phase'].append(line_phase)
-        self.resonance_freqs.setdefault(module, []).append(freq_hz)
-        self._update_resonance_checkbox_text(module) 
-        self._update_resonance_legend_entry(module) 
+        freqs = self.resonance_freqs.setdefault(module, [])
+        idx = bisect.bisect_left(freqs, freq_hz)
+        line_mag, line_phase = self._resonance_lines(module, freq_hz)
+        freqs.insert(idx, freq_hz)
+        plot_info['resonance_lines_mag'].insert(idx, line_mag)
+        plot_info['resonance_lines_phase'].insert(idx, line_phase)
+        self._update_resonance_checkbox_text(module)
+        self._update_resonance_legend_entry(module)
         self._toggle_resonances_visible(self.show_resonances_cb.isChecked())
         self._update_multisweep_button_state(module)
 
@@ -687,19 +713,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             return
 
         if active_module in self.plots:
-            plot_info = self.plots[active_module]
-            amp_plot_item = plot_info['amp_plot'].getPlotItem()
-            phase_plot_item = plot_info['phase_plot'].getPlotItem()
-
-            for line in plot_info.get('resonance_lines_mag', []):
-                amp_plot_item.removeItem(line)
-            plot_info['resonance_lines_mag'] = []
-
-            for line in plot_info.get('resonance_lines_phase', []):
-                phase_plot_item.removeItem(line)
-            plot_info['resonance_lines_phase'] = []
-
-            self.resonance_freqs[active_module] = []
+            self._set_resonances(active_module, [])
             
             res_freqs_hz = resonance_results.get('resonance_frequencies', [])
 
@@ -709,17 +723,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 self._update_multisweep_button_state(active_module) 
                 return 
 
-            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            for res_freq_hz in res_freqs_hz:
-                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                amp_plot_item.addItem(line_mag)
-                plot_info['resonance_lines_mag'].append(line_mag)
-
-                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                phase_plot_item.addItem(line_phase)
-                plot_info['resonance_lines_phase'].append(line_phase)
-
-            self.resonance_freqs[active_module] = res_freqs_hz
+            self._set_resonances(active_module, res_freqs_hz)
             self._update_resonance_checkbox_text(active_module) 
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked()) 
@@ -734,33 +738,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         
     def _use_loaded_resonances(self, active_module: int, load_resonance_freqs: list):
         if active_module in self.plots:
-            plot_info = self.plots[active_module]
-            amp_plot_item = plot_info['amp_plot'].getPlotItem()
-            phase_plot_item = plot_info['phase_plot'].getPlotItem()
-
-            for line in plot_info.get('resonance_lines_mag', []):
-                amp_plot_item.removeItem(line)
-            plot_info['resonance_lines_mag'] = []
-
-            for line in plot_info.get('resonance_lines_phase', []):
-                phase_plot_item.removeItem(line)
-            plot_info['resonance_lines_phase'] = []
-
-            self.resonance_freqs[active_module] = []
-            
-            res_freqs_hz = load_resonance_freqs
-
-            line_pen = pg.mkPen('r', style=QtCore.Qt.PenStyle.DashLine)
-            for res_freq_hz in res_freqs_hz:
-                line_mag = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                amp_plot_item.addItem(line_mag)
-                plot_info['resonance_lines_mag'].append(line_mag)
-
-                line_phase = pg.InfiniteLine(pos=res_freq_hz, angle=90, movable=False, pen=line_pen)
-                phase_plot_item.addItem(line_phase)
-                plot_info['resonance_lines_phase'].append(line_phase)
-
-            self.resonance_freqs[active_module] = res_freqs_hz
+            self._set_resonances(active_module, load_resonance_freqs)
             self._update_resonance_checkbox_text(active_module) 
             self._update_resonance_legend_entry(active_module) 
             self._toggle_resonances_visible(self.show_resonances_cb.isChecked())

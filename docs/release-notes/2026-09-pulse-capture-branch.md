@@ -407,6 +407,12 @@ Bugs present on main, with the symptom.
   wrong (K0 3% low at hf/2kT = 0.2, negative from 1 to 2), so no resonator
   above 5 GHz at 120 mK built. They are the Abramowitz and Stegun fits,
   within 2e-7 of scipy.
+- Simulator: `get_samples` advanced the pulse schedule on the wall clock and
+  the stream advanced it on stream time. A stream that had fallen behind
+  real time, as on the macOS and Windows runners at stage 1, fired no pulse
+  after a sample read until it caught up: a capture right after
+  `measure_df_calibrations` recorded none. A read follows the stream's clock
+  while one runs.
 - A mock server outlived a client that crashed or was killed, holding about
   300 MB and its ports; the server checks once a second (`PARENT_POLL_S`)
   that the process that started it is alive, and shuts down when it is not.

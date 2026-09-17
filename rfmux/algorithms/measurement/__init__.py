@@ -19,10 +19,12 @@ from . import channel_selection
 from . import streamer_config
 from . import trigger_capture
 from . import py_run_pfb_streamer
+from . import noise_spectrum
 
 __all__ = [
     "py_get_samples",
     "take_netanal",
+    "noise_spectrum",
     "py_get_pfb_samples",
     "multisweep",
     "bias_kids",

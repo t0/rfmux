@@ -16,9 +16,36 @@ import threading
 import time
 from contextlib import contextmanager
 
+from PyQt6 import QtCore
 from ipykernel.inprocess.ipkernel import InProcessKernel
 from qtconsole.inprocess import QtInProcessKernelClient, QtInProcessKernelManager
 from qtconsole.rich_jupyter_widget import RichJupyterWidget
+
+
+class _GuiThread(QtCore.QObject):
+    """Relays (future, callback) pairs to the thread that created it."""
+
+    call = QtCore.pyqtSignal(object, object)
+
+    def __init__(self):
+        super().__init__()
+        self.call.connect(self._run, QtCore.Qt.ConnectionType.QueuedConnection)
+
+    def _run(self, future, callback):
+        callback(future)
+
+
+_gui_thread = None
+
+
+def on_done(future: concurrent.futures.Future, callback) -> None:
+    """Call callback(future) on the GUI thread once *future* completes.
+    A cancelled future is not reported. First use must be from the GUI thread."""
+    global _gui_thread
+    if _gui_thread is None:
+        _gui_thread = _GuiThread()
+    future.add_done_callback(
+        lambda f: None if f.cancelled() else _gui_thread.call.emit(f, callback))
 
 
 class Interpreter:

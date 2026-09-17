@@ -82,6 +82,19 @@ periscope._start_network_analysis({
     "clear_channels": False})
 ''' + SWEEP_TAIL
 
+# A one-call panel action: the QP pulse toggle in mock mode.
+QP_PULSES = PROLOGUE + r'''
+periscope.is_mock_mode = True
+periscope._toggle_qp_pulses()
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline and periscope.qp_pulse_mode == "none":
+    app.processEvents(); time.sleep(0.01)
+print("MODE", periscope.qp_pulse_mode)
+print("TRANSCRIPT", periscope.jupyter_widget._control.toPlainText())
+with contextlib.redirect_stdout(io.StringIO()):
+    periscope.close()
+'''
+
 # Raised from IPython there is no second shell: the enclosing session is the
 # namespace and the transcript goes to its stdout.
 HOSTED = r'''
@@ -122,6 +135,12 @@ def test_multi_module_sweep_is_one_flat_call_per_amplitude():
         assert (f"netanal_0[{amp}] = await crs.take_netanal(amp={amp}, " in transcript
                 and f"module=[1, 2], **periscope.netanal_hooks('netanal_0', {amp}))" in transcript)
     assert "asyncio.gather" not in transcript and "for amp in" not in transcript
+
+
+def test_qp_pulse_toggle_is_a_console_cell():
+    out = _child(QP_PULSES)
+    assert "MODE periodic" in out
+    assert "await crs.set_pulse_mode('periodic', " in out.split("TRANSCRIPT", 1)[1]
 
 
 def test_raised_from_ipython_the_enclosing_session_is_the_namespace():

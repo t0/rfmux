@@ -1336,12 +1336,9 @@ class PeriscopeRuntime:
             task.stop()  # Request interruption
             task.wait(2000)  # Wait up to 2 seconds for thread to finish
             self.multisweep_tasks.pop(task_key, None)
-        # The startup df-calibration worker, if still sweeping: ask it
-        # to stop, then wait.
-        task = getattr(self, "_df_cal_task", None)
-        if task is not None and task.isRunning():
-            task.requestInterruption()
-            task.wait(2000)
+        future = getattr(self, "_df_cal_future", None)
+        if future is not None and not future.done():
+            future.cancel()
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
             if not sip.isdeleted(self.notebook_dock):
@@ -1443,6 +1440,12 @@ class PeriscopeRuntime:
             return self.jupyter_widget.run(code)
         print(code)
         return self.interpreter.run(code, namespace)
+
+    def run_python_then(self, code: str, comment: str, done) -> concurrent.futures.Future:
+        """run_python, then done(future) on the GUI thread; a cancelled cell is not reported."""
+        future = self.run_python(code, comment)
+        on_done(future, done)
+        return future
 
     def netanal_hooks(self, window_id: str, amplitude: float) -> dict:
         """The progress and data callbacks that feed a network analysis panel
@@ -2569,7 +2572,6 @@ class PeriscopeRuntime:
         MockBiasDialog = MagicMock(return_value=fake_bias_dialog)
         MockNoiseDialog = MagicMock(return_value=fake_noise_dialog)
         MockConfigDialog = MagicMock(return_value=fake_mock_config_dialog)
-        MockCRSInitTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockFetcher = MagicMock(return_value=fake_fetcher)
         MockNASignals = MagicMock(return_value=fake_signals)
         MockRunPython = MagicMock(side_effect=lambda code, comment="": concurrent.futures.Future())
@@ -2633,7 +2635,6 @@ class PeriscopeRuntime:
                 MockConfigDialog,
                 create=True,
             ),
-            patch("rfmux.tools.periscope.tasks.CRSInitializeTask", MockCRSInitTask, create=True),
             patch("rfmux.tools.periscope.tasks.DACScaleFetcher", MockFetcher, create=True),
             patch(
                 "rfmux.tools.periscope.tasks.NetworkAnalysisSignals",
@@ -2665,7 +2666,6 @@ class PeriscopeRuntime:
             patch.object(periscope_app, "NoiseSpectrumDialog", MockNoiseDialog, create=True),
             patch.object(periscope_app, "MockConfigurationDialog", MockConfigDialog, create=True),
             patch.object(periscope_app.Periscope, "_apply_mock_configuration", MagicMock()),
-            patch.object(periscope_app, "CRSInitializeTask", MockCRSInitTask, create=True),
             patch.object(periscope_app, "DACScaleFetcher", MockFetcher, create=True),
             patch.object(periscope_app, "NetworkAnalysisSignals", MockNASignals, create=True),
             patch.object(periscope_app.Periscope, "run_python", MockRunPython),

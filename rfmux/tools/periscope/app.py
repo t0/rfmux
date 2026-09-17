@@ -48,7 +48,7 @@ import concurrent.futures
 
 from .console_kernel import Interpreter
 from .tasks import *  # Provides: worker thread classes (UDPReceiver, IQTask, PSDTask,
-                       # CRSInitializeTask, MultisweepTask, etc.)
+                       # MultisweepTask, etc.)
                        # and their associated signal classes (IQSignals, PSDSignals, etc.).
 
 from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, InitializeCRSDialog, etc.)
@@ -59,10 +59,7 @@ from PyQt6 import sip  # For checking if Qt C++ objects have been deleted
 from . import settings
 from .mock_configuration_dialog import MockConfigurationDialog
 from .pulse_capture_panel import PulseCapturePanel
-from .streamer_config_dialog import (
-    ApplyStreamerConfigTask,
-    StreamerConfigDialog,
-)
+from .streamer_config_dialog import StreamerConfigDialog
 from .dock_manager import PeriscopeDockManager
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
@@ -242,10 +239,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Measure df calibrations from startup, off the GUI thread, so
         # the window is up and streaming while the sweep runs.  Mock
-        # mode only -- see _measure_df_calibrations.  The launcher
+        # mode only -- see _start_df_calibration.  The launcher
         # measures them behind its build window for large arrays and
         # hands the rows in instead.
-        self._df_cal_task = None
+        self._df_cal_future = None
         if tuning is None:
             self._start_df_calibration(self.module)
         elif tuning:
@@ -330,10 +327,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.netanal_tasks: Dict[str, list] = {} # Running sweeps' cell futures, by window_id
 
         # CRS (Control and Readout System) Initialization signals.
-        # CRSInitializeSignals (from .tasks) handles success/error signals for CRS initialization.
-        self.crs_init_signals = CRSInitializeSignals()
-        self.crs_init_signals.success.connect(self._crs_init_success)
-        self.crs_init_signals.error.connect(self._crs_init_error)
         
         # Multisweep analysis signals and tracking.
         # MultisweepSignals and MultisweepTask are from .tasks.
@@ -997,7 +990,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Allows the user to select an IRIG timing source and optionally clear
         existing channel configurations on the CRS. If a CRS object is not
         available or critical attributes are missing, an error message is shown.
-        If the user confirms the dialog, a `CRSInitializeTask` is started.
+        If the user confirms the dialog, the initialization runs as a session cell.
         """
         if self.crs is None:
             QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for initialization.")
@@ -1017,9 +1010,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if irig_source is None:
                 QtWidgets.QMessageBox.warning(self, "Selection Error", "No IRIG source selected.")
                 return
-            # CRSInitializeTask from .tasks
-            task = CRSInitializeTask(self.crs, self.module, irig_source, clear_channels, self.crs_init_signals)
-            self.pool.start(task)
+            lines = [f"await crs.set_timestamp_port({irig_source!r})"]
+            if clear_channels:
+                lines.append(f"await crs.clear_channels(module={self.module!r})")
+
+            def done(future):
+                if future.exception() is not None:
+                    self._crs_init_error(f"Error during CRS initialization: {future.exception()!r}")
+                else:
+                    self._crs_init_success("CRS board initialized successfully.")
+            self.run_python_then("\n".join(lines), "Initialize CRS Board", done)
 
     def _fetch_dac_scales_for_dialog(self, dialog) -> None:
         """
@@ -1454,18 +1454,23 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 "No CRS connection to apply the streamer configuration to",
                 5000)
             return
-        task = ApplyStreamerConfigTask(self.crs, cfg, parent=self)
-        task.success.connect(
-            lambda info: print(
-                f"[Periscope] Streamer configured: dec {cfg.dec_stage}, "
-                f"{'short' if cfg.short_packets else 'long'} packets, "
-                f"{info['total_mbps']:.0f} Mbps"))
-        task.error.connect(
-            lambda msg: QtWidgets.QMessageBox.critical(
-                self, "Streamer Configuration",
-                f"Failed to apply configuration:\n{msg}"))
-        self._streamer_apply_task = task  # keep a ref while running
-        task.start()
+        kwargs = dict(dec_stage=cfg.dec_stage, short=cfg.short_packets, modules=cfg.modules,
+                      pfb_channels=cfg.pfb_channels, pfb_module=cfg.pfb_module)
+        args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+
+        def done(future):
+            if future.exception() is not None:
+                QtWidgets.QMessageBox.critical(
+                    self, "Streamer Configuration",
+                    f"Failed to apply configuration:\n{future.exception()}")
+                return
+            info = self.session_namespace()["streamer"]
+            print(f"[Periscope] Streamer configured: dec {cfg.dec_stage}, "
+                  f"{'short' if cfg.short_packets else 'long'} packets, "
+                  f"{info['total_mbps']:.0f} Mbps")
+
+        self.run_python_then(f"streamer = await crs.configure_streamer({args})",
+                             "Streamer Config", done)
 
     def _open_pulse_capture_panel(self) -> None:
         """Create a Pulse Capture dock for live detection."""
@@ -1772,24 +1777,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.unit_mode = "df"
             self.real_units = False  # df units are different from standard real units
             
-            # Check if calibration data is available
-            if (not self.df_calibrations.get(self.module)
-                    and self._df_calibration_running()):
-                # The startup measurement is still sweeping; a second
-                # sweep would fight it for the same tones.
-                self.statusBar().showMessage(
-                    "df calibration is still being measured; try again in "
-                    "a moment", 5000)
-                self.rb_counts.setChecked(True)
-                self.unit_mode = "counts"
-                self.real_units = False
-                return
             if not self.df_calibrations.get(self.module):
-                # Normally done at startup; this catches a module tuned
-                # afterwards, and blocks the window for the sweep
-                # (seconds at many tones) when it fires.
-                self._measure_df_calibrations(self.module)
-            if not self.df_calibrations.get(self.module):
+                # Normally measured at startup in mock mode; this catches
+                # a module tuned afterwards. On hardware the calibration
+                # comes from bias_kids, so nothing starts here.
+                if not self._df_calibration_running():
+                    self._start_df_calibration(self.module)
+                if self._df_calibration_running():
+                    self.statusBar().showMessage(
+                        "df calibration is being measured; try again in "
+                        "a moment", 5000)
+                    self.rb_counts.setChecked(True)
+                    self.unit_mode = "counts"
+                    self.real_units = False
+                    return
                 QtWidgets.QMessageBox.warning(
                     self,
                     "df Calibration Not Available",
@@ -1810,62 +1811,31 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Rebuild layout to update axis labels
         self._build_layout()
     
-    def _measure_df_calibrations(self, module: int) -> None:
-        """Measure a calibration for every biased channel, in mock mode:
-        ``crs.measure_df_calibrations``, a narrow sweep around each bias
-        point, so a simulated session can use df units without a
-        multisweep first.
-
-        Only in mock mode.  Sweeping moves each channel's frequency and
-        puts it back, which is free against a simulator and not something
-        to do to a tuned array because someone picked a units option; on
-        hardware the calibration comes from bias_kids.
-        """
-        measure = self._df_calibration_measurement(module)
-        if measure is None:
-            return
-        try:
-            rows = asyncio.run(measure())
-        except Exception as exc:
-            print(f"[Periscope] df calibration failed: {exc}")
-            return
-        if rows:
-            self._handle_tuning_ready(module, dict(rows))
-
-    def _df_calibration_measurement(self, module: int):
-        """The coroutine factory both the startup worker and the
-        synchronous fallback run, or None when there is nothing to
-        measure (a board, or no CRS)."""
-        crs = getattr(self, "crs", None)
-        if crs is None or not getattr(self, "is_mock_mode", False):
-            return None
-
-        async def _measure():
-            # Every channel the module reports as biased, not just the
-            # ones on screen: the macro resolves that itself.
-            return await crs.measure_df_calibrations(module=module)
-        return _measure
-
     def _start_df_calibration(self, module: int) -> None:
-        """Measure in a worker; the result lands through the same
-        handler a multisweep's calibration does."""
-        measure = self._df_calibration_measurement(module)
-        if measure is None:
+        """Measure df calibrations as a session cell (mock mode only); the
+        result lands through the same handler a multisweep's calibration does."""
+        if self.crs is None or not getattr(self, "is_mock_mode", False):
             return
-        signals = DfCalibrationSignals()
-        signals.completed.connect(self._on_df_calibration_measured)
-        signals.error.connect(
-            lambda msg: print(f"[Periscope] df calibration failed: {msg}"))
-        self._df_cal_task = DfCalibrationTask(measure, module, signals,
-                                              parent=self)
-        self._df_cal_task.start()
+        name = f"df_calibrations_m{module}"
+
+        def done(future):
+            self._df_cal_future = None
+            if future.exception() is not None:
+                print(f"[Periscope] df calibration failed: {future.exception()}")
+                return
+            rows = self.session_namespace()[name]
+            self._on_df_calibration_measured(module, dict(rows or {}))
+
+        self._df_cal_future = self.run_python_then(
+            f"{name} = await crs.measure_df_calibrations(module={module!r})",
+            "df calibration", done)
         self.statusBar().showMessage(
             f"Measuring df calibrations for module {module} in the "
             "background; df units are available when it finishes")
 
     def _df_calibration_running(self) -> bool:
-        task = getattr(self, "_df_cal_task", None)
-        return task is not None and task.isRunning()
+        future = getattr(self, "_df_cal_future", None)
+        return future is not None and not future.done()
 
     def _on_df_calibration_measured(self, module: int, rows: dict) -> None:
         if rows:
@@ -1873,7 +1843,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.statusBar().showMessage(
             f"df calibrations measured for {len(rows)} channels on module "
             f"{module}", 8000)
-        self._df_cal_task = None
+        self._df_cal_future = None
 
     def _handle_tuning_ready(self, module: int, tuning: Dict[int, dict]):
         """Hold a module's tuning rows, from bias_kids, the mock startup
@@ -2045,51 +2015,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Capture reference to avoid closure issues
-        crs = self.crs
-        
-        # Run the async pulse mode setting in a separate thread
-        import threading
-        
-        def run_async_pulse_mode():
-            try:
-                # Create new event loop for this thread
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+        # Off -> Periodic -> Random -> Off, with the parameters the mock
+        # configuration holds.
+        cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
+        mode = {"none": "periodic", "periodic": "random"}.get(self.qp_pulse_mode, "none")
+        args = ", ".join([repr(mode)] + [f"{k}={v!r}" for k, v in pulse_mode_kwargs(cfg).items()])
 
-                # Off -> Periodic -> Random -> Off, with the parameters
-                # the mock configuration holds.
-                cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
-                mode = {"none": "periodic", "periodic": "random"}.get(
-                    self.qp_pulse_mode, "none")
-                loop.run_until_complete(crs.set_pulse_mode(
-                    mode, **pulse_mode_kwargs(cfg)))
-                self.qp_pulse_mode = mode
-                if self.mock_config is None:
-                    self.mock_config = mc.defaults()
-                self.mock_config["pulse_mode"] = mode
-                print(f"[Periscope] QP pulses: {mode}")
-                # Update UI on main thread
-                QtCore.QMetaObject.invokeMethod(
-                    self, "_update_pulse_button_ui", 
-                    QtCore.Qt.ConnectionType.QueuedConnection
-                )
-                
-            except Exception as e:
-                print(f"[Periscope] Error setting pulse mode: {e}")
-                # Show error on main thread
-                QtCore.QMetaObject.invokeMethod(
-                    self, "_show_pulse_error", 
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(str, str(e))
-                )
-            finally:
-                loop.close()
-        
-        # Start the async operation in a separate thread
-        thread = threading.Thread(target=run_async_pulse_mode, daemon=True)
-        thread.start()
-    
+        def done(future):
+            if future.exception() is not None:
+                self._show_pulse_error(str(future.exception()))
+                return
+            self.qp_pulse_mode = mode
+            if self.mock_config is None:
+                self.mock_config = mc.defaults()
+            self.mock_config["pulse_mode"] = mode
+            print(f"[Periscope] QP pulses: {mode}")
+            self._update_pulse_button_ui()
+
+        self.run_python_then(f"await crs.set_pulse_mode({args})", "QP pulses", done)
+
     @QtCore.pyqtSlot()
     def _update_pulse_button_ui(self):
         """Update the pulse button UI after async operation completes."""

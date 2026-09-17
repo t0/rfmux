@@ -2,7 +2,7 @@
 
 from .utils import * # Imports QtCore, QThread, QObject, pyqtSignal, QRunnable,
                      # streamer, np, asyncio, time, socket, queue, traceback, sys,
-                     # DEFAULT_AMPLITUDE, NETANAL_UPDATE_INTERVAL, DENSITY_GRID,
+                     # DEFAULT_AMPLITUDE, DENSITY_GRID,
                      # SCATTER_POINTS, spectrum_from_slow_tod, pg,
                      # gaussian_filter, convolve, SMOOTH_SIGMA, LOG_COMPRESS,
                      # DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ, DEFAULT_NSAMPLES,
@@ -205,38 +205,6 @@ class UDPReceiver(QtCore.QThread):
         except OSError:
             pass
 
-class DfCalibrationSignals(QObject):
-    completed = pyqtSignal(int, dict)
-    error = pyqtSignal(str)
-
-
-class DfCalibrationTask(QtCore.QThread):
-    """Runs one df-calibration measurement off the GUI thread.
-
-    *measure* is a callable returning the coroutine to run, whose
-    result is ``{channel: tuning row}``; the app hands in
-    crs.measure_df_calibrations for the module, tests hand in whatever
-    they like.  Mock mode measures at startup
-    and the sweep is seconds at many tones: it must not hold the window.
-    """
-
-    def __init__(self, measure, module: int,
-                 signals: DfCalibrationSignals, parent=None):
-        super().__init__(parent)
-        self.measure, self.module, self.signals = measure, module, signals
-
-    def run(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        try:
-            rows = loop.run_until_complete(self.measure())
-            self.signals.completed.emit(self.module, dict(rows or {}))
-        except Exception as exc:
-            self.signals.error.emit(str(exc))
-        finally:
-            loop.close()
-
-
 class IQSignals(QObject):
     done = pyqtSignal(int, str, object)
 
@@ -377,9 +345,6 @@ class PSDTask(QRunnable):
 
         return (freq_dsb_sorted, psd_dsb_sorted)
 
-class CRSInitializeSignals(QObject):
-    success = pyqtSignal(str); error = pyqtSignal(str)
-
 class NetworkAnalysisSignals(QObject):
     progress = pyqtSignal(int, float)
     amplitude_started = pyqtSignal(int, int, int, float)  # module, index, count, amplitude
@@ -405,60 +370,6 @@ class DACScaleFetcher(QtCore.QThread):
                 print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
                 dac_scales[module_idx] = None
 
-class CRSInitializeTask(QRunnable):
-    def __init__(self, crs: "CRS", module: int, irig_source: Any, clear_channels: bool, signals: CRSInitializeSignals):
-        super().__init__(); self.crs, self.module, self.irig_source = crs, module, irig_source
-        self.clear_channels, self.signals, self._loop = clear_channels, signals, None
-    def run(self):
-        # traceback from .utils
-        self._loop = asyncio.new_event_loop(); asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self._initialize_c_r_s())
-            self.signals.success.emit("CRS board initialized successfully.")
-        except Exception as e:
-            self.signals.error.emit(f"Error during CRS initialization: {type(e).__name__}: {str(e)}\n{traceback.format_exc()}")
-        finally:
-            if self._loop:
-                if self._loop.is_running(): self._loop.stop()
-                self._loop.close(); self._loop = None
-    async def _initialize_c_r_s(self):
-        await self.crs.set_timestamp_port(self.irig_source)
-        if self.clear_channels: await self.crs.clear_channels(module=self.module)
-
-class SetCableLengthSignals(QObject):
-    """Signals for SetCableLengthTask."""
-    success = pyqtSignal(int, float)  # module_id, length_set
-    error = pyqtSignal(int, str)    # module_id, error_message
-
-class SetCableLengthTask(QRunnable):
-    """A QRunnable task to set the cable length on the CRS asynchronously."""
-    def __init__(self, crs: "CRS", module_id: int, length: float, signals: SetCableLengthSignals):
-        super().__init__()
-        self.crs = crs
-        self.module_id = module_id
-        self.length = length
-        self.signals = signals
-        self._loop = None
-
-    def run(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        try:
-            self._loop.run_until_complete(self.crs.set_cable_length(length=self.length, module=self.module_id))
-            self.signals.success.emit(self.module_id, self.length)
-        except Exception as e:
-            # traceback, sys are imported from .utils
-            err_msg = f"Error setting cable length for module {self.module_id} to {self.length}m: {type(e).__name__}: {str(e)}"
-            print(f"ERROR: {err_msg}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            self.signals.error.emit(self.module_id, err_msg)
-        finally:
-            if self._loop:
-                if self._loop.is_running():
-                    self._loop.stop()
-                self._loop.close()
-            self._loop = None
-
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
     # Updated data_update to include iteration and direction:
@@ -480,7 +391,6 @@ def fit_frequencies_for(amp: float, fit_by_amp: dict) -> list | None:
     nearest = min(fit_by_amp, key=lambda a: abs(a - amp))
     return list(fit_by_amp[nearest])
 
-
 def sweep_centres(amp: float, baseline: list, fit_by_amp: dict | None,
                   remembered) -> list:
     """Centre frequencies of one amplitude's sweep, per section.
@@ -500,7 +410,6 @@ def sweep_centres(amp: float, baseline: list, fit_by_amp: dict | None,
         old = remembered(idx, amp)
         centres.append(old if old is not None else cf)
     return centres
-
 
 class MultisweepTask(QtCore.QThread):
     """QThread subclass for performing multisweep operations without blocking the GUI."""
@@ -538,7 +447,6 @@ class MultisweepTask(QtCore.QThread):
 
     def _progress_callback_wrapper(self, module_idx, progress_percentage):
         if self._running: self.signals.progress.emit(module_idx, progress_percentage)
-
 
     def run(self):
         """QThread entry point - runs in a separate thread."""
@@ -862,13 +770,11 @@ class MultisweepTask(QtCore.QThread):
                 enhanced_results[res_idx]['fitting_error'] = str(e)
             return enhanced_results
 
-
 class BiasKidsSignals(QObject):
     """Signals for BiasKidsTask."""
     progress = pyqtSignal(int, float)  # module, progress_percentage
     completed = pyqtSignal(int, dict, float)  # module, biased_results, nco_frequency_hz
     error = pyqtSignal(str)  # error_message
-
 
 class BiasKidsTask(QtCore.QThread):
     """QThread subclass for running the bias_kids algorithm without blocking the GUI."""

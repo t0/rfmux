@@ -3,7 +3,6 @@
 # Imports from within the 'periscope' subpackage
 from .utils import *
 from .layouts import FlowLayout, labelled
-from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
@@ -51,10 +50,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Track last session export filename for overwriting
         self._last_export_filename: Optional[str] = None
 
-        # Initialize signals for SetCableLengthTask
-        self.set_cable_length_signals = SetCableLengthSignals()
-        # Optionally, connect these signals to handlers for user feedback
-        self.set_cable_length_signals.error.connect(self._handle_set_cable_length_error)
         
         # Setup the UI components
         self._setup_ui()

@@ -2,6 +2,7 @@
 the GUI keeps going while they do."""
 
 import re
+import threading
 import time
 
 import pytest
@@ -178,6 +179,25 @@ def test_interrupt_kernel_stops_a_typed_await_cell(widget, console):
     km.interrupt_kernel()
     pump(lambda: not w._executing)
     assert "typed_finished" not in km.kernel.shell.user_ns
+
+
+def test_on_done_calls_back_on_the_gui_thread(widget):
+    from rfmux.tools.periscope.console_kernel import on_done
+    w, pump = widget
+    seen = []
+    on_done(w.run("value = 6 * 7"),
+            lambda f: seen.append((threading.current_thread(), f.exception())))
+    pump(lambda: seen)
+    assert seen == [(threading.main_thread(), None)]
+
+
+def test_on_done_delivers_the_cells_exception(widget):
+    from rfmux.tools.periscope.console_kernel import on_done
+    w, pump = widget
+    seen = []
+    on_done(w.run("raise RuntimeError('boom')"), lambda f: seen.append(str(f.exception())))
+    pump(lambda: seen)
+    assert seen == ["RuntimeError: boom"]
 
 
 def test_cell_output_reaches_the_console_not_the_gui_threads_output(console, qt_app):

@@ -30,7 +30,9 @@ from ...algorithms.measurement.streamer_config import (
 
 
 class _CoroutineThread(QtCore.QThread):
-    """Run one coroutine on its own event loop off the GUI thread."""
+    """Run one coroutine on its own event loop off the GUI thread: the
+    state read that fills the dialog, which is plumbing rather than an
+    action the session should show."""
 
     success = pyqtSignal(dict)
     error = pyqtSignal(str)
@@ -47,13 +49,6 @@ class _CoroutineThread(QtCore.QThread):
             self.error.emit(str(e))
         finally:
             loop.close()
-
-
-class ApplyStreamerConfigTask(_CoroutineThread):
-    """Apply a StreamerConfig off the GUI thread."""
-
-    def __init__(self, crs, cfg: StreamerConfig, parent=None):
-        super().__init__(apply_streamer_config(crs, cfg), parent)
 
 
 class StreamerConfigDialog(QtWidgets.QDialog):

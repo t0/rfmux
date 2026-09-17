@@ -1903,7 +1903,10 @@ class TestHardStop:
         """A PulseCapture built straight from a ring size must resolve
         the same lag and hard stop as one configured through
         PulseCaptureConfig.  These were two independent formulas that
-        disagreed by 1.2x; they now share the ring-geometry constants."""
+        disagreed by 1.2x; they now share the ring-geometry constants.
+        With no margins asked for: the config grows its ring by the
+        pre-pulse and post-pulse spans, which a bare ring size cannot
+        say, and hands the session both values explicitly."""
         cfg = PulseCaptureConfig(max_pulse_ms=250.0, pre_pulse_ms=0.0,
                                  post_pulse_ms=0.0)
         for rate in (19073.486328125, 1220703.125):

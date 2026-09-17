@@ -323,6 +323,10 @@ def test_the_recording_is_merged_into_the_pulse_file(tmp_path, monkeypatch):
     rs._merge_recording(result)
     assert calls == [(pulse, fx)] and result.merged_fastrx
     assert result.warnings == []
+    # The merged file says it holds the 100G data, and the result
+    # follows it: the exports and the review read the path from there.
+    assert result.pulse_path == tmp_path / "pulse_100G.h5"
+    assert result.pulse_path.exists() and not pulse.exists()
 
 
 def test_a_merge_that_fails_is_a_warning(tmp_path, monkeypatch):
@@ -334,6 +338,7 @@ def test_a_merge_that_fails_is_a_warning(tmp_path, monkeypatch):
     result = _result(tmp_path, pulse_path=pulse, fastrx_path=fx)
     rs._merge_recording(result)
     assert not result.merged_fastrx
+    assert result.pulse_path == tmp_path / "pulse.h5"
     assert result.warnings == [
         "fastrx not merged into pulse.h5: no disciplined timestamp"]
 

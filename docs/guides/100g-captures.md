@@ -146,7 +146,8 @@ The products, sharing one time stamp, named `module2` for one module and
 
 - `pulse_module<M>_HHMMSS.h5`, the slow-stream pulse capture, with each
   channel's tuning under its `tuning` group. A file across modules keys
-  its channels by (module, channel).
+  its channels by (module, channel). Once the recording is merged in it
+  is `pulse_module<M>_HHMMSS_100G.h5`.
 - `parser_module<M>_HHMMSS.dirfile/serial_<NNNN>`, the parser's dirfile of
   the same channels, and a `.log` with its drop statistics.
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of
@@ -157,8 +158,10 @@ browser shows them.
 
 After the run the command lists the channels that triggered with their
 pulse counts, merges the recording into the pulse file as its fast stream
-(`--no-merge-fastrx` leaves the file slow-only; `rfmux fastrx merge
-<pulse.h5> <run.fastrx>` does it later) and opens Periscope in review
+and renames that file to end in `_100G`, so its name says it holds the
+100G data (`--no-merge-fastrx` leaves the file slow-only under its own
+name; `rfmux fastrx merge <pulse.h5> <run.fastrx>` does it later, in
+place unless given an output name) and opens Periscope in review
 mode on the pulse file, in its session folder. The command exits 1 after
 a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a

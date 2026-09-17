@@ -546,14 +546,22 @@ def _merge(pulse_path: Path, fastrx_path: Path) -> None:
     merge_fastrx(pulse_path, fastrx_path)
 
 
+#: Ends the name of a pulse file that carries the 100G recording.
+MERGED_SUFFIX = "_100G"
+
+
 def _merge_recording(result: RecordResult) -> None:
-    """The fastrx recording into the pulse file as its fast stream; a
-    merge that fails is a warning, the run itself having succeeded."""
+    """The fastrx recording into the pulse file as its fast stream, the
+    file renamed to say it holds the 100G data; a merge that fails is a
+    warning, the run itself having succeeded."""
     if not (result.pulse_path and result.pulse_path.exists()
             and result.fastrx_path and result.fastrx_path.exists()):
         return
     try:
         _merge(result.pulse_path, result.fastrx_path)
+        result.pulse_path = result.pulse_path.rename(
+            result.pulse_path.with_stem(
+                result.pulse_path.stem + MERGED_SUFFIX))
         result.merged_fastrx = True
     except Exception as e:
         result.warnings.append(

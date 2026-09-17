@@ -98,7 +98,8 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="With --channel-streamer: " + TRUNC_HELP)
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
-                   "fast stream (a both-mode file, as Periscope reviews it)")
+                   "fast stream (a both-mode file, as Periscope reviews it), "
+                   "renamed to end in _100G")
 @click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
               default="periscope", show_default=True,
               help="After the run: Periscope in review mode on the pulse file, the "
@@ -196,7 +197,8 @@ def _run(*, serial, hostname, modules, channels, duration, session,
         if path is not None:
             click.echo(f"[record] {name.split('_')[0]:7s} {path}")
     if result.merged_fastrx:
-        click.echo("[record] fastrx merged into the pulse file as its fast stream")
+        click.echo("[record] fastrx merged into the pulse file as its fast "
+                   f"stream: {result.pulse_path.name}")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
     _show(result, show)

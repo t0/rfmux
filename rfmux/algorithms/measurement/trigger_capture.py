@@ -134,6 +134,12 @@ class PulseCaptureResult:
     #: the two summaries, ``time_offset``, and the union-window TOD from
     #: both ring buffers.  Empty unless ``streamer_mode="both"``.
     pairs: List[dict] = field(default_factory=list)
+    #: Coincidence events of a single-stream capture whose config sets
+    #: ``coincidence_window_ms`` or ``dump_all_channels``: each names
+    #: its member pulses (``channel``, ``pulse_idx``, ``trigger_time``,
+    #: ``summary``), its ``window``, and under ``dump`` the same span of
+    #: every channel that did not trigger, when that was asked for.
+    events: List[dict] = field(default_factory=list)
     hdf5_path: Optional[Path] = None
 
     @property
@@ -412,6 +418,7 @@ async def _run_single(result, host, channels, module, streamer_mode,
         sample_rate=rate, hdf5_path=hdf5_path,
         tuning=tuning,
         on_pulse=_collector(stream), on_noise=on_noise,
+        on_event=result.events.append,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None,
         **result.config.session_kwargs(rate))

@@ -63,13 +63,15 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     return Recording(_recording_file(tmp_path, spacing, span))
 
 
-def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None):
+def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None,
+             **config_kw):
     """A slow-only capture of the event on the first of *channels*
     (keys), stamps fed late as the board stamps them; the others see
     noise."""
     path = str(tmp_path / "slow.h5")
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
-                             max_pulse_ms=30.0, noise_train_ms=300.0)
+                             max_pulse_ms=30.0, noise_train_ms=300.0,
+                             **config_kw)
     got = []
     s = PulseCaptureSession(channels=list(channels), module=module,
                             sample_rate=FS, hdf5_path=path, tuning=tuning,
@@ -377,6 +379,26 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
         assert pair["fast_tod"]["Amp_I"].max() == \
             pytest.approx(AMP * factor.real, rel=0.02)
         assert "noise_std_I" in r.f[f"fast/channel_{CHANNEL}"].attrs
+
+
+def test_a_merged_file_keeps_the_captures_events(tmp_path):
+    """The events index the capture's pulses, which the merge files as
+    the slow stream's."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture(tmp_path, channels=(CHANNEL, CHANNEL + 1),
+                    dump_all_channels=True)
+    with PulseHDF5Reader(path) as r:
+        before = r.get_event(1)
+    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+                         span=(-0.002, 0.035))
+    merge_fastrx(path, fx)
+    with PulseHDF5Reader(path) as r:
+        assert r.dual and r.events_stream == "slow"
+        after = r.get_event(1)
+        assert r.get_pulse(CHANNEL, after["members"][0]["pulse_idx"],
+                           stream="slow") is not None
+    assert after["members"] == before["members"]
+    assert after["dumped"] == before["dumped"]
 
 
 def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):

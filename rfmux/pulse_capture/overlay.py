@@ -467,6 +467,10 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
             key = channel_group(c)
             del writer.f["slow"][key]
             reader.f.copy(reader.f[key], writer.f["slow"], name=key)
+        if "events" in reader.f:
+            # The capture's events index its pulses, now the slow ones.
+            reader.f.copy(reader.f["events"], writer.f, name="events")
+            writer.f["events"].attrs["stream"] = "slow"
         writer.update_histograms("slow", reader.get_histograms())
         writer.update_templates("slow", reader.get_templates())
 

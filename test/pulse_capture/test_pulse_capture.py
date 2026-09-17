@@ -1416,12 +1416,15 @@ class TestDetectionParamsPlumbing:
         # session_kwargs also carries the sizing quantities, which are
         # not detection knobs but are needed to build the session (the
         # ring, the training length, the record the file keeps), and
-        # trigger_basis, which the session applies on the way in rather
-        # than handing to PulseCapture.
+        # what the session does itself rather than handing to
+        # PulseCapture: trigger_basis on the way in, the coincidence
+        # events on the way out.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
                                                    "noise_samples",
                                                    "noise_record_samples",
-                                                   "trigger_basis"}
+                                                   "trigger_basis",
+                                                   "coincidence_window_s",
+                                                   "dump_all_channels"}
         # The join that matters: every detection knob still gets there.
         assert set(DETECTION_PARAMS) <= set(kw)
 

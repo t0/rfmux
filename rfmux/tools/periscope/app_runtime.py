@@ -1383,14 +1383,26 @@ class PeriscopeRuntime:
                 self.jupyter_widget = PeriscopeConsole()
                 self.jupyter_widget.kernel_client = self.kernel_manager.client()
                 self.jupyter_widget.kernel_client.start_channels()
-                
+
+                # What the kernel is doing, above the console, with a way to
+                # stop it: a long cell keeps the GUI live, so this and the
+                # busy cursor are the signs it is running.
+                self.kernel_activity = KernelActivity(self.jupyter_widget.kernel_client, self)
+                self.kernel_status = KernelStatus(self.kernel_activity, self.kernel_manager.interrupt_kernel)
+                console = QtWidgets.QWidget()
+                console_layout = QtWidgets.QVBoxLayout(console)
+                console_layout.setContentsMargins(0, 0, 0, 0)
+                console_layout.setSpacing(0)
+                console_layout.addWidget(self.kernel_status)
+                console_layout.addWidget(self.jupyter_widget, 1)
+
                 try: # Attempt to load awaitless extension for better async interaction
                     load_awaitless_extension(ipython=kernel.shell)
                 except Exception as e_awaitless:
                     warnings.warn(f"Could not load awaitless extension: {e_awaitless}", RuntimeWarning)
                     traceback.print_exc()
                 
-                self.console_dock_widget.setWidget(self.jupyter_widget)
+                self.console_dock_widget.setWidget(console)
                 self._update_console_style(self.dark_mode) # Apply initial style
                 # Set a more specific stylesheet for prompts and background
                 style_sheet = (".in-prompt { color: #00FF00 !important; } .out-prompt { color: #00DD00 !important; } body { background-color: #1C1C1C; color: #DDDDDD; }" 

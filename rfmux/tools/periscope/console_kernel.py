@@ -16,7 +16,7 @@ import threading
 import time
 from contextlib import contextmanager
 
-from PyQt6 import QtCore
+from PyQt6 import QtCore, QtWidgets
 from ipykernel.inprocess.ipkernel import InProcessKernel
 from qtconsole.inprocess import QtInProcessKernelClient, QtInProcessKernelManager
 from qtconsole.rich_jupyter_widget import RichJupyterWidget
@@ -156,6 +156,79 @@ class PeriscopeConsole(RichJupyterWidget):
                 self.input_buffer = future.saved_input
             future._finish(msg["content"])
         self._pump()
+
+
+class KernelActivity(QtCore.QObject):
+    """What the kernel is doing, from its own iopub status messages: idle,
+    or busy with the first line of the cell it announced. Typed and
+    panel-issued cells alike, so one status-bar label covers both."""
+
+    changed = QtCore.pyqtSignal(str)
+
+    def __init__(self, kernel_client, parent=None):
+        super().__init__(parent)
+        self.text = "Python: idle"
+        self._busy = False
+        kernel_client.iopub_channel.message_received.connect(self._on_message)
+
+    def _on_message(self, msg):
+        # The kernel says busy first, then announces the cell it is running.
+        kind = msg["msg_type"]
+        if kind == "status":
+            state = msg["content"]["execution_state"]
+            if state not in ("busy", "idle"):
+                return
+            self._busy = state == "busy"
+            self._set("Python: running" if self._busy else "Python: idle")
+        elif kind == "execute_input" and self._busy:
+            lines = [l.strip() for l in msg["content"]["code"].splitlines()
+                     if l.strip() and not l.lstrip().startswith("#")]
+            if lines:
+                self._set(f"Python: running  {lines[0]}")
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def _set(self, text):
+        if text != self.text:
+            self.text = text
+            self.changed.emit(text)
+
+
+class KernelStatus(QtWidgets.QWidget):
+    """A strip above the console: a coloured dot, the running line and an
+    Interrupt button. The application cursor turns busy while the kernel
+    is, so a long cell is visible from any panel without blocking one."""
+
+    def __init__(self, activity: KernelActivity, interrupt, parent=None):
+        super().__init__(parent)
+        self._activity = activity
+        self._cursor_set = False
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(6, 2, 6, 2)
+        self.dot = QtWidgets.QLabel("●")
+        self.label = QtWidgets.QLabel()
+        self.button = QtWidgets.QPushButton("Interrupt")
+        self.button.setToolTip("Cancel the running cell (Ctrl-C in the console does the same).")
+        self.button.clicked.connect(interrupt)
+        layout.addWidget(self.dot)
+        layout.addWidget(self.label, 1)
+        layout.addWidget(self.button)
+        activity.changed.connect(self._on_changed)
+        self._on_changed(activity.text)
+
+    def _on_changed(self, text: str):
+        busy = self._activity.busy
+        self.label.setText(text)
+        self.button.setEnabled(busy)
+        self.dot.setStyleSheet(f"color: {'#e69f00' if busy else '#4caf50'}; font-size: 14px;")
+        if busy and not self._cursor_set:
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.CursorShape.BusyCursor)
+            self._cursor_set = True
+        elif not busy and self._cursor_set:
+            QtWidgets.QApplication.restoreOverrideCursor()
+            self._cursor_set = False
 
 
 class _ShellChannel:

@@ -208,6 +208,36 @@ def test_on_done_delivers_the_cells_exception(widget):
     assert seen == ["RuntimeError: boom"]
 
 
+def test_kernel_activity_names_the_running_cell_then_goes_idle(widget, console):
+    from rfmux.tools.periscope.console_kernel import KernelActivity
+    w, pump = widget
+    _, kc, _ = console
+    activity = KernelActivity(kc)
+    seen = []
+    activity.changed.connect(seen.append)
+    future = w.run("# Noise Spectrum\nimport asyncio\nawait asyncio.sleep(0.3)")
+    pump(lambda: any(s.startswith("Python: running") for s in seen))
+    pump(future.done)
+    pump(lambda: activity.text == "Python: idle")
+    assert "Python: running  import asyncio" in seen
+
+
+def test_kernel_status_shows_busy_offers_interrupt_and_sets_the_cursor(widget, console, qt_app):
+    from PyQt6 import QtWidgets
+    from rfmux.tools.periscope.console_kernel import KernelActivity, KernelStatus
+    w, pump = widget
+    km, kc, _ = console
+    status = KernelStatus(KernelActivity(kc), km.interrupt_kernel)
+    assert not status.button.isEnabled() and QtWidgets.QApplication.overrideCursor() is None
+    w.run("import asyncio\nawait asyncio.sleep(30)\nunreached = True")
+    pump(lambda: status.button.isEnabled())
+    assert QtWidgets.QApplication.overrideCursor() is not None
+    status.button.click()
+    pump(lambda: not status.button.isEnabled())
+    assert QtWidgets.QApplication.overrideCursor() is None
+    assert "unreached" not in km.kernel.shell.user_ns
+
+
 def test_cell_output_reaches_the_console_not_the_gui_threads_output(console, qt_app):
     _, kc, run = console
     streams = []

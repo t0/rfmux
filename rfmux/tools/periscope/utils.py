@@ -180,7 +180,8 @@ import pyqtgraph as pg
 UPWARD_SWEEP_STYLE = Qt.PenStyle.SolidLine
 DOWNWARD_SWEEP_STYLE = Qt.PenStyle.DotLine  # Dotted line for downward sweeps
 
-from .console_kernel import ConsoleKernelManager, PeriscopeConsole, on_done
+from .console_kernel import (ConsoleKernelManager, KernelActivity, KernelStatus,
+                             PeriscopeConsole, on_done)
 
 # Local imports (adjusted for new location)
 import rfmux # Ensure rfmux is available for the console

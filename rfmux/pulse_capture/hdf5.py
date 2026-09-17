@@ -330,7 +330,8 @@ class PulseHDF5Writer(_PulseFileWriter):
     per-channel noise statistics.  Each call to :meth:`append_pulse`
     creates a new HDF5 group with compressed waveform datasets and
     metadata attributes.  The file is flushed after every write for
-    crash safety.
+    crash safety.  Coincidence events index those pulses from
+    ``events/`` (:meth:`append_event`).
 
     Parameters
     ----------

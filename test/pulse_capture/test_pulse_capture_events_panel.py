@@ -109,6 +109,23 @@ def test_an_event_draws_its_channels_together(qt_app, tmp_path):
     assert rise["Ch2"] - rise["Ch1"] == pytest.approx(0.003)
 
 
+def test_event_traces_sit_about_the_level_each_pulse_triggered_from(
+        qt_app, tmp_path):
+    """The baseline wanders after training; the level recorded at the
+    trigger follows it, so a drifted channel still starts at zero."""
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0),
+                    GROUP_EVENTS)
+    wf = panel.reader.get_pulse(1, 1)
+    drifted = dict(wf, Amp_I=wf["Amp_I"] + 1.0,
+                   trigger_baseline_I=wf["trigger_baseline_I"] + 1.0)
+    panel._get_waveform = lambda ch, idx, stream=None: (
+        drifted if (ch, idx) == (1, 1) else panel.reader.get_pulse(ch, idx))
+    panel._show_event(1)
+    curve = next(c for c in panel.pulse_plot_i.getPlotItem().listDataItems()
+                 if c.name() == "Ch1")
+    assert abs(curve.getData()[1][0]) < 1e-6
+
+
 def test_following_leaves_out_the_channels_that_did_not_trigger(
         qt_app, tmp_path):
     panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0,

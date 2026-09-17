@@ -2184,24 +2184,25 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         units = set()
         for ch, wf, triggered in traces:
             t = np.asarray(wf["Time"], dtype=np.float64) - t_ref
+            # About the level the pulse triggered from, which follows
+            # the baseline's drift where the training mean does not; a
+            # channel that did not trigger sits at its own median.
             amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
             amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
-            ns = self.noise_stats.get(ch)
+            amp_I = amp_I - wf.get("trigger_baseline_I", np.median(amp_I))
+            amp_Q = amp_Q - wf.get("trigger_baseline_Q", np.median(amp_Q))
             view = self._view_coeffs(ch)
             if view is not None:
                 amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, view[0])
-                ns = self._view_noise(ch, ns) if ns is not None else None
             units.add(self._units_label(ch))
             pen = pg.mkPen(_channel_color(ch),
                            width=LINE_WIDTH if triggered else 1,
                            style=(QtCore.Qt.PenStyle.SolidLine if triggered
                                   else QtCore.Qt.PenStyle.DotLine))
             name = short_label(ch) + ("" if triggered else " (no trigger)")
-            for plot, data, mean in (
-                    (self.pulse_plot_i, amp_I, getattr(ns, "mean_I", None)),
-                    (self.pulse_plot_q, amp_Q, getattr(ns, "mean_Q", None))):
-                base = mean if mean is not None else float(np.median(data))
-                plot.plot(t, data - base, pen=pen, name=name)
+            for plot, data in ((self.pulse_plot_i, amp_I),
+                               (self.pulse_plot_q, amp_Q)):
+                plot.plot(t, data, pen=pen, name=name)
         first, second = self._axis_names(event["members"][0]["channel"])
         for plot, name in ((self.pulse_plot_i, first),
                            (self.pulse_plot_q, second)):

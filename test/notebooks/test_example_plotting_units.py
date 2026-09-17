@@ -17,7 +17,7 @@ from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.tuning import (
     BiasReport, bifurcated_by_derivative, collect_amplitude_iterations_for,
-    normalized_arc_speed,
+    normalized_arc_speed, hysteresis_separation,
 )
 from rfmux.tuning.bias import BiasFinding, BifurcationCheck
 
@@ -27,6 +27,7 @@ DEMOS = Path(__file__).parents[2] / "rfmux/reference-notebooks/Demos"
 
 @pytest.fixture
 def plotters(monkeypatch):
+    monkeypatch.syspath_prepend(str(DEMOS))
     monkeypatch.setattr(plt, "show", lambda: None)
     modules = {}
     for name in ("multisweep", "bias", "netanal"):
@@ -207,7 +208,7 @@ def test_bifurcation_plot_matches_periscope_quantity(plotters, noise_gate_factor
     assert traces[0].get_linewidth() > traces[2].get_linewidth()
     bars = [line.get_ydata()[0] for line in panel.lines if len(line.get_xdata()) == 2]
     assert 1 in bars and -1 in bars
-    assert panel.get_ylabel() == "Δ normalized speed / threshold"
+    assert panel.get_ylabel() == "IQ-speed change / threshold"
 
 
 def test_bifurcation_plot_skips_unusable_traces(plotters):
@@ -218,13 +219,13 @@ def test_bifurcation_plot_skips_unusable_traces(plotters):
     np.testing.assert_allclose([line.get_ydata()[0] for line in panel.lines], [1, -1])
 
 
-@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks"])
+@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks", "plot_hysteresis_checks"])
 def test_bias_plot_requires_embedded_report(plotters, function):
     with pytest.raises(ValueError, match="run find_bias_points"):
         getattr(plotters.bias, function)(measurement())
 
 
-@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks"])
+@pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks", "plot_hysteresis_checks"])
 def test_bias_plot_rejects_separate_report(plotters, function):
     block = biased_measurement()
     report = BiasReport.from_dict(block["bias_report"])
@@ -379,3 +380,30 @@ def test_notebook_transmission_matches_module(plotters, notebook, function, argu
                 line.get_ydata(), [-6.0206, -12.0412, -6.0206], atol=1e-4,
             )
     assert panel.get_ylabel() == "|S21| [dB, drive-referenced]"
+
+
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+@pytest.mark.parametrize("limit", [0.1, 0.0])
+def test_hysteresis_plot_uses_saved_settings(plotters, compare, limit):
+    block = biased_measurement()
+    block["bias_report"]["settings"].update(compare=compare, max_discrepancy=limit)
+    for pair in block["results"].values():
+        up = pair["upward"]["R1"]
+        pair["downward"] = {"R1": dict(up, iq_counts=up["iq_counts"] * 0.8)}
+    plotters.bias.plot_hysteresis_checks(block)
+    panel = plt.gcf().axes[0]
+    assert len(panel.lines) == 3
+    for line, pair in zip(panel.lines, block["results"].values()):
+        entries = {direction: sections["R1"] for direction, sections in pair.items()}
+        frequencies, separation = hysteresis_separation(entries, compare=compare)
+        np.testing.assert_allclose(line.get_xdata(), (frequencies - 600e6) / 1e3)
+        np.testing.assert_allclose(line.get_ydata(), separation / (limit or 1))
+    np.testing.assert_allclose(panel.lines[-1].get_ydata(), [1, 1] if limit else [0, 0])
+    assert panel.lines[0].get_linewidth() > panel.lines[1].get_linewidth()
+
+
+def test_hysteresis_plot_explains_missing_pairs(plotters):
+    plotters.bias.plot_hysteresis_checks(biased_measurement())
+    panel = plt.gcf().axes[0]
+    assert any(text.get_text() == "no usable up/down pairs" for text in panel.texts)
+    assert len(panel.lines) == 1  # the threshold remains visible

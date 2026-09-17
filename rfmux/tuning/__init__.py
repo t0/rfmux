@@ -36,6 +36,7 @@ from .bias import (
     iq_derivatives,
     iq_derivatives_at,
     normalized_arc_speed,
+    hysteresis_separation,
 )
 from .find_resonances import (
     ResonanceCandidate,
@@ -96,6 +97,7 @@ __all__ = [
     "iq_derivatives",
     "iq_derivatives_at",
     "normalized_arc_speed",
+    "hysteresis_separation",
     "ResonanceCandidate",
     "ResonanceSearch",
     "find_resonances",

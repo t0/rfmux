@@ -10,6 +10,7 @@ Run ``find_bias_points`` to store ``bias_report`` in the module dict::
     find_bias_points(module_sweeps)
     biasplots.plot_bias_points(module_sweeps)
     biasplots.plot_bifurcation_checks(module_sweeps)
+    biasplots.plot_hysteresis_checks(module_sweeps)
 
 ``plot_arc_speed_panels`` and ``plot_bifurcation_verdict_map`` evaluate the
 sweeps directly and do not require a saved report. Flagged bias points are
@@ -26,7 +27,9 @@ import textwrap
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
+from matplotlib.colorbar import Colorbar
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, LogFormatter
 from matplotlib.patches import Patch
 
 from rfmux.core.transferfunctions import convert_roc_to_dbm
@@ -37,6 +40,7 @@ from rfmux.tuning import (
     collect_amplitude_iterations_for,
     iq_arc_speed,
     normalized_arc_speed,
+    hysteresis_separation,
 )
 
 __all__ = [
@@ -48,11 +52,13 @@ __all__ = [
     "PLOT_STYLE",
     "PREFERRED_DIRECTION",
     "amplitude_mappable",
+    "amplitude_colorbar",
     "offset_khz",
     "panels_per_row",
     "plot_arc_speed_panels",
     "plot_bias_points",
     "plot_bifurcation_checks",
+    "plot_hysteresis_checks",
     "plot_bifurcation_verdict_map",
     "square_axes",
 ]
@@ -120,6 +126,29 @@ def panels_per_row(count, few=5, many=7):
     if count < 10:
         return count
     return few
+
+
+def _decimal_amplitude(value: float, position: float | None = None) -> str:
+    """Format a DAC fraction with four significant digits and no exponent."""
+    return np.format_float_positional(
+        value, precision=4, unique=False, fractional=False, trim="-",
+    )
+
+
+class _DecimalLogFormatter(LogFormatter):
+    def __call__(self, value: float, position: float | None = None) -> str:
+        # Preserve Matplotlib's minor-label selection across wide log ranges.
+        return _decimal_amplitude(value) if super().__call__(value, position) else ""
+
+
+def amplitude_colorbar(
+    fig: plt.Figure, mappable: plt.cm.ScalarMappable, **kwargs,
+) -> Colorbar:
+    """Draw a normalized-amplitude colourbar with decimal tick labels."""
+    bar = fig.colorbar(mappable, format=FuncFormatter(_decimal_amplitude), **kwargs)
+    if isinstance(mappable.norm, LogNorm):
+        bar.minorformatter = _DecimalLogFormatter()
+    return bar
 
 
 def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
@@ -424,11 +453,13 @@ def plot_bifurcation_checks(
 ) -> None:
     """Plot normalized arc-speed changes in derivative-threshold units.
 
-    Matches Periscope's "Bias: detect bifurc" view: each trace is the
+    Matches Periscope's "Bias: derivative" view: each trace is the
     point-to-point change in normalized arc speed divided by the larger of
-    its spike-prominence and noise thresholds. The shared threshold is ±1.
+    its spike-prominence and noise thresholds. The larger threshold is ±1;
+    the legend names its source.
     The detector tests spike prominence and adjacency; crossing a line alone
-    does not establish bifurcation.
+    does not establish bifurcation. This view does not show the up/down
+    separation test, which can also trigger a combined verdict.
 
     Args:
         results: one module's multisweep dict with an embedded ``bias_report``.
@@ -443,7 +474,9 @@ def plot_bifurcation_checks(
         batchlen: resonators per figure; None uses one figure.
 
     All amplitude steps are drawn, including those beyond the recorded checks.
-    The selected step is thicker, with its lower threshold shown faintly.
+    The selected amplitude is thicker, with its lower threshold shown faintly.
+    "Spike threshold" is the configured fraction of the arc-speed range;
+    "Noise threshold" is the configured multiple of the noise estimate.
     Unusable or zero-threshold traces are skipped, as in Periscope.
     """
     report = _bias_report(results)
@@ -476,6 +509,7 @@ def plot_bifurcation_checks(
             for panel, finding in zip(panels, batch):
                 unbinding = []
                 binding_kinds = set()
+                lower_kinds = set()
                 for step, swept_direction, entry in traces[finding.name]:
                     try:
                         frequencies, changes = _arc_quantity("spikes", entry)
@@ -501,25 +535,26 @@ def plot_bifurcation_checks(
                         ls={"upward": "-", "downward": "--"}.get(swept_direction, ":"),
                         lw=2.5 if chosen else 1.0,
                     )
-                    binding_kinds.add("noise gate" if noise >= prominence
-                                      else "spike prominence")
+                    binding_kinds.add("Noise" if noise >= prominence else "Spike")
                     if chosen:
                         unbinding.append(min(prominence, noise) / threshold)
+                        lower_kinds.add("Spike" if noise >= prominence else "Noise")
 
                 binding = (next(iter(binding_kinds)) if len(binding_kinds) == 1
-                           else "higher of spike prominence and noise gate")
+                           else "Larger")
                 panel.axhspan(-1, 1, color="0.35", alpha=0.08)
                 for sign in (1, -1):
                     panel.axhline(sign, color="0.35", lw=1,
-                                  label=f"±1: threshold ({binding})" if sign == 1 else None)
+                                  label=f"{binding} threshold (±1)" if sign == 1 else None)
                 if unbinding:
+                    lower = next(iter(lower_kinds)) if len(lower_kinds) == 1 else "Lower"
                     panel.axhspan(-min(unbinding), min(unbinding),
                                   color="0.35", alpha=0.04)
                     for index, other in enumerate(unbinding):
                         for sign in (1, -1):
                             panel.axhline(
                                 sign * other, color="0.35", lw=1, ls="--", alpha=0.4,
-                                label="selected step: lower threshold"
+                                label=f"{lower} threshold (selected amp.)"
                                 if index == 0 and sign == 1 else None,
                             )
                 if not binding_kinds:
@@ -530,10 +565,72 @@ def plot_bifurcation_checks(
                 panel.legend(fontsize=10)
 
             _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]",
-                          "Δ normalized speed / threshold")
-            fig.colorbar(mappable, ax=axes, label="drive amp. [norm.]")
+                          "IQ-speed change / threshold")
+            amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
             _titled(fig, _batch_title(
-                title, "derivative bifurcation checks — selected step in bold",
+                title, "Derivative test — selected amplitude bold",
+                len(findings), batch_number, len(batches),
+            ))
+            plt.show()
+
+
+def plot_hysteresis_checks(
+    results: dict, *, names: str | list[str] | None = None,
+    ncols: int | None = None, panel_size: tuple[float, float] = (7.0, 5.0),
+    title: str | None = None, batchlen: int | None = BATCH_SIZE,
+) -> None:
+    """Plot up/down separation versus frequency, one curve per amplitude.
+
+    Reads compare and max_discrepancy from the embedded bias_report. Values
+    above 1 exceed the allowed separation; equality does not trigger. Magnitude
+    compares dip-depth fractions; IQ compares loop-radius fractions. For a
+    zero limit, show those fractions directly with the threshold at zero.
+    Missing or unusable sweep pairs are skipped. The selected amplitude is bold.
+    """
+    report = _bias_report(results)
+    findings = _findings(report, names)
+    compare = report.settings.get("compare", "magnitude")
+    limit = report.settings.get("max_discrepancy", 0.1)
+    divisor = limit if limit > 0 else 1.0
+    units = "dip depth" if compare == "magnitude" else "loop radius"
+    ylabel = "Up/down difference / limit" if limit > 0 else f"Up/down difference / {units}"
+    entries = {f.name: collect_amplitude_iterations_for(results, f.name) for f in findings}
+    amplitudes = [sweep["sweep_amplitude"] for steps in entries.values()
+                  for pair in steps.values() for sweep in pair.values()]
+    if not amplitudes:
+        raise ValueError("No sweeps match the selected resonators.")
+    mappable = amplitude_mappable(amplitudes)
+    batches = _batches(findings, batchlen)
+    columns = _columns_for(batches, ncols)
+    for batch_number, batch in enumerate(batches, start=1):
+        with plt.rc_context(PLOT_STYLE):
+            fig, axes, panels = _panel_grid(len(batch), columns, panel_size)
+            for panel, finding in zip(panels, batch):
+                drawn = False
+                for step, pair in entries[finding.name].items():
+                    try:
+                        frequencies, separation = hysteresis_separation(pair, compare=compare)
+                    except (ValueError, KeyError):
+                        continue
+                    sweep = pair["upward"]
+                    panel.plot(
+                        offset_khz(sweep, frequencies), separation / divisor,
+                        color=mappable.to_rgba(sweep["sweep_amplitude"]),
+                        lw=2.5 if step == finding.iteration else 1.0,
+                    )
+                    drawn = True
+                panel.axhline(limit / divisor, color="0.35", ls="--",
+                              label=f"Limit: {limit:g} × {units}")
+                if not drawn:
+                    panel.text(0.5, 0.5, "no usable up/down pairs", ha="center",
+                               transform=panel.transAxes)
+                panel.set_ylim(bottom=0)
+                panel.set_title(finding.name)
+                panel.legend(fontsize=10)
+            _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", ylabel)
+            amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
+            _titled(fig, _batch_title(
+                title, f"Hysteresis ({compare}) — selected amplitude bold",
                 len(findings), batch_number, len(batches),
             ))
             plt.show()
@@ -865,7 +962,7 @@ def plot_arc_speed_panels(
                 panel.set_title(f"{name}  {centre_mhz:.3f} MHz")
 
             _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", spec["label"])
-            fig.colorbar(mappable, ax=axes, label="drive amp. [norm.]")
+            amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
 
             if annotate and spec["annotation"] == "threshold":
                 handles = [Line2D([], [], color="0.35", lw=1.5, ls="--")]

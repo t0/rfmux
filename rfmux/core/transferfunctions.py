@@ -865,6 +865,8 @@ def apply_iq_conversion(i_vals, q_vals, factor):
 
 def convert_iq_to_df(iq, fbias, f_calsweep, iq_calsweep):
     '''
+    TODO: DEPRECATED AND REPLACED BY THE CONFUSINGLY NAMED APPLY_IQ_CONVERSION ?
+
     Equation 4.5 of Pete Barry's thesis (https://orca.cardiff.ac.uk/id/eprint/71562/1/2014BarryPPhD.pdf)
     Converts from I,Q voltage units to fequency shift and dissipation.
 

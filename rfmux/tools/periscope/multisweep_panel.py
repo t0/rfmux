@@ -143,6 +143,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.iq_sweep_plots_cache = []   # List of plot widgets for IQ tab
         self.fit_sweep_plots_cache = []  # List of plot widgets for the fit tab
         self.bias_sweep_plots_cache = []  # List of plot widgets for the bias tab
+        self.hysteresis_sweep_plots_cache = []
         self.freq_sweep_plots_cache = []  # List of plot widgets for the bias frequency tab
 
         # The fitters' settings outlive any one fit, and are shared by nothing
@@ -427,13 +428,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # What the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
-        self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: detect bifurc")
+        self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: derivative")
         self._tab_tooltip(
             self.bias_sweeps_tab,
-            "The point-to-point change in each sweep's normalized arc "
-            "speed, in units of the bar the derivative test applied to it. "
-            "A spike past \u00b11 with one the other way beside it is what "
-            "that test calls a bifurcation.")
+            "Change in normalized IQ speed. Spikes must meet both the noise "
+            "and spike thresholds; the larger is ±1. Faint lines show the "
+            "smaller threshold at the selected amplitude. Up/down separation "
+            "is shown under Bias: hysteresis.")
 
         # What choosing the bias frequency looked at
         self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
@@ -448,6 +449,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             "frequency method the line is at the dip instead, and need not "
             "sit at this curve's peak.")
 
+        self.hysteresis_sweeps_tab, self.hysteresis_sweeps_grid, self.hysteresis_colorbar = (
+            self._create_sweep_tab())
+        self.plot_tabs.addTab(self.hysteresis_sweeps_tab, "Bias: hysteresis")
+        self._tab_tooltip(
+            self.hysteresis_sweeps_tab,
+            "Up/down separation relative to its allowed limit. Values above "
+            "the dashed line trigger detection. Each curve is one amplitude; the "
+            "selected amplitude is bold. Both sweep directions are required.")
+
         # Every tab that is a grid of one subplot per resonator, and the four
         # things that differ between them. Keyed by the tab itself, so adding
         # one is adding a row rather than renumbering a chain of branches.
@@ -460,6 +470,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                                   self.fit_sweep_plots_cache, self.fit_colorbar),
             self.bias_sweeps_tab: ('bias', self.bias_sweeps_grid,
                                    self.bias_sweep_plots_cache, self.bias_colorbar),
+            self.hysteresis_sweeps_tab: ('hysteresis', self.hysteresis_sweeps_grid,
+                                         self.hysteresis_sweep_plots_cache,
+                                         self.hysteresis_colorbar),
             self.freq_sweeps_tab: ('frequency', self.freq_sweeps_grid,
                                    self.freq_sweep_plots_cache, self.freq_colorbar),
         }
@@ -901,7 +914,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Get DAC scale for label formatting
         dac_scale = self._dac_scale()
 
-        has_downward = any(direction == 'downward'
+        has_downward = plot_type != 'hysteresis' and any(direction == 'downward'
                            for traces in traces_by_name.values()
                            for _step, direction, _amp, _sweep in traces)
 

@@ -21,6 +21,7 @@ from rfmux.tuning.bias import (
     iq_derivatives,
     iq_derivatives_at,
     normalized_arc_speed,
+    hysteresis_separation,
     # The pieces of the derivative test that have their own behaviour to pin
     # down — the noise floor's robustness and the pairing rule's monotonicity
     # are properties of these two rather than of any one verdict.
@@ -1465,3 +1466,24 @@ def test_retained_bifurcation_does_not_hide_an_off_center_frequency():
     with_the_sweep_centre_moved(sweeps, "R0001", -20e3)
     report = find_bias_points(sweeps, max_distance_hz=5e3, save=False)
     assert report["R0001"].flagged_kind == FLAG_OFF_CENTRE
+
+
+@pytest.mark.parametrize("compare,expected", [
+    ("magnitude", [0, 0.2, 0, 0.1, 0]),
+    ("iq", [0, 1 / 3, 0, 1 / 6, 0]),
+])
+def test_hysteresis_curve_locates_the_reported_difference(compare, expected):
+    frequencies = np.arange(5, dtype=float)
+    up = np.array([3, 2, 1, 2, 3], dtype=complex)
+    down = up + np.array([0, 0.4, 0, 0.2, 0])
+    entries = {
+        "upward": {"frequencies": frequencies, "iq_counts": up},
+        "downward": {"frequencies": frequencies[::-1], "iq_counts": down[::-1]},
+    }
+    measured_f, separation = hysteresis_separation(entries, compare=compare)
+    np.testing.assert_array_equal(measured_f, frequencies)
+    np.testing.assert_allclose(separation, expected, atol=1e-14)
+    check = bifurcated_by_hysteresis(entries, compare=compare,
+                                    max_discrepancy=separation.max())
+    assert check.metric["max_separation"] == separation.max()
+    assert not check.bifurcated  # equality is allowed

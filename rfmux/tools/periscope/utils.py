@@ -546,20 +546,23 @@ class UnitConverter:
         Returns:
             A compact string such as ``"-23.45 dBm"`` or ``"152.3 µVpk"``.
         """
+        normalized = np.format_float_positional(
+            amp_value, precision=4, unique=False, fractional=False, trim="-",
+        )
         if unit_mode == "dbm":
             if dac_scale is not None:
                 dbm = convert_dacunits_to_dbm(amp_value, dac_scale)
                 return f"{dbm:.1f} dBm"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{normalized} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
                 volts = convert_dacunits_to_volts(amp_value, dac_scale)
                 return UnitConverter._format_si_volts(volts) + "pk"
-            return f"{amp_value:.2e} (Norm)"
+            return f"{normalized} (Norm)"
 
         # counts or anything else
-        return f"{amp_value:.2e} Norm"
+        return f"{normalized} Norm"
 
     @staticmethod
     def _format_si_volts(volts: float) -> str:

@@ -9,7 +9,8 @@ from PyQt6 import QtCore, QtWidgets
 from rfmux.core.transferfunctions import (convert_roc_to_volts,
                                           convert_dacunits_to_volts)
 from rfmux.tuning.bias import (
-    bifurcated_by_derivative, iq_arc_speed, iq_derivatives, normalized_arc_speed)
+    BiasFinding, bifurcated_by_derivative, iq_arc_speed, iq_derivatives, normalized_arc_speed,
+    hysteresis_separation)
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
@@ -51,7 +52,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         grid_layout: QGridLayout to populate with plots
         traces_by_name: ``{name: [(step, direction, amplitude, sweep), ...]}``,
             in the order to draw them; *sweep* is one of multisweep's entries
-        plot_type: 'magnitude', 'iq', 'fit', 'bias' or 'frequency'
+        plot_type: 'magnitude', 'iq', 'fit', 'bias', 'hysteresis' or 'frequency'
         current_batch: Current batch index (0-based)
         batch_size: Number of resonators per batch
         columns: Subplots per row
@@ -132,7 +133,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
         for step, direction, amplitude, _sweep in traces:
             label = UnitConverter.format_probe_label(amplitude, unit_mode, dac_scale)
             suffix = " (Down)" if direction == "downward" else " (Up)"
-            legend_labels[(step, direction, amplitude)] = label + suffix
+            legend_labels[(step, direction, amplitude)] = (
+                label if plot_type == "hysteresis" else label + suffix)
 
     # Populate grid
     for idx, name in enumerate(batch_names):
@@ -190,7 +192,11 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             elif plot_type == 'bias':
                 _plot_bifurcation(plot_item, traces, amplitude_to_color,
                                   pen_color, bias, bias_settings or {}, labels)
-                plot_item.setLabel('left', 'Change in arc speed / bar')
+                plot_item.setLabel('left', 'IQ-speed change / threshold')
+                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+            elif plot_type == 'hysteresis':
+                _plot_hysteresis(plot_item, traces, amplitude_to_color, pen_color,
+                                 bias, bias_settings or {}, labels)
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'frequency':
                 _plot_bias_frequency(plot_item, traces, amplitude_to_color,
@@ -616,22 +622,11 @@ def _derivative_bars(entry, settings) -> tuple[float, float]:
 
 def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
                       bias, settings, legend_labels=None):
-    """What the derivative test looks at, in units of the bar it applied.
+    """Plot changes in normalized IQ speed divided by each trace's cutoff.
 
-    The quantity is the point-to-point change in the normalized arc speed, and
-    a spike in it above the bar -- with a spike the other way beside it -- is
-    what the test calls a bifurcation. Every trace is divided by its own
-    threshold, so a step driven a thousandth as hard is still visible beside
-    the loud one and the bar is the same line for all of them: ``±1``.
-
-    For the step a resonator is biased at, the bar that did *not* bind is drawn
-    too, faintly. Below ±1 it is the noise gate that decided; at ±1 the two
-    coincide. That is the question the detector otherwise answers by being run
-    again with one of the two switched off.
-
-    The legend is always drawn here, and names the two bars rather than the
-    traces: the colorbar says which drive a line is, and nothing else on the
-    subplot says what ``±1`` is a threshold *of*.
+    The cutoff is the larger of the noise and span thresholds, drawn at ±1.
+    Show the unused threshold faintly for the bias step. The detector tests
+    prominence and adjacency; a crossing alone does not establish bifurcation.
     """
     if traces:
         _add_legend(plot_item, pen_color)
@@ -652,6 +647,7 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
     # different steps of a schedule can be held by different bars, and a legend
     # that named one of them would be wrong on the others.
     binding_kinds = set()
+    lower_kinds = set()
 
     for step, direction, amplitude, sweep in traces:
         try:
@@ -677,25 +673,24 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
         binding_kinds.add(_bar_kind(prominence_bar, noise_bar))
         if chosen:
             unbinding.append(min(prominence_bar, noise_bar) / bar)
+            lower_kinds.add("Spike" if noise_bar >= prominence_bar else "Noise")
 
     if traces:
-        _bar_legend(plot_item, pen_color, binding_kinds, bool(unbinding))
+        _bar_legend(plot_item, pen_color, binding_kinds, lower_kinds)
 
     if unbinding:
         colour = pg.mkColor(pen_color)
         colour.setAlpha(UNBINDING_BAR_ALPHA)
         faint = pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE)
-        # One band, at the lowest of them: below that line the noise gate is
-        # what decides, whichever direction the sweep was taken in.
+        # Shade once at the smallest unused cutoff to avoid overlapping bands.
         _bar_band(plot_item, min(unbinding), pen_color, UNBINDING_FILL_ALPHA)
         for other in unbinding:
             for sign in (1.0, -1.0):
                 plot_item.addLine(y=sign * other, pen=faint)
 
 
-#: What the two bars of the derivative test are called, in the words the
-#: settings window uses for the factor that scales each.
-BAR_NAMES = ("spike prominence", "noise gate")
+#: Sources of the derivative cutoff: arc-speed span and noise estimate.
+BAR_NAMES = ("Spike", "Noise")
 
 
 def _bar_kind(prominence_bar: float, noise_bar: float) -> str:
@@ -707,7 +702,7 @@ def _bar_kind(prominence_bar: float, noise_bar: float) -> str:
     return BAR_NAMES[1] if noise_bar >= prominence_bar else BAR_NAMES[0]
 
 
-def _bar_legend(plot_item, pen_color, binding_kinds: set, has_unbinding: bool) -> None:
+def _bar_legend(plot_item, pen_color, binding_kinds: set, lower_kinds: set) -> None:
     """Name the threshold and its shading, and the gate that did not bind.
 
     One entry per bar, drawn as the line with its band under it, because on the
@@ -716,15 +711,15 @@ def _bar_legend(plot_item, pen_color, binding_kinds: set, has_unbinding: bool) -
     "no spike here".
     """
     named = (next(iter(binding_kinds)) if len(binding_kinds) == 1
-             else "higher of the two")
-    legend_key(plot_item, f"\u00b11: threshold ({named})",
+             else "Larger")
+    legend_key(plot_item, f"{named} threshold (±1)",
                pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
-    if has_unbinding:
+    if lower_kinds:
+        lower = next(iter(lower_kinds)) if len(lower_kinds) == 1 else "Lower"
         colour = pg.mkColor(pen_color)
         colour.setAlpha(UNBINDING_BAR_ALPHA)
-        other = next((n for n in BAR_NAMES if n != named), "the other bar")
         legend_key(
-            plot_item, f"{other}, did not bind",
+            plot_item, f"{lower} threshold (selected amp.)",
             pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE),
             pen_color, UNBINDING_FILL_ALPHA)
 
@@ -759,6 +754,46 @@ def _bar_band(plot_item, bar: float, pen_color, alpha: int) -> None:
         brush=pg.mkBrush(colour), pen=pg.mkPen(None))
     band.setZValue(-10)
     plot_item.addItem(band)
+
+
+def _plot_hysteresis(
+    plot_item: pg.PlotItem, traces: list[tuple], amplitude_to_color: dict,
+    pen_color: str, bias: BiasFinding | None, settings: dict,
+    legend_labels: dict | None = None,
+) -> None:
+    """Draw the hysteresis detector's separation curve for each amplitude."""
+    compare = settings.get("compare", "magnitude")
+    limit = settings.get("max_discrepancy", 0.1)
+    divisor = limit if limit > 0 else 1.0
+    units = "dip depth" if compare == "magnitude" else "loop radius"
+    ylabel = "Up/down difference / limit" if limit > 0 else f"Up/down difference / {units}"
+    plot_item.setLabel('left', ylabel)
+    _add_legend(plot_item, pen_color)
+    pairs = {}
+    for step, direction, amplitude, sweep in traces:
+        pairs.setdefault(step, {})[direction] = sweep
+    drawn = False
+    for step, pair in pairs.items():
+        try:
+            frequencies, separation = hysteresis_separation(pair, compare=compare)
+        except (ValueError, KeyError):
+            continue
+        sweep = pair["upward"]
+        amplitude = sweep["sweep_amplitude"]
+        label = legend_labels.get((step, "upward", amplitude)) if legend_labels else None
+        plot_item.plot(
+            (frequencies - sweep["original_center_frequency"]) / 1e3,
+            separation / divisor,
+            pen=_trace_pen(amplitude, "upward", amplitude_to_color, pen_color,
+                           chosen=_biased_at(bias, step)), name=label)
+        drawn = True
+    pen = pg.mkPen(color=pen_color, width=1, style=DOWNWARD_SWEEP_STYLE)
+    plot_item.addLine(y=limit / divisor, pen=pen)
+    legend_key(plot_item, f"Limit: {limit:g} × {units}", pen)
+    if not drawn:
+        note = pg.TextItem("No usable up/down pairs", color=pen_color)
+        plot_item.addItem(note)
+    plot_item.getViewBox().setLimits(yMin=0)
 
 
 #: The two components of the arc speed, under the line whose magnitude they

@@ -221,6 +221,8 @@ by each section’s drive amplitude to compare shapes. The plotters read the
 `results[step][direction][name]` dictionaries directly.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
@@ -298,7 +300,7 @@ def plot_sections_at_iteration(results, iteration, ncols=4):
     for panel in axes[:, 0]:
         panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
 
-    fig.colorbar(mappable, ax=axes, label="sweep amplitude")
+    amplitude_colorbar(fig, mappable, ax=axes, label="sweep amplitude")
     fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
     plt.show()
 
@@ -311,6 +313,8 @@ Now follow one resonator across all five amplitudes. Section 7 will use fitted
 parameters to describe these changes in resonance frequency and shape.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
@@ -362,7 +366,7 @@ def plot_amplitude_iterations(results, name):
     ax_iq.set_xlabel("I [counts / DAC amplitude]")
     ax_iq.set_ylabel("Q [counts / DAC amplitude]")
     ax_iq.set_aspect("equal", "datalim")
-    fig.colorbar(mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
+    amplitude_colorbar(fig, mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
     fig.suptitle(f"{name}, {len(steps)} amplitude steps")
     plt.show()
 
@@ -931,6 +935,8 @@ A fitted curve can extend below them; inspect the fit quality before treating
 that depth as a reliable estimate.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 def plot_fitted_traces(results, name, linewidths=8):
     """One resonator at every amplitude, each trace with its skewed fit over it."""
     # Keep direction with each section so both sweeps can be drawn.
@@ -984,7 +990,7 @@ def plot_fitted_traces(results, name, linewidths=8):
 
     ax.set_xlabel("offset [kHz]")
     ax.set_ylabel("|S21| / off-resonance [dB]")
-    fig.colorbar(mappable, ax=ax, label="sweep amplitude")
+    amplitude_colorbar(fig, mappable, ax=ax, label="sweep amplitude")
     for direction in dict.fromkeys(direction for direction, section in traces):
         ax.plot([], [], color="0.3", ls=styles[direction],
                 marker=markers[direction], label=direction)

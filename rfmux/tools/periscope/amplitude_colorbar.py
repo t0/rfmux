@@ -8,14 +8,7 @@ from .utils import UnitConverter, COLORMAP_CHOICES
 
 
 class AmplitudeColorBar(QtWidgets.QWidget):
-    """A thin horizontal colorbar that maps amplitude → color.
-
-    Shown above the sweep grid when there are too many sweeps for per-plot
-    legends (>5).  Uses the same ``inferno`` colormap and dark/light mode
-    mapping as the curves in the grid plots.
-
-    The widget is ~30 px tall and stretches to full width.
-    """
+    """Amplitude gradient with unit-aware endpoints and optional direction key."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -65,15 +58,20 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         bg_color = QtGui.QColor("#1C1C1C") if self._dark_mode else QtGui.QColor("#FFFFFF")
         painter.fillRect(self.rect(), bg_color)
 
-        # Layout constants
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+
+        # Reserve enough space for decimal endpoint labels.
         margin = 8
         bar_top = 4
         bar_height = 14
         label_y = bar_top + bar_height + 12
 
         # --- Gradient bar ---
-        bar_left = margin + 60   # room for min label
-        bar_right = w - margin - 60  # room for max label
+        bar_left = margin + metrics.horizontalAdvance(self._min_label) + 6
+        bar_right = w - margin - metrics.horizontalAdvance(self._max_label) - 6
         bar_width = max(bar_right - bar_left, 10)
 
         if self._cmap is not None:
@@ -98,9 +96,6 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         painter.drawRect(int(bar_left), bar_top, int(bar_width), bar_height)
 
         # --- Labels ---
-        font = painter.font()
-        font.setPointSize(8)
-        painter.setFont(font)
         painter.setPen(text_color)
 
         # Min label (left of bar)

@@ -22,7 +22,9 @@ import textwrap
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
+from matplotlib.colorbar import Colorbar
 from matplotlib.lines import Line2D
+from matplotlib.ticker import FuncFormatter, LogFormatter
 
 from rfmux.tuning import (
     collect_amplitude_iterations_for,
@@ -36,6 +38,7 @@ __all__ = [
     "MEASURED_COLOUR",
     "PLOT_STYLE",
     "amplitude_mappable",
+    "amplitude_colorbar",
     "fitted_value",
     "model_on_a_finer_grid",
     "offset_khz",
@@ -103,6 +106,29 @@ def panels_per_row(count, few=5, many=7):
     if count < 10:
         return count
     return few
+
+
+def _decimal_amplitude(value: float, position: float | None = None) -> str:
+    """Format a DAC fraction with four significant digits and no exponent."""
+    return np.format_float_positional(
+        value, precision=4, unique=False, fractional=False, trim="-",
+    )
+
+
+class _DecimalLogFormatter(LogFormatter):
+    def __call__(self, value: float, position: float | None = None) -> str:
+        # Preserve Matplotlib's minor-label selection across wide log ranges.
+        return _decimal_amplitude(value) if super().__call__(value, position) else ""
+
+
+def amplitude_colorbar(
+    fig: plt.Figure, mappable: plt.cm.ScalarMappable, **kwargs,
+) -> Colorbar:
+    """Draw a normalized-amplitude colourbar with decimal tick labels."""
+    bar = fig.colorbar(mappable, format=FuncFormatter(_decimal_amplitude), **kwargs)
+    if isinstance(mappable.norm, LogNorm):
+        bar.minorformatter = _DecimalLogFormatter()
+    return bar
 
 
 def amplitude_mappable(amplitudes, cmap=AMPLITUDE_CMAP):
@@ -479,7 +505,7 @@ def _draw_fit_batch(
             loc="outside lower center", ncols=2,
         )
         if not one_step:
-            fig.colorbar(mappable, ax=axes, label="drive amp. [norm.]")
+            amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
 
         _titled(fig, title)
         plt.show()

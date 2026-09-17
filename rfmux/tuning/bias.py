@@ -842,6 +842,26 @@ def bifurcated_by_hysteresis(
         ValueError: unknown comparison, missing or unusable direction, or
             frequency ranges that do not overlap.
     """
+    _, separation = hysteresis_separation(entries, compare=compare)
+    maximum = float(np.max(separation))
+    return BifurcationCheck(
+        method="hysteresis",
+        bifurcated=maximum > max_discrepancy,
+        metric={"max_separation": maximum},
+        threshold=max_discrepancy,
+    )
+
+
+def hysteresis_separation(
+    entries: Mapping[str, dict], *, compare: str = "magnitude",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ascending frequencies and the hysteresis test's separation curve.
+
+    Magnitude differences are in upward-sweep dip depths; IQ distances are in
+    upward-sweep loop radii. Downward samples are interpolated onto the upward
+    grid, using endpoint values outside their range. The ranges must overlap.
+    The detector compares the maximum of this curve to max_discrepancy.
+    """
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
 
     missing = {"upward", "downward"} - set(entries)
@@ -864,13 +884,7 @@ def bifurcated_by_hysteresis(
             f"there is nothing to compare them at."
         )
 
-    separation = _HYSTERESIS_COMPARISON[compare](f_up, z_up, f_down, z_down)
-    return BifurcationCheck(
-        method="hysteresis",
-        bifurcated=separation > max_discrepancy,
-        metric={"max_separation": separation},
-        threshold=max_discrepancy,
-    )
+    return f_up, _HYSTERESIS_COMPARISON[compare](f_up, z_up, f_down, z_down)
 
 
 def bifurcated_by_either(
@@ -942,8 +956,8 @@ def _in_thresholds(value, threshold: float):
 
 def _separation_in_iq(
     f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
-) -> float:
-    """How far apart the two directions are on the IQ plane, in loop radii."""
+) -> np.ndarray:
+    """Pointwise IQ separation in upward-sweep loop radii."""
     # Onto one grid. Exact where the grids agree, which for two directions of
     # one sweep is everywhere — the interpolation is for the case where a
     # re-centring or a dropped point has moved one of them.
@@ -958,13 +972,13 @@ def _separation_in_iq(
             "to measure a discrepancy against."
         )
 
-    return float(np.max(np.abs(z_up - on_up)) / radius)
+    return np.abs(z_up - on_up) / radius
 
 
 def _separation_in_magnitude(
     f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
-) -> float:
-    """How far apart the two directions' ``|S21|`` curves are, in dip depths.
+) -> np.ndarray:
+    """Pointwise magnitude separation in upward-sweep dip depths.
 
     The magnitudes are interpolated, not the complex traces — the curve being
     compared is the one you would plot, so a phase difference between the
@@ -985,7 +999,7 @@ def _separation_in_magnitude(
             "a discrepancy against."
         )
 
-    return float(np.max(np.abs(up - on_up)) / depth)
+    return np.abs(up - on_up) / depth
 
 
 def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

@@ -188,6 +188,8 @@ lines for downward sweeps. Dividing by the
 drive amplitude makes their shapes easier to compare.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
@@ -263,7 +265,7 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
     panels[0].legend(fontsize=7)
 
     panels[0].set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
-    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
+    amplitude_colorbar(fig, mappable, ax=list(panels), label="drive amplitude")
     plt.show()
 
 
@@ -345,6 +347,8 @@ The detector looks for an adjacent positive and negative spike in the
 point-to-point change of that speed. Plot that change for both directions:
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.tuning import normalized_arc_speed
 
 
@@ -386,7 +390,7 @@ def plot_derivative_test(results, names):
     panels[0].legend(fontsize=7)
 
     panels[0].set_ylabel("point-to-point change in arc speed", fontsize=8)
-    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
+    amplitude_colorbar(fig, mappable, ax=list(panels), label="drive amplitude")
     fig.suptitle("What the derivative test looks at", fontsize=11)
     plt.show()
 
@@ -1049,6 +1053,8 @@ frequency marked on the direction used for calibration. These traces use raw
 magnitude so the marker shows the measured operating point.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import convert_roc_to_dbm
 
 def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
@@ -1103,7 +1109,7 @@ def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
     panels[0].legend(fontsize=7)
 
     panels[0].set_ylabel("received power [dBm]", fontsize=8)
-    fig.colorbar(mappable, ax=list(panels), label="drive amplitude")
+    amplitude_colorbar(fig, mappable, ax=list(panels), label="drive amplitude")
     fig.suptitle("The bias points for each resonator",
                  fontsize=11)
     plt.show()
@@ -1111,6 +1117,23 @@ def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
 
 plot_bias_points_on_sweeps(multi_amplitude_module_results)
 ```
+
+### Inspect the hysteresis verdict
+
+Plot the up/down separation at every amplitude, using the comparison and limit
+stored in the multisweep's bias report:
+
+```python
+import example_plotting_bias as biasplots
+
+biasplots.plot_hysteresis_checks(multi_amplitude_module_results)
+```
+
+Values above 1 exceed the allowed difference. The legend states the limit in
+fractions of dip depth (magnitude comparison) or loop radius (IQ comparison).
+A zero limit is drawn at zero, with separation shown without division by the
+limit. The selected amplitude is bold. In Periscope, use **Bias: hysteresis**; that
+view follows the current bias settings. Both sweep directions are needed.
 
 ## 6. Apply the bias points
 
@@ -1130,4 +1153,3 @@ The call is shown for reference; the cells above only measure and analyze sweeps
 - **Threshold selection:** inspect verdict maps and traces from your own array.
   The mock demonstrates the calculations and fallbacks, but cannot establish
   physical hysteresis thresholds or operating limits.
-

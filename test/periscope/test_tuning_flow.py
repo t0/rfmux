@@ -32,7 +32,7 @@ from rfmux.tuning.fits import (  # noqa: E402
     BIFURCATION_A, collect_fit_params)
 from rfmux.tuning.bias import (  # noqa: E402
     FLAG_KINDS, BiasReport, bifurcated_by_derivative, iq_arc_speed,
-    iq_derivatives, normalized_arc_speed)
+    iq_derivatives, normalized_arc_speed, hysteresis_separation)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -468,6 +468,7 @@ FIT_TAB = 3
 HISTOGRAM_TAB = 4
 BIAS_TAB = 5
 BIAS_FREQ_TAB = 6
+HYSTERESIS_TAB = 7
 
 
 def _grid_widgets(panel, tab_idx=MAGNITUDE_TAB):
@@ -3480,3 +3481,49 @@ def test_edit_catalog_disables_removal_during_analysis(
     panel._set_analysis_enabled(True)
     assert panel.catalog_editor.remove_button.isEnabled()
     panel.close()
+
+
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_hysteresis_tab_uses_detector_curve(board, qt_app, swept_container, compare):
+    panel = _panel_showing(swept_container, board)
+    panel.bias_settings.compare_combo.setCurrentIndex(
+        panel.bias_settings.compare_combo.findData(compare))
+    panel.bias_settings.discrepancy_spin.setValue(0.2)
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+    name = panel._selected_names()[0]
+    steps = collect_amplitude_iterations_for(panel.module_sweeps, name)
+    curves = _grid_curves(panel, HYSTERESIS_TAB)[0]
+    assert len(curves) == len(steps)
+    for curve, pair in zip(curves, steps.values()):
+        frequencies, separation = hysteresis_separation(pair, compare=compare)
+        x, y = curve.getData()
+        np.testing.assert_allclose(x, (frequencies - pair["upward"]["original_center_frequency"]) / 1e3)
+        np.testing.assert_allclose(y, separation / 0.2)
+    chosen = list(steps).index(panel.bias_report[name].iteration)
+    widths = [curve.opts["pen"].widthF() for curve in curves]
+    assert widths[chosen] > min(widths)
+    assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [1]
+
+
+def test_hysteresis_tab_updates_the_allowed_difference(board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    before = _grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1].copy()
+    panel.bias_settings.discrepancy_spin.setValue(0.2)
+    panel.bias_settings.apply_button.click()
+    after = _grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1]
+    np.testing.assert_allclose(after, before / 2)
+    panel.bias_settings.discrepancy_spin.setValue(0.0)
+    panel.bias_settings.apply_button.click()
+    assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [0]
+    assert np.isfinite(_grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1]).all()
+
+
+def test_hysteresis_tab_explains_missing_pairs(qt_app):
+    from rfmux.tools.periscope.multisweep_grid_helpers import _plot_hysteresis
+
+    widget = pg.PlotWidget()
+    _plot_hysteresis(widget.getPlotItem(), [], {}, "black", None, {})
+    assert any(isinstance(item, pg.TextItem) and item.toPlainText() == "No usable up/down pairs"
+               for item in widget.getPlotItem().items)
+    widget.close()

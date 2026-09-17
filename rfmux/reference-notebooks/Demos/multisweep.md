@@ -587,6 +587,8 @@ uses received power minus drive power in dBm, using the saved
 gain and loss; it does not set the off-resonance baseline to zero.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
@@ -659,7 +661,7 @@ def plot_amplitude_iterations(results, name):
     ax_iq.set_xlabel("I [counts / DAC amplitude]")
     ax_iq.set_ylabel("Q [counts / DAC amplitude]")
     ax_iq.set_aspect("equal", "datalim")
-    fig.colorbar(mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
+    amplitude_colorbar(fig, mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
     fig.suptitle(f"{name}, {len(steps)} amplitude steps")
     plt.show()
 
@@ -683,6 +685,8 @@ Absolute ramp steps give all resonators the same amplitude and colour.
 Each panel includes all available directions, using solid and dashed lines.
 
 ```python
+from example_plotting_multisweep import amplitude_colorbar
+
 from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
@@ -741,7 +745,7 @@ def plot_sections_at_iteration(results, iteration, ncols=5):
     for panel in axes[:, 0]:
         panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
 
-    fig.colorbar(mappable, ax=axes, label="sweep amplitude")
+    amplitude_colorbar(fig, mappable, ax=axes, label="sweep amplitude")
     fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
     plt.show()
 
@@ -907,4 +911,3 @@ except ValueError as e:
   See `rfmux.tuning.store` for output directory settings.
 
 Multisweep silences only the channels it swept. Other tones remain active.
-

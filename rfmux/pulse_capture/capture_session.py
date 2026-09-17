@@ -82,7 +82,7 @@ from .detection import (
 )
 from . import walk
 from .channel_keys import describe
-from .events import EventGrouper, event_channels
+from .events import EventGrouper, NoiseSampler, event_channels
 from ..streamer import epoch_to_utc
 from .analysis import (
     calibration_of,
@@ -215,6 +215,12 @@ class PulseCaptureConfig:
     #: the ring moves on.  With no coincidence window each pulse is an
     #: event of its own.
     dump_all_channels: bool = False
+    #: Noise samples: every channel over one window, as long as a
+    #: typical saved pulse record, taken at random moments whatever the
+    #: samples hold and filed as events of kind "noise".  The waits
+    #: between them are normally distributed about this many seconds
+    #: (see events.NoiseSampler).  0 takes none.
+    noise_capture_interval_s: float = 0.0
     min_pulse_ms: float = 0.0      # 0 = no glitch rejection
     #: Longest pulse the ring must hold, and the basis for the floor
     #: under the baseline tracking window.  Estimate it generously — a
@@ -302,8 +308,9 @@ class PulseCaptureConfig:
         around it."""
         need = self.max_pulse_ms * 1e-3 * sample_rate * self.BUFFER_SAFETY
         # A dumped channel is read once its event closes, the window
-        # and the hard stop after the first trigger.
-        if self.dump_all_channels:
+        # and the hard stop after the first trigger; a noise sample once
+        # the slowest channel has passed its window.
+        if self.dump_all_channels or self.noise_capture_interval_s > 0:
             need += (self.coincidence_window_ms * 1e-3 * sample_rate
                      + max(self.EVENT_RING_SLACK_S * sample_rate,
                            self.EVENT_RING_SLACK_SAMPLES))
@@ -313,7 +320,14 @@ class PulseCaptureConfig:
 
     @property
     def events_on(self) -> bool:
-        return self.coincidence_window_ms > 0 or self.dump_all_channels
+        return (self.coincidence_window_ms > 0 or self.dump_all_channels
+                or self.noise_capture_interval_s > 0)
+
+    @property
+    def noise_capture_window_ms(self) -> float:
+        """A noise sample's length before any pulse has shown what a
+        typical record is: that of the longest one."""
+        return self.pre_pulse_ms + self.max_pulse_ms + self.post_pulse_ms
 
     def noise_samples(self, sample_rate: float) -> int:
         """Training length in samples, memory-bounded.
@@ -421,9 +435,13 @@ class PulseCaptureConfig:
             "enable_pileup": self.enable_pileup,
             "min_end_samples": self.min_end_samples,
             "trigger_basis": self.trigger_basis,
-            "coincidence_window_s": (self.coincidence_window_ms * 1e-3
-                                     if self.events_on else None),
+            "coincidence_window_s": (
+                self.coincidence_window_ms * 1e-3
+                if self.coincidence_window_ms > 0 or self.dump_all_channels
+                else None),
             "dump_all_channels": self.dump_all_channels,
+            "noise_capture_interval_s": self.noise_capture_interval_s,
+            "noise_capture_window_s": self.noise_capture_window_ms * 1e-3,
             "buf_size": self.buf_size(sample_rate),
             "noise_samples": self.noise_samples(sample_rate),
             "noise_record_samples": self.noise_record_samples(sample_rate),
@@ -505,6 +523,16 @@ class PulseCaptureConfig:
         if self.trigger_samples < 0:
             issues.append(("error",
                            "Trigger confirmation cannot be negative."))
+        if self.noise_capture_interval_s < 0:
+            issues.append(("error",
+                           "The noise capture interval cannot be negative."))
+        elif 0 < self.noise_capture_interval_s * 1e3 \
+                < 2 * self.noise_capture_window_ms:
+            issues.append((
+                "warning",
+                f"Noise captures every {self.noise_capture_interval_s:g} s "
+                f"are {self.noise_capture_window_ms:g} ms each: they will "
+                "run nearly back to back."))
         if self.coincidence_window_ms < 0:
             issues.append(("error",
                            "The coincidence window cannot be negative."))
@@ -661,6 +689,9 @@ class PulseCaptureSession(_CallbackHost):
         trigger_basis: str = "df",
         coincidence_window_s: Optional[float] = None,
         dump_all_channels: bool = False,
+        noise_capture_interval_s: float = 0.0,
+        noise_capture_window_s: float = 0.0,
+        noise_rng: Optional[np.random.Generator] = None,
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
         progress_interval_s: float = 0.1,
@@ -681,7 +712,13 @@ class PulseCaptureSession(_CallbackHost):
         self.dump_all_channels = bool(dump_all_channels)
         if self.dump_all_channels and coincidence_window_s is None:
             self.coincidence_window_s = 0.0
-        if self.coincidence_window_s is not None and not sample_rate:
+        self.noise_capture_interval_s = float(noise_capture_interval_s)
+        self.noise_capture_window_s = float(noise_capture_window_s)
+        self._noise_rng = noise_rng
+        #: Schedules the noise samples; built with the engine.
+        self.noise: Optional[NoiseSampler] = None
+        if (self.coincidence_window_s is not None
+                or self.noise_capture_interval_s > 0) and not sample_rate:
             raise ValueError("events need the stream's sample_rate: an "
                              "event closes a hard stop after its window")
         self.on_event = on_event
@@ -1216,13 +1253,19 @@ class PulseCaptureSession(_CallbackHost):
             on_pulse=self._on_engine_pulse,
             **detection,
         )
-        if self.coincidence_window_s is not None:
+        if (self.coincidence_window_s is not None
+                or self.noise_capture_interval_s > 0):
             # No pulse outlives the hard stop, so none that triggered
             # inside an event's window is still open that long after it.
             self.events = EventGrouper(
                 self.coincidence_window_s,
                 self.pcap.max_capture_samples / self.sample_rate,
                 on_event=self._on_event)
+        if self.noise_capture_interval_s > 0:
+            self.noise = NoiseSampler(
+                self.noise_capture_interval_s, self.noise_capture_window_s,
+                pre_s=self.pcap.pre_samples / self.sample_rate,
+                rng=self._noise_rng)
 
         if self.hdf5_path is not None:
             capture_params = {
@@ -1234,6 +1277,9 @@ class PulseCaptureSession(_CallbackHost):
                 capture_params["coincidence_window_s"] = \
                     self.coincidence_window_s
                 capture_params["dump_all_channels"] = self.dump_all_channels
+            if self.noise_capture_interval_s > 0:
+                capture_params["noise_capture_interval_s"] = \
+                    self.noise_capture_interval_s
             if self.sample_rate:
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
@@ -1280,6 +1326,9 @@ class PulseCaptureSession(_CallbackHost):
         self.templates.add_pulse(channel, pulse_data, ns)
         if self.events is not None:
             self.events.add(channel, pulse_idx, summary)
+        if self.noise is not None:
+            self.noise.observe(summary["saved_end_time"]
+                               - summary["start_time"])
 
         self._callback(self.on_pulse, channel, pulse_idx, summary, pulse_data)
         self._callback(self.on_stats, self.stats())
@@ -1299,28 +1348,43 @@ class PulseCaptureSession(_CallbackHost):
             return
         self._clock[pos] = t
         # The slowest channel is only worth finding once this one has
-        # passed the deadline.
-        if t >= self.events.deadline:
-            self.events.advance(float(self._clock.min()))
+        # passed the deadline, or the end of the next noise sample.
+        due = self.noise is not None and (
+            self.noise.window is None or t >= self.noise.window[1])
+        if not due and t < self.events.deadline:
+            return
+        now = float(self._clock.min())
+        if due and math.isfinite(now):
+            sample = self.noise.take(now)
+            if sample is not None:
+                moment, window = sample
+                self.events.add_noise(
+                    moment, window, self._read_channels(self.channels, *window))
+        self.events.advance(now)
+
+    def _read_channels(self, channels, t0: float, t1: float) -> dict:
+        """{channel: samples over [t0, t1]} from the rings."""
+        out = {}
+        for ch in channels:
+            try:
+                window = self.pcap.get_window_by_time(ch, t0, t1)
+            except Exception as e:
+                self._error(f"Event dump of {describe(ch)} failed: {e}")
+                continue
+            if window is not None:
+                out[ch] = window
+        return out
 
     def _on_event(self, event: dict) -> None:
         """An event closed: take the channels that did not trigger from
-        their rings if asked to, then file and announce it."""
-        if self.dump_all_channels and event["window"] is not None:
-            t0, t1 = event["window"]
+        their rings if asked to, then file and announce it.  A noise
+        sample comes with every channel already."""
+        if (self.dump_all_channels and event["kind"] == "pulses"
+                and event["window"] is not None):
             triggered = set(event_channels(event))
-            dump = {}
-            for ch in self.channels:
-                if ch in triggered:
-                    continue
-                try:
-                    window = self.pcap.get_window_by_time(ch, t0, t1)
-                except Exception as e:
-                    self._error(f"Event dump of {describe(ch)} failed: {e}")
-                    continue
-                if window is not None:
-                    dump[ch] = window
-            event["dump"] = dump
+            event["dump"] = self._read_channels(
+                [ch for ch in self.channels if ch not in triggered],
+                *event["window"])
         self._to_writer("append_event", event,
                         what=f"write for event #{event['event_idx']}")
         self._callback(self.on_event, event)
@@ -1524,6 +1588,7 @@ class DualPulseCaptureSession(_CallbackHost):
         on_pulse: Optional[Callable] = None,
         on_pair: Optional[Callable] = None,
         on_event: Optional[Callable] = None,
+        noise_rng: Optional[np.random.Generator] = None,
         on_stats: Optional[Callable] = None,
         on_histograms: Optional[Callable] = None,
         on_templates: Optional[Callable] = None,
@@ -1604,11 +1669,18 @@ class DualPulseCaptureSession(_CallbackHost):
         #: here a hard stop after it triggered at the latest, unless the
         #: matcher or a ring is still holding it (see _advance_events).
         self.events: Optional[EventGrouper] = None
+        self.noise: Optional[NoiseSampler] = None
+        self._ring_clock: Dict[tuple, float] = {}
         if self.config.events_on:
             self.events = EventGrouper(
-                self.config.coincidence_window_ms * 1e-3,
+                self.config.session_kwargs(slow_rate)["coincidence_window_s"],
                 self.config.max_capture_samples(slow_rate) / slow_rate,
                 on_event=self._on_event)
+        if self.config.noise_capture_interval_s > 0:
+            self.noise = NoiseSampler(
+                self.config.noise_capture_interval_s,
+                self.config.noise_capture_window_ms * 1e-3,
+                pre_s=self.config.pre_pulse_ms * 1e-3, rng=noise_rng)
 
         self.slow = self._make_stream("slow", slow_rate,
                                       time_offset_s=self.slow_time_offset_s)
@@ -1661,7 +1733,8 @@ class DualPulseCaptureSession(_CallbackHost):
         # the event's last pair: the window and the margins on top.
         dump = ((self.config.coincidence_window_ms + self.config.pre_pulse_ms
                  + self.config.post_pulse_ms) / 1e3
-                if self.config.dump_all_channels else 0.0)
+                if (self.config.dump_all_channels
+                    or self.config.noise_capture_interval_s > 0) else 0.0)
         min_buf = int((self.config.max_pulse_ms / 1e3
                        * self.config.BUFFER_SAFETY
                        + grace + dump + 0.1) * sample_rate)
@@ -1671,6 +1744,7 @@ class DualPulseCaptureSession(_CallbackHost):
         # when the other channels are to be read out of it.
         kwargs["coincidence_window_s"] = None
         kwargs["dump_all_channels"] = False
+        kwargs["noise_capture_interval_s"] = 0.0
         return PulseCaptureSession(
             channels=self.channels if channels is None else channels,
             module=self.module,
@@ -1716,7 +1790,9 @@ class DualPulseCaptureSession(_CallbackHost):
             "post_pulse_ms": self.config.post_pulse_ms,
             **({"coincidence_window_s":
                 self.config.coincidence_window_ms * 1e-3,
-                "dump_all_channels": self.config.dump_all_channels}
+                "dump_all_channels": self.config.dump_all_channels,
+                "noise_capture_interval_s":
+                    self.config.noise_capture_interval_s}
                if self.events is not None else {}),
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
@@ -1749,11 +1825,11 @@ class DualPulseCaptureSession(_CallbackHost):
 
     def feed_slow(self, ch: int, i: float, q: float, t) -> None:
         self.slow.feed_sample(ch, i, q, t)
-        self._advance_matcher("slow", self.slow.shifted(t))
+        self._advance_matcher("slow", self.slow.shifted(t), ch)
 
     def feed_fast(self, ch: int, i: float, q: float, t) -> None:
         self.fast.feed_sample(ch, i, q, t)
-        self._advance_matcher("fast", t)
+        self._advance_matcher("fast", t, ch)
 
     def feed_slow_block(self, ch: int, i_vals, q_vals, timestamps) -> None:
         """Block form of :meth:`feed_slow`."""
@@ -1772,9 +1848,14 @@ class DualPulseCaptureSession(_CallbackHost):
         stamps = session.shifted(stamps)
         usable = stamps[np.isfinite(stamps)]
         if usable.size:
-            self._advance_matcher(stream, float(usable[-1]))
+            self._advance_matcher(stream, float(usable[-1]), ch)
 
-    def _advance_matcher(self, stream: str, t) -> None:
+    def _advance_matcher(self, stream: str, t, ch=None) -> None:
+        # Where each ring has got to: an event's other channels are read
+        # from them, and a stream's clock runs ahead of the channels of
+        # a block it has not fed yet.
+        if self.events is not None and ch is not None and t is not None:
+            self._ring_clock[(stream, ch)] = t
         # Throttled: expiry sweep at most every 20 ms of stream time
         if t is not None and t - self._last_advance.get(stream,
                                                         float("-inf")) > 0.02:
@@ -1969,6 +2050,8 @@ class DualPulseCaptureSession(_CallbackHost):
             self._to_writer("append_match", pair["channel"], pair,
                             what="match write")
             self._callback(self.on_pair, pair)
+            if self.noise is not None and pair.get("window"):
+                self.noise.observe(pair["window"][1] - pair["window"][0])
             if self.events is not None:
                 window = pair.get("window") or (None, None)
                 self.events.add(pair["channel"], pair["pair_idx"], {
@@ -1990,9 +2073,34 @@ class DualPulseCaptureSession(_CallbackHost):
     def _advance_events(self) -> None:
         if self.events is None:
             return
-        clocks = [c for c in self.matcher._latest.values() if c is not None]
-        if clocks:
-            self.events.advance(min(clocks), settled=self._settled_by)
+        # The slowest ring, of every channel on each stream that
+        # carries it; one not fed yet holds everything.
+        rings = ([("slow", ch) for ch in self.channels]
+                 + [("fast", ch) for ch in self.fast_channels])
+        if any(ring not in self._ring_clock for ring in rings):
+            return
+        now = min(self._ring_clock[ring] for ring in rings)
+        sample = self.noise.take(now) if self.noise is not None else None
+        if sample is not None:
+            moment, window = sample
+            self.events.add_noise(
+                moment, window, self._read_channels(self.channels, *window))
+        self.events.advance(now, settled=self._settled_by)
+
+    def _read_channels(self, channels, t0: float, t1: float) -> dict:
+        """{channel: {"slow_tod", "fast_tod"}} over [t0, t1] from the
+        rings, the fast side for the channels that stream carries."""
+        out = {}
+        for ch in channels:
+            sides = {"channel": ch}
+            for stream, session in (("slow", self.slow), ("fast", self.fast)):
+                if stream == "fast" and ch not in self.fast_channels:
+                    continue
+                self._take_window(sides, stream, session, t0, t1)
+            if len(sides) > 1:
+                del sides["channel"]
+                out[ch] = sides
+        return out
 
     def _settled_by(self, t: float) -> bool:
         """Whether every pulse that triggered by *t* has left the
@@ -2007,23 +2115,12 @@ class DualPulseCaptureSession(_CallbackHost):
     def _on_event(self, event: dict) -> None:
         """An event closed: with the dump on, every channel that has no
         pair in it is read from both rings over the event's window."""
-        if self.config.dump_all_channels and event["window"] is not None:
-            t0, t1 = event["window"]
+        if (self.config.dump_all_channels and event["kind"] == "pulses"
+                and event["window"] is not None):
             triggered = set(event_channels(event))
-            dump = {}
-            for ch in self.channels:
-                if ch in triggered:
-                    continue
-                sides = {"channel": ch}
-                for stream, session in (("slow", self.slow),
-                                        ("fast", self.fast)):
-                    if stream == "fast" and ch not in self.fast_channels:
-                        continue
-                    self._take_window(sides, stream, session, t0, t1)
-                if len(sides) > 1:
-                    del sides["channel"]
-                    dump[ch] = sides
-            event["dump"] = dump
+            event["dump"] = self._read_channels(
+                [ch for ch in self.channels if ch not in triggered],
+                *event["window"])
         self._to_writer("append_event", event,
                         what=f"write for event #{event['event_idx']}")
         self._callback(self.on_event, event)

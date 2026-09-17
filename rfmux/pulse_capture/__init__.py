@@ -82,7 +82,8 @@ from .sources import (
     run_slow_source,
 )
 
-from .events import EventGrouper, events_of, group_by_trigger
+from .events import (EventGrouper, NoiseSampler, events_of,
+                     group_by_trigger)
 from .hdf5 import DualPulseHDF5Writer, PulseHDF5Reader, PulseHDF5Writer
 
 __all__ = [
@@ -121,6 +122,7 @@ __all__ = [
     "run_slow_source",
     # events
     "EventGrouper",
+    "NoiseSampler",
     "events_of",
     "group_by_trigger",
     # hdf5

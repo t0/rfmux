@@ -611,11 +611,13 @@ def test_the_event_options_reach_the_capture_config(monkeypatch):
     monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
     result = CliRunner().invoke(record.cli, [
         "--serial", "0156", "--duration", "5", "--coincidence-window-ms", "2",
-        "--dump-all-channels", "--pre-pulse-ms", "1", "--post-pulse-ms", "3"])
+        "--dump-all-channels", "--pre-pulse-ms", "1", "--post-pulse-ms", "3",
+        "--noise-capture-interval-s", "30"])
     assert result.exit_code == 0, result.output
     cfg = runs[0]["config"]
     assert (cfg.coincidence_window_ms, cfg.dump_all_channels,
             cfg.pre_pulse_ms, cfg.post_pulse_ms) == (2.0, True, 1.0, 3.0)
+    assert cfg.noise_capture_interval_s == 30.0
 
 
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):

@@ -156,3 +156,20 @@ def test_a_channel_with_no_tone_is_skipped_with_a_warning():
             board, channels=[1, 3], module=1))
     assert set(cals) == {1}
     assert board.freq == {1: FR[1], 2: FR[2]}, "no channel was moved but 1"
+
+
+def test_a_row_keeps_the_sweep_and_the_fit_it_came_from():
+    """A capture stores the row with each channel's pulses, so the file
+    can show the resonance the calibration was read off, as it does for
+    a bias_kids entry."""
+    from rfmux.pulse_capture.analysis import tuning_sweep
+    rows = _measure(_Board(1), span_hz=20e3, resolution_hz=500.0)
+    row = rows[1]
+    assert row["bias_channel"] == 1 and row["bias_frequency"] == FR[1]
+    assert row["df_calibration_source"] == "measured"
+    assert len(row["frequencies"]) == len(row["iq_complex"]) == 41
+    assert row["nonlinear_fit_success"]
+    assert row["nonlinear_fit_params"]["fr"] == pytest.approx(
+        FR[1], abs=0.25 * LINEWIDTH)
+    f, iq, point = tuning_sweep(row)
+    assert f[0] < FR[1] < f[-1] and point is not None

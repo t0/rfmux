@@ -1424,7 +1424,9 @@ class TestDetectionParamsPlumbing:
                                                    "noise_record_samples",
                                                    "trigger_basis",
                                                    "coincidence_window_s",
-                                                   "dump_all_channels"}
+                                                   "dump_all_channels",
+                                                   "noise_capture_interval_s",
+                                                   "noise_capture_window_s"}
         # The join that matters: every detection knob still gets there.
         assert set(DETECTION_PARAMS) <= set(kw)
 

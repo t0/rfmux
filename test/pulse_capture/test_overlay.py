@@ -445,6 +445,27 @@ def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
     assert t0 <= fast[0] and fast[-1] <= t1
 
 
+def test_a_merged_file_keeps_its_noise_samples(tmp_path):
+    """Tagged as they were, every channel's slow samples with them; the
+    recording is added where it covers the sample's window."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path,
+                                         noise_capture_interval_s=0.4)
+    with PulseHDF5Reader(path) as r:
+        before = [r.get_event(k) for k in range(1, r.event_count + 1)]
+    assert before and {e["kind"] for e in before} == {"noise"}
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = [r.get_event(k) for k in range(1, r.event_count + 1)]
+    assert [(e["kind"], e["window"], e["dumped"]) for e in after] == \
+        [(e["kind"], e["window"], e["dumped"]) for e in before]
+    for old, new in zip(before, after):
+        for ch in old["dumped"]:
+            np.testing.assert_array_equal(new["dump"][ch]["slow_tod"]["Amp_I"],
+                                          old["dump"][ch]["Amp_I"])
+
+
 def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
     """In a both-mode file the list holds pairs; an event's members are
     the pairs of the slow pulses it indexes, and its view draws them."""

@@ -144,6 +144,7 @@ class _PulseFileWriter:
         (str, ("streamer_mode", "trigger_basis", "stored_units")),
         (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
                  "post_pulse_ms", "coincidence_window_s",
+                 "noise_capture_interval_s",
                  "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count", "slow_time_offset_s")),
@@ -241,7 +242,8 @@ class _PulseFileWriter:
     def append_event(self, event: dict) -> None:
         """File one coincidence event under ``events/``::
 
-            events/event_<k>/         trigger_time, window_t0, window_t1
+            events/event_<k>/         kind, trigger_time, window_t0,
+                                      window_t1
                 members               rows of (channel, index), or of
                                       (module, channel, index)
                 trigger_times         one per member
@@ -260,15 +262,20 @@ class _PulseFileWriter:
         events = self.f.require_group("events")
         idx = int(event["event_idx"])
         grp = events.create_group(f"event_{idx:06d}")
+        # "pulses", or "noise" for a sample nothing triggered.
+        grp.attrs["kind"] = str(event.get("kind", "pulses"))
         grp.attrs["trigger_time"] = float(event["trigger_time"])
         if event.get("window") is not None:
             grp.attrs["window_t0"] = float(event["window"][0])
             grp.attrs["window_t1"] = float(event["window"][1])
         members = event["members"]
+        rows = [[*(m["channel"] if isinstance(m["channel"], tuple)
+                   else (m["channel"],)), m["pulse_idx"]] for m in members]
+        # A noise sample may name no pulse at all: an empty table still
+        # has a row width, that of the file's channel keys.
+        width = 1 + max(1, np.ndim(self.f["metadata"].attrs["channels"]))
         grp.create_dataset("members", data=np.array(
-            [[*(m["channel"] if isinstance(m["channel"], tuple)
-                else (m["channel"],)), m["pulse_idx"]] for m in members],
-            dtype=np.int64))
+            rows, dtype=np.int64).reshape(len(rows), width))
         grp.create_dataset("trigger_times", data=np.array(
             [m["trigger_time"] for m in members], dtype=np.float64))
         for channel, tod in (event.get("dump") or {}).items():
@@ -991,6 +998,7 @@ def _event_from_group(grp, event_idx: int, dump: bool = True) -> dict:
                for r, t in zip(rows, times)]
     event: Dict[str, Any] = {
         "event_idx": event_idx,
+        "kind": str(_convert_attr(grp.attrs.get("kind", "pulses"))),
         "trigger_time": float(grp.attrs["trigger_time"]),
         "window": ((float(grp.attrs["window_t0"]),
                     float(grp.attrs["window_t1"]))

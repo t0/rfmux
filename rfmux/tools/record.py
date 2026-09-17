@@ -118,6 +118,10 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               default=_DEFAULTS.coincidence_window_ms, show_default=True,
               help="Pulses on any channels that trigger within this of an event's "
                    "first trigger are recorded as one event; 0 records no events")
+@click.option("--noise-capture-interval-s", type=float,
+              default=_DEFAULTS.noise_capture_interval_s, show_default=True,
+              help="Take a noise sample of every channel at random moments, the "
+                   "waits normally distributed about this many seconds; 0 takes none")
 @click.option("--dump-all-channels/--no-dump-all-channels",
               default=_DEFAULTS.dump_all_channels, show_default=True,
               help="With each event, save the same span of every channel that did "
@@ -133,7 +137,8 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
         fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, show,
         bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
         pre_pulse_ms, post_pulse_ms, coincidence_window_ms,
-        dump_all_channels, noise_train_ms, trigger_basis, quiet):
+        noise_capture_interval_s, dump_all_channels, noise_train_ms,
+        trigger_basis, quiet):
     """Record the slow and channel streams of a module, or of several
     feeding one RF line, into a session."""
     if serial is None:
@@ -158,6 +163,7 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
         pre_pulse_ms=pre_pulse_ms, post_pulse_ms=post_pulse_ms,
         coincidence_window_ms=coincidence_window_ms,
         dump_all_channels=dump_all_channels,
+        noise_capture_interval_s=noise_capture_interval_s,
         noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
     _run(serial=serial, hostname=hostname, modules=list(modules), channels=channels,
          duration=duration, session=session, session_dir=session_dir,

@@ -11,10 +11,6 @@ arbitrary because the index reads stamps, not a rate.
 import numpy as np
 import pytest
 
-pytest.importorskip(
-    "rfmux.fastrx", reason="this rfmux build does not include fastrx"
-)
-
 from rfmux.core.transferfunctions import (
     VOLTS_PER_ROC, decimated_stream_delay_s, decimation_to_sampling,
     sampling_to_decimation)
@@ -25,7 +21,7 @@ from rfmux.pulse_capture.hdf5 import PulseHDF5Reader, PulseHDF5Writer
 from rfmux.pulse_capture.overlay import (
     Recording, correlation_lag_s, counts_to_stored, merge_fastrx,
     pulse_overlay, slow_shift_s)
-from test.test_fastrx_file import file_header, record, seconds_ts, write
+from test.fastrx_bytes import file_header, record, seconds_ts, write
 
 FS = decimation_to_sampling(6)                    # 596 Hz slow stream
 LATE = decimated_stream_delay_s(sampling_to_decimation(FS))

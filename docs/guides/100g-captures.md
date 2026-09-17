@@ -12,6 +12,8 @@ command line, what the run does, and the viewer.
 
 Needs: Linux with the fastrx extension built (clang, libxdp, libbpf and
 liburing at install time) and a 100G NIC on the channel-stream network.
+Reading a recording afterwards needs neither: `Recording` opens one with
+numpy alone where the extension is not built, on macOS and Windows too.
 
 ## 1. Before the first run
 
@@ -272,3 +274,10 @@ with PulseHDF5Reader("pulse_module2_143012.h5") as r:
                        dirfile="~/data/run.dirfile/serial_0156")
 # ov.pulse, ov.dirfile, ov.fastrx: dicts of times, I, Q in ov.units
 ```
+
+The reference notebook `Demos/fastrx_recording.md` works through reading a
+recording offline: the records and their stamps, a channel over a window of
+time, sequence gaps and drop-outs, a recording that holds several modules,
+and the overlay and the merge above. It writes a small recording with
+`write_recording` (`rfmux.pulse_capture.recording_file`) when given none, so
+it runs without a board.

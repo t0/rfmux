@@ -713,7 +713,6 @@ class ClickableViewBox(pg.ViewBox):
         # scenePos() is from the event 'event', map it to view coordinates
         pt_view = self.mapSceneToView(event.scenePos()) 
         x_val = 10 ** pt_view.x() if log_x else pt_view.x()
-        y_val = 10 ** pt_view.y() if log_y else pt_view.y() # y_val needed for QMessageBox
 
         # 1. Handle window-specific modes first (e.g., add_subtract_mode for NetworkAnalysisWindow)
         if window and getattr(window, 'add_subtract_mode', False):
@@ -738,39 +737,23 @@ class ClickableViewBox(pg.ViewBox):
                 event.accept()
                 return
         
-        # 2. Emit the generic doubleClickedEvent signal.
-        #    This is intended for features like the Detector Digest in MultisweepWindow.
+        # 2. Offer the double-click to the panel (the detector digest in
+        #    the multisweep window).  A slot accepts the event when it
+        #    acts on it; Qt delivers events already accepted, so the
+        #    flag is cleared first for that to mean anything.
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.doubleClickedEvent.emit(event) # Pass the original event object
+            event.ignore()
+            self.doubleClickedEvent.emit(event)
             if event.isAccepted():
-                # If a slot connected to doubleClickedEvent accepted the event,
-                # we assume it's fully handled.
                 return
 
-        # 3. Default behavior for left double-click: show coordinates QMessageBox
-        #    This executes if not in add_subtract_mode and no slot accepted doubleClickedEvent.
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and not event.isAccepted():
-            plot_item = self.parentItem()
-            x_label_text = y_label_text = "" # Renamed to avoid conflict with x_val, y_val
-            if isinstance(plot_item, pg.PlotItem):
-                x_axis = plot_item.getAxis("bottom"); y_axis = plot_item.getAxis("left")
-                if x_axis and x_axis.label: x_label_text = x_axis.label.toPlainText().strip()
-                if y_axis and y_axis.label: y_label_text = y_axis.label.toPlainText().strip()
-            x_label_text = x_label_text or "X"; y_label_text = y_label_text or "Y"
-            
-            parent_widget = None
-            current_scene = self.scene() # Store scene in a variable
-            if current_scene and current_scene.views(): # Ensure scene and views exist
-                parent_widget = current_scene.views()[0].window()
-
-            if parent_widget: # Only show if we have a valid parent widget
-                box = QtWidgets.QMessageBox(parent_widget)
-                box.setWindowTitle("Coordinates")
-                box.setText(f"{y_label_text}: {y_val:.6g}\n{x_label_text}: {x_val:.6g}")
-                box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
-                box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                box.show()
-            event.accept() # Accept the event after showing the message box
+            # 3. Otherwise autoscale the plot to its data.  autoRange()
+            #    switches continuous auto-ranging off, which a live plot
+            #    with Auto Scale on must keep.
+            auto_x, auto_y = self.autoRangeEnabled()
+            self.autoRange()
+            self.enableAutoRange(x=auto_x, y=auto_y)
+            event.accept()
             return
 
         # 4. If not a left button double click and not handled by any of the above,

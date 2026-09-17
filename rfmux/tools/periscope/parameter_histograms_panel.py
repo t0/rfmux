@@ -5,7 +5,8 @@ import pyqtgraph as pg
 
 # Imports from within the 'periscope' subpackage
 from .utils import (
-    ScreenshotMixin, TABLEAU10_COLORS, UnitConverter, AMPLITUDE_COLORMAP_THRESHOLD
+    ClickableViewBox, ScreenshotMixin, TABLEAU10_COLORS, UnitConverter,
+    AMPLITUDE_COLORMAP_THRESHOLD
 )
 from .layouts import FlowLayout
 from .multisweep_grid_helpers import create_amplitude_color_map
@@ -123,7 +124,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
         
         # Frequency scatter plot (top left)
-        self.freq_plot = pg.PlotWidget()
+        self.freq_plot = pg.PlotWidget(viewBox=self._view_box())
         self.freq_plot.setBackground(bg_color)
         freq_item = self.freq_plot.getPlotItem()
         if freq_item:
@@ -135,7 +136,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         grid.addWidget(self.freq_plot, 0, 0)
         
         # Qr histogram (top right)
-        self.qr_plot = pg.PlotWidget()
+        self.qr_plot = pg.PlotWidget(viewBox=self._view_box())
         self.qr_plot.setBackground(bg_color)
         qr_item = self.qr_plot.getPlotItem()
         if qr_item:
@@ -147,7 +148,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         grid.addWidget(self.qr_plot, 0, 1)
         
         # Qc histogram (bottom left)
-        self.qc_plot = pg.PlotWidget()
+        self.qc_plot = pg.PlotWidget(viewBox=self._view_box())
         self.qc_plot.setBackground(bg_color)
         qc_item = self.qc_plot.getPlotItem()
         if qc_item:
@@ -159,7 +160,7 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         grid.addWidget(self.qc_plot, 1, 0)
         
         # Qi histogram (bottom right)
-        self.qi_plot = pg.PlotWidget()
+        self.qi_plot = pg.PlotWidget(viewBox=self._view_box())
         self.qi_plot.setBackground(bg_color)
         qi_item = self.qi_plot.getPlotItem()
         if qi_item:
@@ -181,6 +182,14 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
         if isinstance(color, (tuple, list, np.ndarray)) and len(color) >= 3:
             return (int(color[0]), int(color[1]), int(color[2]))
         return (100, 100, 255)  # fallback
+
+    @staticmethod
+    def _view_box() -> ClickableViewBox:
+        """Panning as these plots always have, with the double-click
+        autoscale every Periscope plot shares."""
+        vb = ClickableViewBox()
+        vb.enableZoomBoxMode(False)
+        return vb
 
     def _style_axes(self, plot_item, pen_color):
         """Apply consistent axis styling."""

@@ -870,7 +870,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "  - Left-click drag: Zoom into region (when Zoom Box enabled) or pan (when disabled)\n"
             "  - Mouse wheel: Zoom in/out around cursor position\n"
             "  - Right-click: Access context menu with plot controls\n"
-            "  - Double-click: Show point coordinates\n"
+            "  - Double-click: Autoscale the plot to its data\n"
             "- **Interactive Session:** Open an embedded iPython console for direct data access\n"
             "- **Initialize CRS:** Configure the CRS board settings (IRIG source, etc.)\n\n"
 

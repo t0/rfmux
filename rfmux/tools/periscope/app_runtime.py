@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
+import concurrent.futures
 import numpy as np
+from IPython import get_ipython
 from typing import Optional
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
@@ -1324,12 +1326,10 @@ class PeriscopeRuntime:
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
-        # Stop any active network analysis tasks (QThread needs proper termination)
-        for task_key in list(self.netanal_tasks.keys()):
-            task = self.netanal_tasks[task_key]
-            task.stop()  # Request interruption
-            task.wait(2000)  # Wait up to 2 seconds for thread to finish
-            self.netanal_tasks.pop(task_key, None)
+        for futures in self.netanal_tasks.values():
+            for future in futures:
+                future.cancel()
+        self.netanal_tasks.clear()
         # Stop any active multisweep tasks (QThread now, needs proper termination)
         for task_key in list(self.multisweep_tasks.keys()):
             task = self.multisweep_tasks[task_key]
@@ -1352,40 +1352,38 @@ class PeriscopeRuntime:
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
             except Exception as e: warnings.warn(f"Error shutting down iPython kernel: {e}", RuntimeWarning) # warnings from .utils
+        if getattr(self, "interpreter", None) is not None:
+            self.interpreter.close()
         # The super().closeEvent() call should be handled by the class that inherits this mixin
         # and also inherits from a QWidget (e.g., Periscope class itself).
         event.accept()
 
     def _add_interactive_console_dock(self):
-        """Add the dock widget for the embedded iPython console (if qtconsole is available)."""
-        # QTCONSOLE_AVAILABLE, Qt from .utils
-        if not QTCONSOLE_AVAILABLE: return
+        """Add the dock widget for the embedded iPython console."""
         self.console_dock_widget = QtWidgets.QDockWidget("Interactive iPython Session", self)
         self.console_dock_widget.setObjectName("InteractiveSessionDock")
         self.console_dock_widget.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.console_dock_widget.setVisible(False) # Initially hidden
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock_widget)
+        self._create_console()
 
-    def _toggle_interactive_session(self):
-        """
-        Toggle the visibility and initialization of the embedded iPython console.
-        Initializes the kernel and Jupyter widget on first toggle if not already done.
-        """
-        # QTCONSOLE_AVAILABLE, ConsoleKernelManager, RichJupyterWidget, rfmux, load_awaitless_extension from .utils
-        # traceback from .utils
-        if not QTCONSOLE_AVAILABLE or self.crs is None: return # Dependencies not met
-        if self.console_dock_widget is None: return # Dock widget not created
+    def _create_console(self):
+        """The kernel and console widget, created once; the dock stays hidden until toggled.
 
-        if self.kernel_manager is None: # First time opening the console
+        Inside an IPython or Jupyter session (raise_periscope) that session
+        is the console: a second in-process shell cannot be created.
+        """
+        if self.crs is None or self.console_dock_widget is None: return
+        if get_ipython() is not None: return
+        if self.kernel_manager is None:
             try:
-                self.kernel_manager = ConsoleKernelManager()
+                self.kernel_manager = ConsoleKernelManager(self.interpreter)
                 self.kernel_manager.start_kernel()
                 kernel = self.kernel_manager.kernel
                 
                 # Push relevant objects into the kernel's namespace
                 kernel.shell.push({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
                 
-                self.jupyter_widget = RichJupyterWidget()
+                self.jupyter_widget = PeriscopeConsole()
                 self.jupyter_widget.kernel_client = self.kernel_manager.client()
                 self.jupyter_widget.kernel_client.start_channels()
                 
@@ -1408,12 +1406,64 @@ class PeriscopeRuntime:
                 traceback.print_exc()
                 if self.kernel_manager and self.kernel_manager.has_kernel: self.kernel_manager.shutdown_kernel()
                 self.kernel_manager = None; self.jupyter_widget = None
-                self.console_dock_widget.setVisible(False); return
-        
-        # Toggle visibility of the console dock widget
+                self.console_dock_widget.setVisible(False)
+
+    def _toggle_interactive_session(self):
+        self._create_console()
+        if self.jupyter_widget is None:
+            if get_ipython() is not None:
+                self.statusBar().showMessage(
+                    "Periscope is running inside your IPython session: crs and periscope are already in it.", 8000)
+            return
         is_visible = self.console_dock_widget.isVisible()
         self.console_dock_widget.setVisible(not is_visible)
         if not is_visible and self.jupyter_widget: self.jupyter_widget.setFocus() # Focus on console when shown
+
+    def session_namespace(self) -> dict:
+        """Where the session's Python runs: the console kernel's namespace, the
+        enclosing IPython's when Periscope was raised from one, or a private
+        dict otherwise. crs, rfmux and periscope are always bound in it."""
+        self._create_console()
+        if self.kernel_manager is not None:
+            return self.kernel_manager.kernel.shell.user_ns
+        if not hasattr(self, "_namespace"):
+            ipython = get_ipython()
+            self._namespace = ipython.user_ns if ipython is not None else {}
+            self._namespace.update({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
+        return self._namespace
+
+    def run_python(self, code: str, comment: str = "") -> concurrent.futures.Future:
+        """Run *code* in the session as a console cell, exactly as if typed.
+        Without a console (raised from IPython) it runs on the interpreter
+        thread in that session's namespace and is printed instead."""
+        namespace = self.session_namespace()
+        if comment:
+            code = f"# {comment}\n{code}"
+        if self.jupyter_widget is not None:
+            return self.jupyter_widget.run(code)
+        print(code)
+        return self.interpreter.run(code, namespace)
+
+    def netanal_hooks(self, window_id: str, amplitude: float) -> dict:
+        """The progress and data callbacks that feed a network analysis panel
+        during one amplitude's sweep; the algorithm names the module."""
+        window_data = self.netanal_windows[window_id]
+        signals = window_data['signals']
+        amplitudes = window_data['window'].original_params.get('amps', [amplitude])
+        index = amplitudes.index(amplitude) + 1 if amplitude in amplitudes else 1
+        for module in window_data['window'].modules:
+            signals.amplitude_started.emit(module, index, len(amplitudes), amplitude)
+
+        def progress(mod, fraction):
+            signals.progress.emit(mod, fraction)
+
+        def data(mod, freqs, amps, phases):
+            order = np.argsort(freqs)
+            freqs, amps, phases = freqs[order], amps[order], phases[order]
+            signals.data_update.emit(mod, freqs, amps, phases)
+            signals.data_update_with_amp.emit(mod, freqs, amps, phases, amplitude)
+
+        return {"progress_callback": progress, "data_callback": data}
 
     def _start_multisweep_analysis(self, params: dict):
         """
@@ -2213,8 +2263,7 @@ class PeriscopeRuntime:
         Args:
             dark_mode_enabled (bool): True if dark mode is active, False otherwise.
         """
-        # QTCONSOLE_AVAILABLE from .utils
-        if self.jupyter_widget and QTCONSOLE_AVAILABLE:
+        if self.jupyter_widget:
             self.jupyter_widget.syntax_style = 'monokai' if dark_mode_enabled else 'default'
             # Define stylesheets for dark and light modes
             style_sheet = ("QWidget { background-color: #1C1C1C; color: #DDDDDD; } .in-prompt { color: #00FF00 !important; } .out-prompt { color: #00DD00 !important; } QPlainTextEdit { background-color: #1C1C1C; color: #DDDDDD; }"
@@ -2523,7 +2572,7 @@ class PeriscopeRuntime:
         MockCRSInitTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockFetcher = MagicMock(return_value=fake_fetcher)
         MockNASignals = MagicMock(return_value=fake_signals)
-        MockNATask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockRunPython = MagicMock(side_effect=lambda code, comment="": concurrent.futures.Future())
         MockMultiTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasSignals = MagicMock(return_value=fake_bias_signals)
@@ -2591,7 +2640,6 @@ class PeriscopeRuntime:
                 MockNASignals,
                 create=True,
             ),
-            patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
             patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
@@ -2620,7 +2668,8 @@ class PeriscopeRuntime:
             patch.object(periscope_app, "CRSInitializeTask", MockCRSInitTask, create=True),
             patch.object(periscope_app, "DACScaleFetcher", MockFetcher, create=True),
             patch.object(periscope_app, "NetworkAnalysisSignals", MockNASignals, create=True),
-            patch.object(periscope_app, "NetworkAnalysisTask", MockNATask, create=True),
+            patch.object(periscope_app.Periscope, "run_python", MockRunPython),
+            patch.object(periscope_app.Periscope, "session_namespace", MagicMock(return_value={})),
             patch.object(periscope_app, "MultisweepTask", MockMultiTask, create=True),
             patch.object(periscope_app, "BiasKidsTask", MockBiasTask, create=True),
             patch.object(periscope_app, "BiasKidsSignals", MockBiasSignals, create=True),

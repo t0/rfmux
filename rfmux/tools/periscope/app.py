@@ -44,8 +44,11 @@ from .utils import *  # Provides: constants (DEFAULT_BUFFER_SIZE, ICON_PATH, etc
                        # plotting tools (pyqtgraph as pg, ClickableViewBox),
                        # and other utilities (Circular, np, math, time, traceback, warnings).
 
+import concurrent.futures
+
+from .console_kernel import Interpreter
 from .tasks import *  # Provides: worker thread classes (UDPReceiver, IQTask, PSDTask,
-                       # NetworkAnalysisTask, CRSInitializeTask, MultisweepTask, etc.)
+                       # CRSInitializeTask, MultisweepTask, etc.)
                        # and their associated signal classes (IQSignals, PSDSignals, etc.).
 
 from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, InitializeCRSDialog, etc.)
@@ -316,16 +319,15 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.psd_signals.done.connect(self._psd_done) # Connect completion signal to handler
 
         # Network Analysis (NetAnal) signals and tracking.
-        # NetworkAnalysisSignals (from .tasks) - signals are routed directly to panels via check_connection()
+        # NetworkAnalysisSignals (from .tasks) - routed to panels by _connect_netanal_signals()
         self.netanal_signals = NetworkAnalysisSignals()
         # Only keep the error signal connected globally as a fallback
         self.netanal_signals.error.connect(self._netanal_error)
         
-        # Structures for managing multiple Network Analysis windows and tasks.
-        # NetworkAnalysisTask is from .tasks.
+        # Structures for managing multiple Network Analysis windows and runs.
         self.netanal_windows: Dict[str, Dict] = {} # Stores window instances and related data by a unique window_id
         self.netanal_window_count: int = 0         # Counter to generate unique window_ids
-        self.netanal_tasks: Dict[str, NetworkAnalysisTask] = {} # Stores active NetAnal tasks
+        self.netanal_tasks: Dict[str, list] = {} # Running sweeps' cell futures, by window_id
 
         # CRS (Control and Readout System) Initialization signals.
         # CRSInitializeSignals (from .tasks) handles success/error signals for CRS initialization.
@@ -348,9 +350,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.font_scale: float = settings.get_font_scale()
 
         # Attributes for the optional embedded iPython console.
-        # QTCONSOLE_AVAILABLE is a boolean constant from .utils.
         self.kernel_manager = None      # Manages the iPython kernel
         self.jupyter_widget = None      # The Qt widget for the console
+        self.interpreter = Interpreter()  # The thread and loop where the session's Python runs
         self.console_dock_widget = None # Dock widget to host the console
 
     def _create_ui_widgets(self, chan_str: str):
@@ -1093,8 +1095,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Initialize and start a new network analysis process.
 
-        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget 
-        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
+        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget
+        and runs each sweep as Python in the session.
         It handles single or multiple module sweeps and iterates through specified
         amplitudes if provided.
 
@@ -1136,45 +1138,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
             
             # Store panel reference
-            self.netanal_windows[window_id] = {
-                'window': panel,  # Keep 'window' key for compatibility
-                'dock': dock,
-                'signals': window_signals,
-                'amplitude_queues': {},
-                'current_amp_index': {}
-            }
+            self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
-            # Connect signals (same as before)
-            window_signals.progress.connect(
-                lambda mod, prog: panel.update_progress(mod, prog),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: panel.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val: panel.update_data_with_amp(mod, freqs, amps, phases, amp_val),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.error.connect(
-                lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Connect data_ready signal for session auto-export
-            # Use default arg to capture panel reference for filename storage
             panel.data_ready.connect(
                 lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
             )
-            
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
-            window_data = self.netanal_windows[window_id]
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
-            for mod_iter in modules_to_run:
-                panel.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
-            
+            self._run_network_analysis(window_id, params)
+
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1261,115 +1231,80 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             print(f"Error in _load_network_analysis: {e}")
             traceback.print_exc()
 
-    def _handle_analysis_completed(self, module_param: int, window_id: str): # Renamed module
-        """
-        Handle the completion of a network analysis sweep for a specific module.
-
-        This method is called when a `NetworkAnalysisTask` signals completion.
-        It updates the corresponding `NetworkAnalysisWindow` to mark the module's
-        analysis as complete. If there are more amplitudes to sweep for this
-        module, it starts the next `NetworkAnalysisTask`.
-
-        Args:
-            module_param (int): The module index for which the analysis completed.
-            window_id (str): The unique identifier of the `NetworkAnalysisWindow`
-                             associated with this analysis.
-        """
-        try:
-            if window_id not in self.netanal_windows: return
-            window_data = self.netanal_windows[window_id]
-            window = window_data['window']
-            window.complete_analysis(module_param)
-            for task_key in list(self.netanal_tasks.keys()):
-                if task_key.startswith(f"{window_id}_{module_param}_"):
-                    self.netanal_tasks.pop(task_key, None)
-            if module_param in window_data['amplitude_queues'] and window_data['amplitude_queues'][module_param]:
-                window_data['current_amp_index'][module_param] += 1
-                total_amps = len(window.original_params.get('amps', []))
-                next_amp = window_data['amplitude_queues'][module_param][0]
-                window.update_amplitude_progress(
-                    module_param, 
-                    window_data['current_amp_index'][module_param] + 1,
-                    total_amps,
-                    next_amp
-                )
-                if module_param in window.progress_bars:
-                    window.progress_bars[module_param].setValue(0)
-                    if window.progress_group:
-                        window.progress_group.setVisible(True)
-                self._start_next_amplitude_task(module_param, window.original_params, window_id)
-        except Exception as e:
-            print(f"Error in _handle_analysis_completed: {e}")
-            traceback.print_exc()
-
-    def check_connection(self, window_data, window_id):
-        
-        window_instance = window_data["window"]
-        window_signals = window_data["signals"]
-        
-        count = window_signals.receivers(window_signals.progress)
-        if count == 0:
-            window_signals.progress.connect(
-                lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.error.connect(
-                lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-        else:
+    def _connect_netanal_signals(self, window_id: str):
+        window_data = self.netanal_windows[window_id]
+        panel, signals = window_data['window'], window_data['signals']
+        if signals.receivers(signals.progress):
             return
-            
-        
-    
-    
-    def _start_next_amplitude_task(self, module_param: int, params: dict, window_id: str): # Renamed module
-        """
-        Start the next network analysis task for a given module and amplitude.
+        queued = QtCore.Qt.ConnectionType.QueuedConnection
+        signals.progress.connect(panel.update_progress, queued)
+        signals.amplitude_started.connect(panel.update_amplitude_progress, queued)
+        signals.data_update.connect(panel.update_data, queued)
+        signals.data_update_with_amp.connect(panel.update_data_with_amp, queued)
+        signals.completed.connect(panel.complete_analysis, queued)
+        signals.error.connect(
+            lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
+            queued)
 
-        This is called iteratively when sweeping through multiple amplitudes.
-        It retrieves the next amplitude from the queue for the specified module
-        and window, then creates and starts a new `NetworkAnalysisTask`.
+    def _run_network_analysis(self, window_id: str, params: dict):
+        """Run a panel's sweep as console cells: one per amplitude, each a
+        flat take_netanal call over the module list, which the algorithm
+        runs concurrently. The cells are what the console shows."""
+        window_data = self.netanal_windows[window_id]
+        signals = window_data['signals']
+        self._connect_netanal_signals(window_id)
+        modules = params.get('module')
+        modules = list(range(1, 9)) if modules is None else list(modules) if isinstance(modules, list) else [modules]
+        amplitudes = list(params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]))
+        lengths = params.get('module_cable_lengths', {})
+        # The dialog's keys are the algorithm's keywords; anything it did not
+        # set takes the algorithm's own default.
+        sweep_kwargs = {k: params[k] for k in ('fmin', 'fmax', 'nsamps', 'npoints', 'max_chans', 'max_span')
+                        if k in params}
+        # The algorithm sweeps one analog bank per call.
+        banks = [bank for bank in ([m for m in modules if m <= 4], [m for m in modules if m > 4]) if bank]
+        result = window_id
+        futures = []
+        for i, amp in enumerate(amplitudes):
+            lines = []
+            if i == 0:
+                for m in modules:
+                    if params.get('clear_channels', True):
+                        lines.append(f"await crs.clear_channels(module={m!r})")
+                    length = lengths.get(m, params.get('cable_length', DEFAULT_CABLE_LENGTH))
+                    lines.append(f"await crs.set_cable_length(length={length!r}, module={m!r})")
+                lines.append(f"{result} = {{}}")
+            for j, bank in enumerate(banks):
+                kwargs = ", ".join(f"{k}={v!r}" for k, v in dict(amp=amp, **sweep_kwargs, module=bank).items())
+                sweep = f"await crs.take_netanal({kwargs}, **periscope.netanal_hooks({window_id!r}, {amp!r}))"
+                lines.append(f"{result}[{amp!r}] = {sweep}" if j == 0
+                             else f"{result}[{amp!r}] += {sweep}")
+            futures.append(self.run_python("\n".join(lines),
+                                           window_data['dock'].windowTitle() if i == 0 else ""))
+        self.netanal_tasks[window_id] = futures
+        namespace = self.session_namespace()
 
-        Args:
-            module_param (int): The module index for which to start the task.
-            params (dict): The base parameters for the network analysis sweep.
-                           The 'amplitude' for this specific task will be taken
-                           from the queue.
-            window_id (str): The unique identifier of the `NetworkAnalysisWindow`
-                             associated with this analysis.
-        """
-        try:
-            if window_id not in self.netanal_windows: return
-            window_data = self.netanal_windows[window_id]
-            self.check_connection(window_data, window_id)
-            signals = window_data['signals']
-            if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
+        def finished(fut):  # Wherever a cell completed; the signals cross to the GUI.
+            if not all(f.done() for f in futures):
                 return
-            amplitude = window_data['amplitude_queues'][module_param].pop(0)
-            task_params = params.copy()
-            task_params['module'] = module_param
-            module_specific_cable_length = params.get('module_cable_lengths', {}).get(module_param)
-            if module_specific_cable_length is not None:
-                task_params['cable_length'] = module_specific_cable_length
-            task_key = f"{window_id}_{module_param}_amp_{amplitude}"
-            # NetworkAnalysisTask from .tasks
-            task = NetworkAnalysisTask(
-                self.crs, module_param, task_params, signals, amplitude=amplitude
-            )
-            self.netanal_tasks[task_key] = task
-            task.start()  # Start the QThread directly since NetworkAnalysisTask is now a QThread
-        except Exception as e:
-            print(f"Error in _start_next_amplitude_task: {e}")
-            traceback.print_exc()
+            if self.netanal_tasks.get(window_id) is futures:
+                self.netanal_tasks.pop(window_id)
+            if any(f.cancelled() for f in futures):
+                return
+            failed = [f.exception() for f in futures if f.exception() is not None]
+            if failed:
+                signals.error.emit(f"Network analysis failed: {failed[0]}")
+                return
+            # take_netanal returns one result per module, in the order asked.
+            for amp, per_module in namespace[result].items():
+                for m, r in zip(sum(banks, []), per_module):
+                    freqs, amps, phases = r['frequencies'], np.abs(r['iq_complex']), r['phase_degrees']
+                    signals.data_update.emit(m, freqs, amps, phases)
+                    signals.data_update_with_amp.emit(m, freqs, amps, phases, amp)
+            for m in modules:
+                signals.completed.emit(m)
+        for future in futures:
+            future.add_done_callback(finished)
 
     def _rerun_network_analysis(self, params: dict, source_panel=None):
         """
@@ -1410,20 +1345,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             for mod, pbar in window.progress_bars.items(): 
                 pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
-            selected_module_param = params.get('module') # Renamed
-            if selected_module_param is None: modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list): modules_to_run = selected_module_param
-            else: modules_to_run = [selected_module_param]
-            for task_key in list(self.netanal_tasks.keys()):
-                if task_key.startswith(f"{window_id}_"):
-                    task = self.netanal_tasks.pop(task_key); task.stop()
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
+            for future in self.netanal_tasks.pop(window_id, []):
+                future.cancel()
             if window.progress_group: window.progress_group.setVisible(True)
-            for mod_iter in modules_to_run: # Renamed
-                window.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+            self._run_network_analysis(window_id, params)
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()
@@ -1502,9 +1427,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         app.setFont(font)
         self.font_scale = scale
         settings.set_font_scale(scale)
-        # Force a relayout so existing widgets pick up the metrics
+        # Force a relayout so existing widgets pick up the metrics. The
+        # console widget shadows font() with a QFont property, so call the
+        # QWidget method explicitly.
         for widget in app.allWidgets():
-            widget.setFont(widget.font())
+            widget.setFont(QtWidgets.QWidget.font(widget))
         try:
             self.statusBar().showMessage(f"UI zoom: {scale*100:.0f}%", 2000)
         except Exception:
@@ -2288,12 +2215,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.interactive_session_action = QtGui.QAction("Interactive iPython &Session", self)
         self.interactive_session_action.setToolTip("Toggle an embedded iPython interactive session.")
         self.interactive_session_action.triggered.connect(self._toggle_interactive_session)
-        if not QTCONSOLE_AVAILABLE or self.crs is None:
+        if self.crs is None:
             self.interactive_session_action.setEnabled(False)
-            if not QTCONSOLE_AVAILABLE:
-                self.interactive_session_action.setToolTip("Interactive session disabled: qtconsole/ipykernel not installed.")
-            else:
-                self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
+            self.interactive_session_action.setToolTip("Interactive session disabled: CRS object not available.")
         jupyter_menu.addAction(self.interactive_session_action)
         
         # Jupyter Notebook panel

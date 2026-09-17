@@ -339,10 +339,6 @@ class NetworkAnalysisDialog(NetworkAnalysisDialogBase):
                     'max_span': float(eval(self.max_span_edit.text())) * 1e6, # Convert MHz to Hz
                     'clear_channels': self.clear_channels_cb.isChecked()
                 }
-                # Basic validation for frequency range
-                if params_dict['fmin'] >= params_dict['fmax']:
-                    QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                    return None
                 return params_dict
         except Exception as e:
             traceback.print_exc() # Log the full traceback for debugging
@@ -496,10 +492,6 @@ class NetworkAnalysisParamsDialog(NetworkAnalysisDialogBase):
                 'max_span': float(eval(self.max_span_edit.text())) * 1e6,
                 'clear_channels': self.clear_channels_cb.isChecked()
             })
-            # Basic validation for frequency range
-            if params_dict['fmin'] >= params_dict['fmax']:
-                QtWidgets.QMessageBox.warning(self, "Input Error", "Min Frequency must be less than Max Frequency.")
-                return None
             return params_dict
         except Exception as e:
             QtWidgets.QMessageBox.critical(self, "Error Parsing Parameters", f"Invalid parameter input: {str(e)}")

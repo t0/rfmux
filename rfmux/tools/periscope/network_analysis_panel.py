@@ -845,16 +845,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if not window_id:
             return
             
-        window_data = parent.netanal_windows[window_id]
-        
-        no_pending_amplitudes = True
-        for module in window_data['amplitude_queues']:
-            if window_data['amplitude_queues'][module]:
-                no_pending_amplitudes = False
-                break
-        
+        running = any(not f.done() for f in parent.netanal_tasks.get(window_id, []))
         all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
-        if all_complete and no_pending_amplitudes:
+        if all_complete and not running:
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):

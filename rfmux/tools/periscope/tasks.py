@@ -382,6 +382,7 @@ class CRSInitializeSignals(QObject):
 
 class NetworkAnalysisSignals(QObject):
     progress = pyqtSignal(int, float)
+    amplitude_started = pyqtSignal(int, int, int, float)  # module, index, count, amplitude
     data_update = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray)
     data_update_with_amp = pyqtSignal(int, np.ndarray, np.ndarray, np.ndarray, float)
     completed = pyqtSignal(int); error = pyqtSignal(str)
@@ -403,141 +404,6 @@ class DACScaleFetcher(QtCore.QThread):
             except Exception as e:
                 print(f"Error fetching DAC scale for module {module_idx}: {e}", file=sys.stderr) # Print to stderr
                 dac_scales[module_idx] = None
-
-class NetworkAnalysisTask(QtCore.QThread):
-    """QThread subclass for performing network analysis operations without blocking the GUI."""
-    def __init__(self, crs: "CRS", module: int, params: dict, signals: NetworkAnalysisSignals, amplitude=None):
-        super().__init__()
-        self.crs, self.module, self.params, self.signals = crs, module, params, signals
-        # DEFAULT_AMPLITUDE, NETANAL_UPDATE_INTERVAL from .utils
-        self.amplitude = amplitude if amplitude is not None else params.get('amp', DEFAULT_AMPLITUDE)
-        self._running, self._last_update_time = True, 0
-        self._update_interval = NETANAL_UPDATE_INTERVAL
-        self._task, self._loop = None, None
-
-    def stop(self):
-        """Stop the network analysis task and cancel any ongoing async operation."""
-        self._running = False
-        self.requestInterruption()
-
-    async def _cleanup_channels(self):
-        try:
-            # Direct approach to set amplitudes to zero without using async with
-            for j in range(1, 1024):
-                await self.crs.set_amplitude(0, channel=j, module=self.module)
-        except Exception as e:
-            print(f"Error in _cleanup_channels: {e}", file=sys.stderr)
-            pass
-
-    def run(self):
-        """QThread entry point - runs in a separate thread."""
-        # Create asyncio loop for this thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        try:
-            progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
-            task_params = self._extract_parameters()
-
-            # Setup phase: Clear channels and set cable length
-            if task_params['clear_channels'] and not self.isInterruptionRequested():
-                loop.run_until_complete(self.crs.clear_channels(module=self.module))
-
-            if not self.isInterruptionRequested():
-                loop.run_until_complete(self.crs.set_cable_length(length=task_params['cable_length'], module=self.module))
-
-            # Main analysis phase
-            if not self.isInterruptionRequested():
-                # Combine parameters for the take_netanal call
-                netanal_params = {
-                    'amp': self.amplitude,
-                    'fmin': task_params['fmin'],
-                    'fmax': task_params['fmax'],
-                    'nsamps': task_params['nsamps'],
-                    'npoints': task_params['npoints'],
-                    'max_chans': task_params['max_chans'],
-                    'max_span': task_params['max_span'],
-                    'module': self.module,
-                    'progress_callback': progress_cb,
-                    'data_callback': data_cb
-                }
-
-                # Process the network analysis asynchronously without blocking
-                result = loop.run_until_complete(self._process_network_analysis(loop, netanal_params))
-
-                # Process results if available and task wasn't interrupted
-                if not self.isInterruptionRequested() and result:
-                    fs_sorted, iq_sorted = result['frequencies'], result['iq_complex']
-                    phase_sorted, amp_sorted = result['phase_degrees'], np.abs(iq_sorted)
-                    self.signals.data_update.emit(self.module, fs_sorted, amp_sorted, phase_sorted)
-                    self.signals.data_update_with_amp.emit(self.module, fs_sorted, amp_sorted, phase_sorted, self.amplitude)
-                    self.signals.completed.emit(self.module)
-
-        except asyncio.CancelledError:
-            self.signals.error.emit(f"Analysis canceled for module {self.module}")
-            if loop.is_running():
-                loop.run_until_complete(self._cleanup_channels())
-        except KeyError as ke:
-            err_msg = f"KeyError accessing results for module {self.module}: {ke}. Expected 'frequencies', 'iq_complex', 'phase_degrees'."
-            print(f"ERROR: {err_msg}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            self.signals.error.emit(err_msg)
-        except Exception as e:
-            err_msg = f"Error processing results for module {self.module}: {type(e).__name__}: {e}"
-            print(f"ERROR: {err_msg}", file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            self.signals.error.emit(err_msg)
-        finally:
-            if loop.is_running():
-                loop.stop()
-            loop.close()
-
-    def _create_progress_callback(self):
-        return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
-
-    def _create_data_callback(self):
-        def data_cb(module_idx, freqs_raw, amps_raw, phases_raw): # Renamed module
-            if self._running:
-                sort_idx = np.argsort(freqs_raw)
-                freqs, amps, phases = freqs_raw[sort_idx], amps_raw[sort_idx], phases_raw[sort_idx]
-                current_time = time.time()
-                if current_time - self._last_update_time >= self._update_interval:
-                    self._last_update_time = current_time                    
-                self.signals.data_update.emit(module_idx, freqs, amps, phases)
-                self.signals.data_update_with_amp.emit(module_idx, freqs, amps, phases, self.amplitude)
-        return data_cb
-
-    def _extract_parameters(self):
-        # Constants from .utils
-        return {'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
-                'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
-                'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),
-                'cable_length': self.params.get('cable_length', DEFAULT_CABLE_LENGTH), 'clear_channels': self.params.get('clear_channels', True)}
-
-    async def _process_network_analysis(self, loop, netanal_params):
-        """Process a single network analysis operation asynchronously.
-
-        This method periodically yields control back to the event loop to keep the GUI responsive.
-        """
-        netanal_coro = self.crs.take_netanal(**netanal_params)
-        task = loop.create_task(netanal_coro)
-
-        # Check for interruption while the task is running
-        while not task.done():
-            if self.isInterruptionRequested():
-                task.cancel()
-                await asyncio.sleep(0.01)  # Give the cancellation a chance to process
-                return None
-            await asyncio.sleep(0.1)  # Short sleep to yield control back to the event loop - this is crucial for preventing GUI freezing
-
-        # Get the result when the task is done
-        if not task.cancelled():
-            try:
-                return await task
-            except Exception as e:
-                print(f"Error in _process_network_analysis: {e}", file=sys.stderr)
-                raise
-        return None
 
 class CRSInitializeTask(QRunnable):
     def __init__(self, crs: "CRS", module: int, irig_source: Any, clear_channels: bool, signals: CRSInitializeSignals):

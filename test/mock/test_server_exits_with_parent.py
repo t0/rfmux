@@ -32,7 +32,8 @@ def _alive(pid: int) -> bool:
 
 
 @pytest.mark.skipif(sys.platform == "win32",
-                    reason="a Windows child keeps its parent's pid on record")
+                    reason="the client is killed with SIGKILL, which Windows "
+                           "does not have")
 def test_a_server_exits_when_its_client_is_killed(tmp_path):
     # To a file: a server left behind would hold a pipe open.
     out = tmp_path / "client.out"

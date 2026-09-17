@@ -443,6 +443,10 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
 
     if reader.dual:
         raise ValueError(f"{reader.path}: already a dual file")
+    mode = reader.metadata.get("streamer_mode") or "slow"
+    if mode != "slow":
+        raise ValueError(f"{reader.path}: a {mode} capture; the recording "
+                         "merges into a slow capture as its fast stream")
     channels = list(reader.channels)
     # A key's module in the recording: its own, or the capture's; a
     # recording carries every module that streamed.
@@ -450,7 +454,7 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     fast_channels = [c for c in channels if where[c][1] <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
     # The slow capture's sample counts take the names a dual file gives
-    # them.  No engine ran on the recording, so there are none for fast.
+    # them.  No engine ran on the recording, so the fast stream has none.
     params = {(f"{k}_slow" if k in RATE_PARAMS else k): v
               for k, v in reader.metadata.items()}
     params.update(streamer_mode="both", sample_rate_fast=PFB_SAMPLING_FREQ,

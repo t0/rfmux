@@ -77,6 +77,7 @@ from .detection import (
     EDGE_LOOKBACK_FRACTION,
     HARD_STOP_RING_FRACTION,
     RATE_PARAMS,
+    SCALAR_PARAMS,
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
@@ -84,8 +85,8 @@ from .detection import (
 from . import walk
 from .channel_keys import describe
 from .events import (
-    EventGrouper, NoiseSampler, event_channels, pair_trigger_time)
-from ..streamer import epoch_to_utc
+    EventGrouper, NoiseSampler, event_channels, pair_trigger_time,
+    stamp_utc)
 from .analysis import (
     calibration_of,
     pulse_summary,
@@ -106,19 +107,7 @@ from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 #: Session-level settings that PulseCapture does not take -- trigger_basis,
 #: which is applied on the way in rather than by the engine -- go into
 #: capture_params directly instead, and are pinned by their own test.
-DETECTION_PARAMS = (
-    "threshold_sigma",
-    "end_sigma",
-    "pre_samples",
-    "post_samples",
-    "min_pulse_samples",
-    "trigger_samples",
-    "enable_pileup",
-    "min_end_samples",
-    "baseline_window",
-    "edge_lookback",
-    "max_capture_samples",
-)
+DETECTION_PARAMS = SCALAR_PARAMS + RATE_PARAMS
 
 
 class CaptureState(Enum):
@@ -188,7 +177,9 @@ class _EventHost(_CallbackHost):
     events: Optional[EventGrouper] = None
     noise: Optional[NoiseSampler] = None
     on_event: Optional[Callable] = None
+    time_origin_epoch: Optional[float] = None
     _dump_untriggered = False
+
 
     def _make_events(self, window_s: Optional[float], hold_s: float, *,
                      dump: bool, interval_s: float, noise_window_s: float,
@@ -217,15 +208,11 @@ class _EventHost(_CallbackHost):
         self.events.advance(now, settled)
 
     def _on_event(self, event: dict) -> None:
-        """An event closed: stamp it from the packet clock as a pulse
+        """An event closed.  Stamp it from the packet clock as a pulse
         is stamped, read the channels that did not trigger from the ring
         buffers if asked to, then write and announce it.  A noise sample
-        comes with every channel already, and its time is the moment it
-        was taken at."""
-        origin = getattr(self, "time_origin_epoch", None)
-        if origin is not None:
-            event["trigger_epoch"] = origin + float(event["trigger_time"])
-            event["trigger_utc"] = epoch_to_utc(event["trigger_epoch"])
+        comes with every channel already; its time is when it was taken."""
+        stamp_utc(event, self.time_origin_epoch)
         if (self._dump_untriggered and event["kind"] == "pulses"
                 and event["window"] is not None):
             triggered = set(event_channels(event))
@@ -492,8 +479,9 @@ class PulseCaptureConfig:
                    + self.post_pulse_samples(sample_rate))
 
     def times_ms(self) -> Dict[str, float]:
-        """The times a capture file records as they were asked for,
-        beside the sample counts they became at the stream's rate."""
+        """The times a capture file records in milliseconds, beside the
+        sample counts the engine ran with.  ``noise_train_ms`` is the span
+        in use, the derived one when none was set."""
         return {"pre_pulse_ms": self.pre_pulse_ms,
                 "post_pulse_ms": self.post_pulse_ms,
                 "min_pulse_ms": self.min_pulse_ms,
@@ -1388,12 +1376,7 @@ class PulseCaptureSession(_EventHost):
     def _on_engine_pulse(self, channel: int, pulse_idx: int,
                          pulse_data: dict) -> None:
         ns = self.noise_stats.get(channel)
-        if self.time_origin_epoch is not None:
-            trig = pulse_data.get("trigger_time")
-            if trig is not None and math.isfinite(trig):
-                epoch = self.time_origin_epoch + float(trig)
-                pulse_data["trigger_epoch"] = epoch
-                pulse_data["trigger_utc"] = epoch_to_utc(epoch)
+        stamp_utc(pulse_data, self.time_origin_epoch)
         summary = pulse_summary(pulse_data, ns, self.threshold_sigma)
 
         self.pulse_counts[channel] = self.pulse_counts.get(channel, 0) + 1
@@ -1840,8 +1823,7 @@ class DualPulseCaptureSession(_EventHost):
         # sample counts once per stream.
         capture_params = {
             "streamer_mode": "both",
-            "threshold_sigma": self.config.threshold_sigma,
-            "end_sigma": self.config.end_sigma,
+            **{name: getattr(self.slow, name) for name in SCALAR_PARAMS},
             **self.config.times_ms(),
             **({"coincidence_window_s":
                 self.config.coincidence_window_ms * 1e-3,
@@ -1849,11 +1831,8 @@ class DualPulseCaptureSession(_EventHost):
                 "noise_capture_interval_s":
                     self.config.noise_capture_interval_s}
                if self.events is not None else {}),
-            **({"noise_capture_window_s":
-                self.config.noise_capture_window_ms * 1e-3}
+            **({"noise_capture_window_s": self.noise.default_window_s}
                if self.noise is not None else {}),
-            "enable_pileup": self.config.enable_pileup,
-            "min_end_samples": self.config.min_end_samples,
             **{f"{name}_{stream}": getattr(session, name)
                for stream, session in (("slow", self.slow),
                                        ("fast", self.fast))

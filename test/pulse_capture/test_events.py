@@ -221,6 +221,13 @@ def test_events_across_modules_keep_their_channel_keys(tmp_path):
         event = r.get_event(1)
     assert [m["channel"] for m in event["members"]] == [(1, 5), (2, 5)]
     assert event["dumped"] == [(2, 6)]
+    import h5py
+    with h5py.File(path, "r") as f:
+        links = f["events/event_000001/pulses"]
+        assert sorted(links) == ["module_1_channel_5_pulse_000001",
+                                 "module_2_channel_5_pulse_000001"]
+        assert links["module_2_channel_5_pulse_000001"] \
+            == f["module_2/channel_5/pulse_000001"]
 
 
 def test_events_need_a_sample_rate():

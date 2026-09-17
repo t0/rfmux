@@ -46,8 +46,8 @@ class MockResonatorModel:
     #: Fraction of the edge frequency kept clear of targets at either
     #: end of the requested range, half a target spacing at most.
     RANGE_PAD = 0.01
-    #: Times a resonator's capacitor variation is drawn again for
-    #: landing outside the range, before it takes its target C.
+    #: Times a resonator's capacitor variation is drawn, while it lands
+    #: outside the range, before it takes its target C.
     RANGE_REDRAWS = 8
 
     def __init__(self, mock_crs):
@@ -421,12 +421,12 @@ class MockResonatorModel:
         # until the actual resonance frequency matches the target.
         print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
         
-        # Every resonator lands inside the requested range.  The targets
-        # keep RANGE_PAD of the edge frequency clear at either end, or
-        # half a target spacing when that is less (a dense array keeps
-        # its range), because the capacitor variation scatters each
-        # resonator about its target; one that still lands outside has
-        # its variation drawn again.
+        # Every resonator lands inside the requested range.  The
+        # capacitor variation scatters each resonator about its target,
+        # so the targets keep RANGE_PAD of the edge frequency clear at
+        # either end, or half a target spacing when that is less (a dense
+        # array keeps its range).  One that lands outside has its
+        # variation drawn again.
         f_min_bound = min(freq_start, freq_end)
         f_max_bound = max(freq_start, freq_end)
         span = f_max_bound - f_min_bound
@@ -434,14 +434,15 @@ class MockResonatorModel:
         target_lo = f_min_bound + min(self.RANGE_PAD * f_min_bound, half_spacing)
         target_hi = f_max_bound - min(self.RANGE_PAD * f_max_bound, half_spacing)
 
-        # Tolerance for frequency convergence: 0.1% of target, and well
-        # inside the padding when the range is narrow.
+        # Tolerance for frequency convergence: 0.1% of target, or half
+        # the padding when that is smaller (a narrow range or a dense
+        # array), so the target C itself lands inside the range.
         freq_tolerance_fraction = 0.001
         if span > 0:
             freq_tolerance_fraction = min(
                 freq_tolerance_fraction,
                 0.5 * (target_lo - f_min_bound) / f_max_bound)
-        max_c_iterations = 20  # Maximum iterations for C-finding
+        max_c_iterations = 40  # Maximum iterations for C-finding
         
         for x in range(num_resonances):
             if progress is not None:
@@ -540,8 +541,9 @@ class MockResonatorModel:
                     # Binary search: take geometric mean of bounds
                     C_current = np.sqrt(C_low * C_high)
                     
-                    # Safety: if bounds have collapsed, break
-                    if C_high / C_low < 1.001:
+                    # The bounds have collapsed inside the tolerance
+                    # (f goes as C to the -1/2).
+                    if C_high / C_low < 1 + freq_tolerance_fraction:
                         print(f"  Bounds collapsed after {iteration+1} iterations: f={actual_freq/1e9:.4f} GHz")
                         break
                 else:
@@ -564,6 +566,9 @@ class MockResonatorModel:
                     actual_freq = lekid.compute_fr()
                     if span == 0 or f_min_bound <= actual_freq <= f_max_bound:
                         break
+                else:
+                    print(f"  Warning: resonator {x} is outside the requested "
+                          f"range at {actual_freq/1e9:.6f} GHz")
 
                 print(f"  Actual frequency: {actual_freq/1e9:.4f} GHz")
                 print(f"  Circuit: C={lekid.C*1e12:.3f} pF, Cc={lekid.Cc*1e15:.2f} fF, Lg={lekid.Lg*1e9:.2f} nH, Lk={lekid.Lk*1e9:.2f} nH")

@@ -14,6 +14,7 @@ import numpy as np
 from rfmux import streamer
 from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession)
+from rfmux.pulse_capture.events import events_of
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
 from test.packet_helpers import stamp
@@ -54,7 +55,9 @@ def test_records_carry_the_decoded_trigger_time(tmp_path):
         assert meta["time_origin_epoch"] == day
     with PulseHDF5Reader(path) as r:
         rec = r.get_pulse(1, 1)
-    assert rec["trigger_utc"] == summ["trigger_utc"]
+        # Grouped afterwards, its event carries the same instant.
+        (event,) = events_of(r, window_s=0.005)
+    assert rec["trigger_utc"] == summ["trigger_utc"] == event["trigger_utc"]
 
 
 def test_a_noise_sample_carries_the_time_it_was_taken_at(tmp_path):

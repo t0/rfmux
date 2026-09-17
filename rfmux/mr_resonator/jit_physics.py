@@ -90,8 +90,7 @@ def bessel_i0(x):
 @jit(nopython=True, cache=True, fastmath=True)
 def bessel_k0(x):
     """Modified Bessel function K0 for x > 0 (Abramowitz & Stegun
-    9.8.5-9.8.6, absolute error below 1e-8 for x <= 2 and relative error
-    below 2e-7 above)."""
+    9.8.5-9.8.6, relative error below 2e-7 for all x)."""
     if x <= 2.0:
         t = (x / 2.0) ** 2
         poly = (-0.57721566 + t * (0.42278420 + t * (0.23069756

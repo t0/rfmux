@@ -8,11 +8,11 @@ developer laptop.
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
 | `pytest --tier=portable` | 51 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1227 | ~2 min | Default while editing. |
+| `pytest --tier=quick` | 1229 | ~2 min | Default while editing. |
 | `pytest --tier=acquisition` | 22 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1249 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 1251 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 1324 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 1326 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -129,6 +129,13 @@ provisioned read-only. Of the `.py` scripts beside the demos,
 (`test_measurement_flow.py`); `pulse_capture_flow.py` is not executed by any
 test, so run it by hand when its notebook changes.
 
+## Qt tests
+
+An autouse fixture in `test/conftest.py` turns the cyclic collector off while
+a test that uses `qt_app` runs, and calls `gc.collect(1)` on the main thread
+afterwards. A panel is a reference cycle. One freed during event dispatch, or
+on a worker thread, segfaults a later test.
+
 ## Platform skips
 
 A few tests skip on macOS or Windows because they pin platform behaviour:
@@ -141,7 +148,12 @@ extension was built. That needs Linux with clang, libxdp, libbpf and
 liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
 `test/tools/test_parser_dirfile.py` skips unless pygetdata is installed:
 it is a default dependency everywhere but Linux aarch64, which has no
-pygetdata wheel. With fastrx built and the test group installed, every tier below
+pygetdata wheel. Two tests skip on Windows:
+`test_mock_capture_and_parser_cover_the_same_stretch`, because
+`rfmux record` starts its parser as an asyncio subprocess, which the selector
+event loop used there does not support, and
+`test/mock/test_server_exits_with_parent.py`, which kills its client with
+`SIGKILL`. With fastrx built and the test group installed, every tier below
 `hardware` reports zero skips on Linux.
 
 ## CI

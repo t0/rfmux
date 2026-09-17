@@ -94,7 +94,7 @@ def test_dense_array_biases_each_resonator_on_its_own_dip():
     with contextlib.redirect_stdout(io.StringIO()):
         asyncio.run(crs.generate_resonators(
             {"num_resonances": 12, "freq_start": 1.30e9, "freq_end": 1.33e9,
-             # A scatter of 0.3 MHz, small against the 2.4 MHz spacing.
+             # A scatter of 0.3 MHz, small against the 2.5 MHz spacing.
              "C_variation": 5e-4,
              "resonator_random_seed": 7, "auto_bias_kids": False}))
     m = crs._resonator_model

@@ -185,6 +185,14 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   (cross-phase modulation of an instantaneous nonlinearity), from the
   states they last left
 - Reproducibility requires concrete `resonator_random_seed` in config
+- Every generated resonator lies inside [`freq_start`, `freq_end`]
+  (`RANGE_PAD`, `RANGE_REDRAWS` in `resonator_model.py`); a test array that
+  needs resolvable neighbours in a narrow range sets a small `C_variation`
+- The K0 and I0 fits in `jit_physics.py` are Abramowitz and Stegun, within
+  2e-7 for every argument; resonators above 5 GHz build
+- A mock server shuts down when the process that started it is gone
+  (`PARENT_POLL_S` in `rfmux/mock/server.py`), so a crashed client leaves
+  none behind
 
 ### Streaming
 - Slow stream: ~38 kHz at dec=0, halving per stage, port 9876, `ReadoutPacket`
@@ -200,6 +208,7 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   cannot leave the host. If multicast does not work on the machine it
   falls back to loopback unicast and prints which step failed
   (`check_multicast_loopback()` in `rfmux/streamer`)
+- A mock module with a tone but no NCO set streams with the NCO read as 0 Hz
 
 ### Threading
 - Periscope: Qt event loop + asyncio integration
@@ -223,9 +232,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1227 tests, ~2 min
+pytest --tier=quick                 # Edit loop: 1229 tests, ~2 min
 pytest --tier=portable              # No CRS, no GUI: 51 tests, ~9 s
-pytest --tier=full                  # All 1249 that run without a board, ~4 min
+pytest --tier=full                  # All 1251 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

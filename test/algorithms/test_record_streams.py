@@ -706,6 +706,10 @@ def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch
 # ── Against the simulator ──────────────────────────────────────────
 
 @pytest.mark.slow_acquisition
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="rfmux record starts its parser as an asyncio subprocess, which "
+           "the selector event loop used on Windows does not support")
 def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     """The real coordination: trigger_capture on the mock's slow stream
     and the parser as a subprocess, both products in the session, the

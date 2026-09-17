@@ -94,8 +94,8 @@ def test_a_reviewed_file_fills_the_template_tab(qt_app, tmp_path, panel):
 
 def test_autoscaling_the_template_fits_the_stacked_span(qt_app, tmp_path,
                                                         panel):
-    """The time grid runs to the hard stop; an autoscale fits the bins
-    that hold data, as the first draw does."""
+    """The time grid runs to half the ring buffer; an autoscale fits the
+    bins that hold data, as the first draw does."""
     panel.load_from_hdf5(_build_timed_capture_file(tmp_path))
     vb = panel.template_plot_i.getPlotItem().vb
     drawn = vb.viewRange()[0]

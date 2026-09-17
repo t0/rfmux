@@ -1,7 +1,7 @@
 """The Mattis-Bardeen conductivity rests on two modified Bessel
-functions; their fits hold over the whole argument range the mock
-reaches (hf/2kT from 0.01 at 300 mK and 100 MHz to 3.6 at 50 mK
-and 7.5 GHz), so a resonator above 5 GHz is as sound as one at 1 GHz."""
+functions.  Their fits hold over the argument range the mock reaches:
+hf/2kT from 0.01 (300 mK, 100 MHz) to 3.6 (50 mK, 7.5 GHz).  A resonator
+above 5 GHz builds with positive Lk, R and Q."""
 import asyncio
 import contextlib
 import io

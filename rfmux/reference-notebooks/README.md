@@ -21,10 +21,12 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
   resonators, bias the detectors, measure the noise. Everything else assumes
   you have done this first.
 - **`Demos/pulse_capture.md`**: detect and record detector pulses, with
-  streaming HDF5, histograms and matched slow+fast capture.
+  streaming HDF5, histograms and matched slow+fast capture, then a walk
+  through the capture file: events, noise samples, units and the tuning rows.
 
 Each has a `.py` counterpart beside it: the same sequence as a plain script,
-to copy from. Both notebooks and `simplified_tuning_flow.py` run in the
+to copy from. `pulse_capture_flow.py` covers the captures; the walk through
+the file is in the notebook only. Both notebooks and `simplified_tuning_flow.py` run in the
 acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
 changing its notebook.
 

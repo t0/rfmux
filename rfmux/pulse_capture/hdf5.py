@@ -140,7 +140,7 @@ class _PulseFileWriter:
 
     #: capture_params written to ``metadata``, grouped by attribute type.
     #: Must cover everything in
-    #: :data:`~.session.DETECTION_PARAMS` — a parameter
+    #: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
     #: missing here is dropped without complaint.
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
@@ -244,12 +244,16 @@ class _PulseFileWriter:
         """File one coincidence event under ``events/``::
 
             events/event_<k>/         kind, trigger_time, window_t0,
-                                      window_t1, trigger_epoch,
-                                      trigger_utc
+                                      window_t1; trigger_epoch and
+                                      trigger_utc once the packet
+                                      clock's day is known
                 members               rows of (channel, index), or of
                                       (module, channel, index)
                 trigger_times         one per member
-                pulses/<channel>_<pulse>   a soft link to each member
+                pulses/<channel group>_<pulse or pair>
+                                      a soft link to each member, the
+                                      group's "/" as "_"; empty for a
+                                      noise sample that holds no pulse
                 dump/<channel group>/Amp_I, Amp_Q, Time
                 dump/<channel group>/slow/...  and  .../fast/...
 
@@ -262,8 +266,8 @@ class _PulseFileWriter:
 
         ``pulses`` is for browsing: a generic HDF5 tool opens an event
         and finds its pulses there.  ``members`` is what the reader
-        uses, and it holds when a link's target is out of reach (an
-        event group copied into another file on its own).
+        uses; it stays valid when an event group is copied into another
+        file, where the links dangle.
         """
         if not self.is_open:
             return

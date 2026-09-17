@@ -26,6 +26,7 @@ import math
 import numpy as np
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
+from ..streamer import epoch_to_utc
 from .channel_keys import ChannelKey
 
 #: One pulse as the grouping sees it.
@@ -52,6 +53,18 @@ def pair_trigger_time(pair: dict) -> float:
                                          pair.get("fast_summary"))
              if s and s.get("trigger_time") is not None]
     return float(min(times)) if times else float("nan")
+
+
+def stamp_utc(record: dict, origin_epoch: Optional[float]) -> None:
+    """Give *record* its ``trigger_time`` as ``trigger_epoch``, seconds
+    since 1970, and ``trigger_utc``, an ISO string.  *origin_epoch* is
+    midnight of the packet clock's day; nothing is written until it is
+    known, or for a time that is not finite."""
+    trig = record.get("trigger_time")
+    if origin_epoch is None or trig is None or not math.isfinite(trig):
+        return
+    record["trigger_epoch"] = float(origin_epoch) + float(trig)
+    record["trigger_utc"] = epoch_to_utc(record["trigger_epoch"])
 
 
 def events_from_triggers(triggers: Iterable[Trigger],
@@ -360,4 +373,7 @@ def events_of(reader, window_s: Optional[float] = None,
                      channel, int(meta["pulse_idx"]))
                     for channel in reader.channels
                     for meta in reader.iter_pulse_metadata(channel, stream)]
-    return events_from_triggers(triggers, window_s or 0.0)
+    events = events_from_triggers(triggers, window_s or 0.0)
+    for event in events:
+        stamp_utc(event, reader.metadata.get("time_origin_epoch"))
+    return events

@@ -277,10 +277,10 @@ It appears in the list that long after its first trigger.
 
 A **noise sample** is listed among the events with the UTC time it was
 taken at and every channel beneath it. A pulse that happened to fall inside
-it is listed too; the sample was taken regardless. Double-click it to draw all its channels, or one of
-its channels for that channel alone. Follow latest passes over noise
-samples. With the coincidence window off and noise samples on, the only
-events are the noise samples.
+it is listed too; the sample was taken regardless. Double-click it to draw
+all its channels, or one of its channels for that channel alone. Follow
+latest passes over noise samples. With the coincidence window off and noise
+samples on, the only events are the noise samples.
 
 From a script the events are on the result and in the file:
 
@@ -304,28 +304,11 @@ with PulseHDF5Reader("capture.h5") as r:
 every channel, and its `members` the pulses inside its window, often
 none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
 
-The file's `metadata` records the capture's times in milliseconds and the
-sample counts they became at the stream's rate, once per stream in a
-both-mode file (`pre_samples_slow`, `pre_samples_fast`). With noise samples
-on it also records `noise_capture_window_s`, a sample's length until five
-records have been saved; each sample's own span is on its event.
-
-In the file, `events/event_<k>` (the number zero-padded to six digits)
-holds `kind`, `members`, `trigger_times`, the window, `trigger_utc` and
-`trigger_epoch` (the first trigger, or the moment a noise sample was taken,
-from the packet clock), `pulses/` and `dump/`. `pulses/` holds a soft link
-to each member, so a generic HDF5 tool opens an event and finds its pulses:
-`h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses`. In a
-both-mode file the links point at the pairs. A
-`members` row is a channel and a pulse index, with the module first for a
-run across modules. `dump/channel_<n>` holds one channel saved without a
-trigger, a dumped channel. In a both-mode file a member's index is a pair
-under `matched/`, and a dumped channel holds `slow/` and `fast/` windows.
-`result.events` has the same shape, with `slow_tod` and `fast_tod` under
-each dumped channel. A slow capture
-that `rfmux record` merges with its 100G recording becomes such a file:
-its events carry over, and each dumped channel gains the recording over
-the event's window.
+`result.events` has the file's shape, with `slow_tod` and `fast_tod` under
+each dumped channel in both mode. A slow capture that `rfmux record` merges
+with its 100G recording becomes a both-mode file: its events carry over, and
+each dumped channel gains the recording over the event's window. The layout
+of `events/` is under [File layout](#file-layout).
 
 ## Fast and dual-stream captures
 
@@ -357,6 +340,105 @@ every simulated detector at startup.
 
 The screenshots in this guide are frequency-basis captures: the axes are df
 and dissipation, and the amplitudes are in hertz.
+
+## File layout
+
+A capture file is plain HDF5. `PulseHDF5Reader` reads it without the paths;
+`h5py`, `h5ls` and HDFView read it with them. Times are packet seconds of
+day. Numbered groups are zero-padded to six digits.
+
+```
+metadata/                      attributes only
+channel_<n>/                   one per channel
+  noise_training               the tail of the noise training record
+  tuning/                      the channel's tuning row, when it has one
+  pulse_<k>/
+    Amp_I, Amp_Q, Time         the saved window, in the channel's stored units
+events/                        when the capture recorded events
+  event_<k>/
+    members, trigger_times
+    pulses/                    a soft link to each member
+    dump/channel_<n>/          Amp_I, Amp_Q, Time
+histograms/
+templates/
+```
+
+A run across modules nests each channel as `module_<m>/channel_<n>`, here
+and under `dump/`, and a `members` row then starts with the module.
+
+**`metadata`** holds `streamer_mode`, `module`, `channels`, the sample rate
+(`sample_rate_slow` or `sample_rate_fast`), `stored_units`, `trigger_basis`,
+`volts_per_count`, `slow_time_offset_s`, `capture_start` and `capture_end`.
+`time_origin_epoch` and `time_origin_utc` are midnight of the packet clock's
+day. A capture configured through `PulseCaptureConfig` records its times in
+milliseconds (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`,
+`max_pulse_ms`, `noise_train_ms`) beside the sample counts the engine ran
+with (`pre_samples`, `post_samples`, `min_pulse_samples`, `trigger_samples`,
+`baseline_window`, `edge_lookback`, `max_capture_samples`), with
+`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`. With
+events on it records `coincidence_window_s` and `dump_all_channels`. With
+noise samples on it records `noise_capture_interval_s` and
+`noise_capture_window_s`, the length of a noise sample until five pulse
+records have been saved. Each sample's own span is on its event.
+
+**A channel group** carries `pulse_count`, `stored_units` and the trained
+noise: `noise_mean_I`, `noise_mean_Q`, `noise_std_I`, `noise_std_Q`, and
+`noise_jump_std_I` and `noise_jump_std_Q` (0 when not measured). `tuning/`
+holds the row's scalars as attributes (`df_calibration` among them), its
+arrays as datasets, and its mappings as JSON attributes named in
+`json_fields`.
+
+**A pulse group** carries, beside its samples:
+
+- `timestamp` (the first saved sample), `n_samples`, `pileup`, `truncated`;
+- the trigger: `trigger_time`, `trigger_index`, `trigger_quad`,
+  `trigger_baseline_I/Q`, `trigger_sigma_I/Q`, and `trigger_epoch` and
+  `trigger_utc` once the packet clock's day is known;
+- the end: `below_threshold_index/time` (the drop below threshold, which
+  feeds the decay constant), `settled_index/time` (absent after a hard
+  stop), `end_index/time`, `end_baseline_I/Q`, `end_confirm_samples`,
+  `end_confirm_target`;
+- the summary: `peak_I`, `peak_Q`, `peak_amp`, `snr`, `peak_snr_I`,
+  `peak_snr_Q`, `duration_s`, `tau_s`, and the `threshold_sigma` and
+  `end_sigma` in force.
+
+**An event group** carries `kind` (`"pulses"` or `"noise"`), `trigger_time`
+(the first trigger, or the moment a noise sample was taken), `trigger_epoch`
+and `trigger_utc`, and the saved span `window_t0` and `window_t1`. A
+`members` row is a channel and a pulse index. `pulses/` links to the same
+pulses, so a generic tool opens an event and finds them:
+
+    h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses
+
+`dump/channel_<n>` holds one channel saved without a trigger, a dumped
+channel. A noise sample dumps every channel, and its `members` are often
+empty. The reader works from `members`; the links are for browsing.
+
+**`histograms`** holds, per metric (`amplitude_i`, `amplitude_q`, `snr`,
+`duration_ms`, `tau_ms`, and for calibrated channels `amplitude_raw_i` and
+`amplitude_raw_q` in volts), `<metric>_edges`, `<metric>_bins` and one
+`<metric>_counts_ch<n>` per channel. **`templates`** holds, per channel,
+`time_s_`, `template_I_`, `template_Q_`, `residual_I_`, `residual_Q_` and
+`counts_` on one time grid, and the scalars `n_pulses_`, `pre_samples_` and
+`post_samples_`. Across modules the suffix is `m<m>ch<n>`.
+
+**A both-mode file**, and a file `rfmux record` merged with its 100G
+recording, has `layout = "dual"` and `streamer_mode = "both"` in its
+metadata, both sample rates, `fast_channels`, and the sample counts once per
+stream: `pre_samples_slow`, `pre_samples_fast` and so on. A merged file has
+the `_slow` counts only, since no engine ran on the recording.
+
+```
+slow/channel_<n>/ ...          each as a channel group above
+fast/channel_<n>/ ...
+matched/channel_<n>/pair_<k>/  slow_idx, fast_idx (-1 for a one-sided pair),
+                               time_offset, window_t0, window_t1, and
+                               slow_tod_* and fast_tod_* over that window
+events/event_<k>/              a member's index is a pair; pulses/ links to
+                               the pairs; dump/channel_<n>/slow/ and fast/
+histograms/slow/, histograms/fast/
+templates/slow/,  templates/fast/
+```
 
 ## From a script
 

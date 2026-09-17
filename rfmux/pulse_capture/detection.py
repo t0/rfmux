@@ -71,9 +71,17 @@ BUFFER_SAFETY: float = 1.5
 #: that pulse.
 HARD_STOP_RING_FRACTION: float = 0.8
 
-#: The detection parameters that are sample counts, and so differ
-#: between the streams of a dual capture: its file records each as
-#: ``<name>_slow`` and ``<name>_fast``.
+#: The detection parameters that are the same at any stream rate.
+SCALAR_PARAMS = (
+    "threshold_sigma",
+    "end_sigma",
+    "enable_pileup",
+    "min_end_samples",
+)
+
+#: The detection parameters that are sample counts derived from the
+#: stream rate, and so differ between the streams of a dual capture:
+#: its file records each as ``<name>_slow`` and ``<name>_fast``.
 RATE_PARAMS = (
     "pre_samples",
     "post_samples",

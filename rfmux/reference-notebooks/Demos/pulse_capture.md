@@ -741,8 +741,12 @@ with h5py.File(CAPTURE_FILE, "r") as f:
     print("\nmetadata:")
     for key, value in sorted(f["metadata"].attrs.items()):
         print(f"  {key:<26} {value}")
-    print("\none pulse's attributes:")
-    for key, value in sorted(f["channel_1/pulse_000001"].attrs.items()):
+    # The first channel that caught a pulse: a short capture can leave one
+    # without any.
+    first = next(f"{name}/pulse_000001" for name in f
+                 if name.startswith("channel_") and "pulse_000001" in f[name])
+    print(f"\nthe attributes of {first}:")
+    for key, value in sorted(f[first].attrs.items()):
         print(f"  {key:<26} {value}")
     # The walk above does not follow links, so it lists each pulse once.
     print("\none event's links to its pulses:")
@@ -760,12 +764,14 @@ an event and finds them there:
 
     h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses
 
+The pulse capture guide lists every group and attribute under "File layout".
 `PulseHDF5Reader` reads the same things without the paths:
 
 ```python
 reader = PulseHDF5Reader(CAPTURE_FILE)
-ch = CHANNELS[0]
-PULSE = 3        # the first pulse of a capture can arrive before the
+ch = max(CHANNELS, key=reader.pulse_count)    # the channel with most pulses
+PULSE = min(3, reader.pulse_count(ch))
+                 # the first pulse of a capture can arrive before the
                  # buffer holds a full pre-pulse span
 pulse = reader.get_pulse(ch, PULSE)
 print("a pulse:", sorted(pulse))

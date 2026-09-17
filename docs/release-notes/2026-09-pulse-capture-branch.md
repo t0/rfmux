@@ -38,7 +38,8 @@ simulator files are unchanged in meaning.
   trigger_basis)`: one-shot capture in slow, fast or both modes. `tuning`
   is `{channel: row}`, each row a `bias_kids` entry (`tuning_rows` in
   `rfmux.algorithms.measurement.df_calibration` keys an output by channel;
-  `measure_df_calibrations` returns rows holding just the calibration).
+  `measure_df_calibrations` returns rows of the same shape: the
+  calibration, the sweep it was read from and the fit).
 - The result carries the pulses per channel, the pairs and the per-stream
   results; with `hdf5_path` the same content is written as the capture runs.
 - Noise training before every capture: the threshold is `threshold_sigma`
@@ -100,7 +101,9 @@ simulator files are unchanged in meaning.
   `packets_missing` counter that counts packets rather than gaps.
 - `rfmux.core.transferfunctions`: `PFB_NYQUIST_FREQ` beside the existing
   `PFB_SAMPLING_FREQ`, stated as not a rate; the CIC parameters as constants;
-  `decimated_stream_delay_s`, `sampling_to_decimation`, `apply_iq_conversion`.
+  `decimated_stream_delay_s`, `sampling_to_decimation`, `apply_iq_conversion`;
+  `convert_amplitude_to_dbm` and `convert_dbm_to_amplitude` against a module's
+  DAC scale.
 - Periscope: app-wide zoom (Ctrl+, Ctrl-, Ctrl+0, persisted); flow-layout
   toolbars that wrap to a laptop width; a framed progress window for large
   mock builds; the mock's df calibrations measured at startup.
@@ -118,7 +121,8 @@ Old values are main at the merge base (e46fc41).
   non-existent `.[dev]` extra, selecting `-m portable` instead of `-k offline`.
 - h5py: undeclared to a runtime dependency. jupytext: dependency group to
   runtime dependency (it ships the JupyterLab plugin that opens `.md`
-  notebooks).
+  notebooks). pygetdata: the `dirfile` extra to a runtime dependency, except
+  on Linux aarch64, which has no wheel.
 - Multisweep result: `df_calibration` was the slope of a cubic spline through
   the raw sweep at the bias point, with `iq_complex_volts` and
   `calibrated_tod_df` beside it; the entries carry none of the three, and
@@ -204,22 +208,34 @@ Old values are main at the merge base (e46fc41).
   `--post-pulse-ms`.
 - Noise samples: `noise_capture_interval_s` on `PulseCaptureConfig`,
   `events.NoiseSampler` for the schedule (normally distributed waits), events
-  of `kind` `"noise"` holding every channel, each event stamped with
-  `trigger_utc` and `trigger_epoch` as a pulse is, **Noise sample every (s)**
-  in Settings and `--noise-capture-interval-s` on `rfmux record`.
+  of `kind` `"noise"` holding every channel. **Noise sample every (s)** in
+  Settings; `--noise-capture-interval-s` on `rfmux record`.
+- Every event, noise samples included, carries `trigger_utc` and
+  `trigger_epoch` as a pulse does, once the packet clock's day is known
+  (`events.stamp_utc`). `events_of` stamps the events it groups afterwards.
 - A Units change converts the traces of a both-mode pair in the Pulse
   View, not only the axis labels. Noise bands are projected onto the viewed
   axes rather than scaled (`analysis.project_noise_stats`).
 - `events/event_<k>/pulses/` holds a soft link to each member pulse, or pair
   in a both-mode or merged file, for browsing with `h5ls` or HDFView. The
   reader uses `members`.
-- File metadata: every capture file records its times in milliseconds
-  (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`, `max_pulse_ms`,
-  `noise_train_ms`) and the sample counts they became (`detection.RATE_PARAMS`:
-  `pre_samples`, `post_samples`, `max_capture_samples` and the rest). A
-  both-mode or merged file names the counts per stream, `pre_samples_slow`
-  and `pre_samples_fast`. `noise_capture_window_s` is the length of a noise
-  sample until five records have been saved.
+- File metadata: a capture configured through `PulseCaptureConfig` records
+  its times in milliseconds (`PulseCaptureConfig.times_ms`: `pre_pulse_ms`,
+  `post_pulse_ms`, `min_pulse_ms`, `max_pulse_ms`, `noise_train_ms`) and the
+  sample counts the engine ran with (the seven names in
+  `detection.RATE_PARAMS`, `pre_samples` to `max_capture_samples`). A
+  both-mode file names the counts per stream, `pre_samples_slow` and
+  `pre_samples_fast`. A merged file has the `_slow` names only, since no
+  engine ran on the recording. `noise_capture_window_s` is the length of a
+  noise sample until five records have been saved.
+  `DETECTION_PARAMS` is `SCALAR_PARAMS + RATE_PARAMS`.
+- Headless helpers: `rfmux.pulse_capture.events` has `EventGrouper`,
+  `group_by_trigger`, `events_of`, `events_from_triggers`,
+  `pair_trigger_time`, `event_counts`, `lean_event` and `stamp_utc`;
+  `analysis` has `baseline_level` and `project_noise_stats`;
+  `PulseCaptureConfig.from_dict` and `times_ms`; `PulseCapture.MIN_PRE_SAMPLES`.
+- `merge_fastrx` refuses a fast capture: the recording merges into a slow
+  capture as its fast stream.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
   trigger to `post_pulse_ms` after the settled sample, or to the hard stop.
   The settled sample is the first of the in-band run that the end
@@ -378,6 +394,22 @@ Bugs present on main, with the symptom.
   it.
 - The unimported copy of the mock defaults, `rfmux/core/mock_config.py`, was
   13 keys behind and wrong on five values; deleted.
+- Resonances added by double-click in the Network Analysis panel were
+  appended out of order, so multisweep assigned channels out of frequency
+  order; the panel keeps them sorted by frequency.
+- The main window's minimum width was set by the status bar's one-line text;
+  the status text wraps.
+- A warning or error dialog left no trace once dismissed; every one is also
+  printed to the console.
+- Simulator: a tone on a module whose NCO had not been set stopped that
+  module's slow stream; an unset NCO reads as 0 Hz and the stream continues.
+- Simulator: the K0 and I0 fits behind the Mattis-Bardeen conductivity were
+  wrong (K0 3% low at hf/2kT = 0.2, negative from 1 to 2), so no resonator
+  above 5 GHz at 120 mK built. They are the Abramowitz and Stegun fits,
+  within 2e-7 of scipy.
+- A mock server outlived a client that crashed or was killed, holding about
+  300 MB and its ports; the server checks once a second (`PARENT_POLL_S`)
+  that the process that started it is alive, and shuts down when it is not.
 
 ## Simulator
 
@@ -407,6 +439,14 @@ Bugs present on main, with the symptom.
 - The mock writes 0-indexed PFB slot fields, as the board does.
 - `physics_batch_mode="reference"` keeps the per-sample loop selectable.
 - `_auto_bias_kids` biases module 1 only, so a mock streams tones on module 1.
+- Every generated resonator lies inside [`freq_start`, `freq_end`]. Targets
+  keep `RANGE_PAD` (1%) of the edge frequency clear at each end, half a
+  target spacing at most, and a resonator that lands outside has its
+  capacitor variation drawn again, `RANGE_REDRAWS` times at most. The
+  capacitance search converges to half the padding. Positions for a given
+  seed differ from earlier releases.
+- Qi at the defaults went from 8.74e6 to 8.48e6 with the Bessel fits (R rises
+  3%, 26% at 50 mK). Values from earlier releases are not comparable.
 
 ## Periscope
 
@@ -440,6 +480,13 @@ The Pulse Capture panel is described in the how-to. Beyond it:
 - The Jupyter panel passes `RFMUX_CRS_HOSTNAME` and `RFMUX_CRS_SERIAL` to the
   kernel so a notebook attaches to the board Periscope is on.
 - Mock mode is `periscope MOCK` or the startup dialog's mock connection.
+- A double-click autoscales any plot to its data. A panel that uses the
+  double-click itself keeps it.
+- A **no trigger** row fills the Pulse View and IQ Plane; the views name the
+  channel's bias frequency; a line under the status reports the most active
+  channel and the coincident pulses.
+- Template tab: the mean and its band are drawn over the bins that hold data,
+  so an autoscale fits the stacked span rather than the whole time grid.
 
 ## Algorithms and calibration
 
@@ -539,7 +586,8 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   export. `trigger_capture` gained
   `on_noise=` for that. After the run it lists the channels that
   triggered, merges the recording into the pulse file as its fast
-  stream (`--no-merge-fastrx`; `rfmux fastrx merge` for an older run)
+  stream and renames it to end in `_100G` (`--no-merge-fastrx`;
+  `rfmux fastrx merge` for an older run)
   and opens Periscope in review mode on the file (`--show overlay` for
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording

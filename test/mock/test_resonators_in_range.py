@@ -34,6 +34,15 @@ def test_a_large_capacitor_variation_stays_in_range():
     assert np.all((f >= 1.0e9) & (f <= 1.5e9)), f
 
 
+def test_a_dense_array_stays_in_range():
+    """Three hundred in 100 MHz: the padding is a sixth of a megahertz,
+    and the capacitance search has to land inside it."""
+    f = _frequencies(freq_start=1.0e9, freq_end=1.1e9, num_resonances=300,
+                     resonator_random_seed=0)
+    assert len(f) == 300
+    assert np.all((f >= 1.0e9) & (f <= 1.1e9))
+
+
 def test_the_resonators_still_span_the_range():
     f = _frequencies(freq_start=1.0e9, freq_end=1.5e9, num_resonances=6,
                      resonator_random_seed=0)

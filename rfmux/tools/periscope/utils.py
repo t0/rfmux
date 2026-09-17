@@ -457,8 +457,9 @@ class _PopupEcho(QtCore.QObject):
                 and isinstance(obj, QtWidgets.QMessageBox)
                 and obj.icon() in self._LEVELS):
             parts = [obj.text(), obj.informativeText(), obj.detailedText()]
-            print(f"[Periscope] {self._LEVELS[obj.icon()]}: "
-                  f"{obj.windowTitle()}: "
+            # macOS message boxes have no title, and Qt reports none.
+            head = [self._LEVELS[obj.icon()], obj.windowTitle()]
+            print("[Periscope] " + ": ".join(h for h in head if h) + ": "
                   + "\n".join(part for part in parts if part),
                   file=sys.stderr, flush=True)
         return False

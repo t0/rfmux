@@ -449,7 +449,7 @@ def test_a_merged_files_events_link_to_its_pairs(tmp_path):
         links = f["events/event_000001/pulses"]
         (name,) = links
         assert links.get(name, getlink=True).path.startswith("/matched/")
-        assert "slow_tod_Amp_I" in links[name] or "slow_idx" in links[name].attrs
+        assert links[name] == f[links.get(name, getlink=True).path]
 
 
 def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
@@ -533,6 +533,25 @@ def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
         assert not r.dual
     with PulseHDF5Reader(out) as r:
         assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
+
+
+def test_a_fast_capture_is_refused(tmp_path):
+    """The recording merges in as the fast stream of a slow capture."""
+    path = tmp_path / "fast.h5"
+    s = PulseCaptureSession(channels=[CHANNEL], module=1, sample_rate=FS,
+                            streamer_mode="fast", hdf5_path=path,
+                            **PulseCaptureConfig(
+                                max_pulse_ms=30.0,
+                                noise_train_ms=300.0).session_kwargs(FS))
+    s.start()
+    rng = np.random.default_rng(5)
+    n = int(0.5 * FS)
+    s.feed_block(CHANNEL, rng.normal(0, 1, n), rng.normal(0, 1, n),
+                 T0 + np.arange(n) / FS)
+    s.stop()
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    with pytest.raises(ValueError, match="a fast capture"):
+        merge_fastrx(str(path), fx)
 
 
 def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(tmp_path):

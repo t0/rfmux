@@ -68,6 +68,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.samples_taken = False
         self.noise_data = {}
         self.spectrum_noise_data = {}
+        self.result_name = None  # The session name this panel's data is bound to
 
         self.debug_noise_data = {}
         self.debug_phase_data = []
@@ -638,7 +639,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         if num_amplitudes > 0:
             # Initial message showing what's about to happen
-            # When sweep_direction is "both", MultisweepTask does upward first
+            # When sweep_direction is "both", the launcher runs upward first
             # Normalize sweep_direction to handle potential case or whitespace issues
             sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
             
@@ -732,55 +733,29 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # When fitting is completed, just show the base text
             self.current_amp_label.setText(base_text)
         
-    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
-        """
-        Receives final data for a completed iteration of a multisweep for the target module.
-        Stores the data for plotting and updates the CF history.
-
-        Args:
-            module (int): The module reporting data.
-            iteration (int): The current iteration index.
-            amplitude (float): The probe amplitude for which data is provided.
-            direction (str): The sweep direction ("upward" or "downward").
-            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
-            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
-        """
-        if module != self.target_module: return
-        
-        self.current_amplitude_being_processed = amplitude
-        self.current_iteration_being_processed = iteration
-
-        
-        # Store data in detector-based structure, keyed by iteration index.
-        # The amplitude and direction are stored inside each entry, not as keys,
-        # so that all detectors share the same iteration indices even if they
-        # use different amplitudes in the future.
-        if results_for_plotting:
-            for detector_id, det_data in results_for_plotting.items():
-                if detector_id not in self.results_by_detector:
-                    self.results_by_detector[detector_id] = {}
+    def set_result(self, value: dict):
+        """Derive the panel's view from its named result,
+        ``{(amplitude, direction): {detector: entry}}`` in the order swept.
+        The panel holds no data of its own beyond this derivation."""
+        self.results_by_detector = {}
+        self.last_output_cfs_by_amp_and_conceptual_idx = {}
+        for iteration, ((amplitude, direction), results) in enumerate(value.items()):
+            self.current_amplitude_being_processed = amplitude
+            self.current_iteration_being_processed = iteration
+            for detector, det_data in results.items():
+                if not isinstance(detector, (int, np.integer)):
+                    continue
                 entry = dict(det_data)
-                entry['amplitude'] = amplitude
-                entry['direction'] = direction
-                entry['iteration'] = iteration
-                self.results_by_detector[detector_id][iteration] = entry
-
-        # --- Update CF history using the pre-mapped results_for_history ---
-        if results_for_history:
-            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
-
-        # Invalidate digest panel so it gets recreated with fresh data
-        # (the panel takes a snapshot at creation time and doesn't track live changes)
-        if self.digest_panel is not None:
-            self.digest_panel = None
-        
-        # Invalidate histogram cache so plots reflect the latest iteration
+                entry.update(amplitude=amplitude, direction=direction, iteration=iteration)
+                self.results_by_detector.setdefault(detector, {})[iteration] = entry
+                bias = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+                if bias is not None:
+                    self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {})[detector - 1] = bias
+        # The digest snapshots the data at creation and the histograms cache it.
+        self.digest_panel = None
         if self.histogram_panel is not None:
             self.histogram_panel.histogram_cache.clear()
-        
-        self._redraw_plots() # Refresh plots with the new data
-        
-        # Note: We now update the status in handle_starting_iteration() instead of here
+        self._redraw_plots()
 
     def _redraw_plots(self):
         """
@@ -1120,13 +1095,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # If we have a parent, look for multisweep tasks related to this window
         window_has_active_tasks = False
         
-        # If parent has multisweep_tasks, check if any are for this window
-        if hasattr(parent, 'multisweep_tasks'):
-            for task_key, task in parent.multisweep_tasks.items(): # type: ignore
-                if hasattr(task, 'target_window') and task.target_window == self:
-                    if not task.is_completed():
-                        window_has_active_tasks = True
-                        break
+        for run in getattr(parent, 'multisweep_tasks', {}).values():
+            if run['window'] is self and any(not f.done() for f in run['futures']):
+                window_has_active_tasks = True
+                break
                         
         # Hide the progress group if there are no active tasks and progress is at 100%
         if not window_has_active_tasks and self.progress_bar.value() == 100:
@@ -1207,8 +1179,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             spectrum_data = None 
             
+        periscope = self._get_periscope_parent()
+        namespace = periscope.session_namespace() if periscope else {}
         return {
             'timestamp': datetime.datetime.now().isoformat(),
+            'name': self.result_name,
+            'result': namespace.get(self.result_name),
+            'cells': list(getattr(periscope, 'session_cells', {}).get(self.result_name, [])),
             'target_module': self.target_module,
             'initial_parameters': self.initial_params,
             'dac_scales_used': self.dac_scales,
@@ -1330,7 +1307,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 
             # --- Determine the final input CFs for the new sweep task ---
-            # This list will be passed to the MultisweepTask as its baseline.
+            # This list will be the baseline of the first sweep cell.
             # The task itself will then refine this per amplitude.
             final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
 
@@ -1367,9 +1344,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # linger in initial_params.
             if new_params_from_dialog.get('use_fit_frequencies') and fit_table \
                     and new_amps_for_this_run:
-                from .tasks import fit_frequencies_for
-                final_baseline_cfs_for_new_task = fit_frequencies_for(
-                    new_amps_for_this_run[0], fit_table)
+                nearest = min(fit_table, key=lambda a: abs(a - new_amps_for_this_run[0]))
+                final_baseline_cfs_for_new_task = list(fit_table[nearest])
                 new_params_from_dialog['fit_frequencies_by_amp'] = fit_table
             else:
                 new_params_from_dialog['fit_frequencies_by_amp'] = None
@@ -1568,24 +1544,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             params = noise_dialog.get_parameters()
             self._get_spectrum(params)
 
-    def _set_decimation(self, crs, decimation):
-        print("Setting decimation to", decimation)
-
-        if decimation > 4:
-            asyncio.run(crs.set_decimation(decimation , short = False))
-        elif decimation == 4:
-            asyncio.run(crs.set_decimation(decimation , module = self.target_module, short = False))
-        else:
-            
-            asyncio.run(crs.set_decimation(decimation, module = self.target_module, short = True))
-
     def _get_spectrum(self, params, use_loaded_noise = False):
         """Acquire or load a noise spectrum and open the NoiseSpectrumPanel.
 
         When *use_loaded_noise* is ``True`` the method expects pre-collected
         data inside *params* (keys ``noise_parameters`` and ``data``) and
-        simply opens the panel.  Otherwise it drives the CRS to collect slow
-        and (optionally) PFB spectrum data, stores the results in
+        simply opens the panel.  Otherwise it runs ``take_noise_spectrum`` as a
+        session cell for the panel's channels, stores the results in
         ``self.spectrum_noise_data``, emits the ``data_ready`` signal for
         session auto-export, and opens the panel.
 
@@ -1602,169 +1567,43 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._open_noise_spectrum_panel(1)
         else:
             periscope = self._get_periscope_parent()
-            if not periscope or periscope.crs is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+            if not periscope or periscope.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            
-            crs = periscope.crs
-    
-            time_taken = params['time_taken']
-            pfb_enabled = params['pfb_enabled']
-            
-            if pfb_enabled:
-                pfb_time_taken = params['pfb_time']
-            else:
-                pfb_time_taken = 0
-                
-            t = time.time() + time_taken + pfb_time_taken
-            formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
-            # Show a progress dialog
-            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated Completion Time {formatted_time}", None, 0, 0, self)
-            progress.setWindowTitle("Please wait")
-            progress.setCancelButton(None)
-            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress.show()
-            
-            QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor)
-    
-            try:
-                decimation = params['decimation']
-                num_samples = params['num_samples']
-                num_segments = params['num_segments']
-                reference = params['reference']
-                spec_lim = params['spectrum_limit']
-                module = self.target_module
-                curr_decimation = asyncio.run(crs.get_decimation())
-    
-                if pfb_enabled:
-                    overlap = params['overlap']
-                    pfb_samples = params['pfb_samples']
-        
-                if curr_decimation != decimation:
-                    self._set_decimation(crs, decimation)
-        
-                spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                                return_spectrum=True, 
-                                                                scaling='psd', 
-                                                                reference=reference, 
-                                                                nsegments=num_segments, 
-                                                                spectrum_cutoff=spec_lim,
-                                                                channel=None, 
-                                                                module=module))
-    
-    
+            module = self.target_module
+            num_res = len(self.conceptual_section_frequencies)
+            name = f"noise_m{module}"
+            kwargs = dict(channels=list(range(1, num_res + 1)), decimation=params['decimation'],
+                          num_samples=params['num_samples'], num_segments=params['num_segments'],
+                          reference=params['reference'], spectrum_limit=params['spectrum_limit'],
+                          pfb_samples=params['pfb_samples'] if params['pfb_enabled'] else None,
+                          module=module)
+            args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            eta = time.time() + params['time_taken'] + (params['pfb_time'] if params['pfb_enabled'] else 0)
+            periscope.statusBar().showMessage(
+                f"Taking a noise spectrum on module {module}; expected to finish at "
+                f"{time.strftime('%H:%M:%S', time.localtime(eta))}")
+
+            def done(future):
+                if future.exception() is not None:
+                    QtWidgets.QMessageBox.critical(self, "Noise Spectrum",
+                                                   f"Noise spectrum failed:\n{future.exception()}")
+                    return
+                data = dict(periscope.session_namespace()[name])
+                dac_scale = self.dac_scales.get(self.active_module_for_dac)
+                data['amplitudes_dbm'] = [UnitConverter.normalize_to_dbm(a, dac_scale)
+                                          for a in data['amplitudes']]
+                if data['pfb_enabled']:
+                    data['overlap'] = params['overlap']
                 self.spectrum_noise_data['noise_parameters'] = params
-                num_res = len(self.conceptual_section_frequencies)
-    
-                amplitudes = []
-                dac_scale_for_module = self.dac_scales.get(self.active_module_for_dac)
-    
-                pfb_psd_i = []
-                pfb_psd_q = []
-                pfb_dual = []
-                pfb_i = []
-                pfb_q = []
-                pfb_freq_iq = []
-                pfb_freq_dsb = []
-    
-                for i in range(num_res):
-                    amp = asyncio.run(crs.get_amplitude(channel=i+1, module = module))
-                    amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
-                    amplitudes.append(amp_dmb)
-    
-                    #### Also running pfb_samples ####
-                    if pfb_enabled:
-                        pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
-                                                                      channel = i + 1,
-                                                                      module = module,
-                                                                      binlim = 1e6,
-                                                                      trim = False,
-                                                                      nsegments = num_segments,
-                                                                      reference = reference,
-                                                                      reset_NCO = False))
-        
-                        psd_i = pfb_data.spectrum.psd_i
-                        pfb_psd_i.append(psd_i)
-                        
-                        psd_q = pfb_data.spectrum.psd_q
-                        pfb_psd_q.append(psd_q)
-                        
-                        I = pfb_data.i
-                        pfb_i.append(I)
-                        
-                        Q = pfb_data.q
-                        pfb_q.append(Q)
-                        
-                        dual = pfb_data.spectrum.psd_dual_sideband
-                        pfb_dual.append(dual)
-                        
-                        freq_iq = pfb_data.spectrum.freq_iq
-                        pfb_freq_iq.append(freq_iq)
-                        
-                        freq_dsb = pfb_data.spectrum.freq_dsb
-                        pfb_freq_dsb.append(freq_dsb)
-    
-                    #### Getting pfb time stamps for plotting #####
-    
-                if pfb_enabled:
-                    total_time = (1/PFB_SAMPLING_FREQ) * pfb_samples #### 2.44 MSS is the rate 
-                    ts_pfb = list(np.linspace(0, total_time, pfb_samples))
-                    
-                
-                slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-                fast_freq = PFB_SAMPLING_FREQ/2   
-    
-    
-                
-                data = {}
-                data['reference'] = reference
-                data['ts'] = spectrum_data.ts
-                data['I'] = spectrum_data.i[0:num_res]
-                data['Q'] = spectrum_data.q[0:num_res]
-                data['freq_iq'] = spectrum_data.spectrum.freq_iq
-                data['single_psd_i'] = spectrum_data.spectrum.psd_i[0:num_res]
-                data['single_psd_q'] = spectrum_data.spectrum.psd_q[0:num_res]
-                data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
-                data['dual_psd'] = spectrum_data.spectrum.psd_dual_sideband[0:num_res]
-                data['amplitudes_dbm'] = amplitudes
-                data['slow_freq_hz'] = slow_freq
-                data['fast_freq_hz'] = fast_freq
-    
-    
-                ##### pfb data ####
-                if pfb_enabled:
-                    data['pfb_enabled'] = True
-                    data['pfb_ts'] = ts_pfb
-                    data['pfb_I'] = pfb_i
-                    data['pfb_Q'] = pfb_q
-                    data['pfb_freq_iq'] = pfb_freq_iq
-                    data['pfb_psd_i'] = pfb_psd_i
-                    data['pfb_psd_q'] = pfb_psd_q
-                    data['pfb_freq_dsb'] = pfb_freq_dsb
-                    data['pfb_dual_psd'] = pfb_dual
-                    data['overlap'] = overlap
-    
-                else:
-                    data['pfb_enabled'] = False
-                
-                self.spectrum_noise_data['data'] = data  
-                
-                # Emit data_ready signal for session auto-export
-                export_data = self._prepare_export_data()
-                identifier = f"module{module}_noise"
-                self.data_ready.emit("noise", identifier, export_data)
-                
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", str(e))
-                traceback.print_exc()
-                raise
-            finally:
-                progress.close()
-                
-            # If we successfully got data, open the noise spectrum panel
-            if self.spectrum_noise_data.get('data'):
-                # Default to opening for the first detector
+                self.spectrum_noise_data['data'] = data
+                self.spectrum_noise_data['name'] = name
+                self.spectrum_noise_data['result'] = periscope.session_namespace()[name]
+                self.data_ready.emit("noise", f"module{module}_noise", self._prepare_export_data())
                 self._open_noise_spectrum_panel(1)
+
+            periscope.run_python_then(f"{name} = await crs.take_noise_spectrum({args})",
+                                      "Noise Spectrum", done, name=name)
 
     def _open_noise_spectrum_panel(self, detector_idx: int = 1):
         """

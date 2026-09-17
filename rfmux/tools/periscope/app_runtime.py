@@ -9,7 +9,9 @@ from unittest.mock import MagicMock, patch, AsyncMock
 from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
 from PyQt6 import sip
+import concurrent.futures
 import numpy as np
+from IPython import get_ipython
 from typing import Optional
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
@@ -19,6 +21,32 @@ from ... import streamer as _streamer
 from ...pulse_capture.sources import (
     columns_for_width,
 )
+
+
+def multisweep_centres(name: str, amp: float, direction: str, swept: set,
+                       fit_table: dict | None, baseline: list) -> str:
+    """Source for a sweep's ``center_frequencies``.
+
+    A re-run that chose the fitted frequencies re-centres on the table's
+    nearest power: its fitted frequencies read from the session when that
+    sweep is there, else the table's values. Otherwise the bias points of
+    the nearest power already swept, and the baseline list before any.
+    *swept* holds the (amplitude, direction) keys already in *name*.
+    """
+    def key_for(a):
+        keys = [k for k in swept if k[0] == a]
+        return next((k for k in keys if k[1] == direction), keys[0] if keys else None)
+
+    if fit_table:
+        nearest = min(fit_table, key=lambda a: abs(a - amp))
+        key = key_for(nearest)
+        return (f"fitted_frequencies({name}[{key!r}])" if key
+                else repr([float(f) for f in fit_table[nearest]]))
+    if swept:
+        nearest = min({a for a, _ in swept}, key=lambda a: abs(a - amp))
+        return f"bias_frequencies({name}[{key_for(nearest)!r}])"
+    return repr([float(f) for f in baseline])
+
 
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
@@ -1324,24 +1352,17 @@ class PeriscopeRuntime:
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
-        # Stop any active network analysis tasks (QThread needs proper termination)
-        for task_key in list(self.netanal_tasks.keys()):
-            task = self.netanal_tasks[task_key]
-            task.stop()  # Request interruption
-            task.wait(2000)  # Wait up to 2 seconds for thread to finish
-            self.netanal_tasks.pop(task_key, None)
-        # Stop any active multisweep tasks (QThread now, needs proper termination)
-        for task_key in list(self.multisweep_tasks.keys()):
-            task = self.multisweep_tasks[task_key]
-            task.stop()  # Request interruption
-            task.wait(2000)  # Wait up to 2 seconds for thread to finish
-            self.multisweep_tasks.pop(task_key, None)
-        # The startup df-calibration worker, if still sweeping: ask it
-        # to stop, then wait.
-        task = getattr(self, "_df_cal_task", None)
-        if task is not None and task.isRunning():
-            task.requestInterruption()
-            task.wait(2000)
+        for futures in self.netanal_tasks.values():
+            for future in futures:
+                future.cancel()
+        self.netanal_tasks.clear()
+        for run in self.multisweep_tasks.values():
+            for future in run['futures']:
+                future.cancel()
+        self.multisweep_tasks.clear()
+        future = getattr(self, "_df_cal_future", None)
+        if future is not None and not future.done():
+            future.cancel()
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
             if not sip.isdeleted(self.notebook_dock):
@@ -1352,50 +1373,60 @@ class PeriscopeRuntime:
         if self.kernel_manager and self.kernel_manager.has_kernel:
             try: self.kernel_manager.shutdown_kernel()
             except Exception as e: warnings.warn(f"Error shutting down iPython kernel: {e}", RuntimeWarning) # warnings from .utils
+        if getattr(self, "interpreter", None) is not None:
+            self.interpreter.close()
         # The super().closeEvent() call should be handled by the class that inherits this mixin
         # and also inherits from a QWidget (e.g., Periscope class itself).
         event.accept()
 
     def _add_interactive_console_dock(self):
-        """Add the dock widget for the embedded iPython console (if qtconsole is available)."""
-        # QTCONSOLE_AVAILABLE, Qt from .utils
-        if not QTCONSOLE_AVAILABLE: return
+        """Add the dock widget for the embedded iPython console."""
         self.console_dock_widget = QtWidgets.QDockWidget("Interactive iPython Session", self)
         self.console_dock_widget.setObjectName("InteractiveSessionDock")
         self.console_dock_widget.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.console_dock_widget.setVisible(False) # Initially hidden
         self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock_widget)
+        self._create_console()
 
-    def _toggle_interactive_session(self):
-        """
-        Toggle the visibility and initialization of the embedded iPython console.
-        Initializes the kernel and Jupyter widget on first toggle if not already done.
-        """
-        # QTCONSOLE_AVAILABLE, QtInProcessKernelManager, RichJupyterWidget, rfmux, load_awaitless_extension from .utils
-        # traceback from .utils
-        if not QTCONSOLE_AVAILABLE or self.crs is None: return # Dependencies not met
-        if self.console_dock_widget is None: return # Dock widget not created
+    def _create_console(self):
+        """The kernel and console widget, created once; the dock stays hidden until toggled.
 
-        if self.kernel_manager is None: # First time opening the console
+        Inside an IPython or Jupyter session (raise_periscope) that session
+        is the console: a second in-process shell cannot be created.
+        """
+        if getattr(self, "crs", None) is None or getattr(self, "console_dock_widget", None) is None: return
+        if get_ipython() is not None: return
+        if self.kernel_manager is None:
             try:
-                self.kernel_manager = QtInProcessKernelManager()
+                self.kernel_manager = ConsoleKernelManager(self.interpreter)
                 self.kernel_manager.start_kernel()
                 kernel = self.kernel_manager.kernel
                 
                 # Push relevant objects into the kernel's namespace
                 kernel.shell.push({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
                 
-                self.jupyter_widget = RichJupyterWidget()
+                self.jupyter_widget = PeriscopeConsole()
                 self.jupyter_widget.kernel_client = self.kernel_manager.client()
                 self.jupyter_widget.kernel_client.start_channels()
-                
+
+                # What the kernel is doing, above the console, with a way to
+                # stop it: a long cell keeps the GUI live, so this and the
+                # busy cursor are the signs it is running.
+                self.kernel_activity = KernelActivity(self.jupyter_widget.kernel_client, self)
+                self.kernel_status = KernelStatus(self.kernel_activity, self.kernel_manager.interrupt_kernel)
+                console = QtWidgets.QWidget()
+                console_layout = QtWidgets.QVBoxLayout(console)
+                console_layout.setContentsMargins(0, 0, 0, 0)
+                console_layout.setSpacing(0)
+                console_layout.addWidget(self.kernel_status)
+                console_layout.addWidget(self.jupyter_widget, 1)
+
                 try: # Attempt to load awaitless extension for better async interaction
                     load_awaitless_extension(ipython=kernel.shell)
                 except Exception as e_awaitless:
                     warnings.warn(f"Could not load awaitless extension: {e_awaitless}", RuntimeWarning)
                     traceback.print_exc()
                 
-                self.console_dock_widget.setWidget(self.jupyter_widget)
+                self.console_dock_widget.setWidget(console)
                 self._update_console_style(self.dark_mode) # Apply initial style
                 # Set a more specific stylesheet for prompts and background
                 style_sheet = (".in-prompt { color: #00FF00 !important; } .out-prompt { color: #00DD00 !important; } body { background-color: #1C1C1C; color: #DDDDDD; }" 
@@ -1408,25 +1439,194 @@ class PeriscopeRuntime:
                 traceback.print_exc()
                 if self.kernel_manager and self.kernel_manager.has_kernel: self.kernel_manager.shutdown_kernel()
                 self.kernel_manager = None; self.jupyter_widget = None
-                self.console_dock_widget.setVisible(False); return
-        
-        # Toggle visibility of the console dock widget
+                self.console_dock_widget.setVisible(False)
+
+    def _toggle_interactive_session(self):
+        self._create_console()
+        if self.jupyter_widget is None:
+            if get_ipython() is not None:
+                self.statusBar().showMessage(
+                    "Periscope is running inside your IPython session: crs and periscope are already in it.", 8000)
+            return
         is_visible = self.console_dock_widget.isVisible()
         self.console_dock_widget.setVisible(not is_visible)
         if not is_visible and self.jupyter_widget: self.jupyter_widget.setFocus() # Focus on console when shown
+
+    def session_namespace(self) -> dict:
+        """Where the session's Python runs: the console kernel's namespace, the
+        enclosing IPython's when Periscope was raised from one, or a private
+        dict otherwise. crs, rfmux and periscope are always bound in it."""
+        self._create_console()
+        if getattr(self, "kernel_manager", None) is not None:
+            return self.kernel_manager.kernel.shell.user_ns
+        if not hasattr(self, "_namespace"):
+            ipython = get_ipython()
+            self._namespace = ipython.user_ns if ipython is not None else {}
+            self._namespace.update({"crs": getattr(self, "crs", None), 'rfmux': rfmux, 'periscope': self})
+        return self._namespace
+
+    def run_python(self, code: str, comment: str = "", name: str = None) -> concurrent.futures.Future:
+        """Run *code* in the session as a console cell, exactly as if typed.
+        Without a console (raised from IPython) it runs on the interpreter
+        thread in that session's namespace and is printed instead. *name*
+        is the session name the cell builds, so its cells travel with the
+        result when a panel exports."""
+        namespace = self.session_namespace()
+        if name is not None:
+            self.__dict__.setdefault('session_cells', {}).setdefault(name, []).append(code)
+        if comment:
+            code = f"# {comment}\n{code}"
+        if self.jupyter_widget is not None:
+            return self.jupyter_widget.run(code)
+        print(code)
+        return self.interpreter.run(code, namespace)
+
+    def run_python_then(self, code: str, comment: str, done, name: str = None) -> concurrent.futures.Future:
+        """run_python, then done(future) on the GUI thread; a cancelled cell is not reported."""
+        future = self.run_python(code, comment, name)
+        on_done(future, done)
+        return future
+
+    def free_name(self, name: str) -> str:
+        """*name* unless the session already has it, else the first name_2, name_3, ... it does not."""
+        namespace = self.session_namespace()
+        candidate, k = name, 2
+        while candidate in namespace:
+            candidate, k = f"{name}_{k}", k + 1
+        return candidate
+
+    def load_result(self, path, name: str, done) -> None:
+        """Bind the result saved in *path* to a free session name, as a cell,
+        then done(name) on the GUI thread."""
+        name = self.free_name(name)
+
+        def bound(future):
+            if future.exception() is not None:
+                QtWidgets.QMessageBox.critical(self, "Load Error", f"Could not load {path}:\n{future.exception()}")
+                return
+            done(name)
+
+        self.run_python_then(
+            f"from rfmux.tools.periscope.session_manager import load_result\n{name} = load_result({str(path)!r})",
+            f"Load {name}", bound, name=name)
+
+    def _connect_multisweep_signals(self, panel):
+        """Route the shared multisweep signals to *panel*, and only to it."""
+        s = self.multisweep_signals
+        for signal in (s.progress, s.starting_iteration, s.completed_iteration,
+                       s.all_completed, s.error, s.fitting_progress):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass
+        queued = QtCore.Qt.ConnectionType.QueuedConnection
+        s.progress.connect(panel.update_progress, queued)
+        s.starting_iteration.connect(panel.handle_starting_iteration, queued)
+        s.completed_iteration.connect(
+            lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
+            queued)
+        s.all_completed.connect(panel.all_sweeps_completed, queued)
+        s.error.connect(panel.handle_error, queued)
+        s.fitting_progress.connect(panel.handle_fitting_progress, queued)
+
+    def multisweep_hooks(self, window_id: str) -> dict:
+        """The progress callback that feeds a multisweep panel."""
+        signals = self.multisweep_signals
+        return {"progress_callback": lambda module, fraction: signals.progress.emit(module, fraction)}
+
+    def _run_multisweep(self, window_id: str, panel, params: dict, title: str):
+        """Run a panel's multisweep as console cells, one per amplitude and
+        direction, each re-centred on the nearest sweep already taken and
+        fitted as chosen. The cells are what the console shows."""
+        module = params['module']
+        name = window_id
+        amplitudes = list(params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]))
+        direction = params.get('sweep_direction', 'upward')
+        directions = ['upward', 'downward'] if direction == 'both' else [direction]
+        baseline = [float(f) for f in params.get('resonance_frequencies', [])]
+        fit_table = params.get('fit_frequencies_by_amp') if params.get('use_fit_frequencies') else None
+        sweep_kwargs = {k: params[k] for k in ('span_hz', 'npoints_per_sweep', 'nsamps',
+                                               'bias_frequency_method', 'rotate_saved_data') if k in params}
+        fits = dict(fit_skewed=bool(params.get('apply_skewed_fit')),
+                    fit_nonlinear=bool(params.get('apply_nonlinear_fit')))
+        namespace = self.session_namespace()
+        swept = set(namespace[name]) if isinstance(namespace.get(name), dict) else set()
+        plan = [(amp, d) for amp in amplitudes for d in directions]
+        signals = self.multisweep_signals
+        preamble = ["from rfmux.algorithms.measurement.multisweep import bias_frequencies, fitted_frequencies"]
+        if name not in namespace:
+            preamble.append(f"{name} = {{}}")
+        futures = []
+        for amp, d in plan:
+            key = (amp, d)
+            centres = multisweep_centres(name, amp, d, swept, fit_table, baseline)
+            kwargs = ", ".join(f"{k}={v!r}" for k, v in {**sweep_kwargs, 'amp': amp, 'sweep_direction': d,
+                                                          **fits, 'module': module}.items())
+            futures.append(self.run_python("\n".join(preamble + [
+                f"{name}[{key!r}] = await crs.multisweep(center_frequencies={centres}, {kwargs}, "
+                f"**periscope.multisweep_hooks({window_id!r}))"]), title if not futures else "", name=name))
+            preamble = []
+            swept.add(key)
+        run = {'window': panel, 'futures': futures}
+        self.multisweep_tasks[f"{window_id}_module_{module}"] = run
+        panel.result_name = name
+
+        def finish(i):
+            amp, d = plan[i]
+
+            def step_done(fut):
+                if fut.exception() is not None:
+                    for f in futures:
+                        f.cancel()
+                    signals.error.emit(module, amp, f"Multisweep failed: {fut.exception()}")
+                    return
+                panel.set_result(self.session_namespace()[name])
+                signals.completed_iteration.emit(module, i, amp, d)
+                if i + 1 < len(plan):
+                    signals.starting_iteration.emit(module, i + 1, *plan[i + 1])
+                else:
+                    if self.multisweep_tasks.get(f"{window_id}_module_{module}") is run:
+                        self.multisweep_tasks.pop(f"{window_id}_module_{module}")
+                    signals.all_completed.emit()
+
+            on_done(futures[i], step_done)
+
+        for i in range(len(plan)):
+            finish(i)
+        signals.starting_iteration.emit(module, 0, *plan[0])
+
+    def netanal_hooks(self, window_id: str, amplitude: float) -> dict:
+        """The progress and data callbacks that feed a network analysis panel
+        during one amplitude's sweep; the algorithm names the module."""
+        window_data = self.netanal_windows[window_id]
+        signals = window_data['signals']
+        amplitudes = window_data['window'].original_params.get('amps', [amplitude])
+        index = amplitudes.index(amplitude) + 1 if amplitude in amplitudes else 1
+        for module in window_data['window'].modules:
+            signals.amplitude_started.emit(module, index, len(amplitudes), amplitude)
+
+        def progress(mod, fraction):
+            signals.progress.emit(mod, fraction)
+
+        def data(mod, freqs, amps, phases):
+            order = np.argsort(freqs)
+            freqs, amps, phases = freqs[order], amps[order], phases[order]
+            signals.data_update.emit(mod, freqs, amps, phases)
+            signals.data_update_with_amp.emit(mod, freqs, amps, phases, amplitude)
+
+        return {"progress_callback": progress, "data_callback": data}
 
     def _start_multisweep_analysis(self, params: dict):
         """
         Start a new multisweep analysis.
 
-        Creates a `MultisweepPanel` wrapped in a QDockWidget and a `MultisweepTask`.
-        Connects signals for progress, data updates, and completion.
+        Creates a `MultisweepPanel` wrapped in a QDockWidget and runs the
+        sweeps as session cells.
 
         Args:
             params (dict): Parameters for the multisweep analysis, typically
                             from a configuration dialog.
         """
-        # MultisweepPanel from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
             window_id = f"multisweep_{self.multisweep_window_count}"; self.multisweep_window_count += 1
@@ -1453,39 +1653,9 @@ class PeriscopeRuntime:
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
             
-            # Disconnect any previous signal connections to avoid multiple calls
-            try:
-                self.multisweep_signals.progress.disconnect()
-                self.multisweep_signals.data_update.disconnect()
-                self.multisweep_signals.completed_iteration.disconnect()
-                self.multisweep_signals.all_completed.disconnect()
-                self.multisweep_signals.error.disconnect()
-            except TypeError: 
-                pass # Raised if signals were not previously connected
+            self._connect_multisweep_signals(panel)
+            self._run_multisweep(window_id, panel, params, dock_title)
 
-            # Connect signals from the MultisweepTask to the new panel's slots
-            self.multisweep_signals.progress.connect(panel.update_progress,
-                                                   QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.starting_iteration.connect(panel.handle_starting_iteration,
-                                                             QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.data_update.connect(panel.update_data,
-                                                      QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.completed_iteration.connect(
-                lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.all_completed.connect(panel.all_sweeps_completed,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.error.connect(panel.handle_error,
-                                                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.fitting_progress.connect(panel.handle_fitting_progress,
-                                                            QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Create and start the task
-            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=panel)
-            task_key = f"{window_id}_module_{target_module}"
-            self.multisweep_tasks[task_key] = task
-            task.start()  # Start the QThread directly
-            
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1541,7 +1711,7 @@ class PeriscopeRuntime:
                                        "channel; re-run from a multisweep export")
         return panel
 
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep",
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep", name: str | None = None,
                                                   title: str = None) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
@@ -1631,17 +1801,17 @@ class PeriscopeRuntime:
             if 'results_by_detector' in load_params:
                 # New format: load directly into panel
                 panel.results_by_detector = load_params['results_by_detector']
+            if name is not None:
+                # The file's result is bound in the session; the panel derives from it.
+                panel.result_name = name
+                panel.set_result(self.session_namespace()[name])
                 panel._redraw_plots()
             elif 'results_by_iteration' in load_params:
-                # Old format: convert via migration helper, then feed through update_data
+                # Old per-iteration format: the same shape a named result has.
                 iteration_params = load_params.get('results_by_iteration', [])
                 if isinstance(iteration_params, dict):
                     iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
-                for i in range(len(iteration_params)):
-                    amplitude = iteration_params[i]['amplitude']
-                    direction = iteration_params[i]['direction']
-                    data = iteration_params[i]['data']
-                    panel.update_data(target_module, i, amplitude, direction, data, None)
+                panel.set_result({(it['amplitude'], it['direction']): it['data'] for it in iteration_params})
             
             # Generate histograms now that data is loaded
             if panel.results_by_detector:
@@ -1675,16 +1845,6 @@ class PeriscopeRuntime:
             QtWidgets.QMessageBox.critical(self, "Error", error_msg)
             return None, None, None, None
 
-    def _adjust_decimation(self, crs, decimation):
-        print("Setting decimation to", decimation)
-
-        if decimation > 4:
-            asyncio.run(crs.set_decimation(decimation , short = False))
-        elif decimation == 4:
-            asyncio.run(crs.set_decimation(decimation , module = self.module, short = False))
-        else:
-            asyncio.run(crs.set_decimation(decimation, module = self.module, short = True))
-    
     def _collect_channel_noise(self, params: dict, loaded=False):
         if loaded:
             channel_noise_data = params['channel_noise_data']
@@ -1693,195 +1853,48 @@ class PeriscopeRuntime:
             self.loaded_channel_noise = True
             self._create_channel_noise_panel(1)
         else:
-            if self.crs is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
+            if self.crs is None:
+                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-    
             if params is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "Received Parameter file is empty")
                 return
-    
-            crs = self.crs
-        
-            time_taken = params['time_taken']
-            pfb_enabled = params['pfb_enabled']
-            
-            if pfb_enabled:
-                pfb_time_taken = params['pfb_time']
-            else:
-                pfb_time_taken = 0
-                
-            t = time.time() + time_taken + pfb_time_taken
-            formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
-            # Show a progress dialog
-            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated Completion Time {formatted_time}", None, 0, 0, self)
-            progress.setWindowTitle("Please wait")
-            progress.setCancelButton(None)
-            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress.show()
-            
-            QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor
-    
-            try:
-                decimation = params['decimation']
-                num_samples = params['num_samples']
-                num_segments = params['num_segments']
-                reference = params['reference']
-                spec_lim = params['spectrum_limit']
-                channels = params['channel_noise']
-                module = self.module
-                curr_decimation = asyncio.run(crs.get_decimation())
-        
-                if pfb_enabled:
-                    overlap = params['overlap']
-                    pfb_samples = params['pfb_samples']
-        
-                if curr_decimation != decimation:
-                    self._adjust_decimation(crs, decimation)
-        
-                spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                                return_spectrum=True, 
-                                                                scaling='psd', 
-                                                                reference=reference, 
-                                                                nsegments=num_segments, 
-                                                                spectrum_cutoff=spec_lim,
-                                                                channel=None, 
-                                                                module=module))
-        
+            module = self.module
+            name = f"noise_m{module}"
+            kwargs = dict(channels=list(params['channel_noise']), decimation=params['decimation'],
+                          num_samples=params['num_samples'], num_segments=params['num_segments'],
+                          reference=params['reference'], spectrum_limit=params['spectrum_limit'],
+                          pfb_samples=params['pfb_samples'] if params['pfb_enabled'] else None,
+                          module=module)
+            args = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+            eta = time.time() + params['time_taken'] + (params['pfb_time'] if params['pfb_enabled'] else 0)
+            self.statusBar().showMessage(
+                f"Taking a noise spectrum on module {module}; expected to finish at "
+                f"{time.strftime('%H:%M:%S', time.localtime(eta))}")
+
+            def done(future):
+                if future.exception() is not None:
+                    QtWidgets.QMessageBox.critical(self, "Noise Spectrum",
+                                                   f"Noise spectrum failed:\n{future.exception()}")
+                    return
+                data = dict(self.session_namespace()[name])
+                dac_scale = self.dac_scales.get(module)
+                data['amplitudes_dbm'] = [UnitConverter.normalize_to_dbm(a, dac_scale)
+                                          for a in data['amplitudes']]
+                if data['pfb_enabled']:
+                    data['overlap'] = params['overlap']
                 self.channel_noise_data['noise_parameters'] = params
-                # num_res = len(self.conceptual_resonance_frequencies)
-        
-                amplitudes = []
-                channel_frequencies = []
-                dac_scale_for_module = self.dac_scales.get(self.module)
-    
-                #### pfb spectrum ###
-                pfb_psd_i = []
-                pfb_psd_q = []
-                pfb_dual = []
-                pfb_i = []
-                pfb_q = []
-                pfb_freq_iq = []
-                pfb_freq_dsb = []
-    
-                ### Slow spectrum ###
-                slow_i = []
-                slow_q = []
-                slow_psd_i = []
-                slow_psd_q = []
-                slow_dual = []
-    
-                for c in channels:
-                    #### Since there is no amplitude being set here 
-                    amp = asyncio.run(crs.get_amplitude(channel = c, module = self.module))
-                    if amp is None:
-                        amplitudes.append(0)
-                    else:
-                        amp_dmb = UnitConverter.normalize_to_dbm(amp, dac_scale_for_module)
-                        amplitudes.append(amp_dmb)
-    
-                    nco = asyncio.run(crs.get_nco_frequency(module = self.module))
-                    f = asyncio.run(crs.get_frequency(channel = c, module = self.module))
-                    if f is None:
-                        channel_frequencies.append(float(nco + 0))
-                    else:
-                        channel_frequencies.append(float(nco + f))
-    
-                    slow_i.append(spectrum_data.i[c-1])
-                    slow_q.append(spectrum_data.q[c-1])
-                    slow_psd_i.append(spectrum_data.spectrum.psd_i[c-1])
-                    slow_psd_q.append(spectrum_data.spectrum.psd_q[c-1])
-                    slow_dual.append(spectrum_data.spectrum.psd_dual_sideband[c-1])
-        
-                    #### Also running pfb_samples ####
-                    if pfb_enabled:
-                        pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
-                                                                      channel = c,
-                                                                      module = module,
-                                                                      binlim = 1e6,
-                                                                      trim = False,
-                                                                      nsegments = num_segments,
-                                                                      reference = reference,
-                                                                      reset_NCO = False))
-        
-                        psd_i = pfb_data.spectrum.psd_i
-                        pfb_psd_i.append(psd_i)
-                        
-                        psd_q = pfb_data.spectrum.psd_q
-                        pfb_psd_q.append(psd_q)
-                        
-                        I = pfb_data.i
-                        pfb_i.append(I)
-                        
-                        Q = pfb_data.q
-                        pfb_q.append(Q)
-                        
-                        dual = pfb_data.spectrum.psd_dual_sideband
-                        pfb_dual.append(dual)
-                        
-                        freq_iq = pfb_data.spectrum.freq_iq
-                        pfb_freq_iq.append(freq_iq)
-                        
-                        freq_dsb = pfb_data.spectrum.freq_dsb
-                        pfb_freq_dsb.append(freq_dsb)
-        
-                #### Getting pfb time stamps for plotting #####
-                if pfb_enabled:
-                    total_time = (1/PFB_SAMPLING_FREQ) * pfb_samples #### 2.44 MSS is the rate 
-                    ts_pfb = list(np.linspace(0, total_time, pfb_samples))
-                    
-                slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-                fast_freq = PFB_SAMPLING_FREQ/2   
-        
-                data = {}
-                data['reference'] = reference
-                data['ts'] = spectrum_data.ts
-                data['I'] = slow_i
-                data['Q'] = slow_q
-                data['freq_iq'] = spectrum_data.spectrum.freq_iq
-                data['single_psd_i'] = slow_psd_i
-                data['single_psd_q'] = slow_psd_q
-                data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
-                data['dual_psd'] = slow_dual
-                data['amplitudes_dbm'] = amplitudes
-                data['channel_frequencies'] = channel_frequencies
-                data['slow_freq_hz'] = slow_freq
-                data['fast_freq_hz'] = fast_freq
-        
-                ##### pfb data ####
-                if pfb_enabled:
-                    data['pfb_enabled'] = True
-                    data['pfb_ts'] = ts_pfb
-                    data['pfb_I'] = pfb_i
-                    data['pfb_Q'] = pfb_q
-                    data['pfb_freq_iq'] = pfb_freq_iq
-                    data['pfb_psd_i'] = pfb_psd_i
-                    data['pfb_psd_q'] = pfb_psd_q
-                    data['pfb_freq_dsb'] = pfb_freq_dsb
-                    data['pfb_dual_psd'] = pfb_dual
-                    data['overlap'] = overlap
-        
-                else:
-                    data['pfb_enabled'] = False
-                
                 self.channel_noise_data['data'] = data
+                self.channel_noise_data['name'] = name
+                self.channel_noise_data['result'] = self.session_namespace()[name]
+                self.channel_noise_data['cells'] = list(self.__dict__.get('session_cells', {}).get(name, []))
                 self.loaded_channel_noise = False
-                
-                # Emit data_ready signal for session auto-export
-                export_data = self._export_channel_noise_data()
-                identifier = f"module{module}_channel_noise"
-                self.main_plot_panel.emit_channel_noise_export(identifier, export_data)
-    
-                if self.channel_noise_data.get('data'):
-                    # Default to opening for the first detector
-                    self._create_channel_noise_panel(1)
-                    
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", str(e))
-                traceback.print_exc()
-                raise
-            finally:
-                progress.close()
+                self.main_plot_panel.emit_channel_noise_export(
+                    f"module{module}_channel_noise", self._export_channel_noise_data())
+                self._create_channel_noise_panel(1)
+
+            self.run_python_then(f"{name} = await crs.take_noise_spectrum({args})",
+                                 "Noise Spectrum", done, name=name)
 
     def _export_channel_noise_data(self):
         
@@ -1950,7 +1963,7 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
+    def _load_multisweep_analysis(self, load_params: dict, name: str | None = None):
         """
         Load multisweep analysis data from file and display in a docked panel.
 
@@ -1959,7 +1972,7 @@ class PeriscopeRuntime:
         """
         # Use the unified helper method
         panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
+            load_params, source_type="multisweep", name=name
         )
         
         if panel is None:
@@ -2003,13 +2016,12 @@ class PeriscopeRuntime:
         """
         Re-run a multisweep analysis for an existing MultisweepPanel.
 
-        Stops any existing task for the panel, updates parameters, and starts a new task.
+        Cancels the panel's running cells, updates parameters, and runs the new sweeps.
 
         Args:
             window_instance (MultisweepPanel): The panel instance to re-run the analysis for.
             params (dict): The new parameters for the multisweep analysis.
         """
-        # MultisweepWindow from .ui, MultisweepTask from .tasks
         window_id = None
         for w_id, data in self.multisweep_windows.items():
             if data['window'] == window_instance: window_id = w_id; break
@@ -2018,51 +2030,18 @@ class PeriscopeRuntime:
         target_module = params.get('module')
         if target_module is None: QtWidgets.QMessageBox.critical(window_instance, "Error", "Target module not specified for multisweep re-run."); return
         
-        old_task_key = f"{window_id}_module_{target_module}"
-        if old_task_key in self.multisweep_tasks: # Stop and remove old task if it exists
-            old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
-            
-        self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
-        # Pass the window_instance to the task (now starts automatically since it's a QThread)
-        
-        ### This reconnects to signal ####
-        try:
-            self.multisweep_signals.progress.disconnect()
-            self.multisweep_signals.data_update.disconnect()
-            self.multisweep_signals.completed_iteration.disconnect()
-            self.multisweep_signals.all_completed.disconnect()
-            self.multisweep_signals.error.disconnect()
-        except TypeError: 
-            pass # Raised if signals were not previously connected
-
-        # Connect signals from the MultisweepTask to the new window's slots
-        self.multisweep_signals.progress.connect(window_instance.update_progress,
-                                               QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.starting_iteration.connect(window_instance.handle_starting_iteration,
-                                                         QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.data_update.connect(window_instance.update_data,
-                                                  QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.completed_iteration.connect(
-            lambda module, iteration, amplitude, direction: window_instance.completed_amplitude_sweep(module, amplitude),
-            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.all_completed.connect(window_instance.all_sweeps_completed,
-                                                    QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.error.connect(window_instance.handle_error,
-                                            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-
-        # Connect data_ready signal for session auto-export
+        for future in self.multisweep_tasks.pop(f"{window_id}_module_{target_module}", {}).get('futures', []):
+            future.cancel()
+        self.multisweep_windows[window_id]['params'] = params.copy()
+        self._connect_multisweep_signals(window_instance)
         if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
-        
-        task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
-        self.multisweep_tasks[old_task_key] = task
-        task.start()  # Start the QThread directly
+        self._run_multisweep(window_id, window_instance,  params,
+                             self.multisweep_windows[window_id]['dock'].windowTitle())
 
     def stop_multisweep_task_for_window(self, window_instance: 'MultisweepPanel'):
         """
-        Stop an active multisweep task associated with a specific panel.
+        Cancel the multisweep cells still running for a panel.
 
         Args:
             window_instance (MultisweepPanel): The panel whose task should be stopped.
@@ -2074,11 +2053,8 @@ class PeriscopeRuntime:
                 window_id = w_id; target_module = data['params'].get('module'); break
         
         if window_id and target_module:
-            task_key = f"{window_id}_module_{target_module}"
-            if task_key in self.multisweep_tasks:
-                task = self.multisweep_tasks.pop(task_key)
-                task.stop()  # Request interruption
-                task.wait(2000)  # Wait up to 2 seconds for thread to finish
+            for future in self.multisweep_tasks.pop(f"{window_id}_module_{target_module}", {}).get('futures', []):
+                future.cancel()
             self.multisweep_windows.pop(window_id, None) # Remove window tracking
 
     def _toggle_notebook_panel(self, notebook_dir: str | None = None, open_file: str | None = None):
@@ -2213,8 +2189,7 @@ class PeriscopeRuntime:
         Args:
             dark_mode_enabled (bool): True if dark mode is active, False otherwise.
         """
-        # QTCONSOLE_AVAILABLE from .utils
-        if self.jupyter_widget and QTCONSOLE_AVAILABLE:
+        if self.jupyter_widget:
             self.jupyter_widget.syntax_style = 'monokai' if dark_mode_enabled else 'default'
             # Define stylesheets for dark and light modes
             style_sheet = ("QWidget { background-color: #1C1C1C; color: #DDDDDD; } .in-prompt { color: #00FF00 !important; } .out-prompt { color: #00DD00 !important; } QPlainTextEdit { background-color: #1C1C1C; color: #DDDDDD; }"
@@ -2520,10 +2495,9 @@ class PeriscopeRuntime:
         MockBiasDialog = MagicMock(return_value=fake_bias_dialog)
         MockNoiseDialog = MagicMock(return_value=fake_noise_dialog)
         MockConfigDialog = MagicMock(return_value=fake_mock_config_dialog)
-        MockCRSInitTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockFetcher = MagicMock(return_value=fake_fetcher)
         MockNASignals = MagicMock(return_value=fake_signals)
-        MockNATask = MagicMock(return_value=MagicMock(start=MagicMock()))
+        MockRunPython = MagicMock(side_effect=lambda code, comment="", name=None: concurrent.futures.Future())
         MockMultiTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasSignals = MagicMock(return_value=fake_bias_signals)
@@ -2584,14 +2558,12 @@ class PeriscopeRuntime:
                 MockConfigDialog,
                 create=True,
             ),
-            patch("rfmux.tools.periscope.tasks.CRSInitializeTask", MockCRSInitTask, create=True),
             patch("rfmux.tools.periscope.tasks.DACScaleFetcher", MockFetcher, create=True),
             patch(
                 "rfmux.tools.periscope.tasks.NetworkAnalysisSignals",
                 MockNASignals,
                 create=True,
             ),
-            patch("rfmux.tools.periscope.tasks.NetworkAnalysisTask", MockNATask, create=True),
             patch("rfmux.tools.periscope.tasks.MultisweepTask", MockMultiTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsTask", MockBiasTask, create=True),
             patch("rfmux.tools.periscope.tasks.BiasKidsSignals", MockBiasSignals, create=True),
@@ -2617,10 +2589,10 @@ class PeriscopeRuntime:
             patch.object(periscope_app, "NoiseSpectrumDialog", MockNoiseDialog, create=True),
             patch.object(periscope_app, "MockConfigurationDialog", MockConfigDialog, create=True),
             patch.object(periscope_app.Periscope, "_apply_mock_configuration", MagicMock()),
-            patch.object(periscope_app, "CRSInitializeTask", MockCRSInitTask, create=True),
             patch.object(periscope_app, "DACScaleFetcher", MockFetcher, create=True),
             patch.object(periscope_app, "NetworkAnalysisSignals", MockNASignals, create=True),
-            patch.object(periscope_app, "NetworkAnalysisTask", MockNATask, create=True),
+            patch.object(periscope_app.Periscope, "run_python", MockRunPython),
+            patch.object(periscope_app.Periscope, "session_namespace", MagicMock(return_value={})),
             patch.object(periscope_app, "MultisweepTask", MockMultiTask, create=True),
             patch.object(periscope_app, "BiasKidsTask", MockBiasTask, create=True),
             patch.object(periscope_app, "BiasKidsSignals", MockBiasSignals, create=True),

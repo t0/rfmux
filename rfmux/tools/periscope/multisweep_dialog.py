@@ -607,11 +607,11 @@ class MultisweepDialog(NetworkAnalysisDialogBase):
     
                     amps_list = [single_default]
     
-                # Store the full list of amplitudes (parsed or defaulted) for the MultisweepTask.
+                # Store the full list of amplitudes (parsed or defaulted) for the sweep cells.
                 params_dict['amps'] = amps_list
     
                 # Store the first amplitude under the singular 'amp' key for potential compatibility
-                # or for display purposes elsewhere. The MultisweepTask itself iterates over 'amps'.
+                # or for display purposes elsewhere. The launcher runs one cell per amplitude.
                 # This assumes amps_list is now guaranteed to be non-empty.
                 params_dict['amp'] = amps_list[0]
                 

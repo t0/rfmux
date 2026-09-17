@@ -131,9 +131,6 @@ BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
 DEFAULT_BUFFER_SIZE = 5_000
 DEFAULT_REFRESH_MS = 33
 
-# GUI update intervals
-NETANAL_UPDATE_INTERVAL = 0.1  # seconds
-
 # ICON_PATH needs to be relative to this file's new location
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons', 'periscope-icon.svg')
 
@@ -183,18 +180,8 @@ import pyqtgraph as pg
 UPWARD_SWEEP_STYLE = Qt.PenStyle.SolidLine
 DOWNWARD_SWEEP_STYLE = Qt.PenStyle.DotLine  # Dotted line for downward sweeps
 
-# Imports for embedded iPython console
-try:
-    from qtconsole.rich_jupyter_widget import RichJupyterWidget
-    from qtconsole.inprocess import QtInProcessKernelManager
-    QTCONSOLE_AVAILABLE = True
-except ImportError:
-    QTCONSOLE_AVAILABLE = False
-    warnings.warn(
-        "qtconsole or ipykernel not found. Interactive session feature will be disabled.\n"
-        "Install them with: pip install qtconsole ipykernel",
-        RuntimeWarning,
-    )
+from .console_kernel import (ConsoleKernelManager, KernelActivity, KernelStatus,
+                             PeriscopeConsole, on_done)
 
 # Local imports (adjusted for new location)
 import rfmux # Ensure rfmux is available for the console

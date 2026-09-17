@@ -63,7 +63,7 @@ async def take_netanal(
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
-          and return a dict keyed by module number.
+          and return a list of results in the same order.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).
     progress_callback : callable, optional
         Callback function that receives (module, progress_percentage) updates.
@@ -79,6 +79,19 @@ async def take_netanal(
         - 'iq_complex': numpy.ndarray - Complex I/Q data corresponding to 'frequencies'.
         - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
     """
+
+    if not fmin < fmax:
+        raise ValueError(f"fmin ({fmin:g} Hz) must be below fmax ({fmax:g} Hz).")
+    if npoints < 2:
+        raise ValueError(f"npoints must be at least 2 (got {npoints}).")
+    if nsamps < 1:
+        raise ValueError(f"nsamps must be at least 1 (got {nsamps}).")
+    if not amp > 0:
+        raise ValueError(f"amp must be positive (got {amp:g}).")
+    if max_chans < 1:
+        raise ValueError(f"max_chans must be at least 1 (got {max_chans}).")
+    if not max_span > 0:
+        raise ValueError(f"max_span must be positive (got {max_span:g} Hz).")
 
     # If user passed modules as a list, run in parallel across those modules
     if isinstance(module, list) and len(module) > 0:
@@ -319,6 +332,7 @@ async def take_netanal(
     phase_sorted = np.degrees(np.angle(iq_sorted))
 
     result_dict = {
+        'module': module,
         'frequencies': fs_sorted,
         'iq_complex': iq_sorted,
         'phase_degrees': phase_sorted

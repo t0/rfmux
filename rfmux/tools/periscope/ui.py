@@ -35,5 +35,5 @@ __all__ = [
     "QtWidgets", "QtCore", "QFont", "QIcon", "pg", # Common Qt/PyQtGraph items from utils
     "ClickableViewBox", # Custom UI element from utils
     # Signal objects from .tasks if UI elements connect to them directly (though usually app class handles this)
-    "IQSignals", "PSDSignals", "NetworkAnalysisSignals", "CRSInitializeSignals", "MultisweepSignals",
+    "IQSignals", "PSDSignals", "NetworkAnalysisSignals", "MultisweepSignals",
 ]

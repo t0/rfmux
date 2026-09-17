@@ -3,7 +3,6 @@
 # Imports from within the 'periscope' subpackage
 from .utils import *
 from .layouts import FlowLayout, labelled
-from .tasks import SetCableLengthSignals # Added import
 # from .tasks import * # Not directly used by this class, dialogs will import what they need.
 
 # Dialogs are now imported from .dialogs within the same package
@@ -28,6 +27,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
         self.modules = modules or []
+        self.result_name = None  # The session name this panel's data is bound to
         self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
         self.unit_mode = "dbm"  # Default to dBm instead of counts
@@ -51,10 +51,6 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Track last session export filename for overwriting
         self._last_export_filename: Optional[str] = None
 
-        # Initialize signals for SetCableLengthTask
-        self.set_cable_length_signals = SetCableLengthSignals()
-        # Optionally, connect these signals to handlers for user feedback
-        self.set_cable_length_signals.error.connect(self._handle_set_cable_length_error)
         
         # Setup the UI components
         self._setup_ui()
@@ -845,16 +841,9 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         if not window_id:
             return
             
-        window_data = parent.netanal_windows[window_id]
-        
-        no_pending_amplitudes = True
-        for module in window_data['amplitude_queues']:
-            if window_data['amplitude_queues'][module]:
-                no_pending_amplitudes = False
-                break
-        
+        running = any(not f.done() for f in parent.netanal_tasks.get(window_id, []))
         all_complete = all(pbar.value() == 100 for pbar in self.progress_bars.values())
-        if all_complete and no_pending_amplitudes:
+        if all_complete and not running:
             self.progress_group.setVisible(False)
 
     def _edit_parameters(self):
@@ -997,6 +986,15 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             
             if is_new_curve: self._update_legends_for_unit_mode()
         self._update_multisweep_button_state(module) 
+
+    def set_result(self, value: dict):
+        """Derive the panel's curves from its named result,
+        ``{amplitude: [take_netanal result per module]}``."""
+        for amplitude, per_module in value.items():
+            for r in per_module:
+                freqs, amps, phases = r['frequencies'], np.abs(r['iq_complex']), r['phase_degrees']
+                self.update_data(r['module'], freqs, amps, phases)
+                self.update_data_with_amp(r['module'], freqs, amps, phases, amplitude)
 
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""

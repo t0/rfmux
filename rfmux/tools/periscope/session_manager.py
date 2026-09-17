@@ -675,3 +675,14 @@ class SessionManager(QtCore.QObject):
         """
         if self.is_active and self._auto_export_enabled:
             self.export_data(data_type, identifier, data)
+
+
+def load_result(path) -> object:
+    """The result a session export holds: the value the panel's session
+    name was bound to when it was exported. Binding it again is a cell,
+    so a loaded panel's data has a name the next step can refer to."""
+    with open(path, "rb") as f:
+        data = pickle.load(f)
+    if not isinstance(data, dict) or "result" not in data:
+        raise ValueError(f"{path} was exported without a named result; open it from the Session Browser.")
+    return data["result"]

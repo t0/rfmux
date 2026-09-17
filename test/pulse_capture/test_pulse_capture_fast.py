@@ -404,17 +404,21 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
 
 
 def test_periscope_takes_the_mocks_df_calibration(mock_crs):
-    """Selecting df units in mock mode measures a calibration.
+    """Selecting df units in mock mode measures a calibration as a session
+    cell; on hardware nothing starts, since the calibration comes from
+    bias_kids."""
+    import ast
+    import asyncio
+    from concurrent.futures import Future
+    from types import SimpleNamespace
 
-    Periscope only learned about calibrations through the multisweep
-    panel's bias_kids run, so a simulated session was told none existed.
-    """
     from rfmux.tools.periscope.app import Periscope
 
     loop, crs = mock_crs
 
     class Fake:
-        """Only the parts _measure_df_calibrations touches."""
+        """Only the parts _start_df_calibration touches; run_python_then
+        executes the cell the way the session would."""
         module = 1
         channel_list = [[1, 2]]
 
@@ -423,14 +427,37 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
             self.is_mock_mode = is_mock
             self.tuning = {}
             self.df_calibrations = {}
+            self.namespace = {"crs": board}
+            self.cells = []
 
-        _measure_df_calibrations = Periscope._measure_df_calibrations
-        _df_calibration_measurement = Periscope._df_calibration_measurement
+        def run_python_then(self, code, comment, done):
+            self.cells.append(code)
+            future = Future()
+            try:
+                compiled = compile(code, "<cell>", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                coro = eval(compiled, self.namespace)
+                if coro is not None:
+                    asyncio.run(coro)
+                future.set_result(None)
+            except Exception as exc:
+                future.set_exception(exc)
+            done(future)
+            return future
+
+        def session_namespace(self):
+            return self.namespace
+
+        def statusBar(self):
+            return SimpleNamespace(showMessage=lambda *args: None)
+
+        _start_df_calibration = Periscope._start_df_calibration
+        _df_calibration_running = Periscope._df_calibration_running
+        _on_df_calibration_measured = Periscope._on_df_calibration_measured
         _handle_tuning_ready = Periscope._handle_tuning_ready
 
     f = Fake(crs)
-    assert not f.tuning.get(1), "should start with none"
-    f._measure_df_calibrations(1)
+    f._start_df_calibration(1)
+    assert f.cells == ["df_calibrations_m1 = await crs.measure_df_calibrations(module=1)"]
     rows = f.tuning.get(1) or {}
     assert rows, "the measurement did not reach Periscope"
     cals = f.df_calibrations[1]
@@ -440,5 +467,5 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
     # Not on hardware: sweeping moves a tuned array, so the calibration
     # there comes from bias_kids, not from picking a units option.
     g = Fake(crs, is_mock=False)
-    g._measure_df_calibrations(1)
-    assert g.tuning == {} and g.df_calibrations == {}
+    g._start_df_calibration(1)
+    assert g.cells == [] and g.tuning == {} and g.df_calibrations == {}

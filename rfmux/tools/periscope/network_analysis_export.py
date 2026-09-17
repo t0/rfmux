@@ -16,7 +16,6 @@ from typing import Tuple, Optional, Union
 
 from .utils import *
 from .dialogs import MultisweepDialog
-from .tasks import SetCableLengthTask, SetCableLengthSignals
 
 
 class NetworkAnalysisExportMixin:
@@ -152,8 +151,14 @@ class NetworkAnalysisExportMixin:
         Returns:
             Dictionary containing all export data
         """
+        main_app = self.window() if hasattr(self, 'window') else None
+        namespace = main_app.session_namespace() if hasattr(main_app, 'session_namespace') else {}
+        name = getattr(self, 'result_name', None)
         export_data = {
             'timestamp': datetime.datetime.now().isoformat(),
+            'name': name,
+            'result': namespace.get(name),
+            'cells': list(getattr(main_app, 'session_cells', {}).get(name, [])),
             'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
             'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
             'modules': {}
@@ -510,7 +515,8 @@ class NetworkAnalysisExportMixin:
         
         try:
             tau_additional = fit_cable_delay(freqs_active, phases_displayed_active_deg)
-            L_new_physical = calculate_new_cable_length(L_old_physical, tau_additional)
+            # A plain float: this value is stored, shown and written into a session cell.
+            L_new_physical = float(calculate_new_cable_length(L_old_physical, tau_additional))
             return L_old_physical, L_new_physical
         except Exception as e:
             QtWidgets.QMessageBox.critical(
@@ -614,29 +620,19 @@ class NetworkAnalysisExportMixin:
             active_module: The module identifier
             new_length: The new cable length in meters
         """
-        # Ensure the main application has the crs object and thread pool
         main_app = self.window()
-        if hasattr(main_app, 'crs') and main_app.crs is not None and \
-           hasattr(main_app, 'pool') and main_app.pool is not None:
-            
-            # Ensure signals for this task are initialized
-            if not hasattr(self, 'set_cable_length_signals'):
-                self.set_cable_length_signals = SetCableLengthSignals()
-
-            # Create and start the task
-            set_length_task = SetCableLengthTask(
-                crs=main_app.crs,
-                module_id=active_module,
-                length=new_length,
-                signals=self.set_cable_length_signals 
-            )
-            main_app.pool.start(set_length_task)
-        else:
+        if getattr(main_app, "crs", None) is None or not hasattr(main_app, "run_python_then"):
             QtWidgets.QMessageBox.warning(
-                self, 
-                "CRS Error", 
-                "Could not send set_cable_length command: CRS or thread pool not available from parent."
-            )
+                self, "CRS Error", "Could not send set_cable_length command: no CRS connection.")
+            return
+
+        def done(future):
+            if future.exception() is not None:
+                self._handle_set_cable_length_error(active_module, str(future.exception()))
+
+        main_app.run_python_then(
+            f"await crs.set_cable_length(length={new_length!r}, module={active_module!r})",
+            "Cable length", done)
 
     def _on_cable_length_changed(self, new_length: float) -> None:
         """

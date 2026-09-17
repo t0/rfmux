@@ -444,6 +444,34 @@ def apply_ui_theme(dark_mode: bool) -> None:
     app.setPalette(ui_palette(dark_mode))
 
 
+class _PopupEcho(QtCore.QObject):
+    """Prints each warning or error message box as it is shown."""
+
+    _LEVELS = {QtWidgets.QMessageBox.Icon.Warning: "WARNING",
+               QtWidgets.QMessageBox.Icon.Critical: "ERROR"}
+
+    def eventFilter(self, obj, event) -> bool:
+        if (event.type() == QtCore.QEvent.Type.Show
+                and isinstance(obj, QtWidgets.QMessageBox)
+                and obj.icon() in self._LEVELS):
+            parts = [obj.text(), obj.informativeText(), obj.detailedText()]
+            print(f"[Periscope] {self._LEVELS[obj.icon()]}: "
+                  f"{obj.windowTitle()}: "
+                  + "\n".join(part for part in parts if part),
+                  file=sys.stderr, flush=True)
+        return False
+
+
+def echo_popups_to_console(app: QtWidgets.QApplication) -> None:
+    """Every warning or error pop-up also goes to the console, so a
+    terminal log or a remote session keeps what a dialog said.  One
+    filter on the application covers the static ``QMessageBox.warning``
+    and ``critical`` calls as well as boxes built by hand."""
+    if getattr(app, "_popup_echo", None) is None:
+        app._popup_echo = _PopupEcho(app)
+        app.installEventFilter(app._popup_echo)
+
+
 def square_axes(plot_item: pg.PlotItem):
     """
     Make the axes have the same scale and equal extent in both directions, so that the

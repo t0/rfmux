@@ -63,7 +63,7 @@ async def take_netanal(
     module : int or list of int
         - If an integer, run one measurement on that module.
         - If a list, e.g. [1, 2, 3], run concurrently for each module in the list
-          and return a dict keyed by module number.
+          and return a list of results in the same order.
         - Note -- lists must be within a single analog bank (1-4) or (5-8).
     progress_callback : callable, optional
         Callback function that receives (module, progress_percentage) updates.

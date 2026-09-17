@@ -135,11 +135,12 @@ toolbar. The **Settings** dialog includes:
 - **Coincidence window (ms)** (off) groups pulses into events: every pulse,
   on any channel, that triggers within this of an event's first trigger.
   Measuring from the first trigger bounds an event at the window, so a
-  steady rate of unrelated pulses cannot chain into one. Events are
-  recorded by slow and fast captures; both mode pairs pulses across the
-  two streams instead.
+  steady rate of unrelated pulses cannot chain into one. In both mode a
+  channel's share of an event is its pair, whichever of the two streams
+  triggered.
 - **Save every channel with each event** (off) also saves, with each event,
-  the same span of every channel that did not trigger. Only a capture can
+  the same span of every channel that did not trigger, from both streams
+  in both mode. Only a capture can
   do this, since those samples are gone once the ring buffer moves on. With
   the coincidence window off, each pulse is then an event of its own. The
   ring buffer grows by the window and a block of samples so the span is
@@ -234,9 +235,13 @@ first trigger. **Save every channel with each event** adds the same span
 of the channels that did not trigger. A run across modules groups across
 them.
 
-**Group by** above the pulse view switches the pulse list between
-**Channels**, each with its pulses, and **Events**, each with the pulses
-that make it up and a **no trigger** row for every channel saved with it.
+**Group by** above the pulse list switches it between **Channels**, each
+with its pulses, and **Events**, each with the pulses that make it up and
+a **no trigger** row for every channel saved with it. In both mode the
+rows are pairs: a channel that triggered on the slow stream alone, on
+the fast stream alone or on both is one member either way, so an event
+can be a fast-only pulse on one channel beside a slow-only one on
+another.
 The pulses are the same either way: they are stored once, under their
 channels, and the events index them. A capture that recorded no events
 can still be grouped by events, in review or live, from the trigger
@@ -245,7 +250,9 @@ that did not trigger need the capture to have saved them.
 
 Double-click an event to draw its channels together, on one time axis
 from the event's first trigger and each about its own baseline, the
-channels that did not trigger as thin dotted traces. Double-click a pulse
+channels that did not trigger as thin dotted traces. In both mode
+**Event shows** picks the slow samples (points), the fast ones (lines) or
+both. Double-click a pulse
 under it for that pulse alone. **Prev** and **Next** step through events,
 and **Follow latest** shows the newest event's pulses as it closes,
 without the channels that did not trigger. An event closes once no pulse
@@ -273,9 +280,13 @@ with PulseHDF5Reader("capture.h5") as r:
 In the file, `events/event_<k>` holds `members` (rows of channel and pulse
 index, with the module first for a run across modules), their
 `trigger_times`, the window, and `dump/channel_<n>` for each channel saved
-without a trigger. A both-mode capture records no events; a slow capture
-that `rfmux record` merges with its 100G recording keeps them, indexing
-the slow pulses.
+without a trigger. In a both-mode file a member's index is that of a
+pair under `matched/`, and a dumped channel holds `slow/` and `fast/`
+windows; `result.events` has the same shape, with `slow_tod` and
+`fast_tod` under each dumped channel as a pair has them. A slow capture
+that `rfmux record` merges with its 100G recording becomes such a file:
+its events carry over, and each dumped channel gains the recording over
+the event's window.
 
 ## Fast and dual-stream captures
 

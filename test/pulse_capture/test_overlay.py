@@ -381,24 +381,68 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
         assert "noise_std_I" in r.f[f"fast/channel_{CHANNEL}"].attrs
 
 
+def _capture_with_a_quiet_channel(tmp_path, **config_kw):
+    """The event on CHANNEL with CHANNEL + 1 quiet beside it, fed a
+    block of each in turn as a source feeds them."""
+    path = str(tmp_path / "slow.h5")
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=30.0, noise_train_ms=300.0,
+                             **config_kw)
+    s = PulseCaptureSession(channels=[CHANNEL, CHANNEL + 1], module=1,
+                            sample_rate=FS, hdf5_path=path,
+                            **cfg.session_kwargs(FS))
+    s.start()
+    rng = np.random.default_rng(5)
+    n, block = int(2.5 * FS), 64
+    t = T0 + np.arange(n) / FS
+    signal = {CHANNEL: _shape(t), CHANNEL + 1: np.zeros(n)}
+    for lo in range(0, n, block):
+        for key in (CHANNEL, CHANNEL + 1):
+            m = len(t[lo:lo + block])
+            s.feed_block(key, signal[key][lo:lo + block] + rng.normal(0, 1, m),
+                         rng.normal(0, 1, m), t[lo:lo + block] + LATE)
+    s.stop()
+    return path
+
+
 def test_a_merged_file_keeps_the_captures_events(tmp_path):
-    """The events index the capture's pulses, which the merge files as
-    the slow stream's."""
+    """The events index the capture's pulses, which are the merged
+    file's pairs under the same numbers."""
     from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
-    path = _capture(tmp_path, channels=(CHANNEL, CHANNEL + 1),
-                    dump_all_channels=True)
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
     with PulseHDF5Reader(path) as r:
         before = r.get_event(1)
-    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
-                         span=(-0.002, 0.035))
-    merge_fastrx(path, fx)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
     with PulseHDF5Reader(path) as r:
-        assert r.dual and r.events_stream == "slow"
+        assert r.dual
         after = r.get_event(1)
-        assert r.get_pulse(CHANNEL, after["members"][0]["pulse_idx"],
-                           stream="slow") is not None
+        (member,) = after["members"]
+        assert r.get_match(member["channel"], member["pulse_idx"])["slow_idx"] \
+            == member["pulse_idx"]
     assert after["members"] == before["members"]
-    assert after["dumped"] == before["dumped"]
+
+
+def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
+    """With every channel saved per event, a channel that did not
+    trigger gets the recording over the event's window beside the slow
+    samples the capture took, as a both-mode capture would hold it."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, dump_all_channels=True)
+    with PulseHDF5Reader(path) as r:
+        before = r.get_event(1)
+    assert before["dumped"] == [CHANNEL + 1]
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = r.get_event(1)
+    quiet = after["dump"][CHANNEL + 1]
+    np.testing.assert_array_equal(quiet["slow_tod"]["Amp_I"],
+                                  before["dump"][CHANNEL + 1]["Amp_I"])
+    fast = quiet["fast_tod"]["Time"]
+    t0, t1 = after["window"]
+    assert len(fast) > 10 * len(quiet["slow_tod"]["Time"])
+    assert t0 <= fast[0] and fast[-1] <= t1
 
 
 def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
@@ -409,8 +453,7 @@ def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
     from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     from rfmux.tools.periscope.pulse_capture_panel import (
         GROUP_EVENTS, PulseCapturePanel)
-    path = _capture(tmp_path, channels=(CHANNEL, CHANNEL + 1),
-                    coincidence_window_ms=1.0)
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
     merge_fastrx(path, _recording_file(
         tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
 
@@ -422,10 +465,13 @@ def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
     assert top.data(0, role) == ("event", 1)
     assert [top.child(k).data(0, role) for k in range(top.childCount())] \
         == [("pair", CHANNEL, 1)]
+    def drawn():
+        return [c.name() for c in
+                panel.pulse_plot_i.getPlotItem().listDataItems()]
     panel._show_event(1)
-    assert [c.name() for c in
-            panel.pulse_plot_i.getPlotItem().listDataItems()] \
-        == [f"Ch{CHANNEL}"]
+    assert drawn() == [f"Ch{CHANNEL} slow", f"Ch{CHANNEL} fast"]
+    panel.event_stream_combo.setCurrentText("fast")
+    assert drawn() == [f"Ch{CHANNEL} fast"]
 
 
 def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):

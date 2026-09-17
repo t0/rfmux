@@ -134,11 +134,14 @@ class PulseCaptureResult:
     #: the two summaries, ``time_offset``, and the union-window TOD from
     #: both ring buffers.  Empty unless ``streamer_mode="both"``.
     pairs: List[dict] = field(default_factory=list)
-    #: Coincidence events of a single-stream capture whose config sets
-    #: ``coincidence_window_ms`` or ``dump_all_channels``: each names
-    #: its member pulses (``channel``, ``pulse_idx``, ``trigger_time``,
-    #: ``summary``), its ``window``, and under ``dump`` the same span of
-    #: every channel that did not trigger, when that was asked for.
+    #: Coincidence events, when the config sets ``coincidence_window_ms``
+    #: or ``dump_all_channels``: each names its members (``channel``,
+    #: ``pulse_idx``, ``trigger_time``, ``summary``), its ``window``, and
+    #: under ``dump`` the same span of every channel that did not
+    #: trigger, when that was asked for.  In ``"both"`` mode a member is
+    #: a pair (``pulse_idx`` is its ``pair_idx``), whichever of its
+    #: streams triggered, and a dumped channel holds ``slow_tod`` and
+    #: ``fast_tod`` like a pair.
     events: List[dict] = field(default_factory=list)
     hdf5_path: Optional[Path] = None
 
@@ -461,7 +464,8 @@ async def _run_dual(result, host, channels, fast_channels, module,
         tuning=tuning,
         on_pulse=lambda s, ch, idx, summary, wf:
             collectors[s](ch, idx, summary, wf),
-        on_pair=result.pairs.append, on_noise=on_noise,
+        on_pair=result.pairs.append, on_event=result.events.append,
+        on_noise=on_noise,
         on_error=(lambda m: print(f"[trigger_capture] {m}")) if verbose
         else None)
     result.slow_time_offset_s = capture_session.slow_time_offset_s

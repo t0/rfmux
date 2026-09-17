@@ -1523,6 +1523,7 @@ class DualPulseCaptureSession(_CallbackHost):
         on_noise: Optional[Callable] = None,
         on_pulse: Optional[Callable] = None,
         on_pair: Optional[Callable] = None,
+        on_event: Optional[Callable] = None,
         on_stats: Optional[Callable] = None,
         on_histograms: Optional[Callable] = None,
         on_templates: Optional[Callable] = None,
@@ -1556,6 +1557,7 @@ class DualPulseCaptureSession(_CallbackHost):
         self.on_noise = on_noise
         self.on_pulse = on_pulse
         self.on_pair = on_pair
+        self.on_event = on_event
         self.on_stats = on_stats
         self.on_histograms = on_histograms
         self.on_templates = on_templates
@@ -1597,6 +1599,16 @@ class DualPulseCaptureSession(_CallbackHost):
         #: slow-minus-fast trigger time of every matched pair: the
         #: board's inter-stream clock skew, one sample per event.
         self._time_offsets: List[float] = []
+        #: Coincidence across channels: a pair is one channel's share of
+        #: an event, whichever of its streams triggered.  A pair leaves
+        #: here a hard stop after it triggered at the latest, unless the
+        #: matcher or a ring is still holding it (see _advance_events).
+        self.events: Optional[EventGrouper] = None
+        if self.config.events_on:
+            self.events = EventGrouper(
+                self.config.coincidence_window_ms * 1e-3,
+                self.config.max_capture_samples(slow_rate) / slow_rate,
+                on_event=self._on_event)
 
         self.slow = self._make_stream("slow", slow_rate,
                                       time_offset_s=self.slow_time_offset_s)
@@ -1645,12 +1657,18 @@ class DualPulseCaptureSession(_CallbackHost):
         # (single-trigger expiry): the ring must cover the full window
         # PLUS the grace, or the extraction races the ring.
         grace = self.matcher.grace_s
+        # A dumped channel is read when its event closes, which is after
+        # the event's last pair: the window and the margins on top.
+        dump = ((self.config.coincidence_window_ms + self.config.pre_pulse_ms
+                 + self.config.post_pulse_ms) / 1e3
+                if self.config.dump_all_channels else 0.0)
         min_buf = int((self.config.max_pulse_ms / 1e3
                        * self.config.BUFFER_SAFETY
-                       + grace + 0.1) * sample_rate)
+                       + grace + dump + 0.1) * sample_rate)
         kwargs["buf_size"] = max(kwargs["buf_size"], min_buf)
-        # Events are a single-stream capture's: a both-mode file pairs
-        # its pulses across streams instead.
+        # Events are grouped here, from the pairs, not per stream; the
+        # config has already grown the ring by the coincidence window
+        # when the other channels are to be read out of it.
         kwargs["coincidence_window_s"] = None
         kwargs["dump_all_channels"] = False
         return PulseCaptureSession(
@@ -1784,6 +1802,8 @@ class DualPulseCaptureSession(_CallbackHost):
         self.fast.stop()
         self.matcher.flush()
         self._release_pairs(force=True)   # nothing left to wait for
+        if self.events is not None:
+            self.events.flush()
         self._to_writer("finalize", what="finalize")
 
     @property
@@ -1945,7 +1965,64 @@ class DualPulseCaptureSession(_CallbackHost):
             self._to_writer("append_match", pair["channel"], pair,
                             what="match write")
             self._callback(self.on_pair, pair)
+            if self.events is not None:
+                window = pair.get("window") or (None, None)
+                self.events.add(pair["channel"], pair["pair_idx"], {
+                    "trigger_time": self._pair_time(pair),
+                    "start_time": window[0], "saved_end_time": window[1],
+                    "slow_idx": pair["slow_idx"],
+                    "fast_idx": pair["fast_idx"]})
             self._emit_stats()
+        self._advance_events()
+
+    @staticmethod
+    def _pair_time(pair: dict) -> float:
+        """When a pair triggered: the earlier of its streams' triggers."""
+        times = [s["trigger_time"] for s in (pair.get("slow_summary"),
+                                             pair.get("fast_summary"))
+                 if s and s.get("trigger_time") is not None]
+        return min(times) if times else float("nan")
+
+    def _advance_events(self) -> None:
+        if self.events is None:
+            return
+        clocks = [c for c in self.matcher._latest.values() if c is not None]
+        if clocks:
+            self.events.advance(min(clocks), settled=self._settled_by)
+
+    def _settled_by(self, t: float) -> bool:
+        """Whether every pulse that triggered by *t* has left the
+        matcher and the window queue as a pair."""
+        for by_channel in self.matcher._pending.values():
+            for pending in by_channel.values():
+                if any(p.t <= t for p in pending):
+                    return False
+        return not any(self._pair_time(pair) <= t
+                       for pair, _union, _done in self._pending_pairs)
+
+    def _on_event(self, event: dict) -> None:
+        """An event closed: with the dump on, every channel that has no
+        pair in it is read from both rings over the event's window."""
+        if self.config.dump_all_channels and event["window"] is not None:
+            t0, t1 = event["window"]
+            triggered = set(event_channels(event))
+            dump = {}
+            for ch in self.channels:
+                if ch in triggered:
+                    continue
+                sides = {"channel": ch}
+                for stream, session in (("slow", self.slow),
+                                        ("fast", self.fast)):
+                    if stream == "fast" and ch not in self.fast_channels:
+                        continue
+                    self._take_window(sides, stream, session, t0, t1)
+                if len(sides) > 1:
+                    del sides["channel"]
+                    dump[ch] = sides
+            event["dump"] = dump
+        self._to_writer("append_event", event,
+                        what=f"write for event #{event['event_idx']}")
+        self._callback(self.on_event, event)
 
     def _take_window(self, pair: dict, stream: str, session,
                      t0: float, t1: float) -> None:

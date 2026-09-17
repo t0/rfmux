@@ -130,16 +130,18 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "either.\n\n"
             "Off records no events.  The pulse list can still group a "
             "capture by events afterwards, from the trigger times.\n"
-            "Not recorded in both mode, which pairs pulses across the "
-            "two streams instead.")
+            "In both mode a channel's share of an event is its pair, "
+            "whichever of the two streams triggered.")
         form.addRow("Coincidence window (ms):", self.coincidence_spin)
         self.dump_check = QtWidgets.QCheckBox(
             "Save every channel with each event")
         self.dump_check.setChecked(config.dump_all_channels)
         self.dump_check.setToolTip(
             "With each event, also save the same span of every channel "
-            "that did not trigger.  Only a capture can: those samples "
-            "are gone once the ring buffer moves on.\n\n"
+            "that did not trigger, from both streams in both mode.  "
+            "Only a capture can: those samples are gone once the ring "
+            "buffer moves on.  rfmux record adds the 100G recording "
+            "over the same span when it merges.\n\n"
             "With the coincidence window off, each pulse is an event of "
             "its own.  The file grows by the untriggered channels for "
             "every event.")

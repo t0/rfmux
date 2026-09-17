@@ -62,6 +62,11 @@ class EventGrouper:
     stop, the longest a capture can run) past the end of its window, on
     the clock of the channel that is furthest behind.
 
+    In a both-mode capture the members are the matched pairs rather
+    than the pulses (``pulse_idx`` is then the pair's index), and a pair
+    can be held up after its pulses end, waiting for its partner or for
+    a ring; :meth:`advance` takes a ``settled`` test for that.
+
     ``on_event`` receives::
 
         {"event_idx", "trigger_time", "window": (t0, t1) | None,
@@ -95,10 +100,17 @@ class EventGrouper:
         self._pending.append({"channel": channel, "pulse_idx": int(pulse_idx),
                               "trigger_time": float(t), "summary": summary})
 
-    def advance(self, now: float) -> None:
+    def advance(self, now: float,
+                settled: Optional[Callable[[float], bool]] = None) -> None:
         """Close every event no open pulse can still join; *now* is the
-        clock of the slowest channel."""
+        clock of the slowest channel.  *settled*, given the end of an
+        event's window, says whether everything that triggered by then
+        has been added: a caller that holds pulses back after they end
+        answers False while it holds one."""
         while now >= self.deadline:
+            if settled is not None and not settled(
+                    self.deadline - self.hold_s):
+                break
             self._close_oldest()
 
     def flush(self) -> None:
@@ -138,16 +150,31 @@ def events_of(reader, window_s: Optional[float] = None,
 
     With *window_s* None these are the events the capture recorded.
     Given a window, or for a file that recorded none, the file's pulses
-    are grouped afresh from their trigger times (on *stream* of a dual
-    file), which needs nothing the capture did not already keep; such
-    events have no dump.
+    are grouped afresh from their trigger times, which needs nothing the
+    capture did not already keep; such events have no dump.  A dual
+    file's pairs are grouped, each at the earlier of its triggers, as
+    its capture groups them; *stream* groups one stream's pulses
+    instead.
     """
     if window_s is None and reader.event_count:
         return list(reader.iter_events())
-    triggers = [(float(meta.get("trigger_time", meta.get("timestamp"))),
-                 channel, int(meta["pulse_idx"]))
-                for channel in reader.channels
-                for meta in reader.iter_pulse_metadata(channel, stream)]
+    if reader.dual and stream is None:
+        triggers = []
+        for channel in reader.channels:
+            for pair in reader.iter_matches(channel):
+                times = [reader.get_pulse_metadata(channel, idx, side)
+                         .get("trigger_time")
+                         for side in ("slow", "fast")
+                         for idx in [pair.get(f"{side}_idx")] if idx]
+                times = [t for t in times if t is not None]
+                if times:
+                    triggers.append((float(min(times)), channel,
+                                     int(pair["pair_idx"])))
+    else:
+        triggers = [(float(meta.get("trigger_time", meta.get("timestamp"))),
+                     channel, int(meta["pulse_idx"]))
+                    for channel in reader.channels
+                    for meta in reader.iter_pulse_metadata(channel, stream)]
     return [{"event_idx": k, "trigger_time": group[0][0], "window": None,
              "dumped": [],
              "members": [{"channel": ch, "pulse_idx": idx, "trigger_time": t}

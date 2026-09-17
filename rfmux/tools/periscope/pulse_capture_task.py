@@ -131,6 +131,7 @@ class PulseCaptureTask(QtCore.QThread):
                     {"stream": stream, "stats": self._noise_snapshot(ns)})
             session.on_pulse = self._on_stream_pulse
             session.on_pair = self._on_pair
+            session.on_event = self._on_event
             session.on_histograms = lambda stream, d: \
                 self.signals.histograms_updated.emit(
                     {"stream": stream, "data": d})

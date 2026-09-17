@@ -194,8 +194,13 @@ Old values are main at the merge base (e46fc41).
   `on_event` on `PulseCaptureSession`), `rfmux/pulse_capture/events.py` for
   the grouping, `events/` in the file with `PulseHDF5Reader.event_count`,
   `get_event` and `iter_events`, `PulseCaptureResult.events`, and
-  **Group by** in the Pulse Capture panel. Pulses stay under their
-  channels; a file without events is laid out as before.
+  **Group by** above the Pulse Capture panel's pulse list. Pulses stay
+  under their channels; a file without events is laid out as before. A
+  both-mode capture groups its pairs (`on_event` on
+  `DualPulseCaptureSession`) and dumps both rings; `merge_fastrx` slices
+  the recording for a merged file's dumped channels; `rfmux record` takes
+  `--coincidence-window-ms`, `--dump-all-channels`, `--pre-pulse-ms` and
+  `--post-pulse-ms`.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
   trigger to `post_pulse_ms` after the sample the pulse settled on, the first
   of the in-band run the end confirmation then verifies, or to the hard

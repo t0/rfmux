@@ -179,6 +179,10 @@ def _channel_color(channel) -> str:
 GROUP_CHANNELS = "Channels"
 GROUP_EVENTS = "Events"
 
+#: Which streams an event of a both-mode capture is drawn from.
+EVENT_STREAMS = {"slow + fast": ("slow", "fast"), "slow": ("slow",),
+                 "fast": ("fast",)}
+
 #: Legend names for the two stored axes, by basis.
 _AXIS_NAMES = {"df": ("df", "diss"), "iq": ("I", "Q")}
 
@@ -522,7 +526,26 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         header.sectionResized.connect(self._on_tree_section_resized)
         self.pulse_tree.viewport().installEventFilter(self)
         self.pulse_tree.itemDoubleClicked.connect(self._on_tree_double_click)
-        splitter.addWidget(self.pulse_tree)
+
+        self.group_combo = QtWidgets.QComboBox()
+        self.group_combo.addItems([GROUP_CHANNELS, GROUP_EVENTS])
+        self.group_combo.setToolTip(
+            "How the pulse list is grouped.\n\n"
+            "Events: pulses on any channels that triggered within the "
+            "coincidence window of an event's first trigger; in both "
+            "mode a channel's share is its pair, whichever stream "
+            "triggered.  The capture's own events when it recorded them "
+            "(Settings: coincidence window, save every channel), else "
+            "the pulses grouped here from their trigger times.  "
+            "Double-click an event to draw its channels together.")
+        self.group_combo.currentTextChanged.connect(self._on_group_changed)
+        listing = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(listing)
+        column.setContentsMargins(4, 4, 0, 0)
+        column.addWidget(labelled("Group by:", self.group_combo), 0,
+                         QtCore.Qt.AlignmentFlag.AlignLeft)
+        column.addWidget(self.pulse_tree)
+        splitter.addWidget(listing)
 
         self.viewer_tabs = QtWidgets.QTabWidget()
         self.viewer_tabs.addTab(self._build_pulse_view(), "Pulse View")
@@ -548,21 +571,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_next.clicked.connect(lambda: self._navigate(+1))
         self.follow_check = QtWidgets.QCheckBox("Follow latest")
         self.follow_check.setChecked(True)
-        self.group_combo = QtWidgets.QComboBox()
-        self.group_combo.addItems([GROUP_CHANNELS, GROUP_EVENTS])
-        self.group_combo.setToolTip(
-            "How the pulse list is grouped.\n\n"
-            "Events: pulses on any channels that triggered within the "
-            "coincidence window of an event's first trigger.  The "
-            "capture's own events when it recorded them (Settings: "
-            "coincidence window, save all channels), else the pulses "
-            "grouped here from their trigger times.  Double-click an "
-            "event to draw its channels together.")
-        self.group_combo.currentTextChanged.connect(self._on_group_changed)
+        self.event_stream_combo = QtWidgets.QComboBox()
+        self.event_stream_combo.addItems(list(EVENT_STREAMS))
+        self.event_stream_combo.setToolTip(
+            "Which streams an event is drawn from: the fast samples as "
+            "lines, the slow ones as points.")
+        self.event_stream_combo.currentTextChanged.connect(
+            lambda _t: self._current_event is not None
+            and self._show_event(self._current_event))
+        self.event_stream_box = labelled("Event shows:",
+                                         self.event_stream_combo)
+        self.event_stream_box.setVisible(False)
         nav.addWidget(self.btn_prev)
         nav.addWidget(self.btn_next)
         nav.addWidget(self.follow_check)
-        nav.addWidget(labelled("Group by:", self.group_combo))
+        nav.addWidget(self.event_stream_box)
         nav.addStretch(1)
         v.addLayout(nav)
 
@@ -1853,6 +1876,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.hist_stream_combo.setVisible(self._both_mode)
         self.template_stream_combo.setVisible(self._both_mode)
         self.iq_stream_combo.setVisible(self._both_mode)
+        self.event_stream_box.setVisible(self._both_mode)
         self._current_pair = None
         self._current_view = None
         self._counts = {c: 0 for c in channels}
@@ -2049,16 +2073,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _event_list(self) -> List[dict]:
         """The capture's recorded events, else its pulses grouped by
-        the same rule; in both mode the slow stream's pulses, which a
-        recorded event indexes too."""
+        the same rule; in both mode its pairs, each at the earlier of
+        its triggers."""
         if self._events:
             return self._events
         if self._both_mode:
-            triggers = [(m["slow_summary"].get("trigger_time", float("nan")),
-                         ch, m["slow_idx"])
-                        for (ch, _), m in self._pair_meta.items()
-                        if m.get("slow_idx") is not None
-                        and m.get("slow_summary")]
+            triggers = [
+                (min((s["trigger_time"] for s in (m.get("slow_summary"),
+                                                  m.get("fast_summary"))
+                      if s and s.get("trigger_time") is not None),
+                     default=float("nan")), ch, idx)
+                for (ch, idx), m in self._pair_meta.items()]
         else:
             triggers = [(summ.get("trigger_time", float("nan")), ch, idx)
                         for (ch, idx), summ in self._pulse_summaries.items()]
@@ -2076,15 +2101,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return None
 
     def _member_key(self, member: dict) -> Optional[Tuple[int, int]]:
-        """A member's key in the panel's registry: the pulse, or in
-        both mode the pair its slow pulse belongs to."""
-        ch, idx = member["channel"], member["pulse_idx"]
-        if not self._both_mode:
-            return (ch, idx) if (ch, idx) in self._pulse_summaries else None
-        for key, meta in self._pair_meta.items():
-            if key[0] == ch and meta.get("slow_idx") == idx:
-                return key
-        return None
+        """A member's key in the panel's registry, a pulse or in both
+        mode a pair; None for one the panel does not hold."""
+        key = (member["channel"], member["pulse_idx"])
+        held = self._pair_meta if self._both_mode else self._pulse_summaries
+        return key if key in held else None
 
     def _add_event_item(self, event: dict) -> None:
         """One event at the top of the tree, its pulses and its dumped
@@ -2094,8 +2115,11 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         channels = list(dict.fromkeys(m["channel"] for m in members))
         spread = members[-1]["trigger_time"] - members[0]["trigger_time"]
         first = self._member_key(members[0])
-        summ = ((self._pair_meta.get(first) or {}).get("slow_summary")
-                if self._both_mode else self._pulse_summaries.get(first)) or {}
+        if self._both_mode:
+            meta = self._pair_meta.get(first) or {}
+            summ = meta.get("slow_summary") or meta.get("fast_summary") or {}
+        else:
+            summ = self._pulse_summaries.get(first) or {}
         item = QtWidgets.QTreeWidgetItem(
             [f"◈ Event #{event['event_idx']:06d}", self._clock(summ),
              f"{len(channels)} ch", f"Δ {spread * 1e3:.3g} ms"])
@@ -2140,11 +2164,64 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return self.reader.get_event(event_idx)
         return self._event(event_idx)
 
+    def _event_traces(self, event: dict, dump: bool):
+        """([(channel, stream, window, triggered)], loading) for an
+        event: each member's samples, and with *dump* each channel
+        saved without a trigger; per stream in both mode, where a
+        pair's union windows are preferred to its records."""
+        traces, loading = [], False
+        streams = (EVENT_STREAMS[self.event_stream_combo.currentText()]
+                   if self._both_mode else (None,))
+
+        def fetch(key, request):
+            nonlocal loading
+            if self.task is not None:
+                loading = self._request_once(key, request) or loading
+
+        for m in event["members"]:
+            ch, idx = m["channel"], m["pulse_idx"]
+            if not self._both_mode:
+                wf = self._get_waveform(ch, idx)
+                if wf is None:
+                    fetch((None, ch, idx), lambda c=ch, i=idx:
+                          self.task.request_waveform(c, i, None))
+                else:
+                    traces.append((ch, None, wf, True))
+                continue
+            pair = self._get_pair(ch, idx)
+            meta = self._pair_meta.get((ch, idx)) or pair or {}
+            if pair is None:
+                fetch(("pair", ch, idx),
+                      lambda c=ch, i=idx: self.task.request_pair(c, i))
+            for stream in streams:
+                wf = (pair or {}).get(f"{stream}_tod")
+                side_idx = meta.get(f"{stream}_idx")
+                if wf is None and side_idx is not None:
+                    wf = self._get_waveform(ch, side_idx, stream)
+                if wf is not None:
+                    traces.append((ch, stream, wf, True))
+
+        if dump and event.get("dumped"):
+            full = self._get_event(event["event_idx"])
+            if full is None:
+                fetch(("event", event["event_idx"]), lambda:
+                      self.task.request_event(event["event_idx"]))
+            for ch, saved in sorted(((full or {}).get("dump") or {}).items()):
+                if not self._both_mode:
+                    traces.append((ch, None, saved, False))
+                    continue
+                for stream in streams:
+                    if saved.get(f"{stream}_tod"):
+                        traces.append((ch, stream, saved[f"{stream}_tod"],
+                                       False))
+        return traces, loading
+
     def _show_event(self, event_idx: int, dump: bool = True) -> None:
         """An event's channels on one time axis, zero at its first
-        trigger, each about its own baseline: the pulses that triggered
-        as solid traces, with *dump* the channels that did not as thin
-        ones."""
+        trigger, each about its own baseline: what triggered as solid
+        traces, with *dump* the channels that did not as dotted ones.
+        In both mode the fast samples are lines and the slow ones
+        points, for whichever streams the view is set to."""
         event = self._event(event_idx)
         if event is None:
             return
@@ -2152,71 +2229,60 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self._pending_fetch.clear()
         self._current_event = event_idx
         self._current_view = self._current_pair = None
-        stream = "slow" if self._both_mode else None
         t_ref = event["trigger_time"]
-
-        traces = []                       # (channel, waveform, triggered)
-        loading = False
-        for m in event["members"]:
-            ch, idx = m["channel"], m["pulse_idx"]
-            wf = self._get_waveform(ch, idx, stream)
-            if wf is None and self.task is not None:
-                loading = self._request_once(
-                    (stream, ch, idx),
-                    lambda c=ch, i=idx: self.task.request_waveform(
-                        c, i, stream)) or loading
-            if wf is not None:
-                traces.append((ch, wf, True))
-        dumped = event.get("dumped") or []
-        if dump and dumped:
-            full = self._get_event(event_idx)
-            if full is None and self.task is not None:
-                loading = self._request_once(
-                    ("event", event_idx),
-                    lambda: self.task.request_event(event_idx)) or loading
-            for ch, wf in sorted(((full or {}).get("dump") or {}).items()):
-                traces.append((ch, wf, False))
+        traces, loading = self._event_traces(event, dump)
 
         for plot in (self.pulse_plot_i, self.pulse_plot_q):
             plot.clear()
             plot.setTitle("loading the event from file…" if loading else None)
         self._set_pulse_x_axis("time from the event's first trigger", "s")
         units = set()
-        for ch, wf, triggered in traces:
+        for ch, stream, wf, triggered in traces:
             t = np.asarray(wf["Time"], dtype=np.float64) - t_ref
-            # About the level the pulse triggered from, which follows
-            # the baseline's drift where the training mean does not; a
-            # channel that did not trigger sits at its own median.
-            amp_I = np.asarray(wf["Amp_I"], dtype=np.float64)
-            amp_Q = np.asarray(wf["Amp_Q"], dtype=np.float64)
-            amp_I = amp_I - wf.get("trigger_baseline_I", np.median(amp_I))
-            amp_Q = amp_Q - wf.get("trigger_baseline_Q", np.median(amp_Q))
+            quads = []
+            for name in ("Amp_I", "Amp_Q"):
+                data = np.asarray(wf[name], dtype=np.float64)
+                # About the level the pulse triggered from, which
+                # follows the baseline's drift where the training mean
+                # does not; a ring window has no such mark, and sits at
+                # its level before the event, or failing that its median.
+                before = data[t < 0]
+                base = wf.get(f"trigger_baseline_{name[-1]}",
+                              np.median(before if len(before) >= 3 else data))
+                quads.append(data - base)
             view = self._view_coeffs(ch)
             if view is not None:
-                amp_I, amp_Q = apply_iq_conversion(amp_I, amp_Q, view[0])
+                quads = apply_iq_conversion(quads[0], quads[1], view[0])
             units.add(self._units_label(ch))
-            pen = pg.mkPen(_channel_color(ch),
-                           width=LINE_WIDTH if triggered else 1,
-                           style=(QtCore.Qt.PenStyle.SolidLine if triggered
-                                  else QtCore.Qt.PenStyle.DotLine))
-            name = short_label(ch) + ("" if triggered else " (no trigger)")
-            for plot, data in ((self.pulse_plot_i, amp_I),
-                               (self.pulse_plot_q, amp_Q)):
-                plot.plot(t, data, pen=pen, name=name)
+            colour = _channel_color(ch)
+            style = (QtCore.Qt.PenStyle.SolidLine if triggered
+                     else QtCore.Qt.PenStyle.DotLine)
+            points = (dict(symbol="o", symbolSize=5, symbolBrush=colour,
+                           symbolPen=None) if stream == "slow" else {})
+            name = (short_label(ch) + (f" {stream}" if stream else "")
+                    + ("" if triggered else " (no trigger)"))
+            for plot, data in zip((self.pulse_plot_i, self.pulse_plot_q),
+                                  quads):
+                plot.plot(t, data, name=name, pen=pg.mkPen(
+                    colour, style=style,
+                    width=LINE_WIDTH if triggered and stream != "slow" else 1),
+                    **points)
         first, second = self._axis_names(event["members"][0]["channel"])
         for plot, name in ((self.pulse_plot_i, first),
                            (self.pulse_plot_q, second)):
             plot.getPlotItem().setLabel("left", f"{name} − baseline")
 
         members = event["members"]
+        dumped = event.get("dumped") or []
         channels = list(dict.fromkeys(m["channel"] for m in members))
         spread = members[-1]["trigger_time"] - members[0]["trigger_time"]
         window = event.get("window")
+        what = "pairs" if self._both_mode else "pulses"
         self.pulse_info.setText(
             f"Event #{event_idx:06d} — {len(channels)} "
             f"channel{'s' if len(channels) != 1 else ''} triggered: "
-            + ", ".join(short_label(c) for c in channels)
-            + f"\n{len(members)} pulses within {spread * 1e3:.3g} ms "
+            + ", ".join(self._member_label(m) for m in members)
+            + f"\n{len(members)} {what} within {spread * 1e3:.3g} ms "
               f"(coincidence window "
               f"{self._coincidence_window_s() * 1e3:g} ms)"
             + (f"   saved window {(window[1] - window[0]) * 1e3:.3g} ms"
@@ -2228,6 +2294,18 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             + ("\nchannels are in different units: "
                + ", ".join(sorted(units)) if len(units) > 1 else ""))
         self._render_iq_plane()
+
+    def _member_label(self, member: dict) -> str:
+        """``Ch2``, or in both mode ``Ch2 (slow)`` for a pair only one
+        stream triggered."""
+        label = short_label(member["channel"])
+        meta = self._pair_meta.get((member["channel"], member["pulse_idx"]))
+        if self._both_mode and meta:
+            sides = [s for s in ("slow", "fast")
+                     if meta.get(f"{s}_idx") is not None]
+            if len(sides) == 1:
+                label += f" ({sides[0]})"
+        return label
 
     def _pulse_item(self, channel: int, pulse_idx: int,
                     summary: dict) -> QtWidgets.QTreeWidgetItem:

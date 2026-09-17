@@ -238,26 +238,26 @@ class _PulseFileWriter:
 
     # ── Lifecycle ─────────────────────────────────────────────────
 
-    def append_event(self, event: dict, stream: Optional[str] = None) -> None:
+    def append_event(self, event: dict) -> None:
         """File one coincidence event under ``events/``::
 
             events/event_<k>/         trigger_time, window_t0, window_t1
-                members               rows of (channel, pulse_idx), or of
-                                      (module, channel, pulse_idx)
+                members               rows of (channel, index), or of
+                                      (module, channel, index)
                 trigger_times         one per member
                 dump/<channel group>/Amp_I, Amp_Q, Time
+                dump/<channel group>/slow/...  and  .../fast/...
 
-        The members index the pulses already stored under their
-        channels (on *stream* in a dual file); ``dump`` holds the same
-        span of the channels that did not trigger, when the capture
-        took it.  The group appears with the first event, so a file
-        without events is laid out as it always was.
+        A member's index is that of a pulse stored under its channel,
+        or in a dual file of a pair under ``matched/``.  ``dump`` holds
+        the same span of the channels that did not trigger, when the
+        capture took it: one window, or in a dual file one per stream
+        that carries the channel.  The group appears with the first
+        event, so a file without events is laid out as it always was.
         """
         if not self.is_open:
             return
         events = self.f.require_group("events")
-        if stream is not None:
-            events.attrs["stream"] = stream
         idx = int(event["event_idx"])
         grp = events.create_group(f"event_{idx:06d}")
         grp.attrs["trigger_time"] = float(event["trigger_time"])
@@ -273,10 +273,16 @@ class _PulseFileWriter:
             [m["trigger_time"] for m in members], dtype=np.float64))
         for channel, tod in (event.get("dump") or {}).items():
             dgrp = grp.create_group(f"dump/{channel_group(channel)}")
-            for name in ("Amp_I", "Amp_Q", "Time"):
-                dgrp.create_dataset(
-                    name, data=np.asarray(tod[name], dtype=np.float64),
-                    compression="gzip", compression_opts=1)
+            windows = ({"": tod} if "Amp_I" in tod else
+                       {f"{side}/": tod[f"{side}_tod"]
+                        for side in ("slow", "fast")
+                        if tod.get(f"{side}_tod")})
+            for prefix, window in windows.items():
+                for name in ("Amp_I", "Amp_Q", "Time"):
+                    dgrp.create_dataset(
+                        prefix + name,
+                        data=np.asarray(window[name], dtype=np.float64),
+                        compression="gzip", compression_opts=1)
         events.attrs["event_count"] = max(
             int(events.attrs.get("event_count", 0)), idx)
         self.f.flush()
@@ -819,16 +825,11 @@ class PulseHDF5Reader:
             return 0
         return int(self.f["events"].attrs.get("event_count", 0))
 
-    @property
-    def events_stream(self) -> Optional[str]:
-        """The stream a dual file's events index; None otherwise."""
-        if "events" not in self.f:
-            return None
-        return _convert_attr(self.f["events"].attrs.get("stream")) or None
-
     def get_event(self, event_idx: int, dump: bool = True) -> Optional[dict]:
-        """One event: its members, and with *dump* the channels that did
-        not trigger."""
+        """One event: its members (pulses, or in a dual file pairs), and
+        with *dump* the channels that did not trigger, each
+        ``{"Amp_I", "Amp_Q", "Time"}`` or in a dual file
+        ``{"slow_tod": ..., "fast_tod": ...}`` like a pair."""
         key = f"events/event_{int(event_idx):06d}"
         if key not in self.f:
             return None
@@ -1007,8 +1008,12 @@ def _event_from_group(grp, event_idx: int, dump: bool = True) -> dict:
                 groups[int(name[8:])] = item
         event["dumped"] = sorted(groups)
         if dump:
+            def window(g):
+                return {n: np.array(g[n]) for n in ("Amp_I", "Amp_Q", "Time")}
             event["dump"] = {
-                ch: {n: np.array(g[n]) for n in ("Amp_I", "Amp_Q", "Time")}
+                ch: (window(g) if "Amp_I" in g else
+                     {f"{side}_tod": window(g[side])
+                      for side in ("slow", "fast") if side in g})
                 for ch, g in groups.items()}
     return event
 

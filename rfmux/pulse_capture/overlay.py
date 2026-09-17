@@ -467,10 +467,6 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
             key = channel_group(c)
             del writer.f["slow"][key]
             reader.f.copy(reader.f[key], writer.f["slow"], name=key)
-        if "events" in reader.f:
-            # The capture's events index its pulses, now the slow ones.
-            reader.f.copy(reader.f["events"], writer.f, name="events")
-            writer.f["events"].attrs["stream"] = "slow"
         writer.update_histograms("slow", reader.get_histograms())
         writer.update_templates("slow", reader.get_templates())
 
@@ -511,9 +507,36 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
             pre_samples=max(8, post // 10), post_samples=post,
             threshold_sigma=thr, sample_rate=PFB_SAMPLING_FREQ)
 
+        def fast_window(c, t0, t1):
+            """The recording over [t0, t1] on *c*, in the file's units;
+            None where the recording does not cover it."""
+            if c not in fast_channels:
+                return None
+            w = rec.window(t0, t1, where[c][1], module=where[c][0])
+            ok = np.isfinite(w.times)
+            if not ok.any():
+                return None
+            tod = _in_units(w.times[ok], w.samples[ok], factors[c])
+            return {"Time": tod["times"], "Amp_I": tod["I"],
+                    "Amp_Q": tod["Q"]}
+
+        # The capture's events index its pulses, which are this file's
+        # pairs under the same numbers.  A channel the capture saved
+        # without a trigger gets the recording over the event's window
+        # beside its slow samples.
+        for idx in range(1, reader.event_count + 1):
+            event = reader.get_event(idx)
+            dump = {}
+            for c, slow in (event.get("dump") or {}).items():
+                dump[c] = {"slow_tod": slow}
+                if event["window"] is not None:
+                    fast = fast_window(c, event["window"][0] + shift,
+                                       event["window"][1] + shift)
+                    if fast is not None:
+                        dump[c]["fast_tod"] = fast
+            writer.append_event({**event, "dump": dump})
+
         for c in channels:
-            recorded = c in fast_channels
-            factor = factors[c]
             for idx in range(1, reader.pulse_count(c) + 1):
                 pulse = reader.get_pulse(c, idx)
                 pair = {"pair_idx": idx, "channel": c, "slow_idx": idx,
@@ -527,22 +550,13 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                             "saved_end_time": float(t[-1])}},
                         period)
                     pair["window"] = window
-                    if recorded:
-                        w = rec.window(window[0], window[1], where[c][1],
-                                       module=where[c][0])
-                        ok = np.isfinite(w.times)
-                        # A window the recording does not cover
-                        # stays absent: the pair reads "fast n/a".
-                        if ok.any():
-                            tod = _in_units(w.times[ok],
-                                            w.samples[ok], factor)
-                            pair["fast_tod"] = {"Time": tod["times"],
-                                                "Amp_I": tod["I"],
-                                                "Amp_Q": tod["Q"]}
-                            hists.add_pulse(c, pair["fast_tod"], noise[c],
-                                            to_raw=to_raw[c])
-                            templates.add_pulse(c, pair["fast_tod"],
-                                                noise[c])
+                    # A window the recording does not cover stays
+                    # absent: the pair reads "fast n/a".
+                    fast = fast_window(c, window[0], window[1])
+                    if fast is not None:
+                        pair["fast_tod"] = fast
+                        hists.add_pulse(c, fast, noise[c], to_raw=to_raw[c])
+                        templates.add_pulse(c, fast, noise[c])
                 writer.append_match(c, pair)
         writer.set_noise_stats("fast", noise)
         if hists.total_pulses():

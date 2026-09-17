@@ -602,6 +602,22 @@ def test_a_bare_record_command_asks_the_dialog(monkeypatch):
     assert runs == [{"serial": "0156", "quiet": False}]
 
 
+def test_the_event_options_reach_the_capture_config(monkeypatch):
+    """The window and the dump are the capture's settings; the merge
+    reads them back from the file the capture wrote."""
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    runs = []
+    monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", "--coincidence-window-ms", "2",
+        "--dump-all-channels", "--pre-pulse-ms", "1", "--post-pulse-ms", "3"])
+    assert result.exit_code == 0, result.output
+    cfg = runs[0]["config"]
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels,
+            cfg.pre_pulse_ms, cfg.post_pulse_ms) == (2.0, True, 1.0, 3.0)
+
+
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record

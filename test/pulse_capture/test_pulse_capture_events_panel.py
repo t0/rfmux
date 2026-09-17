@@ -176,3 +176,35 @@ def test_a_live_event_joins_the_tree(qt_app, tmp_path):
                     {"channel": 2, "pulse_idx": 1, "trigger_time": 10.002}],
         "dumped": []})
     assert _tree(panel) == {("event", 1): [("pulse", 1, 1), ("pulse", 2, 1)]}
+
+
+def test_the_grouping_sits_above_the_pulse_list(qt_app):
+    """It groups the list, so it is with the list and not inside one of
+    the view tabs."""
+    panel = PulseCapturePanel(dark_mode=False)
+    assert panel.group_combo.parent().parent() is \
+        panel.pulse_tree.parent()
+    assert not panel.viewer_tabs.isAncestorOf(panel.group_combo)
+
+
+def test_a_both_mode_event_is_made_of_pairs_and_draws_either_stream(
+        qt_app, tmp_path):
+    from test.pulse_capture.test_events_dual import _capture
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0,
+                       dump_all_channels=True)
+    panel = _review(path, GROUP_EVENTS)
+    tree = _tree(panel)
+    # Newest first.  Channel 1 triggered on both streams, channel 2 on
+    # the slow one alone, and channel 3 was saved without a trigger.
+    assert [[r[0] for r in rows] for rows in tree.values()] == [
+        ["pair", "dump", "dump"], ["pair", "pair", "dump"]]
+    assert panel.event_stream_box.isVisibleTo(panel)
+
+    panel._show_event(1)
+    assert "Ch1, Ch2 (slow)" in panel.pulse_info.text()
+    assert _curve_names(panel) == sorted([
+        "Ch1 slow", "Ch1 fast", "Ch2 slow", "Ch2 fast",
+        "Ch3 slow (no trigger)", "Ch3 fast (no trigger)"])
+    panel.event_stream_combo.setCurrentText("slow")
+    assert _curve_names(panel) == ["Ch1 slow", "Ch2 slow",
+                                   "Ch3 slow (no trigger)"]

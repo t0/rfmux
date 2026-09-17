@@ -204,8 +204,9 @@ Old values are main at the merge base (e46fc41).
   `--post-pulse-ms`.
 - Noise samples: `noise_capture_interval_s` on `PulseCaptureConfig`,
   `events.NoiseSampler` for the schedule (normally distributed waits), events
-  of `kind` `"noise"` holding every channel, **Noise sample every (s)** in
-  Settings and `--noise-capture-interval-s` on `rfmux record`.
+  of `kind` `"noise"` holding every channel, each event stamped with
+  `trigger_utc` and `trigger_epoch` as a pulse is, **Noise sample every (s)**
+  in Settings and `--noise-capture-interval-s` on `rfmux record`.
 - A Units change converts the traces of a both-mode pair in the Pulse
   View, not only the axis labels. Noise bands are projected onto the viewed
   axes rather than scaled (`analysis.project_noise_stats`).

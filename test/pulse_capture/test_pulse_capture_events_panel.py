@@ -358,6 +358,19 @@ def test_noise_samples_are_tagged_in_the_event_list(qt_app, tmp_path):
     assert f"noise samples:  {len(events)}" in panel.noise_label.text()
 
 
+def test_a_noise_sample_shows_the_time_it_was_taken_at(qt_app, tmp_path):
+    _, path = _noise_file(tmp_path)
+    panel = _review(path, GROUP_EVENTS)
+    panel._events[0]["trigger_utc"] = "2026-09-02T16:00:01.250000Z"
+    panel._rebuild_tree()
+    rows = [panel.pulse_tree.topLevelItem(k)
+            for k in range(panel.pulse_tree.topLevelItemCount())]
+    row = next(r for r in rows if r.data(0, ROLE) == ("event", 1))
+    assert row.text(1) == "16:00:01.250000"
+    panel._show_event(1)
+    assert "taken at 2026-09-02T16:00:01.250000Z" in panel.pulse_info.text()
+
+
 def test_a_noise_sample_draws_every_channel(qt_app, tmp_path):
     _, path = _noise_file(tmp_path)
     panel = _review(path, GROUP_EVENTS)

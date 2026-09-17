@@ -1194,7 +1194,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 finite = np.isfinite(mean)
                 if not np.any(finite):
                     continue
-                plot.plot(t_ref, mean,
+                # Only the span that holds data is drawn: a curve over
+                # the whole grid reports the grid as its bounds, empty
+                # bins included, and an autoscale then fits the grid.
+                filled = np.nonzero(finite)[0]
+                span = slice(filled[0], filled[-1] + 1)
+                plot.plot(t_ref[span], mean[span],
                           pen=pg.mkPen(color, width=2.2),
                           connect="finite",
                           name=_series_name(label, n_pulses, len(series)))
@@ -1212,9 +1217,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                         (mean + resid)[both])))
                     band = QtGui.QColor(color)
                     band.setAlpha(60)
-                    upper = pg.PlotDataItem(t_ref, mean + resid,
+                    upper = pg.PlotDataItem(t_ref[span], (mean + resid)[span],
                                             connect="finite")
-                    lower = pg.PlotDataItem(t_ref, mean - resid,
+                    lower = pg.PlotDataItem(t_ref[span], (mean - resid)[span],
                                             connect="finite")
                     fill = pg.FillBetweenItem(upper, lower, brush=band)
                     plot.addItem(fill)
@@ -2140,11 +2145,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             summ = self._pulse_summaries.get(first) or {}
         noise = event.get("kind") == "noise"
         item = QtWidgets.QTreeWidgetItem(
-            [f"◇ Noise sample #{event['event_idx']:06d}", "",
+            [f"◇ Noise sample #{event['event_idx']:06d}", self._clock(event),
              f"{len(event.get('dumped') or [])} ch",
              f"{len(members)} pulse{'s' if len(members) != 1 else ''}"]
             if noise else
-            [f"◈ Event #{event['event_idx']:06d}", self._clock(summ),
+            [f"◈ Event #{event['event_idx']:06d}",
+             self._clock(event) or self._clock(summ),
              f"{len(channels)} ch", f"Δ {spread * 1e3:.3g} ms"])
         item.setData(0, role, ("event", event["event_idx"]))
         item.setToolTip(0, "Double-click to draw the event's channels "
@@ -2312,7 +2318,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                    if window else "")
                 + ("\ncontains a pulse on: "
                    + ", ".join(self._member_label(m) for m in members)
-                   if members else "\nno pulse triggered inside it"))
+                   if members else "\nno pulse triggered inside it")
+                + self._trigger_clock_text(event, "taken"))
             self._render_iq_plane()
             return
         channels = list(dict.fromkeys(m["channel"] for m in members))
@@ -2332,7 +2339,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                + ("" if dump else " (not drawn while following)")
                if dumped else "")
             + ("\nchannels are in different units: "
-               + ", ".join(sorted(units)) if len(units) > 1 else ""))
+               + ", ".join(sorted(units)) if len(units) > 1 else "")
+            + self._trigger_clock_text(event, "first trigger"))
         self._render_iq_plane()
 
     def _frequency_text(self, channel: int) -> str:
@@ -2594,9 +2602,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return text
 
     @staticmethod
-    def _trigger_clock_text(summary: dict) -> str:
+    def _trigger_clock_text(summary: dict, what: str = "trigger") -> str:
         utc = summary.get("trigger_utc") if summary else None
-        return f"\ntrigger at {utc} (packet clock)" if utc else ""
+        return f"\n{what} at {utc} (packet clock)" if utc else ""
 
     @staticmethod
     def _dropped_text(counts: dict) -> str:

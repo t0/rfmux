@@ -243,7 +243,8 @@ class _PulseFileWriter:
         """File one coincidence event under ``events/``::
 
             events/event_<k>/         kind, trigger_time, window_t0,
-                                      window_t1
+                                      window_t1, trigger_epoch,
+                                      trigger_utc
                 members               rows of (channel, index), or of
                                       (module, channel, index)
                 trigger_times         one per member
@@ -265,6 +266,9 @@ class _PulseFileWriter:
         # "pulses", or "noise" for a sample with no trigger.
         grp.attrs["kind"] = str(event.get("kind", "pulses"))
         grp.attrs["trigger_time"] = float(event["trigger_time"])
+        if event.get("trigger_utc") is not None:
+            grp.attrs["trigger_epoch"] = float(event["trigger_epoch"])
+            grp.attrs["trigger_utc"] = str(event["trigger_utc"])
         if event.get("window") is not None:
             grp.attrs["window_t0"] = float(event["window"][0])
             grp.attrs["window_t1"] = float(event["window"][1])
@@ -1006,6 +1010,9 @@ def _event_from_group(grp, event_idx: int, dump: bool = True) -> dict:
         "members": members,
         "dumped": [],
     }
+    if "trigger_utc" in grp.attrs:
+        event["trigger_epoch"] = float(grp.attrs["trigger_epoch"])
+        event["trigger_utc"] = str(_convert_attr(grp.attrs["trigger_utc"]))
     if "dump" in grp:
         groups = {}
         for name, item in grp["dump"].items():

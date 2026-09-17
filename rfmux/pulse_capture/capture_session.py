@@ -216,9 +216,15 @@ class _EventHost(_CallbackHost):
         self.events.advance(now, settled)
 
     def _on_event(self, event: dict) -> None:
-        """An event closed: read the channels that did not trigger from
-        the ring buffers if asked to, then write and announce it.  A
-        noise sample comes with every channel already."""
+        """An event closed: stamp it from the packet clock as a pulse
+        is stamped, read the channels that did not trigger from the ring
+        buffers if asked to, then write and announce it.  A noise sample
+        comes with every channel already, and its time is the moment it
+        was taken at."""
+        origin = getattr(self, "time_origin_epoch", None)
+        if origin is not None:
+            event["trigger_epoch"] = origin + float(event["trigger_time"])
+            event["trigger_utc"] = epoch_to_utc(event["trigger_epoch"])
         if (self._dump_untriggered and event["kind"] == "pulses"
                 and event["window"] is not None):
             triggered = set(event_channels(event))

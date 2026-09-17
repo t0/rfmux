@@ -275,9 +275,9 @@ without the channels that did not trigger. An event closes one hard stop
 after its window ends, when no pulse that belongs to it can still be open.
 It appears in the list that long after its first trigger.
 
-A **noise sample** is listed among the events with every channel beneath
-it, and a pulse that happened to fall inside it is listed too; the sample
-was taken regardless. Double-click it to draw all its channels, or one of
+A **noise sample** is listed among the events with the UTC time it was
+taken at and every channel beneath it. A pulse that happened to fall inside
+it is listed too; the sample was taken regardless. Double-click it to draw all its channels, or one of
 its channels for that channel alone. Follow latest passes over noise
 samples. With the coincidence window off and noise samples on, the only
 events are the noise samples.
@@ -305,7 +305,9 @@ every channel, and its `members` the pulses inside its window, often
 none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
 
 In the file, `events/event_<k>` (the number zero-padded to six digits)
-holds `kind`, `members`, `trigger_times`, the window and `dump/`. A
+holds `kind`, `members`, `trigger_times`, the window, `trigger_utc` and
+`trigger_epoch` (the first trigger, or the moment a noise sample was taken,
+from the packet clock) and `dump/`. A
 `members` row is a channel and a pulse index, with the module first for a
 run across modules. `dump/channel_<n>` holds one channel saved without a
 trigger, a dumped channel. In a both-mode file a member's index is a pair

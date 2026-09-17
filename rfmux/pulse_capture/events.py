@@ -316,7 +316,9 @@ def event_counts(events: Iterable[dict]) -> Dict[str, int]:
 def lean_event(event: dict) -> dict:
     """*event* as a file lists it without its samples: members without
     their summaries, and the dumped channels by name only."""
-    return {"event_idx": event["event_idx"],
+    return {**{k: event[k] for k in ("trigger_epoch", "trigger_utc")
+               if k in event},
+            "event_idx": event["event_idx"],
             "kind": event.get("kind", "pulses"),
             "trigger_time": event["trigger_time"],
             "window": event.get("window"),

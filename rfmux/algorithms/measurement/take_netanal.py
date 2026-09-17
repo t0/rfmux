@@ -80,6 +80,19 @@ async def take_netanal(
         - 'phase_degrees': numpy.ndarray - Phase in degrees corresponding to 'frequencies'.
     """
 
+    if not fmin < fmax:
+        raise ValueError(f"fmin ({fmin:g} Hz) must be below fmax ({fmax:g} Hz).")
+    if npoints < 2:
+        raise ValueError(f"npoints must be at least 2 (got {npoints}).")
+    if nsamps < 1:
+        raise ValueError(f"nsamps must be at least 1 (got {nsamps}).")
+    if not amp > 0:
+        raise ValueError(f"amp must be positive (got {amp:g}).")
+    if max_chans < 1:
+        raise ValueError(f"max_chans must be at least 1 (got {max_chans}).")
+    if not max_span > 0:
+        raise ValueError(f"max_span must be positive (got {max_span:g} Hz).")
+
     # If user passed modules as a list, run in parallel across those modules
     if isinstance(module, list) and len(module) > 0:
 

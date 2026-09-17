@@ -91,6 +91,19 @@ def test_the_dump_takes_both_streams_of_every_other_channel():
         assert times[0] - t0 < 1.5 / fs and t1 - times[-1] < 1.5 / fs, side
 
 
+def test_a_dual_event_links_to_its_pairs(tmp_path):
+    import h5py
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0)
+    with h5py.File(path, "r") as f, PulseHDF5Reader(path) as r:
+        for event in r.iter_events():
+            links = f[f"events/event_{event['event_idx']:06d}/pulses"]
+            assert len(links) == len(event["members"])
+            for m in event["members"]:
+                name = f"channel_{m['channel']}_pair_{m['pulse_idx']:06d}"
+                assert links[name] == f[
+                    f"matched/channel_{m['channel']}/pair_{m['pulse_idx']:06d}"]
+
+
 def test_events_round_trip_through_a_dual_file(tmp_path):
     got, path = _capture(tmp_path, coincidence_window_ms=5.0,
                          dump_all_channels=True)

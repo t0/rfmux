@@ -437,6 +437,21 @@ def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(tmp_path):
     assert "pre_samples" not in after and "pre_samples_fast" not in after
 
 
+def test_a_merged_files_events_link_to_its_pairs(tmp_path):
+    """The links are rewritten for the merged layout, not carried over
+    from the slow file's."""
+    import h5py
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with h5py.File(path, "r") as f:
+        links = f["events/event_000001/pulses"]
+        (name,) = links
+        assert links.get(name, getlink=True).path.startswith("/matched/")
+        assert "slow_tod_Amp_I" in links[name] or "slow_idx" in links[name].attrs
+
+
 def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
     """With every channel saved per event, a channel that did not
     trigger gets the recording over the event's window beside the slow

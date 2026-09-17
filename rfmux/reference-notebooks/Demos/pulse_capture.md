@@ -744,12 +744,22 @@ with h5py.File(CAPTURE_FILE, "r") as f:
     print("\none pulse's attributes:")
     for key, value in sorted(f["channel_1/pulse_000001"].attrs.items()):
         print(f"  {key:<26} {value}")
+    # The walk above does not follow links, so it lists each pulse once.
+    print("\none event's links to its pulses:")
+    pulses = f["events/event_000001/pulses"]
+    for name in pulses:
+        print(f"  {name} -> {pulses.get(name, getlink=True).path}")
 ```
 
 Each `channel_<n>` group holds that channel's noise statistics as attributes,
 its `noise_training` record, its `tuning` row and one `pulse_<k>` group per
 pulse. `events` lists the events, `histograms` and `templates` hold what the
-capture accumulated, and `metadata` the capture parameters.
+capture accumulated, and `metadata` the capture parameters. Under each event,
+`pulses` holds a soft link to each of its pulses, so `h5ls` or HDFView opens
+an event and finds them there:
+
+    h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses
+
 `PulseHDF5Reader` reads the same things without the paths:
 
 ```python

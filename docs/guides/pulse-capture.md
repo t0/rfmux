@@ -313,7 +313,10 @@ records have been saved; each sample's own span is on its event.
 In the file, `events/event_<k>` (the number zero-padded to six digits)
 holds `kind`, `members`, `trigger_times`, the window, `trigger_utc` and
 `trigger_epoch` (the first trigger, or the moment a noise sample was taken,
-from the packet clock) and `dump/`. A
+from the packet clock), `pulses/` and `dump/`. `pulses/` holds a soft link
+to each member, so a generic HDF5 tool opens an event and finds its pulses:
+`h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses`. In a
+both-mode file the links point at the pairs. A
 `members` row is a channel and a pulse index, with the module first for a
 run across modules. `dump/channel_<n>` holds one channel saved without a
 trigger, a dumped channel. In a both-mode file a member's index is a pair

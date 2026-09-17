@@ -170,6 +170,25 @@ def test_events_round_trip_through_the_file(tmp_path):
         assert "dump" not in lean and lean["dumped"] == [3]
 
 
+def test_an_event_links_to_its_pulses(tmp_path):
+    """A generic HDF5 tool opens an event and finds its pulses: each
+    link is the pulse the members table names."""
+    import h5py
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0)
+    with h5py.File(path, "r") as f:
+        links = f["events/event_000001/pulses"]
+        assert sorted(links) == ["channel_1_pulse_000001",
+                                 "channel_2_pulse_000001"]
+        for name, target in (("channel_1_pulse_000001", "channel_1/pulse_000001"),
+                             ("channel_2_pulse_000001", "channel_2/pulse_000001")):
+            assert isinstance(links.get(name, getlink=True), h5py.SoftLink)
+            assert links[name] == f[target]
+        # A walk of the file still meets each pulse once, under its channel.
+        seen = []
+        f.visit(seen.append)
+        assert sum(s.endswith("pulse_000001") for s in seen) == 2
+
+
 def test_a_file_without_events_is_laid_out_as_before(tmp_path):
     _, path = _capture(tmp_path)
     with PulseHDF5Reader(path) as r:

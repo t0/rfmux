@@ -135,6 +135,9 @@ class _PulseFileWriter:
     them — so that is all the subclasses carry.
     """
 
+    #: Where an event's member lives: a pulse under its channel.
+    _MEMBER_PATH = "/{group}/pulse_{idx:06d}"
+
     #: capture_params written to ``metadata``, grouped by attribute type.
     #: Must cover everything in
     #: :data:`~.session.DETECTION_PARAMS` — a parameter
@@ -246,6 +249,7 @@ class _PulseFileWriter:
                 members               rows of (channel, index), or of
                                       (module, channel, index)
                 trigger_times         one per member
+                pulses/<channel>_<pulse>   a soft link to each member
                 dump/<channel group>/Amp_I, Amp_Q, Time
                 dump/<channel group>/slow/...  and  .../fast/...
 
@@ -255,6 +259,11 @@ class _PulseFileWriter:
         capture took it: one window, or in a dual file one per stream
         that carries the channel.  The group appears with the first
         event, so a file without events has no ``events/`` group.
+
+        ``pulses`` is for browsing: a generic HDF5 tool opens an event
+        and finds its pulses there.  ``members`` is what the reader
+        uses, and it holds when a link's target is out of reach (an
+        event group copied into another file on its own).
         """
         if not self.is_open:
             return
@@ -280,6 +289,13 @@ class _PulseFileWriter:
             rows, dtype=np.int64).reshape(len(rows), width))
         grp.create_dataset("trigger_times", data=np.array(
             [m["trigger_time"] for m in members], dtype=np.float64))
+        links = grp.create_group("pulses")
+        for m in members:
+            group = channel_group(m["channel"])
+            target = self._MEMBER_PATH.format(group=group,
+                                              idx=int(m["pulse_idx"]))
+            links[f"{group.replace('/', '_')}_{target.rsplit('/', 1)[1]}"] = \
+                h5py.SoftLink(target)
         for channel, tod in (event.get("dump") or {}).items():
             dgrp = grp.create_group(f"dump/{channel_group(channel)}")
             windows = ({"": tod} if "Amp_I" in tod else
@@ -486,6 +502,8 @@ class DualPulseHDF5Writer(_PulseFileWriter):
     """
 
     STREAMS = ("slow", "fast")
+    #: An event's member is a pair.
+    _MEMBER_PATH = "/matched/{group}/pair_{idx:06d}"
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],

@@ -210,6 +210,9 @@ Old values are main at the merge base (e46fc41).
 - A Units change converts the traces of a both-mode pair in the Pulse
   View, not only the axis labels. Noise bands are projected onto the viewed
   axes rather than scaled (`analysis.project_noise_stats`).
+- `events/event_<k>/pulses/` holds a soft link to each member pulse, or pair
+  in a both-mode or merged file, for browsing with `h5ls` or HDFView. The
+  reader uses `members`.
 - File metadata: every capture file records its times in milliseconds
   (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`, `max_pulse_ms`,
   `noise_train_ms`) and the sample counts they became (`detection.RATE_PARAMS`:

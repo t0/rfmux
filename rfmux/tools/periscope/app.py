@@ -1160,7 +1160,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             raise
 
 
-    def _load_network_analysis(self, params: dict):
+    def _load_network_analysis(self, params: dict, name: str | None = None):
         """
         Load network analysis data from file and display in a docked panel.
 
@@ -1202,24 +1202,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             # Store panel reference
             self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
-            # Load data into panel
+            if name is not None:
+                # The file's result is bound in the session; the panel derives from it.
+                panel.result_name = name
+                panel.set_result(self.session_namespace()[name])
+            else:
+                for mod in modules_to_run:
+                    # Each sweep carries its own probe amplitude; pairing by
+                    # position would trust the file's ordering instead.
+                    sweeps = [v for k, v in params['modules'][mod].items()
+                              if isinstance(k, int)]
+                    for sweep in sweeps:
+                        freqs = np.array(sweep['frequency']['values'])
+                        amps = np.array(sweep['magnitude']['counts']['raw'])
+                        phases = np.array(sweep['phase']['values'])
+                        panel.update_data(mod, freqs, amps, phases)
+                        panel.update_data_with_amp(mod, freqs, amps, phases,
+                                                   sweep['sweep_amplitude'])
             for mod in modules_to_run:
-                # Each sweep carries its own probe amplitude; pairing by
-                # position would trust the file's ordering instead.
-                sweeps = [v for k, v in params['modules'][mod].items()
-                          if isinstance(k, int)]
-                for sweep in sweeps:
-                    freqs = np.array(sweep['frequency']['values'])
-                    amps = np.array(sweep['magnitude']['counts']['raw'])
-                    phases = np.array(sweep['phase']['values'])
+                r_freq = params.get('modules', {}).get(mod, {}).get('resonances_hz')
+                if r_freq:
+                    panel._use_loaded_resonances(mod, r_freq)
 
-                    panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases,
-                                               sweep['sweep_amplitude'])
-                
-                r_freq = params['modules'][mod]['resonances_hz']
-                panel._use_loaded_resonances(mod, r_freq)
-            
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1281,31 +1285,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lines.append(f"{result}[{amp!r}] = {sweep}" if j == 0
                              else f"{result}[{amp!r}] += {sweep}")
             futures.append(self.run_python("\n".join(lines),
-                                           window_data['dock'].windowTitle() if i == 0 else ""))
+                                           window_data['dock'].windowTitle() if i == 0 else "", name=result))
         self.netanal_tasks[window_id] = futures
-        namespace = self.session_namespace()
+        panel = window_data['window']
+        panel.result_name = result
 
-        def finished(fut):  # Wherever a cell completed; the signals cross to the GUI.
+        def finished(fut):  # On the GUI thread, once every cell has completed.
             if not all(f.done() for f in futures):
                 return
             if self.netanal_tasks.get(window_id) is futures:
                 self.netanal_tasks.pop(window_id)
-            if any(f.cancelled() for f in futures):
-                return
             failed = [f.exception() for f in futures if f.exception() is not None]
             if failed:
                 signals.error.emit(f"Network analysis failed: {failed[0]}")
                 return
-            # take_netanal returns one result per module, in the order asked.
-            for amp, per_module in namespace[result].items():
-                for m, r in zip(sum(banks, []), per_module):
-                    freqs, amps, phases = r['frequencies'], np.abs(r['iq_complex']), r['phase_degrees']
-                    signals.data_update.emit(m, freqs, amps, phases)
-                    signals.data_update_with_amp.emit(m, freqs, amps, phases, amp)
+            panel.set_result(self.session_namespace()[result])
             for m in modules:
                 signals.completed.emit(m)
         for future in futures:
-            future.add_done_callback(finished)
+            on_done(future, finished)
 
     def _rerun_network_analysis(self, params: dict, source_panel=None):
         """
@@ -2828,8 +2826,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Use existing load mechanism
-        self._load_network_analysis(data)
+        if 'result' in data:
+            self.load_result(file_path, data.get('name') or 'netanal',
+                             lambda name: self._load_network_analysis(data, name))
+        else:
+            self._load_network_analysis(data)
     
     def _load_multisweep_from_session(self, data: dict, file_path: str):
         """Load multisweep data from session file into a new panel."""
@@ -2843,8 +2844,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Use existing load mechanism
-        self._load_multisweep_analysis(data)
+        if 'result' in data:
+            self.load_result(file_path, data.get('name') or 'multisweep',
+                             lambda name: self._load_multisweep_analysis(data, name))
+        else:
+            self._load_multisweep_analysis(data)
     
     def _load_bias_from_session(self, data: dict, file_path: str):
         """
@@ -2962,8 +2966,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
-        # Use existing load mechanism
-        self._collect_channel_noise(data, loaded=True)
+        noise = data['channel_noise_data']
+        if 'result' in noise:
+            self.load_result(file_path, noise.get('name') or 'noise',
+                             lambda name: self._collect_channel_noise(data, loaded=True))
+        else:
+            self._collect_channel_noise(data, loaded=True)
         
     def _open_file_with_system_default(self, file_path: str):
         """

@@ -372,10 +372,6 @@ class DACScaleFetcher(QtCore.QThread):
 
 class MultisweepSignals(QObject):
     progress = pyqtSignal(int, float)
-    # Updated data_update to include iteration and direction:
-    # 1. results_for_plotting: {output_cf: data_dict_val} - original structure from crs.multisweep
-    # 2. results_for_history: {conceptual_idx: output_cf_key} - for easy history update
-    data_update = pyqtSignal(int, int, float, str, dict, dict) # module, iteration, amplitude, direction, results_for_plotting, results_for_history
     completed_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
     starting_iteration = pyqtSignal(int, int, float, str) # module, iteration, amplitude, direction
     fitting_progress = pyqtSignal(int, str) # module, status_message

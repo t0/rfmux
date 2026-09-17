@@ -332,6 +332,7 @@ async def take_netanal(
     phase_sorted = np.degrees(np.angle(iq_sorted))
 
     result_dict = {
+        'module': module,
         'frequencies': fs_sorted,
         'iq_complex': iq_sorted,
         'phase_degrees': phase_sorted

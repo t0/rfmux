@@ -68,6 +68,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.samples_taken = False
         self.noise_data = {}
         self.spectrum_noise_data = {}
+        self.result_name = None  # The session name this panel's data is bound to
 
         self.debug_noise_data = {}
         self.debug_phase_data = []
@@ -732,55 +733,29 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # When fitting is completed, just show the base text
             self.current_amp_label.setText(base_text)
         
-    def update_data(self, module: int, iteration: int, amplitude: float, direction: str, results_for_plotting: dict, results_for_history: dict):
-        """
-        Receives final data for a completed iteration of a multisweep for the target module.
-        Stores the data for plotting and updates the CF history.
-
-        Args:
-            module (int): The module reporting data.
-            iteration (int): The current iteration index.
-            amplitude (float): The probe amplitude for which data is provided.
-            direction (str): The sweep direction ("upward" or "downward").
-            results_for_plotting (dict): Data for plotting, format: {output_cf: data_dict_val}.
-            results_for_history (dict): Data for history, format: {conceptual_idx: output_cf_key}.
-        """
-        if module != self.target_module: return
-        
-        self.current_amplitude_being_processed = amplitude
-        self.current_iteration_being_processed = iteration
-
-        
-        # Store data in detector-based structure, keyed by iteration index.
-        # The amplitude and direction are stored inside each entry, not as keys,
-        # so that all detectors share the same iteration indices even if they
-        # use different amplitudes in the future.
-        if results_for_plotting:
-            for detector_id, det_data in results_for_plotting.items():
-                if detector_id not in self.results_by_detector:
-                    self.results_by_detector[detector_id] = {}
+    def set_result(self, value: dict):
+        """Derive the panel's view from its named result,
+        ``{(amplitude, direction): {detector: entry}}`` in the order swept.
+        The panel holds no data of its own beyond this derivation."""
+        self.results_by_detector = {}
+        self.last_output_cfs_by_amp_and_conceptual_idx = {}
+        for iteration, ((amplitude, direction), results) in enumerate(value.items()):
+            self.current_amplitude_being_processed = amplitude
+            self.current_iteration_being_processed = iteration
+            for detector, det_data in results.items():
+                if not isinstance(detector, (int, np.integer)):
+                    continue
                 entry = dict(det_data)
-                entry['amplitude'] = amplitude
-                entry['direction'] = direction
-                entry['iteration'] = iteration
-                self.results_by_detector[detector_id][iteration] = entry
-
-        # --- Update CF history using the pre-mapped results_for_history ---
-        if results_for_history:
-            self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {}).update(results_for_history)
-
-        # Invalidate digest panel so it gets recreated with fresh data
-        # (the panel takes a snapshot at creation time and doesn't track live changes)
-        if self.digest_panel is not None:
-            self.digest_panel = None
-        
-        # Invalidate histogram cache so plots reflect the latest iteration
+                entry.update(amplitude=amplitude, direction=direction, iteration=iteration)
+                self.results_by_detector.setdefault(detector, {})[iteration] = entry
+                bias = det_data.get('bias_frequency', det_data.get('original_center_frequency'))
+                if bias is not None:
+                    self.last_output_cfs_by_amp_and_conceptual_idx.setdefault(amplitude, {})[detector - 1] = bias
+        # The digest snapshots the data at creation and the histograms cache it.
+        self.digest_panel = None
         if self.histogram_panel is not None:
             self.histogram_panel.histogram_cache.clear()
-        
-        self._redraw_plots() # Refresh plots with the new data
-        
-        # Note: We now update the status in handle_starting_iteration() instead of here
+        self._redraw_plots()
 
     def _redraw_plots(self):
         """
@@ -1204,8 +1179,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         else:
             spectrum_data = None 
             
+        periscope = self._get_periscope_parent()
+        namespace = periscope.session_namespace() if periscope else {}
         return {
             'timestamp': datetime.datetime.now().isoformat(),
+            'name': self.result_name,
+            'result': namespace.get(self.result_name),
+            'cells': list(getattr(periscope, 'session_cells', {}).get(self.result_name, [])),
             'target_module': self.target_module,
             'initial_parameters': self.initial_params,
             'dac_scales_used': self.dac_scales,
@@ -1617,11 +1597,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                     data['overlap'] = params['overlap']
                 self.spectrum_noise_data['noise_parameters'] = params
                 self.spectrum_noise_data['data'] = data
+                self.spectrum_noise_data['name'] = name
+                self.spectrum_noise_data['result'] = periscope.session_namespace()[name]
                 self.data_ready.emit("noise", f"module{module}_noise", self._prepare_export_data())
                 self._open_noise_spectrum_panel(1)
 
             periscope.run_python_then(f"{name} = await crs.take_noise_spectrum({args})",
-                                      "Noise Spectrum", done)
+                                      "Noise Spectrum", done, name=name)
 
     def _open_noise_spectrum_panel(self, detector_idx: int = 1):
         """

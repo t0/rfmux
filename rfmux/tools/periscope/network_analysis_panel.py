@@ -27,6 +27,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     def __init__(self, parent=None, modules=None, dac_scales=None, dark_mode=False, is_loaded_data=False):
         super().__init__(parent)
         self.modules = modules or []
+        self.result_name = None  # The session name this panel's data is bound to
         self.data = {}  # module -> amplitude data dictionary
         self.raw_data = {}  # Store the raw IQ data for unit conversion
         self.unit_mode = "dbm"  # Default to dBm instead of counts
@@ -985,6 +986,15 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             
             if is_new_curve: self._update_legends_for_unit_mode()
         self._update_multisweep_button_state(module) 
+
+    def set_result(self, value: dict):
+        """Derive the panel's curves from its named result,
+        ``{amplitude: [take_netanal result per module]}``."""
+        for amplitude, per_module in value.items():
+            for r in per_module:
+                freqs, amps, phases = r['frequencies'], np.abs(r['iq_complex']), r['phase_degrees']
+                self.update_data(r['module'], freqs, amps, phases)
+                self.update_data_with_amp(r['module'], freqs, amps, phases, amplitude)
 
     def update_data(self, module: int, freqs: np.ndarray, amps: np.ndarray, phases: np.ndarray):
         """Update the plot data for a specific module."""

@@ -107,6 +107,36 @@ with contextlib.redirect_stdout(io.StringIO()):
     periscope.close()
 '''
 
+# Export and load: the file carries the named value, and loading binds it
+# again as a cell under a free name, from which a second panel derives.
+ROUNDTRIP = PROLOGUE + r'''
+import pickle, tempfile
+periscope._start_network_analysis({
+    "module": 1, "amps": [0.001], "fmin": 1000e6, "fmax": 1100e6, "npoints": 100,
+    "nsamps": 2, "max_chans": 64, "max_span": 500e6, "cable_length": 10.0,
+    "clear_channels": True})
+deadline = time.monotonic() + 150
+while time.monotonic() < deadline and periscope.netanal_tasks:
+    app.processEvents(); time.sleep(0.01)
+panel = periscope.netanal_windows["netanal_0"]["window"]
+export = panel.build_export_dict()
+path = tempfile.mktemp(suffix=".pkl")
+with open(path, "wb") as f:
+    pickle.dump(export, f)
+periscope._load_netanal_from_session(export, path)
+deadline = time.monotonic() + 60
+while time.monotonic() < deadline and "netanal_1" not in periscope.netanal_windows:
+    app.processEvents(); time.sleep(0.01)
+loaded = periscope.netanal_windows["netanal_1"]["window"]
+ns = periscope.session_namespace()
+print("ROUNDTRIP", export["name"], sorted(export["result"]), len(export["cells"]),
+      loaded.result_name, sorted(k for k in loaded.data[1] if k != "default"),
+      ns[loaded.result_name][0.001][0]["frequencies"].size)
+print("TRANSCRIPT", periscope.jupyter_widget._control.toPlainText())
+with contextlib.redirect_stdout(io.StringIO()):
+    periscope.close()
+'''
+
 # A one-call panel action: the QP pulse toggle in mock mode.
 QP_PULSES = PROLOGUE + r'''
 periscope.is_mock_mode = True
@@ -173,6 +203,12 @@ def test_multisweep_re_centres_by_name_and_fits_in_the_call():
             "amp=0.002, sweep_direction='upward', fit_skewed=True, fit_nonlinear=False, module=1, "
             "**periscope.multisweep_hooks('multisweep_0'))") in transcript
     assert "fit_multisweep(" not in transcript
+
+
+def test_export_carries_the_named_value_and_load_binds_it_again():
+    out = _child(ROUNDTRIP)
+    assert "ROUNDTRIP netanal_0 [0.001] 1 netanal_0_2 ['1_0.001'] 100" in out
+    assert "netanal_0_2 = load_result(" in out.split("TRANSCRIPT", 1)[1]
 
 
 def test_qp_pulse_toggle_is_a_console_cell():

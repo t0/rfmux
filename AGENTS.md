@@ -119,6 +119,13 @@ The rules:
 - Cells run one at a time on the interpreter thread, so the console is
   busy during an operation and typed input waits, as in Vivado. The
   GUI thread is never blocked.
+- **A panel's data is its named result.** The cell assigns a session
+  name (`netanal_0`, `multisweep_0`, `noise_m1`); the panel holds
+  `result_name` and derives its view from the value with `set_result`.
+  An export carries `name`, `result` (the value) and `cells` (what built
+  it) beside the display-oriented keys older readers use. Loading a
+  file binds the name again with a `load_result(...)` cell, so a loaded
+  panel's data can feed the next step just like a live one.
 
 **Tasks**: the remaining `QThread` subclasses (`MultisweepTask`,
 `BiasKidsTask`, `PulseCaptureTask`) hold orchestration that has not yet

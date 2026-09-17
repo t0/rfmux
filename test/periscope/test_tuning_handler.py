@@ -30,7 +30,7 @@ def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
     cells = []
     p = bare_periscope(monkeypatch, crs=object())
     p.multisweep_signals, p.multisweep_tasks = MultisweepSignals(), {}
-    p.run_python = lambda code, comment="": cells.append(code) or concurrent.futures.Future()
+    p.run_python = lambda code, comment="", name=None: cells.append(code) or concurrent.futures.Future()
     p.session_namespace = lambda: {}
     p._start_multisweep_analysis({
         "module": 2, "resonance_frequencies": [1.0e9], "span_hz": 2.0e5,

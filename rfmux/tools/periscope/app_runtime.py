@@ -1393,7 +1393,7 @@ class PeriscopeRuntime:
         Inside an IPython or Jupyter session (raise_periscope) that session
         is the console: a second in-process shell cannot be created.
         """
-        if self.crs is None or self.console_dock_widget is None: return
+        if getattr(self, "crs", None) is None or getattr(self, "console_dock_widget", None) is None: return
         if get_ipython() is not None: return
         if self.kernel_manager is None:
             try:
@@ -1457,19 +1457,23 @@ class PeriscopeRuntime:
         enclosing IPython's when Periscope was raised from one, or a private
         dict otherwise. crs, rfmux and periscope are always bound in it."""
         self._create_console()
-        if self.kernel_manager is not None:
+        if getattr(self, "kernel_manager", None) is not None:
             return self.kernel_manager.kernel.shell.user_ns
         if not hasattr(self, "_namespace"):
             ipython = get_ipython()
             self._namespace = ipython.user_ns if ipython is not None else {}
-            self._namespace.update({'crs': self.crs, 'rfmux': rfmux, 'periscope': self})
+            self._namespace.update({"crs": getattr(self, "crs", None), 'rfmux': rfmux, 'periscope': self})
         return self._namespace
 
-    def run_python(self, code: str, comment: str = "") -> concurrent.futures.Future:
+    def run_python(self, code: str, comment: str = "", name: str = None) -> concurrent.futures.Future:
         """Run *code* in the session as a console cell, exactly as if typed.
         Without a console (raised from IPython) it runs on the interpreter
-        thread in that session's namespace and is printed instead."""
+        thread in that session's namespace and is printed instead. *name*
+        is the session name the cell builds, so its cells travel with the
+        result when a panel exports."""
         namespace = self.session_namespace()
+        if name is not None:
+            self.__dict__.setdefault('session_cells', {}).setdefault(name, []).append(code)
         if comment:
             code = f"# {comment}\n{code}"
         if self.jupyter_widget is not None:
@@ -1477,16 +1481,39 @@ class PeriscopeRuntime:
         print(code)
         return self.interpreter.run(code, namespace)
 
-    def run_python_then(self, code: str, comment: str, done) -> concurrent.futures.Future:
+    def run_python_then(self, code: str, comment: str, done, name: str = None) -> concurrent.futures.Future:
         """run_python, then done(future) on the GUI thread; a cancelled cell is not reported."""
-        future = self.run_python(code, comment)
+        future = self.run_python(code, comment, name)
         on_done(future, done)
         return future
+
+    def free_name(self, name: str) -> str:
+        """*name* unless the session already has it, else the first name_2, name_3, ... it does not."""
+        namespace = self.session_namespace()
+        candidate, k = name, 2
+        while candidate in namespace:
+            candidate, k = f"{name}_{k}", k + 1
+        return candidate
+
+    def load_result(self, path, name: str, done) -> None:
+        """Bind the result saved in *path* to a free session name, as a cell,
+        then done(name) on the GUI thread."""
+        name = self.free_name(name)
+
+        def bound(future):
+            if future.exception() is not None:
+                QtWidgets.QMessageBox.critical(self, "Load Error", f"Could not load {path}:\n{future.exception()}")
+                return
+            done(name)
+
+        self.run_python_then(
+            f"from rfmux.tools.periscope.session_manager import load_result\n{name} = load_result({str(path)!r})",
+            f"Load {name}", bound, name=name)
 
     def _connect_multisweep_signals(self, panel):
         """Route the shared multisweep signals to *panel*, and only to it."""
         s = self.multisweep_signals
-        for signal in (s.progress, s.starting_iteration, s.data_update, s.completed_iteration,
+        for signal in (s.progress, s.starting_iteration, s.completed_iteration,
                        s.all_completed, s.error, s.fitting_progress):
             try:
                 signal.disconnect()
@@ -1495,7 +1522,6 @@ class PeriscopeRuntime:
         queued = QtCore.Qt.ConnectionType.QueuedConnection
         s.progress.connect(panel.update_progress, queued)
         s.starting_iteration.connect(panel.handle_starting_iteration, queued)
-        s.data_update.connect(panel.update_data, queued)
         s.completed_iteration.connect(
             lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
             queued)
@@ -1538,11 +1564,12 @@ class PeriscopeRuntime:
                                                           **fits, 'module': module}.items())
             futures.append(self.run_python("\n".join(preamble + [
                 f"{name}[{key!r}] = await crs.multisweep(center_frequencies={centres}, {kwargs}, "
-                f"**periscope.multisweep_hooks({window_id!r}))"]), title if not futures else ""))
+                f"**periscope.multisweep_hooks({window_id!r}))"]), title if not futures else "", name=name))
             preamble = []
             swept.add(key)
         run = {'window': panel, 'futures': futures}
         self.multisweep_tasks[f"{window_id}_module_{module}"] = run
+        panel.result_name = name
 
         def finish(i):
             amp, d = plan[i]
@@ -1553,10 +1580,7 @@ class PeriscopeRuntime:
                         f.cancel()
                     signals.error.emit(module, amp, f"Multisweep failed: {fut.exception()}")
                     return
-                results = self.session_namespace()[name][(amp, d)]
-                history = {k - 1: r.get('bias_frequency', r.get('original_center_frequency'))
-                           for k, r in results.items() if isinstance(k, (int, np.integer))}
-                signals.data_update.emit(module, i, amp, d, results, history)
+                panel.set_result(self.session_namespace()[name])
                 signals.completed_iteration.emit(module, i, amp, d)
                 if i + 1 < len(plan):
                     signals.starting_iteration.emit(module, i + 1, *plan[i + 1])
@@ -1687,7 +1711,7 @@ class PeriscopeRuntime:
                                        "channel; re-run from a multisweep export")
         return panel
 
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep",
+    def _create_multisweep_panel_from_loaded_data(self, load_params: dict, source_type: str = "multisweep", name: str | None = None,
                                                   title: str = None) -> tuple:
         """
         Create and display a MultisweepPanel from loaded data.
@@ -1777,17 +1801,17 @@ class PeriscopeRuntime:
             if 'results_by_detector' in load_params:
                 # New format: load directly into panel
                 panel.results_by_detector = load_params['results_by_detector']
+            if name is not None:
+                # The file's result is bound in the session; the panel derives from it.
+                panel.result_name = name
+                panel.set_result(self.session_namespace()[name])
                 panel._redraw_plots()
             elif 'results_by_iteration' in load_params:
-                # Old format: convert via migration helper, then feed through update_data
+                # Old per-iteration format: the same shape a named result has.
                 iteration_params = load_params.get('results_by_iteration', [])
                 if isinstance(iteration_params, dict):
                     iteration_params = [iteration_params[k] for k in sorted(iteration_params.keys())]
-                for i in range(len(iteration_params)):
-                    amplitude = iteration_params[i]['amplitude']
-                    direction = iteration_params[i]['direction']
-                    data = iteration_params[i]['data']
-                    panel.update_data(target_module, i, amplitude, direction, data, None)
+                panel.set_result({(it['amplitude'], it['direction']): it['data'] for it in iteration_params})
             
             # Generate histograms now that data is loaded
             if panel.results_by_detector:
@@ -1861,13 +1885,16 @@ class PeriscopeRuntime:
                     data['overlap'] = params['overlap']
                 self.channel_noise_data['noise_parameters'] = params
                 self.channel_noise_data['data'] = data
+                self.channel_noise_data['name'] = name
+                self.channel_noise_data['result'] = self.session_namespace()[name]
+                self.channel_noise_data['cells'] = list(self.__dict__.get('session_cells', {}).get(name, []))
                 self.loaded_channel_noise = False
                 self.main_plot_panel.emit_channel_noise_export(
                     f"module{module}_channel_noise", self._export_channel_noise_data())
                 self._create_channel_noise_panel(1)
 
             self.run_python_then(f"{name} = await crs.take_noise_spectrum({args})",
-                                 "Noise Spectrum", done)
+                                 "Noise Spectrum", done, name=name)
 
     def _export_channel_noise_data(self):
         
@@ -1936,7 +1963,7 @@ class PeriscopeRuntime:
         dock.show()
         dock.raise_()
         
-    def _load_multisweep_analysis(self, load_params: dict):
+    def _load_multisweep_analysis(self, load_params: dict, name: str | None = None):
         """
         Load multisweep analysis data from file and display in a docked panel.
 
@@ -1945,7 +1972,7 @@ class PeriscopeRuntime:
         """
         # Use the unified helper method
         panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            load_params, source_type="multisweep"
+            load_params, source_type="multisweep", name=name
         )
         
         if panel is None:
@@ -2470,7 +2497,7 @@ class PeriscopeRuntime:
         MockConfigDialog = MagicMock(return_value=fake_mock_config_dialog)
         MockFetcher = MagicMock(return_value=fake_fetcher)
         MockNASignals = MagicMock(return_value=fake_signals)
-        MockRunPython = MagicMock(side_effect=lambda code, comment="": concurrent.futures.Future())
+        MockRunPython = MagicMock(side_effect=lambda code, comment="", name=None: concurrent.futures.Future())
         MockMultiTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasTask = MagicMock(return_value=MagicMock(start=MagicMock()))
         MockBiasSignals = MagicMock(return_value=fake_bias_signals)

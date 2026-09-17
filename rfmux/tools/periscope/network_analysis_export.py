@@ -151,8 +151,14 @@ class NetworkAnalysisExportMixin:
         Returns:
             Dictionary containing all export data
         """
+        main_app = self.window() if hasattr(self, 'window') else None
+        namespace = main_app.session_namespace() if hasattr(main_app, 'session_namespace') else {}
+        name = getattr(self, 'result_name', None)
         export_data = {
             'timestamp': datetime.datetime.now().isoformat(),
+            'name': name,
+            'result': namespace.get(name),
+            'cells': list(getattr(main_app, 'session_cells', {}).get(name, [])),
             'parameters': self.current_params.copy() if hasattr(self, 'current_params') else {},
             'dac_scales_used': self.dac_scales.copy() if hasattr(self, 'dac_scales') else {},
             'modules': {}

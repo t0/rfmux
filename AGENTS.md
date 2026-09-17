@@ -7,7 +7,7 @@
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
 - **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
-- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, and the HDF5 record
+- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, coincidence events (`events.py`), and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
@@ -223,9 +223,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1126 tests, ~1 min
+pytest --tier=quick                 # Edit loop: 1152 tests, ~1 min
 pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1148 that run without a board, ~4 min
+pytest --tier=full                  # All 1174 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

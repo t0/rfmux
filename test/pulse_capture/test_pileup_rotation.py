@@ -32,7 +32,7 @@ def _engine(records, **kw):
     return PulseCapture(
         channels=[1], buf_size=8192, noise_stats={1: ns},
         threshold_sigma=5.0, end_sigma=1.5, trigger_samples=2,
-        edge_lookback=61035, min_end_samples=10, margin_fraction=0.1,
+        edge_lookback=61035, min_end_samples=10,
         max_capture_samples=732422, baseline_window=0,
         on_pulse=lambda ch, k, d: records.append(d), **kw)
 

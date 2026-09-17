@@ -1,9 +1,10 @@
 """The end-confirmation floor.
 
-A capture ends once the confirmation bucket exceeds
-``max(min_end_samples, margin_fraction * core)``.  For a short pulse the
-floor wins, so it alone decides how long after the pulse settled the
-capture is released.
+A capture ends once the confirmation bucket exceeds the largest of
+``min_end_samples``, ``END_CONFIRM_FRACTION * core`` and the post-pulse
+samples.  For a short pulse with no post-pulse span the floor wins, so
+it alone decides how long after the pulse settled the capture is
+released.
 """
 
 import numpy as np
@@ -17,11 +18,11 @@ FS = 1000.0
 
 def _end_gap(min_end_samples):
     """Samples from below-threshold to end-confirmed for a clean, short
-    pulse whose margin_fraction * core is far below the floor."""
+    pulse whose END_CONFIRM_FRACTION * core is far below the floor."""
     got = []
     s = PulseCaptureSession(
         channels=[1], sample_rate=FS, noise_samples=300, hdf5_path=None,
-        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+        threshold_sigma=5.0, end_sigma=1.5,
         min_end_samples=min_end_samples, trigger_samples=1,
         on_pulse=lambda ch, idx, summ, data: got.append(data))
     s.start()
@@ -74,7 +75,7 @@ def _short_pulse_summary():
     got = []
     s = PulseCaptureSession(
         channels=[1], sample_rate=FS, noise_samples=300, hdf5_path=None,
-        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+        threshold_sigma=5.0, end_sigma=1.5,
         min_end_samples=10, trigger_samples=1,
         on_pulse=lambda ch, idx, summ, data: got.append((summ, data)))
     s.start()

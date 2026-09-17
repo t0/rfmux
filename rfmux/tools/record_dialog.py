@@ -136,8 +136,8 @@ class RecordDialog(QtWidgets.QDialog):
         self.parser_iface_combo = QtWidgets.QComboBox()
         self.parser_iface_combo.setEditable(True)
         self.parser_iface_combo.setToolTip(
-            "interface the parser listens on; auto finds it from the board "
-            "address")
+            "interface the parser listens on: the one the board's 1G "
+            "stream arrives on")
         self.fastrx_check = QtWidgets.QCheckBox("fastrx recording")
         self.fastrx_iface_combo = QtWidgets.QComboBox()
         self.fastrx_iface_combo.setEditable(True)
@@ -215,6 +215,7 @@ class RecordDialog(QtWidgets.QDialog):
         self.modules_edit.textChanged.connect(self._refresh)
         self.duration_spin.valueChanged.connect(self._refresh)
         self.fastrx_iface_combo.currentTextChanged.connect(self._refresh)
+        self.parser_iface_combo.currentTextChanged.connect(self._refresh)
         self.capture_form.updated.connect(self._refresh)
         self.recheck_btn.clicked.connect(self._refresh)
         self.copy_btn.clicked.connect(
@@ -304,14 +305,11 @@ class RecordDialog(QtWidgets.QDialog):
         fast = running + [n for n, v in speeds.items()
                           if v is not None and v >= _FAST_MBPS
                           and n not in running]
-        for combo, names, extra in (
-                (self.parser_iface_combo, list(speeds), [("auto", "auto")]),
-                (self.fastrx_iface_combo, fast, [])):
+        for combo, names in ((self.parser_iface_combo, list(speeds)),
+                             (self.fastrx_iface_combo, fast)):
             current = _combo_value(combo)
             combo.blockSignals(True)
             combo.clear()
-            for text, value in extra:
-                combo.addItem(text, value)
             for n in names:
                 combo.addItem(_label(n, speeds.get(n)), n)
             if not current and combo is self.fastrx_iface_combo \
@@ -319,6 +317,8 @@ class RecordDialog(QtWidgets.QDialog):
                 current = fast[0]
             _select(combo, current)
             combo.blockSignals(False)
+        self.parser_iface_combo.lineEdit().setPlaceholderText(
+            "choose an interface")
 
     def _start_command(self) -> str:
         fx = _fastrx()
@@ -345,6 +345,9 @@ class RecordDialog(QtWidgets.QDialog):
                   self.streamer_check, self.trunc_combo):
             w.setEnabled(self.fastrx_check.isChecked())
         self.parser_iface_combo.setEnabled(self.parser_check.isChecked())
+        if self.parser_check.isChecked() and \
+                not _combo_value(self.parser_iface_combo):
+            problems.append("choose the interface the parser listens on")
         if self.fastrx_check.isChecked():
             if fx is None:
                 self.fastrx_status.setText(
@@ -400,8 +403,7 @@ class RecordDialog(QtWidgets.QDialog):
             "capture": self.capture_check.isChecked(),
             "parser": self.parser_check.isChecked(),
             "fastrx": self.fastrx_check.isChecked(),
-            "parser_interface": (None if parser_iface in ("", "auto")
-                                 else parser_iface),
+            "parser_interface": parser_iface or None,
             "fastrx_interface": _combo_value(self.fastrx_iface_combo) or None,
             "fastrx_socket": None,
             "merge_fastrx": self.merge_check.isChecked(),
@@ -429,8 +431,7 @@ class RecordDialog(QtWidgets.QDialog):
     def _saved_config(self) -> PulseCaptureConfig:
         raw = self.settings.value(_KEY + "capture_config", "")
         try:
-            return PulseCaptureConfig(**json.loads(raw)) if raw else \
-                PulseCaptureConfig()
+            return PulseCaptureConfig.from_dict(json.loads(raw) if raw else {})
         except (TypeError, ValueError):
             return PulseCaptureConfig()
 
@@ -456,7 +457,10 @@ class RecordDialog(QtWidgets.QDialog):
         self.capture_check.setChecked(v("capture", "true") in (True, "true"))
         self.parser_check.setChecked(v("parser", "true") in (True, "true"))
         self.fastrx_check.setChecked(v("fastrx", "true") in (True, "true"))
-        _select(self.parser_iface_combo, str(v("parser_interface", "auto")))
+        # A saved "auto" means no choice.
+        saved_iface = str(v("parser_interface", ""))
+        _select(self.parser_iface_combo,
+                "" if saved_iface == "auto" else saved_iface)
         _select(self.fastrx_iface_combo, str(v("fastrx_interface", "")))
         self.merge_check.setChecked(v("merge_fastrx", "true") in (True, "true"))
         self.streamer_check.setChecked(
@@ -483,7 +487,7 @@ class RecordDialog(QtWidgets.QDialog):
                 ("capture", "true" if o["capture"] else "false"),
                 ("parser", "true" if o["parser"] else "false"),
                 ("fastrx", "true" if o["fastrx"] else "false"),
-                ("parser_interface", o["parser_interface"] or "auto"),
+                ("parser_interface", o["parser_interface"] or ""),
                 ("fastrx_interface", o["fastrx_interface"] or ""),
                 ("merge_fastrx", "true" if o["merge_fastrx"] else "false"),
                 ("channel_streamer", "true" if o["channel_streamer"] else "false"),

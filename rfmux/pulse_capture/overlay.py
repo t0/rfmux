@@ -438,20 +438,27 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     from .accumulators import PulseHistogramSet, PulseTemplateSet
     from .analysis import storage_transform
     from .capture_session import DualPulseCaptureSession, PulseCaptureConfig
-    from .detection import estimate_noise_stats
+    from .detection import RATE_PARAMS, estimate_noise_stats
     from .hdf5 import DualPulseHDF5Writer
 
     if reader.dual:
         raise ValueError(f"{reader.path}: already a dual file")
+    mode = reader.metadata.get("streamer_mode") or "slow"
+    if mode != "slow":
+        raise ValueError(f"{reader.path}: a {mode} capture; the recording "
+                         "merges into a slow capture as its fast stream")
     channels = list(reader.channels)
     # A key's module in the recording: its own, or the capture's; a
     # recording carries every module that streamed.
     where = {c: split_key(c, reader.metadata.get("module")) for c in channels}
     fast_channels = [c for c in channels if where[c][1] <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
-    params = {**reader.metadata, "streamer_mode": "both",
-              "sample_rate_fast": PFB_SAMPLING_FREQ,
-              "fast_channels": fast_channels}
+    # The slow capture's sample counts take the names a dual file gives
+    # them.  No engine ran on the recording, so the fast stream has none.
+    params = {(f"{k}_slow" if k in RATE_PARAMS else k): v
+              for k, v in reader.metadata.items()}
+    params.update(streamer_mode="both", sample_rate_fast=PFB_SAMPLING_FREQ,
+                  fast_channels=fast_channels)
     tuning = {c: reader.tuning(c) for c in channels}
     tuning = {c: row for c, row in tuning.items() if row}
     units = {c: reader.stored_units(c) for c in channels}
@@ -507,9 +514,36 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
             pre_samples=max(8, post // 10), post_samples=post,
             threshold_sigma=thr, sample_rate=PFB_SAMPLING_FREQ)
 
+        def fast_window(c, t0, t1):
+            """The recording over [t0, t1] on *c*, in the file's units;
+            None where the recording does not cover it."""
+            if c not in fast_channels:
+                return None
+            w = rec.window(t0, t1, where[c][1], module=where[c][0])
+            ok = np.isfinite(w.times)
+            if not ok.any():
+                return None
+            tod = _in_units(w.times[ok], w.samples[ok], factors[c])
+            return {"Time": tod["times"], "Amp_I": tod["I"],
+                    "Amp_Q": tod["Q"]}
+
+        # The capture's events index its pulses, which are this file's
+        # pairs under the same numbers.  A channel the capture saved
+        # without a trigger gets the recording over the event's window
+        # beside its slow samples.
+        for idx in range(1, reader.event_count + 1):
+            event = reader.get_event(idx)
+            dump = {}
+            for c, slow in (event.get("dump") or {}).items():
+                dump[c] = {"slow_tod": slow}
+                if event["window"] is not None:
+                    fast = fast_window(c, event["window"][0] + shift,
+                                       event["window"][1] + shift)
+                    if fast is not None:
+                        dump[c]["fast_tod"] = fast
+            writer.append_event({**event, "dump": dump})
+
         for c in channels:
-            recorded = c in fast_channels
-            factor = factors[c]
             for idx in range(1, reader.pulse_count(c) + 1):
                 pulse = reader.get_pulse(c, idx)
                 pair = {"pair_idx": idx, "channel": c, "slow_idx": idx,
@@ -523,22 +557,13 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                             "saved_end_time": float(t[-1])}},
                         period)
                     pair["window"] = window
-                    if recorded:
-                        w = rec.window(window[0], window[1], where[c][1],
-                                       module=where[c][0])
-                        ok = np.isfinite(w.times)
-                        # A window the recording does not cover
-                        # stays absent: the pair reads "fast n/a".
-                        if ok.any():
-                            tod = _in_units(w.times[ok],
-                                            w.samples[ok], factor)
-                            pair["fast_tod"] = {"Time": tod["times"],
-                                                "Amp_I": tod["I"],
-                                                "Amp_Q": tod["Q"]}
-                            hists.add_pulse(c, pair["fast_tod"], noise[c],
-                                            to_raw=to_raw[c])
-                            templates.add_pulse(c, pair["fast_tod"],
-                                                noise[c])
+                    # A window the recording does not cover stays
+                    # absent: the pair reads "fast n/a".
+                    fast = fast_window(c, window[0], window[1])
+                    if fast is not None:
+                        pair["fast_tod"] = fast
+                        hists.add_pulse(c, fast, noise[c], to_raw=to_raw[c])
+                        templates.add_pulse(c, fast, noise[c])
                 writer.append_match(c, pair)
         writer.set_noise_stats("fast", noise)
         if hists.total_pulses():

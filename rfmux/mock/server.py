@@ -138,6 +138,10 @@ def yaml_hook(hwm):
         s.close()
 
 
+#: How often a server checks that the process that started it is alive.
+PARENT_POLL_S = 1.0
+
+
 # Start up a web server. This is a distinct process, so COW semantics.
 class ServerProcess(mp_ctx.Process):
     daemon = True
@@ -173,6 +177,19 @@ class ServerProcess(mp_ctx.Process):
 
         # Set up signal handlers for graceful shutdown
         shutdown_event = asyncio.Event()
+
+        # The client shuts its servers down at exit, which a client that
+        # crashed or was killed never reaches.  A server left behind
+        # holds its memory and its ports, so it watches for its parent.
+        parent = multiprocessing.parent_process()
+
+        async def watch_parent():
+            while parent is None or parent.is_alive():
+                await asyncio.sleep(PARENT_POLL_S)
+            print("[MockCRS Server] Parent process is gone")
+            shutdown_event.set()
+
+        watcher = loop.create_task(watch_parent())
 
         def signal_handler():
             shutdown_event.set()
@@ -211,6 +228,7 @@ class ServerProcess(mp_ctx.Process):
 
         # Clean shutdown
         print("[MockCRS Server] Shutting down...")
+        watcher.cancel()
 
         # Stop UDP streaming for all models
         for model in self.models.values():

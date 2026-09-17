@@ -7,7 +7,7 @@
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
 - **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
-- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, and the HDF5 record
+- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, coincidence events (`events.py`), and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
@@ -185,6 +185,17 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   (cross-phase modulation of an instantaneous nonlinearity), from the
   states they last left
 - Reproducibility requires concrete `resonator_random_seed` in config
+- Every generated resonator lies inside [`freq_start`, `freq_end`]
+  (`RANGE_PAD`, `RANGE_REDRAWS` in `resonator_model.py`); a test array that
+  needs resolvable neighbours in a narrow range sets a small `C_variation`
+- The K0 and I0 fits in `jit_physics.py` are Abramowitz and Stegun, within
+  2e-7 for every argument; resonators above 5 GHz build
+- One pulse schedule serves the stream and `get_samples`, and it ignores
+  any time at or before the latest it has seen; a read follows the stream's
+  clock while one runs (`MockCRS._physics_time`)
+- A mock server shuts down when the process that started it is gone
+  (`PARENT_POLL_S` in `rfmux/mock/server.py`), so a crashed client leaves
+  none behind
 
 ### Streaming
 - Slow stream: ~38 kHz at dec=0, halving per stage, port 9876, `ReadoutPacket`
@@ -200,6 +211,7 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   cannot leave the host. If multicast does not work on the machine it
   falls back to loopback unicast and prints which step failed
   (`check_multicast_loopback()` in `rfmux/streamer`)
+- A mock module with a tone but no NCO set streams with the NCO read as 0 Hz
 
 ### Threading
 - Periscope: Qt event loop + asyncio integration
@@ -223,9 +235,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1075 tests, ~1 min
-pytest --tier=portable              # No CRS, no GUI: 43 tests, ~9 s
-pytest --tier=full                  # All 1097 that run without a board, ~4 min
+pytest --tier=quick                 # Edit loop: 1231 tests, ~2 min
+pytest --tier=portable              # No CRS, no GUI: 51 tests, ~9 s
+pytest --tier=full                  # All 1253 that run without a board, ~4 min
 pytest --tier=acquisition           # MockCRS server + real UDP: 22 tests, ~3 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
@@ -234,7 +246,7 @@ python -m rfmux.tools.periscope     # Launch Periscope
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
 but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
-the test group and the `dirfile` extra installed they report zero skips.
+the test group installed they report zero skips.
 Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus

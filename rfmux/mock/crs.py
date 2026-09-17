@@ -448,11 +448,11 @@ class ServerMockCRS:
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
             raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
         with self._config_lock:
             self._frequencies[(module, channel)] = frequency
 
@@ -465,11 +465,11 @@ class ServerMockCRS:
         assert isinstance(amplitude, (int, float)), "Amplitude must be a number"
         if not (-1.0 <= amplitude <= 1.0):
             raise ValueError("Amplitude must be between -1.0 and +1.0.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int)
-        assert module is not None and isinstance(module, int)
         with self._config_lock:
             self._amplitudes[(module, channel)] = amplitude
 
@@ -732,6 +732,23 @@ class ServerMockCRS:
         assert isinstance(value, int)
         self._hmc7044_registers[address] = value
 
+    def _physics_time(self) -> float:
+        """The time the pulse schedule is advanced to by a sample read.
+
+        The schedule ignores any time at or before the latest it has
+        seen, and the stream advances it with stream time, which falls
+        behind the wall clock whenever blocks take longer to generate
+        than they span.  A read on the wall clock would then put the
+        schedule ahead of the stream, and the stream would fire no pulse
+        until it had caught up.  So a read follows the stream's clock
+        while one runs, and the wall clock since the mock started
+        otherwise.
+        """
+        streamer = self._udp_manager._streamer
+        if streamer is not None and streamer.running:
+            return streamer.t_stream
+        return time.time() - self.mock_start_time
+
     async def get_samples(self, num_samples, channel=None, module=1, average=False):
         """Get sample data for a specific module using direct physics calculations."""
         assert isinstance(num_samples, int)
@@ -753,7 +770,7 @@ class ServerMockCRS:
                                mock_config.MOCK_DEFAULTS['scale_factor'])
         noise_level = cfg.get('udp_noise_level',
                               mock_config.MOCK_DEFAULTS['udp_noise_level'])
-        current_time = time.time() - self.mock_start_time
+        current_time = self._physics_time()
 
         if average:
             effective_num_samples = 1

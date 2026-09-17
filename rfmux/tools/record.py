@@ -24,6 +24,7 @@ from pathlib import Path
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
+    MERGED_SUFFIX,
     resolve_channels,
     pulse_summary_lines,
     record_streams,
@@ -98,7 +99,8 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="With --channel-streamer: " + TRUNC_HELP)
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
-                   "fast stream (a both-mode file, as Periscope reviews it)")
+                   "fast stream (a both-mode file, as Periscope reviews it), "
+                   f"renamed to end in {MERGED_SUFFIX}")
 @click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
               default="periscope", show_default=True,
               help="After the run: Periscope in review mode on the pulse file, the "
@@ -109,6 +111,23 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--end-sigma", type=float, default=_DEFAULTS.end_sigma, show_default=True)
 @click.option("--min-pulse-ms", type=float, default=_DEFAULTS.min_pulse_ms, show_default=True)
 @click.option("--max-pulse-ms", type=float, default=_DEFAULTS.max_pulse_ms, show_default=True)
+@click.option("--pre-pulse-ms", type=float, default=_DEFAULTS.pre_pulse_ms, show_default=True,
+              help="Saved before each trigger")
+@click.option("--post-pulse-ms", type=float, default=_DEFAULTS.post_pulse_ms, show_default=True,
+              help="Saved after each pulse settled")
+@click.option("--coincidence-window-ms", type=float,
+              default=_DEFAULTS.coincidence_window_ms, show_default=True,
+              help="Pulses on any channels that trigger within this of an event's "
+                   "first trigger are recorded as one event; 0 records no coincident events")
+@click.option("--noise-capture-interval-s", type=float,
+              default=_DEFAULTS.noise_capture_interval_s, show_default=True,
+              help="Take a noise sample of every channel at random moments, the "
+                   "waits normally distributed about this many seconds; 0 takes none")
+@click.option("--dump-all-channels/--no-dump-all-channels",
+              default=_DEFAULTS.dump_all_channels, show_default=True,
+              help="With each event, save the same span of every channel that did "
+                   "not trigger: its slow samples, and its 100G samples when the "
+                   "recording is merged")
 @click.option("--noise-train-ms", type=float, default=_DEFAULTS.noise_train_ms, show_default=True,
               help="Noise-training span; the other recorders start when it ends")
 @click.option("--trigger-basis", type=click.Choice(["df", "iq"]), default=_DEFAULTS.trigger_basis,
@@ -118,7 +137,9 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
         fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, show,
         bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
-        noise_train_ms, trigger_basis, quiet):
+        pre_pulse_ms, post_pulse_ms, coincidence_window_ms,
+        noise_capture_interval_s, dump_all_channels, noise_train_ms,
+        trigger_basis, quiet):
     """Record the slow and channel streams of a module, or of several
     feeding one RF line, into a session."""
     if serial is None:
@@ -140,6 +161,10 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
     config = dataclasses.replace(
         _DEFAULTS, threshold_sigma=threshold_sigma, end_sigma=end_sigma,
         min_pulse_ms=min_pulse_ms, max_pulse_ms=max_pulse_ms,
+        pre_pulse_ms=pre_pulse_ms, post_pulse_ms=post_pulse_ms,
+        coincidence_window_ms=coincidence_window_ms,
+        dump_all_channels=dump_all_channels,
+        noise_capture_interval_s=noise_capture_interval_s,
         noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
     _run(serial=serial, hostname=hostname, modules=list(modules), channels=channels,
          duration=duration, session=session, session_dir=session_dir,
@@ -196,7 +221,8 @@ def _run(*, serial, hostname, modules, channels, duration, session,
         if path is not None:
             click.echo(f"[record] {name.split('_')[0]:7s} {path}")
     if result.merged_fastrx:
-        click.echo("[record] fastrx merged into the pulse file as its fast stream")
+        click.echo("[record] fastrx merged into the pulse file as its fast "
+                   f"stream: {result.pulse_path.name}")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
     _show(result, show)

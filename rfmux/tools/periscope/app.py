@@ -61,6 +61,7 @@ from .streamer_config_dialog import (
     StreamerConfigDialog,
 )
 from .dock_manager import PeriscopeDockManager
+from .layouts import FlowLayout, WrappingLabel
 from .main_plot_panel import MainPlotPanel
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
@@ -798,20 +799,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "  Fs: effective sampling frequency\n"
             "  Short/Long: packet mode (128 or 1024 channels)"
         )
-        self.info_text = QtWidgets.QLabel()
+        self.info_text = WrappingLabel()
 
-        # Add them to the status bar
-        self.statusBar().addWidget(self.fps_label)
-        self.statusBar().addWidget(self.pps_label)
-        
-        # Add simulation speed label if in mock mode
+        # One wrapping row rather than the status bar's own fixed one,
+        # whose labels side by side set a minimum window width wider
+        # than a laptop screen; the bar grows by a row as they wrap.
+        row = QtWidgets.QWidget()
+        flow = FlowLayout(row, margin=0)
+        flow.addWidget(self.fps_label)
+        flow.addWidget(self.pps_label)
         if self.is_mock_mode:
-            self.statusBar().addWidget(self.sim_speed_label)
-        
-        self.statusBar().addWidget(self.packet_loss_label)
-        self.statusBar().addWidget(self.dropped_label)
-        self.statusBar().addWidget(self.streaming_info_label)
-        self.statusBar().addPermanentWidget(self.info_text)
+            flow.addWidget(self.sim_speed_label)
+        flow.addWidget(self.packet_loss_label)
+        flow.addWidget(self.dropped_label)
+        flow.addWidget(self.streaming_info_label)
+        flow.addWidget(self.info_text)
+        self.statusBar().addWidget(row, 1)
         
 
     def _show_help(self):
@@ -867,7 +870,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "  - Left-click drag: Zoom into region (when Zoom Box enabled) or pan (when disabled)\n"
             "  - Mouse wheel: Zoom in/out around cursor position\n"
             "  - Right-click: Access context menu with plot controls\n"
-            "  - Double-click: Show point coordinates\n"
+            "  - Double-click: Autoscale the plot to its data\n"
             "- **Interactive Session:** Open an embedded iPython console for direct data access\n"
             "- **Initialize CRS:** Configure the CRS board settings (IRIG source, etc.)\n\n"
 

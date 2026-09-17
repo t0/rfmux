@@ -32,10 +32,12 @@ import sys
 # Import required modules
 import rfmux
 from rfmux.core.crs import CRS
-from rfmux.core.transferfunctions import fit_cable_delay, calculate_new_cable_length
+from rfmux.core.transferfunctions import (
+    fit_cable_delay, calculate_new_cable_length,
+    convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 from rfmux.algorithms.measurement.fitting import find_resonances, fit_skewed_multisweep
 from rfmux.algorithms.measurement.fitting_nonlinear import fit_nonlinear_iq_multisweep
-from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.algorithms.measurement.bias_kids import bias_kids, dac_scale_dbm
 from rfmux.streamer import find_streamer_conflict
 
 # Import mock mode support
@@ -51,10 +53,15 @@ async def main(serial="MOCK"):
     
     # Configuration parameters
     MODULE = 1  # Use Module 1
-    
-    # Network analysis parameters
+
+    # Tone powers, in dBm.  The algorithms take a normalized amplitude, a
+    # fraction of the DAC's full scale; the conversion needs the board's
+    # DAC scale, so it happens once the board is connected.
+    NETANAL_POWER_DBM = -60.0
+    MULTISWEEP_POWERS_DBM = [-65.0, -60.0, -55.0]   # bias_kids picks one per detector
+
+    # Network analysis parameters ('amp' is filled in from NETANAL_POWER_DBM)
     NETANAL_PARAMS = {
-        'amp': 0.001,
         'fmin': 0.6e9,      # 600 MHz
         'fmax': 1.1e9,     # 1100 MHz  
         'nsamps': 10,
@@ -77,8 +84,7 @@ async def main(serial="MOCK"):
     MULTISWEEP_PARAMS = {
         'span_hz': 200e3,             # the multisweep defaults: 200 kHz span,
         'npoints_per_sweep': 101,     # 2 kHz per point across a 10 kHz linewidth
-        'amp': 0.001,
-        'nsamps': 10,
+        'nsamps': 10,                 # one sweep per MULTISWEEP_POWERS_DBM
         'module': MODULE,
         'bias_frequency_method': 'max-diq',  # Method to find optimal bias frequency
         'rotate_saved_data': False,          # Don't rotate data for df calibration consistency
@@ -93,6 +99,19 @@ async def main(serial="MOCK"):
         'fit_resonances': True,
         'center_iq_circle': True,
         'normalize_fit': True
+    }
+
+    # Bias parameters
+    BIAS_PARAMS = {
+        'nonlinear_threshold': 0.77,   # highest nonlinearity `a` to bias at
+        'fallback_to_lowest': True,    # no suitable power: use the lowest
+        'fit_method': 'nonlinear',     # the fit the choice is read from
+        'measure_calibration': True,   # step the tones to measure df_calibration
+        'calibration_step': 0.05,      # that step, in fitted linewidths
+        'optimize_phase': False,       # rotate the IQ basis to put the signal in Q
+        'num_phase_samples': 300,      # samples that rotation is chosen from
+        'bandpass_params': None,       # band-pass them first; None is 5 to 20 Hz
+        'module': MODULE
     }
 
     SAMPLE_PARAMS = {
@@ -157,11 +176,17 @@ async def main(serial="MOCK"):
 
             # Run the algorithm flow with mock CRS.  The resonator count is
             # known here, so the run can check its own findings.
+            dac_scale = await dac_scale_dbm(crs, MODULE)
+            if dac_scale is None:
+                raise RuntimeError(f"module {MODULE} reports no DAC scale")
+            NETANAL_PARAMS['amp'] = convert_dbm_to_amplitude(NETANAL_POWER_DBM, dac_scale)
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
                                    MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
                                    expected_resonances=MOCK_CONFIG['num_resonances'],
                                    collect_pfb=True, pfb_samples=20_000,
-                                   is_mock=True)
+                                   is_mock=True, BIAS_PARAMS=BIAS_PARAMS,
+                                   multisweep_powers_dbm=MULTISWEEP_POWERS_DBM,
+                                   dac_scale=dac_scale)
 
         else:
             # Use real hardware - load session with serial number
@@ -183,9 +208,15 @@ async def main(serial="MOCK"):
 
             # Run the algorithm flow.  No expected_resonances: how many a
             # real array has is what the sweep is there to find out.
+            dac_scale = await dac_scale_dbm(crs, MODULE)
+            if dac_scale is None:
+                raise RuntimeError(f"module {MODULE} reports no DAC scale")
+            NETANAL_PARAMS['amp'] = convert_dbm_to_amplitude(NETANAL_POWER_DBM, dac_scale)
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
                                    MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
-                                   collect_pfb=True)
+                                   collect_pfb=True, BIAS_PARAMS=BIAS_PARAMS,
+                                   multisweep_powers_dbm=MULTISWEEP_POWERS_DBM,
+                                   dac_scale=dac_scale)
             
     except Exception as e:
         print(f"\n❌ Error occurred: {type(e).__name__}: {str(e)}")
@@ -211,7 +242,8 @@ async def main(serial="MOCK"):
 async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
                            MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS, full_run = True,
                            *, expected_resonances=None, collect_pfb=False,
-                           pfb_samples=100_000, is_mock=False):
+                           pfb_samples=100_000, is_mock=False, BIAS_PARAMS=None,
+                           multisweep_powers_dbm=None, dac_scale=None):
     """Run the complete algorithm flow with the given CRS instance.
 
     expected_resonances : int, optional
@@ -300,10 +332,32 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
         print(f"   Progress: {percentage:.1f}%", end='\r')
     
     MULTISWEEP_PARAMS['progress_callback'] = progress_callback
-    
-    multisweep_results = await crs.multisweep(**MULTISWEEP_PARAMS)
-    
-    print(f"\n   ✓ Multisweep complete for {len(multisweep_results)} resonances")
+
+    # One sweep of every resonator per power, keyed by detector and then
+    # by power index, as bias_kids expects.  With no powers given, one
+    # sweep runs at MULTISWEEP_PARAMS['amp'].
+    if multisweep_powers_dbm:
+        amps = [convert_dbm_to_amplitude(dbm, dac_scale)
+                for dbm in multisweep_powers_dbm]
+    else:
+        amps = [MULTISWEEP_PARAMS.pop('amp')]
+    sweeps_by_detector = {}
+    for k, amp in enumerate(amps):
+        print(f"   Sweep {k + 1}/{len(amps)}: amplitude {amp:.3g}"
+              + (f" ({multisweep_powers_dbm[k]:g} dBm)"
+                 if multisweep_powers_dbm else ""))
+        sweep = await crs.multisweep(amp=amp, **MULTISWEEP_PARAMS)
+        for det, entry in sweep.items():
+            entry['amplitude'] = amp
+            entry['direction'] = MULTISWEEP_PARAMS.get('sweep_direction', 'upward')
+            sweeps_by_detector.setdefault(det, {})[k] = entry
+
+    # The fits below are shown for the sweeps at the middle power.
+    multisweep_results = {det: by_power[len(amps) // 2]
+                          for det, by_power in sweeps_by_detector.items()}
+
+    print(f"\n   ✓ Multisweep complete for {len(multisweep_results)} resonances"
+          f" at {len(amps)} power{'s' if len(amps) != 1 else ''}")
     
     # Step 6: Do fitting
     print("\n6. Performing resonance fitting...")
@@ -355,24 +409,36 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     def bias_progress_callback(module, percentage):
         print(f"   Bias progress: {percentage:.1f}%", end='\r')
     
-    # Pass multisweep results directly to bias_kids
-    # Since we're doing a single amplitude sweep, we can pass the results directly
+    # bias_kids chooses, for each detector, the highest power that is not
+    # bifurcated and whose fitted nonlinearity is under the threshold.
     bias_results = await bias_kids(
         crs=crs,
-        multisweep_results=multisweep_results,
-        module=MODULE,
-        progress_callback=bias_progress_callback
+        multisweep_results={'results_by_detector': sweeps_by_detector},
+        progress_callback=bias_progress_callback,
+        **(BIAS_PARAMS or {'module': MODULE})
     )
-    
+
     print(f"\n   ✓ Bias complete for {len(bias_results)} detectors")
-    
+
     # Display bias results
     print("\n   Bias results summary:")
-    for det_idx, det_data in bias_results.items():
-        if 'bias_frequency' in det_data:
-            print(f"     Detector {det_idx}: bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
-            if 'df_calibration' in det_data:
-                print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V")
+    for det_idx, det_data in sorted(bias_results.items()):
+        if 'bias_frequency' not in det_data:
+            continue
+        fit = det_data.get('nonlinear_fit_params') or {}
+        amp = det_data.get('sweep_amplitude')
+        power = ("not recorded" if amp is None
+                 else f"{convert_amplitude_to_dbm(amp, dac_scale):.1f} dBm"
+                 if dac_scale is not None else f"amplitude {amp:.3g}")
+        print(f"     Detector {det_idx}: channel {det_data.get('bias_channel')}, "
+              f"power {power}, bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
+        print(f"                      a={fit.get('a', float('nan')):.2f}, "
+              f"Qr={fit.get('Qr', float('nan')):.0f}"
+              + (", bifurcated at one of the powers"
+                 if det_data.get('bifurcation_ever_seen') else ""))
+        if det_data.get('df_calibration') is not None:
+            print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V"
+                  f" ({det_data.get('df_calibration_source', '')})")
     
     
     ### Step 8. Slow Noise spectrum 

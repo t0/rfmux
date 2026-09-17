@@ -204,6 +204,8 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     spectrum_from_slow_tod,
     convert_roc_to_volts,
     convert_roc_to_dbm,
+    convert_amplitude_to_dbm,
+    convert_dbm_to_amplitude,
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
@@ -444,6 +446,35 @@ def apply_ui_theme(dark_mode: bool) -> None:
     app.setPalette(ui_palette(dark_mode))
 
 
+class _PopupEcho(QtCore.QObject):
+    """Prints each warning or error message box as it is shown."""
+
+    _LEVELS = {QtWidgets.QMessageBox.Icon.Warning: "WARNING",
+               QtWidgets.QMessageBox.Icon.Critical: "ERROR"}
+
+    def eventFilter(self, obj, event) -> bool:
+        if (event.type() == QtCore.QEvent.Type.Show
+                and isinstance(obj, QtWidgets.QMessageBox)
+                and obj.icon() in self._LEVELS):
+            parts = [obj.text(), obj.informativeText(), obj.detailedText()]
+            # macOS message boxes have no title, and Qt reports none.
+            head = [self._LEVELS[obj.icon()], obj.windowTitle()]
+            print("[Periscope] " + ": ".join(h for h in head if h) + ": "
+                  + "\n".join(part for part in parts if part),
+                  file=sys.stderr, flush=True)
+        return False
+
+
+def echo_popups_to_console(app: QtWidgets.QApplication) -> None:
+    """Every warning or error pop-up also goes to the console, so a
+    terminal log or a remote session keeps what a dialog said.  One
+    filter on the application covers the static ``QMessageBox.warning``
+    and ``critical`` calls as well as boxes built by hand."""
+    if getattr(app, "_popup_echo", None) is None:
+        app._popup_echo = _PopupEcho(app)
+        app.installEventFilter(app._popup_echo)
+
+
 def square_axes(plot_item: pg.PlotItem):
     """
     Make the axes have the same scale and equal extent in both directions, so that the
@@ -489,29 +520,13 @@ class UnitConverter:
     Utility class for converting between different units.
     """
     @staticmethod
-    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
+    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float) -> float:
         if normalized_amplitude <= 0: return -np.inf
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        v_peak = normalized_amplitude * v_peak_max
-        v_rms = v_peak / np.sqrt(2.0)
-        power_w = v_rms**2 / resistance
-        power_mw = power_w * 1000
-        return 10 * np.log10(power_mw)
+        return convert_amplitude_to_dbm(normalized_amplitude, dac_scale_dbm)
 
     @staticmethod
-    def dbm_to_normalize(dbm: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        power_mw = 10**(dbm/10)
-        power_w = power_mw / 1000
-        v_rms = np.sqrt(power_w * resistance)
-        v_peak = v_rms * np.sqrt(2.0)
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        return v_peak / v_peak_max
+    def dbm_to_normalize(dbm: float, dac_scale_dbm: float) -> float:
+        return convert_dbm_to_amplitude(dbm, dac_scale_dbm)
 
     @staticmethod
     def sweep_reference(freqs: np.ndarray) -> int:
@@ -685,7 +700,6 @@ class ClickableViewBox(pg.ViewBox):
         # scenePos() is from the event 'event', map it to view coordinates
         pt_view = self.mapSceneToView(event.scenePos()) 
         x_val = 10 ** pt_view.x() if log_x else pt_view.x()
-        y_val = 10 ** pt_view.y() if log_y else pt_view.y() # y_val needed for QMessageBox
 
         # 1. Handle window-specific modes first (e.g., add_subtract_mode for NetworkAnalysisWindow)
         if window and getattr(window, 'add_subtract_mode', False):
@@ -710,39 +724,23 @@ class ClickableViewBox(pg.ViewBox):
                 event.accept()
                 return
         
-        # 2. Emit the generic doubleClickedEvent signal.
-        #    This is intended for features like the Detector Digest in MultisweepWindow.
+        # 2. Offer the double-click to the panel (the detector digest in
+        #    the multisweep window).  A slot accepts the event when it
+        #    acts on it; Qt delivers events already accepted, so the
+        #    flag is cleared first for that to mean anything.
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.doubleClickedEvent.emit(event) # Pass the original event object
+            event.ignore()
+            self.doubleClickedEvent.emit(event)
             if event.isAccepted():
-                # If a slot connected to doubleClickedEvent accepted the event,
-                # we assume it's fully handled.
                 return
 
-        # 3. Default behavior for left double-click: show coordinates QMessageBox
-        #    This executes if not in add_subtract_mode and no slot accepted doubleClickedEvent.
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and not event.isAccepted():
-            plot_item = self.parentItem()
-            x_label_text = y_label_text = "" # Renamed to avoid conflict with x_val, y_val
-            if isinstance(plot_item, pg.PlotItem):
-                x_axis = plot_item.getAxis("bottom"); y_axis = plot_item.getAxis("left")
-                if x_axis and x_axis.label: x_label_text = x_axis.label.toPlainText().strip()
-                if y_axis and y_axis.label: y_label_text = y_axis.label.toPlainText().strip()
-            x_label_text = x_label_text or "X"; y_label_text = y_label_text or "Y"
-            
-            parent_widget = None
-            current_scene = self.scene() # Store scene in a variable
-            if current_scene and current_scene.views(): # Ensure scene and views exist
-                parent_widget = current_scene.views()[0].window()
-
-            if parent_widget: # Only show if we have a valid parent widget
-                box = QtWidgets.QMessageBox(parent_widget)
-                box.setWindowTitle("Coordinates")
-                box.setText(f"{y_label_text}: {y_val:.6g}\n{x_label_text}: {x_val:.6g}")
-                box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
-                box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                box.show()
-            event.accept() # Accept the event after showing the message box
+            # 3. Otherwise autoscale the plot to its data.  autoRange()
+            #    switches continuous auto-ranging off, which a live plot
+            #    with Auto Scale on must keep.
+            auto_x, auto_y = self.autoRangeEnabled()
+            self.autoRange()
+            self.enableAutoRange(x=auto_x, y=auto_y)
+            event.accept()
             return
 
         # 4. If not a left button double click and not handled by any of the above,

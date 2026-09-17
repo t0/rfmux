@@ -23,6 +23,7 @@ import math
 import numpy as np
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import merged
+from rfmux.mock.resonator_model import MockResonatorModel
 from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
@@ -146,7 +147,11 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_start_spin.setRange(0.001, 100.0)
         self.freq_start_spin.setSingleStep(0.001)
         self.freq_start_spin.setDecimals(3)
-        self.freq_start_spin.setToolTip("Start frequency for resonance generation [GHz]")
+        range_tip = (
+            "{} frequency a generated resonator can have [GHz].  Targets keep "
+            f"{MockResonatorModel.RANGE_PAD:.0%} of this frequency clear of "
+            "the edge, less in a dense array.")
+        self.freq_start_spin.setToolTip(range_tip.format("Lowest"))
         layout.addWidget(self.freq_start_spin, row, 3)
 
         row += 1
@@ -155,7 +160,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_end_spin.setRange(0.001, 100.0)
         self.freq_end_spin.setSingleStep(0.001)
         self.freq_end_spin.setDecimals(3)
-        self.freq_end_spin.setToolTip("End frequency for resonance generation [GHz]")
+        self.freq_end_spin.setToolTip(range_tip.format("Highest"))
         layout.addWidget(self.freq_end_spin, row, 1)
 
         # Random seed (optional)

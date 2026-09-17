@@ -43,6 +43,13 @@ class MockResonatorModel:
     This class now exclusively uses persistent MR_LEKID objects to avoid memory leaks
     and provide resonator physics simulation.
     """
+    #: Fraction of the edge frequency kept clear of targets at either
+    #: end of the requested range, half a target spacing at most.
+    RANGE_PAD = 0.01
+    #: Times a resonator's capacitor variation is drawn, while it lands
+    #: outside the range, before it takes its target C.
+    RANGE_REDRAWS = 8
+
     def __init__(self, mock_crs):
         """
         Initialize the resonator model.
@@ -414,13 +421,28 @@ class MockResonatorModel:
         # until the actual resonance frequency matches the target.
         print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
         
-        # Determine bounds for frequency correction
+        # Every resonator lands inside the requested range.  The
+        # capacitor variation scatters each resonator about its target,
+        # so the targets keep RANGE_PAD of the edge frequency clear at
+        # either end, or half a target spacing when that is less (a dense
+        # array keeps its range).  One that lands outside has its
+        # variation drawn again.
         f_min_bound = min(freq_start, freq_end)
         f_max_bound = max(freq_start, freq_end)
-        
-        # Tolerance for frequency convergence (0.1% of target)
+        span = f_max_bound - f_min_bound
+        half_spacing = span / (2 * max(num_resonances, 1))
+        target_lo = f_min_bound + min(self.RANGE_PAD * f_min_bound, half_spacing)
+        target_hi = f_max_bound - min(self.RANGE_PAD * f_max_bound, half_spacing)
+
+        # Tolerance for frequency convergence: 0.1% of target, or half
+        # the padding when that is smaller (a narrow range or a dense
+        # array), so the target C itself lands inside the range.
         freq_tolerance_fraction = 0.001
-        max_c_iterations = 20  # Maximum iterations for C-finding
+        if span > 0:
+            freq_tolerance_fraction = min(
+                freq_tolerance_fraction,
+                0.5 * (target_lo - f_min_bound) / f_max_bound)
+        max_c_iterations = 40  # Maximum iterations for C-finding
         
         for x in range(num_resonances):
             if progress is not None:
@@ -430,7 +452,7 @@ class MockResonatorModel:
                 if num_resonances == 1:
                     target_freq = (freq_start + freq_end) / 2  # Middle frequency
                 else:
-                    target_freq = freq_start + (freq_end - freq_start) * x / (num_resonances - 1)
+                    target_freq = target_lo + (target_hi - target_lo) * x / (num_resonances - 1)
                 
                 # Apply Cc variation using dedicated RNG (doesn't change during iteration)
                 Cc_actual = Cc_base * (1 + variation_rng.normal(0, Cc_variation))
@@ -519,8 +541,9 @@ class MockResonatorModel:
                     # Binary search: take geometric mean of bounds
                     C_current = np.sqrt(C_low * C_high)
                     
-                    # Safety: if bounds have collapsed, break
-                    if C_high / C_low < 1.001:
+                    # The bounds have collapsed inside the tolerance
+                    # (f goes as C to the -1/2).
+                    if C_high / C_low < 1 + freq_tolerance_fraction:
                         print(f"  Bounds collapsed after {iteration+1} iterations: f={actual_freq/1e9:.4f} GHz")
                         break
                 else:
@@ -529,15 +552,23 @@ class MockResonatorModel:
                 # Use the best result we found
                 complex_res_params['C'] = best_C
                 
-                # Apply C variation using dedicated RNG now that we have the target C
-                C_with_variation = best_C * (1 + variation_rng.normal(0, C_variation))
-                C_with_variation = max(C_with_variation, best_C * 0.5)  # At least 50% of target
-                complex_res_params['C'] = C_with_variation
-                
-                # Final resonator creation with variation applied
-                complex_res = MR_complex_resonator(**complex_res_params)
-                lekid = complex_res.lekid
-                actual_freq = lekid.compute_fr()
+                # Apply C variation using dedicated RNG now that we have the
+                # target C, drawing again while the resonator lands outside
+                # the requested range; the last try is the target C itself.
+                for attempt in range(self.RANGE_REDRAWS + 1):
+                    C_with_variation = best_C
+                    if attempt < self.RANGE_REDRAWS:
+                        C_with_variation *= 1 + variation_rng.normal(0, C_variation)
+                    C_with_variation = max(C_with_variation, best_C * 0.5)  # At least 50% of target
+                    complex_res_params['C'] = C_with_variation
+                    complex_res = MR_complex_resonator(**complex_res_params)
+                    lekid = complex_res.lekid
+                    actual_freq = lekid.compute_fr()
+                    if span == 0 or f_min_bound <= actual_freq <= f_max_bound:
+                        break
+                else:
+                    print(f"  Warning: resonator {x} is outside the requested "
+                          f"range at {actual_freq/1e9:.6f} GHz")
 
                 print(f"  Actual frequency: {actual_freq/1e9:.4f} GHz")
                 print(f"  Circuit: C={lekid.C*1e12:.3f} pF, Cc={lekid.Cc*1e15:.2f} fF, Lg={lekid.Lg*1e9:.2f} nH, Lk={lekid.Lk*1e9:.2f} nH")
@@ -1196,7 +1227,15 @@ class MockResonatorModel:
             args = (L0[i], R0[i], self.C_array[i], self.Cc_array[i],
                     k0.input_atten_dB, complex(k0.ZLNA))
             f_c = float(self.resonator_frequencies[i])
-            grid = f_c + np.linspace(-2e6, 2e6, 4001)
+            # The grid holds tens of loaded linewidths so its outer
+            # fifths see only the through-current: an over-coupled
+            # resonator (small C at a high frequency) is megahertz wide.
+            omega = 2.0 * np.pi * f_c
+            width = f_c * (R0[i] / (omega * L0[i])
+                           + self.Cc_array[i] ** 2 * omega * 50.0
+                           / (8.0 * self.C_array[i]))
+            half_span = max(2e6, 25.0 * width)
+            grid = f_c + np.linspace(-half_span, half_span, 4001)
             I = jit_physics.linear_currents(grid, *args)
             # The through-current is a smooth background: a line
             # through the outer fifth of the grid on each side.
@@ -1683,8 +1722,8 @@ class MockResonatorModel:
         
         t_state_update = time.perf_counter()
         
-        # Get NCO frequency for this module using the proper getter
-        nco_freq = self.mock_crs._nco_frequencies.get(module)
+        # An NCO nobody has set is at 0, as get_nco_frequency reports it.
+        nco_freq = self.mock_crs._nco_frequencies.get(module, 0)
         
         # Get decimation stage for bandwidth calculation
         dec_stage = self.mock_crs._fir_stage  # Note: still called fir_stage in MockCRS for compatibility

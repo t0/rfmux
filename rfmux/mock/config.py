@@ -44,6 +44,9 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Basic resonator distribution
     # -------------------------------------------------------------------------
     "num_resonances": 5,
+    # Every resonator lands inside [freq_start, freq_end]: the targets
+    # keep 1% of the edge frequency clear at each end, less in a dense
+    # array (MockResonatorModel.RANGE_PAD).
     "freq_start": 1.0e9,   # Hz
     "freq_end": 1.5e9,     # Hz
     "resonator_random_seed": None,  # int | None

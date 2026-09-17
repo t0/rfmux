@@ -893,7 +893,6 @@ class TestPulseCaptureSession:
             # white noise, so termination is prompt and these tests
             # stay about what they assert rather than about the end.
             end_sigma=1.5,
-            margin_fraction=0.2,
             buf_size=4000,
             sample_rate=38147.0,
             noise_samples=200,
@@ -1074,11 +1073,34 @@ class TestPulseCaptureConfig:
         assert cfg.min_pulse_samples(1220703.125) == 1221
 
     def test_buffer_autosizing_and_floor(self):
-        cfg = PulseCaptureConfig(max_pulse_ms=250.0)
+        cfg = PulseCaptureConfig(max_pulse_ms=250.0, pre_pulse_ms=0.0,
+                                 post_pulse_ms=0.0)
         # 0.25 s * 19073 Hz * 1.5 safety
         assert cfg.buf_size(19073.486328125) == 7153
         # tiny rate hits the floor
         assert cfg.buf_size(10.0) == 1000
+
+    def test_ring_and_hard_stop_make_room_for_the_margins(self):
+        """The ring holds the longest pulse with the time asked for
+        around it, and a pulse of that length still has its post-pulse
+        span before the hard stop."""
+        rate = 19073.486328125
+        bare = PulseCaptureConfig(max_pulse_ms=250.0, pre_pulse_ms=0.0,
+                                  post_pulse_ms=0.0)
+        cfg = PulseCaptureConfig(max_pulse_ms=250.0, pre_pulse_ms=20.0,
+                                 post_pulse_ms=10.0)
+        pre, post = cfg.pre_pulse_samples(rate), cfg.post_pulse_samples(rate)
+        assert (pre, post) == (381, 191)
+        assert cfg.buf_size(rate) == bare.buf_size(rate) + pre + post
+        assert cfg.max_capture_samples(rate) == \
+            bare.max_capture_samples(rate) + post
+        kw = cfg.session_kwargs(rate)
+        assert (kw["pre_samples"], kw["post_samples"]) == (pre, post)
+
+    def test_negative_margins_do_not_validate(self):
+        cfg = PulseCaptureConfig(post_pulse_ms=-1.0)
+        assert any(s == "error" and "Pre-pulse and post-pulse" in m
+                   for s, m in cfg.validate())
 
     def test_session_kwargs_match_session_signature(self):
         cfg = PulseCaptureConfig(min_pulse_ms=0.5, max_pulse_ms=100.0)
@@ -1147,7 +1169,7 @@ class TestPulseCaptureConfig:
 
     def test_edge_and_hard_stop_follow_max_pulse(self):
         """Both new time scales derive from max_pulse_ms — no knobs."""
-        cfg = PulseCaptureConfig(max_pulse_ms=100.0)
+        cfg = PulseCaptureConfig(max_pulse_ms=100.0, post_pulse_ms=0.0)
         assert cfg.edge_lookback_samples(1000.0) == 10   # 10% of pulse
         assert cfg.max_capture_samples(1000.0) == 120    # 1.2x pulse
         kw = cfg.session_kwargs(1000.0)
@@ -1394,12 +1416,19 @@ class TestDetectionParamsPlumbing:
         # session_kwargs also carries the sizing quantities, which are
         # not detection knobs but are needed to build the session (the
         # ring, the training length, the record the file keeps), and
-        # trigger_basis, which the session applies on the way in rather
-        # than handing to PulseCapture.
+        # what the session does itself rather than handing to
+        # PulseCapture: trigger_basis on the way in, the coincidence
+        # events on the way out, and the times in milliseconds that it
+        # only records in the file.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
+                                                   "config_times_ms",
                                                    "noise_samples",
                                                    "noise_record_samples",
-                                                   "trigger_basis"}
+                                                   "trigger_basis",
+                                                   "coincidence_window_s",
+                                                   "dump_all_channels",
+                                                   "noise_capture_interval_s",
+                                                   "noise_capture_window_s"}
         # The join that matters: every detection knob still gets there.
         assert set(DETECTION_PARAMS) <= set(kw)
 
@@ -1589,7 +1618,7 @@ def _run(baseline_window, amp, seed=0, n=20000, pulse_at=None,
                                mean_Q=0.0, std_Q=1.0)}
     pcap = _collecting_capture(
         buf_size=5000, channels=[1], noise_stats=ns,
-        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1, baseline_window=baseline_window, **pcap_kw)
+        threshold_sigma=5.0, end_sigma=1.5, baseline_window=baseline_window, **pcap_kw)
     if monotonic:
         rng = np.random.default_rng(seed)
         k = np.arange(n)
@@ -1880,14 +1909,16 @@ class TestHardStop:
     def test_bare_engine_defaults_match_the_config(self):
         """A PulseCapture built straight from a ring size must resolve
         the same lag and hard stop as one configured through
-        PulseCaptureConfig.  These were two independent formulas that
-        disagreed by 1.2x; they now share the ring-geometry constants."""
-        cfg = PulseCaptureConfig(max_pulse_ms=250.0)
+        PulseCaptureConfig.  Both derive from the ring-geometry constants.
+        With no margins asked for: the config grows its ring by the
+        pre-pulse and post-pulse spans, which a bare ring size cannot
+        say, and hands the session both values explicitly."""
+        cfg = PulseCaptureConfig(max_pulse_ms=250.0, pre_pulse_ms=0.0,
+                                 post_pulse_ms=0.0)
         for rate in (19073.486328125, 1220703.125):
             buf = cfg.buf_size(rate)
-            assert (PulseCapture.default_edge_lookback(
-                buf, cfg.margin_fraction)
-                == cfg.edge_lookback_samples(rate))
+            assert (PulseCapture.default_edge_lookback(buf)
+                    == cfg.edge_lookback_samples(rate))
             # buf_size rounds up where max_capture rounds to nearest,
             # so allow the one sample that costs.
             assert abs(PulseCapture.default_max_capture_samples(buf)
@@ -1931,7 +1962,8 @@ class TestHardStop:
         d = pcap.pulses["Channel 1"][1]
         assert d["truncated"] is False, \
             "the anchor must end the capture, not the hard stop"
-        n = len(d["Amp_I"])
+        # From the trigger on: the pre-trigger span is a setting.
+        n = len(d["Amp_I"]) - d["trigger_index"]
         assert n < 400, f"window still bloated ({n} samples)"
         # The end mark (bucket confirmation) sits past the window but
         # within the same neighborhood — not at the hard stop.
@@ -1987,7 +2019,7 @@ def _mk(trigger_samples, **kw):
                                mean_Q=0.0, std_Q=1.0)}
     return _collecting_capture(
         buf_size=1000, channels=[1], noise_stats=ns,
-        threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1, trigger_samples=trigger_samples, **kw)
+        threshold_sigma=5.0, end_sigma=1.5, trigger_samples=trigger_samples, **kw)
 
 
 class TestTriggerConfirmation:
@@ -2114,7 +2146,7 @@ class TestDecisionMarks:
                                    mean_Q=0.0, std_Q=1.0)}
         pcap = _collecting_capture(
             buf_size=4000, channels=[1], noise_stats=ns,
-            threshold_sigma=5.0, end_sigma=1.5, margin_fraction=0.1,
+            threshold_sigma=5.0, end_sigma=1.5,
             trigger_samples=trigger_samples)
         rng = np.random.default_rng(seed)
         for k in range(n):

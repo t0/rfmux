@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import numpy as np
 import warnings
+from dataclasses import replace
 from typing import Dict, Optional
 
 from .detection import ChannelNoiseStats
-from ..core.transferfunctions import VOLTS_PER_ROC
+from ..core.transferfunctions import VOLTS_PER_ROC, apply_iq_conversion
 
 
 def pulse_peaks(
@@ -303,6 +304,51 @@ def display_transform(df_calibration, stored_basis: str, stored_units: str,
     if stored is None or wanted is None or stored == 0:
         return None
     return wanted / stored, view_units
+
+
+def project_noise_stats(ns: ChannelNoiseStats,
+                        factor: complex) -> ChannelNoiseStats:
+    """Noise statistics taken through a :func:`display_transform` factor.
+
+    The baseline is a signed position in the plane, so it rotates with
+    the samples.  The spreads are widths: a rotation by theta puts
+    cos^2 of one axis's variance and sin^2 of the other's on each new
+    axis.  The two axes are taken as uncorrelated, which is all the
+    statistics record.  A jump spread of zero means it was not measured,
+    and stays zero.
+    """
+    k = abs(factor)
+    if k == 0 or factor == 1.0:
+        return ns
+    c2, s2 = (factor.real / k) ** 2, (factor.imag / k) ** 2
+
+    def spread(a: float, b: float):
+        return (k * float(np.sqrt(c2 * a * a + s2 * b * b)),
+                k * float(np.sqrt(s2 * a * a + c2 * b * b)))
+    mean_I, mean_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, factor)
+    std_I, std_Q = spread(ns.std_I, ns.std_Q)
+    jump_I, jump_Q = ((0.0, 0.0) if not (ns.jump_std_I and ns.jump_std_Q)
+                      else spread(ns.jump_std_I, ns.jump_std_Q))
+    return replace(ns, mean_I=float(mean_I), std_I=std_I,
+                   mean_Q=float(mean_Q), std_Q=std_Q,
+                   jump_std_I=jump_I, jump_std_Q=jump_Q)
+
+
+def baseline_level(waveform: dict, quad: str, t_ref: float) -> float:
+    """The level to draw *waveform*'s ``Amp_<quad>`` about.
+
+    A pulse carries the level it triggered from, which follows the
+    baseline's drift where the training mean does not.  A window read
+    from the ring buffer has no such mark: it takes the median of its
+    samples before *t_ref*, or of all of them when fewer than three
+    come before.
+    """
+    marked = waveform.get(f"trigger_baseline_{quad}")
+    if marked is not None:
+        return float(marked)
+    data = np.asarray(waveform[f"Amp_{quad}"], dtype=np.float64)
+    before = data[np.asarray(waveform["Time"], dtype=np.float64) < t_ref]
+    return float(np.median(before if len(before) >= 3 else data))
 
 
 def _calibration(df_calibration) -> Optional[complex]:

@@ -72,49 +72,35 @@ if platform.system() == "Darwin":
 
 
 @jit(nopython=True, cache=True, fastmath=True)
-def bessel_k0(x):
-    """
-    Fast approximation of modified Bessel function K0.
-    
-    Accurate to ~1e-6 relative error for all x > 0.
-    """
-    if x < 0.001:
-        return 15.0 - np.log(x/2)
-    elif x < 2.0:
-        log_term = np.log(x / 2.0)
-        gamma = 0.5772156649
-        k0 = -log_term - gamma
-        k0 += 0.25 * x * x * (log_term + gamma - 0.5)
-        k0 += 0.015625 * x**4 * (log_term + gamma - 0.75)
-        return k0
-    else:
-        sqrt_term = np.sqrt(np.pi / (2.0 * x))
-        exp_term = np.exp(-x)
-        series = 1.0 + 1.0/(8.0*x) + 9.0/(128.0*x*x)
-        return sqrt_term * exp_term * series
+def bessel_i0(x):
+    """Modified Bessel function I0 (Abramowitz & Stegun 9.8.1-9.8.2,
+    relative error below 2e-7 for all x)."""
+    x = abs(x)
+    if x < 3.75:
+        t = (x / 3.75) ** 2
+        return (1.0 + t * (3.5156229 + t * (3.0899424 + t * (1.2067492
+                + t * (0.2659732 + t * (0.0360768 + t * 0.0045813))))))
+    t = 3.75 / x
+    poly = (0.39894228 + t * (0.01328592 + t * (0.00225319 + t * (-0.00157565
+            + t * (0.00916281 + t * (-0.02057706 + t * (0.02635537
+            + t * (-0.01647633 + t * 0.00392377))))))))
+    return np.exp(x) / np.sqrt(x) * poly
 
 
 @jit(nopython=True, cache=True, fastmath=True)
-def bessel_i0(x):
-    """
-    Fast approximation of modified Bessel function I0.
-    
-    Accurate to ~1e-6 relative error for all x.
-    """
-    if x < 0.0:
-        x = -x
-    if x < 3.75:
-        t = x / 3.75
-        t2 = t * t
-        return 1.0 + 3.5156229*t2 + 3.0899424*t2*t2 + 1.2067492*t2*t2*t2 + \
-               0.2659732*t2*t2*t2*t2 + 0.0360768*t2*t2*t2*t2*t2 + 0.0045813*t2*t2*t2*t2*t2*t2
-    else:
-        t = 3.75 / x
-        exp_term = np.exp(x)
-        sqrt_term = 1.0 / np.sqrt(2.0 * np.pi * x)
-        series = 0.39894228 + 0.01328592*t + 0.00225319*t*t - 0.00157565*t*t*t + \
-                 0.00916281*t*t*t*t - 0.02057706*t*t*t*t*t
-        return exp_term * series * sqrt_term
+def bessel_k0(x):
+    """Modified Bessel function K0 for x > 0 (Abramowitz & Stegun
+    9.8.5-9.8.6, relative error below 2e-7 for all x)."""
+    if x <= 2.0:
+        t = (x / 2.0) ** 2
+        poly = (-0.57721566 + t * (0.42278420 + t * (0.23069756
+                + t * (0.03488590 + t * (0.00262698 + t * (0.00010750
+                + t * 0.00000740))))))
+        return -np.log(x / 2.0) * bessel_i0(x) + poly
+    t = 2.0 / x
+    poly = (1.25331414 + t * (-0.07832358 + t * (0.02189568 + t * (-0.01062446
+            + t * (0.00587872 + t * (-0.00251540 + t * 0.00053208))))))
+    return np.exp(-x) / np.sqrt(x) * poly
 
 
 # ============================================================================

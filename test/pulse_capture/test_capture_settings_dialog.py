@@ -57,7 +57,8 @@ def test_roundtrip(qt_app):
     dlg.threshold_spin.setValue(8.0)
     dlg.min_pulse_spin.setValue(0.5)
     dlg.max_pulse_spin.setValue(100.0)
-    dlg.margin_spin.setValue(0.2)
+    dlg.pre_pulse_spin.setValue(2.5)
+    dlg.post_pulse_spin.setValue(12.0)
     dlg.pileup_check.setChecked(False)
 
     cfg = dlg.get_config()
@@ -68,9 +69,41 @@ def test_roundtrip(qt_app):
     assert cfg.noise_train_ms == 5000.0
     assert cfg.noise_train_span_ms() == 5000.0
     assert "samples" in dlg.noise_label.text()
-    assert cfg.margin_fraction == 0.2
+    assert (cfg.pre_pulse_ms, cfg.post_pulse_ms) == (2.5, 12.0)
     assert cfg.enable_pileup is False
     dlg.close()
+
+
+def test_event_settings_round_trip_and_size_the_ring(qt_app):
+    """The coincidence window and the dump reach the config, and the
+    ring the dialog reports grows by what a dump needs."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    cfg = dlg.get_config()
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels) == (0.0, False)
+    assert dlg.coincidence_spin.text() == "off"
+    before = cfg.buf_size(19073.486328125)
+    dlg.coincidence_spin.setValue(2.5)
+    dlg.dump_check.setChecked(True)
+    cfg = dlg.get_config()
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels) == (2.5, True)
+    assert cfg.buf_size(19073.486328125) > before
+    assert f"{cfg.buf_size(19073.486328125):,} samples" in \
+        _plain(dlg.pulse_derived_label)
+    dlg.close()
+
+
+def test_noise_sampling_round_trips(qt_app):
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    assert dlg.noise_capture_spin.text() == "off"
+    assert dlg.get_config().noise_capture_interval_s == 0.0
+    dlg.noise_capture_spin.setValue(30.0)
+    assert dlg.get_config().noise_capture_interval_s == 30.0
+    back = PulseCaptureSettingsDialog(config=dlg.get_config(),
+                                      sample_rate=19073.486328125)
+    assert back.noise_capture_spin.value() == 30.0
+    assert "normally distributed" in dlg.noise_capture_spin.toolTip()
+    dlg.close()
+    back.close()
 
 
 def test_rolling_baseline_span_is_shown(qt_app):
@@ -102,12 +135,13 @@ def test_derived_readouts_split_by_driving_knob(qt_app):
     dlg.threshold_spin.setValue(10.0)
     assert "14.1σ" in dlg.sigma_derived_label.text()
 
-    # And the time scales follow max pulse: 50 ms → 60 ms hard stop,
-    # 5 ms edge lookback (95 samples at 19 kHz reads 4.98 ms).
-    assert "60 ms" in pulse_txt
+    # And the time scales follow max pulse: 50 ms → 60 ms hard stop
+    # plus the 5 ms post-pulse time, 5 ms edge lookback (95 samples at
+    # 19 kHz reads 4.98 ms).
+    assert "65 ms" in pulse_txt
     assert "4.98 ms" in pulse_txt
     dlg.max_pulse_spin.setValue(500.0)
-    assert "600 ms" in _plain(dlg.pulse_derived_label)
+    assert "605 ms" in _plain(dlg.pulse_derived_label)
     assert "50 ms" in _plain(dlg.pulse_derived_label)
     dlg.close()
 
@@ -204,28 +238,28 @@ def test_stored_df_basis_survives_the_dialog_without_a_calibration(qt_app):
 
 def test_derived_values_are_one_per_line(qt_app):
     dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
-    assert dlg.pulse_derived_label.text().count("<tr>") == 6
+    assert dlg.pulse_derived_label.text().count("<tr>") == 7
     assert dlg.sigma_derived_label.text().count("<tr>") == 2
     dlg.close()
 
 
-def test_max_pulse_tooltip_follows_the_margin_fraction(qt_app):
-    """The lookback the tooltip cites is margin fraction × max pulse, so
-    it must track the margin spin rather than quote the default; the
-    other ratios come from the config's constants."""
+def test_max_pulse_tooltip_cites_the_config_ratios(qt_app):
     dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
     tip = dlg.max_pulse_spin.toolTip()
     for piece in ("1.5×", "1.2×", "20×", "10%"):
         assert piece in tip, piece
-    dlg.margin_spin.setValue(0.2)
-    assert "20%" in dlg.max_pulse_spin.toolTip()
-    assert "10%" not in dlg.max_pulse_spin.toolTip()
     dlg.close()
 
 
-def test_margin_tooltip_names_the_lookback(qt_app):
-    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
-    assert "lookback" in dlg.margin_spin.toolTip()
+def test_saved_margins_are_shown_in_samples_at_this_rate(qt_app):
+    """The times are the setting; what they come to at this stream's
+    rate is derived, and follows the spin boxes."""
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    assert "95 samples before the trigger, 95 after it settled" in \
+        _plain(dlg.pulse_derived_label)
+    dlg.post_pulse_spin.setValue(0.0)
+    assert "95 samples before the trigger, 0 after it settled" in \
+        _plain(dlg.pulse_derived_label)
     dlg.close()
 
 

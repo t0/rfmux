@@ -11,9 +11,7 @@ aligned fast and slow data. This guide is how to use it: the dialog, the
 command line, what the run does, and the viewer.
 
 Needs: Linux with the fastrx extension built (clang, libxdp, libbpf and
-liburing at install time), a 100G NIC on the channel-stream network, and
-pygetdata for the parser dirfile (`uv pip install -e .[dirfile]`, with
-libgetdata on the system).
+liburing at install time) and a 100G NIC on the channel-stream network.
 
 ## 1. Before the first run
 
@@ -79,8 +77,8 @@ The **Run** tab:
   modules itself.
 - **Duration**, in seconds, after the capture's noise training.
 - **Products**: the pulse capture of the slow stream, the parser dirfile
-  with its interface (found from the board's address by default), and
-  the fastrx recording with its 100G interface. The interfaces are listed
+  with the interface the board's 1G stream arrives on, which you choose,
+  and the fastrx recording with its 100G interface. The interfaces are listed
   with their negotiated rates, every one for the parser and the 100 Gb/s
   ones for fastrx, a lone 100 Gb/s interface filled in. The
   dialog checks for a running fastrxd on that interface and, when there
@@ -148,7 +146,8 @@ The products, sharing one time stamp, named `module2` for one module and
 
 - `pulse_module<M>_HHMMSS.h5`, the slow-stream pulse capture, with each
   channel's tuning under its `tuning` group. A file across modules keys
-  its channels by (module, channel).
+  its channels by (module, channel). Once the recording is merged in it
+  is `pulse_module<M>_HHMMSS_100G.h5`.
 - `parser_module<M>_HHMMSS.dirfile/serial_<NNNN>`, the parser's dirfile of
   the same channels, and a `.log` with its drop statistics.
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of
@@ -158,13 +157,24 @@ All three are listed in the session's metadata, so Periscope's session
 browser shows them.
 
 After the run the command lists the channels that triggered with their
-pulse counts, merges the recording into the pulse file as its fast stream
-(`--no-merge-fastrx` leaves the file slow-only; `rfmux fastrx merge
-<pulse.h5> <run.fastrx>` does it later) and opens Periscope in review
-mode on the pulse file, in its session folder. The command exits 1 after
+pulse counts. It merges the recording into the pulse file as its fast
+stream and renames the file to end in `_100G`, so its name says it holds
+the 100G data. It then opens Periscope in review mode on that file, in its
+session folder. `--no-merge-fastrx` leaves the file slow-only under its own
+name. `rfmux fastrx merge <pulse.h5> <run.fastrx>` merges later, in place
+unless given an output name. The command exits 1 after
 a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a
 parser that wrote nothing, or a recording that could not be merged.
+
+The capture settings in the dialog, and `--coincidence-window-ms`,
+`--dump-all-channels` and `--noise-capture-interval-s` on the command
+line, record coincident events and noise samples (see the pulse capture
+guide). With every channel saved per event, the merge also slices the
+recording for the channels that did not trigger, over the event's window.
+An event in the merged file then holds the 100G samples of every captured
+channel. A noise sample gets the recording for all its channels the same
+way.
 
 ## 5. Reviewing in Periscope
 

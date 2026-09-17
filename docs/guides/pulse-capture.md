@@ -16,10 +16,11 @@ For the headless version, with every step as a runnable cell, open the
 A capture estimates the noise on each channel first, then triggers when a
 sample leaves `threshold_sigma` faster than the baseline 1/f drift.
 It closes when both axes are back inside `end_sigma` of the baseline.
-The saved window starts before the trigger, so the rising edge is kept, and ends
-where the pulse settled; the confirmation that follows only verifies that
-it stayed there. A capture still open at 1.2 times `max_pulse_ms` is
-closed there and flagged `truncated`. Two pulses that
+The saved window starts `pre_pulse_ms` before the trigger, so the rising edge
+is kept, and ends `post_pulse_ms` after the pulse settled; the rest of the
+confirmation that follows only verifies that it stayed there. A capture still
+open at 1.2 times `max_pulse_ms` plus `post_pulse_ms` is closed there and
+flagged `truncated`. Two pulses that
 overlap are split when the signal rises sharply again on the tail of the
 first, and both fragments are flagged `pileup`. The figure above is pulled
 from the output from a mock-mode run. All of the annotated metadata for the pulse
@@ -124,8 +125,35 @@ toolbar. The **Settings** dialog includes:
   The second test is a difference of raw samples, so baseline drift cannot fake it.
 - **Max pulse (ms)** (50) is the longest pulse you expect. It sizes the
   pulse-scale quantities: the ring buffer at 1.5 times it, the hard stop at
-  1.2, and the edge lookback. Estimate it generously. A pulse that outlasts
-  the buffer loses its rising edge.
+  1.2, and the edge lookback at a tenth. Estimate it generously. A pulse
+  that outlasts the buffer loses its rising edge.
+- **Pre-pulse time (ms)** (5) and **Post-pulse time (ms)** (5) are how much
+  is saved before the trigger and after the pulse settled. The ring buffer
+  grows by both and the hard stop by the post-pulse time. The capture is
+  released once the post-pulse time has arrived, so the channel cannot
+  trigger again inside it, and a pulse arriving there is a pileup.
+- **Coincidence window (ms)** (off) groups pulses into events: every pulse,
+  on any channel, that triggers within this of an event's first trigger.
+  Measuring from the first trigger bounds an event at the window, so a
+  steady rate of unrelated pulses cannot chain into one. In both mode a
+  channel's share of an event is its pair, whichever of the two streams
+  triggered.
+- **Save every channel with each event** (off) also saves, with each event,
+  the same span of every channel that did not trigger, from both streams
+  in both mode. Only a capture can
+  do this, since those samples are gone once the ring buffer moves on. With
+  the coincidence window off, each pulse is then an event of its own, unless
+  two channels trigger on the same sample. The ring buffer grows by the
+  window and two blocks of samples (at least 0.1 s) so the span is still
+  there when the event closes. Noise samples grow it the same way.
+- **Noise sample every (s)** (off) takes noise samples for the statistics
+  of the noise: every channel over one window, at random moments, whether
+  or not a pulse is present. The waits between them are normally distributed
+  about this many seconds, a quarter of it wide. A sample is as long as a
+  typical pulse record: the median of the latest 200 saved. Until five have
+  been saved it is the pre-pulse time plus the max pulse plus the post-pulse
+  time.
+  Each is an event tagged as a noise sample.
 - **1/f window (ms)** (5000) is the record the noise σ is fitted from and
   the span of the rolling baseline. It has to be long compared with any
   pulse and with the 1/f knee, so it is seconds whatever the pulse length.
@@ -141,13 +169,10 @@ toolbar. The **Settings** dialog includes:
 - **End σ**: a capture ends once both axes are back inside this band.
   It must sit below **Threshold σ**.
 - **End confirmation floor (samples)** (10): the fewest in-band samples
-  that confirm the end. For long pulses the count grows to **Margin
-  fraction** of the time above threshold. It counts down while the signal
-  is out of band, so one noisy sample does not restart it. The saved
-  window ends where the pulse settled; the confirmation only verifies it.
-- **Margin fraction** (0.10): the fraction of the saved window kept before
-  the trigger, the confirmation count as a fraction of the time above
-  threshold, and the edge lookback as a fraction of the max pulse.
+  that confirm the end. The count grows to a tenth of the time above
+  threshold for a long pulse, and to the post-pulse time when that is
+  longer. It counts down while the signal is out of band, so one noisy
+  sample does not restart it.
 - **Min pulse (ms)** (0): pulses shorter than this are dropped as
   glitches. 0 turns the filter off.
 - **Split piled-up events** (on): a fresh rise on the tail of a pulse
@@ -211,6 +236,80 @@ pulse list shows it as a **noise training** row under each channel, one
 per stream in both mode, live and in review; double-click it to see that
 channel's record with its baselines and bands.
 
+## Coincident events
+
+Set a **Coincidence window** in Settings and the capture records events:
+every pulse, on any channel, that triggers within the window of an event's
+first trigger. **Save every channel with each event** adds the same span
+of the channels that did not trigger. A run across modules groups across
+them.
+
+**Group by** above the pulse list chooses **Channels** or **Events**. An
+event lists its pulses, and a **no trigger** row for every channel saved
+with it. In both mode the rows are pairs. A channel counts once whether it
+triggered on the slow stream, the fast stream or both. An event can hold a
+fast-only pulse on one channel and a slow-only pulse on another.
+The pulses are the same either way: they are stored once, under their
+channels, and the events index them. A capture that recorded no events
+can still be grouped by events, live or in review. The grouping uses the
+pulses' trigger times and the window in Settings. The channels that did
+not trigger are there only if the capture saved them.
+
+The line under the status names the most active channel. It counts the
+pulses that shared an event with another channel, and those that came
+alone. Its tooltip ranks the channels. Until the first pulse it shows the
+noise each channel trained to. The pulse and event views name the
+frequency a channel is biased at, when the capture carries its tuning.
+
+Double-click an event to draw its channels together. Time is measured
+from the event's first trigger and each channel is drawn about its own
+baseline. Channels that did not trigger are thin dotted traces. In both mode
+**Event shows** picks the slow samples (points), the fast ones (lines) or
+both. Double-click a pulse
+under it for that pulse alone, and a **no trigger** row for that
+channel's samples over the event's window: it fills the Pulse View and
+the IQ Plane the way a pulse does, against the channel's noise bands,
+with both streams in both mode. **Prev** and **Next** step through events,
+and **Follow latest** shows the newest event's pulses as it closes,
+without the channels that did not trigger. An event closes one hard stop
+after its window ends, when no pulse that belongs to it can still be open.
+It appears in the list that long after its first trigger.
+
+A **noise sample** is listed among the events with the UTC time it was
+taken at and every channel beneath it. A pulse that happened to fall inside
+it is listed too; the sample was taken regardless. Double-click it to draw
+all its channels, or one of its channels for that channel alone. Follow
+latest passes over noise samples. With the coincidence window off and noise
+samples on, the only events are the noise samples.
+
+From a script the events are on the result and in the file:
+
+```python
+config = PulseCaptureConfig(coincidence_window_ms=2.0, dump_all_channels=True)
+result = await crs.trigger_capture(channel=[1, 2, 3], module=1,
+                                   config=config, hdf5_path="capture.h5")
+for event in result.events:
+    print(event["event_idx"], [m["channel"] for m in event["members"]],
+          sorted(event["dump"]))
+
+from rfmux.pulse_capture import PulseHDF5Reader, events_of
+with PulseHDF5Reader("capture.h5") as r:
+    event = r.get_event(1)            # members, window, dumped channels
+    pulse = r.get_pulse(event["members"][0]["channel"],
+                        event["members"][0]["pulse_idx"])
+    regrouped = events_of(r, window_s=0.010)   # any file, any window
+```
+
+`event["kind"]` is `"pulses"` or `"noise"`; a noise sample's `dump` holds
+every channel, and its `members` the pulses inside its window, often
+none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
+
+`result.events` has the file's shape, with `slow_tod` and `fast_tod` under
+each dumped channel in both mode. A slow capture that `rfmux record` merges
+with its 100G recording becomes a both-mode file: its events carry over, and
+each dumped channel gains the recording over the event's window. The layout
+of `events/` is under [File layout](#file-layout).
+
 ## Fast and dual-stream captures
 
 The slow stream runs at 596 Hz at the default decimation stage and 38 kHz
@@ -241,6 +340,105 @@ every simulated detector at startup.
 
 The screenshots in this guide are frequency-basis captures: the axes are df
 and dissipation, and the amplitudes are in hertz.
+
+## File layout
+
+A capture file is plain HDF5. `PulseHDF5Reader` reads it without the paths;
+`h5py`, `h5ls` and HDFView read it with them. Times are packet seconds of
+day. Numbered groups are zero-padded to six digits.
+
+```
+metadata/                      attributes only
+channel_<n>/                   one per channel
+  noise_training               the tail of the noise training record
+  tuning/                      the channel's tuning row, when it has one
+  pulse_<k>/
+    Amp_I, Amp_Q, Time         the saved window, in the channel's stored units
+events/                        when the capture recorded events
+  event_<k>/
+    members, trigger_times
+    pulses/                    a soft link to each member
+    dump/channel_<n>/          Amp_I, Amp_Q, Time
+histograms/
+templates/
+```
+
+A run across modules nests each channel as `module_<m>/channel_<n>`, here
+and under `dump/`, and a `members` row then starts with the module.
+
+**`metadata`** holds `streamer_mode`, `module`, `channels`, the sample rate
+(`sample_rate_slow` or `sample_rate_fast`), `stored_units`, `trigger_basis`,
+`volts_per_count`, `slow_time_offset_s`, `capture_start` and `capture_end`.
+`time_origin_epoch` and `time_origin_utc` are midnight of the packet clock's
+day. A capture configured through `PulseCaptureConfig` records its times in
+milliseconds (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`,
+`max_pulse_ms`, `noise_train_ms`) beside the sample counts the engine ran
+with (`pre_samples`, `post_samples`, `min_pulse_samples`, `trigger_samples`,
+`baseline_window`, `edge_lookback`, `max_capture_samples`), with
+`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`. With
+events on it records `coincidence_window_s` and `dump_all_channels`. With
+noise samples on it records `noise_capture_interval_s` and
+`noise_capture_window_s`, the length of a noise sample until five pulse
+records have been saved. Each sample's own span is on its event.
+
+**A channel group** carries `pulse_count`, `stored_units` and the trained
+noise: `noise_mean_I`, `noise_mean_Q`, `noise_std_I`, `noise_std_Q`, and
+`noise_jump_std_I` and `noise_jump_std_Q` (0 when not measured). `tuning/`
+holds the row's scalars as attributes (`df_calibration` among them), its
+arrays as datasets, and its mappings as JSON attributes named in
+`json_fields`.
+
+**A pulse group** carries, beside its samples:
+
+- `timestamp` (the first saved sample), `n_samples`, `pileup`, `truncated`;
+- the trigger: `trigger_time`, `trigger_index`, `trigger_quad`,
+  `trigger_baseline_I/Q`, `trigger_sigma_I/Q`, and `trigger_epoch` and
+  `trigger_utc` once the packet clock's day is known;
+- the end: `below_threshold_index/time` (the drop below threshold, which
+  feeds the decay constant), `settled_index/time` (absent after a hard
+  stop), `end_index/time`, `end_baseline_I/Q`, `end_confirm_samples`,
+  `end_confirm_target`;
+- the summary: `peak_I`, `peak_Q`, `peak_amp`, `snr`, `peak_snr_I`,
+  `peak_snr_Q`, `duration_s`, `tau_s`, and the `threshold_sigma` and
+  `end_sigma` in force.
+
+**An event group** carries `kind` (`"pulses"` or `"noise"`), `trigger_time`
+(the first trigger, or the moment a noise sample was taken), `trigger_epoch`
+and `trigger_utc`, and the saved span `window_t0` and `window_t1`. A
+`members` row is a channel and a pulse index. `pulses/` links to the same
+pulses, so a generic tool opens an event and finds them:
+
+    h5ls --follow-symlinks -r capture.h5/events/event_000001/pulses
+
+`dump/channel_<n>` holds one channel saved without a trigger, a dumped
+channel. A noise sample dumps every channel, and its `members` are often
+empty. The reader works from `members`; the links are for browsing.
+
+**`histograms`** holds, per metric (`amplitude_i`, `amplitude_q`, `snr`,
+`duration_ms`, `tau_ms`, and for calibrated channels `amplitude_raw_i` and
+`amplitude_raw_q` in volts), `<metric>_edges`, `<metric>_bins` and one
+`<metric>_counts_ch<n>` per channel. **`templates`** holds, per channel,
+`time_s_`, `template_I_`, `template_Q_`, `residual_I_`, `residual_Q_` and
+`counts_` on one time grid, and the scalars `n_pulses_`, `pre_samples_` and
+`post_samples_`. Across modules the suffix is `m<m>ch<n>`.
+
+**A both-mode file**, and a file `rfmux record` merged with its 100G
+recording, has `layout = "dual"` and `streamer_mode = "both"` in its
+metadata, both sample rates, `fast_channels`, and the sample counts once per
+stream: `pre_samples_slow`, `pre_samples_fast` and so on. A merged file has
+the `_slow` counts only, since no engine ran on the recording.
+
+```
+slow/channel_<n>/ ...          each as a channel group above
+fast/channel_<n>/ ...
+matched/channel_<n>/pair_<k>/  slow_idx, fast_idx (-1 for a one-sided pair),
+                               time_offset, window_t0, window_t1, and
+                               slow_tod_* and fast_tod_* over that window
+events/event_<k>/              a member's index is a pair; pulses/ links to
+                               the pairs; dump/channel_<n>/slow/ and fast/
+histograms/slow/, histograms/fast/
+templates/slow/,  templates/fast/
+```
 
 ## From a script
 

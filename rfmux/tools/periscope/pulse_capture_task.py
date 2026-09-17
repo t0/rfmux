@@ -42,6 +42,7 @@ from ...pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
+from ...pulse_capture.events import lean_event
 from ...pulse_capture.sources import SlowIngest, pfb_streamer_mismatch
 
 
@@ -54,6 +55,7 @@ class PulseCaptureSignals(QtCore.QObject):
     pulse_detected = pyqtSignal(int, int, dict)  # channel, pulse_idx, summary
     #                                         (both-mode summary has "stream")
     pair_matched = pyqtSignal(dict)         # lean pair meta (both-mode)
+    event_closed = pyqtSignal(dict)         # lean coincidence event (no samples)
     stats_updated = pyqtSignal(dict)        # PulseCaptureSession.stats()
     histograms_updated = pyqtSignal(dict)   # PulseHistogramSet.get_histogram_data()
     templates_updated = pyqtSignal(dict)    # trigger-aligned stack arrays
@@ -119,6 +121,7 @@ class PulseCaptureTask(QtCore.QThread):
         self._stop_requested = False
 
         self._pair_cache: "OrderedDict[Tuple[int, int], dict]" = OrderedDict()
+        self._event_cache: "OrderedDict[int, dict]" = OrderedDict()
 
         # Route session callbacks through Qt signals (called in run() thread)
         session.on_stats = lambda s: self.signals.stats_updated.emit(s)
@@ -129,6 +132,7 @@ class PulseCaptureTask(QtCore.QThread):
                     {"stream": stream, "stats": self._noise_snapshot(ns)})
             session.on_pulse = self._on_stream_pulse
             session.on_pair = self._on_pair
+            session.on_event = self._on_event
             session.on_histograms = lambda stream, d: \
                 self.signals.histograms_updated.emit(
                     {"stream": stream, "data": d})
@@ -144,6 +148,7 @@ class PulseCaptureTask(QtCore.QThread):
             session.on_progress = lambda p: \
                 self.signals.noise_progress.emit(p)
             session.on_pulse = self._on_pulse
+            session.on_event = self._on_event
             session.on_histograms = lambda d: \
                 self.signals.histograms_updated.emit(d)
             session.on_templates = lambda d: \
@@ -237,6 +242,17 @@ class PulseCaptureTask(QtCore.QThread):
         """Full pair dict (summaries + any cross-stream TODs)."""
         with self._cache_lock:
             return self._pair_cache.get((channel, pair_idx))
+
+    def get_event(self, event_idx: int) -> Optional[dict]:
+        """A recent event with its dumped channels, or None if evicted."""
+        with self._cache_lock:
+            return self._event_cache.get(event_idx)
+
+    def request_event(self, event_idx: int) -> None:
+        """Ask the worker to load an evicted event from the live file;
+        ``waveform_ready`` fires with channel -1 when the read is done,
+        whether or not it found the event."""
+        self._send_control(("__fetch_event__", event_idx))
 
     def _send_control(self, item: tuple) -> None:
         """A control item to the worker; a full queue is reported, not
@@ -475,6 +491,12 @@ class PulseCaptureTask(QtCore.QThread):
                         lambda w: w.read_match(ch, idx),
                         f"Pair read failed for ch{ch} pair {idx}", ch, idx)
             return True
+        if item[0] == "__fetch_event__":
+            idx = item[1]
+            self._fetch(self._event_cache, idx,
+                        lambda w: w.read_event(idx),
+                        f"Event read failed for event {idx}", -1, idx)
+            return True
         if item[0] == "__fetch__":
             _, ch, idx, stream = item
             self._fetch(self._cache, (stream, ch, idx),
@@ -517,6 +539,13 @@ class PulseCaptureTask(QtCore.QThread):
         if stream is not None:
             summary["stream"] = stream
         self.signals.pulse_detected.emit(channel, pulse_idx, summary)
+
+    def _on_event(self, event: dict) -> None:
+        with self._cache_lock:
+            self._event_cache[event["event_idx"]] = event
+            while len(self._event_cache) > self._cache_size:
+                self._event_cache.popitem(last=False)
+        self.signals.event_closed.emit(lean_event(event))
 
     def _on_pair(self, pair: dict) -> None:
         key = (pair["channel"], pair["pair_idx"])

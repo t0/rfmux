@@ -136,8 +136,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         """Offer only the methods and directions *directions* can answer for.
 
         Comparing two sweeps needs two sweeps: a one-direction measurement has
-        no hysteresis to look at, and the default method runs that test. Rather
-        than let the press fail, the choices that cannot work are taken away.
+        no hysteresis to look at. The choices that cannot work are taken away.
         """
         directions = list(directions or [])
         both = {"upward", "downward"} <= set(directions)

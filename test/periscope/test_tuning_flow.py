@@ -2038,7 +2038,7 @@ BIFURCATING = {"amp": AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
 
 
 def _both_directions(catalog, qt_app, crs, **overrides):
-    """A schedule swept both ways, which is what the default test compares."""
+    """A schedule swept both ways, for tests that compare the directions."""
     params = {"amp": AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
               "sweep_direction": ("upward", "downward")}
     params.update(overrides)
@@ -2223,9 +2223,7 @@ def test_a_flagged_run_says_how_many_and_then_stops_saying_it(board, qt_app,
 
 
 def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
-    """The default test compares two sweeps and this measurement has one, so
-    the window drops to the test that reads a single trace rather than letting
-    the press fail."""
+    """The default derivative test can find a bias from one direction."""
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(
         crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 3),

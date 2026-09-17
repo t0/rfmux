@@ -229,6 +229,7 @@ def test_only_the_steps_actually_examined_get_a_verdict():
     choice = find_bias_amplitude(iterations)
 
     assert set(choice.checks) == {0, 1}
+    assert {check.method for check in choice.checks.values()} == {"derivative"}
     assert not choice.checks[0].bifurcated
     assert choice.checks[1].bifurcated
 
@@ -1244,6 +1245,14 @@ def test_comparing_directions_on_a_one_direction_sweep_is_refused_once_not_per_r
         )
 
 
+def test_default_bifurcation_method_reads_one_sweep_direction():
+    report = find_bias_points(
+        a_schedule(directions=("upward",)), save=False
+    )
+
+    assert report.settings["amplitude_method"] == "derivative"
+
+
 def test_a_direction_that_was_not_swept_is_refused():
     with pytest.raises(ValueError, match="was not swept"):
         find_bias_points(a_schedule(directions=("upward",)),
@@ -1260,7 +1269,7 @@ def test_the_whole_container_is_refused_because_a_report_is_about_one_module():
 def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
     report = find_bias_points(a_schedule(), max_discrepancy=0.4)
 
-    assert report.settings["amplitude_method"] == "both"
+    assert report.settings["amplitude_method"] == "derivative"
     assert report.settings["frequency_method"] == "iq_derivative"
     assert report.settings["max_discrepancy"] == 0.4
     assert report.settings["max_distance_hz"] is None

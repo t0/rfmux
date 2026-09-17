@@ -350,7 +350,7 @@ class BiasReport:
 def find_bias_points(
     sweeps,
     *,
-    amplitude_method: str = "both",
+    amplitude_method: str = "derivative",
     frequency_method: str = "iq_derivative",
     direction: str | None = None,
     spike_prominence_factor: float = 0.5,
@@ -374,8 +374,8 @@ def find_bias_points(
 
     Args:
         sweeps: one module's block, ``results[crs.module[m].index()]``.
-        amplitude_method: ``"both"`` (default) and ``"hysteresis"`` require
-            both sweep directions. ``"derivative"`` also works with one.
+        amplitude_method: ``"derivative"`` (default) works with one sweep
+            direction. ``"both"`` and ``"hysteresis"`` require both.
         frequency_method: ``"iq_derivative"`` or ``"minimum"``; see
             :func:`find_bias_frequency`.
         direction: sweep used for frequency and calibration. None prefers
@@ -627,7 +627,7 @@ def _check_method(argument: str, value: str, allowed: tuple[str, ...]) -> None:
 def find_bias_amplitude(
     iterations: Mapping[int, Mapping[str, dict]],
     *,
-    method: str = "both",
+    method: str = "derivative",
     spike_prominence_factor: float = 0.5,
     noise_gate_factor: float = 50.0,
     max_discrepancy: float = 0.1,
@@ -658,9 +658,9 @@ def find_bias_amplitude(
             returns. A single ``multisweep`` gives one amplitude step, which is
             a legitimate thing to hand over.
         method: which test, from :data:`BIFURCATION_METHODS`. The default,
-            ``"both"``, runs the other two and takes either verdict, so it is
-            the one method that reads all three of the settings below — and
-            the one that needs both sweep directions.
+            ``"derivative"``, detects jumps within each supplied sweep.
+            ``"both"`` runs the derivative and hysteresis tests and takes
+            either verdict, so it needs both sweep directions.
         spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
         noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
         max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.

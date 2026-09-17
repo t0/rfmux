@@ -123,6 +123,8 @@ def test_a_one_direction_sweep_cannot_run_the_tests_that_compare_two(panel):
     Rather than let the press fail, the window drops to the test that reads a
     single trace."""
     window, _ = panel
+    window._select(window.method_combo, "both")
+    window.apply_button.click()
     assert window.get_parameters()["amplitude_method"] == "both"
     window.set_directions_swept(["upward"])
     assert window.get_parameters()["amplitude_method"] == "derivative"
@@ -131,6 +133,8 @@ def test_a_one_direction_sweep_cannot_run_the_tests_that_compare_two(panel):
 def test_both_directions_leave_the_choice_alone(panel):
     """Nothing is taken away from a measurement that can answer for it."""
     window, _ = panel
+    window._select(window.method_combo, "both")
+    window.apply_button.click()
     window.set_directions_swept(["upward", "downward"])
     assert window.get_parameters()["amplitude_method"] == "both"
 

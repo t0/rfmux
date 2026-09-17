@@ -283,7 +283,7 @@ from low to high and selects the step below the first bifurcated step.
 | Argument | Default | Meaning |
 |---|---|---|
 | `iterations` | required | One resonator’s `{step: {direction: section}}` dictionary |
-| `method` | `"both"` | `"derivative"`, `"hysteresis"`, or either test combined |
+| `method` | `"derivative"` | `"derivative"`, `"hysteresis"`, or either test combined |
 | `spike_prominence_factor` | `0.5` | Required spike prominence relative to arc-speed range |
 | `noise_gate_factor` | `50.0` | Required spike prominence relative to noise |
 | `max_discrepancy` | `0.1` | Hysteresis separation threshold |
@@ -673,7 +673,8 @@ this test while still triggering derivative detection.
 It takes `{direction: section}` with both directions and accepts the same
 `spike_prominence_factor=0.5`, `noise_gate_factor=50.0`,
 `max_discrepancy=0.1`, and `compare="magnitude"` settings.
-This is the default `method="both"` in the amplitude finder.
+Select `method="both"` to run both detectors and treat either verdict as
+bifurcation.
 
 ## 3. Choose a bias frequency
 
@@ -893,7 +894,7 @@ for every resonator in the sweep’s catalog snapshot.
 | Argument | Default | Meaning |
 |---|---|---|
 | `sweeps` | required | One module’s multisweep output |
-| `amplitude_method` | `"both"` | Bifurcation test; `"both"` and `"hysteresis"` require both directions |
+| `amplitude_method` | `"derivative"` | Bifurcation test; `"both"` and `"hysteresis"` require both directions |
 | `frequency_method` | `"iq_derivative"` | Frequency-selection method |
 | `direction` | `None` | Direction for frequency and calibration; prefers upward |
 | `spike_prominence_factor` | `0.5` | Derivative prominence threshold |

@@ -74,6 +74,7 @@ from ..core.transferfunctions import (
 from .detection import (
     DEFAULT_END_SIGMA,
     BUFFER_SAFETY,
+    EDGE_LOOKBACK_FRACTION,
     HARD_STOP_RING_FRACTION,
     ChannelNoiseStats,
     PulseCapture,
@@ -104,7 +105,8 @@ from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
 DETECTION_PARAMS = (
     "threshold_sigma",
     "end_sigma",
-    "margin_fraction",
+    "pre_samples",
+    "post_samples",
     "min_pulse_samples",
     "trigger_samples",
     "enable_pileup",
@@ -196,7 +198,11 @@ class PulseCaptureConfig:
     #: Accidental-trigger budget used to pick trigger_samples, per
     #: channel per minute.
     max_accidental_per_min: float = 1.0
-    margin_fraction: float = 0.1
+    #: Time kept before the trigger, and after the pulse settled.  The
+    #: capture is released once the post-pulse span has arrived, so a
+    #: long one also holds the channel that much longer.
+    pre_pulse_ms: float = 5.0
+    post_pulse_ms: float = 5.0
     min_pulse_ms: float = 0.0      # 0 = no glitch rejection
     #: Longest pulse the ring must hold, and the basis for the floor
     #: under the baseline tracking window.  Estimate it generously — a
@@ -212,12 +218,13 @@ class PulseCaptureConfig:
     noise_train_ms: float = 5000.0
     enable_pileup: bool = True
     #: Floor under the end-confirmation count, in samples.  A capture
-    #: ends once the confirmation bucket exceeds
-    #: ``max(min_end_samples, margin_fraction * core)``, where the bucket
-    #: fills by one per sample with both quadratures inside end_sigma
-    #: and leaks by one per sample outside it.  The floor is what ends a
-    #: short pulse; it is a sample count, so it is 17 ms at 596 Hz and
-    #: 4 us on the PFB stream.
+    #: ends once the confirmation bucket exceeds the largest of
+    #: min_end_samples, END_CONFIRM_FRACTION of the pulse's time above
+    #: threshold and the post-pulse samples, where the bucket fills by
+    #: one per sample with both quadratures inside end_sigma and leaks
+    #: by one per sample outside it.  The floor is what ends a short
+    #: pulse; it is a sample count, so it is 17 ms at 596 Hz and 4 us on
+    #: the PFB stream.
     min_end_samples: int = 10
     #: Which basis the trigger tests: ``"iq"`` (the raw quadratures) or
     #: ``"df"`` (frequency and dissipation, rotated with the channel's
@@ -255,9 +262,9 @@ class PulseCaptureConfig:
     #: Hard stop on a capture, as a multiple of the max pulse length —
     #: the ring fraction expressed against the pulse rather than the
     #: ring, so it is the same stop the engine's own default computes.
-    #: The ring (1.5x) still has room for the pre-trigger margin, and a
-    #: baseline that drifted mid-capture can delay the end condition but
-    #: never wedge the engine.
+    #: The post-pulse span is added to it and the ring grows by both
+    #: margins, so a baseline that drifted mid-capture can delay the
+    #: end condition but never wedge the engine.
     HARD_STOP_FACTOR = HARD_STOP_RING_FRACTION * BUFFER_SAFETY
 
     # ── ms → samples (per stream rate) ────────────────────────────
@@ -265,9 +272,19 @@ class PulseCaptureConfig:
     def min_pulse_samples(self, sample_rate: float) -> int:
         return int(round(self.min_pulse_ms * 1e-3 * sample_rate))
 
+    def pre_pulse_samples(self, sample_rate: float) -> int:
+        return int(round(self.pre_pulse_ms * 1e-3 * sample_rate))
+
+    def post_pulse_samples(self, sample_rate: float) -> int:
+        return int(round(self.post_pulse_ms * 1e-3 * sample_rate))
+
     def buf_size(self, sample_rate: float) -> int:
+        """BUFFER_SAFETY times the longest pulse, plus the margins kept
+        around it."""
         need = self.max_pulse_ms * 1e-3 * sample_rate * self.BUFFER_SAFETY
-        return max(self._MIN_BUF, int(math.ceil(need)))
+        return max(self._MIN_BUF,
+                   int(math.ceil(need)) + self.pre_pulse_samples(sample_rate)
+                   + self.post_pulse_samples(sample_rate))
 
     def noise_samples(self, sample_rate: float) -> int:
         """Training length in samples, memory-bounded.
@@ -344,29 +361,32 @@ class PulseCaptureConfig:
                    self.NOISE_RECORD_PULSES * self.max_pulse_samples(sample_rate))
 
     def edge_lookback_samples(self, sample_rate: float) -> int:
-        """Edge-detector lag K: margin_fraction of the max pulse.
+        """Edge-detector lag K: EDGE_LOOKBACK_FRACTION of the max pulse.
 
         Long enough to contain any physical rise (KID rise times are a
         small fraction of the decay the pulse length is set from), short
         enough that 1/f wander moves negligibly across it.  The jump-σ
         the edge threshold uses is measured from the training record at
         exactly this lag."""
-        return max(1, int(round(self.margin_fraction
+        return max(1, int(round(EDGE_LOOKBACK_FRACTION
                                 * self.max_pulse_samples(sample_rate))))
 
     def max_capture_samples(self, sample_rate: float) -> int:
-        """Hard stop on a capture — HARD_STOP_FACTOR × the max pulse,
-        floored so the stop can never sit inside the end-confirmation
-        count of a legitimate short pulse."""
+        """Hard stop on a capture — HARD_STOP_FACTOR × the max pulse
+        plus the post-pulse span the end confirmation waits for, floored
+        so the stop can never sit inside the end-confirmation count of a
+        legitimate short pulse."""
         return max(32, int(round(self.HARD_STOP_FACTOR
-                                 * self.max_pulse_samples(sample_rate))))
+                                 * self.max_pulse_samples(sample_rate)))
+                   + self.post_pulse_samples(sample_rate))
 
     def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
         """Keyword arguments for :class:`PulseCaptureSession`."""
         return {
             "threshold_sigma": self.threshold_sigma,
             "end_sigma": self.end_sigma,
-            "margin_fraction": self.margin_fraction,
+            "pre_samples": self.pre_pulse_samples(sample_rate),
+            "post_samples": self.post_pulse_samples(sample_rate),
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
             "trigger_samples": self.trigger_samples_for(sample_rate),
             "enable_pileup": self.enable_pileup,
@@ -387,6 +407,8 @@ class PulseCaptureConfig:
         return {
             "sample_rate_hz": sample_rate,
             "min_pulse_samples": self.min_pulse_samples(sample_rate),
+            "pre_pulse_samples": self.pre_pulse_samples(sample_rate),
+            "post_pulse_samples": self.post_pulse_samples(sample_rate),
             "min_end_samples": self.min_end_samples,
             "min_end_ms": self.min_end_samples / sample_rate * 1e3,
             "noise_samples": self.noise_samples(sample_rate),
@@ -451,9 +473,10 @@ class PulseCaptureConfig:
         if self.trigger_samples < 0:
             issues.append(("error",
                            "Trigger confirmation cannot be negative."))
-        if not 0 <= self.margin_fraction <= 1:
+        if self.pre_pulse_ms < 0 or self.post_pulse_ms < 0:
             issues.append(("error",
-                           "Margin fraction must be within 0–1."))
+                           "Pre-pulse and post-pulse time cannot be "
+                           "negative."))
         if self.min_end_samples < 1:
             issues.append(("error",
                            "End confirmation floor must be at least 1 "
@@ -516,8 +539,8 @@ class PulseCaptureSession(_CallbackHost):
     streamer_mode : str
         "slow", "fast", or "both" (metadata only — the session is
         agnostic to where samples come from).
-    threshold_sigma, end_sigma, margin_fraction, min_pulse_samples,
-    enable_pileup, buf_size :
+    threshold_sigma, end_sigma, pre_samples, post_samples,
+    min_pulse_samples, enable_pileup, buf_size :
         Passed through to :class:`PulseCapture`.
     sample_rate : float, optional
         Nominal sample rate in Hz (metadata only; all timing derives
@@ -578,7 +601,8 @@ class PulseCaptureSession(_CallbackHost):
         streamer_mode: str = "slow",
         threshold_sigma: float = 5.0,
         end_sigma: float = DEFAULT_END_SIGMA,
-        margin_fraction: float = 0.1,
+        pre_samples: Optional[int] = None,
+        post_samples: int = 0,
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
@@ -610,7 +634,7 @@ class PulseCaptureSession(_CallbackHost):
         self.streamer_mode = streamer_mode
         self.threshold_sigma = threshold_sigma
         self.end_sigma = end_sigma
-        self.margin_fraction = margin_fraction
+        self.post_samples = max(0, int(post_samples))
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
@@ -636,9 +660,12 @@ class PulseCaptureSession(_CallbackHost):
         # through the engine's own resolvers, so there is one definition
         # of each default rather than a copy that can drift.
         if edge_lookback is None:
-            edge_lookback = PulseCapture.default_edge_lookback(
-                buf_size, margin_fraction)
+            edge_lookback = PulseCapture.default_edge_lookback(buf_size)
         self.edge_lookback = max(0, int(edge_lookback))
+        # Resolved here too, so the file records the span in use.
+        if pre_samples is None:
+            pre_samples = PulseCapture.default_edge_lookback(buf_size)
+        self.pre_samples = int(pre_samples)
         if max_capture_samples is None:
             max_capture_samples = PulseCapture.default_max_capture_samples(
                 buf_size)
@@ -1552,7 +1579,8 @@ class DualPulseCaptureSession(_CallbackHost):
             "streamer_mode": "both",
             "threshold_sigma": self.config.threshold_sigma,
             "end_sigma": self.config.end_sigma,
-            "margin_fraction": self.config.margin_fraction,
+            "pre_pulse_ms": self.config.pre_pulse_ms,
+            "post_pulse_ms": self.config.post_pulse_ms,
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
             "min_pulse_ms": self.config.min_pulse_ms,

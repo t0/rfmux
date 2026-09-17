@@ -38,8 +38,8 @@ Template alignment is on the **trigger crossing** -- the first sample
 whose deviation exceeds ``threshold_sigma`` in either quadrature, which
 is exactly the condition :class:`~.detection.PulseCapture`
 triggers on.  Aligning on the window start instead would smear the
-stack, because the pre-trigger margin is a fraction of each pulse's own
-length; aligning on the peak would bias the rise.
+stack, because the pre-pulse span is a setting and the ring cuts it
+short for an early pulse; aligning on the peak would bias the rise.
 """
 
 from __future__ import annotations

@@ -110,10 +110,13 @@ def _records(channels, packets, *, blocks, use_walk, max_packets=64,
 @pytest.mark.parametrize("max_packets", [1, 37, 4096])
 @pytest.mark.parametrize("baseline_window", [0, 60])
 @pytest.mark.parametrize("threshold", [5.0, 2.5])
+@pytest.mark.parametrize("post_samples", [0, 25])
 def test_walk_matches_process_sample(channels, max_packets, baseline_window,
-                                     threshold, monkeypatch):
+                                     threshold, post_samples, monkeypatch):
+    # A post-pulse span longer than the end floor is the third term of
+    # the confirmation target, which the walk computes for itself.
     kw = dict(threshold_sigma=threshold, end_sigma=threshold * 0.4,
-              baseline_window=baseline_window)
+              baseline_window=baseline_window, post_samples=post_samples)
     if baseline_window:
         pc = PulseCapture(channels=[1], buf_size=1024, noise_stats={},
                           baseline_window=baseline_window)

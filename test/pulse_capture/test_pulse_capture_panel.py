@@ -239,7 +239,7 @@ def _build_capture_file(tmp_path, n_pulses=3):
     path = tmp_path / "review_source.h5"
     capture_session = PulseCaptureSession(
         channels=[1], threshold_sigma=5.0, end_sigma=1.5,
-        margin_fraction=0.2, noise_samples=200, hdf5_path=path,
+        noise_samples=200, hdf5_path=path,
         histogram_flush_every=2)
     rng = np.random.default_rng(42)
     capture_session.start()

@@ -45,6 +45,8 @@ as well as documentation.
 
 from .detection import (
     BUFFER_SAFETY,
+    EDGE_LOOKBACK_FRACTION,
+    END_CONFIRM_FRACTION,
     HARD_STOP_RING_FRACTION,
     ChannelNoiseStats,
     Circular,
@@ -85,6 +87,8 @@ from .hdf5 import DualPulseHDF5Writer, PulseHDF5Reader, PulseHDF5Writer
 __all__ = [
     # detection
     "BUFFER_SAFETY",
+    "EDGE_LOOKBACK_FRACTION",
+    "END_CONFIRM_FRACTION",
     "HARD_STOP_RING_FRACTION",
     "ChannelNoiseStats",
     "Circular",

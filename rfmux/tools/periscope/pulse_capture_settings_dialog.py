@@ -19,6 +19,10 @@ from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
+from ...pulse_capture.detection import (
+    EDGE_LOOKBACK_FRACTION,
+    END_CONFIRM_FRACTION,
+)
 
 
 def _ms(ms: float) -> str:
@@ -92,8 +96,26 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.max_pulse_spin.setDecimals(1)
         self.max_pulse_spin.setValue(config.max_pulse_ms)
         # Tooltip is built in _update_dependent_values: its ratios come
-        # from the config's constants and the live margin fraction.
+        # from the config's constants.
         form.addRow("Max pulse (ms):", self.max_pulse_spin)
+
+        self.pre_pulse_spin = QtWidgets.QDoubleSpinBox()
+        self.post_pulse_spin = QtWidgets.QDoubleSpinBox()
+        for spin, value in ((self.pre_pulse_spin, config.pre_pulse_ms),
+                            (self.post_pulse_spin, config.post_pulse_ms)):
+            spin.setRange(0.0, 60_000.0)
+            spin.setDecimals(3)
+            spin.setValue(value)
+        self.pre_pulse_spin.setToolTip(
+            "Time saved before the trigger, at least 2 samples.")
+        self.post_pulse_spin.setToolTip(
+            "Time saved after the pulse settled.\n\n"
+            "The capture is released once this much has arrived after "
+            "the settled sample, so the end confirmation runs at least "
+            "this long and the channel cannot trigger again within it; "
+            "a pulse arriving inside it is a pileup.")
+        form.addRow("Pre-pulse time (ms):", self.pre_pulse_spin)
+        form.addRow("Post-pulse time (ms):", self.post_pulse_spin)
 
         # The 1/f window is its own time scale, seconds whatever the
         # pulse length: the record fitted for sigma and the span of the
@@ -166,31 +188,21 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "The end is decided by a leaky bucket: it fills by one for "
             "each sample with BOTH quadratures inside the end band, "
             "leaks by one for each sample outside it, and the capture "
-            "ends when it exceeds max(this floor, margin fraction × "
-            "the pulse's own length above threshold).  The leak is what "
+            "ends when it exceeds the largest of this floor, "
+            f"{END_CONFIRM_FRACTION:.0%} of the pulse's own length above "
+            "threshold, and the post-pulse time.  The leak is what "
             "lets an isolated noisy sample pass without restarting the "
             "count.\n\n"
             "For a short pulse the floor is what ends it, so this sets "
             "how long after the pulse settles the capture is released.  "
-            "The record itself ends where the pulse settled.  It is a "
+            "The record itself ends the post-pulse time after the pulse "
+            "settled.  It is a "
             "sample count: the same number is 17 ms at 596 Hz and 4 µs "
             "on the PFB stream."
             "\n\nAlso how far back the pileup test looks for the pulse's "
             "own recent level: a rise of threshold sigma over this many "
             "samples, after decay evidence, splits the capture.")
         adv.addRow("End confirmation floor (samples):", self.min_end_spin)
-
-        self.margin_spin = QtWidgets.QDoubleSpinBox()
-        self.margin_spin.setRange(0.0, 1.0)
-        self.margin_spin.setSingleStep(0.05)
-        self.margin_spin.setValue(config.margin_fraction)
-        self.margin_spin.setToolTip(
-            "Fraction of the saved length kept before the trigger, and "
-            "the adaptive end-confirmation count: the bucket must exceed "
-            "max(end floor, this × the pulse's time above threshold).\n"
-            "Also the edge-detector lookback: this × the max pulse "
-            "length.")
-        adv.addRow("Margin fraction:", self.margin_spin)
 
         self.min_pulse_spin = QtWidgets.QDoubleSpinBox()
         self.min_pulse_spin.setRange(0.0, 10_000.0)
@@ -269,7 +281,8 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.status_label.setWordWrap(True)
         form.addRow(self.status_label)
 
-        for w in (self.threshold_spin, self.end_spin, self.margin_spin,
+        for w in (self.threshold_spin, self.end_spin, self.pre_pulse_spin,
+                  self.post_pulse_spin,
                   self.min_pulse_spin, self.max_pulse_spin, self.window_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
@@ -281,7 +294,8 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         return PulseCaptureConfig(
             threshold_sigma=float(self.threshold_spin.value()),
             end_sigma=float(self.end_spin.value()),
-            margin_fraction=float(self.margin_spin.value()),
+            pre_pulse_ms=float(self.pre_pulse_spin.value()),
+            post_pulse_ms=float(self.post_pulse_spin.value()),
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),
@@ -302,12 +316,13 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             self.max_pulse_spin.setToolTip(
                 "Longest pulse you expect — every time scale in pulse "
                 "detection derives from this.  Estimate generously.\n"
-                f"Sets the ring buffer ({cfg.BUFFER_SAFETY:g}×), the hard "
-                "stop that force-ends a stuck capture "
-                f"({cfg.HARD_STOP_FACTOR:g}×), the noise-training length "
-                f"({cfg.NOISE_TRAIN_PULSES}×), the rolling-baseline "
-                "median span, and the edge-detector lookback (margin "
-                f"fraction × max pulse: {cfg.margin_fraction:.0%}).")
+                f"Sets the ring buffer ({cfg.BUFFER_SAFETY:g}×, plus the "
+                "pre-pulse and post-pulse times), the hard stop that "
+                "force-ends a stuck capture "
+                f"({cfg.HARD_STOP_FACTOR:g}×, plus the post-pulse time), "
+                f"the noise-training length ({cfg.NOISE_TRAIN_PULSES}×), "
+                "the rolling-baseline median span, and the edge-detector "
+                f"lookback ({EDGE_LOOKBACK_FRACTION:.0%}).")
             # The record is memory-bounded at fast rates and floored at
             # slow ones; the label says which length is actually used.
             span = d["noise_train_span_ms"]
@@ -329,9 +344,12 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
                 ("ring buffer", f"{d['buf_samples']:,} samples "
                                 f"({d['buf_mb_per_channel']:.2f} MB/ch, "
                                 f"{d['buf_mb_total']:.2f} MB total)"),
+                ("saved around the pulse",
+                 f"{d['pre_pulse_samples']:,} samples before the trigger, "
+                 f"{d['post_pulse_samples']:,} after it settled"),
                 ("hard stop", f"{_ms(d['max_capture_ms'])} "
-                              f"({cfg.HARD_STOP_FACTOR:g}×; a stuck "
-                              "capture is saved and flagged truncated)"),
+                              f"({cfg.HARD_STOP_FACTOR:g}× + post-pulse; a "
+                              "stuck capture is saved and flagged truncated)"),
                 ("noise training", f"{_ms(d['noise_train_actual_ms'])} "
                                    f"({d['noise_samples']:,} samples)"),
                 ("baseline median", _ms(d['baseline_window_ms'])),

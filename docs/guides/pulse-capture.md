@@ -16,10 +16,11 @@ For the headless version, with every step as a runnable cell, open the
 A capture estimates the noise on each channel first, then triggers when a
 sample leaves `threshold_sigma` faster than the baseline 1/f drift.
 It closes when both axes are back inside `end_sigma` of the baseline.
-The saved window starts before the trigger, so the rising edge is kept, and ends
-where the pulse settled; the confirmation that follows only verifies that
-it stayed there. A capture still open at 1.2 times `max_pulse_ms` is
-closed there and flagged `truncated`. Two pulses that
+The saved window starts `pre_pulse_ms` before the trigger, so the rising edge
+is kept, and ends `post_pulse_ms` after the pulse settled; the rest of the
+confirmation that follows only verifies that it stayed there. A capture still
+open at 1.2 times `max_pulse_ms` plus `post_pulse_ms` is closed there and
+flagged `truncated`. Two pulses that
 overlap are split when the signal rises sharply again on the tail of the
 first, and both fragments are flagged `pileup`. The figure above is pulled
 from the output from a mock-mode run. All of the annotated metadata for the pulse
@@ -124,8 +125,13 @@ toolbar. The **Settings** dialog includes:
   The second test is a difference of raw samples, so baseline drift cannot fake it.
 - **Max pulse (ms)** (50) is the longest pulse you expect. It sizes the
   pulse-scale quantities: the ring buffer at 1.5 times it, the hard stop at
-  1.2, and the edge lookback. Estimate it generously. A pulse that outlasts
-  the buffer loses its rising edge.
+  1.2, and the edge lookback at a tenth. Estimate it generously. A pulse
+  that outlasts the buffer loses its rising edge.
+- **Pre-pulse time (ms)** (5) and **Post-pulse time (ms)** (5) are how much
+  is saved before the trigger and after the pulse settled. The ring buffer
+  grows by both and the hard stop by the post-pulse time. The capture is
+  released once the post-pulse time has arrived, so the channel cannot
+  trigger again inside it, and a pulse arriving there is a pileup.
 - **1/f window (ms)** (5000) is the record the noise σ is fitted from and
   the span of the rolling baseline. It has to be long compared with any
   pulse and with the 1/f knee, so it is seconds whatever the pulse length.
@@ -141,13 +147,10 @@ toolbar. The **Settings** dialog includes:
 - **End σ**: a capture ends once both axes are back inside this band.
   It must sit below **Threshold σ**.
 - **End confirmation floor (samples)** (10): the fewest in-band samples
-  that confirm the end. For long pulses the count grows to **Margin
-  fraction** of the time above threshold. It counts down while the signal
-  is out of band, so one noisy sample does not restart it. The saved
-  window ends where the pulse settled; the confirmation only verifies it.
-- **Margin fraction** (0.10): the fraction of the saved window kept before
-  the trigger, the confirmation count as a fraction of the time above
-  threshold, and the edge lookback as a fraction of the max pulse.
+  that confirm the end. The count grows to a tenth of the time above
+  threshold for a long pulse, and to the post-pulse time when that is
+  longer. It counts down while the signal is out of band, so one noisy
+  sample does not restart it.
 - **Min pulse (ms)** (0): pulses shorter than this are dropped as
   glitches. 0 turns the filter off.
 - **Split piled-up events** (on): a fresh rise on the tail of a pulse

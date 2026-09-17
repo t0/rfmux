@@ -210,3 +210,15 @@ def test_several_modules_take_an_export_each_or_per_module_ranges(
     dlg.channels_edit.setText("5:1-4")
     assert "Modules run 1-4" in dlg.status_label.text()
 
+
+
+def test_a_config_saved_with_a_retired_field_keeps_the_rest(
+        qt_app, tmp_path, monkeypatch):
+    """Settings saved before margin_fraction became the pre-pulse and
+    post-pulse times still carry the user's other choices."""
+    _, settings = _dialog(tmp_path, monkeypatch)
+    settings.setValue("record/capture_config",
+                      '{"threshold_sigma": 6.5, "margin_fraction": 0.2}')
+    cfg = rd.RecordDialog(settings=settings).get_options()["config"]
+    assert cfg.threshold_sigma == 6.5
+    assert cfg.pre_pulse_ms == rd.PulseCaptureConfig().pre_pulse_ms

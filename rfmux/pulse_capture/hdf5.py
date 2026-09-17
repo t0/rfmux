@@ -142,11 +142,13 @@ class _PulseFileWriter:
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
         (str, ("streamer_mode", "trigger_basis", "stored_units")),
-        (float, ("threshold_sigma", "end_sigma", "margin_fraction",
+        (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
+                 "post_pulse_ms",
                  "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count", "slow_time_offset_s")),
-        (int, ("min_pulse_samples", "module", "trigger_samples",
+        (int, ("pre_samples", "post_samples",
+               "min_pulse_samples", "module", "trigger_samples",
                "trigger_samples_slow", "trigger_samples_fast",
                "baseline_window", "edge_lookback", "max_capture_samples",
                "min_end_samples")),

@@ -334,9 +334,9 @@ How pulse detection works:
   axes are df and dissipation for a channel with a calibration (section 7),
   I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and
   closes when both are back inside ±`end_sigma` of the baseline, or of the
-  level the pulse rose from, for `min_end_samples`, or `margin_fraction` of
-  its time above threshold if that is longer. `end_sigma` must sit below
-  `threshold_sigma`.
+  level the pulse rose from, for `min_end_samples`, or a tenth of its time
+  above threshold, or `post_pulse_ms`, whichever is longest. `end_sigma`
+  must sit below `threshold_sigma`.
 - **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
   the threshold. Left at 0 it is derived from the stream rate to hold
   accidental triggers under `max_accidental_per_min`: 1 sample at 596 Hz, 2 on
@@ -371,11 +371,11 @@ How pulse detection works:
 
 The figure is the engine's own output on a synthetic pulse and a piled-up
 pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
-saved: from `margin_fraction` of the window before the trigger (10% by
-default), so the record keeps pre-trigger baseline, to the sample the pulse
-settled on inside the end band. The end confirmation, at least
-`min_end_samples` later, only verifies that it stayed there and lies past
-the record. `duration_ms` runs from the trigger to the settled sample. The
+saved: from `pre_pulse_ms` before the trigger (5 ms by default), so the
+record keeps pre-trigger baseline, to `post_pulse_ms` (5 ms) after the sample
+the pulse settled on inside the end band. The end confirmation runs at least
+that long and at least `min_end_samples`; what is left of it only verifies
+that the pulse stayed there and lies past the record. `duration_ms` runs from the trigger to the settled sample. The
 drop below `threshold_sigma` is kept as a mark and feeds the fit-free decay
 constant.
 
@@ -576,8 +576,8 @@ plt.tight_layout(); plt.show()
 ### Trigger-aligned template
 
 Every pulse is stacked on its **trigger crossing**, not on the start of its
-window: the pre-trigger margin varies with pulse length and would smear the
-stack. The mean beats the noise down as 1/√N; the shaded band is the per-bin
+window: the pre-pulse time is a setting, and the ring cuts it short for a
+pulse that arrives early, either of which would smear the stack. The mean beats the noise down as 1/√N; the shaded band is the per-bin
 RMS spread, which separates pulse-to-pulse variation from measurement noise.
 
 ```python

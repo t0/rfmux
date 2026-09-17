@@ -70,6 +70,16 @@ BUFFER_SAFETY: float = 1.5
 #: that pulse, leaving room for the pre-trigger margin in the same ring.
 HARD_STOP_RING_FRACTION: float = 0.8
 
+#: Edge-detector lag, as a fraction of the longest expected pulse: long
+#: enough to contain any physical rise, short enough that 1/f wander
+#: moves negligibly across it.
+EDGE_LOOKBACK_FRACTION: float = 0.1
+
+#: The end-confirmation count grows to this fraction of a pulse's time
+#: above threshold, so a long pulse is not released on a brief dip of
+#: its tail into the end band.
+END_CONFIRM_FRACTION: float = 0.1
+
 
 # ───────────────────────── Circular Buffer ──────────────────────────
 
@@ -246,11 +256,12 @@ class PulseCapture:
     delay nothing: the pulse ends when the signal is back where it
     started.
 
-    The saved window runs from a ``margin_fraction`` pre-trigger margin
-    to the sample the pulse settled on, the first of the in-band run the
-    end confirmation then verifies, or to the hard stop.  The pulse's
-    duration is trigger to that settled sample; the below-threshold
-    instant is kept as a mark and feeds the fit-free decay constant.
+    The saved window runs from ``pre_samples`` before the trigger to
+    ``post_samples`` after the sample the pulse settled on, the first of
+    the in-band run the end confirmation then verifies, or to the hard
+    stop.  The pulse's duration is trigger to that settled sample; the
+    below-threshold instant is kept as a mark and feeds the fit-free
+    decay constant.
 
     Parameters
     ----------
@@ -265,10 +276,13 @@ class PulseCapture:
     end_sigma : float
         Number of standard deviations — signal must return within this
         to declare pulse end (default 1.5σ).
-    margin_fraction : float
-        Fraction of the saved length kept as pre-trigger margin, and
-        fraction of the time above threshold that the end-of-pulse
-        confirmation count grows to.  Default 0.1 (10%).
+    pre_samples : int, optional
+        Samples kept before the trigger, at least 2.  None (the
+        default) keeps ``EDGE_LOOKBACK_FRACTION`` of the longest pulse
+        the ring was sized for.
+    post_samples : int
+        Samples kept after the pulse settled.  The end confirmation
+        runs at least this long, so they are there to keep.  Default 0.
     min_pulse_samples : int
         Minimum pulse duration (trigger → settled) in samples.  Pulses
         shorter than this are discarded as glitches.  Default 0.
@@ -326,17 +340,16 @@ class PulseCapture:
     _BASELINE_RESERVOIR: int = 4096
 
     @staticmethod
-    def default_edge_lookback(buf_size: int,
-                              margin_fraction: float = 0.1) -> int:
-        """Edge-detector lag derived from the ring: ``margin_fraction``
-        of the longest pulse the ring was sized for (the ring is
-        ``BUFFER_SAFETY`` times that pulse).  Shared with noise
-        estimation so the measured jump-σ is taken at the same lag the
-        edge detector uses, and equal by construction to
-        ``PulseCaptureConfig.edge_lookback_samples`` for the same
+    def default_edge_lookback(buf_size: int) -> int:
+        """Edge-detector lag derived from the ring:
+        ``EDGE_LOOKBACK_FRACTION`` of the longest pulse the ring was
+        sized for (a bare ring is ``BUFFER_SAFETY`` times that pulse).
+        Shared with noise estimation so the measured jump-σ is taken at
+        the same lag the edge detector uses, and equal by construction
+        to ``PulseCaptureConfig.edge_lookback_samples`` for the same
         intent."""
         return max(1, int(round(
-            margin_fraction * buf_size / BUFFER_SAFETY)))
+            EDGE_LOOKBACK_FRACTION * buf_size / BUFFER_SAFETY)))
 
     @staticmethod
     def default_max_capture_samples(buf_size: int) -> int:
@@ -351,7 +364,8 @@ class PulseCapture:
         noise_stats: Dict[int, ChannelNoiseStats],
         threshold_sigma: float = 5.0,
         end_sigma: float = DEFAULT_END_SIGMA,
-        margin_fraction: float = 0.1,
+        pre_samples: Optional[int] = None,
+        post_samples: int = 0,
         min_pulse_samples: int = 0,
         trigger_samples: int = 2,
         enable_pileup: bool = True,
@@ -365,7 +379,11 @@ class PulseCapture:
         self.buf_size = buf_size
         self.threshold_sigma = threshold_sigma
         self.end_sigma = end_sigma
-        self.margin_fraction = margin_fraction
+        if pre_samples is None:
+            pre_samples = self.default_edge_lookback(buf_size)
+        # At least 2, so a record always shows what it triggered from.
+        self.pre_samples = max(2, int(pre_samples))
+        self.post_samples = max(0, int(post_samples))
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))
         self.enable_pileup = enable_pileup
@@ -378,8 +396,7 @@ class PulseCapture:
         self.min_end_samples = max(1, int(min_end_samples))
 
         if edge_lookback is None:
-            edge_lookback = self.default_edge_lookback(buf_size,
-                                                       margin_fraction)
+            edge_lookback = self.default_edge_lookback(buf_size)
         self.edge_lookback = max(0, int(edge_lookback))
         if max_capture_samples is None:
             max_capture_samples = self.default_max_capture_samples(buf_size)
@@ -746,7 +763,8 @@ class PulseCapture:
                        float(ns.jump_std_I), float(ns.jump_std_Q),
                        float(self.threshold_sigma), float(self.end_sigma),
                        int(self.trigger_samples), int(self.edge_lookback),
-                       int(self.min_end_samples), float(self.margin_fraction),
+                       int(self.min_end_samples), float(END_CONFIRM_FRACTION),
+                       int(self.post_samples),
                        int(self.max_capture_samples), bool(self.enable_pileup),
                        bool(self.freeze_triggers), si, sf, out)
             k, reason = int(out[0]), int(out[1])
@@ -1151,11 +1169,7 @@ class PulseCapture:
 
             # Use frozen active_duration for stable end target
             ref_duration = st.active_duration or since_trig
-            adaptive_end = max(
-                self.min_end_samples,
-                int(self.margin_fraction * ref_duration))
-
-            if st.end_ptr_count > adaptive_end:
+            if st.end_ptr_count > self._end_confirm_target(ref_duration):
                 self._save_pulse(channel)
             elif (self.max_capture_samples > 0
                     and since_trig >= self.max_capture_samples):
@@ -1163,17 +1177,26 @@ class PulseCapture:
 
     # ── Internal helpers ──────────────────────────────────────────
 
+    def _end_confirm_target(self, active_duration: int) -> int:
+        """The count the end-confirmation bucket must exceed: the
+        floor, the pulse's own share, and the post-pulse samples the
+        record is to keep, which have to arrive before it is saved."""
+        return max(self.min_end_samples,
+                   int(END_CONFIRM_FRACTION * active_duration),
+                   self.post_samples)
+
     def _save_pulse(self, channel: int, pileup: bool = False,
                     truncated: bool = False) -> None:
         st = self.state[channel]
         # Buffer arithmetic is per channel: ch_sample_n counts only this
         # channel's samples, where abs_n counts every channel's.
         # raw_post counts samples since the trigger; the window end is
-        # exclusive.  A confirmed end keeps the record through the
-        # sample the pulse settled on: the confirmation that follows
-        # only verifies that point and lies past the data.  A hard stop
-        # keeps everything through the stop sample.  A split ends one
-        # sample earlier: the split sample begins the next fragment.
+        # exclusive.  A confirmed end keeps the record through
+        # post_samples after the sample the pulse settled on; the rest
+        # of the confirmation only verifies that point and lies past
+        # the data.  A hard stop keeps everything through the stop
+        # sample.  A split ends one sample earlier: the split sample
+        # begins the next fragment.
         raw_post = st.ch_sample_n - (st.trig_abs or st.ch_sample_n)
         # Where the pulse settled, in samples since the trigger: only a
         # confirmed end has one.  A split or a hard stop never saw the
@@ -1184,7 +1207,7 @@ class PulseCapture:
                 and st.settled_abs >= st.trig_abs):
             settled = st.settled_abs - st.trig_abs
         if settled is not None:
-            post = settled + 1
+            post = settled + 1 + self.post_samples
         elif pileup:
             post = raw_post
         else:
@@ -1206,11 +1229,7 @@ class PulseCapture:
             self._reset(channel)
             return
 
-        # Pre-trigger margin: margin_fraction of the saved length,
-        # minimum 2 samples to always show trigger context.
-        pre_margin = max(2, int(self.margin_fraction * post))
-
-        start = max(0, trig_fifo - pre_margin)
+        start = max(0, trig_fifo - self.pre_samples)
         end = min(L, trig_fifo + post)
         if end <= start:
             self._reset(channel)
@@ -1223,10 +1242,11 @@ class PulseCapture:
         # Where the state machine actually acted, so a capture can be
         # read back against the decisions that produced it.  end_index
         # is the sample the capture was released on: the last saved
-        # sample for a hard stop, past the data for a confirmed end
-        # (the record stops where the pulse settled) and for a split
-        # (the split sample begins the next fragment).  Times are
-        # carried alongside the indices for those cases.
+        # sample for a hard stop, at or past the end of the data for a
+        # confirmed end (the record stops post_samples after the pulse
+        # settled) and past it for a split (the split sample begins the
+        # next fragment).  Times are carried alongside the indices for
+        # those cases.
         ts_all = self.buf[channel]["ts"].data()
         trigger_index = trig_fifo - start
         end_index = (L - 1) - start
@@ -1262,12 +1282,9 @@ class PulseCapture:
             "threshold_sigma": float(self.threshold_sigma),
             "end_sigma": float(self.end_sigma),
             "end_confirm_samples": int(st.end_ptr_count),
-            "end_confirm_target": int(max(
-                self.min_end_samples,
-                int(self.margin_fraction * (
-                    st.active_duration
-                    if st.active_duration is not None
-                    else st.ch_sample_n - st.trig_abs)))),
+            "end_confirm_target": self._end_confirm_target(
+                st.active_duration if st.active_duration is not None
+                else st.ch_sample_n - st.trig_abs),
         }
         if below_index is not None:
             pulse_data["below_threshold_index"] = int(below_index)

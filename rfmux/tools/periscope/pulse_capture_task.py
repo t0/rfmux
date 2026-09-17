@@ -545,6 +545,7 @@ class PulseCaptureTask(QtCore.QThread):
                 self._event_cache.popitem(last=False)
         self.signals.event_closed.emit({
             "event_idx": event["event_idx"],
+            "kind": event.get("kind", "pulses"),
             "trigger_time": event["trigger_time"],
             "window": event["window"],
             "members": [{k: m[k] for k in

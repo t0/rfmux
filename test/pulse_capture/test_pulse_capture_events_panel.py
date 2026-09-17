@@ -319,3 +319,50 @@ def test_a_units_change_redraws_the_event_and_the_no_trigger_views(
     assert panel._current_dump == (1, 3)
     assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
         == "I (V)"
+
+
+def _noise_file(tmp_path):
+    from test.pulse_capture.test_noise_samples import _capture
+    dry, _, _, _ = _capture(noise_capture_interval_s=1.0)
+    start = int(round(dry[1]["window"][0] * FS)) + 20
+    events, path, _, _ = _capture(tmp_path, pulses=[(2, start)],
+                                  noise_capture_interval_s=1.0)
+    return events, path
+
+
+def test_noise_samples_are_tagged_in_the_event_list(qt_app, tmp_path):
+    events, path = _noise_file(tmp_path)
+    panel = _review(path, GROUP_EVENTS)
+    labels = [panel.pulse_tree.topLevelItem(k).text(0)
+              for k in range(len(events))]
+    assert all(text.startswith("◇ Noise sample #") for text in labels)
+    # Every channel under each, and the pulse that fell inside one.
+    tree = _tree(panel)
+    assert tree[("event", 2)] == [("pulse", 2, 1), ("dump", 2, 1),
+                                  ("dump", 2, 2), ("dump", 2, 3)]
+    assert tree[("event", 1)] == [("dump", 1, 1), ("dump", 1, 2),
+                                  ("dump", 1, 3)]
+    assert f"noise samples:  {len(events)}" in panel.noise_label.text()
+
+
+def test_a_noise_sample_draws_every_channel(qt_app, tmp_path):
+    _, path = _noise_file(tmp_path)
+    panel = _review(path, GROUP_EVENTS)
+    panel._show_event(2)
+    assert _curve_names(panel) == ["Ch1", "Ch2", "Ch3"]
+    text = panel.pulse_info.text()
+    assert text.startswith("Noise sample #000002") and "Ch2" in text
+    panel._show_event(1)
+    assert "no pulse triggered inside it" in panel.pulse_info.text()
+    _double_click(panel, ("dump", 1, 3))
+    assert "[noise sample]" in panel.pulse_info.text()
+
+
+def test_following_passes_over_noise_samples(qt_app, tmp_path):
+    """A noise sample is for the statistics, not for keeping up with
+    the capture: with nothing else to follow, nothing is drawn."""
+    _, path = _noise_file(tmp_path)
+    panel = _review(path, GROUP_EVENTS)
+    panel.follow_check.setChecked(True)
+    panel._show_latest()
+    assert panel._current_event is None

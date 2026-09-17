@@ -92,6 +92,20 @@ def test_event_settings_round_trip_and_size_the_ring(qt_app):
     dlg.close()
 
 
+def test_noise_sampling_round_trips(qt_app):
+    dlg = PulseCaptureSettingsDialog(sample_rate=19073.486328125)
+    assert dlg.noise_capture_spin.text() == "off"
+    assert dlg.get_config().noise_capture_interval_s == 0.0
+    dlg.noise_capture_spin.setValue(30.0)
+    assert dlg.get_config().noise_capture_interval_s == 30.0
+    back = PulseCaptureSettingsDialog(config=dlg.get_config(),
+                                      sample_rate=19073.486328125)
+    assert back.noise_capture_spin.value() == 30.0
+    assert "normally distributed" in dlg.noise_capture_spin.toolTip()
+    dlg.close()
+    back.close()
+
+
 def test_rolling_baseline_span_is_shown(qt_app):
     """No baseline controls left to get wrong — the window is the
     training span, so the dialog only reports it."""

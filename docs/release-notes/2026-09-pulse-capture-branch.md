@@ -201,6 +201,13 @@ Old values are main at the merge base (e46fc41).
   the recording for a merged file's dumped channels; `rfmux record` takes
   `--coincidence-window-ms`, `--dump-all-channels`, `--pre-pulse-ms` and
   `--post-pulse-ms`.
+- Noise samples: `noise_capture_interval_s` on `PulseCaptureConfig`,
+  `events.NoiseSampler` for the schedule (normally distributed waits), events
+  of `kind` `"noise"` holding every channel, **Noise sample every (s)** in
+  Settings and `--noise-capture-interval-s` on `rfmux record`.
+- The Pulse View re-projects a both-mode pair on a Units change (it
+  relabelled the axes over unconverted traces), and noise bands are
+  projected onto the viewed axes rather than scaled.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
   trigger to `post_pulse_ms` after the sample the pulse settled on, the first
   of the in-band run the end confirmation then verifies, or to the hard

@@ -167,12 +167,14 @@ a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a
 parser that wrote nothing, or a recording that could not be merged.
 
-The capture settings in the dialog, and `--coincidence-window-ms` and
-`--dump-all-channels` on the command line, record coincident events (see
-the pulse capture guide). With every channel saved per event, the merge
+The capture settings in the dialog, and `--coincidence-window-ms`,
+`--dump-all-channels` and `--noise-capture-interval-s` on the command
+line, record coincident events and noise samples (see the pulse capture
+guide). With every channel saved per event, the merge
 slices the recording for the channels that did not trigger as well, over
 the event's window, so an event in the merged file holds the 100G samples
-of every captured channel whether or not it fired.
+of every captured channel whether or not it fired. A noise sample gets
+the recording for all its channels the same way.
 
 ## 5. Reviewing in Periscope
 

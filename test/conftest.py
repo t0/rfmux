@@ -1,5 +1,6 @@
 import pytest
 import rfmux
+import gc
 import os
 import socket
 import pytest_asyncio
@@ -208,3 +209,32 @@ def qt_app():
     QtWidgets = pytest.importorskip("PyQt6.QtWidgets")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     yield app
+
+
+@pytest.fixture(autouse=True)
+def _free_dropped_widgets_between_tests(request):
+    """Free the widgets a GUI test dropped, here and nowhere else.
+
+    A panel is a reference cycle (its slots hold it), so one a test
+    dropped waits for the cyclic collector, which otherwise runs
+    whenever allocation counts say so.  Inside ``processEvents`` that
+    frees plot items while Qt is dispatching to their scene; on a worker
+    thread it destroys widgets off the GUI thread.  Either is a
+    segfault in some later test, and which one moves with every change
+    to how much a panel allocates.
+
+    So the collector is off while a GUI test runs and is run here, on
+    the main thread with nothing being dispatched.  Everything the test
+    made is still in the youngest generation, the collector not having
+    run to promote it, so collecting the young generations frees it
+    without scanning the whole interpreter.
+    """
+    if "qt_app" not in request.fixturenames:
+        yield
+        return
+    gc.disable()
+    try:
+        yield
+    finally:
+        gc.collect(1)
+        gc.enable()

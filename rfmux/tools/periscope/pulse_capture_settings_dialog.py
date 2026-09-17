@@ -19,6 +19,7 @@ from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
+from ...pulse_capture.events import NoiseSampler
 from ...pulse_capture.detection import (
     EDGE_LOOKBACK_FRACTION,
     END_CONFIRM_FRACTION,
@@ -146,6 +147,23 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "its own.  The file grows by the untriggered channels for "
             "every event.")
         form.addRow(self.dump_check)
+
+        self.noise_capture_spin = QtWidgets.QDoubleSpinBox()
+        self.noise_capture_spin.setRange(0.0, 86_400.0)
+        self.noise_capture_spin.setDecimals(3)
+        self.noise_capture_spin.setSpecialValueText("off")
+        self.noise_capture_spin.setValue(config.noise_capture_interval_s)
+        self.noise_capture_spin.setToolTip(
+            "Take noise samples: every channel over one window, at random "
+            "moments, whatever the samples hold, for the statistics of the "
+            "noise.  Each is an event tagged as a noise sample; a pulse "
+            "that happens to fall inside one is listed with it.\n\n"
+            "The waits between samples are normally distributed about this "
+            f"many seconds, {NoiseSampler.JITTER:.0%} of it wide.  A sample "
+            "is as long as a typical pulse record, the median of those "
+            f"saved so far; until {NoiseSampler.MIN_RECORDS} have been, the "
+            "pre-pulse time, the max pulse and the post-pulse time.")
+        form.addRow("Noise sample every (s):", self.noise_capture_spin)
 
         # The 1/f window is its own time scale, seconds whatever the
         # pulse length: the record fitted for sigma and the span of the
@@ -313,6 +331,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
 
         for w in (self.threshold_spin, self.end_spin, self.pre_pulse_spin,
                   self.post_pulse_spin, self.coincidence_spin,
+                  self.noise_capture_spin,
                   self.min_pulse_spin, self.max_pulse_spin, self.window_spin,
                   self.trigger_spin, self.min_end_spin):
             w.valueChanged.connect(self._update_dependent_values)
@@ -329,6 +348,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             post_pulse_ms=float(self.post_pulse_spin.value()),
             coincidence_window_ms=float(self.coincidence_spin.value()),
             dump_all_channels=self.dump_check.isChecked(),
+            noise_capture_interval_s=float(self.noise_capture_spin.value()),
             trigger_samples=int(self.trigger_spin.value()),
             min_pulse_ms=float(self.min_pulse_spin.value()),
             max_pulse_ms=float(self.max_pulse_spin.value()),

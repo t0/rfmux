@@ -145,6 +145,13 @@ toolbar. The **Settings** dialog includes:
   the coincidence window off, each pulse is then an event of its own. The
   ring buffer grows by the window and a block of samples so the span is
   still there when the event closes.
+- **Noise sample every (s)** (off) takes noise samples for the statistics
+  of the noise: every channel over one window, at random moments, whatever
+  the samples hold. The waits between them are normally distributed about
+  this many seconds, a quarter of it wide. A sample is as long as a typical
+  pulse record: the median of those saved so far, and until five have been
+  saved, the pre-pulse time plus the max pulse plus the post-pulse time.
+  Each is an event tagged as a noise sample.
 - **1/f window (ms)** (5000) is the record the noise σ is fitted from and
   the span of the rolling baseline. It has to be long compared with any
   pulse and with the 1/f knee, so it is seconds whatever the pulse length.
@@ -268,6 +275,13 @@ without the channels that did not trigger. An event closes once no pulse
 that belongs to it can still be open, a hard stop after its window, so it
 appears that long after its first trigger.
 
+A **noise sample** is listed among the events with every channel beneath
+it, and a pulse that happened to fall inside it is listed too; the sample
+was taken regardless. Double-click it to draw all its channels, or one of
+its channels for that channel alone. Follow latest passes over noise
+samples. With only noise samples asked for, pulses are not made events of
+their own.
+
 From a script the events are on the result and in the file:
 
 ```python
@@ -286,7 +300,11 @@ with PulseHDF5Reader("capture.h5") as r:
     regrouped = events_of(r, window_s=0.010)   # any file, any window
 ```
 
-In the file, `events/event_<k>` holds `members` (rows of channel and pulse
+`event["kind"]` is `"pulses"` or `"noise"`; a noise sample's `dump` holds
+every channel, and its `members` the pulses inside its window, often
+none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
+
+In the file, `events/event_<k>` holds its `kind`, `members` (rows of channel and pulse
 index, with the module first for a run across modules), their
 `trigger_times`, the window, and `dump/channel_<n>` for each channel saved
 without a trigger. In a both-mode file a member's index is that of a

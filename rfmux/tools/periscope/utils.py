@@ -204,6 +204,8 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     spectrum_from_slow_tod,
     convert_roc_to_volts,
     convert_roc_to_dbm,
+    convert_amplitude_to_dbm,
+    convert_dbm_to_amplitude,
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
@@ -518,28 +520,13 @@ class UnitConverter:
     """
     @staticmethod
     def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
+        # The termination cancels: amplitude is a ratio to full scale.
         if normalized_amplitude <= 0: return -np.inf
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        v_peak = normalized_amplitude * v_peak_max
-        v_rms = v_peak / np.sqrt(2.0)
-        power_w = v_rms**2 / resistance
-        power_mw = power_w * 1000
-        return 10 * np.log10(power_mw)
+        return convert_amplitude_to_dbm(normalized_amplitude, dac_scale_dbm)
 
     @staticmethod
     def dbm_to_normalize(dbm: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        power_mw = 10**(dbm/10)
-        power_w = power_mw / 1000
-        v_rms = np.sqrt(power_w * resistance)
-        v_peak = v_rms * np.sqrt(2.0)
-        power_max_mw = 10**(dac_scale_dbm/10)
-        power_max_w = power_max_mw / 1000
-        v_rms_max = np.sqrt(power_max_w * resistance)
-        v_peak_max = v_rms_max * np.sqrt(2.0)
-        return v_peak / v_peak_max
+        return convert_dbm_to_amplitude(dbm, dac_scale_dbm)
 
     @staticmethod
     def sweep_reference(freqs: np.ndarray) -> int:

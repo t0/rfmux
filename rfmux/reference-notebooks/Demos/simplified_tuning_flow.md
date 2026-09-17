@@ -212,9 +212,10 @@ each `max_span`-wide chunk. The cell below sweeps 50,000 points.
 
 Parameters:
 
-- **`amp`**: drive amplitude in normalized DAC units. Too high drives the
-  resonators nonlinear (they bifurcate and the dip is distorted); too low
-  measures the amplifier's noise. 0.001 is a starting point for a first look.
+- **`amp`**: drive amplitude in normalized DAC units, set here from a tone
+  power in dBm. Too high drives the resonators nonlinear (they bifurcate and
+  the dip is distorted); too low measures the amplifier's noise. -60 dBm is a
+  starting point for a first look.
 - **`nsamps`**: samples averaged per point.
 - **`npoints`**: sweep resolution. A resonator with too few points across it
   cannot be fitted, and at high Q the linewidth is a few kHz.
@@ -224,9 +225,24 @@ Parameters:
 > If Periscope is attached to the same board its plots follow along, as if you
 > had driven its Network Analysis panel.
 
+The algorithms take a normalized amplitude, a fraction of the DAC's full
+scale. `dac_scale_dbm` reads the power of a full-scale tone from the board,
+and the two converters go between that amplitude and dBm.
+
+```python
+from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
+from rfmux.core.transferfunctions import (
+    convert_amplitude_to_dbm, convert_dbm_to_amplitude)
+
+DAC_SCALE_DBM = await dac_scale_dbm(crs, MODULE)
+NETANAL_POWER_DBM = -60.0
+print(f"DAC scale {DAC_SCALE_DBM:+.1f} dBm: {NETANAL_POWER_DBM:g} dBm is "
+      f"amplitude {convert_dbm_to_amplitude(NETANAL_POWER_DBM, DAC_SCALE_DBM):.3g}")
+```
+
 ```python
 NETANAL_PARAMS = {
-    "amp": 0.001,
+    "amp": convert_dbm_to_amplitude(NETANAL_POWER_DBM, DAC_SCALE_DBM),
     "fmin": 0.6e9,
     "fmax": 1.1e9,
     "nsamps": 10,
@@ -391,7 +407,10 @@ over a narrow span. The cell below uses 101 points across 200 kHz, 2 kHz per
 point: five samples across a 10 kHz linewidth instead of one. The tones are
 simultaneous, so the whole array costs about the time of one sweep.
 
-It also picks a bias frequency at this drive power. `bias_frequency_method`
+The right tone power differs from resonator to resonator, so the cell
+sweeps at three powers and section 8 chooses one per detector.
+
+It also picks a bias frequency at each drive power. `bias_frequency_method`
 decides where:
 
 - **`"max-diq"`** (default): the point of steepest IQ motion, |d(I+jQ)/df|,
@@ -400,10 +419,10 @@ decides where:
 - **`None`**: keep the frequency you asked for.
 
 ```python
+MULTISWEEP_POWERS_DBM = [-65.0, -60.0, -55.0]   # lowest first
 MULTISWEEP_PARAMS = {
     "span_hz": 200e3,           # Periscope's multisweep defaults: 200 kHz span,
     "npoints_per_sweep": 101,   # 101 points, 2 kHz per point
-    "amp": 0.001,
     "nsamps": 10,
     "module": MODULE,
     "bias_frequency_method": "max-diq",
@@ -411,19 +430,31 @@ MULTISWEEP_PARAMS = {
     "sweep_direction": "upward",
 }
 
-_shown[0] = -25.0
 def sweep_progress(module, percentage):
-    if percentage - _shown[0] >= 25.0:
+    if percentage - _shown[0] >= 50.0:
         _shown[0] = percentage
         print(f"  sweeping… {percentage:.0f}%")
 
-multisweep_results = await crs.multisweep(
-    center_frequencies=resonance_frequencies,
-    progress_callback=sweep_progress,
-    **MULTISWEEP_PARAMS,
-)
+# One sweep of every resonator per power, filed by detector and then by
+# power: the shape bias_kids chooses an amplitude from.
+sweeps_by_detector = {}
+for k, power_dbm in enumerate(MULTISWEEP_POWERS_DBM):
+    amp = convert_dbm_to_amplitude(power_dbm, DAC_SCALE_DBM)
+    print(f"{power_dbm:g} dBm (amplitude {amp:.3g})")
+    _shown[0] = -50.0
+    sweep = await crs.multisweep(
+        center_frequencies=resonance_frequencies, amp=amp,
+        progress_callback=sweep_progress, **MULTISWEEP_PARAMS)
+    for det, entry in sweep.items():
+        entry["amplitude"] = amp
+        entry["direction"] = MULTISWEEP_PARAMS["sweep_direction"]
+        sweeps_by_detector.setdefault(det, {})[k] = entry
 
-print(f"\n{len(multisweep_results)} resonances swept")
+# The sweeps at the middle power, for the plots and fits below.
+multisweep_results = {det: by_power[1]
+                      for det, by_power in sweeps_by_detector.items()}
+print(f"\n{len(multisweep_results)} resonances swept at "
+      f"{len(MULTISWEEP_POWERS_DBM)} powers")
 ```
 
 The result is keyed by **detector index** (1-based, matching the channel each
@@ -548,9 +579,10 @@ the signal in Q (a proxy for the df basis), with `optimize_phase=True`.
 
 `fit_method` names the resonance fit it works from, `"nonlinear"` (default) or
 `"skewed"`, and runs it on any sweep that does not already carry it. Given
-sweeps at several amplitudes it chooses the **highest amplitude that is not
-bifurcated and has `a` below `nonlinear_threshold`** (0.77). With one
-amplitude, as here, that amplitude is used. The bias frequency is the
+sweeps at several amplitudes, as here, it chooses for each detector the
+**highest amplitude that is not bifurcated and has `a` below
+`nonlinear_threshold`** (0.77). With `fallback_to_lowest`, a detector with no
+such amplitude is biased at the lowest one instead of being left out. The bias frequency is the
 multisweep's `max-diq` or `min-s21` point read off the fitted curve rather than
 the raw sweep grid, and the tone is programmed at the nearest multiple of the
 298 Hz tone grid.
@@ -566,6 +598,18 @@ This cell briefly moves the tones. The fit's own value is kept as `df_calibratio
 `measure_calibration=False` to use the fit's.
 
 ```python
+BIAS_PARAMS = {
+    "nonlinear_threshold": 0.77,   # highest nonlinearity `a` to bias at
+    "fallback_to_lowest": True,    # no suitable power: use the lowest
+    "fit_method": "nonlinear",     # the fit the choice is read from
+    "measure_calibration": True,   # step the tones to measure df_calibration
+    "calibration_step": 0.05,      # that step, in fitted linewidths
+    "optimize_phase": False,       # rotate the IQ basis to put the signal in Q
+    "num_phase_samples": 300,      # samples that rotation is chosen from
+    "bandpass_params": None,       # band-pass them first; None is 5 to 20 Hz
+    "module": MODULE,
+}
+
 _shown[0] = -25.0
 def bias_progress(module, percentage):
     if percentage - _shown[0] >= 25.0:
@@ -574,26 +618,34 @@ def bias_progress(module, percentage):
 
 bias_results = await bias_kids(
     crs=crs,
-    multisweep_results=multisweep_results,
-    module=MODULE,
+    multisweep_results={"results_by_detector": sweeps_by_detector},
     progress_callback=bias_progress,
+    **BIAS_PARAMS,
 )
 
 n_biased = sum(1 for d in bias_results.values() if d.get("bias_successful"))
 print(f"\n{n_biased}/{len(bias_results)} detectors biased\n")
-print(f"{'det':>4} {'ch':>3} {'bias freq (MHz)':>16} {'offset (kHz)':>13} "
-      f"{'|df_cal| (Hz/V)':>16} {'source':>9}")
+print(f"{'det':>4} {'ch':>3} {'power (dBm)':>12} {'a':>6} {'Qr':>8} "
+      f"{'bias freq (MHz)':>16} {'offset (kHz)':>13} {'|df_cal| (Hz/V)':>16} "
+      f"{'source':>9}")
 for det in sorted(bias_results):
     d = bias_results[det]
+    fit = d.get("nonlinear_fit_params") or {}
+    power = convert_amplitude_to_dbm(d["sweep_amplitude"], DAC_SCALE_DBM)
     offset = (d["bias_frequency"] - d["original_center_frequency"]) / 1e3
     cal = d.get("df_calibration")
     cal_str = f"{abs(cal):16.3e}" if cal is not None else " " * 16
-    print(f"{det:>4} {d.get('bias_channel', '?'):>3} "
+    print(f"{det:>4} {d.get('bias_channel', '?'):>3} {power:12.1f} "
+          f"{fit.get('a', float('nan')):6.2f} {fit.get('Qr', float('nan')):8.0f} "
           f"{d['bias_frequency']/1e6:16.4f} {offset:13.2f} {cal_str} "
-          f"{d.get('df_calibration_source', ''):>9}")
+          f"{d.get('df_calibration_source', ''):>9}"
+          + ("   a sweep at a higher power jumped"
+             if d.get("bifurcation_ever_seen") else ""))
 ```
 
-The offsets show how far `max-diq` moved the bias frequency from the dip that
+The power column is the one `bias_kids` chose for that detector from the three
+swept, and `a` is the fitted nonlinearity at that power. The offsets show how
+far `max-diq` moved the bias frequency from the dip that
 `find_resonances` reported. An offset that is a large fraction of the sweep
 span means the sweep did not contain its own resonance: `span_hz` is too
 small, or the wide sweep mislocated it.
@@ -670,6 +722,24 @@ pfb_freq = np.asarray(pfb_data.spectrum.freq_iq)
 pfb_psd_i = np.asarray(pfb_data.spectrum.psd_i)
 print(f"\ndet {pfb_channel}: bandwidth to {pfb_freq.max()/1e3:.0f} kHz, "
       f"mean I PSD {np.mean(pfb_psd_i[2:]):.2f} dBm/Hz")
+```
+
+The two spectra are the same channel in the same units, so they go on one
+axis: the slow stream below its Nyquist frequency, the PFB samples from there
+to a megahertz. On the simulator the PFB trace is the uniform noise noted
+above, not the detector.
+
+```python
+idx = bias_results[pfb_channel].get("bias_channel", pfb_channel) - 1
+fig, ax = plt.subplots(figsize=(9, 3.8))
+ax.semilogx(freq_iq[1:], np.asarray(slow_data.spectrum.psd_i[idx])[1:],
+            lw=0.9, label=f"slow stream, to {freq_iq.max():.0f} Hz")
+keep = pfb_freq > 0
+ax.semilogx(pfb_freq[keep], pfb_psd_i[keep], lw=0.9,
+            label=f"PFB samples, to {pfb_freq.max()/1e3:.0f} kHz")
+ax.set_xlabel("frequency (Hz)"); ax.set_ylabel("PSD (dBm/Hz)")
+ax.set_title(f"det {pfb_channel}: noise spectrum, I, both streams")
+ax.legend(fontsize=8); plt.tight_layout(); plt.show()
 ```
 
 Pulse detection on these streams (triggering, per-pulse metrics, streaming

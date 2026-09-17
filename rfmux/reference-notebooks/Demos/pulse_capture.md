@@ -358,6 +358,21 @@ How pulse detection works:
   at many channels.
 - **A capture that never ends is cut off** at the hard stop and flagged
   `truncated`.
+- **The saved record has set margins.** `pre_pulse_ms` is kept before the
+  trigger and `post_pulse_ms` after the pulse settled, 5 ms each by default.
+- **Pulses on different channels can be one event.** With
+  `coincidence_window_ms` set, every pulse on any channel that triggers
+  within that window of an event's first trigger belongs to the event. The
+  pulses stay stored under their channels and the event lists them.
+  `dump_all_channels=True` saves, with each event, the same span of every
+  channel that did not trigger.
+- **Noise samples are taken at random.** With `noise_capture_interval_s`
+  set, every channel is saved over one window at random moments, whatever
+  the samples hold, for the statistics of the noise. The waits between
+  samples are normally distributed about the interval, a quarter of it wide.
+  A sample is as long as a typical pulse record, the median of those saved
+  so far, and is filed as an event of kind `"noise"`. Until five records
+  have been saved it is `pre_pulse_ms + max_pulse_ms + post_pulse_ms` long.
 - **Piled-up pulses are split.** A fresh rise on the tail of a pulse, after
   it was seen decaying, starts a new one. The rise is judged against the
   larger of the trained jump-σ and the scatter measured inside the capture,
@@ -388,9 +403,14 @@ capture_config = PulseCaptureConfig(
     end_sigma=1.5,          # close when BOTH are back inside ±1.5σ
     min_pulse_ms=0.2,       # glitch filter: drop anything shorter
     max_pulse_ms=50.0,      # longest recordable pulse; sizes the buffer
+    pre_pulse_ms=5.0,       # saved before the trigger
+    post_pulse_ms=5.0,      # saved after the pulse settled
     noise_train_ms=1000.0,  # the 1/f window: noise fit and rolling baseline
                             # (5 s by default; 1 s keeps this demo short)
     enable_pileup=True,     # split piled-up events on a sharp re-rise
+    coincidence_window_ms=0.0,     # 0: no events (section 7 turns these on)
+    dump_all_channels=False,       # save the channels that did not trigger
+    noise_capture_interval_s=0.0,  # 0: no noise samples
 )
 
 fs = decimation_to_sampling(cfg.dec_stage)
@@ -635,7 +655,8 @@ calls (`get_frequency`, `set_frequency`, `get_samples`), so it runs against a
 board too. On hardware take the calibration from `bias_kids` instead of
 sweeping a tuned array again. With no channel list it measures every channel
 the module reports as biased, which is what Periscope does at startup in mock
-mode. It returns rows of the same shape, holding just the calibration:
+mode. It returns rows of the same shape: the calibration, the sweep it was
+read from and the resonance fitted to that sweep.
 
 ```python
 tuning = await crs.measure_df_calibrations(module=MODULE)
@@ -646,20 +667,34 @@ for ch, row in sorted(tuning.items()):
 ```
 
 A capture with this tuning triggers in the frequency basis and stores each
-calibrated channel in hertz:
+calibrated channel in hertz. This one also records events and noise samples,
+and captures a third channel that has no detector on it. That channel never
+triggers, so `dump_all_channels` saves it with every event:
 
 ```python
+from dataclasses import replace
+
 reader.close()
 
+EVENT_CHANNELS = CHANNELS + [3]
+event_config = replace(
+    capture_config,
+    coincidence_window_ms=2.0,      # the simulated pulses arrive together
+    dump_all_channels=True,
+    noise_capture_interval_s=0.25,  # about eight noise samples in 2 s
+)
+CAPTURE_FILE = OUTPUT_DIR / "pulse_capture_calibrated.h5"
 res = await crs.trigger_capture(
-    channel=CHANNELS, module=MODULE, streamer_mode="slow", time_run=2.0,
-    threshold_sigma=5.0, end_sigma=1.5,
-    tuning=tuning,
-    hdf5_path=str(OUTPUT_DIR / "pulse_capture_calibrated.h5"),
+    channel=EVENT_CHANNELS, module=MODULE, streamer_mode="slow", time_run=2.0,
+    config=event_config, tuning=tuning, hdf5_path=str(CAPTURE_FILE),
 )
 for ch in res.channels:
     peaks = [s["peak_amp"] for s in res.summaries[ch].values()]
-    print(f"ch{ch}: {len(peaks)} pulses, mean peak {np.mean(peaks):.4g} Hz")
+    units = "Hz" if ch in tuning else "V"
+    print(f"ch{ch}: {len(peaks)} pulses"
+          + (f", mean peak {np.mean(peaks):.4g} {units}" if peaks else ""))
+kinds = [e["kind"] for e in res.events]
+print(f"{kinds.count('pulses')} events, {kinds.count('noise')} noise samples")
 ```
 
 Every file records the units per channel, the counts-to-volts constant and
@@ -667,7 +702,7 @@ the tuning row under each channel's `tuning` group, with `df_calibration`
 among its attributes. Dual files (section 9) carry the same:
 
 ```python
-with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_calibrated.h5") as r:
+with PulseHDF5Reader(CAPTURE_FILE) as r:
     print(f"trigger basis: {r.trigger_basis()}   "
           f"volts per count: {r.volts_per_count():.4g}")
     for ch in r.channels:
@@ -680,6 +715,297 @@ with PulseHDF5Reader(OUTPUT_DIR / "pulse_capture_calibrated.h5") as r:
               f"tuning fields {sorted(r.tuning(ch))}")
 ```
 
+### Everything in the file
+
+The file is plain HDF5, so `h5py` alone reads it. This walks the whole tree:
+groups, datasets with their shapes, and how many attributes each carries.
+
+```python
+import h5py
+
+def show(name, item):
+    depth = name.count("/")
+    # One pulse and one event stand for the rest.
+    if "/pulse_" in name and "pulse_000001" not in name:
+        return
+    if name.startswith("events/event_") and "event_000001" not in name:
+        return
+    kind = (f"dataset {item.shape} {item.dtype}"
+            if isinstance(item, h5py.Dataset)
+            else f"group, {len(item.attrs)} attributes")
+    print("  " * depth + f"{name.split('/')[-1]:<22} {kind}")
+
+with h5py.File(CAPTURE_FILE, "r") as f:
+    f.visititems(show)
+    print("\nmetadata:")
+    for key, value in sorted(f["metadata"].attrs.items()):
+        print(f"  {key:<26} {value}")
+    print("\none pulse's attributes:")
+    for key, value in sorted(f["channel_1/pulse_000001"].attrs.items()):
+        print(f"  {key:<26} {value}")
+```
+
+Each `channel_<n>` group holds that channel's noise statistics as attributes,
+its `noise_training` record, its `tuning` row and one `pulse_<k>` group per
+pulse. `events` lists the events, `histograms` and `templates` hold what the
+capture accumulated, and `metadata` the capture parameters.
+`PulseHDF5Reader` reads the same things without the paths:
+
+```python
+reader = PulseHDF5Reader(CAPTURE_FILE)
+ch = CHANNELS[0]
+PULSE = 3        # the first pulse of a capture can arrive before the
+                 # buffer holds a full pre-pulse span
+pulse = reader.get_pulse(ch, PULSE)
+print("a pulse:", sorted(pulse))
+print("noise training record:", reader.noise_training(ch).shape,
+      reader.noise_training(ch).dtype)
+print("tuning row:", sorted(reader.tuning(ch)))
+print("events:", reader.event_count)
+```
+
+### A pulse as Periscope draws it
+
+The Pulse View draws the two stored axes against time with the noise bands
+the trigger used and the marks of its decisions. The record carries all of
+them.
+
+```python
+ns = reader.noise_stats(ch)
+units = reader.stored_units(ch)
+t_ms = (pulse["Time"] - pulse["trigger_time"]) * 1e3
+names = ("df", "dissipation") if units == "Hz" else ("I", "Q")
+
+fig, axes = plt.subplots(2, 1, figsize=(9, 5), sharex=True)
+for ax, key, name, mean, std in (
+        (axes[0], "Amp_I", names[0], ns.mean_I, ns.std_I),
+        (axes[1], "Amp_Q", names[1], ns.mean_Q, ns.std_Q)):
+    ax.plot(t_ms, pulse[key], lw=1.2)
+    ax.axhline(mean, color="0.5", lw=0.8)
+    for k, style in ((pulse["threshold_sigma"], "--"),
+                     (pulse["end_sigma"], ":")):
+        ax.axhline(mean + k * std, color="0.5", lw=0.8, ls=style)
+        ax.axhline(mean - k * std, color="0.5", lw=0.8, ls=style)
+    for mark, color in (("trigger_time", "tab:orange"),
+                        ("below_threshold_time", "tab:red"),
+                        ("settled_time", "tab:cyan")):
+        if mark in pulse:
+            ax.axvline((pulse[mark] - pulse["trigger_time"]) * 1e3,
+                       color=color, lw=1)
+    ax.set_ylabel(f"{name} ({units})")
+axes[1].set_xlabel("time from trigger (ms)")
+axes[0].set_title(f"channel {ch}, pulse {PULSE}: trigger (orange), back "
+                  "below threshold (red), settled (cyan)")
+plt.tight_layout(); plt.show()
+```
+
+The IQ Plane draws the pulse over the sweep the channel was tuned with.
+`tuning_sweep` returns that sweep in counts, turned to sit under the samples,
+with the bias point. `display_transform` gives the factor that takes stored
+samples, or counts, into the view. Here the view is volts on the I and Q
+axes:
+
+```python
+from rfmux.pulse_capture.analysis import display_transform, tuning_sweep
+
+row = reader.tuning(ch)
+cal = reader.df_calibration(ch)
+f_sweep, sweep_counts, bias_point = tuning_sweep(row)
+
+pulse_to_volts, _ = display_transform(cal, "df", units, "iq", "V")
+counts_to_volts, _ = display_transform(cal, "iq", "counts", "iq", "V")
+z = (pulse["Amp_I"] + 1j * pulse["Amp_Q"]) * pulse_to_volts
+sweep = sweep_counts * counts_to_volts
+
+plt.figure(figsize=(5.5, 5.5))
+plt.plot(sweep.real, sweep.imag, color="0.6", lw=1, label="tuning sweep")
+plt.plot((bias_point * counts_to_volts).real,
+         (bias_point * counts_to_volts).imag, "k+", ms=12, label="bias point")
+plt.scatter(z.real, z.imag, c=t_ms, s=10, cmap="viridis", label="pulse")
+plt.colorbar(label="time from trigger (ms)")
+plt.xlabel("I (V)"); plt.ylabel("Q (V)"); plt.axis("equal")
+plt.title(f"channel {ch}: pulse over its sweep"); plt.legend(); plt.show()
+```
+
+The pulse leaves the bias point along the sweep and relaxes back to it. The
+calibration is the sweep's slope at the bias point, so it is exact for small
+shifts. A pulse this large travels part of the way round the resonance
+circle, and the part of its path that curves away from that slope reads as
+dissipation in the Pulse View above.
+
+### Changing units
+
+A channel's samples are stored once, in hertz along df and dissipation when it
+has a calibration. Every other view is one complex multiplication: a rotation
+by the calibration's angle and a scale. With `cal` in hertz per volt and `vpc`
+volts per count:
+
+| view | factor on stored hertz |
+|---|---|
+| df and dissipation (Hz) | `1` |
+| I and Q (V) | `1 / cal` |
+| I and Q (counts) | `1 / (vpc * cal)` |
+
+`display_transform(cal, stored_basis, stored_units, view_basis, view_units)`
+returns the factor for any pair of views, and `apply_iq_conversion` applies
+one to two real arrays.
+
+```python
+from rfmux.core.transferfunctions import apply_iq_conversion
+
+vpc = reader.volts_per_count()
+stored = pulse["Amp_I"] + 1j * pulse["Amp_Q"]          # df + j dissipation, Hz
+
+to_volts, _ = display_transform(cal, "df", "Hz", "iq", "V")
+to_counts, _ = display_transform(cal, "df", "Hz", "iq", "counts")
+print(f"to volts : x {to_volts:.4g}   = 1/cal           : {1 / cal:.4g}")
+print(f"to counts: x {to_counts:.4g}   = 1/(vpc * cal)   : {1 / (vpc * cal):.4g}")
+print(f"a rotation by {np.degrees(np.angle(to_volts)):+.1f} degrees, "
+      f"a scale of {abs(to_volts):.4g} V per Hz")
+
+i_volts, q_volts = apply_iq_conversion(pulse["Amp_I"], pulse["Amp_Q"], to_volts)
+
+# And back: volts on I and Q into hertz along df and dissipation.
+back, _ = display_transform(cal, "iq", "V", "df", "Hz")
+df_hz, diss_hz = apply_iq_conversion(i_volts, q_volts, back)
+print("round trip exact:", np.allclose(df_hz, pulse["Amp_I"])
+      and np.allclose(diss_hz, pulse["Amp_Q"]))
+
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.2))
+axes[0].plot(t_ms, pulse["Amp_I"], label="df")
+axes[0].plot(t_ms, pulse["Amp_Q"], label="dissipation")
+axes[0].set_ylabel("Hz"); axes[0].set_title("as stored")
+axes[1].plot(t_ms, i_volts, label="I")
+axes[1].plot(t_ms, q_volts, label="Q")
+axes[1].set_ylabel("V"); axes[1].set_title("the same pulse on I and Q")
+for ax in axes:
+    ax.set_xlabel("time from trigger (ms)"); ax.legend()
+plt.tight_layout(); plt.show()
+```
+
+The projection matters for noise too. A channel is usually noisier along df
+than along dissipation, and on the I and Q axes each axis sees a mix of the
+two.
+
+### Pileup, coincident pulses and noise samples
+
+Every pulse records how it ended. `pileup` marks both fragments of a split
+pair and `truncated` a capture cut off at the hard stop:
+
+```python
+for c in reader.channels:
+    metas = list(reader.iter_pulse_metadata(c))
+    print(f"ch{c}: {len(metas)} pulses, "
+          f"{sum(m['pileup'] for m in metas)} pileup, "
+          f"{sum(m['truncated'] for m in metas)} truncated")
+```
+
+An event lists the pulses that make it up. Its `kind` is `"pulses"` or
+`"noise"`, its `members` name each pulse by channel and index, and `dumped`
+names the channels saved with it without a trigger:
+
+```python
+print(f"coincidence window: "
+      f"{reader.metadata['coincidence_window_s'] * 1e3:g} ms\n")
+events = list(reader.iter_events())
+# The first few, and the first noise samples further on.
+for event in events[:5] + [e for e in events[5:] if e["kind"] == "noise"][:2]:
+    members = [(m["channel"], m["pulse_idx"]) for m in event["members"]]
+    if event["kind"] == "noise":
+        t0, t1 = event["window"]
+        print(f"  event {event['event_idx']:>3}  noise sample   "
+              f"channels {event['dumped']} over {(t1 - t0) * 1e3:.1f} ms, "
+              f"pulses inside it: {members}")
+        continue
+    spread_ms = (event["members"][-1]["trigger_time"]
+                 - event["trigger_time"]) * 1e3
+    what = "coincident" if len({c for c, _ in members}) > 1 else "one channel"
+    print(f"  event {event['event_idx']:>3}  {what:<14} pulses {members}, "
+          f"{spread_ms:.2f} ms apart, saved without a trigger: "
+          f"{event['dumped']}")
+```
+
+`get_event` returns the saved samples as well. This draws one coincident
+event, each channel about its own level before the event:
+
+```python
+coincident = next(e for e in reader.iter_events()
+                  if e["kind"] == "pulses" and len(e["members"]) > 1)
+event = reader.get_event(coincident["event_idx"])
+t0 = event["trigger_time"]
+
+plt.figure(figsize=(9, 3.5))
+for m in event["members"]:
+    wf = reader.get_pulse(m["channel"], m["pulse_idx"])
+    plt.plot((wf["Time"] - t0) * 1e3, wf["Amp_I"] - wf["trigger_baseline_I"],
+             label=f"ch{m['channel']} pulse {m['pulse_idx']}")
+for c, wf in event["dump"].items():
+    t = (wf["Time"] - t0) * 1e3
+    level = np.median(wf["Amp_I"][t < 0]) if np.any(t < 0) else 0.0
+    plt.plot(t, wf["Amp_I"] - level, ls=":", lw=1, label=f"ch{c}, no trigger")
+plt.xlabel("time from the event's first trigger (ms)")
+plt.ylabel("first stored axis, about its baseline")
+plt.title(f"event {event['event_idx']}"); plt.legend(); plt.show()
+```
+
+The channels are in their own stored units here: hertz for the calibrated
+ones, volts for the channel without a detector.
+
+A noise sample holds every channel over the same window, taken whether or not
+anything triggered. Its `members` are the pulses that happened to fall inside
+it. The samples with none are the ones to measure the noise from. At one
+simulated pulse every 50 ms few of this short capture's samples are free of
+one; a real capture is mostly quiet.
+
+```python
+samples = [reader.get_event(e["event_idx"]) for e in reader.iter_events()
+           if e["kind"] == "noise"]
+quiet = [s for s in samples if not s["members"]]
+print(f"{len(samples)} noise samples, {len(quiet)} without a pulse in them")
+for c in reader.channels:
+    trained = reader.noise_stats(c).std_I
+    if quiet:
+        sigma = np.mean([np.std(s["dump"][c]["Amp_I"]) for s in quiet])
+        print(f"  ch{c}: sigma over the quiet samples {sigma:.4g} "
+              f"{reader.stored_units(c)}, trained sigma {trained:.4g}")
+    else:
+        print(f"  ch{c}: trained sigma {trained:.4g} {reader.stored_units(c)}")
+```
+
+### A channel's sweep and fit
+
+The `tuning` row is the `bias_kids` entry for the channel, so it holds the
+sweep, the fitted resonance and the bias point as well as the calibration.
+Scalars and fit parameters come back as values, the sweep as arrays:
+
+```python
+row = reader.tuning(ch)
+fit = row.get("nonlinear_fit_params") or {}
+print(f"bias frequency {row['bias_frequency'] / 1e6:.6f} MHz, "
+      f"df calibration {abs(row['df_calibration']):.4g} Hz/V "
+      f"({row['df_calibration_source']})")
+for key in ("fr", "Qr", "amp", "phi", "a"):
+    if key in fit:
+        print(f"  {key:<4} {fit[key]:.6g}")
+
+f_mhz = np.asarray(row["frequencies"]) / 1e6
+fig, axes = plt.subplots(1, 2, figsize=(11, 3.4))
+axes[0].plot(f_mhz, np.abs(row["iq_complex"]), ".", ms=4, label="sweep")
+if "nonlinear_model_iq" in row:
+    axes[0].plot(f_mhz, np.abs(row["nonlinear_model_iq"]), lw=1, label="fit")
+axes[0].axvline(row["bias_frequency"] / 1e6, color="k", lw=0.8, ls=":",
+                label="bias")
+axes[0].set_xlabel("frequency (MHz)"); axes[0].set_ylabel("|S21| (counts)")
+axes[0].legend()
+axes[1].plot(np.real(row["iq_complex"]), np.imag(row["iq_complex"]), ".", ms=4)
+axes[1].set_xlabel("I (counts)"); axes[1].set_ylabel("Q (counts)")
+axes[1].axis("equal")
+fig.suptitle(f"channel {ch}: the sweep its calibration was read from")
+plt.tight_layout(); plt.show()
+
+reader.close()
+```
+
 ## 8. Fast (PFB) capture
 
 The fast streamer carries up to **4 channels of one module** at 2.44 MHz,
@@ -688,8 +1014,14 @@ off in a `finally`.
 
 The same `PulseCaptureConfig` is reused: `session_kwargs(PFB_SAMPLING_FREQ)`
 re-derives the buffer, training length and confirmation count for the new rate.
+`duration_s` includes the noise training, so this short demo trains for
+100 ms. The simulator generates the PFB stream slower than real time.
 
 ```python
+from dataclasses import replace
+
+fast_config = replace(capture_config, noise_train_ms=100.0)
+
 await crs.configure_streamer(cfg.dec_stage, short=cfg.short_packets,
                              modules=[MODULE],
                              pfb_channels=CHANNELS, pfb_module=MODULE)
@@ -698,11 +1030,11 @@ try:
         channels=CHANNELS, module=MODULE, streamer_mode="fast",
         sample_rate=PFB_SAMPLING_FREQ,
         hdf5_path=str(OUTPUT_DIR / "pulse_capture_fast.h5"),
-        **capture_config.session_kwargs(PFB_SAMPLING_FREQ),
+        **fast_config.session_kwargs(PFB_SAMPLING_FREQ),
     )
     fast_session.start()
     covered = await run_pfb_source(fast_session, host, CHANNELS,
-                                   module=MODULE, duration_s=0.25)
+                                   module=MODULE, duration_s=0.4)
     fast_session.stop()
     print(f"{fast_session.total_pulses} pulses over {covered*1e3:.0f} ms")
 finally:

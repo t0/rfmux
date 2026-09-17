@@ -328,7 +328,9 @@ async def bias_kids(
         Dictionary or list of dictionaries containing only the biased detectors' data.
         Each entry includes the original multisweep data plus:
         - 'bias_channel': The assigned channel number (1-based)
-        - 'bias_amplitude': The amplitude selected for biasing
+        - 'sweep_amplitude': The amplitude of the sweep the detector is
+          biased from, which the tone is set to ('selected_amplitude'
+          repeats it when the sweeps were at several amplitudes)
         - 'bifurcation_suspected': Whether any amplitude showed bifurcation
         - 'bias_successful': Whether the detector was successfully biased
         - 'optimal_phase_degrees': The optimal ADC phase found (if phase optimization enabled)

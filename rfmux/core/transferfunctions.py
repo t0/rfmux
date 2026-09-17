@@ -145,6 +145,24 @@ def volts_squared_to_dbm(v2, termination=TERMINATION, floor=0.0):
     return 10.0 * np.log10(ratio)
 
 
+def convert_amplitude_to_dbm(amplitude, dac_scale_dbm):
+    """Tone power in dBm for a normalized DAC *amplitude*, against the
+    module's DAC scale in dBm (the power of a full-scale tone; see
+    ``bias_kids.dac_scale_dbm``).  Amplitude is a voltage ratio, so it
+    is 20 log10 of it below full scale."""
+    amplitude = np.asarray(amplitude, dtype=float)
+    with np.errstate(divide="ignore"):
+        dbm = dac_scale_dbm + 20.0 * np.log10(amplitude)
+    return float(dbm) if dbm.ndim == 0 else dbm
+
+
+def convert_dbm_to_amplitude(dbm, dac_scale_dbm):
+    """Normalized DAC amplitude for a tone power in *dbm*: the inverse
+    of :func:`convert_amplitude_to_dbm`."""
+    amplitude = 10.0 ** ((np.asarray(dbm, dtype=float) - dac_scale_dbm) / 20.0)
+    return float(amplitude) if amplitude.ndim == 0 else amplitude
+
+
 def convert_volts_to_dbm(volts, termination=50.0):
     """
     Convenience function for converting a signal amplitude in

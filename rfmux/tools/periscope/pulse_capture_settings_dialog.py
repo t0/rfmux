@@ -112,9 +112,9 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.post_pulse_spin.setToolTip(
             "Time saved after the pulse settled.\n\n"
             "The capture is released once this much has arrived after "
-            "the settled sample, so the end confirmation runs at least "
-            "this long and the channel cannot trigger again within it; "
-            "a pulse arriving inside it is a pileup.")
+            "the settled sample.  The end confirmation runs at least "
+            "this long, and the channel cannot trigger again within it.  "
+            "A pulse arriving inside it is a pileup.")
         form.addRow("Pre-pulse time (ms):", self.pre_pulse_spin)
         form.addRow("Post-pulse time (ms):", self.post_pulse_spin)
 
@@ -129,8 +129,9 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "pulses are stored under their channels either way; the "
             "events index them, and the pulse list can be grouped by "
             "either.\n\n"
-            "Off records no events.  The pulse list can still group a "
-            "capture by events afterwards, from the trigger times.\n"
+            "Off records no coincident events.  The pulse list can still "
+            "group a capture by events afterwards, from the trigger "
+            "times.\n"
             "In both mode a channel's share of an event is its pair, "
             "whichever of the two streams triggered.")
         form.addRow("Coincidence window (ms):", self.coincidence_spin)
@@ -140,12 +141,12 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.dump_check.setToolTip(
             "With each event, also save the same span of every channel "
             "that did not trigger, from both streams in both mode.  "
-            "Only a capture can: those samples are gone once the ring "
-            "buffer moves on.  rfmux record adds the 100G recording "
+            "Only a capture can do this: those samples are gone once the "
+            "ring buffer moves on.  rfmux record adds the 100G recording "
             "over the same span when it merges.\n\n"
             "With the coincidence window off, each pulse is an event of "
-            "its own.  The file grows by the untriggered channels for "
-            "every event.")
+            "its own, unless two channels trigger on the same sample.  "
+            "The file grows by the untriggered channels for every event.")
         form.addRow(self.dump_check)
 
         self.noise_capture_spin = QtWidgets.QDoubleSpinBox()
@@ -155,14 +156,16 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.noise_capture_spin.setValue(config.noise_capture_interval_s)
         self.noise_capture_spin.setToolTip(
             "Take noise samples: every channel over one window, at random "
-            "moments, whatever the samples hold, for the statistics of the "
-            "noise.  Each is an event tagged as a noise sample; a pulse "
-            "that happens to fall inside one is listed with it.\n\n"
+            "moments, whether or not a pulse is present, for the "
+            "statistics of the noise.  Each is an event tagged as a noise "
+            "sample; a pulse that happens to fall inside one is listed "
+            "with it.\n\n"
             "The waits between samples are normally distributed about this "
             f"many seconds, {NoiseSampler.JITTER:.0%} of it wide.  A sample "
-            "is as long as a typical pulse record, the median of those "
-            f"saved so far; until {NoiseSampler.MIN_RECORDS} have been, the "
-            "pre-pulse time, the max pulse and the post-pulse time.")
+            "is as long as a typical pulse record: the median of the "
+            f"latest {NoiseSampler.RECORDS_KEPT} saved.  Until "
+            f"{NoiseSampler.MIN_RECORDS} records have been saved it is the "
+            "pre-pulse time plus the max pulse plus the post-pulse time.")
         form.addRow("Noise sample every (s):", self.noise_capture_spin)
 
         # The 1/f window is its own time scale, seconds whatever the

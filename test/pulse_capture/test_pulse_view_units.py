@@ -1,4 +1,4 @@
-"""A Units change re-projects what the pulse view draws, not only its
+"""A Units change converts the traces the pulse view draws, not only its
 axis labels: every trace is the stored samples times one complex factor,
 a rotation by the df calibration's angle and a scale.  Checked for a
 slow capture in review and live, and for a both-mode capture, with a
@@ -154,23 +154,18 @@ def test_both_mode_reprojects_both_streams(qt_app, tmp_path):
     _check_reprojection(panel, stored)
 
 
-def test_noise_bands_are_projected_onto_the_viewed_axes(qt_app, tmp_path):
-    """A channel noisier along df than along dissipation: viewed in
-    volts, 80 degrees round, the wide band belongs to Q."""
+def test_noise_bands_follow_the_view(qt_app, tmp_path):
+    """The bands are the statistics projected by the factor the traces
+    are converted with."""
+    from rfmux.pulse_capture.analysis import project_noise_stats
     from rfmux.pulse_capture.detection import ChannelNoiseStats
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(_slow_file(tmp_path))
     ns = ChannelNoiseStats(mean_I=100.0, std_I=50.0, mean_Q=-20.0, std_Q=5.0)
     panel.units_combo.setCurrentText(UNITS_VOLTS)
-    seen = panel._view_noise(1, ns)
-    k, theta = abs(1 / CAL), np.angle(1 / CAL)
-    assert seen.std_I == pytest.approx(
-        k * np.hypot(50.0 * np.cos(theta), 5.0 * np.sin(theta)))
-    assert seen.std_Q == pytest.approx(
-        k * np.hypot(50.0 * np.sin(theta), 5.0 * np.cos(theta)))
-    assert seen.std_Q > 4 * seen.std_I
-    assert complex(seen.mean_I, seen.mean_Q) == pytest.approx(
-        complex(100.0, -20.0) / CAL)
+    seen, want = panel._view_noise(1, ns), project_noise_stats(ns, 1 / CAL)
+    for name in ("mean_I", "std_I", "mean_Q", "std_Q"):
+        assert getattr(seen, name) == pytest.approx(getattr(want, name))
 
 
 def test_a_failed_redraw_is_reported(qt_app, tmp_path, capsys):

@@ -177,6 +177,8 @@ async def main(serial="MOCK"):
             # Run the algorithm flow with mock CRS.  The resonator count is
             # known here, so the run can check its own findings.
             dac_scale = await dac_scale_dbm(crs, MODULE)
+            if dac_scale is None:
+                raise RuntimeError(f"module {MODULE} reports no DAC scale")
             NETANAL_PARAMS['amp'] = convert_dbm_to_amplitude(NETANAL_POWER_DBM, dac_scale)
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
                                    MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
@@ -207,6 +209,8 @@ async def main(serial="MOCK"):
             # Run the algorithm flow.  No expected_resonances: how many a
             # real array has is what the sweep is there to find out.
             dac_scale = await dac_scale_dbm(crs, MODULE)
+            if dac_scale is None:
+                raise RuntimeError(f"module {MODULE} reports no DAC scale")
             NETANAL_PARAMS['amp'] = convert_dbm_to_amplitude(NETANAL_POWER_DBM, dac_scale)
             await run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
                                    MULTISWEEP_PARAMS, FIT_PARAMS, SAMPLE_PARAMS,
@@ -329,9 +333,9 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
     
     MULTISWEEP_PARAMS['progress_callback'] = progress_callback
 
-    # One sweep of every resonator per power, filed by detector and then
-    # by power: the shape bias_kids chooses an amplitude from.  Without
-    # powers, the one sweep at MULTISWEEP_PARAMS['amp'].
+    # One sweep of every resonator per power, keyed by detector and then
+    # by power index, as bias_kids expects.  With no powers given, one
+    # sweep runs at MULTISWEEP_PARAMS['amp'].
     if multisweep_powers_dbm:
         amps = [convert_dbm_to_amplitude(dbm, dac_scale)
                 for dbm in multisweep_powers_dbm]
@@ -430,7 +434,7 @@ async def run_algorithm_flow(crs, MODULE, NETANAL_PARAMS, FIND_RES_PARAMS,
               f"power {power}, bias_freq={det_data['bias_frequency']/1e6:.3f} MHz")
         print(f"                      a={fit.get('a', float('nan')):.2f}, "
               f"Qr={fit.get('Qr', float('nan')):.0f}"
-              + (", a sweep at a higher power jumped"
+              + (", bifurcated at one of the powers"
                  if det_data.get('bifurcation_ever_seen') else ""))
         if det_data.get('df_calibration') is not None:
             print(f"                      |df_cal|={abs(det_data['df_calibration']):.3e} Hz/V"

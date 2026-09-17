@@ -61,13 +61,14 @@ _SQRT2 = math.sqrt(2.0)
 #: session and the config share.
 DEFAULT_END_SIGMA = 1.5
 
-#: Ring headroom over the longest expected pulse.  The pre-trigger
-#: margin and the end-confirmation tail share the ring with the pulse.
+#: Ring headroom over the longest expected pulse, for an engine built
+#: without margins of its own.  ``PulseCaptureConfig.buf_size`` adds the
+#: pre- and post-pulse spans on top of it.
 BUFFER_SAFETY: float = 1.5
 
 #: Fraction of the ring a capture may fill before the hard stop.  With
 #: the ring at 1.5x the max expected pulse, 0.8 puts the stop at 1.2x
-#: that pulse, leaving room for the pre-trigger margin in the same ring.
+#: that pulse.
 HARD_STOP_RING_FRACTION: float = 0.8
 
 #: Edge-detector lag, as a fraction of the longest expected pulse: long
@@ -339,15 +340,17 @@ class PulseCapture:
     #: the full-stream median to ~0.01 sigma.
     _BASELINE_RESERVOIR: int = 4096
 
+    #: Fewest samples saved before a trigger.
+    MIN_PRE_SAMPLES: int = 2
+
     @staticmethod
     def default_edge_lookback(buf_size: int) -> int:
         """Edge-detector lag derived from the ring:
         ``EDGE_LOOKBACK_FRACTION`` of the longest pulse the ring was
         sized for (a bare ring is ``BUFFER_SAFETY`` times that pulse).
         Shared with noise estimation so the measured jump-σ is taken at
-        the same lag the edge detector uses, and equal by construction
-        to ``PulseCaptureConfig.edge_lookback_samples`` for the same
-        intent."""
+        the same lag the edge detector uses.  For a bare ring it equals
+        ``PulseCaptureConfig.edge_lookback_samples``."""
         return max(1, int(round(
             EDGE_LOOKBACK_FRACTION * buf_size / BUFFER_SAFETY)))
 
@@ -382,7 +385,7 @@ class PulseCapture:
         if pre_samples is None:
             pre_samples = self.default_edge_lookback(buf_size)
         # At least 2, so a record always shows what it triggered from.
-        self.pre_samples = max(2, int(pre_samples))
+        self.pre_samples = max(self.MIN_PRE_SAMPLES, int(pre_samples))
         self.post_samples = max(0, int(post_samples))
         self.min_pulse_samples = min_pulse_samples
         self.trigger_samples = max(1, int(trigger_samples))

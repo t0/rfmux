@@ -227,7 +227,8 @@ Parameters:
 
 The algorithms take a normalized amplitude, a fraction of the DAC's full
 scale. `dac_scale_dbm` reads the power of a full-scale tone from the board,
-and the two converters go between that amplitude and dBm.
+and the two converters go between that amplitude and dBm. It returns `None`
+for a module that analog banking hides, which has no scale to convert with.
 
 ```python
 from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
@@ -235,6 +236,7 @@ from rfmux.core.transferfunctions import (
     convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 
 DAC_SCALE_DBM = await dac_scale_dbm(crs, MODULE)
+assert DAC_SCALE_DBM is not None, f"module {MODULE} reports no DAC scale"
 NETANAL_POWER_DBM = -60.0
 print(f"DAC scale {DAC_SCALE_DBM:+.1f} dBm: {NETANAL_POWER_DBM:g} dBm is "
       f"amplitude {convert_dbm_to_amplitude(NETANAL_POWER_DBM, DAC_SCALE_DBM):.3g}")
@@ -435,8 +437,8 @@ def sweep_progress(module, percentage):
         _shown[0] = percentage
         print(f"  sweeping… {percentage:.0f}%")
 
-# One sweep of every resonator per power, filed by detector and then by
-# power: the shape bias_kids chooses an amplitude from.
+# One sweep of every resonator per power, keyed by detector and then by
+# power index, as bias_kids expects.
 sweeps_by_detector = {}
 for k, power_dbm in enumerate(MULTISWEEP_POWERS_DBM):
     amp = convert_dbm_to_amplitude(power_dbm, DAC_SCALE_DBM)
@@ -582,10 +584,10 @@ the signal in Q (a proxy for the df basis), with `optimize_phase=True`.
 sweeps at several amplitudes, as here, it chooses for each detector the
 **highest amplitude that is not bifurcated and has `a` below
 `nonlinear_threshold`** (0.77). With `fallback_to_lowest`, a detector with no
-such amplitude is biased at the lowest one instead of being left out. The bias frequency is the
-multisweep's `max-diq` or `min-s21` point read off the fitted curve rather than
-the raw sweep grid, and the tone is programmed at the nearest multiple of the
-298 Hz tone grid.
+such amplitude is biased at the lowest one instead of being left out. The
+bias frequency is the multisweep's `max-diq` or `min-s21` point read off the
+fitted curve rather than the raw sweep grid, and the tone is programmed at
+the nearest multiple of the 298 Hz tone grid.
 
 It also returns **`df_calibration`**, a complex number in hertz per volt:
 multiply the IQ motion in volts by it to get frequency shift plus j times
@@ -639,7 +641,7 @@ for det in sorted(bias_results):
           f"{fit.get('a', float('nan')):6.2f} {fit.get('Qr', float('nan')):8.0f} "
           f"{d['bias_frequency']/1e6:16.4f} {offset:13.2f} {cal_str} "
           f"{d.get('df_calibration_source', ''):>9}"
-          + ("   a sweep at a higher power jumped"
+          + ("   bifurcated at one of the powers"
              if d.get("bifurcation_ever_seen") else ""))
 ```
 

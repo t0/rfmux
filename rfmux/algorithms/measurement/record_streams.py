@@ -46,6 +46,7 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
+from ...pulse_capture.events import event_counts
 from ...core.session_folder import (is_session, latest_export, load_metadata,
                              register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
@@ -582,12 +583,13 @@ def pulse_summary_lines(capture) -> List[str]:
     lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
                  f"{len(stream.summaries)} channels")
     events = getattr(capture, "events", None) or []
-    samples = sum(e.get("kind") == "noise" for e in events)
+    counts = event_counts(events)
+    samples = counts["noise_samples"]
     if len(events) > samples:
-        shared = sum(len({m["channel"] for m in e["members"]}) > 1
-                     for e in events if e.get("kind") != "noise")
-        lines.append(f"{len(events) - samples} events, {shared} across more "
-                     "than one channel")
+        lines.append(
+            f"{len(events) - samples} events, {counts['coincident_events']} "
+            f"across more than one channel "
+            f"({counts['coincident_pulses']} pulses)")
     if samples:
         lines.append(f"{samples} noise samples")
     return lines

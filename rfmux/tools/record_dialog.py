@@ -430,13 +430,8 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _saved_config(self) -> PulseCaptureConfig:
         raw = self.settings.value(_KEY + "capture_config", "")
-        # A config saved by another version may carry fields this one
-        # does not have; the rest of it is still the user's.
-        known = {f.name for f in dataclasses.fields(PulseCaptureConfig)}
         try:
-            return PulseCaptureConfig(**{
-                k: v for k, v in json.loads(raw).items() if k in known}) \
-                if raw else PulseCaptureConfig()
+            return PulseCaptureConfig.from_dict(json.loads(raw) if raw else {})
         except (TypeError, ValueError):
             return PulseCaptureConfig()
 
@@ -462,7 +457,7 @@ class RecordDialog(QtWidgets.QDialog):
         self.capture_check.setChecked(v("capture", "true") in (True, "true"))
         self.parser_check.setChecked(v("parser", "true") in (True, "true"))
         self.fastrx_check.setChecked(v("fastrx", "true") in (True, "true"))
-        # "auto" is what earlier versions saved for no choice.
+        # A saved "auto" means no choice.
         saved_iface = str(v("parser_interface", ""))
         _select(self.parser_iface_combo,
                 "" if saved_iface == "auto" else saved_iface)

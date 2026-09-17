@@ -1,6 +1,6 @@
 """The network analysis panel keeps a module's resonances in frequency
 order however they arrive, because multisweep assigns channels in list
-order: a resonance added by hand belongs between its neighbours, not at
+order: a resonance added by hand belongs between its neighbors, not at
 the end of the channel list."""
 import pytest
 

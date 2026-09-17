@@ -79,3 +79,16 @@ def test_times_reach_the_engine_as_samples_at_the_stream_rate():
                  np.arange(200) / FS)
     assert (s.pcap.pre_samples, s.pcap.post_samples) == (25, 40)
     s.stop()
+
+
+def test_the_session_records_the_pre_pulse_span_the_engine_uses():
+    """A pre-pulse time under two samples is raised to two by both."""
+    kw = PulseCaptureConfig(pre_pulse_ms=0.0).session_kwargs(FS)
+    kw["noise_samples"] = 200
+    s = PulseCaptureSession(channels=[1], sample_rate=FS, hdf5_path=None, **kw)
+    s.start()
+    rng = np.random.default_rng(1)
+    s.feed_block(1, rng.normal(0, 1, 200), rng.normal(0, 1, 200),
+                 np.arange(200) / FS)
+    assert s.pre_samples == s.pcap.pre_samples == 2
+    s.stop()

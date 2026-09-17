@@ -24,6 +24,7 @@ from pathlib import Path
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
+    MERGED_SUFFIX,
     resolve_channels,
     pulse_summary_lines,
     record_streams,
@@ -99,7 +100,7 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
                    "fast stream (a both-mode file, as Periscope reviews it), "
-                   "renamed to end in _100G")
+                   f"renamed to end in {MERGED_SUFFIX}")
 @click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
               default="periscope", show_default=True,
               help="After the run: Periscope in review mode on the pulse file, the "
@@ -117,7 +118,7 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--coincidence-window-ms", type=float,
               default=_DEFAULTS.coincidence_window_ms, show_default=True,
               help="Pulses on any channels that trigger within this of an event's "
-                   "first trigger are recorded as one event; 0 records no events")
+                   "first trigger are recorded as one event; 0 records no coincident events")
 @click.option("--noise-capture-interval-s", type=float,
               default=_DEFAULTS.noise_capture_interval_s, show_default=True,
               help="Take a noise sample of every channel at random moments, the "

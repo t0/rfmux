@@ -219,15 +219,13 @@ def _free_dropped_widgets_between_tests(request):
     dropped waits for the cyclic collector, which otherwise runs
     whenever allocation counts say so.  Inside ``processEvents`` that
     frees plot items while Qt is dispatching to their scene; on a worker
-    thread it destroys widgets off the GUI thread.  Either is a
-    segfault in some later test, and which one moves with every change
-    to how much a panel allocates.
+    thread it destroys widgets off the GUI thread.  Either one
+    segfaults a later test.
 
     So the collector is off while a GUI test runs and is run here, on
     the main thread with nothing being dispatched.  Everything the test
-    made is still in the youngest generation, the collector not having
-    run to promote it, so collecting the young generations frees it
-    without scanning the whole interpreter.
+    made is still in generation 0, because the collector has not run.
+    ``gc.collect(1)`` frees it without scanning the whole interpreter.
     """
     if "qt_app" not in request.fixturenames:
         yield

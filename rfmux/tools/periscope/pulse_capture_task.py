@@ -42,6 +42,7 @@ from ...pulse_capture.capture_session import (
     CaptureState,
     PulseCaptureSession,
 )
+from ...pulse_capture.events import lean_event
 from ...pulse_capture.sources import SlowIngest, pfb_streamer_mismatch
 
 
@@ -249,7 +250,8 @@ class PulseCaptureTask(QtCore.QThread):
 
     def request_event(self, event_idx: int) -> None:
         """Ask the worker to load an evicted event from the live file;
-        ``waveform_ready`` fires with channel -1 when it is cached."""
+        ``waveform_ready`` fires with channel -1 when the read is done,
+        whether or not it found the event."""
         self._send_control(("__fetch_event__", event_idx))
 
     def _send_control(self, item: tuple) -> None:
@@ -543,15 +545,7 @@ class PulseCaptureTask(QtCore.QThread):
             self._event_cache[event["event_idx"]] = event
             while len(self._event_cache) > self._cache_size:
                 self._event_cache.popitem(last=False)
-        self.signals.event_closed.emit({
-            "event_idx": event["event_idx"],
-            "kind": event.get("kind", "pulses"),
-            "trigger_time": event["trigger_time"],
-            "window": event["window"],
-            "members": [{k: m[k] for k in
-                         ("channel", "pulse_idx", "trigger_time")}
-                        for m in event["members"]],
-            "dumped": sorted(event.get("dump") or {})})
+        self.signals.event_closed.emit(lean_event(event))
 
     def _on_pair(self, pair: dict) -> None:
         key = (pair["channel"], pair["pair_idx"])

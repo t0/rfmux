@@ -519,13 +519,12 @@ class UnitConverter:
     Utility class for converting between different units.
     """
     @staticmethod
-    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
-        # The termination cancels: amplitude is a ratio to full scale.
+    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float) -> float:
         if normalized_amplitude <= 0: return -np.inf
         return convert_amplitude_to_dbm(normalized_amplitude, dac_scale_dbm)
 
     @staticmethod
-    def dbm_to_normalize(dbm: float, dac_scale_dbm: float, resistance: float = 50.0) -> float:
+    def dbm_to_normalize(dbm: float, dac_scale_dbm: float) -> float:
         return convert_dbm_to_amplitude(dbm, dac_scale_dbm)
 
     @staticmethod

@@ -332,11 +332,11 @@ How pulse detection works:
 
 - **A capture opens on either axis and closes when both have settled.** The
   axes are df and dissipation for a channel with a calibration (section 7),
-  I and Q otherwise. It opens when either leaves ±`threshold_sigma`, and
+  I and Q otherwise. It opens when either leaves ±`threshold_sigma`. It
   closes when both are back inside ±`end_sigma` of the baseline, or of the
-  level the pulse rose from, for `min_end_samples`, or a tenth of its time
-  above threshold, or `post_pulse_ms`, whichever is longest. `end_sigma`
-  must sit below `threshold_sigma`.
+  level the pulse rose from. They must stay there for the longest of
+  `min_end_samples`, a tenth of the time above threshold, and
+  `post_pulse_ms`. `end_sigma` must sit below `threshold_sigma`.
 - **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
   the threshold. Left at 0 it is derived from the stream rate to hold
   accidental triggers under `max_accidental_per_min`: 1 sample at 596 Hz, 2 on
@@ -367,11 +367,11 @@ How pulse detection works:
   `dump_all_channels=True` saves, with each event, the same span of every
   channel that did not trigger.
 - **Noise samples are taken at random.** With `noise_capture_interval_s`
-  set, every channel is saved over one window at random moments, whatever
-  the samples hold, for the statistics of the noise. The waits between
+  set, every channel is saved over one window at random moments, whether or
+  not a pulse is present, for the statistics of the noise. The waits between
   samples are normally distributed about the interval, a quarter of it wide.
-  A sample is as long as a typical pulse record, the median of those saved
-  so far, and is filed as an event of kind `"noise"`. Until five records
+  A sample is as long as a typical pulse record, the median of the latest
+  200 saved, and is saved as an event of kind `"noise"`. Until five records
   have been saved it is `pre_pulse_ms + max_pulse_ms + post_pulse_ms` long.
 - **Piled-up pulses are split.** A fresh rise on the tail of a pulse, after
   it was seen decaying, starts a new one. The rise is judged against the
@@ -389,10 +389,10 @@ pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
 saved: from `pre_pulse_ms` before the trigger (5 ms by default), so the
 record keeps pre-trigger baseline, to `post_pulse_ms` (5 ms) after the sample
 the pulse settled on inside the end band. The end confirmation runs at least
-that long and at least `min_end_samples`; what is left of it only verifies
-that the pulse stayed there and lies past the record. `duration_ms` runs from the trigger to the settled sample. The
-drop below `threshold_sigma` is kept as a mark and feeds the fit-free decay
-constant.
+that long and at least `min_end_samples`. The rest of the confirmation only
+verifies that the pulse stayed there, and is not saved. `duration_ms` runs
+from the trigger to the settled sample. The drop below `threshold_sigma` is
+kept as a mark and feeds the fit-free decay constant.
 
 `describe()` reports everything derived at a given rate, and `validate()` catches
 inconsistent settings before you spend a capture on them.
@@ -596,9 +596,10 @@ plt.tight_layout(); plt.show()
 ### Trigger-aligned template
 
 Every pulse is stacked on its **trigger crossing**, not on the start of its
-window: the pre-pulse time is a setting, and the ring cuts it short for a
-pulse that arrives early, either of which would smear the stack. The mean beats the noise down as 1/√N; the shaded band is the per-bin
-RMS spread, which separates pulse-to-pulse variation from measurement noise.
+window: the pre-pulse time is a setting, and a pulse that arrives before
+the ring buffer has filled gets less of it. Either would smear the stack.
+The mean beats the noise down as 1/√N; the shaded band is the per-bin RMS
+spread, which separates pulse-to-pulse variation from measurement noise.
 
 ```python
 tmpl = reader.get_templates()
@@ -717,7 +718,7 @@ with PulseHDF5Reader(CAPTURE_FILE) as r:
 
 ### Everything in the file
 
-The file is plain HDF5, so `h5py` alone reads it. This walks the whole tree:
+The file is plain HDF5, so `h5py` alone reads it. This prints the whole tree:
 groups, datasets with their shapes, and how many attributes each carries.
 
 ```python
@@ -806,7 +807,8 @@ samples, or counts, into the view. Here the view is volts on the I and Q
 axes:
 
 ```python
-from rfmux.pulse_capture.analysis import display_transform, tuning_sweep
+from rfmux.pulse_capture.analysis import (
+    baseline_level, display_transform, tuning_sweep)
 
 row = reader.tuning(ch)
 cal = reader.df_calibration(ch)
@@ -829,8 +831,8 @@ plt.title(f"channel {ch}: pulse over its sweep"); plt.legend(); plt.show()
 
 The pulse leaves the bias point along the sweep and relaxes back to it. The
 calibration is the sweep's slope at the bias point, so it is exact for small
-shifts. A pulse this large travels part of the way round the resonance
-circle, and the part of its path that curves away from that slope reads as
+shifts. A pulse this large travels part of the way around the resonance
+circle. The part of its path that curves away from that slope reads as
 dissipation in the Pulse View above.
 
 ### Changing units
@@ -926,7 +928,9 @@ for event in events[:5] + [e for e in events[5:] if e["kind"] == "noise"][:2]:
 ```
 
 `get_event` returns the saved samples as well. This draws one coincident
-event, each channel about its own level before the event:
+event, each channel about its own baseline. `baseline_level` gives the level
+a pulse triggered from, and for a channel that did not trigger the median of
+its samples before the event:
 
 ```python
 coincident = next(e for e in reader.iter_events()
@@ -937,12 +941,13 @@ t0 = event["trigger_time"]
 plt.figure(figsize=(9, 3.5))
 for m in event["members"]:
     wf = reader.get_pulse(m["channel"], m["pulse_idx"])
-    plt.plot((wf["Time"] - t0) * 1e3, wf["Amp_I"] - wf["trigger_baseline_I"],
+    plt.plot((wf["Time"] - t0) * 1e3,
+             wf["Amp_I"] - baseline_level(wf, "I", t0),
              label=f"ch{m['channel']} pulse {m['pulse_idx']}")
 for c, wf in event["dump"].items():
-    t = (wf["Time"] - t0) * 1e3
-    level = np.median(wf["Amp_I"][t < 0]) if np.any(t < 0) else 0.0
-    plt.plot(t, wf["Amp_I"] - level, ls=":", lw=1, label=f"ch{c}, no trigger")
+    plt.plot((wf["Time"] - t0) * 1e3,
+             wf["Amp_I"] - baseline_level(wf, "I", t0),
+             ls=":", lw=1, label=f"ch{c}, no trigger")
 plt.xlabel("time from the event's first trigger (ms)")
 plt.ylabel("first stored axis, about its baseline")
 plt.title(f"event {event['event_idx']}"); plt.legend(); plt.show()
@@ -953,9 +958,9 @@ ones, volts for the channel without a detector.
 
 A noise sample holds every channel over the same window, taken whether or not
 anything triggered. Its `members` are the pulses that happened to fall inside
-it. The samples with none are the ones to measure the noise from. At one
-simulated pulse every 50 ms few of this short capture's samples are free of
-one; a real capture is mostly quiet.
+it. The samples with none are the ones to measure the noise from. The
+simulator pulses every 50 ms, so few of these samples are free of a pulse.
+A real capture is mostly quiet.
 
 ```python
 samples = [reader.get_event(e["event_idx"]) for e in reader.iter_events()
@@ -974,9 +979,10 @@ for c in reader.channels:
 
 ### A channel's sweep and fit
 
-The `tuning` row is the `bias_kids` entry for the channel, so it holds the
-sweep, the fitted resonance and the bias point as well as the calibration.
-Scalars and fit parameters come back as values, the sweep as arrays:
+The `tuning` row is shaped like the `bias_kids` entry for the channel, so it
+holds the sweep, the fitted resonance and the bias point as well as the
+calibration. Scalars and fit parameters come back as values, the sweep as
+arrays:
 
 ```python
 row = reader.tuning(ch)

@@ -11,12 +11,12 @@ over them, so a capture can be browsed by channel or by event, and a
 file that was captured without events can still be grouped afterwards
 (:func:`group_by_trigger`) from the trigger times its pulses carry.
 What cannot be recovered afterwards is the data of the channels that
-did not trigger, which the session takes from their rings when an event
-closes (``dump_all_channels``).
+did not trigger, which the session takes from their ring buffers when an
+event closes (``dump_all_channels``).
 
-A noise sample is an event nothing triggered: every channel over one
-window, taken at a random moment whatever the samples hold, for the
-statistics of the noise.  :class:`NoiseSampler` decides the moments.
+A noise sample is an event with no trigger: every channel over one
+window, taken at a random moment whether or not a pulse is present, for
+the statistics of the noise.  :class:`NoiseSampler` decides the moments.
 """
 
 from __future__ import annotations
@@ -45,6 +45,27 @@ def group_by_trigger(triggers: Iterable[Trigger],
     return events
 
 
+def pair_trigger_time(pair: dict) -> float:
+    """When a both-mode pair triggered: the earlier of its streams'
+    triggers, NaN for a pair that carries neither."""
+    times = [s["trigger_time"] for s in (pair.get("slow_summary"),
+                                         pair.get("fast_summary"))
+             if s and s.get("trigger_time") is not None]
+    return float(min(times)) if times else float("nan")
+
+
+def events_from_triggers(triggers: Iterable[Trigger],
+                         window_s: float) -> List[dict]:
+    """*triggers* grouped into events shaped like the recorded ones,
+    numbered from 1, with no window and no dumped channels."""
+    return [{"event_idx": k, "kind": "pulses",
+             "trigger_time": group[0][0], "window": None, "dumped": [],
+             "members": [{"channel": ch, "pulse_idx": idx, "trigger_time": t}
+                         for t, ch, idx in group]}
+            for k, group in enumerate(
+                group_by_trigger(triggers, window_s), start=1)]
+
+
 def event_window(summaries: Iterable[dict]) -> Optional[Tuple[float, float]]:
     """First saved sample to last saved sample over an event's pulses:
     the span a channel that did not trigger is dumped over."""
@@ -62,7 +83,7 @@ class NoiseSampler:
     """When to take noise samples, and how long each is.
 
     The waits between samples are drawn from a normal distribution
-    centred on ``interval_s``, ``JITTER`` of it wide, and never shorter
+    centered on ``interval_s``, ``JITTER`` of it wide, and never shorter
     than the window, so two samples cannot overlap.  The window starts
     ``pre_s`` before the chosen moment, as a pulse's record starts
     before its trigger.
@@ -133,15 +154,16 @@ class EventGrouper:
 
     A pulse reaches :meth:`add` when it ends, which is not the order
     pulses triggered in: a long pulse that triggered first arrives after
-    a short one that triggered later.  So an event is closed only once
-    no pulse that belongs to it can still be open, ``hold_s`` (the hard
-    stop, the longest a capture can run) past the end of its window, on
-    the clock of the channel that is furthest behind.
+    a short one that triggered later.  So an event closes ``hold_s``
+    after its window ends, measured on the slowest channel's time.
+    ``hold_s`` is the hard stop, the longest a capture can run, so no
+    pulse that belongs to the event is still open.
 
     In a both-mode capture the members are the matched pairs rather
     than the pulses (``pulse_idx`` is then the pair's index), and a pair
     can be held up after its pulses end, waiting for its partner or for
-    a ring; :meth:`advance` takes a ``settled`` test for that.
+    a ring buffer to fill; :meth:`advance` takes a ``settled`` test for
+    that.
 
     ``on_event`` receives::
 
@@ -209,16 +231,15 @@ class EventGrouper:
     def advance(self, now: float,
                 settled: Optional[Callable[[float], bool]] = None) -> None:
         """Close every event no open pulse can still join; *now* is the
-        clock of the slowest channel.  *settled*, given the end of an
-        event's window, says whether everything that triggered by then
-        has been added: a caller that holds pulses back after they end
-        answers False while it holds one."""
+        clock of the slowest channel.  *settled(t)* returns True once
+        every pulse that triggered by *t* has been added.  A caller that
+        holds pulses after they end returns False until then."""
         while now >= self.deadline:
             if settled is not None and not settled(
                     self.deadline - self.hold_s):
                 break
             self._close_next()
-        # A pulse older than any sample still open can name nothing.
+        # Drop pulses too old to fall inside any pending noise sample.
         oldest = (self._noise[0]["window"][0] if self._noise
                   else now - self.hold_s)
         self._recent = [m for m in self._recent
@@ -277,6 +298,35 @@ def event_channels(event: dict) -> List[ChannelKey]:
     return list(seen)
 
 
+def event_counts(events: Iterable[dict]) -> Dict[str, int]:
+    """How a capture's events divide: ``coincident_events`` with pulses
+    on more than one channel, the ``coincident_pulses`` in them, and
+    ``noise_samples``."""
+    counts = {"coincident_events": 0, "coincident_pulses": 0,
+              "noise_samples": 0}
+    for event in events:
+        if event.get("kind") == "noise":
+            counts["noise_samples"] += 1
+        elif len(event_channels(event)) > 1:
+            counts["coincident_events"] += 1
+            counts["coincident_pulses"] += len(event["members"])
+    return counts
+
+
+def lean_event(event: dict) -> dict:
+    """*event* as a file lists it without its samples: members without
+    their summaries, and the dumped channels by name only."""
+    return {"event_idx": event["event_idx"],
+            "kind": event.get("kind", "pulses"),
+            "trigger_time": event["trigger_time"],
+            "window": event.get("window"),
+            "dumped": sorted(event.get("dump") or {}),
+            "members": [{"channel": m["channel"],
+                         "pulse_idx": m["pulse_idx"],
+                         "trigger_time": m["trigger_time"]}
+                        for m in event["members"]]}
+
+
 def events_of(reader, window_s: Optional[float] = None,
               stream: Optional[str] = None) -> List[dict]:
     """The events of a capture file, without dumped samples.
@@ -308,10 +358,4 @@ def events_of(reader, window_s: Optional[float] = None,
                      channel, int(meta["pulse_idx"]))
                     for channel in reader.channels
                     for meta in reader.iter_pulse_metadata(channel, stream)]
-    return [{"event_idx": k, "kind": "pulses",
-             "trigger_time": group[0][0], "window": None,
-             "dumped": [],
-             "members": [{"channel": ch, "pulse_idx": idx, "trigger_time": t}
-                         for t, ch, idx in group]}
-            for k, group in enumerate(
-                group_by_trigger(triggers, window_s or 0.0), start=1)]
+    return events_from_triggers(triggers, window_s or 0.0)

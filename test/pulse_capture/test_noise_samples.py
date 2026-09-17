@@ -1,5 +1,6 @@
 """Noise samples: every channel over one window, taken at random
-moments whatever the samples hold, filed as events of kind "noise"."""
+moments whether or not a pulse is present, saved as events of kind
+"noise"."""
 
 import numpy as np
 import pytest
@@ -188,7 +189,7 @@ def test_both_mode_takes_both_streams_of_every_channel():
 
 
 def test_config_validation():
-    assert any(sev == "error" and "noise capture" in msg.lower() for sev, msg
+    assert any(sev == "error" and "noise sample" in msg.lower() for sev, msg
                in PulseCaptureConfig(noise_capture_interval_s=-1).validate())
     assert any(sev == "warning" and "back to back" in msg for sev, msg in
                PulseCaptureConfig(noise_capture_interval_s=0.05).validate())

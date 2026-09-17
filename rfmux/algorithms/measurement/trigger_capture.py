@@ -134,8 +134,9 @@ class PulseCaptureResult:
     #: the two summaries, ``time_offset``, and the union-window TOD from
     #: both ring buffers.  Empty unless ``streamer_mode="both"``.
     pairs: List[dict] = field(default_factory=list)
-    #: Coincidence events, when the config sets ``coincidence_window_ms``
-    #: or ``dump_all_channels``: each names its members (``channel``,
+    #: Events, when the config sets ``coincidence_window_ms``,
+    #: ``dump_all_channels`` or ``noise_capture_interval_s`` (events of
+    #: kind ``"noise"``): each names its members (``channel``,
     #: ``pulse_idx``, ``trigger_time``, ``summary``), its ``window``, and
     #: under ``dump`` the same span of every channel that did not
     #: trigger, when that was asked for.  In ``"both"`` mode a member is

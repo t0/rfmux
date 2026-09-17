@@ -142,15 +142,17 @@ toolbar. The **Settings** dialog includes:
   the same span of every channel that did not trigger, from both streams
   in both mode. Only a capture can
   do this, since those samples are gone once the ring buffer moves on. With
-  the coincidence window off, each pulse is then an event of its own. The
-  ring buffer grows by the window and a block of samples so the span is
-  still there when the event closes.
+  the coincidence window off, each pulse is then an event of its own, unless
+  two channels trigger on the same sample. The ring buffer grows by the
+  window and two blocks of samples (at least 0.1 s) so the span is still
+  there when the event closes. Noise samples grow it the same way.
 - **Noise sample every (s)** (off) takes noise samples for the statistics
-  of the noise: every channel over one window, at random moments, whatever
-  the samples hold. The waits between them are normally distributed about
-  this many seconds, a quarter of it wide. A sample is as long as a typical
-  pulse record: the median of those saved so far, and until five have been
-  saved, the pre-pulse time plus the max pulse plus the post-pulse time.
+  of the noise: every channel over one window, at random moments, whether
+  or not a pulse is present. The waits between them are normally distributed
+  about this many seconds, a quarter of it wide. A sample is as long as a
+  typical pulse record: the median of the latest 200 saved. Until five have
+  been saved it is the pre-pulse time plus the max pulse plus the post-pulse
+  time.
   Each is an event tagged as a noise sample.
 - **1/f window (ms)** (5000) is the record the noise σ is fitted from and
   the span of the rolling baseline. It has to be long compared with any
@@ -242,28 +244,26 @@ first trigger. **Save every channel with each event** adds the same span
 of the channels that did not trigger. A run across modules groups across
 them.
 
-**Group by** above the pulse list switches it between **Channels**, each
-with its pulses, and **Events**, each with the pulses that make it up and
-a **no trigger** row for every channel saved with it. In both mode the
-rows are pairs: a channel that triggered on the slow stream alone, on
-the fast stream alone or on both is one member either way, so an event
-can be a fast-only pulse on one channel beside a slow-only one on
-another.
+**Group by** above the pulse list chooses **Channels** or **Events**. An
+event lists its pulses, and a **no trigger** row for every channel saved
+with it. In both mode the rows are pairs. A channel counts once whether it
+triggered on the slow stream, the fast stream or both. An event can hold a
+fast-only pulse on one channel and a slow-only pulse on another.
 The pulses are the same either way: they are stored once, under their
 channels, and the events index them. A capture that recorded no events
-can still be grouped by events, in review or live, from the trigger
-times its pulses carry and the window in Settings; only the channels
-that did not trigger need the capture to have saved them.
+can still be grouped by events, live or in review. The grouping uses the
+pulses' trigger times and the window in Settings. The channels that did
+not trigger are there only if the capture saved them.
 
-The line under the status names the most active channel and counts the
-pulses that shared an event with another channel against those that came
-alone; its tooltip ranks the channels. Until the first pulse it shows the
+The line under the status names the most active channel. It counts the
+pulses that shared an event with another channel, and those that came
+alone. Its tooltip ranks the channels. Until the first pulse it shows the
 noise each channel trained to. The pulse and event views name the
 frequency a channel is biased at, when the capture carries its tuning.
 
-Double-click an event to draw its channels together, on one time axis
-from the event's first trigger and each about its own baseline, the
-channels that did not trigger as thin dotted traces. In both mode
+Double-click an event to draw its channels together. Time is measured
+from the event's first trigger and each channel is drawn about its own
+baseline. Channels that did not trigger are thin dotted traces. In both mode
 **Event shows** picks the slow samples (points), the fast ones (lines) or
 both. Double-click a pulse
 under it for that pulse alone, and a **no trigger** row for that
@@ -271,16 +271,16 @@ channel's samples over the event's window: it fills the Pulse View and
 the IQ Plane the way a pulse does, against the channel's noise bands,
 with both streams in both mode. **Prev** and **Next** step through events,
 and **Follow latest** shows the newest event's pulses as it closes,
-without the channels that did not trigger. An event closes once no pulse
-that belongs to it can still be open, a hard stop after its window, so it
-appears that long after its first trigger.
+without the channels that did not trigger. An event closes one hard stop
+after its window ends, when no pulse that belongs to it can still be open.
+It appears in the list that long after its first trigger.
 
 A **noise sample** is listed among the events with every channel beneath
 it, and a pulse that happened to fall inside it is listed too; the sample
 was taken regardless. Double-click it to draw all its channels, or one of
 its channels for that channel alone. Follow latest passes over noise
-samples. With only noise samples asked for, pulses are not made events of
-their own.
+samples. With the coincidence window off and noise samples on, the only
+events are the noise samples.
 
 From a script the events are on the result and in the file:
 
@@ -304,13 +304,14 @@ with PulseHDF5Reader("capture.h5") as r:
 every channel, and its `members` the pulses inside its window, often
 none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
 
-In the file, `events/event_<k>` holds its `kind`, `members` (rows of channel and pulse
-index, with the module first for a run across modules), their
-`trigger_times`, the window, and `dump/channel_<n>` for each channel saved
-without a trigger. In a both-mode file a member's index is that of a
-pair under `matched/`, and a dumped channel holds `slow/` and `fast/`
-windows; `result.events` has the same shape, with `slow_tod` and
-`fast_tod` under each dumped channel as a pair has them. A slow capture
+In the file, `events/event_<k>` (the number zero-padded to six digits)
+holds `kind`, `members`, `trigger_times`, the window and `dump/`. A
+`members` row is a channel and a pulse index, with the module first for a
+run across modules. `dump/channel_<n>` holds one channel saved without a
+trigger, a dumped channel. In a both-mode file a member's index is a pair
+under `matched/`, and a dumped channel holds `slow/` and `fast/` windows.
+`result.events` has the same shape, with `slow_tod` and `fast_tod` under
+each dumped channel. A slow capture
 that `rfmux record` merges with its 100G recording becomes such a file:
 its events carry over, and each dumped channel gains the recording over
 the event's window.

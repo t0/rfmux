@@ -255,14 +255,14 @@ class _PulseFileWriter:
         the same span of the channels that did not trigger, when the
         capture took it: one window, or in a dual file one per stream
         that carries the channel.  The group appears with the first
-        event, so a file without events is laid out as it always was.
+        event, so a file without events has no ``events/`` group.
         """
         if not self.is_open:
             return
         events = self.f.require_group("events")
         idx = int(event["event_idx"])
         grp = events.create_group(f"event_{idx:06d}")
-        # "pulses", or "noise" for a sample nothing triggered.
+        # "pulses", or "noise" for a sample with no trigger.
         grp.attrs["kind"] = str(event.get("kind", "pulses"))
         grp.attrs["trigger_time"] = float(event["trigger_time"])
         if event.get("window") is not None:

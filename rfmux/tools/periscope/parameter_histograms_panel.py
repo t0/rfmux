@@ -185,8 +185,8 @@ class ParameterHistogramsPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     @staticmethod
     def _view_box() -> ClickableViewBox:
-        """Panning as these plots always have, with the double-click
-        autoscale every Periscope plot shares."""
+        """Left-drag pans, and a double-click autoscales as
+        ``ClickableViewBox`` plots do."""
         vb = ClickableViewBox()
         vb.enableZoomBoxMode(False)
         return vb

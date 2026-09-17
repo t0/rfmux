@@ -195,9 +195,10 @@ Old values are main at the merge base (e46fc41).
   the grouping, `events/` in the file with `PulseHDF5Reader.event_count`,
   `get_event` and `iter_events`, `PulseCaptureResult.events`, and
   **Group by** above the Pulse Capture panel's pulse list. Pulses stay
-  under their channels; a file without events is laid out as before. A
+  under their channels; a file without events has no `events/` group. A
   both-mode capture groups its pairs (`on_event` on
-  `DualPulseCaptureSession`) and dumps both rings; `merge_fastrx` slices
+  `DualPulseCaptureSession`) and reads the channels that did not trigger
+  from both ring buffers; `merge_fastrx` slices
   the recording for a merged file's dumped channels; `rfmux record` takes
   `--coincidence-window-ms`, `--dump-all-channels`, `--pre-pulse-ms` and
   `--post-pulse-ms`.
@@ -205,13 +206,14 @@ Old values are main at the merge base (e46fc41).
   `events.NoiseSampler` for the schedule (normally distributed waits), events
   of `kind` `"noise"` holding every channel, **Noise sample every (s)** in
   Settings and `--noise-capture-interval-s` on `rfmux record`.
-- The Pulse View re-projects a both-mode pair on a Units change (it
-  relabelled the axes over unconverted traces), and noise bands are
-  projected onto the viewed axes rather than scaled.
+- A Units change converts the traces of a both-mode pair in the Pulse
+  View, not only the axis labels. Noise bands are projected onto the viewed
+  axes rather than scaled (`analysis.project_noise_stats`).
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
-  trigger to `post_pulse_ms` after the sample the pulse settled on, the first
-  of the in-band run the end confirmation then verifies, or to the hard
-  stop, and a hard stop always flags `truncated`. The two times replace
+  trigger to `post_pulse_ms` after the settled sample, or to the hard stop.
+  The settled sample is the first of the in-band run that the end
+  confirmation verifies. A hard stop always flags `truncated`. The two
+  times replace
   `margin_fraction` in `PulseCaptureConfig` and the Settings dialog, and
   reach `PulseCaptureSession` and `PulseCapture` as `pre_samples` and
   `post_samples`. `duration_ms` runs from the trigger to that settled

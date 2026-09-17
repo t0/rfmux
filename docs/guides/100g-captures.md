@@ -157,12 +157,12 @@ All three are listed in the session's metadata, so Periscope's session
 browser shows them.
 
 After the run the command lists the channels that triggered with their
-pulse counts, merges the recording into the pulse file as its fast stream
-and renames that file to end in `_100G`, so its name says it holds the
-100G data (`--no-merge-fastrx` leaves the file slow-only under its own
-name; `rfmux fastrx merge <pulse.h5> <run.fastrx>` does it later, in
-place unless given an output name) and opens Periscope in review
-mode on the pulse file, in its session folder. The command exits 1 after
+pulse counts. It merges the recording into the pulse file as its fast
+stream and renames the file to end in `_100G`, so its name says it holds
+the 100G data. It then opens Periscope in review mode on that file, in its
+session folder. `--no-merge-fastrx` leaves the file slow-only under its own
+name. `rfmux fastrx merge <pulse.h5> <run.fastrx>` merges later, in place
+unless given an output name. The command exits 1 after
 a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a
 parser that wrote nothing, or a recording that could not be merged.
@@ -170,11 +170,11 @@ parser that wrote nothing, or a recording that could not be merged.
 The capture settings in the dialog, and `--coincidence-window-ms`,
 `--dump-all-channels` and `--noise-capture-interval-s` on the command
 line, record coincident events and noise samples (see the pulse capture
-guide). With every channel saved per event, the merge
-slices the recording for the channels that did not trigger as well, over
-the event's window, so an event in the merged file holds the 100G samples
-of every captured channel whether or not it fired. A noise sample gets
-the recording for all its channels the same way.
+guide). With every channel saved per event, the merge also slices the
+recording for the channels that did not trigger, over the event's window.
+An event in the merged file then holds the 100G samples of every captured
+channel. A noise sample gets the recording for all its channels the same
+way.
 
 ## 5. Reviewing in Periscope
 

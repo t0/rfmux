@@ -1,7 +1,6 @@
 """A tone set on a module whose NCO nobody has set: the mock reports
-that NCO as 0 and must stream on that basis.  Reading it as missing
-failed every physics call, which stopped the module's packets for good
-the moment a console `crs.set_frequency(...)` configured a channel."""
+that NCO as 0 and streams the module's packets on that basis, as after
+a console `crs.set_frequency(...)` on a fresh module."""
 import asyncio
 import contextlib
 import io

@@ -214,7 +214,7 @@ def _double_click(panel, role):
     for k in range(panel.pulse_tree.topLevelItemCount()):
         top = panel.pulse_tree.topLevelItem(k)
         for j in range(top.childCount()):
-            if tuple(top.child(j).data(0, ROLE)) == role:
+            if tuple(top.child(j).data(0, ROLE) or ()) == role:
                 panel._on_tree_double_click(top.child(j), 0)
                 return
     raise AssertionError(f"no row {role}")
@@ -241,6 +241,19 @@ def test_a_no_trigger_row_fills_the_pulse_view_and_the_plane(
     # And a pulse row afterwards is a pulse again.
     _double_click(panel, ("pulse", 1, 1))
     assert panel._current_dump is None and panel._iq_source()[0] == 1
+
+
+def test_a_noise_training_row_replaces_a_no_trigger_view(qt_app, tmp_path):
+    """The training segment stays drawn when a late read arrives for the
+    no-trigger row that was viewed before it."""
+    panel = _review(_capture_file(tmp_path, coincidence_window_ms=5.0,
+                                  dump_all_channels=True), GROUP_EVENTS)
+    _double_click(panel, ("dump", 1, 3))
+    panel.group_combo.setCurrentText(GROUP_CHANNELS)
+    _double_click(panel, ("noise", None, 2))
+    panel._on_waveform_ready(3, 1)
+    assert "Noise training" in panel.pulse_info.text()
+    assert panel._iq_source() is None or panel._iq_source()[0] != 3
 
 
 def test_a_both_mode_no_trigger_row_draws_both_streams(qt_app, tmp_path):
@@ -294,7 +307,7 @@ def test_the_strip_says_when_coincidence_is_off(qt_app, tmp_path):
 
 def test_a_units_change_redraws_the_event_and_the_no_trigger_views(
         qt_app, tmp_path):
-    """The traces move with the axis labels, not just the labels."""
+    """The traces move with the axis labels, not only the labels."""
     from rfmux.core.transferfunctions import VOLTS_PER_ROC
     from rfmux.tools.periscope.pulse_capture_panel import (
         UNITS_COUNTS, UNITS_VOLTS)

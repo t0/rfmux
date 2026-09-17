@@ -122,8 +122,8 @@ def test_interfaces_show_their_rates_and_sort_by_role(
 
 
 def test_the_parser_interface_has_to_be_chosen(qt_app, tmp_path, monkeypatch):
-    """Nothing is chosen for the user, an "auto" an earlier version
-    saved included, and Record waits for the choice."""
+    """Nothing is chosen for the user, a saved "auto" included, and
+    Record waits for the choice."""
     _, settings = _dialog(tmp_path, monkeypatch)
     settings.setValue("parser_interface", "auto")
     dlg = rd.RecordDialog(settings=settings)

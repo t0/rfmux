@@ -423,6 +423,20 @@ def test_a_merged_file_keeps_the_captures_events(tmp_path):
     assert after["members"] == before["members"]
 
 
+def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(tmp_path):
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    with PulseHDF5Reader(path) as r:
+        before = dict(r.metadata)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = dict(r.metadata)
+    assert after["pre_samples_slow"] == before["pre_samples"]
+    assert after["max_pulse_ms"] == before["max_pulse_ms"]
+    assert "pre_samples" not in after and "pre_samples_fast" not in after
+
+
 def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
     """With every channel saved per event, a channel that did not
     trigger gets the recording over the event's window beside the slow

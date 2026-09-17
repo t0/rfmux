@@ -304,6 +304,12 @@ with PulseHDF5Reader("capture.h5") as r:
 every channel, and its `members` the pulses inside its window, often
 none. `PulseCaptureConfig(noise_capture_interval_s=30)` asks for them.
 
+The file's `metadata` records the capture's times in milliseconds and the
+sample counts they became at the stream's rate, once per stream in a
+both-mode file (`pre_samples_slow`, `pre_samples_fast`). With noise samples
+on it also records `noise_capture_window_s`, a sample's length until five
+records have been saved; each sample's own span is on its event.
+
 In the file, `events/event_<k>` (the number zero-padded to six digits)
 holds `kind`, `members`, `trigger_times`, the window, `trigger_utc` and
 `trigger_epoch` (the first trigger, or the moment a noise sample was taken,

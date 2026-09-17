@@ -71,6 +71,19 @@ BUFFER_SAFETY: float = 1.5
 #: that pulse.
 HARD_STOP_RING_FRACTION: float = 0.8
 
+#: The detection parameters that are sample counts, and so differ
+#: between the streams of a dual capture: its file records each as
+#: ``<name>_slow`` and ``<name>_fast``.
+RATE_PARAMS = (
+    "pre_samples",
+    "post_samples",
+    "min_pulse_samples",
+    "trigger_samples",
+    "baseline_window",
+    "edge_lookback",
+    "max_capture_samples",
+)
+
 #: Edge-detector lag, as a fraction of the longest expected pulse: long
 #: enough to contain any physical rise, short enough that 1/f wander
 #: moves negligibly across it.

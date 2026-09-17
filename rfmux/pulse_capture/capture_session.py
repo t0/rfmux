@@ -76,6 +76,7 @@ from .detection import (
     BUFFER_SAFETY,
     EDGE_LOOKBACK_FRACTION,
     HARD_STOP_RING_FRACTION,
+    RATE_PARAMS,
     ChannelNoiseStats,
     PulseCapture,
     estimate_noise_stats,
@@ -490,9 +491,19 @@ class PulseCaptureConfig:
                                  * self.max_pulse_samples(sample_rate)))
                    + self.post_pulse_samples(sample_rate))
 
+    def times_ms(self) -> Dict[str, float]:
+        """The times a capture file records as they were asked for,
+        beside the sample counts they became at the stream's rate."""
+        return {"pre_pulse_ms": self.pre_pulse_ms,
+                "post_pulse_ms": self.post_pulse_ms,
+                "min_pulse_ms": self.min_pulse_ms,
+                "max_pulse_ms": self.max_pulse_ms,
+                "noise_train_ms": self.noise_train_span_ms()}
+
     def session_kwargs(self, sample_rate: float) -> Dict[str, Any]:
         """Keyword arguments for :class:`PulseCaptureSession`."""
         return {
+            "config_times_ms": self.times_ms(),
             "threshold_sigma": self.threshold_sigma,
             "end_sigma": self.end_sigma,
             "pre_samples": self.pre_pulse_samples(sample_rate),
@@ -759,6 +770,7 @@ class PulseCaptureSession(_EventHost):
         noise_capture_interval_s: float = 0.0,
         noise_capture_window_s: float = 0.0,
         noise_rng: Optional[np.random.Generator] = None,
+        config_times_ms: Optional[Dict[str, float]] = None,
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
         progress_interval_s: float = 0.1,
@@ -781,6 +793,8 @@ class PulseCaptureSession(_EventHost):
             self.coincidence_window_s = 0.0
         self.noise_capture_interval_s = float(noise_capture_interval_s)
         self.noise_capture_window_s = float(noise_capture_window_s)
+        #: ``PulseCaptureConfig.times_ms()``, for the file's metadata.
+        self.config_times_ms = dict(config_times_ms or {})
         self._noise_rng = noise_rng
         #: Schedules the noise samples; built with the engine.
         self.noise: Optional[NoiseSampler] = None
@@ -1345,6 +1359,9 @@ class PulseCaptureSession(_EventHost):
             if self.noise_capture_interval_s > 0:
                 capture_params["noise_capture_interval_s"] = \
                     self.noise_capture_interval_s
+                capture_params["noise_capture_window_s"] = \
+                    self.noise_capture_window_s
+            capture_params.update(self.config_times_ms)
             if self.sample_rate:
                 key = ("sample_rate_fast" if self.streamer_mode == "fast"
                        else "sample_rate_slow")
@@ -1819,29 +1836,28 @@ class DualPulseCaptureSession(_EventHost):
         self.fast.start()
         if self.hdf5_path is None:
             return
-        # The rate-independent detection parameters; the per-stream ones
-        # differ by rate and have no slot in the dual file.
+        # The rate-independent detection parameters as they are, and the
+        # sample counts once per stream.
         capture_params = {
             "streamer_mode": "both",
             "threshold_sigma": self.config.threshold_sigma,
             "end_sigma": self.config.end_sigma,
-            "pre_pulse_ms": self.config.pre_pulse_ms,
-            "post_pulse_ms": self.config.post_pulse_ms,
+            **self.config.times_ms(),
             **({"coincidence_window_s":
                 self.config.coincidence_window_ms * 1e-3,
                 "dump_all_channels": self.config.dump_all_channels,
                 "noise_capture_interval_s":
                     self.config.noise_capture_interval_s}
                if self.events is not None else {}),
+            **({"noise_capture_window_s":
+                self.config.noise_capture_window_ms * 1e-3}
+               if self.noise is not None else {}),
             "enable_pileup": self.config.enable_pileup,
             "min_end_samples": self.config.min_end_samples,
-            "min_pulse_ms": self.config.min_pulse_ms,
-            "max_pulse_ms": self.config.max_pulse_ms,
-            "noise_train_ms": self.config.noise_train_span_ms(),
-            "trigger_samples_slow":
-                self.config.trigger_samples_for(self.slow.sample_rate),
-            "trigger_samples_fast":
-                self.config.trigger_samples_for(self.fast.sample_rate),
+            **{f"{name}_{stream}": getattr(session, name)
+               for stream, session in (("slow", self.slow),
+                                       ("fast", self.fast))
+               for name in RATE_PARAMS},
             "module": self.module,
             "fast_channels": list(self.fast_channels),
             "sample_rate_slow": self.slow.sample_rate,

@@ -210,6 +210,13 @@ Old values are main at the merge base (e46fc41).
 - A Units change converts the traces of a both-mode pair in the Pulse
   View, not only the axis labels. Noise bands are projected onto the viewed
   axes rather than scaled (`analysis.project_noise_stats`).
+- File metadata: every capture file records its times in milliseconds
+  (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`, `max_pulse_ms`,
+  `noise_train_ms`) and the sample counts they became (`detection.RATE_PARAMS`:
+  `pre_samples`, `post_samples`, `max_capture_samples` and the rest). A
+  both-mode or merged file names the counts per stream, `pre_samples_slow`
+  and `pre_samples_fast`. `noise_capture_window_s` is the length of a noise
+  sample until five records have been saved.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
   trigger to `post_pulse_ms` after the settled sample, or to the hard stop.
   The settled sample is the first of the in-band run that the end

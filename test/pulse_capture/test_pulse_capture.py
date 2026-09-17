@@ -1418,8 +1418,10 @@ class TestDetectionParamsPlumbing:
         # ring, the training length, the record the file keeps), and
         # what the session does itself rather than handing to
         # PulseCapture: trigger_basis on the way in, the coincidence
-        # events on the way out.
+        # events on the way out, and the times in milliseconds that it
+        # only records in the file.
         assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
+                                                   "config_times_ms",
                                                    "noise_samples",
                                                    "noise_record_samples",
                                                    "trigger_basis",

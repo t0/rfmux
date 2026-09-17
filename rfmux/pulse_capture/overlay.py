@@ -438,7 +438,7 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     from .accumulators import PulseHistogramSet, PulseTemplateSet
     from .analysis import storage_transform
     from .capture_session import DualPulseCaptureSession, PulseCaptureConfig
-    from .detection import estimate_noise_stats
+    from .detection import RATE_PARAMS, estimate_noise_stats
     from .hdf5 import DualPulseHDF5Writer
 
     if reader.dual:
@@ -449,9 +449,12 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
     where = {c: split_key(c, reader.metadata.get("module")) for c in channels}
     fast_channels = [c for c in channels if where[c][1] <= rec.channels]
     slow_rate = float(reader.metadata.get("sample_rate_slow") or 0.0)
-    params = {**reader.metadata, "streamer_mode": "both",
-              "sample_rate_fast": PFB_SAMPLING_FREQ,
-              "fast_channels": fast_channels}
+    # The slow capture's sample counts take the names a dual file gives
+    # them.  No engine ran on the recording, so there are none for fast.
+    params = {(f"{k}_slow" if k in RATE_PARAMS else k): v
+              for k, v in reader.metadata.items()}
+    params.update(streamer_mode="both", sample_rate_fast=PFB_SAMPLING_FREQ,
+                  fast_channels=fast_channels)
     tuning = {c: reader.tuning(c) for c in channels}
     tuning = {c: row for c, row in tuning.items() if row}
     units = {c: reader.stored_units(c) for c in channels}

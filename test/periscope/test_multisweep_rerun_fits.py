@@ -7,7 +7,7 @@ pytest.importorskip("PyQt6")
 
 from test.qt_helpers import spin  # noqa: E402
 
-from rfmux.tools.periscope.tasks import sweep_centres  # noqa: E402
+from rfmux.tools.periscope.app_runtime import multisweep_centres  # noqa: E402
 from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
 from rfmux.tools.periscope.multisweep_panel import MultisweepPanel  # noqa: E402
 
@@ -26,16 +26,16 @@ def _entry(amp, fr=None, bias=None):
 
 
 def test_each_power_takes_its_own_fit_over_the_remembered_bias_point():
-    """The table wins for the amplitude nearest the one swept; without
-    a table the last sweep's bias point wins, then the baseline."""
+    """The table wins for the amplitude nearest the one swept, read from
+    the session when that sweep is there; without a table the nearest
+    sweep's bias points win, then the baseline."""
     table = {0.01: [100.1e6, 200.1e6], 0.03: [100.3e6, 200.3e6]}
-    remembered = lambda idx, amp: 150.0e6 if idx == 0 else None
-    assert sweep_centres(0.011, CONCEPTUAL, table, remembered) == \
-        [100.1e6, 200.1e6]
-    assert sweep_centres(0.03, CONCEPTUAL, table, remembered) == \
-        [100.3e6, 200.3e6]
-    assert sweep_centres(0.03, CONCEPTUAL, None, remembered) == \
-        [150.0e6, 200.0e6]
+    swept = {(0.01, 'upward'), (0.01, 'downward')}
+    centres = lambda amp, tbl, done: multisweep_centres("multisweep_0", amp, 'upward', done, tbl, CONCEPTUAL)
+    assert centres(0.011, table, swept) == "fitted_frequencies(multisweep_0[(0.01, 'upward')])"
+    assert centres(0.03, table, swept) == "[100300000.0, 200300000.0]"
+    assert centres(0.03, None, swept) == "bias_frequencies(multisweep_0[(0.01, 'upward')])"
+    assert centres(0.03, None, set()) == "[100000000.0, 200000000.0]"
 
 
 def test_the_panel_tables_the_fits_per_amplitude(qt_app):

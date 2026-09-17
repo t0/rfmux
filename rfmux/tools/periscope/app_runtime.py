@@ -22,6 +22,32 @@ from ...pulse_capture.sources import (
     columns_for_width,
 )
 
+
+def multisweep_centres(name: str, amp: float, direction: str, swept: set,
+                       fit_table: dict | None, baseline: list) -> str:
+    """Source for a sweep's ``center_frequencies``.
+
+    A re-run that chose the fitted frequencies re-centres on the table's
+    nearest power: its fitted frequencies read from the session when that
+    sweep is there, else the table's values. Otherwise the bias points of
+    the nearest power already swept, and the baseline list before any.
+    *swept* holds the (amplitude, direction) keys already in *name*.
+    """
+    def key_for(a):
+        keys = [k for k in swept if k[0] == a]
+        return next((k for k in keys if k[1] == direction), keys[0] if keys else None)
+
+    if fit_table:
+        nearest = min(fit_table, key=lambda a: abs(a - amp))
+        key = key_for(nearest)
+        return (f"fitted_frequencies({name}[{key!r}])" if key
+                else repr([float(f) for f in fit_table[nearest]]))
+    if swept:
+        nearest = min({a for a, _ in swept}, key=lambda a: abs(a - amp))
+        return f"bias_frequencies({name}[{key_for(nearest)!r}])"
+    return repr([float(f) for f in baseline])
+
+
 class PeriscopeRuntime:
     """Mixin providing runtime methods for :class:`Periscope`."""
     
@@ -1330,12 +1356,10 @@ class PeriscopeRuntime:
             for future in futures:
                 future.cancel()
         self.netanal_tasks.clear()
-        # Stop any active multisweep tasks (QThread now, needs proper termination)
-        for task_key in list(self.multisweep_tasks.keys()):
-            task = self.multisweep_tasks[task_key]
-            task.stop()  # Request interruption
-            task.wait(2000)  # Wait up to 2 seconds for thread to finish
-            self.multisweep_tasks.pop(task_key, None)
+        for run in self.multisweep_tasks.values():
+            for future in run['futures']:
+                future.cancel()
+        self.multisweep_tasks.clear()
         future = getattr(self, "_df_cal_future", None)
         if future is not None and not future.done():
             future.cancel()
@@ -1459,6 +1483,94 @@ class PeriscopeRuntime:
         on_done(future, done)
         return future
 
+    def _connect_multisweep_signals(self, panel):
+        """Route the shared multisweep signals to *panel*, and only to it."""
+        s = self.multisweep_signals
+        for signal in (s.progress, s.starting_iteration, s.data_update, s.completed_iteration,
+                       s.all_completed, s.error, s.fitting_progress):
+            try:
+                signal.disconnect()
+            except TypeError:
+                pass
+        queued = QtCore.Qt.ConnectionType.QueuedConnection
+        s.progress.connect(panel.update_progress, queued)
+        s.starting_iteration.connect(panel.handle_starting_iteration, queued)
+        s.data_update.connect(panel.update_data, queued)
+        s.completed_iteration.connect(
+            lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
+            queued)
+        s.all_completed.connect(panel.all_sweeps_completed, queued)
+        s.error.connect(panel.handle_error, queued)
+        s.fitting_progress.connect(panel.handle_fitting_progress, queued)
+
+    def multisweep_hooks(self, window_id: str) -> dict:
+        """The progress callback that feeds a multisweep panel."""
+        signals = self.multisweep_signals
+        return {"progress_callback": lambda module, fraction: signals.progress.emit(module, fraction)}
+
+    def _run_multisweep(self, window_id: str, panel, params: dict, title: str):
+        """Run a panel's multisweep as console cells, one per amplitude and
+        direction, each re-centred on the nearest sweep already taken and
+        fitted as chosen. The cells are what the console shows."""
+        module = params['module']
+        name = window_id
+        amplitudes = list(params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]))
+        direction = params.get('sweep_direction', 'upward')
+        directions = ['upward', 'downward'] if direction == 'both' else [direction]
+        baseline = [float(f) for f in params.get('resonance_frequencies', [])]
+        fit_table = params.get('fit_frequencies_by_amp') if params.get('use_fit_frequencies') else None
+        sweep_kwargs = {k: params[k] for k in ('span_hz', 'npoints_per_sweep', 'nsamps',
+                                               'bias_frequency_method', 'rotate_saved_data') if k in params}
+        fits = dict(fit_skewed=bool(params.get('apply_skewed_fit')),
+                    fit_nonlinear=bool(params.get('apply_nonlinear_fit')))
+        namespace = self.session_namespace()
+        swept = set(namespace[name]) if isinstance(namespace.get(name), dict) else set()
+        plan = [(amp, d) for amp in amplitudes for d in directions]
+        signals = self.multisweep_signals
+        preamble = ["from rfmux.algorithms.measurement.multisweep import bias_frequencies, fitted_frequencies"]
+        if name not in namespace:
+            preamble.append(f"{name} = {{}}")
+        futures = []
+        for amp, d in plan:
+            key = (amp, d)
+            centres = multisweep_centres(name, amp, d, swept, fit_table, baseline)
+            kwargs = ", ".join(f"{k}={v!r}" for k, v in {**sweep_kwargs, 'amp': amp, 'sweep_direction': d,
+                                                          **fits, 'module': module}.items())
+            futures.append(self.run_python("\n".join(preamble + [
+                f"{name}[{key!r}] = await crs.multisweep(center_frequencies={centres}, {kwargs}, "
+                f"**periscope.multisweep_hooks({window_id!r}))"]), title if not futures else ""))
+            preamble = []
+            swept.add(key)
+        run = {'window': panel, 'futures': futures}
+        self.multisweep_tasks[f"{window_id}_module_{module}"] = run
+
+        def finish(i):
+            amp, d = plan[i]
+
+            def step_done(fut):
+                if fut.exception() is not None:
+                    for f in futures:
+                        f.cancel()
+                    signals.error.emit(module, amp, f"Multisweep failed: {fut.exception()}")
+                    return
+                results = self.session_namespace()[name][(amp, d)]
+                history = {k - 1: r.get('bias_frequency', r.get('original_center_frequency'))
+                           for k, r in results.items() if isinstance(k, (int, np.integer))}
+                signals.data_update.emit(module, i, amp, d, results, history)
+                signals.completed_iteration.emit(module, i, amp, d)
+                if i + 1 < len(plan):
+                    signals.starting_iteration.emit(module, i + 1, *plan[i + 1])
+                else:
+                    if self.multisweep_tasks.get(f"{window_id}_module_{module}") is run:
+                        self.multisweep_tasks.pop(f"{window_id}_module_{module}")
+                    signals.all_completed.emit()
+
+            on_done(futures[i], step_done)
+
+        for i in range(len(plan)):
+            finish(i)
+        signals.starting_iteration.emit(module, 0, *plan[0])
+
     def netanal_hooks(self, window_id: str, amplitude: float) -> dict:
         """The progress and data callbacks that feed a network analysis panel
         during one amplitude's sweep; the algorithm names the module."""
@@ -1484,14 +1596,13 @@ class PeriscopeRuntime:
         """
         Start a new multisweep analysis.
 
-        Creates a `MultisweepPanel` wrapped in a QDockWidget and a `MultisweepTask`.
-        Connects signals for progress, data updates, and completion.
+        Creates a `MultisweepPanel` wrapped in a QDockWidget and runs the
+        sweeps as session cells.
 
         Args:
             params (dict): Parameters for the multisweep analysis, typically
                             from a configuration dialog.
         """
-        # MultisweepPanel from .ui, MultisweepTask from .tasks, sys, traceback from .utils
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep."); return
             window_id = f"multisweep_{self.multisweep_window_count}"; self.multisweep_window_count += 1
@@ -1518,39 +1629,9 @@ class PeriscopeRuntime:
             if hasattr(panel, 'data_ready') and hasattr(self, 'session_manager'):
                 panel.data_ready.connect(self.session_manager.handle_data_ready)
             
-            # Disconnect any previous signal connections to avoid multiple calls
-            try:
-                self.multisweep_signals.progress.disconnect()
-                self.multisweep_signals.data_update.disconnect()
-                self.multisweep_signals.completed_iteration.disconnect()
-                self.multisweep_signals.all_completed.disconnect()
-                self.multisweep_signals.error.disconnect()
-            except TypeError: 
-                pass # Raised if signals were not previously connected
+            self._connect_multisweep_signals(panel)
+            self._run_multisweep(window_id, panel, params, dock_title)
 
-            # Connect signals from the MultisweepTask to the new panel's slots
-            self.multisweep_signals.progress.connect(panel.update_progress,
-                                                   QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.starting_iteration.connect(panel.handle_starting_iteration,
-                                                             QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.data_update.connect(panel.update_data,
-                                                      QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.completed_iteration.connect(
-                lambda module, iteration, amplitude, direction: panel.completed_amplitude_sweep(module, amplitude),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.all_completed.connect(panel.all_sweeps_completed,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.error.connect(panel.handle_error,
-                                                QtCore.Qt.ConnectionType.QueuedConnection)
-            self.multisweep_signals.fitting_progress.connect(panel.handle_fitting_progress,
-                                                            QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Create and start the task
-            task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=panel)
-            task_key = f"{window_id}_module_{target_module}"
-            self.multisweep_tasks[task_key] = task
-            task.start()  # Start the QThread directly
-            
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
             if main_dock:
@@ -1908,13 +1989,12 @@ class PeriscopeRuntime:
         """
         Re-run a multisweep analysis for an existing MultisweepPanel.
 
-        Stops any existing task for the panel, updates parameters, and starts a new task.
+        Cancels the panel's running cells, updates parameters, and runs the new sweeps.
 
         Args:
             window_instance (MultisweepPanel): The panel instance to re-run the analysis for.
             params (dict): The new parameters for the multisweep analysis.
         """
-        # MultisweepWindow from .ui, MultisweepTask from .tasks
         window_id = None
         for w_id, data in self.multisweep_windows.items():
             if data['window'] == window_instance: window_id = w_id; break
@@ -1923,51 +2003,18 @@ class PeriscopeRuntime:
         target_module = params.get('module')
         if target_module is None: QtWidgets.QMessageBox.critical(window_instance, "Error", "Target module not specified for multisweep re-run."); return
         
-        old_task_key = f"{window_id}_module_{target_module}"
-        if old_task_key in self.multisweep_tasks: # Stop and remove old task if it exists
-            old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
-            
-        self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
-        # Pass the window_instance to the task (now starts automatically since it's a QThread)
-        
-        ### This reconnects to signal ####
-        try:
-            self.multisweep_signals.progress.disconnect()
-            self.multisweep_signals.data_update.disconnect()
-            self.multisweep_signals.completed_iteration.disconnect()
-            self.multisweep_signals.all_completed.disconnect()
-            self.multisweep_signals.error.disconnect()
-        except TypeError: 
-            pass # Raised if signals were not previously connected
-
-        # Connect signals from the MultisweepTask to the new window's slots
-        self.multisweep_signals.progress.connect(window_instance.update_progress,
-                                               QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.starting_iteration.connect(window_instance.handle_starting_iteration,
-                                                         QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.data_update.connect(window_instance.update_data,
-                                                  QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.completed_iteration.connect(
-            lambda module, iteration, amplitude, direction: window_instance.completed_amplitude_sweep(module, amplitude),
-            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.all_completed.connect(window_instance.all_sweeps_completed,
-                                                    QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.error.connect(window_instance.handle_error,
-                                            QtCore.Qt.ConnectionType.QueuedConnection)
-        self.multisweep_signals.fitting_progress.connect(window_instance.handle_fitting_progress,
-                                                        QtCore.Qt.ConnectionType.QueuedConnection)
-
-        # Connect data_ready signal for session auto-export
+        for future in self.multisweep_tasks.pop(f"{window_id}_module_{target_module}", {}).get('futures', []):
+            future.cancel()
+        self.multisweep_windows[window_id]['params'] = params.copy()
+        self._connect_multisweep_signals(window_instance)
         if hasattr(window_instance, 'data_ready') and hasattr(self, 'session_manager'):
             window_instance.data_ready.connect(self.session_manager.handle_data_ready)
-        
-        task = MultisweepTask(crs=self.crs, params=params, signals=self.multisweep_signals, window=window_instance)
-        self.multisweep_tasks[old_task_key] = task
-        task.start()  # Start the QThread directly
+        self._run_multisweep(window_id, window_instance,  params,
+                             self.multisweep_windows[window_id]['dock'].windowTitle())
 
     def stop_multisweep_task_for_window(self, window_instance: 'MultisweepPanel'):
         """
-        Stop an active multisweep task associated with a specific panel.
+        Cancel the multisweep cells still running for a panel.
 
         Args:
             window_instance (MultisweepPanel): The panel whose task should be stopped.
@@ -1979,11 +2026,8 @@ class PeriscopeRuntime:
                 window_id = w_id; target_module = data['params'].get('module'); break
         
         if window_id and target_module:
-            task_key = f"{window_id}_module_{target_module}"
-            if task_key in self.multisweep_tasks:
-                task = self.multisweep_tasks.pop(task_key)
-                task.stop()  # Request interruption
-                task.wait(2000)  # Wait up to 2 seconds for thread to finish
+            for future in self.multisweep_tasks.pop(f"{window_id}_module_{target_module}", {}).get('futures', []):
+                future.cancel()
             self.multisweep_windows.pop(window_id, None) # Remove window tracking
 
     def _toggle_notebook_panel(self, notebook_dir: str | None = None, open_file: str | None = None):

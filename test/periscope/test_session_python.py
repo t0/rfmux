@@ -82,6 +82,31 @@ periscope._start_network_analysis({
     "clear_channels": False})
 ''' + SWEEP_TAIL
 
+# A multisweep at two powers with a skewed fit: the second power re-centres
+# on the first's bias points by name, and each fit is its own cell.
+MULTISWEEP = PROLOGUE + r'''
+with contextlib.redirect_stdout(io.StringIO()):
+    asyncio.run(crs.generate_resonators({"num_resonances": 2, "resonator_random_seed": 5,
+                                         "auto_bias_kids": True, "bias_amplitude": 0.001}))
+nco = asyncio.run(crs.get_nco_frequency(module=1))
+cfs = [nco + asyncio.run(crs.get_frequency(channel=ch, module=1)) for ch in (1, 2)]
+periscope._start_multisweep_analysis({
+    "module": 1, "resonance_frequencies": cfs, "span_hz": 200e3, "npoints_per_sweep": 21,
+    "nsamps": 1, "amps": [0.001, 0.002], "sweep_direction": "upward",
+    "bias_frequency_method": "max-diq", "rotate_saved_data": False,
+    "apply_skewed_fit": True, "apply_nonlinear_fit": False})
+panel = periscope.multisweep_windows["multisweep_0"]["window"]
+deadline = time.monotonic() + 150
+while time.monotonic() < deadline and len(panel.results_by_detector.get(1, {})) < 2:
+    app.processEvents(); time.sleep(0.01)
+print("RESULT", sorted(periscope.session_namespace()["multisweep_0"]),
+      [sorted(v) for v in panel.results_by_detector.values()],
+      panel.results_by_detector[1][1].get("skewed_fit_applied"))
+print("TRANSCRIPT", periscope.jupyter_widget._control.toPlainText())
+with contextlib.redirect_stdout(io.StringIO()):
+    periscope.close()
+'''
+
 # A one-call panel action: the QP pulse toggle in mock mode.
 QP_PULSES = PROLOGUE + r'''
 periscope.is_mock_mode = True
@@ -135,6 +160,19 @@ def test_multi_module_sweep_is_one_flat_call_per_amplitude():
         assert (f"netanal_0[{amp}] = await crs.take_netanal(amp={amp}, " in transcript
                 and f"module=[1, 2], **periscope.netanal_hooks('netanal_0', {amp}))" in transcript)
     assert "asyncio.gather" not in transcript and "for amp in" not in transcript
+
+
+def test_multisweep_re_centres_by_name_and_fits_in_the_call():
+    out = _child(MULTISWEEP)
+    assert "RESULT [(0.001, 'upward'), (0.002, 'upward')] [[0, 1], [0, 1]] True" in out
+    transcript = out.split("TRANSCRIPT", 1)[1]
+    assert "multisweep_0[(0.001, 'upward')] = await crs.multisweep(center_frequencies=[" in transcript
+    assert ("multisweep_0[(0.002, 'upward')] = await crs.multisweep("
+            "center_frequencies=bias_frequencies(multisweep_0[(0.001, 'upward')]), span_hz=200000.0, "
+            "npoints_per_sweep=21, nsamps=1, bias_frequency_method='max-diq', rotate_saved_data=False, "
+            "amp=0.002, sweep_direction='upward', fit_skewed=True, fit_nonlinear=False, module=1, "
+            "**periscope.multisweep_hooks('multisweep_0'))") in transcript
+    assert "fit_multisweep(" not in transcript
 
 
 def test_qp_pulse_toggle_is_a_console_cell():

@@ -6,11 +6,17 @@ Optionally fits resonances and centers IQ data.
 
 import numpy as np
 import asyncio
+import concurrent.futures
+import os
+import sys
+import traceback
 import warnings
 
 from ...core.hardware_map import macro
 from ...core.schema import CRS
+from . import fitting, fitting_nonlinear
 from .fitting import center_resonance_iq_circle, identify_bifurcation
+from .df_calibration import fitted_frequency
 from typing import Optional, Tuple # Added for type hinting
 
 def _get_recalculated_center_freq(
@@ -101,6 +107,8 @@ async def multisweep(
     bias_frequency_method: Optional[str] = "max-diq", # Options: "min-s21", "max-diq", or None
     rotate_saved_data: bool = False,  # Whether to rotate sweep data based on TOD analysis
     sweep_direction: str = "upward", # Options: "upward", "downward"
+    fit_skewed: bool = False,
+    fit_nonlinear: bool = False,
     *,
     module,
     progress_callback=None,
@@ -133,6 +141,9 @@ async def multisweep(
             - None: No recalculation. Use original center frequency.
             Defaults to "max-diq".  Both are read off the raw sweep grid here;
             bias_kids reads the same point off the fitted resonance.
+        fit_skewed, fit_nonlinear (bool, optional):
+            Fit each sweep before returning (see fit_multisweep), so every
+            entry carries its fit parameters and model curve. Default False.
         rotate_saved_data (bool, optional):
             Whether to rotate sweep data based on TOD analysis. When True and bias_frequency_method
             is not None:
@@ -237,6 +248,9 @@ async def multisweep(
                 nsamps=nsamps,
                 bias_frequency_method=bias_frequency_method,
                 rotate_saved_data=rotate_saved_data,
+                sweep_direction=sweep_direction,
+                fit_skewed=fit_skewed,
+                fit_nonlinear=fit_nonlinear,
                 module=m, # Pass single module here
                 progress_callback=progress_callback,
                 data_callback=data_callback,
@@ -584,4 +598,91 @@ async def multisweep(
     except Exception as e:
         warnings.warn(f"Hardware cleanup failed for module {module}: {e}")
     
+    if fit_skewed or fit_nonlinear:
+        results_by_index = fit_multisweep(results_by_index, skewed=fit_skewed, nonlinear=fit_nonlinear)
     return results_by_index
+
+
+def bias_frequencies(results: dict) -> list:
+    """The bias point each sweep chose, else its centre, per detector."""
+    return [float(results[k].get('bias_frequency', results[k]['original_center_frequency']))
+            for k in sorted(results)]
+
+
+def fitted_frequencies(results: dict) -> list:
+    """The fitted resonance frequency where a fit succeeded, else the bias
+    point, else the centre, per detector."""
+    return [float(fitted_frequency(results[k])
+                  or results[k].get('bias_frequency', results[k]['original_center_frequency']))
+            for k in sorted(results)]
+
+
+def fit_multisweep(results: dict, skewed: bool = False, nonlinear: bool = False,
+                   max_workers: int = None) -> dict:
+    """*results* with the chosen fits added to every detector's entry.
+
+    Skewed adds ``fit_params`` and ``skewed_model_mag``; nonlinear adds
+    ``nonlinear_fit_params`` and ``nonlinear_model_iq``. Every entry
+    carries ``<fit>_fit_applied`` and ``<fit>_fit_success`` flags. The
+    detectors are fitted in parallel chunks, one per worker.
+    """
+    items = list(results.items())
+    if not items:
+        return dict(results)
+    if not (skewed or nonlinear):
+        return _fit_chunk(dict(items), False, False)
+    workers = max_workers or max(1, min(4, (os.cpu_count() or 1) - 1))
+    size = max(1, len(items) // min(workers, len(items)))
+    chunks = [dict(items[i:i + size]) for i in range(0, len(items), size)]
+    fitted = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for chunk in pool.map(lambda c: _fit_chunk(c, skewed, nonlinear), chunks):
+            fitted.update(chunk)
+    return fitted
+
+
+def _fit_chunk(chunk: dict, skewed: bool, nonlinear: bool) -> dict:
+    out = {k: dict(v) for k, v in chunk.items()}
+    for entry in out.values():
+        entry.update(skewed_fit_applied=skewed, skewed_fit_success=False,
+                     nonlinear_fit_applied=nonlinear, nonlinear_fit_success=False)
+    if not (skewed or nonlinear):
+        return out
+    try:
+        if skewed:
+            fits = fitting.fit_skewed_multisweep(out, approx_Q_for_fit=1e4, fit_resonances=True,
+                                                 center_iq_circle=True, normalize_fit=True)
+            for k, entry in out.items():
+                if k not in fits:
+                    continue
+                entry.update(fits[k])
+                p = entry.get('fit_params') or {}
+                entry['skewed_fit_success'] = p.get('fr') is not None and p.get('fr') != 'nan'
+                if entry['skewed_fit_success'] and entry.get('frequencies') is not None:
+                    try:
+                        entry['skewed_model_mag'] = fitting.s21_skewed(
+                            entry['frequencies'], p['fr'], p['Qr'], p['Qcre'], p['Qcim'], p['A'])
+                    except Exception as e:
+                        print(f"Warning: no skewed model for resonance {k}: {e}", file=sys.stderr)
+        if nonlinear:
+            # parallel=False: this already runs one chunk per worker.
+            fits = fitting_nonlinear.fit_nonlinear_iq_multisweep(
+                dict(out), fit_nonlinearity=True, n_extrema_points=5, verbose=False, parallel=False)
+            for k, entry in out.items():
+                if k not in fits:
+                    continue
+                entry.update(fits[k])
+                entry.setdefault('nonlinear_fit_success', False)
+                p = entry.get('nonlinear_fit_params') or {}
+                if entry['nonlinear_fit_success'] and p and entry.get('frequencies') is not None:
+                    try:
+                        entry['nonlinear_model_iq'] = fitting_nonlinear.nonlinear_iq(
+                            entry['frequencies'], p['fr'], p['Qr'], p['amp'], p['phi'],
+                            p['a'], p['i0'], p['q0'])
+                    except Exception as e:
+                        print(f"Warning: no nonlinear model for resonance {k}: {e}", file=sys.stderr)
+    except Exception as e:
+        traceback.print_exc(file=sys.stderr)
+        for entry in out.values():
+            entry['fitting_error'] = str(e)
+    return out

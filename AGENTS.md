@@ -103,9 +103,12 @@ self.run_python_then(
 ```
 The rules:
 - A cell is flat calls with literal values, written with `repr`. No
-  loops, comprehensions or helper expressions: if a panel needs a loop
-  or a `gather`, that orchestration belongs in the algorithm (as
-  `take_netanal` takes a module list), and the cell stays one call.
+  loops or comprehensions: if a panel needs a loop or a `gather`, that
+  orchestration belongs in the algorithm (as `take_netanal` takes a
+  module list), and the cell stays one call. An argument may be a plain
+  function of a result already named in the session, such as
+  `center_frequencies=bias_frequencies(multisweep_0[(0.001, 'upward')])`,
+  which is how one step feeds the next without pasting its numbers.
 - Values are plain Python where they are produced. A numpy scalar
   renders as `np.float64(...)` and fails in the cell; convert at the
   source, not in the f-string.

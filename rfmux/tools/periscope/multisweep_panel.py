@@ -638,7 +638,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         if num_amplitudes > 0:
             # Initial message showing what's about to happen
-            # When sweep_direction is "both", MultisweepTask does upward first
+            # When sweep_direction is "both", the launcher runs upward first
             # Normalize sweep_direction to handle potential case or whitespace issues
             sweep_direction_norm = sweep_direction.lower().strip() if sweep_direction else ""
             
@@ -1120,13 +1120,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # If we have a parent, look for multisweep tasks related to this window
         window_has_active_tasks = False
         
-        # If parent has multisweep_tasks, check if any are for this window
-        if hasattr(parent, 'multisweep_tasks'):
-            for task_key, task in parent.multisweep_tasks.items(): # type: ignore
-                if hasattr(task, 'target_window') and task.target_window == self:
-                    if not task.is_completed():
-                        window_has_active_tasks = True
-                        break
+        for run in getattr(parent, 'multisweep_tasks', {}).values():
+            if run['window'] is self and any(not f.done() for f in run['futures']):
+                window_has_active_tasks = True
+                break
                         
         # Hide the progress group if there are no active tasks and progress is at 100%
         if not window_has_active_tasks and self.progress_bar.value() == 100:
@@ -1330,7 +1327,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             section_frequencies_from_dialog = list(new_params_from_dialog.get('resonance_frequencies', []))
 
             # --- Determine the final input CFs for the new sweep task ---
-            # This list will be passed to the MultisweepTask as its baseline.
+            # This list will be the baseline of the first sweep cell.
             # The task itself will then refine this per amplitude.
             final_baseline_cfs_for_new_task = list(self.conceptual_section_frequencies)
 
@@ -1367,9 +1364,8 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             # linger in initial_params.
             if new_params_from_dialog.get('use_fit_frequencies') and fit_table \
                     and new_amps_for_this_run:
-                from .tasks import fit_frequencies_for
-                final_baseline_cfs_for_new_task = fit_frequencies_for(
-                    new_amps_for_this_run[0], fit_table)
+                nearest = min(fit_table, key=lambda a: abs(a - new_amps_for_this_run[0]))
+                final_baseline_cfs_for_new_task = list(fit_table[nearest])
                 new_params_from_dialog['fit_frequencies_by_amp'] = fit_table
             else:
                 new_params_from_dialog['fit_frequencies_by_amp'] = None

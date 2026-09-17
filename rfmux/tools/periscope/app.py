@@ -48,7 +48,7 @@ import concurrent.futures
 
 from .console_kernel import Interpreter
 from .tasks import *  # Provides: worker thread classes (UDPReceiver, IQTask, PSDTask,
-                       # MultisweepTask, etc.)
+                       # BiasKidsTask, PulseCaptureTask, etc.)
                        # and their associated signal classes (IQSignals, PSDSignals, etc.).
 
 from .ui import *     # Provides: dialog classes (NetworkAnalysisDialog, InitializeCRSDialog, etc.)
@@ -237,16 +237,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Start the UDP packet receiver thread (UDPReceiver from .tasks).
         self._init_receiver()
 
-        # Measure df calibrations from startup, off the GUI thread, so
-        # the window is up and streaming while the sweep runs.  Mock
-        # mode only -- see _start_df_calibration.  The launcher
-        # measures them behind its build window for large arrays and
-        # hands the rows in instead.
         self._df_cal_future = None
-        if tuning is None:
-            self._start_df_calibration(self.module)
-        elif tuning:
-            self._handle_tuning_ready(self.module, dict(tuning))
 
         # Initialize a QThreadPool for managing concurrent tasks (QThreadPool from .utils).
         # Used for network analysis, PSD calculations, etc.
@@ -261,7 +252,17 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Construct the main user interface.
         self._build_ui(chan_str) # Pass chan_str for initial display in QLineEdit
-        
+
+        # Measure df calibrations from startup as a session cell, now that
+        # the console exists, so the window is up and streaming while the
+        # sweep runs. Mock mode only -- see _start_df_calibration. The
+        # launcher measures them behind its build window for large arrays
+        # and hands the rows in instead.
+        if tuning is None:
+            self._start_df_calibration(self.module)
+        elif tuning:
+            self._handle_tuning_ready(self.module, dict(tuning))
+
         # Create the main plot panel in its dock
         self._add_plot_container(None)  # Layout not needed, using dock
         
@@ -329,11 +330,11 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # CRS (Control and Readout System) Initialization signals.
         
         # Multisweep analysis signals and tracking.
-        # MultisweepSignals and MultisweepTask are from .tasks.
+        # MultisweepSignals is from .tasks.
         self.multisweep_signals = MultisweepSignals()
         self.multisweep_windows: Dict[str, Dict] = {} # Stores multisweep window instances
         self.multisweep_window_count: int = 0        # Counter for unique multisweep window_ids
-        self.multisweep_tasks: Dict[str, MultisweepTask] = {} # Stores active Multisweep tasks
+        self.multisweep_tasks: Dict[str, dict] = {} # Running multisweeps: {'window', 'futures'}, by window/module
 
         # Pulse capture panels (live pulse detection docks)
         self.pulse_capture_windows: Dict[str, Dict] = {}
@@ -568,7 +569,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         # Add interactive console dock
         self._add_interactive_console_dock()
-        
+
         # Add session menu
         self._create_session_menu()
         

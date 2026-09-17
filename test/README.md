@@ -139,9 +139,9 @@ process group). `test/test_fastrx_file.py`,
 `test/pulse_capture/test_overlay.py` skip at collection unless the fastrx
 extension was built. That needs Linux with clang, libxdp, libbpf and
 liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
-`test/tools/test_parser_dirfile.py` skips unless pygetdata is installed
-(`uv pip install -e .[dirfile]`, with libgetdata on the system). With fastrx
-built and the test and dirfile groups installed, every tier below
+`test/tools/test_parser_dirfile.py` skips unless pygetdata is installed:
+it is a default dependency everywhere but Linux aarch64, which has no
+pygetdata wheel. With fastrx built and the test group installed, every tier below
 `hardware` reports zero skips on Linux.
 
 ## CI

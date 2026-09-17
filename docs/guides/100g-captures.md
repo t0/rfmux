@@ -11,9 +11,7 @@ aligned fast and slow data. This guide is how to use it: the dialog, the
 command line, what the run does, and the viewer.
 
 Needs: Linux with the fastrx extension built (clang, libxdp, libbpf and
-liburing at install time), a 100G NIC on the channel-stream network, and
-pygetdata for the parser dirfile (`uv pip install -e .[dirfile]`, with
-libgetdata on the system).
+liburing at install time) and a 100G NIC on the channel-stream network.
 
 ## 1. Before the first run
 

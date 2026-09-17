@@ -279,7 +279,7 @@ async def record_streams(
     # Requirements, before the board is touched or a file written.
     if parser and importlib.util.find_spec("pygetdata") is None:
         raise RuntimeError("the parser dirfile needs pygetdata: "
-                           "uv pip install -e .[dirfile]")
+                           "uv pip install pygetdata")
     fastrx_channels = 0
     fx = None
     if fastrx:

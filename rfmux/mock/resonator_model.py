@@ -43,6 +43,13 @@ class MockResonatorModel:
     This class now exclusively uses persistent MR_LEKID objects to avoid memory leaks
     and provide resonator physics simulation.
     """
+    #: Fraction of the edge frequency kept clear of targets at either
+    #: end of the requested range, half a target spacing at most.
+    RANGE_PAD = 0.01
+    #: Times a resonator's capacitor variation is drawn again for
+    #: landing outside the range, before it takes its target C.
+    RANGE_REDRAWS = 8
+
     def __init__(self, mock_crs):
         """
         Initialize the resonator model.
@@ -414,12 +421,26 @@ class MockResonatorModel:
         # until the actual resonance frequency matches the target.
         print(f"Generating {num_resonances} resonators from {freq_start/1e9:.2f} GHz to {freq_end/1e9:.2f} GHz")
         
-        # Determine bounds for frequency correction
+        # Every resonator lands inside the requested range.  The targets
+        # keep RANGE_PAD of the edge frequency clear at either end, or
+        # half a target spacing when that is less (a dense array keeps
+        # its range), because the capacitor variation scatters each
+        # resonator about its target; one that still lands outside has
+        # its variation drawn again.
         f_min_bound = min(freq_start, freq_end)
         f_max_bound = max(freq_start, freq_end)
-        
-        # Tolerance for frequency convergence (0.1% of target)
+        span = f_max_bound - f_min_bound
+        half_spacing = span / (2 * max(num_resonances, 1))
+        target_lo = f_min_bound + min(self.RANGE_PAD * f_min_bound, half_spacing)
+        target_hi = f_max_bound - min(self.RANGE_PAD * f_max_bound, half_spacing)
+
+        # Tolerance for frequency convergence: 0.1% of target, and well
+        # inside the padding when the range is narrow.
         freq_tolerance_fraction = 0.001
+        if span > 0:
+            freq_tolerance_fraction = min(
+                freq_tolerance_fraction,
+                0.5 * (target_lo - f_min_bound) / f_max_bound)
         max_c_iterations = 20  # Maximum iterations for C-finding
         
         for x in range(num_resonances):
@@ -430,7 +451,7 @@ class MockResonatorModel:
                 if num_resonances == 1:
                     target_freq = (freq_start + freq_end) / 2  # Middle frequency
                 else:
-                    target_freq = freq_start + (freq_end - freq_start) * x / (num_resonances - 1)
+                    target_freq = target_lo + (target_hi - target_lo) * x / (num_resonances - 1)
                 
                 # Apply Cc variation using dedicated RNG (doesn't change during iteration)
                 Cc_actual = Cc_base * (1 + variation_rng.normal(0, Cc_variation))
@@ -529,15 +550,20 @@ class MockResonatorModel:
                 # Use the best result we found
                 complex_res_params['C'] = best_C
                 
-                # Apply C variation using dedicated RNG now that we have the target C
-                C_with_variation = best_C * (1 + variation_rng.normal(0, C_variation))
-                C_with_variation = max(C_with_variation, best_C * 0.5)  # At least 50% of target
-                complex_res_params['C'] = C_with_variation
-                
-                # Final resonator creation with variation applied
-                complex_res = MR_complex_resonator(**complex_res_params)
-                lekid = complex_res.lekid
-                actual_freq = lekid.compute_fr()
+                # Apply C variation using dedicated RNG now that we have the
+                # target C, drawing again while the resonator lands outside
+                # the requested range; the last try is the target C itself.
+                for attempt in range(self.RANGE_REDRAWS + 1):
+                    C_with_variation = best_C
+                    if attempt < self.RANGE_REDRAWS:
+                        C_with_variation *= 1 + variation_rng.normal(0, C_variation)
+                    C_with_variation = max(C_with_variation, best_C * 0.5)  # At least 50% of target
+                    complex_res_params['C'] = C_with_variation
+                    complex_res = MR_complex_resonator(**complex_res_params)
+                    lekid = complex_res.lekid
+                    actual_freq = lekid.compute_fr()
+                    if span == 0 or f_min_bound <= actual_freq <= f_max_bound:
+                        break
 
                 print(f"  Actual frequency: {actual_freq/1e9:.4f} GHz")
                 print(f"  Circuit: C={lekid.C*1e12:.3f} pF, Cc={lekid.Cc*1e15:.2f} fF, Lg={lekid.Lg*1e9:.2f} nH, Lk={lekid.Lk*1e9:.2f} nH")

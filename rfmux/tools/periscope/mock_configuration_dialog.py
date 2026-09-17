@@ -146,7 +146,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_start_spin.setRange(0.001, 100.0)
         self.freq_start_spin.setSingleStep(0.001)
         self.freq_start_spin.setDecimals(3)
-        self.freq_start_spin.setToolTip("Start frequency for resonance generation [GHz]")
+        self.freq_start_spin.setToolTip(
+            "Lowest frequency a generated resonance can have [GHz].  The "
+            "resonances are spread over the range, up to 1% inside either "
+            "end.")
         layout.addWidget(self.freq_start_spin, row, 3)
 
         row += 1
@@ -155,7 +158,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.freq_end_spin.setRange(0.001, 100.0)
         self.freq_end_spin.setSingleStep(0.001)
         self.freq_end_spin.setDecimals(3)
-        self.freq_end_spin.setToolTip("End frequency for resonance generation [GHz]")
+        self.freq_end_spin.setToolTip(
+            "Highest frequency a generated resonance can have [GHz].  The "
+            "resonances are spread over the range, up to 1% inside either "
+            "end.")
         layout.addWidget(self.freq_end_spin, row, 1)
 
         # Random seed (optional)

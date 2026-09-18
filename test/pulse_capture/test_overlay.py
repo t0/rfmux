@@ -25,11 +25,6 @@ from rfmux.pulse_capture.overlay import (
     pulse_overlay, slow_shift_s)
 from test.fastrx_bytes import file_header, record, seconds_ts, write
 
-pytestmark = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="with these in the run, the Windows quick tier ends in an access "
-           "violation between two later tests; not yet understood")
-
 FS = decimation_to_sampling(6)                    # 596 Hz slow stream
 LATE = decimated_stream_delay_s(sampling_to_decimation(FS))
 T0 = 43000.0
@@ -176,6 +171,9 @@ def test_correlation_lag_reads_a_known_offset():
 
 
 def _dirfile(tmp_path, channel=CHANNEL, dec_stage=True):
+    if sys.platform == "win32":
+        pytest.skip("a dirfile written here leaves the Windows quick tier to "
+                    "end in an access violation; not yet understood")
     """The event as the parser writes it: long packets stamped late by
     the board, dec stage 6, so the timebase is corrected as written.
     Without *dec_stage*, as an older parser wrote it: the raw stamps

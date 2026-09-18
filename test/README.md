@@ -152,7 +152,10 @@ pygetdata wheel. Two tests skip on Windows:
 `rfmux record` starts its parser as an asyncio subprocess, which the selector
 event loop used there does not support, and
 `test/mock/test_server_exits_with_parent.py`, which kills its client with
-`SIGKILL`. With fastrx built and the test group installed, every tier below
+`SIGKILL`. `test/pulse_capture/test_overlay.py` skips on Windows as a whole:
+with it in the run the Windows quick tier ends in an access violation between
+two later, unrelated tests. The cause is not found; the module's note says
+what is known. With fastrx built and the test group installed, every tier below
 `hardware` reports zero skips on Linux.
 
 ## CI

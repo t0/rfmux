@@ -6,8 +6,6 @@ The files are built byte by byte (``test/fastrx_bytes.py``), so these pin
 the on-disk format rather than whatever a writer happens to emit.
 """
 
-import sys
-
 import numpy as np
 import pytest
 

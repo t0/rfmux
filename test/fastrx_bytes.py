@@ -2,6 +2,7 @@
 so the tests that read one pin the on-disk format itself (see
 rfmux/streamer/include/fastrx.h).  No extension, no daemon, no NIC."""
 
+import itertools
 import struct
 
 import numpy as np
@@ -99,7 +100,13 @@ def record(channels: int, seq: int, *, snapshot=None, serial=42, ts=None,
     return rec.ljust(stride_for(channels), b"\0")
 
 
-def write(tmp_path, chunks, name="capture.fastrx"):
-    path = tmp_path / name
+_written = itertools.count()
+
+
+def write(tmp_path, chunks, name=None):
+    """The chunks as a file under *tmp_path*, named uniquely unless
+    *name* is given: a reader keeps a recording memory-mapped, and
+    Windows will not let a mapped file be written again."""
+    path = tmp_path / (name or f"capture{next(_written)}.fastrx")
     path.write_bytes(b"".join(chunks))
     return str(path)

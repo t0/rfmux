@@ -192,7 +192,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             elif plot_type == 'bias':
                 _plot_bifurcation(plot_item, traces, amplitude_to_color,
                                   pen_color, bias, bias_settings or {}, labels)
-                plot_item.setLabel('left', 'IQ-speed change / threshold')
+                plot_item.setLabel('left', 'IQ-speed change (× threshold)')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'hysteresis':
                 _plot_hysteresis(plot_item, traces, amplitude_to_color, pen_color,
@@ -703,16 +703,10 @@ def _bar_kind(prominence_bar: float, noise_bar: float) -> str:
 
 
 def _bar_legend(plot_item, pen_color, binding_kinds: set, lower_kinds: set) -> None:
-    """Name the threshold and its shading, and the gate that did not bind.
-
-    One entry per bar, drawn as the line with its band under it, because on the
-    plot the two are one thing: the line is where the threshold is and the
-    shading is everything under it, which is the half of the reading that says
-    "no spike here".
-    """
+    """Label the prominence reference and the smaller selected-drive gate."""
     named = (next(iter(binding_kinds)) if len(binding_kinds) == 1
              else "Larger")
-    legend_key(plot_item, f"{named} threshold (±1)",
+    legend_key(plot_item, f"±1 × {named.lower()} prominence threshold",
                pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
     if lower_kinds:
         lower = next(iter(lower_kinds)) if len(lower_kinds) == 1 else "Lower"

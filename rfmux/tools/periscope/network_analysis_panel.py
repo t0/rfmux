@@ -131,8 +131,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # Add/Subtract mode
         self.edit_resonances_cb = QtWidgets.QCheckBox("Add/Subtract Resonances")
         self.edit_resonances_cb.setToolTip(
-            "When enabled, double-click adds a resonance;\n"
-            "Shift + double-click removes the nearest resonance."
+            "Double-click to add; Shift-double-click to remove a resonance."
         )
         self.edit_resonances_cb.toggled.connect(self._toggle_resonance_edit_mode)
         toolbar_global_layout.addWidget(self.edit_resonances_cb)
@@ -141,9 +140,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Magnitudes")
         self.normalize_checkbox.setChecked(False)
         self.normalize_checkbox.setToolTip(
-            "Divide the measurement by the amplitude it was swept at, so the "
-            "curve is a transmission rather than a received power. Volts and "
-            "dB need the module's DAC scale; counts do not.")
+            "Divide the trace by its drive amplitude to show transmission.")
         self.normalize_checkbox.toggled.connect(self._toggle_normalization)
         toolbar_global_layout.addWidget(self.normalize_checkbox)
 
@@ -177,7 +174,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
         # Unwrap Cable Delay button
         unwrap_button = QtWidgets.QPushButton("Unwrap Cable Delay")
-        unwrap_button.setToolTip("Fit phase slope, calculate cable length, and apply compensation for the active module.")
+        unwrap_button.setToolTip("Fit and compensate cable delay for the active module.")
         unwrap_button.clicked.connect(self._unwrap_cable_delay_action)
         toolbar_module_layout.addWidget(unwrap_button)
 

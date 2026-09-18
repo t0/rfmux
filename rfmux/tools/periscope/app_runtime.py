@@ -1155,11 +1155,7 @@ class PeriscopeRuntime:
                 f"| Loss: {net_percent:.1f}% missed, "
                 f"{gui_percent:.1f}% dropped")
             self.packet_loss_label.setToolTip(
-                "missed — never reached the receiver: the network, the "
-                "kernel UDP buffer, or this process starving the "
-                "receive thread\n"
-                "dropped — reached the receiver, discarded because "
-                "Periscope could not draw it fast enough")
+                "Missed: not received. Dropped: received but not drawn.")
 
             self.dropped_label.setText(
                 f"| Lost: {missing:,} missed / {qdrops:,} dropped")

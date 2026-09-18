@@ -19,10 +19,8 @@ from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
-from ...pulse_capture.events import NoiseSampler
 from ...pulse_capture.detection import (
     EDGE_LOOKBACK_FRACTION,
-    END_CONFIRM_FRACTION,
 )
 
 
@@ -81,15 +79,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.threshold_spin.setSingleStep(0.5)
         self.threshold_spin.setValue(config.threshold_sigma)
         self.threshold_spin.setToolTip(
-            "How significant an event must be, used by BOTH trigger "
-            "tests:\n"
-            "• amplitude — EITHER I or Q deviates this many σ from "
-            "baseline, and\n"
-            "• edge — the deviation GREW by this many jump-σ within "
-            "the edge lookback.\n"
-            "The edge test compares two raw samples, so the baseline "
-            "cancels out of it: slow 1/f wander that drifts across the "
-            "amplitude band cannot fake it.")
+            "Significance required by both the amplitude and edge triggers.")
         form.addRow("Threshold σ:", self.threshold_spin)
 
         self.max_pulse_spin = QtWidgets.QDoubleSpinBox()
@@ -110,11 +100,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.pre_pulse_spin.setToolTip(
             "Time saved before the trigger, at least 2 samples.")
         self.post_pulse_spin.setToolTip(
-            "Time saved after the pulse settled.\n\n"
-            "The capture is released once this much has arrived after "
-            "the settled sample.  The end confirmation runs at least "
-            "this long, and the channel cannot trigger again within it.  "
-            "A pulse arriving inside it is a pileup.")
+            "Time saved after the pulse settles.")
         form.addRow("Pre-pulse time (ms):", self.pre_pulse_spin)
         form.addRow("Post-pulse time (ms):", self.post_pulse_spin)
 
@@ -124,29 +110,13 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.coincidence_spin.setSpecialValueText("off")
         self.coincidence_spin.setValue(config.coincidence_window_ms)
         self.coincidence_spin.setToolTip(
-            "Pulses on any channels that trigger within this of an "
-            "event's first trigger are recorded as one event.  The "
-            "pulses are stored under their channels either way; the "
-            "events index them, and the pulse list can be grouped by "
-            "either.\n\n"
-            "Off records no coincident events.  The pulse list can still "
-            "group a capture by events afterwards, from the trigger "
-            "times.\n"
-            "In both mode a channel's share of an event is its pair, "
-            "whichever of the two streams triggered.")
+            "Group channel triggers within this interval as one event.")
         form.addRow("Coincidence window (ms):", self.coincidence_spin)
         self.dump_check = QtWidgets.QCheckBox(
             "Save every channel with each event")
         self.dump_check.setChecked(config.dump_all_channels)
         self.dump_check.setToolTip(
-            "With each event, also save the same span of every channel "
-            "that did not trigger, from both streams in both mode.  "
-            "Only a capture can do this: those samples are gone once the "
-            "ring buffer moves on.  rfmux record adds the 100G recording "
-            "over the same span when it merges.\n\n"
-            "With the coincidence window off, each pulse is an event of "
-            "its own, unless two channels trigger on the same sample.  "
-            "The file grows by the untriggered channels for every event.")
+            "Also save untriggered channels over each event's time span.")
         form.addRow(self.dump_check)
 
         self.noise_capture_spin = QtWidgets.QDoubleSpinBox()
@@ -155,17 +125,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.noise_capture_spin.setSpecialValueText("off")
         self.noise_capture_spin.setValue(config.noise_capture_interval_s)
         self.noise_capture_spin.setToolTip(
-            "Take noise samples: every channel over one window, at random "
-            "moments, whether or not a pulse is present, for the "
-            "statistics of the noise.  Each is an event tagged as a noise "
-            "sample; a pulse that happens to fall inside one is listed "
-            "with it.\n\n"
-            "The waits between samples are normally distributed about this "
-            f"many seconds, {NoiseSampler.JITTER:.0%} of it wide.  A sample "
-            "is as long as a typical pulse record: the median of the "
-            f"latest {NoiseSampler.RECORDS_KEPT} saved.  Until "
-            f"{NoiseSampler.MIN_RECORDS} records have been saved it is the "
-            "pre-pulse time plus the max pulse plus the post-pulse time.")
+            "Average interval between normally distributed noise samples.")
         form.addRow("Noise sample every (s):", self.noise_capture_spin)
 
         # The 1/f window is its own time scale, seconds whatever the
@@ -179,21 +139,11 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             f"derived ({PulseCaptureConfig.NOISE_TRAIN_PULSES}× max pulse)")
         self.window_spin.setValue(config.noise_train_ms)
         self.window_spin.setToolTip(
-            "The record the noise level (sigma) is fitted from, and the "
-            "span the rolling baseline median covers.  It must be long "
-            "compared with any pulse and with the 1/f knee, so it is "
-            "seconds whatever the pulse length.  Below "
-            f"{PulseCaptureConfig.MIN_WINDOW_MS / 1e3:g} s the baseline is "
-            "refreshed often enough to fall behind the stream at many "
-            "channels.\n"
-            "Robust estimators tolerate pulses in the window.  0 derives "
-            f"it as {PulseCaptureConfig.NOISE_TRAIN_PULSES}× the max pulse.")
+            "Window used to estimate noise and the rolling baseline; 0 derives it.")
         form.addRow("1/f window (ms):", self.window_spin)
         self.noise_label = QtWidgets.QLabel()
         self.noise_label.setToolTip(
-            "The window as the capture will use it at this rate: the "
-            "record is memory-bounded on the PFB stream and floored "
-            "against the ring buffer.")
+            "Effective noise window at the current sample rate.")
         form.addRow("Window at this rate:", self.noise_label)
 
         adv_box = QtWidgets.QGroupBox("Advanced")
@@ -212,15 +162,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.trigger_spin.setSpecialValueText("auto")
         self.trigger_spin.setValue(config.trigger_samples)
         self.trigger_spin.setToolTip(
-            "Consecutive samples that must clear the threshold before a "
-            "capture starts.  auto keeps accidental triggers under "
-            "1/min per channel at this stream rate.\n"
-            "How much evidence one sample is depends entirely on the "
-            "rate: at 5σ noise alone crosses ~2.5 times per HOUR at "
-            "596 Hz but ~2.8 times per SECOND on the PFB stream.  "
-            "Forcing 2 everywhere would reject real pulses on a heavily "
-            "decimated slow stream, where a fast pulse spans less than "
-            "one sample.")
+            "Consecutive threshold crossings required; auto uses the stream rate.")
         adv.addRow("Trigger confirmation (samples):", self.trigger_spin)
 
         self.end_spin = QtWidgets.QDoubleSpinBox()
@@ -235,24 +177,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.min_end_spin.setRange(1, 100_000)
         self.min_end_spin.setValue(config.min_end_samples)
         self.min_end_spin.setToolTip(
-            "Floor under the end-confirmation count.\n\n"
-            "The end is decided by a leaky bucket: it fills by one for "
-            "each sample with BOTH quadratures inside the end band, "
-            "leaks by one for each sample outside it, and the capture "
-            "ends when it exceeds the largest of this floor, "
-            f"{END_CONFIRM_FRACTION:.0%} of the pulse's own length above "
-            "threshold, and the post-pulse time.  The leak is what "
-            "lets an isolated noisy sample pass without restarting the "
-            "count.\n\n"
-            "For a short pulse the floor is what ends it, so this sets "
-            "how long after the pulse settles the capture is released.  "
-            "The record itself ends the post-pulse time after the pulse "
-            "settled.  It is a "
-            "sample count: the same number is 17 ms at 596 Hz and 4 µs "
-            "on the PFB stream."
-            "\n\nAlso how far back the pileup test looks for the pulse's "
-            "own recent level: a rise of threshold sigma over this many "
-            "samples, after decay evidence, splits the capture.")
+            "Minimum settled-sample count for the end-confirmation bucket.")
         adv.addRow("End confirmation floor (samples):", self.min_end_spin)
 
         self.min_pulse_spin = QtWidgets.QDoubleSpinBox()
@@ -260,16 +185,13 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.min_pulse_spin.setDecimals(3)
         self.min_pulse_spin.setValue(config.min_pulse_ms)
         self.min_pulse_spin.setToolTip(
-            "Pulses shorter than this, trigger to settled, are discarded "
-            "as glitches (0 = keep everything)")
+            "Discard shorter pulses as glitches; 0 keeps all pulses.")
         adv.addRow("Min pulse (ms):", self.min_pulse_spin)
 
         self.pileup_check = QtWidgets.QCheckBox(
             "Split piled-up events (edge re-trigger)")
         self.pileup_check.setToolTip(
-            "A fresh edge arriving while the current pulse is decaying "
-            "splits the capture into separate events.  Uses the same "
-            "edge detector as the trigger.")
+            "Split a decaying pulse when a fresh trigger edge arrives.")
         self.pileup_check.setChecked(config.enable_pileup)
         adv.addRow(self.pileup_check)
 
@@ -287,24 +209,9 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             item = self.basis_combo.model().item(1)
             item.setEnabled(False)
             item.setToolTip(
-                "No df calibration for these channels.  Run a multisweep, "
-                "then Find Bias and Apply Bias (or find_bias_points and "
-                "apply_bias headlessly), then reopen these settings.")
+                "Unavailable until these channels have a df calibration.")
         self.basis_combo.setToolTip(
-            "What the threshold is applied to.\n\n"
-            "A pulse moves the resonance frequency, so it lies along one "
-            "direction in the IQ plane — set by the bias point and cable "
-            "delay, and unrelated to the I and Q axes.  Testing the raw "
-            "quadratures therefore tests an arbitrary basis: at 45 "
-            "degrees each one sees the pulse divided by root two while "
-            "carrying the full noise.  Rotating first puts the signal in "
-            "one axis.\n\n"
-            "Needs a df calibration from bias_kids.  Channels without "
-            "one cannot be rotated and stay on the quadratures.\n\n"
-            "This makes the calibration matter for detection, not just "
-            "for labelling an axis: a wrong one costs sensitivity.  It "
-            "also sets the units the capture is stored in — hertz once "
-            "rotated, volts otherwise.")
+            "Apply thresholds in raw I/Q or calibrated df/dissipation coordinates.")
         adv.addRow("Trigger basis:", self.basis_combo)
 
         # What each primary knob drives, at the actual stream rate —
@@ -313,19 +220,13 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self.pulse_derived_label = QtWidgets.QLabel()
         self.pulse_derived_label.setWordWrap(True)
         self.pulse_derived_label.setToolTip(
-            "The ring buffer, hard stop and edge lookback follow the max "
-            "pulse; the training record and the baseline median follow "
-            "the 1/f window, floored against the ring so the median never "
-            "runs in a span a pulse could dominate.")
+            "Derived buffer, timeout, lookback, and baseline time scales.")
         form.addRow("Time scales:", self.pulse_derived_label)
 
         self.sigma_derived_label = QtWidgets.QLabel()
         self.sigma_derived_label.setWordWrap(True)
         self.sigma_derived_label.setToolTip(
-            "Everything statistical derives from the threshold.  The "
-            "edge jump-σ itself is measured from the training record "
-            "at the lookback lag, so filter correlation and 1/f power "
-            "are priced in automatically.")
+            "Derived amplitude, edge, and pileup thresholds.")
         form.addRow("Threshold σ sets:", self.sigma_derived_label)
 
         self.status_label = QtWidgets.QLabel()

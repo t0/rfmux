@@ -179,8 +179,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         for method in BIFURCATION_METHODS:
             self.method_combo.addItem(method.capitalize(), method)
         self.method_combo.setToolTip(
-            "Derivative detects jumps in one sweep. Hysteresis compares "
-            "both directions. Both uses either test."
+            "Choose how bifurcation is detected."
         )
         self.method_combo.currentIndexChanged.connect(self._update_enabled)
         amplitude_form.addRow("Bifurcation test:", self.method_combo)
@@ -194,8 +193,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.prominence_spin.setDecimals(3)
         self.prominence_spin.setSingleStep(0.05)
         self.prominence_spin.setToolTip(
-            "Minimum spike prominence as a fraction of the arc-speed "
-            "range. Higher values detect fewer jumps."
+            "Spike prominence as a fraction of the arc-speed range."
         )
         derivative_form.addRow("Spike prominence factor:", self.prominence_spin)
 
@@ -205,8 +203,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.noise_gate_spin.setSingleStep(5.0)
         self.noise_gate_spin.setSpecialValueText("Off")
         self.noise_gate_spin.setToolTip(
-            "Minimum spike prominence relative to the estimated noise "
-            "floor. Higher values detect fewer jumps."
+            "Spike prominence as a multiple of the estimated noise floor."
         )
         derivative_form.addRow("Noise gate factor:", self.noise_gate_spin)
         layout.addWidget(self.derivative_group)
@@ -220,9 +217,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.discrepancy_spin.setDecimals(3)
         self.discrepancy_spin.setSingleStep(0.01)
         self.discrepancy_spin.setToolTip(
-            "Allowed difference between sweep directions, relative to dip "
-            "depth or IQ loop radius. Higher values allow more "
-            "difference."
+            "Allowed up/down difference in dip depths or loop radii."
         )
         hysteresis_form.addRow("Max discrepancy:", self.discrepancy_spin)
 
@@ -254,8 +249,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         for direction in ("upward", "downward"):
             self.direction_combo.addItem(direction.capitalize(), direction)
         self.direction_combo.setToolTip(
-            "Sweep direction used for bias frequency and calibration. "
-            "Automatic prefers upward."
+            "Sweep direction used for bias frequency and calibration."
         )
         frequency_form.addRow("Measured on:", self.direction_combo)
         layout.addWidget(frequency_group)
@@ -263,8 +257,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         distance_group = QtWidgets.QGroupBox("How far the tone may move")
         distance_layout = QtWidgets.QGridLayout(distance_group)
         distance_group.setToolTip(
-            "Beyond this distance from the sweep centre, keep the tone at "
-            "the centre and flag the result."
+            "Limit how far the bias may move from the sweep centre."
         )
 
         self._distance_radios = {
@@ -286,8 +279,7 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.fraction_spin.setDecimals(3)
         self.fraction_spin.setSingleStep(0.01)
         self.fraction_spin.setToolTip(
-            "Distance limit as a fraction of the full sweep span. "
-            "0.25 allows a quarter-span shift.")
+            "Distance limit as a fraction of the full sweep span.")
 
         distance_layout.addWidget(self._distance_radios["none"], 0, 0, 1, 2)
         distance_layout.addWidget(self._distance_radios["absolute"], 1, 0)

@@ -173,8 +173,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
         plot.setTitle("Resonant frequency", color=self._foreground())
         plot.setLabel("bottom", "Frequency rank")
         plot.setLabel("left", "fr", units="MHz")
-        plot.setToolTip("Sorted fitted frequencies; colour shows Qr on a linear "
-                        "scale. Missing or non-finite Qr uses the foreground colour.")
+        plot.setToolTip("Sorted fitted frequencies, coloured by Qr.")
 
     def _draw_histogram(self, plot, rows: list, param: str, log_edges) -> None:
         """One parameter binned, one outline per drive amplitude.

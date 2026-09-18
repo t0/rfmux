@@ -111,8 +111,7 @@ class FitDisplayToolbar(QtWidgets.QWidget):
 
         self.model_combo = QtWidgets.QComboBox()
         self.model_combo.setToolTip(
-            "Which fitted model is drawn. One at a time, so a plot shows one "
-            "model's answer rather than three overlaid")
+            "Choose which fitted model is drawn.")
         self.model_combo.setEnabled(False)
         layout.addWidget(labelled("Fit:", self.model_combo))
 
@@ -122,9 +121,7 @@ class FitDisplayToolbar(QtWidgets.QWidget):
 
         self.amplitude_combo = QtWidgets.QComboBox()
         self.amplitude_combo.setToolTip(
-            "Which sweeps are drawn: all of them, one amplitude step of the "
-            "schedule, or -- once a bias has been found -- each resonator at "
-            "the step it is biased at")
+            "Choose which drive amplitudes are drawn.")
         if self._all_amplitudes:
             self.amplitude_combo.addItem("All amplitudes", ALL_AMPLITUDES)
         else:

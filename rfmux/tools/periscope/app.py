@@ -387,7 +387,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create toolbar widgets
         self.e_ch = QtWidgets.QLineEdit(chan_str)
         self.e_ch.setMaximumWidth(40)
-        self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
+        self.e_ch.setToolTip("Comma-separated channels; join channels in one row with '&'.")
         self.e_ch.returnPressed.connect(self._update_channels)
 
         self.e_buf = QtWidgets.QLineEdit(str(self.N))
@@ -470,14 +470,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         self.btn_pulse_capture = QtWidgets.QPushButton("Pulse Capture")
         self.btn_pulse_capture.setToolTip(
-            "Open a live pulse capture panel: slow stream, PFB stream, or "
-            "both with pair matching")
+            "Open live pulse capture for the slow stream, PFB stream, or both.")
         self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
 
         self.btn_streamer_cfg = QtWidgets.QPushButton("Streamer Config")
         self.btn_streamer_cfg.setToolTip(
-            "Configure the slow streamer (decimation, short/long packets, "
-            "modules) and the fast PFB streamer, with live bandwidth math")
+            "Configure the slow and PFB streamers.")
         self.btn_streamer_cfg.clicked.connect(
             self._show_streamer_config_dialog)
         if self.crs is None and self.host != "OFFLINE":
@@ -496,7 +494,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
             
             self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
-            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
+            self.btn_qp_pulses.setToolTip("Cycle mock pulses through off, periodic, and random modes.")
             self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
             self.qp_pulse_mode = 'none'
 
@@ -696,12 +694,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.spin_segments.setRange(1, 256)      # Number of segments for averaging
         self.spin_segments.setValue(1)           # Default to 1 (no averaging)
         self.spin_segments.setMaximumWidth(80)
-        self.spin_segments.setToolTip("Number of segments for Welch PSD averaging (more segments = smoother floor, less resolution).")
+        self.spin_segments.setToolTip("Welch segments; more smooths the PSD but reduces resolution.")
 
         # Binning controls
         self.cb_exp_binning = QtWidgets.QCheckBox("Exponential bins")
         self.cb_exp_binning.setChecked(False)  # Default to off
-        self.cb_exp_binning.setToolTip("Apply exponential binning to PSD plots. This is a visual aid and is not statistically rigorous.")
+        self.cb_exp_binning.setToolTip("Apply display-only exponential binning to PSD plots.")
         
         self.spin_bins = QtWidgets.QSpinBox()  # Spinbox for number of bins
         self.spin_bins.setRange(10, 5000)      # Reasonable range for bins
@@ -743,13 +741,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Checkbox for zoom box mode vs. pan mode on plots
         self.cb_zoom_box = QtWidgets.QCheckBox("Zoom Box Mode", checked=True)
-        self.cb_zoom_box.setToolTip("Enable: Left-click drag creates a zoom box.\nDisable: Left-click drag pans the plot.")
+        self.cb_zoom_box.setToolTip("Checked: drag to zoom. Unchecked: drag to pan.")
         self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
         layout.addWidget(self.cb_zoom_box)
 
         # Checkbox for auto-scaling plots (excluding TOD)
         self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
-        self.cb_auto_scale.setToolTip("Enable/disable auto-ranging for IQ, FFT, SSB, and DSB plots. Can improve display performance when disabled.")
+        self.cb_auto_scale.setToolTip("Automatically range IQ and spectrum plots.")
         self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
         layout.addWidget(self.cb_auto_scale)
         return group_box
@@ -805,16 +803,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Add simulation speed label for mock mode
         if self.is_mock_mode:
             self.sim_speed_label = QtWidgets.QLabel()
-            self.sim_speed_label.setToolTip("Simulation speed relative to real-time\n>1.0x = faster than real-time\n<1.0x = slower than real-time")
+            self.sim_speed_label.setToolTip("Simulation speed relative to real time.")
         
         self.packet_loss_label = QtWidgets.QLabel()
         self.dropped_label = QtWidgets.QLabel()
         self.streaming_info_label = QtWidgets.QLabel()
         self.streaming_info_label.setToolTip(
-            "Current streaming configuration:\n"
-            "  Dec Stage: decimation stage (0-6)\n"
-            "  Fs: effective sampling frequency\n"
-            "  Short/Long: packet mode (128 or 1024 channels)"
+            "Current decimation, sample rate, and packet mode."
         )
         self.info_text = WrappingLabel()
 
@@ -839,8 +834,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Display the help dialog with usage instructions and tips.
         """
         # `QtWidgets`, `QtCore` are from .utils.
-        msg = QtWidgets.QMessageBox(self)
-        msg.setWindowTitle("Periscope Help")
         help_text = (
             "# Periscope Help\n\n"
             
@@ -950,8 +943,74 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "\n"
             "If you are still seeing dropped packets due to UDP overflows in machines with limited UDP buffer sizes (such as OSX and Windows), it can help to reduce the periscope plotting buffer size, or number of plots.\n"            
         )
+        self._show_help_text("Periscope Help", help_text)
+
+    def _show_bias_plot_help(self) -> None:
+        self._show_help_text("Bias plot guide", """
+# Bias plot guide
+
+Find Bias chooses a drive amplitude and a tone frequency for each resonator.
+Use these three Multisweep tabs to inspect the evidence for those choices.
+
+## Bias: derivative — look for an abrupt jump
+
+A smooth resonance moves smoothly through the IQ plane as frequency changes.
+A sudden jump can indicate bifurcation. This test looks for a positive spike
+followed by a negative spike within two samples in the change in IQ speed.
+Both spikes must have enough prominence (height above their surrounding base).
+Either sweep direction can supply the pair.
+
+**Vertical scale:** each curve is the point-to-point change in normalized IQ
+speed divided by that curve's prominence threshold. I and Q are first scaled
+by their own ranges before calculating speed (distance per hertz).
+The plotted ratio has no units. A value of +1 means an increase equal to one
+threshold; −1 means a decrease of the same size. +2 means twice the threshold.
+
+**Solid lines and shading:** ±1 mark one threshold on either side of zero.
+The threshold is the larger of the spike setting times the speed range and
+the noise gate setting times the estimated noise in the speed changes.
+The legend names which sets the threshold, or says “larger” if it varies
+between curves. Each curve uses its own threshold, so different drives
+can be compared on this scale.
+
+These are reference lines, not a pass/fail band: crossing a line alone does
+not establish bifurcation, and staying inside the shading does not guarantee
+a pass. The detector checks spike prominence relative to the surrounding
+base, not height from zero, and requires the positive/negative pair.
+
+**Faint lines:** the smaller threshold at the selected drive, expressed on
+the same scale. The selected drive is drawn with thicker curves; the drive
+colors are identified by the colorbar or legend. Apply changes in Find Bias
+Settings to redraw the derivative plot with those thresholds.
+
+## Bias: hysteresis — compare the sweep directions
+
+This test checks whether upward and downward sweeps follow different paths
+at the same drive. Both directions are required. The plot shows their
+separation divided by the allowed separation: values above 1 trigger this
+test. If the allowed separation is zero, the plot shows separation directly
+and any value above zero triggers the test. Each curve is one drive; the
+selected drive is thicker.
+
+The magnitude comparison measures separation in units of the upward sweep's
+dip depth. The IQ comparison measures complex separation in loop radii and
+can also respond to phase or frequency drift. Choose the comparison and
+allowed separation in Find Bias Settings.
+
+## Bias: frequency — inspect where the tone goes
+
+At the selected drive, the plot shows IQ arc speed (response change per
+hertz), with dI/df and dQ/df as thin green and red curves. The IQ derivative
+frequency method chooses the largest arc speed; the minimum method chooses
+the magnitude dip instead, which need not coincide with the speed peak.
+The vertical line marks the selected frequency on the hardware frequency
+grid. This tab needs a selected bias step to display its curves.
+""")
+
+    def _show_help_text(self, title: str, help_text: str) -> None:
         help_dialog = QtWidgets.QDialog(self)
-        help_dialog.setWindowTitle("Periscope Help")
+        help_dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        help_dialog.setWindowTitle(title)
         layout = QtWidgets.QVBoxLayout(help_dialog)
         scroll_area = QtWidgets.QScrollArea(help_dialog)
         scroll_area.setWidgetResizable(True)
@@ -974,7 +1033,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         layout.addLayout(button_layout)
         help_dialog.setLayout(layout)
         help_dialog.resize(700, 500) 
-        help_dialog.exec()
+        help_dialog.show()
 
     def _toggle_zoom_box_mode(self, enable: bool):
         """
@@ -1918,51 +1977,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         else:
             self.btn_qp_pulses.setText("QP Pulses: Off")
         
-        # Update tooltip to show current state
-        # Compose tooltip including active parameters
-        try:
-            cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
-        except Exception:
-            cfg = mc.defaults()
-        extra = ""
-        if self.qp_pulse_mode == 'periodic':
-            extra = f"\nPeriod={cfg['pulse_period']} s, tau_rise={cfg['pulse_tau_rise']} s, tau_decay={cfg['pulse_tau_decay']} s, amp={cfg['pulse_amplitude']}, res={cfg['pulse_resonators']}"
-        elif self.qp_pulse_mode == 'random':
-            ram = cfg['pulse_random_amp_mode']
-            if ram == 'uniform':
-                amin = cfg['pulse_random_amp_min']
-                amax = cfg['pulse_random_amp_max']
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"ampMode=uniform[{amin},{amax}], "
-                    f"res={cfg['pulse_resonators']}"
-                )
-            elif ram == 'lognormal':
-                mu = cfg['pulse_random_amp_logmean']
-                sigma = cfg['pulse_random_amp_logsigma']
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"ampMode=lognormal[μ={mu},σ={sigma}], "
-                    f"res={cfg['pulse_resonators']}"
-                )
-            else:
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"amp=fixed({cfg['pulse_amplitude']}), "
-                    f"res={cfg['pulse_resonators']}"
-                )
-        tooltip_text = (
-            f"Toggle quasiparticle pulses in mock mode\n"
-            f"Current: {self.qp_pulse_mode.title()}\n"
-            f"Cycles through: Off → Periodic → Random → Off{extra}"
-        )
-        self.btn_qp_pulses.setToolTip(tooltip_text)
+        self.btn_qp_pulses.setToolTip(
+            "Cycle mock pulses through off, periodic, and random modes.")
     
     @QtCore.pyqtSlot(str)
     def _show_pulse_error(self, error_msg):
@@ -1980,6 +1996,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         help_action.setToolTip("Open Help Dialog")
         help_action.triggered.connect(self._show_help)
         help_menu.addAction(help_action)
+        bias_help_action = QtGui.QAction("&Bias plot guide", self)
+        bias_help_action.triggered.connect(self._show_bias_plot_help)
+        help_menu.addAction(bias_help_action)
         
 
     def _create_view_menu(self):

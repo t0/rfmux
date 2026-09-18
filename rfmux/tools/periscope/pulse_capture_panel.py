@@ -150,10 +150,7 @@ def _series_name(label: str, count, n_series: int):
 
 
 _PLOT_SPEC_TIP = (
-    "Which channels to draw.  Empty: every channel.  \"1,2,4\": those "
-    "channels, one line each.  \"1-5\": channels 1 to 5 combined into "
-    "one.  \"*\": all channels combined.  Items can be mixed: \"1,3-8,*\".  "
-    "In a capture across modules, \"2:1-8\" is module 2's channels 1 to 8.")
+    "Channels to draw: 1,2; combine 1-5; '*' combines all; prefix with module:.")
 
 
 def _noise_detail(stats: dict, names=("I", "Q"), unit: str = "") -> str:
@@ -401,20 +398,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["slow", "fast", "both"])
         self.mode_combo.setToolTip(
-            "slow: ~kHz readout stream (taps the Periscope display "
-            "stream)\nfast: ~2.44 MHz PFB stream (max 4 channels; the "
-            "PFB streamer must already be streaming them — set it "
-            "under Streamer…)\n"
-            "both: concurrent slow+fast with live pulse matching — the "
-            "tree lists matched pairs")
+            "Capture the slow stream, fast PFB stream, or matched pairs.")
         h.addWidget(labelled("Mode:", self.mode_combo))
 
         self.channels_edit = QtWidgets.QLineEdit("1,2")
         self.channels_edit.setFixedWidth(90)
         self.channels_edit.setToolTip(
-            "1-indexed channels: \"1,2\", ranges \"2-19\", or a mix\n"
-            "\"1,5-8,20\".  \"all\" takes every channel on this module\n"
-            "that has a bias set.")
+            "Channels such as 1,2 or 2-19; 'all' uses every biased channel.")
         h.addWidget(labelled("Channels:", self.channels_edit))
 
         self.module_spin = QtWidgets.QSpinBox()
@@ -432,10 +422,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.end_spin.setValue(self.capture_config.end_sigma)
         self.end_spin.setSingleStep(0.1)
         self.end_spin.setToolTip(
-            "Pulse end requires BOTH axes back within this band of the "
-            "baseline for the confirmation count.  A tighter band keeps "
-            "more of the tail and lengthens the capture: 1.0σ runs about "
-            "a fifth longer than 1.5σ.")
+            "Band both axes must re-enter before the pulse ends.")
         h.addWidget(labelled("End σ:", self.end_spin))
 
         self.pileup_check = QtWidgets.QCheckBox("Pileup")
@@ -452,17 +439,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.units_combo.addItems([UNITS_COUNTS, UNITS_VOLTS, UNITS_DF])
         self.units_combo.setCurrentText(UNITS_VOLTS)
         self.units_combo.setToolTip(
-            "Units for waveforms, histograms and templates.\n\n"
-            "counts: raw ADC.  volts: the readout scale.  df: rotated "
-            "into frequency and dissipation, in hertz — needs a df "
-            "calibration for the channel.")
+            "Display counts, volts, or calibrated df/dissipation.")
         self.units_combo.currentTextChanged.connect(self._on_user_view_changed)
         h.addWidget(labelled("Units:", self.units_combo))
 
         self.btn_settings = QtWidgets.QPushButton("Settings…")
         self.btn_settings.setToolTip(
-            "All capture parameters: margins, min/max pulse length, "
-            "noise training — with live ms → samples math")
+            "Configure capture timing, triggering, and noise estimation.")
         self.btn_settings.clicked.connect(self._on_capture_settings)
         h.addWidget(self.btn_settings)
 
@@ -541,14 +524,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.group_combo = QtWidgets.QComboBox()
         self.group_combo.addItems([GROUP_CHANNELS, GROUP_EVENTS])
         self.group_combo.setToolTip(
-            "How the pulse list is grouped.\n\n"
-            "Events: pulses on any channels that triggered within the "
-            "coincidence window of an event's first trigger; in both "
-            "mode a channel's share is its pair, whichever stream "
-            "triggered.  Shows the events the capture recorded.  If it "
-            "recorded none, the pulses are grouped from their trigger "
-            "times and the coincidence window in Settings.  "
-            "Double-click an event to draw its channels together.")
+            "Group the pulse list by channel or coincident event.")
         self.group_combo.currentTextChanged.connect(self._on_group_changed)
         listing = QtWidgets.QWidget()
         column = QtWidgets.QVBoxLayout(listing)
@@ -585,8 +561,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.event_stream_combo = QtWidgets.QComboBox()
         self.event_stream_combo.addItems(list(EVENT_STREAMS))
         self.event_stream_combo.setToolTip(
-            "Which streams an event is drawn from: the fast samples as "
-            "lines, the slow ones as points.")
+            "Choose which stream is drawn for an event.")
         self.event_stream_combo.currentTextChanged.connect(
             lambda _t: self._current_event is not None
             and self._show_event(self._current_event))

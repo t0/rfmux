@@ -219,8 +219,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Save Button
         self.export_btn = QtWidgets.QPushButton("💾")
         self.export_btn.setToolTip(
-            "Save this multisweep to the session folder, or overwrite the file "
-            "it was already saved to")
+            "Save this multisweep.")
         self.export_btn.clicked.connect(self._save_multisweep_action)
         toolbar_layout.addWidget(self.export_btn)
         
@@ -356,9 +355,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.normalize_checkbox = QtWidgets.QCheckBox("Normalize Traces")
         self.normalize_checkbox.setChecked(self.normalize_traces)
         self.normalize_checkbox.setToolTip(
-            "Divide each sweep by the amplitude it was taken at, so an "
-            "amplitude ladder lands on one axis instead of stacked by drive. "
-            "Volts and dB need the module's DAC scale; counts do not.")
+            "Divide each sweep by its drive amplitude for comparison.")
         self.normalize_checkbox.toggled.connect(self._toggle_trace_normalization)
 
         unit_layout.addWidget(QtWidgets.QLabel("Units:"))
@@ -407,11 +404,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.addTab(self.detector_digest_tab, "Detector Digest")
         self._tab_tooltip(
             self.detector_digest_tab,
-            "One resonator at the size of the panel: every drive it was swept "
-            "at, then the one it is biased at with its fitted model over it, "
-            "and under them a column of numbers for the bias point and one for "
-            "each fit of that sweep. Double-click a subplot on any grid tab to "
-            "come here on that resonator.")
+            "Inspect one resonator's sweeps, bias point, and fit results.")
 
         # Fit Results (per-detector grid, models over the measurement)
         self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = \
@@ -422,19 +415,14 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.addTab(self.fit_histograms_tab, "Fit Histograms")
         self._tab_tooltip(
             self.fit_histograms_tab,
-            "Every fitted parameter on the array at once: where each "
-            "resonance sits and how the quality factors and the "
-            "nonlinearity are distributed, at each drive.")
+            "Compare fitted parameters across the array.")
 
         # What the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
         self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: derivative")
         self._tab_tooltip(
             self.bias_sweeps_tab,
-            "Change in normalized IQ speed. Spikes must meet both the noise "
-            "and spike thresholds; the larger is ±1. Faint lines show the "
-            "smaller threshold at the selected amplitude. Up/down separation "
-            "is shown under Bias: hysteresis.")
+            "Looks for abrupt jumps in a sweep that indicate bifurcation.")
 
         # What choosing the bias frequency looked at
         self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
@@ -442,21 +430,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias: frequency")
         self._tab_tooltip(
             self.freq_sweeps_tab,
-            "How far each resonator's IQ trace moves per hertz at the drive "
-            "it is biased at -- what the iq_derivative method maximizes. "
-            "The line is where the tone will go, on the hardware grid; the "
-            "gap to the peak is that quantization. With the 'minimum' "
-            "frequency method the line is at the dip instead, and need not "
-            "sit at this curve's peak.")
+            "Inspect the selected bias frequency at the chosen drive.")
 
         self.hysteresis_sweeps_tab, self.hysteresis_sweeps_grid, self.hysteresis_colorbar = (
             self._create_sweep_tab())
         self.plot_tabs.addTab(self.hysteresis_sweeps_tab, "Bias: hysteresis")
         self._tab_tooltip(
             self.hysteresis_sweeps_tab,
-            "Up/down separation relative to its allowed limit. Values above "
-            "the dashed line trigger detection. Each curve is one amplitude; the "
-            "selected amplitude is bold. Both sweep directions are required.")
+            "Checks whether upward and downward sweeps disagree, "
+            "indicating hysteresis.")
 
         # Every tab that is a grid of one subplot per resonator, and the four
         # things that differ between them. Keyed by the tab itself, so adding
@@ -1363,8 +1345,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.collision_tab = tab
         self._sweep_grids[tab] = ('magnitude', grid, [], colorbar)
         self.plot_tabs.addTab(tab, "Collisions")
-        self._tab_tooltip(tab, "All measured traces of resonators flagged by "
-                          "the collision check. The original catalog is unchanged.")
+        self._tab_tooltip(tab, "Traces flagged by the collision check.")
         self.current_batch = 0
         self.plot_tabs.setCurrentWidget(tab)
         self._redraw_plots()
@@ -1490,8 +1471,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.is_capture_tuning = True
         self.rerun_btn.setEnabled(False)
         self.rerun_btn.setToolTip(
-            "A capture's tuning holds one sweep per channel, at the amplitude "
-            "it was biased at; re-run from the multisweep it came from.")
+            "Re-run from the multisweep used to tune this capture.")
         self.current_amp_label.setText(
             f"{len(self.catalog.names())} channels, as the capture was tuned.")
 

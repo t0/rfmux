@@ -153,10 +153,7 @@ class FindResonancesSettingsPanel(AnalysisSettingsPanel):
         self.min_separation_spin.setSingleStep(1.0)
         self.min_separation_spin.setSuffix(" kHz")
         self.min_separation_spin.setToolTip(
-            "Resonances at this separation or closer collide, including equality. "
-            "To pass, their frequency separation must be greater than this value. "
-            "Zero only cuts identical frequencies; Disable collision cut skips "
-            "the check entirely."
+            "Reject resonance pairs separated by this distance or less."
         )
         collision_form.addRow("Collision threshold (kHz):", self.min_separation_spin)
         explanation = QtWidgets.QLabel(

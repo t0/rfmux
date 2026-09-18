@@ -75,9 +75,7 @@ class CustomMaterialDialog(QtWidgets.QDialog):
         self.tc_edit.setValidator(ScientificDoubleValidator())
         self.tc_edit.setPlaceholderText("e.g., 1.2 for Al, 9.2 for Nb")
         self.tc_edit.setToolTip(
-            "<b>Critical Temperature (Tc)</b><br>"
-            "Temperature at which material transitions to superconducting state.<br>"
-            "Examples: Al = 1.2 K, Nb = 9.2 K, TiN ≈ 4-5 K"
+            "Temperature at which the material becomes superconducting."
         )
         form_layout.addRow("Tc (K):", self.tc_edit)
         
@@ -86,10 +84,7 @@ class CustomMaterialDialog(QtWidgets.QDialog):
         self.n0_edit.setValidator(ScientificDoubleValidator())
         self.n0_edit.setPlaceholderText("e.g., 1.72e10 for Al")
         self.n0_edit.setToolTip(
-            "<b>Density of States at Fermi Level (N₀)</b><br>"
-            "Single-spin density of states per unit volume per unit energy.<br>"
-            "Units: µm⁻³eV⁻¹<br>"
-            "Example: Al = 1.72×10¹⁰ µm⁻³eV⁻¹"
+            "Single-spin density of states at the Fermi level."
         )
         form_layout.addRow("N₀ (µm⁻³eV⁻¹):", self.n0_edit)
         
@@ -98,11 +93,7 @@ class CustomMaterialDialog(QtWidgets.QDialog):
         self.tau0_edit.setValidator(ScientificDoubleValidator())
         self.tau0_edit.setPlaceholderText("e.g., 438e-9 for Al (438 ns)")
         self.tau0_edit.setToolTip(
-            "<b>Quasiparticle Recombination Time (τ₀)</b><br>"
-            "Characteristic time for quasiparticle recombination at Tc.<br>"
-            "Also called electron-phonon interaction time.<br>"
-            "Units: seconds<br>"
-            "Example: Al = 438 ns = 438×10⁻⁹ s"
+            "Quasiparticle recombination time at Tc, in seconds."
         )
         form_layout.addRow("τ₀ (s):", self.tau0_edit)
         
@@ -111,11 +102,7 @@ class CustomMaterialDialog(QtWidgets.QDialog):
         self.rs_edit.setValidator(ScientificDoubleValidator())
         self.rs_edit.setPlaceholderText("e.g., 4.0 for thin Al")
         self.rs_edit.setToolTip(
-            "<b>Sheet Resistance (Rs)</b><br>"
-            "Surface resistance per square, measured at room temperature.<br>"
-            "Units: Ω/□ (Ohms per square)<br>"
-            "Example: Thin Al films typically 2-10 Ω/□<br>"
-            "This is the value you measure directly from your fabricated film."
+            "Room-temperature sheet resistance in ohms per square."
         )
         form_layout.addRow("Rs (Ω/□):", self.rs_edit)
         
@@ -124,10 +111,7 @@ class CustomMaterialDialog(QtWidgets.QDialog):
         self.thickness_ref_edit.setValidator(ScientificDoubleValidator())
         self.thickness_ref_edit.setPlaceholderText("e.g., 20 for 20nm Al")
         self.thickness_ref_edit.setToolTip(
-            "<b>Reference Film Thickness</b><br>"
-            "Film thickness where Rs was measured.<br>"
-            "Units: nm (nanometers)<br>"
-            "Used to calculate σN = 1/(Rs × thickness)"
+            "Film thickness at which Rs was measured, in nanometres."
         )
         form_layout.addRow("Thickness (nm):", self.thickness_ref_edit)
         

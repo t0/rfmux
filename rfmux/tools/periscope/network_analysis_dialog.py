@@ -104,8 +104,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
 
         self.label_edit = QtWidgets.QLineEdit(self.params.get("label") or "")
         self.label_edit.setToolTip(
-            "Your name for this measurement. It goes on the end of the "
-            "filename: netanal_YYYYMMDD_HHMMSS_<name>.pkl")
+            "Optional name appended to the saved measurement filename.")
         form.addRow("Measurement Name:", self.label_edit)
 
         # One Periscope is one module, so this says which rather than asking.
@@ -143,8 +142,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         self.direction_combo.setCurrentText(
             self.params.get("sweep_direction", DEFAULT_SWEEP_DIRECTION))
         self.direction_combo.setToolTip(
-            "Which way through the band. The trace comes back in the order it "
-            "was measured, so a downward netanal has descending frequencies.")
+            "Direction in which frequencies are measured across the band.")
         form.addRow("Sweep direction:", self.direction_combo)
 
         layout.addWidget(param_group)

@@ -104,7 +104,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         layout.addRow("Estimated Slow Time:", self.time_taken_label)
 
         self.highest_freq_label = QtWidgets.QLabel("268.22 Hz")
-        self.highest_freq_label.setToolTip("Displays the highest measurable frequency. Go lower in decimation for higher value.")
+        self.highest_freq_label.setToolTip("Highest measurable frequency at this decimation.")
         layout.addRow("Highest Frequency:", self.highest_freq_label)
 
         self.freq_resolution_label = QtWidgets.QLabel("0 Hz")
@@ -148,7 +148,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         pfb_layout.addRow("PFB Samples:", self.pfb_samples)
         
         self.overlap_sample = QtWidgets.QLabel("0")
-        self.overlap_sample.setToolTip("Internally estimated overlapping frequency samples. Reduce decimation or segments for more overlap.")
+        self.overlap_sample.setToolTip("Estimated overlapping frequency samples.")
         pfb_layout.addRow("Overlapping Samples:", self.overlap_sample)
 
         

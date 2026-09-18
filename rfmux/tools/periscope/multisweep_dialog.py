@@ -170,11 +170,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.center_source_combo.addItem("Previous multisweep centers", "previous")
         self.center_source_combo.addItem("Custom frequencies", "custom")
         self.center_source_combo.setToolTip(
-            "Catalog: bias frequencies from the active array or Find Resonances.\n"
-            "Previous: the last recorded sweep center for each resonator.\n"
-            "Custom: one center per resonator in the displayed order, or a new\n"
-            "array when no catalog is loaded. Bias points are preserved.\n"
-            "All sources use the amplitude schedule.")
+            "Choose catalog, previous, or custom sweep centres.")
         self.center_source_combo.currentIndexChanged.connect(self._refresh)
         form.addWidget(self.center_source_combo)
 
@@ -194,8 +190,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.custom_amp_edit.textChanged.connect(self._refresh)
         self.custom_amp_label = QtWidgets.QLabel("Base amplitude:")
         self.custom_amp_edit.setToolTip(
-            "Seeds each custom resonator's amplitude for the own-amplitude "
-            "or multiplicative schedule. Absolute schedules supply their own amplitudes.")
+            "Starting amplitudes for custom resonators.")
         custom_form.addRow(self.custom_amp_label, self.custom_amp_edit)
         form.addWidget(self.custom_widget)
 

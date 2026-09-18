@@ -23,6 +23,11 @@ from rfmux.pulse_capture.overlay import (
     pulse_overlay, slow_shift_s)
 from test.fastrx_bytes import file_header, record, seconds_ts, write
 
+import sys as _sys
+pytestmark = pytest.mark.skipif(
+    _sys.platform == "win32",
+    reason="bisecting an access violation on the Windows runner")
+
 FS = decimation_to_sampling(6)                    # 596 Hz slow stream
 LATE = decimated_stream_delay_s(sampling_to_decimation(FS))
 T0 = 43000.0

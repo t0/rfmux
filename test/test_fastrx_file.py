@@ -27,8 +27,6 @@ except ImportError:                     # the extension builds on Linux only
 def PacketFile(request):
     """The reader under test."""
     if request.param == "numpy":
-        if sys.platform == "win32":
-            pytest.skip("bisecting an access violation on the Windows runner")
         return RecordingFile
     if fastrx is None:
         pytest.skip("this rfmux build does not include fastrx")

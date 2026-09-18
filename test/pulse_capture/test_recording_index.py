@@ -10,11 +10,6 @@ from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from rfmux.pulse_capture.overlay import Recording
 from test.fastrx_bytes import file_header, record, seconds_ts, write
 
-import sys as _sys
-pytestmark = pytest.mark.skipif(
-    _sys.platform == "win32",
-    reason="bisecting an access violation on the Windows runner")
-
 T0 = 43000.0
 DT = 1.0 / PFB_SAMPLING_FREQ
 

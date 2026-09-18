@@ -4,8 +4,9 @@ A toolbar of twenty controls in one row forces a window wider than a
 1080p display; a label carrying a file path forces it wider still.
 ``FlowLayout`` wraps its items into as many rows as the width needs,
 ``labelled`` keeps a caption with its control so the two wrap
-together, and ``ElidedLabel`` shows what fits of a long text; the
-caller puts the full text in its tooltip.
+together, ``WrappingLabel`` is a text that wraps within its row, and
+``ElidedLabel`` shows what fits of a long text; the caller puts the
+full text in its tooltip.
 """
 from __future__ import annotations
 
@@ -72,6 +73,13 @@ class FlowLayout(QtWidgets.QLayout):
                 x = area.x()
                 y += row_h + self._v
                 row_h = 0
+            # An item wider than a whole row is given the row, and the
+            # height it needs at that width if it can wrap.
+            if hint.width() > area.width() > 0:
+                hint = QtCore.QSize(
+                    area.width(),
+                    item.heightForWidth(area.width())
+                    if item.hasHeightForWidth() else hint.height())
             if not dry:
                 item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
             x += hint.width() + self._h
@@ -93,6 +101,23 @@ def grouped(*widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
 def labelled(text: str, widget: QtWidgets.QWidget) -> QtWidgets.QWidget:
     """*widget* with a caption to its left."""
     return grouped(QtWidgets.QLabel(text), widget)
+
+
+class WrappingLabel(QtWidgets.QLabel):
+    """A label for a ``FlowLayout``: it asks for its text on one line
+    and wraps onto more when the row is narrower than that."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def sizeHint(self) -> QtCore.QSize:
+        # A word-wrapped QLabel's own hint is a roughly square block
+        # whatever room there is.
+        m = self.contentsMargins()
+        width = (self.fontMetrics().horizontalAdvance(self.text())
+                 + m.left() + m.right() + 2 * self.margin() + 4)
+        return QtCore.QSize(width, self.heightForWidth(width))
 
 
 class ElidedLabel(QtWidgets.QLabel):

@@ -45,6 +45,7 @@ from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
+from ...pulse_capture.events import event_counts
 from ...core.session_folder import (is_session, latest_export, load_metadata,
                              register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
@@ -317,7 +318,7 @@ async def record_streams(
     # Requirements, before the board is touched or a file written.
     if parser and importlib.util.find_spec("pygetdata") is None:
         raise RuntimeError("the parser dirfile needs pygetdata: "
-                           "uv pip install -e .[dirfile]")
+                           "uv pip install pygetdata")
     fastrx_channels = 0
     fx = None
     if fastrx:
@@ -586,14 +587,22 @@ def _merge(pulse_path: Path, fastrx_path: Path) -> None:
     merge_fastrx(pulse_path, fastrx_path)
 
 
+#: Ends the name of a pulse file that carries the 100G recording.
+MERGED_SUFFIX = "_100G"
+
+
 def _merge_recording(result: RecordResult) -> None:
-    """The fastrx recording into the pulse file as its fast stream; a
-    merge that fails is a warning, the run itself having succeeded."""
+    """The fastrx recording into the pulse file as its fast stream, the
+    file renamed to say it holds the 100G data; a merge that fails is a
+    warning, the run itself having succeeded."""
     if not (result.pulse_path and result.pulse_path.exists()
             and result.fastrx_path and result.fastrx_path.exists()):
         return
     try:
         _merge(result.pulse_path, result.fastrx_path)
+        result.pulse_path = result.pulse_path.rename(
+            result.pulse_path.with_stem(
+                result.pulse_path.stem + MERGED_SUFFIX))
         result.merged_fastrx = True
     except Exception as e:
         result.warnings.append(
@@ -613,6 +622,16 @@ def pulse_summary_lines(capture) -> List[str]:
              f"best {snr:.1f}\u03c3" for ch, n, snr in rows]
     lines.append(f"{sum(r[1] for r in rows)} pulses on {len(rows)} of "
                  f"{len(stream.summaries)} channels")
+    events = getattr(capture, "events", None) or []
+    counts = event_counts(events)
+    samples = counts["noise_samples"]
+    if len(events) > samples:
+        lines.append(
+            f"{len(events) - samples} events, {counts['coincident_events']} "
+            f"across more than one channel "
+            f"({counts['coincident_pulses']} pulses)")
+    if samples:
+        lines.append(f"{samples} noise samples")
     return lines
 
 

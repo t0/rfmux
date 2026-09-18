@@ -30,10 +30,11 @@ from __future__ import annotations
 
 import numpy as np
 import warnings
+from dataclasses import replace
 from typing import Dict, Optional
 
 from .detection import ChannelNoiseStats
-from ..core.transferfunctions import VOLTS_PER_ROC
+from ..core.transferfunctions import VOLTS_PER_ROC, apply_iq_conversion
 
 
 def pulse_peaks(
@@ -305,6 +306,51 @@ def display_transform(df_calibration, stored_basis: str, stored_units: str,
     return wanted / stored, view_units
 
 
+def project_noise_stats(ns: ChannelNoiseStats,
+                        factor: complex) -> ChannelNoiseStats:
+    """Noise statistics taken through a :func:`display_transform` factor.
+
+    The baseline is a signed position in the plane, so it rotates with
+    the samples.  The spreads are widths: a rotation by theta puts
+    cos^2 of one axis's variance and sin^2 of the other's on each new
+    axis.  The two axes are taken as uncorrelated, which is all the
+    statistics record.  A jump spread of zero means it was not measured,
+    and stays zero.
+    """
+    k = abs(factor)
+    if k == 0 or factor == 1.0:
+        return ns
+    c2, s2 = (factor.real / k) ** 2, (factor.imag / k) ** 2
+
+    def spread(a: float, b: float):
+        return (k * float(np.sqrt(c2 * a * a + s2 * b * b)),
+                k * float(np.sqrt(s2 * a * a + c2 * b * b)))
+    mean_I, mean_Q = apply_iq_conversion(ns.mean_I, ns.mean_Q, factor)
+    std_I, std_Q = spread(ns.std_I, ns.std_Q)
+    jump_I, jump_Q = ((0.0, 0.0) if not (ns.jump_std_I and ns.jump_std_Q)
+                      else spread(ns.jump_std_I, ns.jump_std_Q))
+    return replace(ns, mean_I=float(mean_I), std_I=std_I,
+                   mean_Q=float(mean_Q), std_Q=std_Q,
+                   jump_std_I=jump_I, jump_std_Q=jump_Q)
+
+
+def baseline_level(waveform: dict, quad: str, t_ref: float) -> float:
+    """The level to draw *waveform*'s ``Amp_<quad>`` about.
+
+    A pulse carries the level it triggered from, which follows the
+    baseline's drift where the training mean does not.  A window read
+    from the ring buffer has no such mark: it takes the median of its
+    samples before *t_ref*, or of all of them when fewer than three
+    come before.
+    """
+    marked = waveform.get(f"trigger_baseline_{quad}")
+    if marked is not None:
+        return float(marked)
+    data = np.asarray(waveform[f"Amp_{quad}"], dtype=np.float64)
+    before = data[np.asarray(waveform["Time"], dtype=np.float64) < t_ref]
+    return float(np.median(before if len(before) >= 3 else data))
+
+
 def _calibration(df_calibration) -> Optional[complex]:
     """The calibration as one complex number, or ``None`` when it is
     absent or not a number at all (a mapping keyed by module where the
@@ -339,6 +385,42 @@ def _basis_units_factor(df_calibration, basis: str, units: str):
     else:
         return None
     return rotation * scale
+
+
+def tuning_sweep(row):
+    """The sweep a tuning row carries, in the frame the channel's
+    samples stream in: ``(frequencies_hz, iq_counts, bias_point)``, or
+    None when the row holds no sweep.
+
+    Catalog tuning rows store unrotated ``iq_volts``. Convert those to
+    counts; ``iq_rotation_deg`` describes the loop, not a programmed ADC
+    phase. Legacy rows store ``iq_complex`` in counts and may carry saved
+    and ADC rotations, which are undone to match their stream frame.
+    *bias_point* is interpolated at the bias frequency, or None without one.
+    """
+    if not isinstance(row, dict) or "frequencies" not in row:
+        return None
+    f = np.asarray(row["frequencies"], dtype=float)
+    if "iq_volts" in row:
+        iq = np.asarray(row["iq_volts"], dtype=complex) / VOLTS_PER_ROC
+    elif "iq_complex" in row:
+        iq = np.asarray(row["iq_complex"], dtype=complex)
+        turn = float(row.get("optimal_phase_degrees") or 0.0) \
+            + float(row.get("applied_rotation_degrees") or 0.0)
+        if turn:
+            iq = iq * np.exp(-1j * np.radians(turn))
+    else:
+        return None
+    if f.size < 2 or f.shape != iq.shape:
+        return None
+    order = np.argsort(f)
+    f, iq = f[order], iq[order]
+    bias = row.get("bias_frequency")
+    point = None
+    if bias is not None and f[0] <= float(bias) <= f[-1]:
+        point = complex(np.interp(float(bias), f, iq.real),
+                        np.interp(float(bias), f, iq.imag))
+    return f, iq, point
 
 
 def window_shortfall(times, window, tolerance: float) -> tuple:

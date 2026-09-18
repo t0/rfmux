@@ -1,6 +1,137 @@
 # Merging `main` into `tuning_headless_revamp`: conflict survey
 
-## Active integration plan — 2026-09-16
+## Integration — 2026-09-17/18
+
+Reviewed `origin/main` at `be0bd49` against this branch at `3ed56fc`.
+The merge was started with `git merge --no-commit --no-ff origin/main`.
+The dry run reported 21 conflicted files (18 content, three modify/delete).
+Keep this branch's catalog-based tuning, immediate mock tone cleanup
+(adapted to main's `_tone_states`), and parent watcher. Adapt the pulse IQ
+overlay to this branch's `iq_volts` sweep schema.
+
+Do **not** retain main's per-amplitude fitted-center rerun implementation.
+Future tracking should use fits from the current amplitude step to choose
+the next step's centers, preferring downward sweeps. It is explicitly
+deferred; see [the detailed plan](multisweep_frequency_tracking_plan.md)
+for metadata semantics, unresolved choices and validation requirements.
+
+Resolution choices:
+
+- Keep deleted panels deleted and retain the current multisweep/netanal
+  dialogs, tasks and catalog/search interfaces. Their field-memory and
+  manual-resonance-edit contracts already have tests on this branch.
+- Take main's physics model and retain atomic response/shutdown locking.
+  `forget_tones` deletes whole tone states, including cached solves and
+  transient fields, and refreshes remaining same-module backgrounds.
+  Preserve clearing tones before regeneration, without replacing the model.
+- Keep this branch's thread-based parent watcher, including the forced-exit
+  path for blocked RPCs. Do not add main's duplicate parent watcher test:
+  `test_server_lifecycle.py` covers normal, failed and killed parents,
+  multiple process start methods and a busy server.
+- The IQ overlay reads catalog `iq_volts` and converts through
+  `VOLTS_PER_ROC`; loop rotation is not an ADC setting. Retain legacy
+  `iq_complex` reading with its saved-data/ADC phase corrections for old
+  files and the deprecated measured-calibration path.
+- Retain drive normalization and DAC scale with zero label offset. Main's
+  public `convert_amplitude_to_dbm` forwards to `convert_dacunits_to_dbm`.
+- Omit main's legacy rerun-center test along with the rejected feature.
+  Omit duplicate dialog-memory/resonance-order tests written for removed
+  APIs: the contracts are covered by `test_dialog_field_memory.py`,
+  `test_field_memory.py`, `test_tuning_flow.py`, and the headless resonance
+  search tests. The netanal dialog continues to display caller-provided
+  DAC scales; its caller owns fetching them, rather than adding a second
+  fetch path to that dialog.
+- Keep the current simplified tuning demo and notebook index organization;
+  incorporate the new pulse-capture feature description.
+- Carry histogram double-click autoscaling into `FitHistogramsTab` using
+  the existing `ClickableViewBox`, retaining pan-by-drag. Its regression
+  exercises the replacement tab rather than importing the deleted panel.
+
+Validation:
+
+- Final no-board collection: 2284 selected, 75 hardware tests deselected.
+- Focused shutdown/regeneration, hysteresis and IQ-plane checks: 19 passed
+  in 6.85 s using the `rfmux-tuning` environment outside the sandbox.
+- Regression sensitivity: a separate process disabled immediate tone cleanup
+  and substituted main's unadapted `tuning_sweep`. All three targeted checks
+  failed (0.63 s). Both off/on and clear/on returned normalized magnitude
+  0.39493073354835634 instead of the fresh-state 0.9894421337289706 within
+  0.001; the catalog sweep returned None. The working adaptations pass the
+  same contracts. This is an adaptation-disabled probe, not a full run of
+  unmodified main, and the timings are not a performance comparison.
+- A sandboxed attempt stalled during `asyncio.run(generate_resonators(...))`
+  with an idle worker thread; interrupted after the 120-second watchdog
+  stack dump. The unrestricted rerun above completed. No code change was
+  needed to resume these tests.
+- Initial full no-board run: 2268 passed, 10 failed, 7 skipped, 2 xfailed,
+  75 deselected in 768.02 s. Failures and adaptations are recorded below.
+  No hardware validation or push.
+- Updated the standard-array notebook's numerical reference: measured
+  tone-minus-nominal offsets span about -1766 to +172 Hz with the corrected
+  physics, replacing the old fixed positive 0.12% offset. The check uses
+  5 kHz absolute tolerance at this low bias power, alongside nominal band
+  bounds and seeded regeneration. Production fit thresholds are unchanged.
+- The demo harness copies shipped Python companions beside each notebook
+  in its temporary execution directory. Three demos imported
+  `example_plotting_multisweep` but the harness omitted it; this also affects
+  the plotting changes already on the working branch before the merge.
+- Adapted the incoming amplitude-label check to `format_probe_label`;
+  the removed `normalize_to_dbm`/`dbm_to_normalize` GUI wrappers stay removed.
+- Catalog and legacy HDF5 IQ overlays, conversions, and double-click
+  autoscaling: 16 passed in 1.95 s after the adaptations. The extra catalog
+  HDF5 parameterization adds one test beyond the initial full collection.
+- The initial full invocation used the environment's Python by absolute
+  path but left base's `jupyter` on PATH. Subsequent invocations put
+  `rfmux-tuning/bin` on PATH too. The IPv6 busy-port test also assumed that
+  localhost resolves to IPv6; this host resolves it only to 127.0.0.1, so
+  that test now checks its prerequisite and skips when absent.
+- Correct-environment Jupyter checks: 4 passed, 1 skipped in 5.68 s.
+- Final rerun of all ten failed cases plus affected histogram, collision,
+  shutdown/regeneration and IQ overlay checks: **25 passed, 1 skipped in
+  255.39 s**. The IPv6 localhost prerequisite accounts for the skip. The
+  standard-array, bias-finding, fitting and multisweep notebooks all passed.
+  No failures remain in the rerun; the entire full tier was not repeated
+  after these fixes. The original full run also covered the acquisition
+  tier. Optional fastrx/pygetdata paths remain unverified in this environment.
+- The completed standard-array rerun found 8/8 resonators and fitted all
+  24 single-amplitude model/resonator combinations. The existing default
+  bias detector agreed with the nonlinear-fit choice for 3/8 resonators;
+  four fired at the quietest amplitude. This is a noisy diagnostic, not a
+  deterministic count or a change to the bias algorithm. Notebook prose
+  now describes the variability instead of claiming exactly two such cases.
+
+Initial full-run failure excerpts (verbatim; repeated cases grouped):
+
+```text
+E       AttributeError: type object 'UnitConverter' has no attribute 'normalize_to_dbm'
+E           assert np.all(ratio > 1.0) and np.ptp(ratio) < 1e-4, ratio
+ModuleNotFoundError: No module named 'example_plotting_multisweep'
+E       ModuleNotFoundError: No module named 'rfmux.tools.periscope.parameter_histograms_panel'
+E       AssertionError: {'error': 'Jupyter server exited unexpectedly:
+E         usage: jupyter [-h] [--version] [--config-dir] [--data-dir] [--runtime...r   show Jupyter config dir
+E       assert 8 == 7
+E       assert 0 == 1
+10 failed, 2268 passed, 7 skipped, 75 deselected, 2 xfailed, 281 warnings in 768.02s (0:12:48)
+```
+
+The missing helper affected three demos; the incorrect Jupyter executable
+affected two port tests. The final two assertions assumed an old array
+placement. The finder now sees all eight in the configured band; the
+collision-display check explicitly requests isolation and sets a separation
+equal to the band width to reject all eight. Production finder behavior is
+unchanged. A subsequent correctly configured Jupyter run exposed the IPv6
+prerequisite above (`assert 49291 != 49291`), addressed by the platform skip.
+
+Regression probe failures (verbatim excerpts):
+
+```text
+E         Obtained: 0.39493073354835634
+E         Expected: 0.9894421337289706 ± 0.001
+E       TypeError: cannot unpack non-iterable NoneType object
+3 failed, 4 deselected in 0.63s
+```
+
+## Completed integration record — 2026-09-16
 
 Target: `8749277` (PR #136), into `b4b457a`; common ancestor `20944a0`.
 The historical survey below describes an earlier integration, not this merge.

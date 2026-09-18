@@ -250,6 +250,7 @@ def main():
     
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
+    echo_popups_to_console(app)
     initial_tuning = None
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
@@ -633,6 +634,7 @@ async def raise_periscope(
         blocking = not qt_loop
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv[:1])
+    echo_popups_to_console(app)
     app_icon = QIcon(ICON_PATH)
     app.setWindowIcon(app_icon)
 

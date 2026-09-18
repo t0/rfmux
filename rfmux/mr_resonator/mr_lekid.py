@@ -96,8 +96,8 @@ class MR_LEKID():
             
         if verbose:
             print('Created new resonator, %s, with params:'%(self.name))
-            #print('Created new resonator, %s, with params:\nLk=%.2e H, Lg=%.2e H, C=%.2e F, Cc=%.2e F, R=%.2e ohm.'%(self.name, self.Lk, self.Lg, self.C, self.Cc, self.R))
-            print(self.generate_res_param_string())
+            print('Lk=%.2e H, Lg=%.2e H, C=%.2e F, Cc=%.2e F, R=%.2e ohm'
+                  % (self.Lk, self.Lg, self.C, self.Cc, self.R))
         
         
     def parallel_RLC(self, fc, C=None, L=None, R=None):
@@ -285,84 +285,6 @@ class MR_LEKID():
 
         return r1, r2, r3
     
-    def calc_Iin(self, fc, Vin=None, Zres=None):
-        """
-        Estimate input current into the attenuator-resonator-LNA network.
-
-        Parameters
-        ----------
-        fc : float
-            Probe frequency [Hz]
-        Vin : float, optional
-            Source voltage before attenuator [V]
-        Zres : complex, optional
-            Total device impedance at fc [Ω]
-
-        Returns
-        -------
-        complex
-            Input current [A]
-        """
-        if Vin is None:
-            Vin = self.Vin
-        if Zres is None:
-            Zres = self.total_impedance(fc)
-        r1, r2, r3 = self.get_att_vals(self.input_atten_dB)
-        Zsys = 1. / ( 1./Zres + 1./self.ZLNA )
-        Zp = 1. / ( 1./Zsys + 1./r3 )
-        I2 = Vin / (r2 + Zp)
-        Iin = I2 * ( r3 / (Zsys + r3) )
-        return Iin
-    
-    def calc_Ires(self, fc, Zres=None, Iin=None, Vin=None, ZLNA=50., Z_other=None):
-        """
-        Estimate resonator branch current using a current divider approximation.
-
-        Parameters
-        ----------
-        fc : float
-            Probe frequency [Hz]
-        Zres : complex, optional
-            Resonator impedance at fc [Ω]
-        Iin : complex, optional
-            Input current [A]
-        Vin : float, optional
-            Source voltage before attenuator [V]
-        ZLNA : complex or float, optional
-            LNA input impedance [Ω]
-        Z_other : complex, optional
-            Optional additional shunt path [Ω]
-
-        Returns
-        -------
-        complex
-            Resonator branch current [A]
-
-        Notes
-        -----
-        Approximation treats the last-stage attenuator resistor, resonator, and LNA
-        input impedance as a three-way current divider. Sufficient for convergence loop.
-        """
-        
-        if Zres is None:
-            Zres = self.total_impedance(fc=fc)
-        if Vin is None:
-            Vin = self.Vin
-        if Iin is None:
-            Iin = self.calc_Iin(fc=fc, Zres=Zres, Vin=Vin)
-
-        _, _, r3 = self.get_att_vals(self.input_atten_dB)
-            
-        if Z_other is not None:
-            Zpar = 1./ ( 1./r3 + 1./Zres + 1./ZLNA + 1./Z_other )
-        else:
-            Zpar = 1./ ( 1./r3 + 1./Zres + 1./ZLNA)
-        Ires = Iin * Zpar / Zres
-        return Ires
-    
-    
-    
-    
     ############
     # L and fr #
     ############
@@ -513,7 +435,3 @@ class MR_LEKID():
     #####
     # extras
     #####
-    
-    def generate_res_param_string(self):
-        res_param_string = 'Lk=%.2e H, Lg=%.2e H, C=%.2e F, Cc=%.2e F, R=%.2e ohm'%(self.Lk, self.Lg, self.C, self.Cc, self.R)
-        return res_param_string

@@ -283,7 +283,7 @@ nonlinear response and are not knobs a user of the array needs.
 |---|---|---|
 | `convergence_tolerance` | 1e-9 | Fractional tolerance of the operating-point iteration. Loosen toward 1e-5 to speed up an array of many tones. |
 | `cache_freq_step`, `cache_amp_step`, `cache_qp_step` | 1e-4 Hz, 1e-8, 1e-4 | Quantization of frequency, amplitude and fractional `nqp` when looking up a converged state, so a repeat of a nearly identical evaluation reuses the last one. |
-| `convergence_cache_max_size` | 1e7 | Cache entry cap. |
+| `convergence_cache_max_size` | 1e7 | Converged operating points retained per tone. |
 | `log_cache_decisions`, `cache_log_interval` | False, 100 | Print every Nth cache decision. |
 | `physics_batch_mode` | "hoisted" | How a block of samples is evaluated. `"reference"` is the sample-by-sample loop the fast path is tested against. |
 
@@ -299,5 +299,7 @@ The mock remembers currents per tone; `hysteresis_follow_hz`,
 `hysteresis_new_tone_steps` and `hysteresis_state_fraction` control following
 frequency moves and reusing cached states. Setting a tone to zero or clearing
 its channel discards its driven history, without requiring a sample read.
+This also discards the tone's cached solutions and transient field; other
+tones retain their states and their coupling backgrounds are refreshed.
 Regenerating an array starts undriven from its configuration and seed; optional
 auto-bias then establishes fresh driven states.

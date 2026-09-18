@@ -323,6 +323,10 @@ def test_the_recording_is_merged_into_the_pulse_file(tmp_path, monkeypatch):
     rs._merge_recording(result)
     assert calls == [(pulse, fx)] and result.merged_fastrx
     assert result.warnings == []
+    # The merged file says it holds the 100G data, and the result
+    # follows it: the exports and the review read the path from there.
+    assert result.pulse_path == tmp_path / "pulse_100G.h5"
+    assert result.pulse_path.exists() and not pulse.exists()
 
 
 def test_a_merge_that_fails_is_a_warning(tmp_path, monkeypatch):
@@ -334,6 +338,7 @@ def test_a_merge_that_fails_is_a_warning(tmp_path, monkeypatch):
     result = _result(tmp_path, pulse_path=pulse, fastrx_path=fx)
     rs._merge_recording(result)
     assert not result.merged_fastrx
+    assert result.pulse_path == tmp_path / "pulse.h5"
     assert result.warnings == [
         "fastrx not merged into pulse.h5: no disciplined timestamp"]
 
@@ -597,6 +602,24 @@ def test_a_bare_record_command_asks_the_dialog(monkeypatch):
     assert runs == [{"serial": "0156", "quiet": False}]
 
 
+def test_the_event_options_reach_the_capture_config(monkeypatch):
+    """The window and the dump are the capture's settings; the merge
+    reads them back from the file the capture wrote."""
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    runs = []
+    monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", "--coincidence-window-ms", "2",
+        "--dump-all-channels", "--pre-pulse-ms", "1", "--post-pulse-ms", "3",
+        "--noise-capture-interval-s", "30"])
+    assert result.exit_code == 0, result.output
+    cfg = runs[0]["config"]
+    assert (cfg.coincidence_window_ms, cfg.dump_all_channels,
+            cfg.pre_pulse_ms, cfg.post_pulse_ms) == (2.0, True, 1.0, 3.0)
+    assert cfg.noise_capture_interval_s == 30.0
+
+
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record
@@ -711,6 +734,10 @@ def test_the_requirements_are_checked_before_anything_runs(tmp_path, monkeypatch
 # ── Against the simulator ──────────────────────────────────────────
 
 @pytest.mark.slow_acquisition
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="rfmux record starts its parser as an asyncio subprocess, which "
+           "the selector event loop used on Windows does not support")
 def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     """The real coordination: trigger_capture on the mock's slow stream
     and the parser as a subprocess, both products in the session, the

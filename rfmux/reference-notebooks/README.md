@@ -39,7 +39,8 @@ Then:
 - **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
   find resonators, select bias points, park the carriers, and measure noise.
 - **`Demos/pulse_capture.md`** — detect and record detector pulses, with
-  streaming HDF5, histograms and matched slow+fast capture.
+  streaming HDF5, histograms, matched slow+fast capture, coincidence events,
+  noise samples and IQ-plane review.
 
 `simplified_tuning_flow` and `pulse_capture` have an unattended `.py`
 counterpart beside them for cron jobs and smoke tests; the notebook is the

@@ -29,7 +29,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from rfmux.core.transferfunctions import decimation_to_sampling  # noqa: E402
-from rfmux.pulse_capture import PulseCaptureConfig  # noqa: E402
+from rfmux.pulse_capture import (  # noqa: E402
+    DETECTION_PARAMS, PulseCaptureConfig)
 from rfmux.pulse_capture.detection import (  # noqa: E402
     ChannelNoiseStats, PulseCapture)
 
@@ -72,9 +73,9 @@ def _pulses(t_ms, arrivals):
 
 def _run_engine(t_ms, i_sigma, q_sigma):
     """Feed one channel through the engine; return the records it saved."""
-    kwargs = CONFIG.session_kwargs(FS)
-    for key in ("trigger_basis", "noise_samples"):
-        kwargs.pop(key)
+    # The engine's share of what the config hands a session.
+    session = CONFIG.session_kwargs(FS)
+    kwargs = {key: session[key] for key in (*DETECTION_PARAMS, "buf_size")}
     records = []
     stats = ChannelNoiseStats(mean_I=0.0, std_I=1.0, mean_Q=0.0, std_Q=1.0)
     pcap = PulseCapture(channels=[1], noise_stats={1: stats},
@@ -126,7 +127,7 @@ def _one_pulse(ax, t, trace, rec):
     ax.text(trig - edge_ms - 0.8, y + 0.4,
             "edge test: rose by more\nthan threshold_sigma\n"
             "jump-σ across the last\nedge_lookback samples\n"
-            "(margin_fraction ×\nmax_pulse_ms)",
+            "(a tenth of\nmax_pulse_ms)",
             ha="right", va="top", fontsize=7.5, color=ORANGE)
     ax.annotate("trigger: trigger_samples\nabove threshold_sigma,\n"
                 "dated to the first",
@@ -138,13 +139,13 @@ def _one_pulse(ax, t, trace, rec):
                 xy=(below, CONFIG.threshold_sigma), xytext=(below + 4, 9.8),
                 fontsize=7.5, color=RED, va="center",
                 arrowprops=dict(arrowstyle="->", color=RED, lw=1))
-    ax.annotate("settled: both axes back\ninside end_sigma; the\n"
-                "record and duration_ms\nend here",
+    ax.annotate("settled: both axes back\ninside end_sigma;\n"
+                "duration_ms ends here",
                 xy=(settled, 2.4), xytext=(settled - 4, -3.2),
                 fontsize=7.5, color=TEAL, va="top", ha="right",
                 arrowprops=dict(arrowstyle="->", color=TEAL, lw=1))
-    ax.annotate("saved window:\nmargin_fraction of it\n"
-                "before the trigger,\nto the settled sample",
+    ax.annotate("saved window:\npre_pulse_ms before\n"
+                "the trigger to\npost_pulse_ms after\nthe settled sample",
                 xy=(saved[0], -1.8), xytext=(-29.5, -2.4),
                 ha="left", va="top", fontsize=7.5, color=BLUE,
                 weight="bold",
@@ -154,17 +155,16 @@ def _one_pulse(ax, t, trace, rec):
                 "or of the level the pulse\n"
                 "rose from, counted up\n"
                 "while inside and down\n"
-                "while out, past\n"
-                "max(min_end_samples,\n"
-                "margin_fraction × time\n"
-                "above threshold).\n"
-                "Verifies the settled point;\n"
-                "lies past the record.",
+                "while out, past the\n"
+                "largest of min_end_samples,\n"
+                "a tenth of the time above\n"
+                "threshold and post_pulse_ms.\n"
+                "Verifies the settled point.",
                 xy=(confirmed, 1.6), xytext=(confirmed + 1.5, 16.4),
                 fontsize=7.5, color=GREEN, va="top", ha="left",
                 arrowprops=dict(arrowstyle="->", color=GREEN, lw=1))
     ax.text(trig + stop_ms + 0.8, 14.6,
-            "hard stop\n(1.2 × max_pulse_ms)\ncloses it anyway,\n"
+            "hard stop (1.2 ×\nmax_pulse_ms +\npost_pulse_ms)\ncloses it anyway,\n"
             "flagged truncated",
             ha="left", va="top", fontsize=7.5, color=PURPLE)
     ax.set_title("Anatomy of one capture window")

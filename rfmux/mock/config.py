@@ -44,6 +44,9 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Basic resonator distribution
     # -------------------------------------------------------------------------
     "num_resonances": 5,
+    # Every resonator lands inside [freq_start, freq_end]: the targets
+    # keep 1% of the edge frequency clear at each end, less in a dense
+    # array (MockResonatorModel.RANGE_PAD).
     "freq_start": 1.0e9,   # Hz
     "freq_end": 1.5e9,     # Hz
     "resonator_random_seed": None,  # int | None
@@ -88,6 +91,14 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     # Noise configuration
     # -------------------------------------------------------------------------
     "nqp_noise_enabled": True,  # Enable noise on quasiparticle density
+    # The current in a resonator with a pulse in flight relaxes toward
+    # each new steady state at the resonator's own rates (a ring-down
+    # of a few 1/linewidth, slower and rotating near a fold) rather
+    # than jumping to it, and the transient shows in the stream.  Off,
+    # the response is quasi-static.  Visible at low decimation and on
+    # the PFB stream; at decimation 6 a sample is far longer than the
+    # ring-down.
+    "envelope_dynamics": True,
     "nqp_noise_std_factor": 0.01,   # Std dev as fraction of base nqp (1%)
 
     # TLS (two-level system) 1/f frequency noise.  Real KIDs show
@@ -118,7 +129,7 @@ MOCK_DEFAULTS: Dict[str, Any] = {
     "cache_qp_step": 0.0001,           # QP quantization as fraction of base QP
     "log_cache_decisions": False,      # enable cache decision logging (rate-limited)
     "cache_log_interval": 100,         # log every N convergence events
-    "convergence_cache_max_size": 10000000,  # max cache entries
+    "convergence_cache_max_size": 10000000,  # converged states kept per tone
     # A resonance driven past its bifurcation is bistable, two stable
     # driven states, and the mock keeps the one a tone left it in, as
     # hardware does: sweeping down you stay in the high-current state
@@ -382,6 +393,9 @@ def apply_overrides(overrides: Dict[str, Any] | None) -> Dict[str, Any]:
 
     # ── TLS 1/f frequency noise ───────────────────────────────────
     cfg["tls_noise_enabled"] = bool(cfg["tls_noise_enabled"])
+    v = cfg.get("envelope_dynamics", True)
+    cfg["envelope_dynamics"] = (v.strip().lower() not in ("0", "false", "no", "off")
+                                if isinstance(v, str) else bool(v))
     try:
         tls_rms = float(cfg.get("tls_fractional_rms", 1e-7))
     except Exception:

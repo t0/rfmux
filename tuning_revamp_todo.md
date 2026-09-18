@@ -10,7 +10,21 @@ live in `tuning_refactor_design.md` §13 — this file is for work.
 
 ---
 
-## Closing VS Code leaves the mock streamer running, and the notebook tests pay
+## Deferred: track resonant frequency between multisweep amplitudes
+
+Add opt-in feedback from each amplitude step's nonlinear fits to the next
+step's centers, preferring the downward direction. Preserve each acquired
+entry's `original_center_frequency`; record the outgoing selection in an
+optional `updated_center_frequency`. Do not retain main's previous-run
+per-amplitude fit lookup when merging. No implementation yet: see
+[the detailed design and test plan](multisweep_frequency_tracking_plan.md).
+
+## ~~Closing VS Code leaves the mock streamer running~~ Done
+
+The mock server now watches its parent from a separate thread and exits even
+if an RPC blocks graceful shutdown. `test/mock/test_server_lifecycle.py`
+covers this behavior. The main integration preserves it. The following is
+the original diagnosis.
 
 Editing a `Demos/*.md` by running its paired `.ipynb` in VS Code starts a mock
 CRS that streams to UDP 9876. Closing VS Code does **not** stop it — the kernel

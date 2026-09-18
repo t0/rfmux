@@ -83,7 +83,7 @@ def test_the_batched_sweep_takes_the_same_state():
     m, f0 = _model()
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     swept = m.s21_sweep(grid[::-1], 0.01)[::-1]
-    m._state_memory.clear()
+    m._tone_states.clear()
     np.testing.assert_allclose(swept, _sweep(m, grid[::-1], 0.01)[::-1],
                                rtol=1e-9)
 
@@ -96,8 +96,7 @@ def test_each_module_keeps_its_own_states():
     crs = m.mock_crs
     grid = np.linspace(f0 - 3e5, f0 + 1e5, 81)
     down = _sweep(m, grid[::-1], 0.01)[::-1]
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     _place(crs, 2, 1, sorted(m.resonator_frequencies)[0], 0.001)
     seen = []
     for f in grid[::-1]:
@@ -107,27 +106,23 @@ def test_each_module_keeps_its_own_states():
     np.testing.assert_allclose(np.abs(seen[::-1]) / 0.01, down, atol=1e-3)
 
 
-def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state(monkeypatch):
+def test_a_moved_tone_is_followed_in_sub_steps_only_where_it_jumps_state():
     """One seeded solve per point where the current moves smoothly (a
     netanal, a dip search); the sub-steps only where one step from the
     previous point lands in the other state."""
     m, f0 = _model()
-    calls = []
-    real = jp.converged_lekid_parameters
 
-    def counting(*a, **k):
-        calls.append(a[0])
-        return real(*a, **k)
-    monkeypatch.setattr(jp, "converged_lekid_parameters", counting)
+    def passes():
+        n, m._solver_passes = m._solver_passes, 0
+        return n
     far = f0 + 3e6
+    m._solver_passes = 0
     _sweep(m, [far, far + 1e4], 0.01)            # a netanal's 10 kHz step
-    assert len(calls) == 2
-    calls.clear()
+    assert passes() == 2
     _sweep(m, np.arange(f0 + 1e5, f0 - 1.95e5 - 1, -5e3), 0.01)
-    n_ride = len(calls)
-    calls.clear()
+    n_ride = passes()
     _sweep(m, [f0 - 2.1e5], 0.01)                # across the fold at -204.9 kHz
-    assert len(calls) > 1
+    assert passes() > 1
     assert n_ride < 2 * 60                        # 60 points, few retaken
 
 
@@ -143,11 +138,9 @@ def test_a_collided_pair_keeps_both_resonances_driven():
         np.argmin(low[np.abs(wide - dip) > 5e4])])
     upper, dip = max(upper, dip), min(upper, dip)
     grid = np.arange(upper + 2e5, dip - 3e5, -2e3)
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     down = _sweep(m, grid, 0.01, tone=(1, 1))
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     up = _sweep(m, grid[::-1], 0.01, tone=(1, 1))[::-1]
     window = (grid > upper - 1.2e5) & (grid < upper + 2e4)
     assert np.abs(up - down)[window].max() > 0.3
@@ -167,8 +160,7 @@ def test_a_tone_switched_off_leaves_its_resonator_at_rest():
     _response(m, 1)
     _place(crs, 1, 1, inside, 0.01)
     back = _response(m, 1)[1][0]
-    m._state_memory.clear()
-    m._convergence_cache.clear()
+    m._tone_states.clear()
     rest = _sweep(m, [inside], 0.01)[0]
     assert abs(deep) / 0.01 < rest - 0.3
     assert abs(back) / 0.01 == pytest.approx(rest, abs=1e-3)

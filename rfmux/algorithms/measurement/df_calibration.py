@@ -256,17 +256,22 @@ def ensure_fits(entries, fit="nonlinear") -> int:
 
 
 @deprecated("rfmux.tuning.iq_derivatives_at on a sweep entry")
-def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None) -> complex:
+def df_calibration_from_sweep(freqs, iq_counts, f_bias, *, fallbacks=None,
+                              entry=None) -> complex:
     """The calibration from one sweep in counts: the inverse of the
     nonlinear resonator model's slope at *f_bias*, the model fitted by
     the flow's own fitter.  Differentiating a spline through the points
     instead scatters by a factor of two on real sweeps, so that is the
     fallback when no fit is usable: announced with a warning, or, when
     *fallbacks* is a list, recorded there for the caller to report once.
+    A dict passed as *entry* is filled with the sweep and its fit, the
+    fields a multisweep result carries them under.
     """
-    entry = {"frequencies": np.asarray(freqs, dtype=np.float64),
-             "iq_complex": np.asarray(iq_counts, dtype=complex),
-             "original_center_frequency": f_bias, "bias_frequency": f_bias}
+    entry = {} if entry is None else entry
+    entry.update({"frequencies": np.asarray(freqs, dtype=np.float64),
+                  "iq_complex": np.asarray(iq_counts, dtype=complex),
+                  "original_center_frequency": f_bias,
+                  "bias_frequency": f_bias})
     ensure_fits([entry])
     cal = df_calibration_for_entry(entry)
     if cal is None:
@@ -340,9 +345,11 @@ async def measure_df_calibrations(
         that multiplies IQ in volts into frequency shift + j dissipation
         in hertz (magnitude hertz per volt, phase minus the angle of the
         frequency direction in the (I, Q) plane, so the product turns
-        that direction onto the real axis), and ``df_calibration_source``
-        ``"measured"``.  Channels whose sweep gives no usable derivative
-        are left out rather than guessed at.
+        that direction onto the real axis), ``df_calibration_source``
+        ``"measured"``, and the sweep it came from: ``bias_channel``,
+        ``bias_frequency``, ``frequencies``, ``iq_complex`` in counts
+        and the resonance fit.  Channels whose sweep gives no usable
+        derivative are left out rather than guessed at.
     """
     if channels is None:
         from .channel_selection import get_biased_channels
@@ -401,10 +408,11 @@ async def measure_df_calibrations(
             warnings.warn(f"channel {ch}: the sweep jumps, so the "
                           f"resonance is bifurcated at this bias power and "
                           f"its df calibration is unreliable", stacklevel=2)
+        entry = {"bias_channel": ch}
         try:
             n_before = len(fell_back)
             cal = df_calibration_from_sweep(bias[ch] + offsets, iq[ch], bias[ch],
-                                            fallbacks=fell_back)
+                                            fallbacks=fell_back, entry=entry)
             if len(fell_back) > n_before:
                 fell_back[-1] = ch
         except Exception as exc:
@@ -415,7 +423,7 @@ async def measure_df_calibrations(
                           f"{exc}", stacklevel=2)
             continue
         if np.isfinite(cal) and cal != 0:
-            out[ch] = {"df_calibration": complex(cal),
+            out[ch] = {**entry, "df_calibration": complex(cal),
                        "df_calibration_source": "measured"}
     if fell_back:
         warnings.warn(f"{len(fell_back)} of {len(channels)} channels had no "

@@ -68,12 +68,11 @@ so a test can say `catalog["<name>"]` and mean the same resonator next run.
 Regenerating with the same configuration gives the same eight.
 
 The list `generate_resonators` returns is each resonator's *nominal* frequency,
-the simulator's `compute_fr()`. Its S21 minimum sits a fixed fraction above
-that — the simulator documents the shift as the same fraction for every
-resonator — and the tone is parked on the minimum, so the tones run about
-0.12 % above the nominal list, by the same ratio all the way across the band.
-That ratio is what the check pins: a shift that varied from one resonator to
-the next would be a different simulator.
+the simulator's `compute_fr()`. At this array's low bias power, the S21 minimum
+lies within a few kilohertz of it. Auto-bias locates that minimum on a 2 kHz
+fine grid. Check that the tones lie within 5 kHz of the nominal frequencies,
+and that regenerating the same array reproduces the tones. No common
+fractional offset or sign of the offset is assumed.
 
 ```python
 cfg = apply_overrides(dict(STANDARD_ARRAY))
@@ -89,7 +88,8 @@ for name, tone, fr, r in zip(names, tones_hz, nominal_hz, ratio):
     print(f"{name:6s} {tone/1e6:13.6f} {fr/1e6:13.6f} {r:13.6f}")
 
 assert count == len(nominal_hz) == STANDARD_ARRAY["num_resonances"]
-assert np.all(ratio > 1.0) and np.ptp(ratio) < 1e-4, ratio
+np.testing.assert_allclose(tones_hz, nominal_hz, rtol=0, atol=5e3)
+assert np.all((nominal_hz >= cfg["freq_start"]) & (nominal_hz <= cfg["freq_end"]))
 # Regenerated with the same seed, the simulator re-biased onto the same tones.
 nco = await crs.get_nco_frequency(module=MODULE)
 regenerated_hz = np.array([
@@ -237,9 +237,9 @@ for f in bias.findings:
 
 The fits put bifurcation between the top two steps for every resonator, so the
 step below the top is the amplitude a physics reading would choose. The
-detectors chose lower on most of them, and on two they fired on the quietest
-step there was. The table below runs each detector on the same sweeps and
-shows the step each would pick, beside the step the fit would. Nothing here is
+detectors can choose lower, including firing on the quietest measured step.
+The counts vary with the simulated noise. The table below runs each detector
+on the same sweeps and shows the step each would pick, beside the step the fit would. Nothing here is
 asserted: this is the comparison the post-merge plan wants to build into bias
 finding, and the array exists so it can be studied. What the detectors are
 reacting to on these traces is the open question — the simulator's 1/f

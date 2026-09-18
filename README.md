@@ -12,7 +12,7 @@ The CRS + MKIDs firmware is described in
 
 ### Installation
 
-**New in 2025:** rfmux is now available on PyPI. We recommend using [uv](https://github.com/astral-sh/uv) for installation:
+We recommend using [uv](https://github.com/astral-sh/uv) for installation:
 
 ```bash
 # Install uv (if not already installed)
@@ -24,8 +24,20 @@ uv venv ### or uv venv my-env-name
 source .venv/bin/activate # On Windows: .venv/Scripts/activate
 # or source my-env-name/bin/activate
 
+```
+
+rfmux is available on PyPI or from the git repo. For installing directly from PyPI:
+
+```bash
 # Install rfmux
 $ uv pip install rfmux
+```
+
+Or to install directly from the cloned git repo:
+
+```bash
+# in the rfmux directory
+$ uv pip install -e .
 ```
 
 **Note:** rfmux now uses a C++ extension for packet processing.  PyPI hosts

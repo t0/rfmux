@@ -72,7 +72,7 @@ def walk(I, Q, T, start, stop,
          bI, bQ, bptr, bcount, bN, bl_decim, baseline_on,
          mean_I, mean_Q, std_I, std_Q, jump_std_I, jump_std_Q,
          thr, end_sigma, trigger_samples, edge_lookback, min_end,
-         margin, max_capture, enable_pileup, freeze,
+         end_fraction, post_samples, max_capture, enable_pileup, freeze,
          si, sf, out) -> None:
     """Walk samples start..stop-1.  Writes the rings and the state in
     place; ``out`` receives (index, reason, rptr, rcount, bptr, bcount).
@@ -292,9 +292,11 @@ def walk(I, Q, T, start, stop,
                 if si[END_PTR] == 0:
                     si[SETTLED] = -1
             ref_duration = si[ACTIVE_DUR] if si[ACTIVE_DUR] > 0 else since_trig
-            adaptive_end = int(margin * ref_duration)
+            adaptive_end = int(end_fraction * ref_duration)
             if adaptive_end < min_end:
                 adaptive_end = min_end
+            if adaptive_end < post_samples:
+                adaptive_end = post_samples
             if si[END_PTR] > adaptive_end:
                 reason = END
                 break
@@ -315,6 +317,6 @@ def warm_up() -> None:
     z = np.zeros(1, dtype=np.float64)
     ring = np.zeros(2, dtype=np.float64)
     walk(z, z, z, 0, 0, ring, ring, ring, 0, 0, 1, ring, ring, 0, 0, 1, 1,
-         True, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 5.0, 2.0, 2, 1, 1, 0.5, 0,
+         True, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 5.0, 2.0, 2, 1, 1, 0.5, 0, 0,
          True, False, np.zeros(N_INT, dtype=np.int64),
          np.zeros(N_FLT, dtype=np.float64), np.zeros(6, dtype=np.int64))

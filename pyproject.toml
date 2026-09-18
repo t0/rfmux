@@ -37,6 +37,11 @@ dependencies = [
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
   "psutil",
+  # "rfmux parser --dirfile" and the dirfile "rfmux record" writes.  The
+  # wheels (Linux x86_64, macOS, Windows) carry libgetdata themselves;
+  # Linux aarch64 has no wheel and no sdist, so it goes without, and
+  # pygetdata is imported only on the paths that use it.
+  "pygetdata; platform_machine != 'aarch64'",
   "pyqtgraph",
   "pytest",
   "pytest-asyncio",
@@ -56,10 +61,6 @@ dependencies = [
 requires-python = ">=3.10"
 
 [project.optional-dependencies]
-
-# Dependencies for "rfmux parser --dirfile" and its test. Needs the
-# libgetdata shared library (Debian/Ubuntu: apt-get install libgetdata8).
-dirfile = ["pygetdata"]
 
 # Dependencies for "rfmux qc".
 qc = [

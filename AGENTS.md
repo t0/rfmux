@@ -7,7 +7,7 @@
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
 - **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
-- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, and the HDF5 record
+- **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, coincidence events (`events.py`), and the HDF5 record
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
 - **Mock System** (`rfmux/mock/`): Physics-based CRS simulator with Numba JIT
@@ -203,9 +203,18 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 ### MockCRS Physics
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
-- Single convergence loop: `converged_lekid_parameters()`, seeded with the
-  currents under each tone and stepped adaptively to preserve hysteresis.
-  Tone shutdown and array regeneration discard the corresponding history.
+- Single convergence loop: `converged_lekid_parameters()`, run by
+  `converge_tones()` with each tone's previous currents to preserve hysteresis.
+  `_tone_states` holds each tone's currents, cached solves and transient field.
+  Off/clear commands immediately discard its state under the physics lock;
+  array regeneration clears all states and tones before optional auto-bias.
+- `envelope_dynamics` enables pulse ring-down; `rfmux/mock/kerr.py` supplies
+  the driven resonator's linearized dynamics. Tones on the same module
+  contribute twice the other tones' squared currents to each other's solve.
+- Generated resonators stay inside `freq_start`/`freq_end`. Sample reads use
+  the stream's clock while streaming, so they do not advance the pulse
+  schedule beyond the stream. The mock's parent watcher also handles a
+  blocked RPC when the parent dies (`rfmux/mock/server.py`).
 - Reproducibility requires concrete `resonator_random_seed` in config
 
 ### Streaming
@@ -245,9 +254,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 2052 tests
-pytest --tier=portable              # No CRS, no GUI: 751 tests
-pytest --tier=full                  # All 2089 that run without a board, including demos
+pytest --tier=quick                 # Edit loop: 2247 tests
+pytest --tier=portable              # No CRS, no GUI: 763 tests
+pytest --tier=full                  # All 2284 that run without a board, including demos
 pytest --tier=acquisition           # MockCRS server + real UDP: 37 tests, including demos (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

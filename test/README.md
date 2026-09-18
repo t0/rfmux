@@ -5,19 +5,28 @@
 Ask for a tier by name. Counts include expected failures and exclude local
 scratch notebooks. This collection has the test group installed but lacks
 `rfmux.fastrx`, so its file-format tests are not included. The missing fastrx
-extension and `pygetdata` also skip capture and recording-review checks. Optional
+extension and an environment missing `pygetdata` also skip capture and recording-review checks. Optional
 dependencies and compiled extensions can change the collected set. Measure local runtime
 with `--durations=20`; acquisition includes full demo notebooks and depends
 strongly on their measurement parameters.
 
+Use the `rfmux-tuning` environment in this checkout. Mock RPC, UDP and
+asyncio worker tests need local socket access; run outside a socket-restricted
+sandbox. `pygetdata` is a default dependency except on `aarch64`; existing
+environments may need their dependencies refreshed.
+Activate the environment (or use `conda run -n rfmux-tuning`) so subprocess
+commands such as `jupyter` also resolve there, not just the Python interpreter.
+The Jupyter IPv6 busy-port check requires `localhost` to resolve to IPv6;
+an IPv6 loopback socket alone is not sufficient.
+
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 751 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 2052 | varies | Default while editing. |
+| `pytest --tier=portable` | 763 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2247 | varies | Default while editing. |
 | `pytest --tier=acquisition` | 37 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 2089 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 2284 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 2164 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2359 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -221,6 +230,13 @@ test, so run it by hand when its notebook changes. Every `Demos/*.md` is
 collected, so a draft notebook left in that directory is executed too: keep
 drafts elsewhere until they are ready to run.
 
+## Qt collection
+
+The `qt_app` fixture supplies a shared QApplication. An autouse fixture
+disables cyclic garbage collection during tests using it, then collects
+generation 1 on the GUI thread during teardown. This keeps dropped widget
+cycles from being finalized during event dispatch or on worker threads.
+
 ## Platform skips
 
 A few tests skip on macOS or Windows because they pin platform behaviour:
@@ -228,9 +244,10 @@ A few tests skip on macOS or Windows because they pin platform behaviour:
 Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT` to a
 process group). `test/test_fastrx_file.py` skips at collection unless the
 fastrx extension was built. That needs Linux with clang, libxdp, libbpf and
-liburing present at install time (`rfmux/streamer/CMakeLists.txt`). With
-fastrx built and the test group installed, every tier below `hardware`
-reports zero skips on Linux.
+liburing present at install time (`rfmux/streamer/CMakeLists.txt`). Optional
+recording checks also require `pygetdata`; the Jupyter IPv6 case requires
+IPv6 resolution for localhost. These prerequisites can produce skips on
+Linux as well.
 
 ## CI
 

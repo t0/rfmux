@@ -92,6 +92,18 @@ def test_a_reviewed_file_fills_the_template_tab(qt_app, tmp_path, panel):
     assert len(panel.template_plot_i.getPlotItem().listDataItems()) >= 1
 
 
+def test_autoscaling_the_template_fits_the_stacked_span(qt_app, tmp_path,
+                                                        panel):
+    """The time grid runs to half the ring buffer; an autoscale fits the
+    bins that hold data, as the first draw does."""
+    panel.load_from_hdf5(_build_timed_capture_file(tmp_path))
+    vb = panel.template_plot_i.getPlotItem().vb
+    drawn = vb.viewRange()[0]
+    vb.autoRange()
+    fitted = vb.viewRange()[0]
+    assert fitted[1] - fitted[0] < 1.2 * (drawn[1] - drawn[0])
+
+
 def test_a_reviewed_dual_file_fills_the_template_tab(qt_app, tmp_path,
                                                      panel):
     panel.load_from_hdf5(_build_dual_file(tmp_path))

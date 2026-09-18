@@ -34,7 +34,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import h5py
 
-from .detection import ChannelNoiseStats
+from .detection import RATE_PARAMS, ChannelNoiseStats
 from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
 from .channel_keys import (ChannelKey, channel_group, check_keys,
@@ -59,6 +59,10 @@ def _store_units(grp, stored_units, channel) -> None:
 
 #: Attribute on a ``tuning`` group naming the fields stored as JSON.
 TUNING_JSON_FIELDS = "json_fields"
+
+#: Dataset under a channel group: the noise training record, complex
+#: samples in the channel's stored units.
+NOISE_RECORD = "noise_training"
 
 
 def _json_default(value):
@@ -131,22 +135,26 @@ class _PulseFileWriter:
     them — so that is all the subclasses carry.
     """
 
+    #: Where an event's member lives: a pulse under its channel.
+    _MEMBER_PATH = "/{group}/pulse_{idx:06d}"
+
     #: capture_params written to ``metadata``, grouped by attribute type.
     #: Must cover everything in
-    #: :data:`~.session.DETECTION_PARAMS` — a parameter
+    #: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
     #: missing here is dropped without complaint.
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
         (str, ("streamer_mode", "trigger_basis", "stored_units")),
-        (float, ("threshold_sigma", "end_sigma", "margin_fraction",
+        (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
+                 "post_pulse_ms", "coincidence_window_s",
+                 "noise_capture_interval_s", "noise_capture_window_s",
                  "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
                  "sample_rate_slow", "sample_rate_fast",
                  "volts_per_count", "slow_time_offset_s")),
-        (int, ("min_pulse_samples", "module", "trigger_samples",
-               "trigger_samples_slow", "trigger_samples_fast",
-               "baseline_window", "edge_lookback", "max_capture_samples",
-               "min_end_samples")),
-        (bool, ("enable_pileup",)),
+        (int, ("module", "min_end_samples",
+               *(name + suffix for name in RATE_PARAMS
+                 for suffix in ("", "_slow", "_fast")))),
+        (bool, ("enable_pileup", "dump_all_channels")),
     )
 
     def __init__(self, path: str | Path, channels: List[ChannelKey],
@@ -180,14 +188,19 @@ class _PulseFileWriter:
         grp.attrs["noise_jump_std_Q"] = ns.jump_std_Q
 
     def _set_noise_stats(self, key_for,
-                         noise_stats: Dict[int, ChannelNoiseStats]) -> None:
-        """Stamp per-channel noise attrs; *key_for* maps channel → group."""
+                         noise_stats: Dict[int, ChannelNoiseStats],
+                         noise_data: Optional[Dict[int, np.ndarray]] = None,
+                         ) -> None:
+        """Stamp per-channel noise attrs and records; *key_for* maps
+        channel → group."""
         if not self.is_open:
             return
         for ch, ns in noise_stats.items():
             key = key_for(ch)
             if key in self.f:
                 self._write_noise_attrs(self.f[key], ns)
+                if noise_data and ch in noise_data:
+                    self._replace_datasets(key, {NOISE_RECORD: noise_data[ch]})
         self.f.flush()
 
     def _append_pulse_to(self, key: str, pulse_idx: int, pulse_data: dict,
@@ -207,11 +220,14 @@ class _PulseFileWriter:
 
     def _replace_datasets(self, group_key: str,
                           data: Dict[str, np.ndarray]) -> None:
-        """Overwrite a group's datasets wholesale (histograms/templates).
+        """Overwrite a group's datasets wholesale (histograms, templates,
+        the noise training record).
 
         Running accumulators are rewritten in full on every flush rather
         than appended to, so the file always holds one self-consistent
-        snapshot however the capture ends.
+        snapshot however the capture ends.  Uncompressed: this runs on
+        the thread that feeds samples, and gzip of a fast channel's
+        training record costs 160 ms for a 4% saving.
         """
         if not self.is_open:
             return
@@ -223,6 +239,90 @@ class _PulseFileWriter:
         self.f.flush()
 
     # ── Lifecycle ─────────────────────────────────────────────────
+
+    def append_event(self, event: dict) -> None:
+        """File one coincidence event under ``events/``::
+
+            events/event_<k>/         kind, trigger_time, window_t0,
+                                      window_t1; trigger_epoch and
+                                      trigger_utc once the packet
+                                      clock's day is known
+                members               rows of (channel, index), or of
+                                      (module, channel, index)
+                trigger_times         one per member
+                pulses/<channel group>_<pulse or pair>
+                                      a soft link to each member, the
+                                      group's "/" as "_"; empty for a
+                                      noise sample that holds no pulse
+                dump/<channel group>/Amp_I, Amp_Q, Time
+                dump/<channel group>/slow/...  and  .../fast/...
+
+        A member's index is that of a pulse stored under its channel,
+        or in a dual file of a pair under ``matched/``.  ``dump`` holds
+        the same span of the channels that did not trigger, when the
+        capture took it: one window, or in a dual file one per stream
+        that carries the channel.  The group appears with the first
+        event, so a file without events has no ``events/`` group.
+
+        ``pulses`` is for browsing: a generic HDF5 tool opens an event
+        and finds its pulses there.  ``members`` is what the reader
+        uses; it stays valid when an event group is copied into another
+        file, where the links dangle.
+        """
+        if not self.is_open:
+            return
+        events = self.f.require_group("events")
+        idx = int(event["event_idx"])
+        grp = events.create_group(f"event_{idx:06d}")
+        # "pulses", or "noise" for a sample with no trigger.
+        grp.attrs["kind"] = str(event.get("kind", "pulses"))
+        grp.attrs["trigger_time"] = float(event["trigger_time"])
+        if event.get("trigger_utc") is not None:
+            grp.attrs["trigger_epoch"] = float(event["trigger_epoch"])
+            grp.attrs["trigger_utc"] = str(event["trigger_utc"])
+        if event.get("window") is not None:
+            grp.attrs["window_t0"] = float(event["window"][0])
+            grp.attrs["window_t1"] = float(event["window"][1])
+        members = event["members"]
+        rows = [[*(m["channel"] if isinstance(m["channel"], tuple)
+                   else (m["channel"],)), m["pulse_idx"]] for m in members]
+        # A noise sample may name no pulse at all: an empty table still
+        # has a row width, that of the file's channel keys.
+        width = 1 + max(1, np.ndim(self.f["metadata"].attrs["channels"]))
+        grp.create_dataset("members", data=np.array(
+            rows, dtype=np.int64).reshape(len(rows), width))
+        grp.create_dataset("trigger_times", data=np.array(
+            [m["trigger_time"] for m in members], dtype=np.float64))
+        links = grp.create_group("pulses")
+        for m in members:
+            group = channel_group(m["channel"])
+            target = self._MEMBER_PATH.format(group=group,
+                                              idx=int(m["pulse_idx"]))
+            links[f"{group.replace('/', '_')}_{target.rsplit('/', 1)[1]}"] = \
+                h5py.SoftLink(target)
+        for channel, tod in (event.get("dump") or {}).items():
+            dgrp = grp.create_group(f"dump/{channel_group(channel)}")
+            windows = ({"": tod} if "Amp_I" in tod else
+                       {f"{side}/": tod[f"{side}_tod"]
+                        for side in ("slow", "fast")
+                        if tod.get(f"{side}_tod")})
+            for prefix, window in windows.items():
+                for name in ("Amp_I", "Amp_Q", "Time"):
+                    dgrp.create_dataset(
+                        prefix + name,
+                        data=np.asarray(window[name], dtype=np.float64),
+                        compression="gzip", compression_opts=1)
+        events.attrs["event_count"] = max(
+            int(events.attrs.get("event_count", 0)), idx)
+        self.f.flush()
+
+    def read_event(self, event_idx: int) -> Optional[dict]:
+        """An event back out of the live file, dump included, for a
+        viewer whose cache has let it go."""
+        key = f"events/event_{int(event_idx):06d}"
+        if not self.is_open or key not in self.f:
+            return None
+        return _event_from_group(self.f[key], int(event_idx))
 
     def finalize(self) -> None:
         """Write final metadata and close the HDF5 file."""
@@ -265,7 +365,8 @@ class PulseHDF5Writer(_PulseFileWriter):
     per-channel noise statistics.  Each call to :meth:`append_pulse`
     creates a new HDF5 group with compressed waveform datasets and
     metadata attributes.  The file is flushed after every write for
-    crash safety.
+    crash safety.  Coincidence events index those pulses from
+    ``events/`` (:meth:`append_event`).
 
     Parameters
     ----------
@@ -294,6 +395,7 @@ class PulseHDF5Writer(_PulseFileWriter):
         capture_params: Dict[str, Any],
         tuning: Optional[Dict[int, dict]] = None,
         stored_units: Optional[Dict[int, str]] = None,
+        noise_data: Optional[Dict[int, np.ndarray]] = None,
     ):
         super().__init__(path, channels, capture_params)
         self._noise_stats = dict(noise_stats)
@@ -303,6 +405,9 @@ class PulseHDF5Writer(_PulseFileWriter):
             grp = self.f.create_group(channel_group(ch))
             self._write_noise_attrs(grp, noise_stats.get(
                 ch, ChannelNoiseStats()))
+            if noise_data and ch in noise_data:
+                self._replace_datasets(channel_group(ch),
+                                       {NOISE_RECORD: noise_data[ch]})
             grp.attrs["pulse_count"] = 0
             _store_tuning(grp, tuning, ch)
             _store_units(grp, stored_units, ch)
@@ -355,14 +460,16 @@ class PulseHDF5Writer(_PulseFileWriter):
 
     def update_noise_stats(
         self, noise_stats: Dict[int, ChannelNoiseStats],
+        noise_data: Optional[Dict[int, np.ndarray]] = None,
     ) -> None:
-        """Refresh per-channel noise attributes after a re-estimation.
+        """Refresh per-channel noise attributes, and the training
+        records when given, after a re-estimation.
 
         Later pulses' derived attrs use the new statistics; the channel
         group attrs always reflect the most recent estimate.
         """
         self._noise_stats.update(noise_stats)
-        self._set_noise_stats(channel_group, noise_stats)
+        self._set_noise_stats(channel_group, noise_stats, noise_data)
 
     def update_histograms(self, histogram_data: Dict[str, np.ndarray]) -> None:
         """Overwrite histogram datasets with current running histograms.
@@ -399,6 +506,8 @@ class DualPulseHDF5Writer(_PulseFileWriter):
     """
 
     STREAMS = ("slow", "fast")
+    #: An event's member is a pair.
+    _MEMBER_PATH = "/matched/{group}/pair_{idx:06d}"
 
     def __init__(self, path, channels: List[int],
                  capture_params: Dict[str, Any],
@@ -429,10 +538,12 @@ class DualPulseHDF5Writer(_PulseFileWriter):
         self.f.flush()
 
     def set_noise_stats(self, stream: str,
-                        noise_stats: Dict[int, ChannelNoiseStats]) -> None:
+                        noise_stats: Dict[int, ChannelNoiseStats],
+                        noise_data: Optional[Dict[int, np.ndarray]] = None,
+                        ) -> None:
         self._noise[stream].update(noise_stats)
         self._set_noise_stats(lambda ch: f"{stream}/{channel_group(ch)}",
-                              noise_stats)
+                              noise_stats, noise_data)
 
     def append_pulse(self, stream: str, channel: int, pulse_idx: int,
                      pulse_data: dict) -> None:
@@ -572,6 +683,18 @@ class PulseHDF5Reader:
             jump_std_I=float(grp.attrs.get("noise_jump_std_I", 0.0)),
             jump_std_Q=float(grp.attrs.get("noise_jump_std_Q", 0.0)),
         )
+
+    def noise_training(self, channel: int,
+                       stream: Optional[str] = None) -> Optional[np.ndarray]:
+        """The tail of the training record *channel*'s noise statistics
+        were fitted to, as much of it as the session kept, complex
+        samples in the stored units; None when the file carries none."""
+        if self.f is None:
+            return None
+        grp = self.f.get(self._ch_key(channel, stream))
+        if grp is None or NOISE_RECORD not in grp:
+            return None
+        return np.asarray(grp[NOISE_RECORD][()], dtype=np.complex128)
 
     def volts_per_count(self) -> Optional[float]:
         """The counts-to-volts constant *this file* was written with.
@@ -724,6 +847,32 @@ class PulseHDF5Reader:
 
     # ── Histograms ────────────────────────────────────────────────
 
+    # ── Events ────────────────────────────────────────────────────
+
+    @property
+    def event_count(self) -> int:
+        """Events the capture recorded; 0 for a file without any."""
+        if "events" not in self.f:
+            return 0
+        return int(self.f["events"].attrs.get("event_count", 0))
+
+    def get_event(self, event_idx: int, dump: bool = True) -> Optional[dict]:
+        """One event: its members (pulses, or in a dual file pairs), and
+        with *dump* the channels that did not trigger, each
+        ``{"Amp_I", "Amp_Q", "Time"}`` or in a dual file
+        ``{"slow_tod": ..., "fast_tod": ...}`` like a pair."""
+        key = f"events/event_{int(event_idx):06d}"
+        if key not in self.f:
+            return None
+        return _event_from_group(self.f[key], int(event_idx), dump=dump)
+
+    def iter_events(self) -> Iterator[dict]:
+        """Every event in order, without the dumped samples."""
+        for idx in range(1, self.event_count + 1):
+            event = self.get_event(idx, dump=False)
+            if event is not None:
+                yield event
+
     def _read_group(self, name: str,
                     stream: Optional[str]) -> Dict[str, np.ndarray]:
         """All datasets of an accumulator group (per stream for dual
@@ -859,6 +1008,49 @@ def _pair_from_group(pg, channel: int, pair_idx: int) -> Dict[str, Any]:
                 "Time": np.array(pg[f"{side}_Time"]),
             }
     return pair
+
+
+def _event_from_group(grp, event_idx: int, dump: bool = True) -> dict:
+    """One event as the session emitted it, without the summaries
+    (reader/writer shared).  ``dumped`` names the channels a dump was
+    taken of, whether or not their samples were asked for."""
+    rows = np.array(grp["members"])
+    times = np.array(grp["trigger_times"])
+    members = [{"channel": (int(r[0]), int(r[1])) if len(r) == 3
+                else int(r[0]),
+                "pulse_idx": int(r[-1]), "trigger_time": float(t)}
+               for r, t in zip(rows, times)]
+    event: Dict[str, Any] = {
+        "event_idx": event_idx,
+        "kind": str(_convert_attr(grp.attrs.get("kind", "pulses"))),
+        "trigger_time": float(grp.attrs["trigger_time"]),
+        "window": ((float(grp.attrs["window_t0"]),
+                    float(grp.attrs["window_t1"]))
+                   if "window_t0" in grp.attrs else None),
+        "members": members,
+        "dumped": [],
+    }
+    if "trigger_utc" in grp.attrs:
+        event["trigger_epoch"] = float(grp.attrs["trigger_epoch"])
+        event["trigger_utc"] = str(_convert_attr(grp.attrs["trigger_utc"]))
+    if "dump" in grp:
+        groups = {}
+        for name, item in grp["dump"].items():
+            if name.startswith("module_"):
+                for sub_name, sub in item.items():
+                    groups[(int(name[7:]), int(sub_name[8:]))] = sub
+            else:
+                groups[int(name[8:])] = item
+        event["dumped"] = sorted(groups)
+        if dump:
+            def window(g):
+                return {n: np.array(g[n]) for n in ("Amp_I", "Amp_Q", "Time")}
+            event["dump"] = {
+                ch: (window(g) if "Amp_I" in g else
+                     {f"{side}_tod": window(g[side])
+                      for side in ("slow", "fast") if side in g})
+                for ch, g in groups.items()}
+    return event
 
 
 def _pulse_dict_from_group(grp) -> dict:

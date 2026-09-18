@@ -354,6 +354,21 @@ LEGEND_TEXT_DARK = '#CCCCCC'   # Legend text colour for dark mode
 LEGEND_TEXT_LIGHT = '#333333'  # Legend text colour for light mode
 
 
+def flag_tint(widget: QtWidgets.QWidget, colour: str,
+              weight: float = 0.25) -> QtGui.QColor:
+    """A background that flags a row or cell of *widget*: its palette's
+    base colour washed with *colour* by *weight*.  Light on a light
+    theme, dark on a dark one, whatever the Dark Mode flag says, and
+    the text keeps the palette's own colour, so it stays readable on
+    a desktop whose window theme the flag does not reach."""
+    base = widget.palette().color(QtGui.QPalette.ColorRole.Base)
+    flag = QtGui.QColor(colour)
+    mix = lambda a, b: int(round(a + (b - a) * weight))
+    return QtGui.QColor(mix(base.red(), flag.red()),
+                        mix(base.green(), flag.green()),
+                        mix(base.blue(), flag.blue()))
+
+
 def theme_colors(dark_mode: bool) -> tuple[str, str]:
     """Return ``(bg_color, pen_color)`` for the given theme.
 
@@ -374,6 +389,93 @@ def theme_colors(dark_mode: bool) -> tuple[str, str]:
 def legend_text_color(dark_mode: bool) -> str:
     """Return the legend text colour appropriate for *dark_mode*."""
     return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
+
+
+#: Fusion's own light and dark colours, spelled out because the style
+#: only hands back the one matching the desktop's colour scheme.
+_UI_PALETTES = {
+    False: dict(window="#efefef", text="#000000", base="#ffffff",
+                alt_base="#f7f7f7", tooltip="#ffffdc", placeholder="#808080",
+                disabled="#bebebe", link="#0000ff", highlight="#308cc6"),
+    True: dict(window="#323232", text="#f0f0f0", base="#242424",
+               alt_base="#2c2c2c", tooltip="#323232", placeholder="#8a8a8a",
+               disabled="#7f7f7f", link="#5aa9ff", highlight="#308cc6"),
+}
+
+
+def ui_palette(dark_mode: bool) -> QtGui.QPalette:
+    """The palette every widget wears in *dark_mode*.  Built on the
+    window colour so Fusion's bevels derive their shades from it."""
+    c = _UI_PALETTES[dark_mode]
+    P = QtGui.QPalette
+    pal = P(QtGui.QColor(c["window"]))
+    for role, colour in (
+        (P.ColorRole.Window, c["window"]), (P.ColorRole.Button, c["window"]),
+        (P.ColorRole.WindowText, c["text"]), (P.ColorRole.Text, c["text"]),
+        (P.ColorRole.ButtonText, c["text"]), (P.ColorRole.ToolTipText, c["text"]),
+        (P.ColorRole.Base, c["base"]), (P.ColorRole.AlternateBase, c["alt_base"]),
+        (P.ColorRole.ToolTipBase, c["tooltip"]),
+        (P.ColorRole.PlaceholderText, c["placeholder"]),
+        (P.ColorRole.Link, c["link"]), (P.ColorRole.Highlight, c["highlight"]),
+        (P.ColorRole.HighlightedText, "#ffffff"), (P.ColorRole.BrightText, "#ff5555"),
+    ):
+        pal.setColor(role, QtGui.QColor(colour))
+    for role in (P.ColorRole.WindowText, P.ColorRole.Text,
+                 P.ColorRole.ButtonText, P.ColorRole.HighlightedText):
+        pal.setColor(P.ColorGroup.Disabled, role, QtGui.QColor(c["disabled"]))
+    pal.setColor(P.ColorGroup.Disabled, P.ColorRole.Highlight,
+                 QtGui.QColor(c["window"]).darker(120))
+    return pal
+
+
+def apply_ui_theme(dark_mode: bool) -> None:
+    """Dress the whole application for *dark_mode*.
+
+    Fusion is the one style that honours an application palette on
+    every platform (the GTK and macOS styles paint from the system
+    theme).  The colour scheme is set too, where the platform supports
+    it, so menus, tooltips and decorations agree with the palette.
+    Widgets that already exist take the palette on the next event-loop
+    turn.
+    """
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    hints = app.styleHints()
+    if hasattr(hints, "setColorScheme"):  # Qt 6.8+
+        hints.setColorScheme(Qt.ColorScheme.Dark if dark_mode
+                             else Qt.ColorScheme.Light)
+    app.setStyle("Fusion")
+    app.setPalette(ui_palette(dark_mode))
+
+
+class _PopupEcho(QtCore.QObject):
+    """Prints each warning or error message box as it is shown."""
+
+    _LEVELS = {QtWidgets.QMessageBox.Icon.Warning: "WARNING",
+               QtWidgets.QMessageBox.Icon.Critical: "ERROR"}
+
+    def eventFilter(self, obj, event) -> bool:
+        if (event.type() == QtCore.QEvent.Type.Show
+                and isinstance(obj, QtWidgets.QMessageBox)
+                and obj.icon() in self._LEVELS):
+            parts = [obj.text(), obj.informativeText(), obj.detailedText()]
+            # macOS message boxes have no title, and Qt reports none.
+            head = [self._LEVELS[obj.icon()], obj.windowTitle()]
+            print("[Periscope] " + ": ".join(h for h in head if h) + ": "
+                  + "\n".join(part for part in parts if part),
+                  file=sys.stderr, flush=True)
+        return False
+
+
+def echo_popups_to_console(app: QtWidgets.QApplication) -> None:
+    """Every warning or error pop-up also goes to the console, so a
+    terminal log or a remote session keeps what a dialog said.  One
+    filter on the application covers the static ``QMessageBox.warning``
+    and ``critical`` calls as well as boxes built by hand."""
+    if getattr(app, "_popup_echo", None) is None:
+        app._popup_echo = _PopupEcho(app)
+        app.installEventFilter(app._popup_echo)
 
 
 def square_axes(plot_item: pg.PlotItem):
@@ -674,7 +776,6 @@ class ClickableViewBox(pg.ViewBox):
         # scenePos() is from the event 'event', map it to view coordinates
         pt_view = self.mapSceneToView(event.scenePos()) 
         x_val = 10 ** pt_view.x() if log_x else pt_view.x()
-        y_val = 10 ** pt_view.y() if log_y else pt_view.y() # y_val needed for QMessageBox
 
         # 1. Handle window-specific modes first (e.g., add_subtract_mode for NetworkAnalysisWindow)
         if window and getattr(window, 'add_subtract_mode', False):
@@ -699,39 +800,23 @@ class ClickableViewBox(pg.ViewBox):
                 event.accept()
                 return
         
-        # 2. Emit the generic doubleClickedEvent signal.
-        #    This is intended for features like the Detector Digest in MultisweepWindow.
+        # 2. Offer the double-click to the panel (the detector digest in
+        #    the multisweep window).  A slot accepts the event when it
+        #    acts on it; Qt delivers events already accepted, so the
+        #    flag is cleared first for that to mean anything.
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.doubleClickedEvent.emit(event) # Pass the original event object
+            event.ignore()
+            self.doubleClickedEvent.emit(event)
             if event.isAccepted():
-                # If a slot connected to doubleClickedEvent accepted the event,
-                # we assume it's fully handled.
                 return
 
-        # 3. Default behavior for left double-click: show coordinates QMessageBox
-        #    This executes if not in add_subtract_mode and no slot accepted doubleClickedEvent.
-        if event.button() == QtCore.Qt.MouseButton.LeftButton and not event.isAccepted():
-            plot_item = self.parentItem()
-            x_label_text = y_label_text = "" # Renamed to avoid conflict with x_val, y_val
-            if isinstance(plot_item, pg.PlotItem):
-                x_axis = plot_item.getAxis("bottom"); y_axis = plot_item.getAxis("left")
-                if x_axis and x_axis.label: x_label_text = x_axis.label.toPlainText().strip()
-                if y_axis and y_axis.label: y_label_text = y_axis.label.toPlainText().strip()
-            x_label_text = x_label_text or "X"; y_label_text = y_label_text or "Y"
-            
-            parent_widget = None
-            current_scene = self.scene() # Store scene in a variable
-            if current_scene and current_scene.views(): # Ensure scene and views exist
-                parent_widget = current_scene.views()[0].window()
-
-            if parent_widget: # Only show if we have a valid parent widget
-                box = QtWidgets.QMessageBox(parent_widget)
-                box.setWindowTitle("Coordinates")
-                box.setText(f"{y_label_text}: {y_val:.6g}\n{x_label_text}: {x_val:.6g}")
-                box.setStandardButtons(QtWidgets.QMessageBox.StandardButton.Close)
-                box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
-                box.show()
-            event.accept() # Accept the event after showing the message box
+            # 3. Otherwise autoscale the plot to its data.  autoRange()
+            #    switches continuous auto-ranging off, which a live plot
+            #    with Auto Scale on must keep.
+            auto_x, auto_y = self.autoRangeEnabled()
+            self.autoRange()
+            self.enableAutoRange(x=auto_x, y=auto_y)
+            event.accept()
             return
 
         # 4. If not a left button double click and not handled by any of the above,

@@ -342,64 +342,30 @@ class ServerMockCRS:
             traceback.print_exc()
             raise
 
-    #: Locating pass.  The S21 minimum sits above compute_fr's impedance
-    #: resonance by the coupling shift, 0.118% of the frequency with the
-    #: default circuit (1.5 MHz at 1.3 GHz), so the window is centred on
-    #: the shifted frequency and scales with it.  A 50 kHz step still
+    #: Locating pass: the S21 minimum sits within a few kHz of
+    #: compute_fr at low power and moves down by up to a few hundred
+    #: kHz at a bias that drives the resonator hard, so the window is a
+    #: fraction of the frequency either side.  A 50 kHz step still
     #: shows a 6 kHz-wide dip as the minimum of a noise-free sweep.
-    #: Where the S21 dip sits relative to compute_fr for the default
-    #: circuit; _measure_dip_shift replaces it with the built array's own
-    #: value before the resonators are biased.
-    _DIP_SHIFT_FRACTION = 0.00118
-    _DIP_LOCATE_FRACTION = 0.0025
+    _DIP_LOCATE_FRACTION = 0.001
     _DIP_LOCATE_STEP_HZ = 50e3
     #: Refining pass: Periscope's multisweep defaults.
     _DIP_SPAN_HZ = 200e3
     _DIP_POINTS = 101
-
-    @property
-    def _dip_shift_fraction(self):
-        return getattr(self, "_measured_dip_shift", self._DIP_SHIFT_FRACTION)
-
-    def _measure_dip_shift(self, amplitude):
-        """The fraction by which the S21 dip sits above compute_fr for
-        this array's circuit, measured on its most isolated resonator
-        over a window wide enough to hold any coupling shift."""
-        model: MockResonatorModel = self._resonator_model
-        freqs = np.asarray(model.resonator_frequencies, dtype=float)
-        if freqs.size == 0:
-            return
-        if freqs.size == 1:
-            gap = np.inf
-            idx = 0
-        else:
-            ordered = np.sort(freqs)
-            gaps = np.diff(ordered)
-            spacing = np.minimum(np.r_[np.inf, gaps], np.r_[gaps, np.inf])
-            idx = int(np.argmax(spacing))
-            gap = spacing[idx]
-            freqs = ordered
-        f0 = freqs[idx]
-        half = min(0.01 * f0, gap / 2)
-        grid = np.arange(f0 - half, f0 + half, self._DIP_LOCATE_STEP_HZ)
-        dip = grid[np.argmin(model.s21_sweep(grid, amplitude))]
-        self._measured_dip_shift = float((dip - f0) / f0)
 
     def _find_s21_dip_frequency(self, nominal_freq, amplitude):
         """The S21 transmission minimum near ``nominal_freq`` (compute_fr).
 
         As on hardware: a coarse sweep locates the dip, then a sweep at
         Periscope's multisweep span and point count pins it.  Both
-        windows stop halfway to the nearest other resonator, whose dip
-        is shifted by the same fraction, so a dense array cannot bias
-        two channels on one dip.
+        windows stop halfway to the nearest other resonator, so a dense
+        array cannot bias two channels on one dip.
         """
         model: MockResonatorModel = self._resonator_model
         gaps = np.abs(np.asarray(model.resonator_frequencies) - nominal_freq)
         gap = gaps[gaps > 0].min(initial=np.inf)
         half = min(self._DIP_LOCATE_FRACTION * nominal_freq, gap / 2)
-        centre = nominal_freq * (1 + self._dip_shift_fraction)
-        coarse = np.arange(centre - half, centre + half,
+        coarse = np.arange(nominal_freq - half, nominal_freq + half,
                            self._DIP_LOCATE_STEP_HZ)
         guess = coarse[np.argmin(model.s21_sweep(coarse, amplitude))]
         fine_half = min(self._DIP_SPAN_HZ / 2, half)
@@ -433,10 +399,6 @@ class ServerMockCRS:
             print(f"[MockCRS] Setting NCO frequency to {nco_freq:.3e} Hz")
             await self.set_nco_frequency(nco_freq, module=module)
             
-            await asyncio.to_thread(self._measure_dip_shift, amplitude)
-            print(f"[MockCRS] S21 dip sits {self._dip_shift_fraction*1e2:+.3f}% "
-                  f"above compute_fr for this circuit")
-
             # One channel per resonator, as many as a packet carries.
             chan_limit = self.channels_per_module()
             to_bias = resonance_frequencies[:chan_limit]
@@ -485,11 +447,11 @@ class ServerMockCRS:
         max_freq_hz = 313.5e6
         if not (min_freq_hz <= frequency <= max_freq_hz):
             raise ValueError(f"The set frequency must be between -313.5 MHz and +313.5 MHz of the NCO frequency.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
-        assert module is not None and isinstance(module, int), "Module must be an integer"
         with self._config_lock:
             self._frequencies[(module, channel)] = frequency
 
@@ -502,11 +464,11 @@ class ServerMockCRS:
         assert isinstance(amplitude, (int, float)), "Amplitude must be a number"
         if not (-1.0 <= amplitude <= 1.0):
             raise ValueError("Amplitude must be between -1.0 and +1.0.")
+        assert channel is not None and isinstance(channel, int), "Channel must be an integer"
+        assert module is not None and isinstance(module, int), "Module must be an integer"
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        assert channel is not None and isinstance(channel, int)
-        assert module is not None and isinstance(module, int)
         with self._resonator_model._physics_lock, self._config_lock:
             self._amplitudes[(module, channel)] = amplitude
             if amplitude == 0:
@@ -771,6 +733,23 @@ class ServerMockCRS:
         assert isinstance(value, int)
         self._hmc7044_registers[address] = value
 
+    def _physics_time(self) -> float:
+        """The time the pulse schedule is advanced to by a sample read.
+
+        The schedule ignores any time at or before the latest it has
+        seen, and the stream advances it with stream time, which falls
+        behind the wall clock whenever blocks take longer to generate
+        than they span.  A read on the wall clock would then put the
+        schedule ahead of the stream, and the stream would fire no pulse
+        until it had caught up.  So a read follows the stream's clock
+        while one runs, and the wall clock since the mock started
+        otherwise.
+        """
+        streamer = self._udp_manager._streamer
+        if streamer is not None and streamer.running:
+            return streamer.t_stream
+        return time.time() - self.mock_start_time
+
     async def get_samples(self, num_samples, channel=None, module=1, average=False):
         """Get sample data for a specific module using direct physics calculations."""
         assert isinstance(num_samples, int)
@@ -792,7 +771,7 @@ class ServerMockCRS:
                                mock_config.MOCK_DEFAULTS['scale_factor'])
         noise_level = cfg.get('udp_noise_level',
                               mock_config.MOCK_DEFAULTS['udp_noise_level'])
-        current_time = time.time() - self.mock_start_time
+        current_time = self._physics_time()
 
         if average:
             effective_num_samples = 1

@@ -1,0 +1,88 @@
+"""Fixtures shared by the mock physics tests."""
+import asyncio
+import contextlib
+import io
+import types
+
+import numpy as np
+import pytest
+
+from rfmux.mr_resonator import jit_physics as jp
+
+
+@pytest.fixture
+def batch():
+    """Builders for the batch-path tests: ``model(seed, mode, pulses)``
+    gives (crs, model) with two resonators biased at 0.001 and the
+    physics_batch_mode set; ``run(crs, m, n_batches, seed, fs, n)`` the
+    stacked block responses, n samples a block at fs (ten at 596 Hz
+    unless given)."""
+
+    def model(seed, mode, pulses=True):
+        from rfmux.mock.crs import ServerMockCRS
+        crs = ServerMockCRS("0000")
+        cfg = {"num_resonances": 2, "resonator_random_seed": seed,
+               "auto_bias_kids": True, "bias_amplitude": 0.001}
+        if pulses:
+            cfg.update({"pulse_mode": "periodic", "pulse_period": 0.0005,
+                        "pulse_tau_rise": 1e-6, "pulse_tau_decay": 1e-4,
+                        "pulse_amplitude": 3.0})
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(crs.generate_resonators(cfg))
+        crs._physics_config["physics_batch_mode"] = mode
+        return crs, crs._resonator_model
+
+    def run(crs, m, n_batches, seed, fs=596.0, n=10):
+        np.random.seed(seed)
+        out = []
+        for k in range(n_batches):
+            t = k * n / fs
+            r = m.calculate_module_response_coupled(
+                1, num_samples=n, sample_rate=fs, start_time=t, pulse_time=t)
+            out.append(np.stack([r[ch] for ch in sorted(r)]))
+        return np.stack(out)
+
+    return types.SimpleNamespace(model=model, run=run)
+
+
+@pytest.fixture
+def kerr_model():
+    """Seed 5, three resonators, noise off: the model, its Kerr
+    envelope parameters, the index of the middle resonator, a seeded
+    solver returning the currents, and the Kerr cubic's |I| at a
+    point."""
+    from rfmux.mock.crs import ServerMockCRS
+    crs = ServerMockCRS("0000")
+    with contextlib.redirect_stdout(io.StringIO()):
+        asyncio.run(crs.generate_resonators(
+            {"num_resonances": 3, "resonator_random_seed": 5,
+             "auto_bias_kids": False}))
+    m = crs._resonator_model
+    m.nqp_noise_enabled = False
+    m._tls_generator = None
+    m._ensure_arrays()
+    base_Lk, base_R, base_Lg = m._base_arrays()
+    L0 = base_Lk + base_Lg + m.L_junk_array
+    k0 = m.mr_lekids[0]
+
+    def solve(f, amp, seed=None):
+        return jp.converged_lekid_parameters(
+            float(f), amp, L0, base_R, m.C_array, m.Cc_array, base_Lk,
+            base_Lg, m.L_junk_array, k0.input_atten_dB, complex(k0.ZLNA),
+            m.Istar, 1e-12, 500, initial_currents=seed)[2]
+
+    env = m.envelope_parameters()
+    i = int(np.argsort(m.resonator_frequencies)[1])
+
+    def cubic(f, amp, j=None):
+        j = i if j is None else j
+        Delta = 2 * np.pi * f - env['omega_r'][j]
+        K, kappa = env['K'][j], env['kappa'][j]
+        roots = np.roots([K ** 2, -2 * K * Delta,
+                          (kappa / 2) ** 2 + Delta ** 2,
+                          -abs(env['D'][j] * amp) ** 2])
+        real = roots[np.abs(roots.imag) < 1e-6 * np.abs(roots).max()].real
+        return np.sqrt(np.sort(real[real > 0]))
+
+    return types.SimpleNamespace(m=m, env=env, i=i, solve=solve, cubic=cubic,
+                                 L0=L0, base_R=base_R, k0=k0)

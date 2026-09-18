@@ -63,13 +63,15 @@ def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
     return Recording(_recording_file(tmp_path, spacing, span))
 
 
-def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None):
+def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None,
+             **config_kw):
     """A slow-only capture of the event on the first of *channels*
     (keys), stamps fed late as the board stamps them; the others see
     noise."""
     path = str(tmp_path / "slow.h5")
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
-                             max_pulse_ms=30.0, noise_train_ms=300.0)
+                             max_pulse_ms=30.0, noise_train_ms=300.0,
+                             **config_kw)
     got = []
     s = PulseCaptureSession(channels=list(channels), module=module,
                             sample_rate=FS, hdf5_path=path, tuning=tuning,
@@ -379,6 +381,149 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
         assert "noise_std_I" in r.f[f"fast/channel_{CHANNEL}"].attrs
 
 
+def _capture_with_a_quiet_channel(tmp_path, **config_kw):
+    """The event on CHANNEL with CHANNEL + 1 quiet beside it, fed a
+    block of each in turn as a source feeds them."""
+    path = str(tmp_path / "slow.h5")
+    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+                             max_pulse_ms=30.0, noise_train_ms=300.0,
+                             **config_kw)
+    s = PulseCaptureSession(channels=[CHANNEL, CHANNEL + 1], module=1,
+                            sample_rate=FS, hdf5_path=path,
+                            **cfg.session_kwargs(FS))
+    s.start()
+    rng = np.random.default_rng(5)
+    n, block = int(2.5 * FS), 64
+    t = T0 + np.arange(n) / FS
+    signal = {CHANNEL: _shape(t), CHANNEL + 1: np.zeros(n)}
+    for lo in range(0, n, block):
+        for key in (CHANNEL, CHANNEL + 1):
+            m = len(t[lo:lo + block])
+            s.feed_block(key, signal[key][lo:lo + block] + rng.normal(0, 1, m),
+                         rng.normal(0, 1, m), t[lo:lo + block] + LATE)
+    s.stop()
+    return path
+
+
+def test_a_merged_file_keeps_the_captures_events(tmp_path):
+    """The events index the capture's pulses, which are the merged
+    file's pairs under the same numbers."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    with PulseHDF5Reader(path) as r:
+        before = r.get_event(1)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        assert r.dual
+        after = r.get_event(1)
+        (member,) = after["members"]
+        assert r.get_match(member["channel"], member["pulse_idx"])["slow_idx"] \
+            == member["pulse_idx"]
+    assert after["members"] == before["members"]
+
+
+def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(tmp_path):
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    with PulseHDF5Reader(path) as r:
+        before = dict(r.metadata)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = dict(r.metadata)
+    assert after["pre_samples_slow"] == before["pre_samples"]
+    assert after["max_pulse_ms"] == before["max_pulse_ms"]
+    assert "pre_samples" not in after and "pre_samples_fast" not in after
+
+
+def test_a_merged_files_events_link_to_its_pairs(tmp_path):
+    """The links are rewritten for the merged layout, not carried over
+    from the slow file's."""
+    import h5py
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with h5py.File(path, "r") as f:
+        links = f["events/event_000001/pulses"]
+        (name,) = links
+        assert links.get(name, getlink=True).path.startswith("/matched/")
+        assert links[name] == f[links.get(name, getlink=True).path]
+
+
+def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
+    """With every channel saved per event, a channel that did not
+    trigger gets the recording over the event's window beside the slow
+    samples the capture took, as a both-mode capture would hold it."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path, dump_all_channels=True)
+    with PulseHDF5Reader(path) as r:
+        before = r.get_event(1)
+    assert before["dumped"] == [CHANNEL + 1]
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = r.get_event(1)
+    quiet = after["dump"][CHANNEL + 1]
+    np.testing.assert_array_equal(quiet["slow_tod"]["Amp_I"],
+                                  before["dump"][CHANNEL + 1]["Amp_I"])
+    fast = quiet["fast_tod"]["Time"]
+    t0, t1 = after["window"]
+    assert len(fast) > 10 * len(quiet["slow_tod"]["Time"])
+    assert t0 <= fast[0] and fast[-1] <= t1
+
+
+def test_a_merged_file_keeps_its_noise_samples(tmp_path):
+    """Tagged as they were, every channel's slow samples with them; the
+    recording is added where it covers the sample's window."""
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    path = _capture_with_a_quiet_channel(tmp_path,
+                                         noise_capture_interval_s=0.4)
+    with PulseHDF5Reader(path) as r:
+        before = [r.get_event(k) for k in range(1, r.event_count + 1)]
+    assert before and {e["kind"] for e in before} == {"noise"}
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    with PulseHDF5Reader(path) as r:
+        after = [r.get_event(k) for k in range(1, r.event_count + 1)]
+    assert [(e["kind"], e["window"], e["dumped"]) for e in after] == \
+        [(e["kind"], e["window"], e["dumped"]) for e in before]
+    for old, new in zip(before, after):
+        for ch in old["dumped"]:
+            np.testing.assert_array_equal(new["dump"][ch]["slow_tod"]["Amp_I"],
+                                          old["dump"][ch]["Amp_I"])
+
+
+def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
+    """In a both-mode file the list holds pairs; an event's members are
+    the pairs of the slow pulses it indexes, and its view draws them."""
+    pytest.importorskip("PyQt6")
+    from PyQt6 import QtCore
+    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+    from rfmux.tools.periscope.pulse_capture_panel import (
+        GROUP_EVENTS, PulseCapturePanel)
+    path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
+    merge_fastrx(path, _recording_file(
+        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.group_combo.setCurrentText(GROUP_EVENTS)
+    panel.load_from_hdf5(path)
+    role = QtCore.Qt.ItemDataRole.UserRole
+    top = panel.pulse_tree.topLevelItem(0)
+    assert top.data(0, role) == ("event", 1)
+    assert [top.child(k).data(0, role) for k in range(top.childCount())] \
+        == [("pair", CHANNEL, 1)]
+    def drawn():
+        return [c.name() for c in
+                panel.pulse_plot_i.getPlotItem().listDataItems()]
+    panel._show_event(1)
+    assert drawn() == [f"Ch{CHANNEL} slow", f"Ch{CHANNEL} fast"]
+    panel.event_stream_combo.setCurrentText("fast")
+    assert drawn() == [f"Ch{CHANNEL} fast"]
+
+
 def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
     path = _capture(tmp_path)
     fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
@@ -388,6 +533,25 @@ def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
         assert not r.dual
     with PulseHDF5Reader(out) as r:
         assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
+
+
+def test_a_fast_capture_is_refused(tmp_path):
+    """The recording merges in as the fast stream of a slow capture."""
+    path = tmp_path / "fast.h5"
+    s = PulseCaptureSession(channels=[CHANNEL], module=1, sample_rate=FS,
+                            streamer_mode="fast", hdf5_path=path,
+                            **PulseCaptureConfig(
+                                max_pulse_ms=30.0,
+                                noise_train_ms=300.0).session_kwargs(FS))
+    s.start()
+    rng = np.random.default_rng(5)
+    n = int(0.5 * FS)
+    s.feed_block(CHANNEL, rng.normal(0, 1, n), rng.normal(0, 1, n),
+                 T0 + np.arange(n) / FS)
+    s.stop()
+    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    with pytest.raises(ValueError, match="a fast capture"):
+        merge_fastrx(str(path), fx)
 
 
 def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(tmp_path):

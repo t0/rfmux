@@ -13,7 +13,7 @@ from rfmux.tuning.fits import BIFURCATION_A, collect_fit_params
 
 from .fit_display_toolbar import FitDisplayToolbar
 from .fit_settings_panel import BIAS_AMPLITUDE
-from .utils import LINE_WIDTH, TABLEAU10_COLORS
+from .utils import ClickableViewBox, LINE_WIDTH, TABLEAU10_COLORS
 
 #: Which of a model's parameters get a histogram, in the order they are drawn.
 #: ``fr`` is not among them: it spans the whole band, so a histogram of it is a
@@ -299,7 +299,9 @@ class FitHistogramsTab(QtWidgets.QWidget):
         while self._grid.count():
             self._grid.takeAt(0)
         while len(self._plots) < count:
-            plot = pg.PlotWidget()
+            view = ClickableViewBox()
+            view.setMouseMode(pg.ViewBox.PanMode)
+            plot = pg.PlotWidget(viewBox=view)
             plot.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
                                QtWidgets.QSizePolicy.Policy.Expanding)
             self._plots.append(plot)

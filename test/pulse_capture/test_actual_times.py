@@ -14,6 +14,7 @@ import numpy as np
 from rfmux import streamer
 from rfmux.pulse_capture.capture_session import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession)
+from rfmux.pulse_capture.events import events_of
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
 from test.packet_helpers import stamp
@@ -54,7 +55,44 @@ def test_records_carry_the_decoded_trigger_time(tmp_path):
         assert meta["time_origin_epoch"] == day
     with PulseHDF5Reader(path) as r:
         rec = r.get_pulse(1, 1)
-    assert rec["trigger_utc"] == summ["trigger_utc"]
+        # Grouped afterwards, its event carries the same instant.
+        (event,) = events_of(r, window_s=0.005)
+    assert rec["trigger_utc"] == summ["trigger_utc"] == event["trigger_utc"]
+
+
+def test_a_noise_sample_carries_the_time_it_was_taken_at(tmp_path):
+    """An event is stamped as a pulse is, a noise sample at the moment
+    it was taken: in the callback, the file and the list a viewer keeps."""
+    from rfmux.pulse_capture.events import lean_event
+    path = tmp_path / "n.h5"
+    cfg = PulseCaptureConfig(max_pulse_ms=50.0, noise_train_ms=300.0,
+                             trigger_basis="iq", noise_capture_interval_s=1.0)
+    events = []
+    s = PulseCaptureSession(channels=[1, 2], sample_rate=1000.0,
+                            hdf5_path=path, on_event=events.append,
+                            noise_rng=np.random.default_rng(5),
+                            time_offset_s=0.0, **cfg.session_kwargs(1000.0))
+    s.start()
+    day = streamer.ts_day_epoch(stamp(0, y=26, d=245))
+    s.set_time_origin(day)
+    rng = np.random.default_rng(3)
+    t0 = 16 * 3600.0                               # seconds of day
+    for lo in range(0, 4000, 50):
+        t = t0 + (lo + np.arange(50)) / 1000.0
+        for ch in (1, 2):
+            s.feed_block(ch, rng.normal(0, 1, 50), rng.normal(0, 1, 50), t)
+    s.stop()
+    sample = next(e for e in events if e["kind"] == "noise")
+    assert sample["trigger_epoch"] == day + sample["trigger_time"]
+    assert sample["trigger_utc"].startswith("2026-09-02T16:00:0")
+    assert lean_event(sample)["trigger_utc"] == sample["trigger_utc"]
+    with h5py.File(path, "r") as f:
+        attrs = f[f"events/event_{sample['event_idx']:06d}"].attrs
+        assert attrs["trigger_utc"] == sample["trigger_utc"]
+        assert attrs["trigger_epoch"] == sample["trigger_epoch"]
+    with PulseHDF5Reader(path) as r:
+        assert (r.get_event(sample["event_idx"])["trigger_utc"]
+                == sample["trigger_utc"])
 
 
 def test_without_a_day_records_have_no_calendar_time():

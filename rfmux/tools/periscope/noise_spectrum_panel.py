@@ -217,7 +217,6 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.prev_button.setEnabled(len(self.detector_indices) > 1)
         nav_layout.addWidget(self.prev_button)
 
-        title_color_str = "white" if self.dark_mode else "black"
         if self.noise_channels is not None:
             title_text = f"Channel {self.noise_channels[self.detector_id-1]} ({self.resonance_frequency_ghz_title * 1e3:.6f} MHz)"
         else:
@@ -227,7 +226,6 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         font = self.title_label.font()
         font.setPointSize(font.pointSize() + 2)
         self.title_label.setFont(font)
-        self.title_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         nav_layout.addWidget(self.title_label, 1)
 
         self.next_button = QtWidgets.QPushButton("Next ▶")
@@ -245,7 +243,6 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
             f"({self.current_detector_index_in_list + 1} of {len(self.detector_indices)})" if self.detector_indices else ""
         )
         self.detector_count_label = QtWidgets.QLabel(detector_count_text)
-        self.detector_count_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
         nav_layout.addWidget(self.detector_count_label)
 
         outer_layout.addWidget(nav_widget)
@@ -665,19 +662,7 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
     def apply_theme(self, dark_mode: bool):
         self.dark_mode = dark_mode
 
-        bg_color_hex = "#1C1C1C" if dark_mode else "#FFFFFF"
-        self.setStyleSheet(f"QWidget {{ background-color: {bg_color_hex}; }}")
-
-        title_color_str = "white" if dark_mode else "black"
         plot_bg_color, plot_pen_color = ("k", "w") if dark_mode else ("w", "k")
-
-        # Labels
-        if hasattr(self, "title_label"):
-            self.title_label.setStyleSheet(f"QLabel {{ color: {title_color_str}; background-color: transparent; }}")
-        if hasattr(self, "detector_count_label"):
-            self.detector_count_label.setStyleSheet(
-                f"QLabel {{ color: {title_color_str}; background-color: transparent; }}"
-            )
 
         # Plots
         if hasattr(self, "plot_time_vs_mag"):
@@ -706,41 +691,3 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
                 axis = plot_item.getAxis(ax)
                 axis.setPen(plot_pen_color)
                 axis.setTextPen(plot_pen_color)
-
-        # Buttons
-        if dark_mode:
-            button_style = """
-                QPushButton {
-                    background-color: #3C3C3C;
-                    color: white;
-                    border: 1px solid #555555;
-                    padding: 5px 10px;
-                    border-radius: 3px;
-                }
-                QPushButton:hover { background-color: #4C4C4C; }
-                QPushButton:pressed { background-color: #2C2C2C; }
-                QPushButton:disabled { background-color: #1C1C1C; color: #666666; }
-            """
-        else:
-            button_style = """
-                QPushButton {
-                    background-color: #F0F0F0;
-                    color: black;
-                    border: 1px solid #CCCCCC;
-                    padding: 5px 10px;
-                    border-radius: 3px;
-                }
-                QPushButton:hover { background-color: #E0E0E0; }
-                QPushButton:pressed { background-color: #D0D0D0; }
-                QPushButton:disabled { background-color: #F8F8F8; color: #999999; }
-            """
-
-        for name in ("prev_button", "next_button", "screenshot_btn"):
-            if hasattr(self, name):
-                getattr(self, name).setStyleSheet(button_style)
-
-        # Checkboxes
-        if hasattr(self, "mean_subtract_checkbox"):
-            self.mean_subtract_checkbox.setStyleSheet(f"QCheckBox {{ color: {title_color_str}; }}")
-        if hasattr(self, "exp_binning_checkbox"):
-            self.exp_binning_checkbox.setStyleSheet(f"QCheckBox {{ color: {title_color_str}; }}")

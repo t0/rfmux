@@ -31,7 +31,8 @@ def test_warm_up_leaves_time_and_pulse_state_alone():
     assert m.last_update_time == 0
     assert m.pulse_config["mode"] == "none"
     assert m.pulse_events == [] and m.last_pulse_time == {}
-    assert m._convergence_cache, "the warm-up should have left caches"
+    assert any(ts.runs for ts in m._tone_states.values()), \
+        "the warm-up should have left kept states"
 
 
 def test_first_real_pulse_converges_nothing_new():

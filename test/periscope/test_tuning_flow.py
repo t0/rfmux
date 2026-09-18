@@ -804,27 +804,26 @@ def test_find_resonances_finds_the_array_through_the_real_task(board, qt_app):
     """The button runs ``find_resonances_in_netanal`` on the module's own
     netanal output, off the GUI thread, and the panel marks what came back.
 
-    Seven of the standard array's eight, because the eighth sits above the
-    band this netanal sweeps.
+    Every resonator of the standard array lies inside the measured band.
     """
     _, crs, catalog = board
     panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
 
     search = _search_on(panel, catalog.module, qt_app)
 
-    assert len(search.candidates) == 7
+    assert len(search.candidates) == len(catalog)
     assert panel.resonance_searches[catalog.module] is search
     # One dashed line per kept resonance, on both plots.
     plot_info = panel.plots[catalog.module]
-    assert len(plot_info["resonance_lines_mag"]) == 7
-    assert len(plot_info["resonance_lines_phase"]) == 7
-    assert "7 resonances" in plot_info["amp_plot"].getPlotItem().titleLabel.text
+    assert len(plot_info["resonance_lines_mag"]) == len(catalog)
+    assert len(plot_info["resonance_lines_phase"]) == len(catalog)
+    assert f"{len(catalog)} resonances" in plot_info["amp_plot"].getPlotItem().titleLabel.text
 
 
-#: A collision cut wider than the array's own 6-20 MHz spacing, so the finder
+#: A collision cut spanning the array's band, so the finder
 #: treats every resonator as colliding with its neighbour and rejects it. The
 #: point is the rejections, which are the only thing a display test can show.
-EVERYTHING_COLLIDES_KHZ = 20_000.0
+EVERYTHING_COLLIDES_KHZ = (FMAX - FMIN) / 1e3
 
 
 def test_the_settings_panel_is_what_the_search_runs_with(board, qt_app):
@@ -834,11 +833,12 @@ def test_the_settings_panel_is_what_the_search_runs_with(board, qt_app):
 
     panel.find_resonances_settings.min_separation_spin.setValue(
         EVERYTHING_COLLIDES_KHZ)
+    panel.find_resonances_settings.require_isolation_check.setChecked(True)
     panel.find_resonances_settings.apply_button.click()
     search = _search_on(panel, catalog.module, qt_app)
 
-    assert len(search.candidates) == 1
-    assert len(search.rejected) == 6
+    assert len(search.candidates) == 0
+    assert len(search.rejected) == len(catalog)
     assert all("collided" in c.rejected_because for c in search.rejected)
 
 

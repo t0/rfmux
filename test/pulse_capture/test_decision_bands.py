@@ -1,6 +1,7 @@
 """The record carries the bands each decision was made against, and the
 views draw those rather than the live stats, which the rolling median
-re-centres after the pulse."""
+re-centres after the pulse; the marks and the info line name the same
+decisions."""
 import h5py
 import numpy as np
 import pytest
@@ -143,6 +144,28 @@ def test_a_record_without_bands_falls_back_to_the_stats(qt_app):
         panel.close()
 
 
+def test_the_mark_labels_take_the_plot_background(qt_app):
+    """The decision-mark labels sit on a wash of the plot's own
+    background, so the trace under the text does not read through."""
+    import pyqtgraph as pg
+
+    def fills(plot):
+        return [it.label.fill.color().getRgb()[:3]
+                for it in plot.getPlotItem().items
+                if isinstance(it, pg.InfiniteLine) and it.label]
+
+    s, d = _capture(0.0)
+    panel = _panel_showing(qt_app, d, s.noise_stats[1])
+    try:
+        light = fills(panel.pulse_plot_i)
+        assert light and all(f == (255, 255, 255) for f in light)
+        panel.apply_theme(True)
+        dark = fills(panel.pulse_plot_i)
+        assert dark and all(f == (0, 0, 0) for f in dark)
+    finally:
+        panel.close()
+
+
 def _record(t0, base, sig, n=40, fs=FS):
     t = t0 + np.arange(n) / fs
     amp = np.full(n, base) + np.r_[np.zeros(10), np.full(30, 8 * sig)]
@@ -153,6 +176,24 @@ def _record(t0, base, sig, n=40, fs=FS):
             "trigger_sigma_I": sig, "trigger_sigma_Q": sig,
             "trigger_quad": "I", "end_baseline_I": base + 0.3 * sig,
             "end_baseline_Q": 0.0, "threshold_sigma": THR, "end_sigma": END}
+
+
+def test_the_info_line_names_the_decisions_the_record_carries(qt_app):
+    """Where the capture triggered, settled and ended, so a pulse can be
+    read against the decisions that produced it."""
+    from rfmux.pulse_capture.detection import ChannelNoiseStats
+    d = dict(_record(43000.0, base=1.0, sig=0.1),
+             below_threshold_index=20, settled_index=25,
+             end_confirm_samples=10, end_confirm_target=10)
+    panel = _panel_showing(qt_app, d,
+                           ChannelNoiseStats(mean_I=1.0, std_I=0.1))
+    try:
+        text = panel.pulse_info.text()
+        for part in ("trigger @ sample 10 (on I)", "below threshold @ 20",
+                     "settled @ 25", "end confirmed @ 30", "bucket 10/10"):
+            assert part in text, text
+    finally:
+        panel.close()
 
 
 def test_the_pair_view_draws_each_records_band(qt_app):

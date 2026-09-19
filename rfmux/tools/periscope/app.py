@@ -63,6 +63,7 @@ from .streamer_config_dialog import (
 from .dock_manager import PeriscopeDockManager
 from .layouts import FlowLayout, WrappingLabel
 from .main_plot_panel import MainPlotPanel
+from .tone_control_widgets import NcoBanner
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import UnifiedStartupDialog
@@ -244,6 +245,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # measures them behind its build window for large arrays and
         # hands the rows in instead.
         self._df_cal_task = None
+        self._tone_control_task = None
         if tuning is None:
             self._start_df_calibration(self.module)
         elif tuning:
@@ -410,6 +412,21 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         self.cb_ssb.toggled.connect(self._handle_psd_toggle)
         self.cb_dsb.toggled.connect(self._handle_psd_toggle)
+
+        # Control mode: editable tone fields beside each row and the NCO
+        # banner above the plots, refreshed from the board once a second.
+        self.cb_control = QtWidgets.QCheckBox("Control", checked=False)
+        self.cb_control.setToolTip(
+            "Show and edit each displayed channel's frequency, amplitude "
+            "and phase; the board is re-read once a second")
+        if self.crs is None:
+            self.cb_control.setEnabled(False)
+            self.cb_control.setToolTip(
+                "CRS object not available - control mode disabled.")
+        self.cb_control.toggled.connect(self._toggle_tone_control)
+        self.nco_banner = NcoBanner(self.module)
+        self.nco_banner.setVisible(False)
+        self.nco_banner.nco_committed.connect(self._send_nco)
 
         # CRS control buttons
         self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")

@@ -237,6 +237,110 @@ class DfCalibrationTask(QtCore.QThread):
             loop.close()
 
 
+class ToneControlSignals(QObject):
+    # module, {"nco", "dac_scale", "channels": {channel: fields}}; a
+    # write answers with only the channel it touched.
+    values_ready = pyqtSignal(int, dict)
+    error = pyqtSignal(str)
+
+
+class ToneControlTask(QtCore.QThread):
+    """Keeps Control mode current: once a second it re-reads every
+    displayed channel in one batched call, and in between it applies
+    the writes and channel changes the GUI queues, each answered with
+    an immediate re-read.  Pacing is from the end of one read to the
+    start of the next, so slow hardware reads less often rather than
+    queueing requests."""
+
+    PERIOD_S = 1.0
+
+    def __init__(self, crs, module: int, channels, signals: ToneControlSignals,
+                 parent=None):
+        super().__init__(parent)
+        self.crs, self.module, self.signals = crs, module, signals
+        self._channels = list(channels)
+        self._requests: "queue.Queue[tuple]" = queue.Queue()
+        self._dac_scale = None
+
+    def set_channels(self, channels) -> None:
+        self._requests.put(("channels", list(channels)))
+
+    def write(self, channel: int, fields: dict) -> None:
+        self._requests.put(("tone", channel, dict(fields)))
+
+    def set_nco(self, frequency_hz: float) -> None:
+        self._requests.put(("nco", float(frequency_hz)))
+
+    def stop(self) -> None:
+        self.requestInterruption()
+        self._requests.put(("stop",))
+
+    def run(self):
+        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            try:
+                self._dac_scale = loop.run_until_complete(
+                    dac_scale_dbm(self.crs, self.module))
+            except Exception as exc:
+                self.signals.error.emit(
+                    f"DAC scale for module {self.module} unavailable, "
+                    f"amplitudes shown normalized: {exc}")
+            while not self.isInterruptionRequested():
+                self._refresh(loop, self._channels)
+                deadline = time.monotonic() + self.PERIOD_S
+                while not self.isInterruptionRequested():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        request = self._requests.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if request[0] == "stop":
+                        return
+                    self._apply(loop, request)
+        finally:
+            loop.close()
+
+    def _refresh(self, loop, channels) -> None:
+        from rfmux.algorithms.measurement.tone_control import read_tones
+        try:
+            result = loop.run_until_complete(
+                read_tones(self.crs, self.module, channels))
+        except Exception as exc:
+            self.signals.error.emit(f"Control read failed: {exc}")
+            return
+        result["dac_scale"] = self._dac_scale
+        self.signals.values_ready.emit(self.module, result)
+
+    def _apply(self, loop, request) -> None:
+        from rfmux.algorithms.measurement.tone_control import write_tone
+        kind = request[0]
+        if kind == "channels":
+            self._channels = request[1]
+            self._refresh(loop, self._channels)
+        elif kind == "tone":
+            _, channel, fields = request
+            try:
+                result = loop.run_until_complete(
+                    write_tone(self.crs, self.module, channel, **fields))
+            except Exception as exc:
+                self.signals.error.emit(f"Ch {channel}: {exc}")
+                self._refresh(loop, [channel])
+                return
+            result["dac_scale"] = self._dac_scale
+            self.signals.values_ready.emit(self.module, result)
+        elif kind == "nco":
+            try:
+                loop.run_until_complete(
+                    self.crs.set_nco_frequency(request[1], module=self.module))
+            except Exception as exc:
+                self.signals.error.emit(f"NCO: {exc}")
+            self._refresh(loop, self._channels)
+
+
 class IQSignals(QObject):
     done = pyqtSignal(int, str, object)
 

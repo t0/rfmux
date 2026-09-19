@@ -43,6 +43,7 @@ def test_layout_rebuild_forgets_smoothed_histogram_ranges(qt_app):
     p._get_active_modes = lambda: []
     p._restore_auto_range_settings = lambda: None
     p._toggle_iqmag = lambda: None
+    p._add_tone_columns = lambda n: None
     # A range smoothed while binning counts.
     p._smooth_range((1, "I"), -1e5, 1e5)
     assert p._hist_ranges

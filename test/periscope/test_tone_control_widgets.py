@@ -1,0 +1,192 @@
+"""Control mode's fields: what they show for a board value, what they
+send for an edit, and when a refresh must leave them alone."""
+
+import pytest
+
+pytest.importorskip("PyQt6")
+
+from PyQt6 import QtCore, QtWidgets  # noqa: E402
+from PyQt6.QtCore import Qt  # noqa: E402
+from PyQt6.QtTest import QTest  # noqa: E402
+
+from rfmux.core.transferfunctions import (  # noqa: E402
+    convert_amplitude_to_dbm, convert_dbm_to_amplitude)
+from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from rfmux.tools.periscope.tone_control_widgets import (  # noqa: E402
+    NcoBanner, ToneColumn, ToneFields)
+
+NCO, DAC = 500e6, -0.5
+TONE = {"frequency": 1.25e6, "amplitude": 0.01, "phase": 30.0}
+
+
+@pytest.fixture
+def fields(qt_app):
+    host = QtWidgets.QWidget()
+    box = QtWidgets.QVBoxLayout(host)
+    w = ToneFields(1)
+    box.addWidget(w)
+    # Somewhere else for focus to go.
+    host.other = QtWidgets.QLineEdit()
+    box.addWidget(host.other)
+    host.show()
+    host.activateWindow()
+    host.other.setFocus()
+    qt_app.processEvents()
+    w.show_values(TONE, NCO, DAC)
+    w.sent = []
+    w.write.connect(lambda ch, f: w.sent.append((ch, f)))
+    w.errors = []
+    w.invalid.connect(w.errors.append)
+    yield w
+    host.close()
+
+
+def _edit(edit, text, qt_app):
+    edit.setFocus()
+    qt_app.processEvents()
+    assert edit.hasFocus()
+    edit.selectAll()
+    QTest.keyClicks(edit, text)
+
+
+def test_shows_offset_actual_frequency_and_dbm_against_the_scale(fields):
+    assert fields.edits["frequency"].text() == "1250.000"
+    assert fields.actual.text() == "= 501.250000 MHz"
+    assert fields.edits["amplitude"].text() == (
+        f"{convert_amplitude_to_dbm(0.01, DAC):.2f}")
+    assert fields.edits["phase"].text() == "30.00"
+    assert fields.state.text() == "tone on"
+
+
+def test_amplitude_zero_is_the_no_tone_state(fields):
+    fields.show_values({"frequency": 0.0, "amplitude": 0.0, "phase": 0.0},
+                       NCO, DAC)
+    assert fields.edits["amplitude"].text() == ""
+    assert fields.edits["frequency"].text() == "0.000"
+    assert fields.state.text() == "no tone (amplitude 0)"
+
+
+def test_without_a_dac_scale_amplitude_is_normalized(fields):
+    fields.show_values(TONE, NCO, None)
+    assert fields.edits["amplitude"].text() == "0.0100"
+    assert fields.units["amplitude"].text() == "norm"
+
+
+def test_enter_sends_the_edit_in_board_units(fields, qt_app):
+    _edit(fields.edits["frequency"], "-2450", qt_app)
+    QTest.keyClick(fields.edits["frequency"], Qt.Key.Key_Return)
+    qt_app.processEvents()
+    assert fields.sent == [(1, {"frequency": -2.45e6})]
+
+
+def test_leaving_a_changed_field_sends_it_too(fields, qt_app):
+    _edit(fields.edits["amplitude"], "-38", qt_app)
+    fields.parent().other.setFocus()
+    qt_app.processEvents()
+    assert fields.sent == [
+        (1, {"amplitude": convert_dbm_to_amplitude(-38.0, DAC)})]
+
+
+def test_leaving_an_unchanged_field_sends_nothing(fields, qt_app):
+    _edit(fields.edits["phase"], "30.00", qt_app)
+    fields.parent().other.setFocus()
+    qt_app.processEvents()
+    assert fields.sent == []
+
+
+def test_leaving_an_untouched_field_after_a_refresh_sends_nothing(
+        fields, qt_app):
+    """Another writer moved the tone while the field had focus: leaving
+    it must not send the old value back."""
+    fields.edits["frequency"].setFocus()
+    qt_app.processEvents()
+    fields.show_values({**TONE, "frequency": 2e6}, NCO, DAC)
+    fields.parent().other.setFocus()
+    qt_app.processEvents()
+    assert fields.sent == []
+    assert fields.edits["frequency"].text() == "2000.000"
+
+
+def test_escape_discards_the_edit(fields, qt_app):
+    _edit(fields.edits["phase"], "99", qt_app)
+    QTest.keyClick(fields.edits["phase"], Qt.Key.Key_Escape)
+    qt_app.processEvents()
+    assert fields.sent == []
+    assert fields.edits["phase"].text() == "30.00"
+
+
+def test_refresh_leaves_a_focused_field_alone(fields, qt_app):
+    _edit(fields.edits["frequency"], "12", qt_app)
+    fields.show_values({**TONE, "frequency": 2e6}, NCO, DAC)
+    assert fields.edits["frequency"].text() == "12"
+    assert fields.edits["phase"].text() == "30.00"
+    # Once the edit is sent, the board's answer is what shows.
+    QTest.keyClick(fields.edits["frequency"], Qt.Key.Key_Return)
+    fields.show_values({**TONE, "frequency": 12e3}, NCO, DAC)
+    assert fields.edits["frequency"].text() == "12.000"
+
+
+def test_off_sends_amplitude_zero(fields, qt_app):
+    _edit(fields.edits["amplitude"], "off", qt_app)
+    QTest.keyClick(fields.edits["amplitude"], Qt.Key.Key_Return)
+    assert fields.sent == [(1, {"amplitude": 0.0})]
+
+
+def test_a_bad_value_is_reported_and_reverted(fields, qt_app):
+    _edit(fields.edits["frequency"], "400000", qt_app)
+    QTest.keyClick(fields.edits["frequency"], Qt.Key.Key_Return)
+    assert fields.sent == []
+    assert fields.errors and "313500" in fields.errors[0]
+    assert fields.edits["frequency"].text() == "1250.000"
+
+
+def test_banner_sends_the_nco_in_hz(qt_app):
+    banner = NcoBanner(1)
+    banner.show()
+    banner.activateWindow()
+    qt_app.processEvents()
+    banner.nco_edit.clearFocus()
+    qt_app.processEvents()
+    banner.show_values(NCO, DAC)
+    assert banner.nco_edit.text() == "500.000000"
+    assert banner.dac_label.text() == "DAC scale (labelled) -0.50 dBm"
+    sent = []
+    banner.nco_committed.connect(sent.append)
+    banner.nco_edit.setFocus()
+    qt_app.processEvents()
+    banner.nco_edit.selectAll()
+    QTest.keyClicks(banner.nco_edit, "501.5")
+    QTest.keyClick(banner.nco_edit, Qt.Key.Key_Return)
+    assert sent == [501.5e6]
+    banner.close()
+
+
+def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
+    p = Periscope.__new__(Periscope)
+    QtWidgets.QMainWindow.__init__(p)
+    p.channel_list = [[1, 2], [3]]
+    host = QtWidgets.QWidget()
+    p.grid = QtWidgets.QGridLayout(host)
+    p.cb_control = QtWidgets.QCheckBox(checked=True)
+
+    p._add_tone_columns(2)
+
+    column = p.grid.itemAtPosition(0, 2).widget()
+    assert isinstance(column, ToneColumn)
+    assert [f.channel for f in column.fields] == [1, 2]
+    assert [f.channel for f in p.grid.itemAtPosition(1, 2).widget().fields] == [3]
+    assert set(p.tone_fields) == {1, 2, 3}
+    # The plots keep the width.
+    assert p.grid.columnStretch(2) == 0
+    assert p.grid.columnStretch(0) == 1 and p.grid.columnStretch(1) == 1
+
+
+def test_layout_adds_nothing_with_control_off(qt_app):
+    p = Periscope.__new__(Periscope)
+    QtWidgets.QMainWindow.__init__(p)
+    p.channel_list = [[1]]
+    host = QtWidgets.QWidget()
+    p.grid = QtWidgets.QGridLayout(host)
+    p.cb_control = QtWidgets.QCheckBox(checked=False)
+    p._add_tone_columns(2)
+    assert p.grid.count() == 0 and p.tone_fields == {}

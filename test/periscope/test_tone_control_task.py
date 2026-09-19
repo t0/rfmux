@@ -55,7 +55,10 @@ def test_reads_writes_and_stops(qt_app, mock_crs):
         first = received[-1]
         assert first["nco"] == 500e6
         assert first["channels"][1]["frequency"] == 1e6
-        assert first["dac_scale"] is not None
+        assert first["dac_scale"] == -0.5
+
+        task.set_channels([3])
+        _wait_for(qt_app, received, lambda r: set(r["channels"]) == {3})
 
         task.write(2, {"frequency": -2e6, "amplitude": 0.02})
         _wait_for(qt_app, received,

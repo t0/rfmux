@@ -225,10 +225,6 @@ class PeriscopeRuntime:
 
     # ---- Control mode: tone fields beside each row, NCO banner above ----
 
-    def _tone_control_on(self) -> bool:
-        cb = getattr(self, "cb_control", None)
-        return cb is not None and cb.isChecked()
-
     def _displayed_channels(self) -> list[int]:
         return [ch for group in self.channel_list for ch in group]
 
@@ -240,12 +236,13 @@ class PeriscopeRuntime:
         for col in range(column):
             self.grid.setColumnStretch(col, 1)
         self.grid.setColumnStretch(column, 0)
-        if not self._tone_control_on():
+        task = getattr(self, "_tone_control_task", None)
+        if task is None or not self.cb_control.isChecked():
             return
         for row_i, group in enumerate(self.channel_list):
             tone_column = ToneColumn(group)
             for fields in tone_column.fields:
-                fields.write.connect(self._send_tone_write)
+                fields.write.connect(task.write)
                 fields.invalid.connect(
                     lambda msg: self.statusBar().showMessage(msg, 8000))
                 self.tone_fields.setdefault(fields.channel, []).append(fields)
@@ -280,11 +277,6 @@ class PeriscopeRuntime:
         for channel, tone in result.get("channels", {}).items():
             for fields in self.tone_fields.get(channel, []):
                 fields.show_values(tone, nco, dac_scale)
-
-    def _send_tone_write(self, channel: int, fields: dict) -> None:
-        task = getattr(self, "_tone_control_task", None)
-        if task is not None:
-            task.write(channel, fields)
 
     def _send_nco(self, frequency_hz: float) -> None:
         task = getattr(self, "_tone_control_task", None)

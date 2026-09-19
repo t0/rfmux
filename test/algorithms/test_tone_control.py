@@ -35,6 +35,7 @@ def test_read_returns_nco_and_every_field_per_channel(mock_crs):
     loop, crs = mock_crs
     got = loop.run_until_complete(read_tones(crs, 1, [1, 2]))
     assert got["nco"] == 500e6
+    assert got["dac_scale"] == -0.5
     assert got["channels"][1] == {
         "frequency": 1.25e6, "amplitude": 0.01, "phase": 30.0}
 

@@ -1,6 +1,8 @@
 """Control mode's fields: what they show for a board value, what they
 send for an edit, and when a refresh must leave them alone."""
 
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("PyQt6")
@@ -64,12 +66,6 @@ def test_amplitude_zero_is_the_no_tone_state(fields):
     assert fields.edits["amplitude"].text() == ""
     assert fields.edits["frequency"].text() == "0.000"
     assert fields.state.text() == "no tone (amplitude 0)"
-
-
-def test_without_a_dac_scale_amplitude_is_normalized(fields):
-    fields.show_values(TONE, NCO, None)
-    assert fields.edits["amplitude"].text() == "0.0100"
-    assert fields.units["amplitude"].text() == "norm"
 
 
 def test_enter_sends_the_edit_in_board_units(fields, qt_app):
@@ -144,11 +140,11 @@ def test_off_sends_amplitude_zero(fields, qt_app):
     assert fields.sent == [(1, {"amplitude": 0.0})]
 
 
-def test_a_bad_value_is_reported_and_reverted(fields, qt_app):
-    _edit(fields.edits["frequency"], "400000", qt_app)
+def test_a_non_number_is_reported_and_reverted(fields, qt_app):
+    _edit(fields.edits["frequency"], "1.2.3", qt_app)
     QTest.keyClick(fields.edits["frequency"], Qt.Key.Key_Return)
     assert fields.sent == []
-    assert fields.errors and "313500" in fields.errors[0]
+    assert fields.errors and "Ch 1 frequency" in fields.errors[0]
     assert fields.edits["frequency"].text() == "1250.000"
 
 
@@ -180,6 +176,7 @@ def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
     host = QtWidgets.QWidget()
     p.grid = QtWidgets.QGridLayout(host)
     p.cb_control = QtWidgets.QCheckBox(checked=True)
+    p._tone_control_task = SimpleNamespace(write=lambda ch, f: None)
 
     p._add_tone_columns(2)
 

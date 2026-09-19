@@ -15,6 +15,7 @@ from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alia
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
+from rfmux.algorithms.measurement.tone_control import read_tones, write_tone
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -238,8 +239,8 @@ class DfCalibrationTask(QtCore.QThread):
 
 
 class ToneControlSignals(QObject):
-    # module, {"nco", "dac_scale", "channels": {channel: fields}}; a
-    # write answers with only the channel it touched.
+    # module, read_tones() result; a write answers with only the
+    # channel it touched.
     values_ready = pyqtSignal(int, dict)
     error = pyqtSignal(str)
 
@@ -247,10 +248,9 @@ class ToneControlSignals(QObject):
 class ToneControlTask(QtCore.QThread):
     """Keeps Control mode current: once a second it re-reads every
     displayed channel in one batched call, and in between it applies
-    the writes and channel changes the GUI queues, each answered with
-    an immediate re-read.  Pacing is from the end of one read to the
-    start of the next, so slow hardware reads less often rather than
-    queueing requests."""
+    the writes the GUI queues, each answered with an immediate re-read.
+    Pacing is from the end of one read to the start of the next, so
+    slow hardware reads less often rather than queueing requests."""
 
     PERIOD_S = 1.0
 
@@ -260,10 +260,10 @@ class ToneControlTask(QtCore.QThread):
         self.crs, self.module, self.signals = crs, module, signals
         self._channels = list(channels)
         self._requests: "queue.Queue[tuple]" = queue.Queue()
-        self._dac_scale = None
 
     def set_channels(self, channels) -> None:
-        self._requests.put(("channels", list(channels)))
+        # Picked up by the next read; a list swap needs no lock.
+        self._channels = list(channels)
 
     def write(self, channel: int, fields: dict) -> None:
         self._requests.put(("tone", channel, dict(fields)))
@@ -276,17 +276,9 @@ class ToneControlTask(QtCore.QThread):
         self._requests.put(("stop",))
 
     def run(self):
-        from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            try:
-                self._dac_scale = loop.run_until_complete(
-                    dac_scale_dbm(self.crs, self.module))
-            except Exception as exc:
-                self.signals.error.emit(
-                    f"DAC scale for module {self.module} unavailable, "
-                    f"amplitudes shown normalized: {exc}")
             while not self.isInterruptionRequested():
                 self._refresh(loop, self._channels)
                 deadline = time.monotonic() + self.PERIOD_S
@@ -305,23 +297,17 @@ class ToneControlTask(QtCore.QThread):
             loop.close()
 
     def _refresh(self, loop, channels) -> None:
-        from rfmux.algorithms.measurement.tone_control import read_tones
         try:
             result = loop.run_until_complete(
                 read_tones(self.crs, self.module, channels))
         except Exception as exc:
             self.signals.error.emit(f"Control read failed: {exc}")
             return
-        result["dac_scale"] = self._dac_scale
         self.signals.values_ready.emit(self.module, result)
 
     def _apply(self, loop, request) -> None:
-        from rfmux.algorithms.measurement.tone_control import write_tone
         kind = request[0]
-        if kind == "channels":
-            self._channels = request[1]
-            self._refresh(loop, self._channels)
-        elif kind == "tone":
+        if kind == "tone":
             _, channel, fields = request
             try:
                 result = loop.run_until_complete(
@@ -330,7 +316,6 @@ class ToneControlTask(QtCore.QThread):
                 self.signals.error.emit(f"Ch {channel}: {exc}")
                 self._refresh(loop, [channel])
                 return
-            result["dac_scale"] = self._dac_scale
             self.signals.values_ready.emit(self.module, result)
         elif kind == "nco":
             try:

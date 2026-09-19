@@ -10,7 +10,6 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from rfmux.core.transferfunctions import (
     convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 
-FREQUENCY_LIMIT_KHZ = 313_500.0
 FIELD_WIDTH_PX = 96
 
 
@@ -66,16 +65,13 @@ class BoardEdit(QtWidgets.QLineEdit):
 
 
 def _parse(text: str) -> float:
-    value = float(text.strip().replace("−", "-"))
-    if value != value:
-        raise ValueError("not a number")
-    return value
+    return float(text.strip().replace("−", "-"))
 
 
 class ToneFields(QtWidgets.QFrame):
     """One channel's frequency (kHz from the NCO), amplitude (dBm against
-    the module's labelled DAC scale, or normalized when it has none) and
-    phase (degrees), with the actual frequency under the first."""
+    the module's labelled DAC scale) and phase (degrees), with the
+    actual frequency under the first."""
 
     # channel, {field: value in board units}
     write = pyqtSignal(int, dict)
@@ -84,7 +80,6 @@ class ToneFields(QtWidgets.QFrame):
     def __init__(self, channel: int, parent=None):
         super().__init__(parent)
         self.channel = channel
-        self._nco: Optional[float] = None
         self._dac_scale: Optional[float] = None
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         grid = QtWidgets.QGridLayout(self)
@@ -118,6 +113,7 @@ class ToneFields(QtWidgets.QFrame):
         self.edits["amplitude"].setToolTip(
             "Tone power in dBm against the module's labelled DAC scale; "
             "0, blank or 'off' turns the tone off")
+        self.edits["amplitude"].setPlaceholderText("off")
         self.edits["phase"].setToolTip(
             "Carrier (DAC) phase in degrees")
         self.actual = QtWidgets.QLabel("")
@@ -127,8 +123,8 @@ class ToneFields(QtWidgets.QFrame):
         grid.setColumnStretch(1, 1)
 
     def show_values(self, tone: dict, nco: Optional[float],
-                    dac_scale: Optional[float]) -> None:
-        self._nco, self._dac_scale = nco, dac_scale
+                    dac_scale: float) -> None:
+        self._dac_scale = dac_scale
         frequency = tone.get("frequency")
         amplitude = tone.get("amplitude")
         phase = tone.get("phase")
@@ -138,17 +134,11 @@ class ToneFields(QtWidgets.QFrame):
             "" if phase is None else f"{phase:.2f}")
         if amplitude is None or amplitude <= 0:
             self.edits["amplitude"].show_board("")
-            self.edits["amplitude"].setPlaceholderText("off")
             self.state.setText("no tone (amplitude 0)")
-        elif dac_scale is None:
-            self.edits["amplitude"].show_board(f"{amplitude:.4f}")
-            self.state.setText("tone on")
         else:
             self.edits["amplitude"].show_board(
                 f"{convert_amplitude_to_dbm(amplitude, dac_scale):.2f}")
             self.state.setText("tone on")
-        self.units["amplitude"].setText("dBm" if dac_scale is not None
-                                        else "norm")
         if frequency is None or nco is None:
             self.actual.setText("")
         else:
@@ -164,20 +154,14 @@ class ToneFields(QtWidgets.QFrame):
         self.write.emit(self.channel, {field: value})
 
     def _to_board_units(self, field: str, text: str) -> float:
+        # The board checks ranges; a rejected value comes back as an
+        # error and the re-read restores the field.
         if field == "frequency":
-            khz = _parse(text)
-            if abs(khz) > FREQUENCY_LIMIT_KHZ:
-                raise ValueError(
-                    f"must be within ±{FREQUENCY_LIMIT_KHZ:.0f} kHz "
-                    "of the NCO")
-            return khz * 1e3
+            return _parse(text) * 1e3
         if field == "amplitude":
             if text.strip().lower() in ("", "off"):
                 return 0.0
-            value = _parse(text)
-            if self._dac_scale is None:
-                return value
-            return convert_dbm_to_amplitude(value, self._dac_scale)
+            return convert_dbm_to_amplitude(_parse(text), self._dac_scale)
         return _parse(text)
 
 
@@ -228,12 +212,9 @@ class NcoBanner(QtWidgets.QFrame):
         row.addStretch(1)
         row.addWidget(QtWidgets.QLabel("refreshed every 1 s"))
 
-    def show_values(self, nco: Optional[float],
-                    dac_scale: Optional[float]) -> None:
+    def show_values(self, nco: Optional[float], dac_scale: float) -> None:
         self.nco_edit.show_board("" if nco is None else f"{nco / 1e6:.6f}")
-        self.dac_label.setText(
-            "DAC scale (labelled) —" if dac_scale is None
-            else f"DAC scale (labelled) {dac_scale:.2f} dBm")
+        self.dac_label.setText(f"DAC scale (labelled) {dac_scale:.2f} dBm")
 
     def _commit(self, text: str) -> None:
         try:

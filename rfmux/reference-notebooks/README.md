@@ -23,11 +23,15 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 - **`Demos/pulse_capture.md`**: detect and record detector pulses, with
   streaming HDF5, histograms and matched slow+fast capture, then a walk
   through the capture file: events, noise samples, units and the tuning rows.
+- **`Demos/fastrx_recording.md`**: open a fastrx recording (the 100G channel
+  stream on disk) offline: its times, samples, gaps and drop-outs, then the
+  recording beside a pulse capture and merged into it. It needs no board and
+  no fastrx extension, and writes a small recording when given none.
 
-Each has a `.py` counterpart beside it: the same sequence as a plain script,
-to copy from. `pulse_capture_flow.py` covers the captures; the walk through
-the file is in the notebook only. Both notebooks and `simplified_tuning_flow.py` run in the
-acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
+The first two have a `.py` counterpart beside them: the same sequence as a
+plain script, to copy from. `pulse_capture_flow.py` covers the captures; the
+walk through the file is in the notebook only. The notebooks and
+`simplified_tuning_flow.py` run in the acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
 changing its notebook.
 
 - **`Guides/`**: the repository's guides and installation page, provisioned

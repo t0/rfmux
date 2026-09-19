@@ -266,9 +266,8 @@ def test_review_of_a_merged_file_shows_the_recording_under_each_pulse(
     """A slow capture with a fastrx recording merged in reviews as a
     both-mode file: one slow-triggered pair per pulse, its fast trace
     from the recording."""
-    pytest.importorskip("rfmux.fastrx")
     from rfmux.pulse_capture.overlay import merge_fastrx
-    from test.test_fastrx_file import file_header, record, seconds_ts, write
+    from test.fastrx_bytes import file_header, record, seconds_ts, write
     path = _build_capture_file(tmp_path)
     # The capture's stamps run from 0; a recording of channel 1 (pipe 1,
     # column 0) over the same seconds, its spacing coarse because the

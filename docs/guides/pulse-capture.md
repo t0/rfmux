@@ -426,7 +426,8 @@ empty. The reader works from `members`; the links are for browsing.
 recording, has `layout = "dual"` and `streamer_mode = "both"` in its
 metadata, both sample rates, `fast_channels`, and the sample counts once per
 stream: `pre_samples_slow`, `pre_samples_fast` and so on. A merged file has
-the `_slow` counts only, since no engine ran on the recording.
+the `_slow` counts only, since no engine ran on the recording, and its pairs
+carry the recording's window (`fast_tod_*`) with no `fast_idx`.
 
 ```
 slow/channel_<n>/ ...          each as a channel group above

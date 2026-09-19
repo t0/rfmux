@@ -10,8 +10,9 @@ the capture session and the parser take out where they write
 dirfile's corrected timebase).  Files written before that carry raw
 stamps, and :func:`slow_shift_s` supplies the shift for them.
 
-The fastrx extension is imported only when a :class:`Recording` is
-opened from a path, so this module loads where it does not build.
+A :class:`Recording` opened from a path reads it through the fastrx
+extension where that is built, and through
+:class:`~.recording_file.RecordingFile`, numpy alone, elsewhere.
 """
 
 from __future__ import annotations
@@ -80,8 +81,9 @@ class Window:
 class Recording:
     """A fastrx recording with a time index over its IRIG stamps.
 
-    Wraps a ``rfmux.fastrx.PacketFile`` (or opens one from a path).  The
-    extension maps the file and hands back strided views; nothing here
+    Wraps a ``rfmux.fastrx.PacketFile`` or a
+    :class:`~.recording_file.RecordingFile` (or opens one from a path).
+    Either maps the file and hands back strided views; nothing here
     reads more of it than the records asked for.  Every record is one
     sample of channels 1 to :attr:`channels`, stamped by the board, so
     a stamp is a sample time with no first-or-last-in-packet ambiguity.
@@ -99,7 +101,10 @@ class Recording:
 
     def __init__(self, source):
         if isinstance(source, (str, bytes)) or hasattr(source, "__fspath__"):
-            from ..fastrx import PacketFile
+            try:
+                from ..fastrx import PacketFile
+            except ImportError:      # the extension builds on Linux only
+                from .recording_file import RecordingFile as PacketFile
             source = PacketFile(str(source))
         self.file = source
         self._ts = source.ts()

@@ -18,7 +18,8 @@ from rfmux.tools.periscope.tone_control_widgets import (  # noqa: E402
     NcoBanner, ToneColumn, ToneFields)
 
 NCO, DAC = 500e6, -0.5
-TONE = {"frequency": 1.25e6, "amplitude": 0.01, "phase": 30.0}
+TONE = {"frequency": 1.25e6, "amplitude": 0.01, "dac_phase": 30.0,
+        "adc_phase": -5.0}
 
 
 @pytest.fixture
@@ -56,14 +57,17 @@ def test_shows_offset_actual_frequency_and_dbm_against_the_scale(fields):
     assert fields.actual.text() == "= 501.250000 MHz"
     assert fields.edits["amplitude"].text() == (
         f"{convert_amplitude_to_dbm(0.01, DAC):.2f}")
-    assert fields.edits["phase"].text() == "30.00"
+    assert fields.normalized.text() == "= 0.010000 normalized"
+    assert fields.edits["dac_phase"].text() == "30.00"
+    assert fields.edits["adc_phase"].text() == "-5.00"
     assert fields.state.text() == "tone on"
 
 
 def test_amplitude_zero_is_the_no_tone_state(fields):
-    fields.show_values({"frequency": 0.0, "amplitude": 0.0, "phase": 0.0},
-                       NCO, DAC)
+    fields.show_values({"frequency": 0.0, "amplitude": 0.0,
+                        "dac_phase": 0.0, "adc_phase": 0.0}, NCO, DAC)
     assert fields.edits["amplitude"].text() == ""
+    assert fields.normalized.text() == "= 0.000000 normalized"
     assert fields.edits["frequency"].text() == "0.000"
     assert fields.state.text() == "no tone (amplitude 0)"
 
@@ -83,8 +87,14 @@ def test_leaving_a_changed_field_sends_it_too(fields, qt_app):
         (1, {"amplitude": convert_dbm_to_amplitude(-38.0, DAC)})]
 
 
+def test_each_phase_field_writes_its_own_target(fields, qt_app):
+    _edit(fields.edits["adc_phase"], "12", qt_app)
+    QTest.keyClick(fields.edits["adc_phase"], Qt.Key.Key_Return)
+    assert fields.sent == [(1, {"adc_phase": 12.0})]
+
+
 def test_leaving_an_unchanged_field_sends_nothing(fields, qt_app):
-    _edit(fields.edits["phase"], "30.00", qt_app)
+    _edit(fields.edits["dac_phase"], "30.00", qt_app)
     fields.parent().other.setFocus()
     qt_app.processEvents()
     assert fields.sent == []
@@ -105,8 +115,8 @@ def test_leaving_an_untouched_field_after_a_refresh_sends_nothing(
 
 def test_a_context_menu_does_not_send_a_half_typed_value(fields, qt_app):
     """The focus loss a right-click menu causes, delivered as Qt does."""
-    _edit(fields.edits["phase"], "9", qt_app)
-    edit = fields.edits["phase"]
+    _edit(fields.edits["dac_phase"], "9", qt_app)
+    edit = fields.edits["dac_phase"]
     QtWidgets.QApplication.sendEvent(
         edit, QtGui.QFocusEvent(QtCore.QEvent.Type.FocusOut,
                                 Qt.FocusReason.PopupFocusReason))
@@ -116,18 +126,18 @@ def test_a_context_menu_does_not_send_a_half_typed_value(fields, qt_app):
 
 
 def test_escape_discards_the_edit(fields, qt_app):
-    _edit(fields.edits["phase"], "99", qt_app)
-    QTest.keyClick(fields.edits["phase"], Qt.Key.Key_Escape)
+    _edit(fields.edits["dac_phase"], "99", qt_app)
+    QTest.keyClick(fields.edits["dac_phase"], Qt.Key.Key_Escape)
     qt_app.processEvents()
     assert fields.sent == []
-    assert fields.edits["phase"].text() == "30.00"
+    assert fields.edits["dac_phase"].text() == "30.00"
 
 
 def test_refresh_leaves_a_focused_field_alone(fields, qt_app):
     _edit(fields.edits["frequency"], "12", qt_app)
     fields.show_values({**TONE, "frequency": 2e6}, NCO, DAC)
     assert fields.edits["frequency"].text() == "12"
-    assert fields.edits["phase"].text() == "30.00"
+    assert fields.edits["dac_phase"].text() == "30.00"
     # Once the edit is sent, the board's answer is what shows.
     QTest.keyClick(fields.edits["frequency"], Qt.Key.Key_Return)
     fields.show_values({**TONE, "frequency": 12e3}, NCO, DAC)

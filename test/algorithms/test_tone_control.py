@@ -27,6 +27,9 @@ def mock_crs():
     loop.run_until_complete(crs.set_phase(
         30.0, units=crs.UNITS.DEGREES, target=crs.TARGET.DAC,
         channel=1, module=1))
+    loop.run_until_complete(crs.set_phase(
+        -5.0, units=crs.UNITS.DEGREES, target=crs.TARGET.ADC,
+        channel=1, module=1))
     yield loop, crs
     loop.close()
 
@@ -37,29 +40,44 @@ def test_read_returns_nco_and_every_field_per_channel(mock_crs):
     assert got["nco"] == 500e6
     assert got["dac_scale"] == -0.5
     assert got["channels"][1] == {
-        "frequency": 1.25e6, "amplitude": 0.01, "phase": 30.0}
+        "frequency": 1.25e6, "amplitude": 0.01,
+        "dac_phase": 30.0, "adc_phase": -5.0}
 
 
 def test_a_channel_the_board_never_set_reads_as_none(mock_crs):
     loop, crs = mock_crs
     got = loop.run_until_complete(read_tones(crs, 1, [2]))
     assert got["channels"][2] == {
-        "frequency": None, "amplitude": None, "phase": None}
+        "frequency": None, "amplitude": None,
+        "dac_phase": None, "adc_phase": None}
 
 
 def test_write_round_trips_through_the_board(mock_crs):
     loop, crs = mock_crs
     got = loop.run_until_complete(write_tone(
-        crs, 1, 3, frequency=-2.45e6, amplitude=0.02, phase=45.0))
+        crs, 1, 3, frequency=-2.45e6, amplitude=0.02, dac_phase=45.0,
+        adc_phase=90.0))
     assert got["channels"][3] == {
-        "frequency": -2.45e6, "amplitude": 0.02, "phase": 45.0}
+        "frequency": -2.45e6, "amplitude": 0.02,
+        "dac_phase": 45.0, "adc_phase": 90.0}
     assert loop.run_until_complete(
         crs.get_frequency(channel=3, module=1)) == -2.45e6
 
 
 def test_write_touches_only_the_given_fields(mock_crs):
     loop, crs = mock_crs
-    loop.run_until_complete(write_tone(crs, 1, 3, amplitude=0.02, phase=45.0))
-    got = loop.run_until_complete(write_tone(crs, 1, 3, frequency=1e6))
+    loop.run_until_complete(write_tone(
+        crs, 1, 3, amplitude=0.02, dac_phase=45.0, adc_phase=90.0))
+    got = loop.run_until_complete(write_tone(crs, 1, 3, adc_phase=10.0))
     assert got["channels"][3]["amplitude"] == 0.02
-    assert got["channels"][3]["phase"] == 45.0
+    assert got["channels"][3]["dac_phase"] == 45.0
+    assert got["channels"][3]["adc_phase"] == 10.0
+
+
+def test_dac_scale_follows_the_module(mock_crs):
+    """The dBm the fields show and accept is referenced to the module's
+    own DAC scale, less the label offset every dialog uses."""
+    loop, crs = mock_crs
+    loop.run_until_complete(crs.set_dac_scale(-6.0, 'DBM', module=1))
+    got = loop.run_until_complete(read_tones(crs, 1, [1]))
+    assert got["dac_scale"] == -7.5

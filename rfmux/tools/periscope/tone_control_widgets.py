@@ -69,9 +69,9 @@ def _parse(text: str) -> float:
 
 
 class ToneFields(QtWidgets.QFrame):
-    """One channel's frequency (kHz from the NCO), amplitude (dBm against
-    the module's labelled DAC scale) and phase (degrees), with the
-    actual frequency under the first."""
+    """One channel's frequency (kHz from the NCO, the actual frequency
+    under it), amplitude (dBm against the module's labelled DAC scale,
+    the normalized value under it) and DAC and ADC phases (degrees)."""
 
     # channel, {field: value in board units}
     write = pyqtSignal(int, dict)
@@ -94,32 +94,40 @@ class ToneFields(QtWidgets.QFrame):
         grid.addWidget(self.state, 0, 1, 1, 2)
 
         self.edits = {}
-        self.units = {}
-        for row, (field, caption, unit) in enumerate((
-                ("frequency", "Frequency", "kHz"),
-                ("amplitude", "Amplitude", "dBm"),
-                ("phase", "Phase", "°")), start=1):
-            row = row * 2 - 1
+        # Read-only lines under a field: the actual frequency, the
+        # normalized amplitude.
+        self.under = {}
+        row = 1
+        for field, caption, unit, tip, under in (
+                ("frequency", "Frequency", "kHz",
+                 "Offset from the NCO in kHz", "NCO + offset"),
+                ("amplitude", "Amplitude", "dBm",
+                 "Tone power in dBm against the module's labelled DAC "
+                 "scale; 0, blank or 'off' turns the tone off",
+                 "Normalized DAC amplitude, as the board holds it"),
+                ("dac_phase", "DAC phase", "°",
+                 "Carrier (DAC) phase in degrees", None),
+                ("adc_phase", "ADC phase", "°",
+                 "Demodulator (ADC) phase in degrees", None)):
             edit = BoardEdit()
+            edit.setToolTip(tip)
             edit.committed.connect(
                 lambda text, f=field: self._commit(f, text))
             self.edits[field] = edit
-            self.units[field] = QtWidgets.QLabel(unit)
             grid.addWidget(QtWidgets.QLabel(caption), row, 0)
             grid.addWidget(edit, row, 1)
-            grid.addWidget(self.units[field], row, 2)
-        self.edits["frequency"].setToolTip(
-            "Offset from the NCO in kHz")
-        self.edits["amplitude"].setToolTip(
-            "Tone power in dBm against the module's labelled DAC scale; "
-            "0, blank or 'off' turns the tone off")
+            grid.addWidget(QtWidgets.QLabel(unit), row, 2)
+            row += 1
+            if under:
+                label = QtWidgets.QLabel("")
+                label.setAlignment(Qt.AlignmentFlag.AlignRight)
+                label.setToolTip(under)
+                self.under[field] = label
+                grid.addWidget(label, row, 1, 1, 2)
+                row += 1
         self.edits["amplitude"].setPlaceholderText("off")
-        self.edits["phase"].setToolTip(
-            "Carrier (DAC) phase in degrees")
-        self.actual = QtWidgets.QLabel("")
-        self.actual.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.actual.setToolTip("NCO + offset")
-        grid.addWidget(self.actual, 2, 1, 1, 2)
+        self.actual = self.under["frequency"]
+        self.normalized = self.under["amplitude"]
         grid.setColumnStretch(1, 1)
 
     def show_values(self, tone: dict, nco: Optional[float],
@@ -127,11 +135,12 @@ class ToneFields(QtWidgets.QFrame):
         self._dac_scale = dac_scale
         frequency = tone.get("frequency")
         amplitude = tone.get("amplitude")
-        phase = tone.get("phase")
         self.edits["frequency"].show_board(
             "" if frequency is None else f"{frequency / 1e3:.3f}")
-        self.edits["phase"].show_board(
-            "" if phase is None else f"{phase:.2f}")
+        for field in ("dac_phase", "adc_phase"):
+            phase = tone.get(field)
+            self.edits[field].show_board(
+                "" if phase is None else f"{phase:.2f}")
         if amplitude is None or amplitude <= 0:
             self.edits["amplitude"].show_board("")
             self.state.setText("no tone (amplitude 0)")
@@ -139,6 +148,8 @@ class ToneFields(QtWidgets.QFrame):
             self.edits["amplitude"].show_board(
                 f"{convert_amplitude_to_dbm(amplitude, dac_scale):.2f}")
             self.state.setText("tone on")
+        self.normalized.setText(
+            "" if amplitude is None else f"= {amplitude:.6f} normalized")
         if frequency is None or nco is None:
             self.actual.setText("")
         else:

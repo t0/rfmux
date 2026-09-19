@@ -9,16 +9,17 @@ from typing import Iterable, Optional
 
 from .bias_kids import DAC_SCALE_LABEL_OFFSET_DB
 
-FIELDS = ("frequency", "amplitude", "phase")
+FIELDS = ("frequency", "amplitude", "dac_phase", "adc_phase")
+PHASE_TARGET = {"dac_phase": "DAC", "adc_phase": "ADC"}
 
 
 async def read_tones(crs, module: int, channels: Iterable[int]) -> dict:
     """The module's NCO, its labelled DAC scale (dBm, as Periscope
     labels amplitudes) and every listed channel's tone, in one batched
     call: ``{"nco": Hz, "dac_scale": dBm, "channels": {channel:
-    {"frequency": Hz from the NCO, "amplitude": normalized, "phase":
-    degrees of the DAC (carrier) phase}}}``.  A value the board has
-    never set reads as None."""
+    {"frequency": Hz from the NCO, "amplitude": normalized, "dac_phase",
+    "adc_phase": degrees}}}``.  A value the board has never set reads
+    as None."""
     channels = list(channels)
     async with crs.tuber_context() as ctx:
         ctx.get_nco_frequency(module=module)
@@ -26,10 +27,13 @@ async def read_tones(crs, module: int, channels: Iterable[int]) -> dict:
         for ch in channels:
             ctx.get_frequency(channel=ch, module=module)
             ctx.get_amplitude(channel=ch, module=module)
-            ctx.get_phase(units=crs.UNITS.DEGREES, target=crs.TARGET.DAC,
-                          channel=ch, module=module)
+            for target in PHASE_TARGET.values():
+                ctx.get_phase(units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, target),
+                              channel=ch, module=module)
         values = await ctx()
-    tones = {ch: dict(zip(FIELDS, values[2 + 3 * i:5 + 3 * i]))
+    n = len(FIELDS)
+    tones = {ch: dict(zip(FIELDS, values[2 + n * i:2 + n * (i + 1)]))
              for i, ch in enumerate(channels)}
     return {"nco": values[0], "dac_scale": values[1] - DAC_SCALE_LABEL_OFFSET_DB,
             "channels": tones}
@@ -38,9 +42,10 @@ async def read_tones(crs, module: int, channels: Iterable[int]) -> dict:
 async def write_tone(crs, module: int, channel: int, *,
                      frequency: Optional[float] = None,
                      amplitude: Optional[float] = None,
-                     phase: Optional[float] = None) -> dict:
+                     dac_phase: Optional[float] = None,
+                     adc_phase: Optional[float] = None) -> dict:
     """Program the given fields of one channel (frequency in Hz from the
-    NCO, amplitude normalized, phase in degrees) and return
+    NCO, amplitude normalized, phases in degrees) and return
     :func:`read_tones` for that channel, so the caller shows what the
     board kept rather than what was sent."""
     async with crs.tuber_context() as ctx:
@@ -48,9 +53,10 @@ async def write_tone(crs, module: int, channel: int, *,
             ctx.set_frequency(float(frequency), channel=channel, module=module)
         if amplitude is not None:
             ctx.set_amplitude(float(amplitude), channel=channel, module=module)
-        if phase is not None:
-            ctx.set_phase(float(phase), units=crs.UNITS.DEGREES,
-                          target=crs.TARGET.DAC, channel=channel,
-                          module=module)
+        for field, phase in (("dac_phase", dac_phase), ("adc_phase", adc_phase)):
+            if phase is not None:
+                ctx.set_phase(float(phase), units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, PHASE_TARGET[field]),
+                              channel=channel, module=module)
         await ctx()
     return await read_tones(crs, module, [channel])

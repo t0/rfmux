@@ -905,6 +905,9 @@ except ValueError as e:
 - **Fit resonators:** `rfmux.tuning.fit_sweeps` stores model results under `fits`
   in each fitted sweep section, leaving the catalog unchanged. See
   `fitting_resonators.md`.
+- **Measure noise:** reapply the desired bias catalog, then use
+  `crs.take_noise_spectrum`. See [noise_measurement.md](noise_measurement.md)
+  for saved noise products and plots against the verification sweeps.
 - **Save data:** multisweep saves results to `~/rfmux_data/ipy_session_<today>/`
   by default. The result records the path under `file_metadata`. Pass
   `save=False` to skip saving, or `label="cooldown3"` to label the file.

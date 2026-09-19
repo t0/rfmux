@@ -30,7 +30,7 @@ def plotters(monkeypatch):
     monkeypatch.syspath_prepend(str(DEMOS))
     monkeypatch.setattr(plt, "show", lambda: None)
     modules = {}
-    for name in ("multisweep", "bias", "netanal"):
+    for name in ("multisweep", "bias", "netanal", "noise"):
         spec = importlib.util.spec_from_file_location(
             name, DEMOS / f"example_plotting_{name}.py"
         )
@@ -407,3 +407,109 @@ def test_hysteresis_plot_explains_missing_pairs(plotters):
     panel = plt.gcf().axes[0]
     assert any(text.get_text() == "no usable up/down pairs" for text in panel.texts)
     assert len(panel.lines) == 1  # the threshold remains visible
+
+
+def noise_measurement() -> dict:
+    sweep = dict(measurement()["results"][0]["upward"]["R1"], sweep_direction="upward")
+    catalog = ResonatorCatalog([
+        Resonator("R1", 7, BiasPoint(600e6, .01, bias_sweep={
+            key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS})),
+    ], module=1)
+    axes = dict(freq_iq=np.arange(5.), freq_dsb=np.arange(-2., 3.))
+    data = dict(iq_counts=np.array([2+3j, 3+4j, 4+5j]),
+                psd_i=np.arange(5.) - 100, psd_q=np.arange(5.) - 90,
+                psd_dual_sideband=np.arange(5.) - 80)
+    return dict(measurement="noise", module=1,
+                call_params=dict(catalog=catalog.to_dict()),
+                results=dict(
+                    acquisition=dict(iq_units="adc_counts", spectrum_units="dBm/Hz",
+                                     slow_sample_rate_hz=2.),
+                    slow=axes,
+                    resonators={"R1": dict(channel=7, amplitude=.01,
+                                           tone_frequency_hz=600e6, slow=data,
+                                           pfb=dict(data, **axes, time_s=np.arange(3.) / 100))}))
+
+
+@pytest.mark.parametrize("units", ["volts", "counts"])
+@pytest.mark.parametrize("explicit", [True, False])
+def test_noise_iq_overlay_uses_same_units_and_measured_tone(plotters, units, explicit):
+    block = noise_measurement()
+    sweeps = dict(measurement(), measurement="multisweep", module=1) if explicit else None
+    figures = plotters.noise.plot_iq_panels(block, units=units, sweeps=sweeps)
+    panel = figures[0].axes[0]
+    factor = VOLTS_PER_ROC if units == "volts" else 1.
+    sweep = measurement()["results"][0]["upward"]["R1"]
+    np.testing.assert_allclose(panel.lines[0].get_xdata(), sweep["iq_counts"].real * factor)
+    np.testing.assert_allclose(panel.collections[0].get_offsets(),
+                               np.array([[2, 3], [3, 4], [4, 5]]) * factor)
+    np.testing.assert_allclose(panel.lines[-1].get_xdata(), sweep["iq_counts"][1].real * factor)
+    assert panel.get_xlabel() == f"I [{units}]"
+
+
+def test_noise_iq_refuses_nearest_sweep_at_wrong_drive(plotters):
+    block = noise_measurement()
+    block["results"]["resonators"]["R1"]["amplitude"] = .03
+    sweeps = dict(measurement(), measurement="multisweep", module=1)
+    with pytest.raises(ValueError, match="amplitudes must match"):
+        plotters.noise.plot_iq_panels(block, sweeps=sweeps)
+
+
+@pytest.mark.parametrize("stream", ["slow", "pfb"])
+@pytest.mark.parametrize("demean", [False, True])
+@pytest.mark.parametrize("units", ["volts", "counts"])
+def test_noise_timestream_units_and_spacing(plotters, stream, demean, units):
+    block = noise_measurement()
+    figures = plotters.noise.plot_timestreams(block, stream=stream, demean=demean, units=units)
+    panel = figures[0].axes[0]
+    factor = VOLTS_PER_ROC if units == "volts" else 1.
+    expected = np.array([2., 3., 4.])
+    if demean:
+        expected -= expected.mean()
+    np.testing.assert_allclose(panel.lines[0].get_ydata(), expected * factor, atol=1e-12 * factor)
+    np.testing.assert_allclose(panel.lines[0].get_xdata(),
+                               np.arange(3.) / (2 if stream == "slow" else 100))
+    assert units in panel.get_ylabel()
+    np.testing.assert_array_equal(block["results"]["resonators"]["R1"][stream]["iq_counts"],
+                                  [2+3j, 3+4j, 4+5j])
+
+
+@pytest.mark.parametrize("stream", ["slow", "pfb"])
+@pytest.mark.parametrize("dual_sideband", [False, True])
+@pytest.mark.parametrize("units", ["dBm/Hz", "dBc/Hz"])
+def test_noise_psd_preserves_signed_offsets_units_and_saved_bins(plotters, stream, dual_sideband, units):
+    block = noise_measurement()
+    block["results"]["acquisition"]["spectrum_units"] = units
+    figures = plotters.noise.plot_psds(block, stream=stream, dual_sideband=dual_sideband)
+    panel = figures[0].axes[0]
+    expected_x = [-2, 2] if dual_sideband else [2, 3, 4]
+    expected_y = [-80, -76] if dual_sideband else [-98, -97, -96]
+    valid = np.isfinite(panel.lines[0].get_ydata())
+    np.testing.assert_array_equal(panel.lines[0].get_xdata()[valid], expected_x)
+    np.testing.assert_array_equal(panel.lines[0].get_ydata()[valid], expected_y)
+    if dual_sideband:
+        assert not valid[2]  # The plotted line must not bridge the omitted carrier.
+    assert panel.get_ylabel() == f"PSD [{units}]"
+    assert panel.get_xscale() == ("symlog" if dual_sideband else "log")
+    assert len(block["results"]["resonators"]["R1"][stream]["psd_i"]) == 5
+
+
+def test_noise_plots_explain_missing_pfb(plotters):
+    block = noise_measurement()
+    del block["results"]["resonators"]["R1"]["pfb"]
+    with pytest.raises(ValueError, match="no pfb capture"):
+        plotters.noise.plot_psds(block, stream="pfb")
+
+
+def test_noise_iq_explicit_channels_need_supplied_sweep(plotters):
+    block = noise_measurement()
+    block["call_params"]["catalog"] = None
+    with pytest.raises(ValueError, match="supply sweeps="):
+        plotters.noise.plot_iq_panels(block)
+
+
+def test_noise_psd_explains_capture_with_only_carrier_bin(plotters):
+    block = noise_measurement()
+    block["results"]["slow"]["freq_dsb"] = np.array([0.])
+    block["results"]["resonators"]["R1"]["slow"]["psd_dual_sideband"] = np.array([0.])
+    figures = plotters.noise.plot_psds(block, dual_sideband=True)
+    assert "no bins beyond" in figures[0].axes[0].texts[0].get_text()

@@ -4,7 +4,6 @@ from unittest.mock import AsyncMock, Mock
 
 import numpy as np
 import pytest
-from tuber.codecs import TuberResult
 
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import BiasReport, store
@@ -30,16 +29,6 @@ def catalog() -> ResonatorCatalog:
     return catalog
 
 
-def samples(channel: int | None = None) -> TuberResult:
-    channels = range(1, 6) if channel is None else [channel]
-    values = [[float(c)] * 8 for c in channels]
-    data = values if channel is None else values[0]
-    return TuberResult(
-        i=data, q=data,
-        spectrum=TuberResult(freq_iq=list(range(8)), freq_dsb=list(range(8)),
-                             psd_i=data, psd_q=data, psd_dual_sideband=data))
-
-
 @pytest.fixture
 def fake_crs() -> Mock:
     fake_crs = Mock()
@@ -50,9 +39,7 @@ def fake_crs() -> Mock:
     fake_crs.get_decimation = AsyncMock(return_value=6)
     fake_crs.start_udp_streaming = AsyncMock(return_value=True)
     fake_crs.stop_udp_streaming = AsyncMock(return_value=True)
-    fake_crs.py_get_samples = AsyncMock(return_value=samples())
-    fake_crs.py_get_pfb_samples = AsyncMock(
-        side_effect=lambda **kwargs: samples(kwargs["channel"]))
+    fake_crs.take_noise_spectrum = AsyncMock(return_value={"crs0000_rmod2": {"results": {}}})
     return fake_crs
 
 
@@ -72,17 +59,13 @@ async def test_no_resonances_stops_before_biasing(fake_crs: Mock) -> None:
 
 
 @pytest.mark.asyncio
-async def test_noise_uses_catalog_channel_numbers(
+async def test_noise_uses_public_algorithm(
     fake_crs: Mock, catalog: ResonatorCatalog,
 ) -> None:
     noise = await demo._acquire_noise(fake_crs, catalog, created_mock=False)
-    for name, channel in [("ALFA", 2), ("BETA", 5)]:
-        record = noise["resonators"][name]
-        assert record["channel"] == channel
-        for stream in ("slow", "pfb"):
-            np.testing.assert_array_equal(record[stream]["i"], [channel] * 8)
-    assert noise["slow_params"]["module"] == catalog.module
-    assert noise["pfb_params"]["reset_NCO"] is False
+    fake_crs.take_noise_spectrum.assert_awaited_once_with(
+        catalog, **demo.NOISE_PARAMS, save=True, label="tuning_noise")
+    assert noise is fake_crs.take_noise_spectrum.return_value
 
 
 @pytest.mark.asyncio
@@ -90,7 +73,7 @@ async def test_capture_failure_stops_owned_stream(
     fake_crs: Mock, catalog: ResonatorCatalog, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(demo, "find_streamer_conflict", lambda: None)
-    fake_crs.py_get_pfb_samples.side_effect = RuntimeError("PFB capture failed")
+    fake_crs.take_noise_spectrum.side_effect = RuntimeError("PFB capture failed")
     with pytest.raises(RuntimeError, match="PFB capture failed"):
         await demo._acquire_noise(fake_crs, catalog, created_mock=True)
     fake_crs.stop_udp_streaming.assert_awaited_once()
@@ -105,7 +88,7 @@ async def test_conflict_does_not_touch_existing_stream(
         await demo._acquire_noise(fake_crs, catalog, created_mock=True)
     fake_crs.start_udp_streaming.assert_not_awaited()
     fake_crs.stop_udp_streaming.assert_not_awaited()
-    fake_crs.py_get_samples.assert_not_awaited()
+    fake_crs.take_noise_spectrum.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -146,22 +129,27 @@ async def test_mock_flow_saves_bias_and_noise_and_stops_stream(
     module_id = crs.module[1].index()
     sweeps = store.load(next(tmp_path.glob("*tuning_amplitudes.pkl")))
     report = BiasReport.from_dict(sweeps[module_id]["bias_report"])
-    noise = store.load(next(tmp_path.glob("noise_*.pkl")))
+    noise_files = list(tmp_path.glob("noise_*.pkl"))
+    assert len(noise_files) == 1
+    noise = store.load(noise_files[0])[module_id]
+    records = noise["results"]["resonators"]
+    assert noise["measurement"] == "noise"
     assert len(report.catalog) == 10
-    assert set(noise["resonators"]) == set(report.catalog.names())
+    assert set(records) == set(report.catalog.names())
     nco = await crs.get_nco_frequency(module=1)
     for resonator in report.catalog:
         frequency = nco + await crs.get_frequency(channel=resonator.channel, module=1)
         amplitude = await crs.get_amplitude(channel=resonator.channel, module=1)
         assert abs(frequency - resonator.bias.frequency_hz) < 1.0
         assert amplitude == pytest.approx(resonator.bias.amplitude)
-        record = noise["resonators"][resonator.name]
+        record = records[resonator.name]
         assert record["channel"] == resonator.channel
         for stream, count in (("slow", 1000), ("pfb", 20000)):
             data = record[stream]
-            assert data["i"].shape == data["q"].shape == (count,)
-            assert data["freq_iq"].shape == data["psd_i"].shape == data["psd_q"].shape
-            positive = data["freq_iq"] > 0
+            assert data["iq_counts"].shape == (count,)
+            axes = noise["results"]["slow"] if stream == "slow" else data
+            assert axes["freq_iq"].shape == data["psd_i"].shape == data["psd_q"].shape
+            positive = axes["freq_iq"] > 0
             assert np.all(np.isfinite(data["psd_i"][positive]))
             assert np.all(np.isfinite(data["psd_q"][positive]))
     status = await crs.get_udp_streaming_status()

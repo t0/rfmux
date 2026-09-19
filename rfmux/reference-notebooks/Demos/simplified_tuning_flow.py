@@ -27,14 +27,8 @@ import sys
 import tempfile
 import time
 
-import numpy as np
-from tuber.codecs import TuberResult
-
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.core.transferfunctions import (
-    PFB_SAMPLING_FREQ, decimation_to_sampling,
-)
 from rfmux.streamer import find_streamer_conflict
 from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, find_bias_points,
@@ -69,13 +63,9 @@ BIAS_SETTINGS = dict(
     spike_prominence_factor=0.5, noise_gate_factor=50.0,
     max_discrepancy=0.1, compare="magnitude",
 )
-SLOW_NOISE_PARAMS = dict(
-    num_samples=1_000, channel=None, return_spectrum=True,
-    scaling="psd", reference="absolute", nsegments=5, spectrum_cutoff=0.9,
-)
-PFB_NOISE_PARAMS = dict(
-    nsamps=20_000, binlim=1e6, trim=False, nsegments=5,
-    reference="absolute", reset_NCO=False,
+NOISE_PARAMS = dict(
+    num_samples=1_000, nsegments=5, reference="absolute",
+    spectrum_cutoff=0.9, pfb_samples=20_000, pfb_nsegments=5,
 )
 
 
@@ -109,34 +99,10 @@ async def _connect(
     return crs, created_mock
 
 
-def _noise_record(
-    data: TuberResult, channel_index: int | None = None,
-) -> dict:
-    def values(value: list) -> np.ndarray:
-        return np.asarray(value if channel_index is None else value[channel_index])
-
-    return {
-        "i": values(data.i), "q": values(data.q),
-        "freq_iq": np.asarray(data.spectrum.freq_iq),
-        "freq_dsb": np.asarray(data.spectrum.freq_dsb),
-        "psd_i": values(data.spectrum.psd_i),
-        "psd_q": values(data.spectrum.psd_q),
-        "psd_dual_sideband": values(data.spectrum.psd_dual_sideband),
-    }
-
-
 async def _acquire_noise(
     crs: rfmux.CRS, catalog: ResonatorCatalog, *, created_mock: bool,
 ) -> dict:
-    module = catalog.module
-    slow_params = dict(SLOW_NOISE_PARAMS, module=module)
-    pfb_params = dict(PFB_NOISE_PARAMS, module=module)
-    noise = {
-        "module_id": crs.module[module].index(), "module": module,
-        "catalog": catalog.to_dict(),
-        "slow_params": slow_params, "pfb_params": pfb_params,
-        "resonators": {},
-    }
+    """Own only this demo's mock sender around the public measurement."""
     started_mock_stream = False
     started = time.perf_counter()
     try:
@@ -149,32 +115,13 @@ async def _acquire_noise(
                     "to measure the existing session.")
             started_mock_stream = await crs.start_udp_streaming()
             print("Mock PFB RPC capture is synthetic uniform noise.")
-
-        slow_rate = decimation_to_sampling(await crs.get_decimation())
-        noise["slow_sample_rate_hz"] = slow_rate
-        noise["pfb_sample_rate_hz"] = PFB_SAMPLING_FREQ
-        slow_data = await crs.py_get_samples(**slow_params)
-        for resonator in catalog:
-            noise["resonators"][resonator.name] = {
-                "channel": resonator.channel,
-                "slow": _noise_record(slow_data, resonator.channel - 1),
-            }
-        del slow_data
-
-        for resonator in catalog:
-            pfb_data = await crs.py_get_pfb_samples(
-                channel=resonator.channel, **pfb_params)
-            noise["resonators"][resonator.name]["pfb"] = _noise_record(pfb_data)
-            print(f"Noise acquired: {resonator.name}, channel {resonator.channel}")
+        noise = await crs.take_noise_spectrum(
+            catalog, **NOISE_PARAMS, save=True, label="tuning_noise")
     finally:
         if started_mock_stream:
             await crs.stop_udp_streaming()
             print("Script's mock UDP streamer stopped")
 
-    print(f"Slow capture: {slow_params['num_samples'] / slow_rate:.3f} s, "
-          f"{slow_rate:.1f} samples/s")
-    print(f"PFB capture per resonator: "
-          f"{pfb_params['nsamps'] / PFB_SAMPLING_FREQ * 1e3:.2f} ms")
     print(f"Noise acquisition completed in {time.perf_counter() - started:.1f} s")
     return noise
 
@@ -226,7 +173,7 @@ async def run_algorithm_flow(
 
     print("5. Acquiring slow-stream and PFB noise", flush=True)
     noise = await _acquire_noise(crs, report.catalog, created_mock=created_mock)
-    noise_path = store.save(noise, "noise", label="tuning_noise")
+    noise_path = store.saved_path(noise)
     print(f"Saved noise: {noise_path}")
     return report
 

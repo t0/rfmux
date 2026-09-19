@@ -421,7 +421,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.cb_control = QtWidgets.QCheckBox("Control", checked=False)
         self.cb_control.setToolTip(
             "Show and edit each displayed channel's frequency, amplitude "
-            "and phase; the board is re-read once a second")
+            "and DAC and ADC phases; the board is re-read once a second")
         if self.crs is None:
             self.cb_control.setEnabled(False)
             self.cb_control.setToolTip(

@@ -12,7 +12,7 @@ The Periscope application provides a comprehensive suite of visualization and an
   - Fast Fourier Transform (FFT) analysis
   - Single-sideband Power Spectral Density (SSB PSD)
   - Dual-sideband Power Spectral Density (DSB PSD)
-  - Control mode: each displayed channel's frequency, amplitude and phase beside its plots, editable, re-read from the board once a second, with the module's NCO in a banner above
+  - Control mode: each displayed channel's frequency, amplitude and DAC and ADC phases beside its plots, editable, re-read from the board once a second, with the module's NCO in a banner above
 
 - **Network Analysis**:
   - Amplitude and phase vs frequency sweeps

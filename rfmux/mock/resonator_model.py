@@ -1760,8 +1760,12 @@ class MockResonatorModel:
             for ch in configured_channels:
                 freq = self.mock_crs._frequencies.get((module, ch))
                 amp = self.mock_crs._amplitudes.get((module, ch))
-                phase_deg = self.mock_crs._phases.get((module, ch), 0)
-                
+                # The board turns samples by minus the ADC phase and the
+                # carrier by plus the DAC phase: one rotation, applied
+                # below as exp(-j phase_deg).
+                phase_deg = (self.mock_crs._phases.get((module, ch), 0)
+                             - self.mock_crs._dac_phases.get((module, ch), 0))
+
                 # A tone at exactly 0 Hz (offset 0 on an unset NCO) is
                 # DC: nothing passes the coupling capacitor, and the
                 # impedance the solver divides by is a complex zero.

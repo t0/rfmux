@@ -212,7 +212,7 @@ class ServerMockCRS:
         self._frequencies = {}
         self._amplitudes = {}
         self._phases = {}          # ADC (demodulator) phase, degrees
-        self._dac_phases = {}      # DAC (carrier) phase, degrees; stored only
+        self._dac_phases = {}      # DAC (carrier) phase, degrees
         self._tuning_results = {}
 
         self._active_modules = [1, 2, 3, 4]

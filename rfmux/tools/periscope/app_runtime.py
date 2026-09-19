@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 from contextlib import contextmanager
 from .extract_params import ParamKeyExtractor
-from .tone_control_widgets import ToneColumn
+from .tone_control_widgets import ToneFields
 from PyQt6 import sip
 import numpy as np
 from typing import Optional
@@ -229,9 +229,9 @@ class PeriscopeRuntime:
         return [ch for group in self.channel_list for ch in group]
 
     def _add_tone_columns(self, column: int) -> None:
-        """One ToneColumn per row in the grid column after the plots,
-        with no stretch so the plots keep the width.  Rebuilt with the
-        layout, so values are delivered to whatever widgets exist."""
+        """One column of ToneFields per row after the plots, with no
+        stretch so the plots keep the width.  Rebuilt with the layout,
+        so values are delivered to whatever widgets exist."""
         self.tone_fields = {}
         # Every column the grid has ever had keeps its stretch, so the
         # ones no longer holding a plot must be set back to none.
@@ -241,13 +241,20 @@ class PeriscopeRuntime:
         if task is None or not self.cb_control.isChecked():
             return
         for row_i, group in enumerate(self.channel_list):
-            tone_column = ToneColumn(group)
-            for fields in tone_column.fields:
+            host = QtWidgets.QWidget()
+            host.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum,
+                               QtWidgets.QSizePolicy.Policy.Preferred)
+            box = QtWidgets.QVBoxLayout(host)
+            box.setContentsMargins(0, 0, 0, 0)
+            for ch in group:
+                fields = ToneFields(ch)
                 fields.write.connect(task.write)
                 fields.invalid.connect(
                     lambda msg: self.statusBar().showMessage(msg, 8000))
-                self.tone_fields.setdefault(fields.channel, []).append(fields)
-            self.grid.addWidget(tone_column, row_i, column)
+                self.tone_fields.setdefault(ch, []).append(fields)
+                box.addWidget(fields)
+            box.addStretch(1)
+            self.grid.addWidget(host, row_i, column)
 
     def _toggle_tone_control(self, on: bool) -> None:
         self._stop_tone_control()

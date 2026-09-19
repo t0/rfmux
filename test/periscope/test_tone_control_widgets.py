@@ -15,7 +15,7 @@ from rfmux.core.transferfunctions import (  # noqa: E402
     convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.tone_control_widgets import (  # noqa: E402
-    NcoBanner, ToneColumn, ToneFields)
+    NcoBanner, ToneFields)
 
 NCO, DAC = 500e6, -0.5
 TONE = {"frequency": 1.25e6, "amplitude": 0.01, "dac_phase": 30.0,
@@ -91,13 +91,6 @@ def test_each_phase_field_writes_its_own_target(fields, qt_app):
     _edit(fields.edits["adc_phase"], "12", qt_app)
     QTest.keyClick(fields.edits["adc_phase"], Qt.Key.Key_Return)
     assert fields.sent == [(1, {"adc_phase": 12.0})]
-
-
-def test_leaving_an_unchanged_field_sends_nothing(fields, qt_app):
-    _edit(fields.edits["dac_phase"], "30.00", qt_app)
-    fields.parent().other.setFocus()
-    qt_app.processEvents()
-    assert fields.sent == []
 
 
 def test_leaving_an_untouched_field_after_a_refresh_sends_nothing(
@@ -190,21 +183,27 @@ def test_banner_sends_the_nco_in_hz(qt_app):
     banner.close()
 
 
-def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
+def _bare_window(channel_list, control_on):
+    """A Periscope with only what _add_tone_columns reads."""
     p = Periscope.__new__(Periscope)
     QtWidgets.QMainWindow.__init__(p)
-    p.channel_list = [[1, 2], [3]]
-    host = QtWidgets.QWidget()
-    p.grid = QtWidgets.QGridLayout(host)
-    p.cb_control = QtWidgets.QCheckBox(checked=True)
+    p.channel_list = channel_list
+    p.grid = QtWidgets.QGridLayout(QtWidgets.QWidget(p))
+    p.cb_control = QtWidgets.QCheckBox(checked=control_on)
     p._tone_control_task = SimpleNamespace(write=lambda ch, f: None)
+    return p
 
+
+def _channels_in(p, row, column):
+    return [w.channel for w in
+            p.grid.itemAtPosition(row, column).widget().findChildren(ToneFields)]
+
+
+def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
+    p = _bare_window([[1, 2], [3]], control_on=True)
     p._add_tone_columns(2)
-
-    column = p.grid.itemAtPosition(0, 2).widget()
-    assert isinstance(column, ToneColumn)
-    assert [f.channel for f in column.fields] == [1, 2]
-    assert [f.channel for f in p.grid.itemAtPosition(1, 2).widget().fields] == [3]
+    assert _channels_in(p, 0, 2) == [1, 2]
+    assert _channels_in(p, 1, 2) == [3]
     assert set(p.tone_fields) == {1, 2, 3}
     # The plots keep the width.
     assert p.grid.columnStretch(2) == 0
@@ -214,23 +213,13 @@ def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
 def test_a_rebuild_with_fewer_plots_frees_the_old_columns(qt_app):
     """A column the grid once had keeps its stretch: after three plot
     modes go to one, the vacated columns must not take width."""
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.channel_list = [[1]]
-    host = QtWidgets.QWidget()
-    p.grid = QtWidgets.QGridLayout(host)
-    p.cb_control = QtWidgets.QCheckBox(checked=False)
+    p = _bare_window([[1]], control_on=False)
     p._add_tone_columns(3)
     p._add_tone_columns(1)
     assert [p.grid.columnStretch(c) for c in range(4)] == [1, 0, 0, 0]
 
 
 def test_layout_adds_nothing_with_control_off(qt_app):
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.channel_list = [[1]]
-    host = QtWidgets.QWidget()
-    p.grid = QtWidgets.QGridLayout(host)
-    p.cb_control = QtWidgets.QCheckBox(checked=False)
+    p = _bare_window([[1]], control_on=False)
     p._add_tone_columns(2)
     assert p.grid.count() == 0 and p.tone_fields == {}

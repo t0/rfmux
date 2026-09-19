@@ -283,10 +283,8 @@ class ToneControlTask(QtCore.QThread):
             while not self.isInterruptionRequested():
                 self._refresh(loop, self._channels)
                 deadline = time.monotonic() + self.PERIOD_S
-                while not self.isInterruptionRequested():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        break
+                while ((remaining := deadline - time.monotonic()) > 0
+                       and not self.isInterruptionRequested()):
                     try:
                         request = self._requests.get(timeout=remaining)
                     except queue.Empty:
@@ -307,26 +305,20 @@ class ToneControlTask(QtCore.QThread):
         self.signals.values_ready.emit(result)
 
     def _apply(self, loop, request) -> None:
-        kind = request[0]
-        if kind == "tone":
+        if request[0] == "tone":
             _, channel, fields = request
-            try:
-                result = loop.run_until_complete(
-                    write_tone(self.crs, self.module, channel, **fields))
-            except Exception as exc:
-                self.signals.error.emit(f"Ch {channel}: {exc}")
-                self._refresh(loop, [channel])
-                return
-            self.signals.values_ready.emit(result)
-        elif kind == "nco":
-            try:
-                result = loop.run_until_complete(write_nco(
-                    self.crs, self.module, request[1], self._channels))
-            except Exception as exc:
-                self.signals.error.emit(f"NCO: {exc}")
-                self._refresh(loop, self._channels)
-                return
-            self.signals.values_ready.emit(result)
+            coro = write_tone(self.crs, self.module, channel, **fields)
+            label, shown = f"Ch {channel}", [channel]
+        else:
+            coro = write_nco(self.crs, self.module, request[1], self._channels)
+            label, shown = "NCO", self._channels
+        try:
+            result = loop.run_until_complete(coro)
+        except Exception as exc:
+            self.signals.error.emit(f"{label}: {exc}")
+            self._refresh(loop, shown)
+            return
+        self.signals.values_ready.emit(result)
 
 
 class IQSignals(QObject):

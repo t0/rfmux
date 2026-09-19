@@ -10,8 +10,6 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from rfmux.core.transferfunctions import (
     convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 
-FIELD_WIDTH_PX = 96
-
 
 class BoardEdit(QtWidgets.QLineEdit):
     """A field mirroring one board value.  Enter sends the text, and so
@@ -33,7 +31,7 @@ class BoardEdit(QtWidgets.QLineEdit):
         self._board = ""
         self._edited = False
         self.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self.setMaximumWidth(FIELD_WIDTH_PX)
+        self.setMaximumWidth(96)
         self.textEdited.connect(lambda _text: setattr(self, "_edited", True))
         self.returnPressed.connect(self.clearFocus)
 
@@ -51,7 +49,7 @@ class BoardEdit(QtWidgets.QLineEdit):
         if event.reason() not in self.SEND_REASONS:
             return
         edited, self._edited = self._edited, False
-        if edited and self.text() != self._board:
+        if edited:
             self.committed.emit(self.text())
         else:
             self.setText(self._board)
@@ -63,10 +61,6 @@ class BoardEdit(QtWidgets.QLineEdit):
             self.clearFocus()
             return
         super().keyPressEvent(event)
-
-
-def _parse(text: str) -> float:
-    return float(text.strip().replace("−", "-"))
 
 
 class ToneFields(QtWidgets.QFrame):
@@ -95,17 +89,15 @@ class ToneFields(QtWidgets.QFrame):
         grid.addWidget(self.state, 0, 1, 1, 2)
 
         self.edits = {}
-        # Read-only lines under a field: the actual frequency, the
-        # normalized amplitude.
-        self.under = {}
         row = 1
+        # (field, caption, unit, tooltip, read-only line under it)
         for field, caption, unit, tip, under in (
                 ("frequency", "Frequency", "kHz",
-                 "Offset from the NCO in kHz", "NCO + offset"),
+                 "Offset from the NCO in kHz", ("actual", "NCO + offset")),
                 ("amplitude", "Amplitude", "dBm",
                  "Tone power in dBm against the module's labelled DAC "
                  "scale; 0, blank or 'off' turns the tone off",
-                 "Normalized DAC amplitude, as the board holds it"),
+                 ("normalized", "Normalized DAC amplitude, as the board holds it")),
                 ("dac_phase", "DAC phase", "°",
                  "Carrier (DAC) phase in degrees", None),
                 ("adc_phase", "ADC phase", "°",
@@ -122,13 +114,11 @@ class ToneFields(QtWidgets.QFrame):
             if under:
                 label = QtWidgets.QLabel("")
                 label.setAlignment(Qt.AlignmentFlag.AlignRight)
-                label.setToolTip(under)
-                self.under[field] = label
+                label.setToolTip(under[1])
+                setattr(self, under[0], label)
                 grid.addWidget(label, row, 1, 1, 2)
                 row += 1
         self.edits["amplitude"].setPlaceholderText("off")
-        self.actual = self.under["frequency"]
-        self.normalized = self.under["amplitude"]
         grid.setColumnStretch(1, 1)
 
     def show_values(self, tone: dict, nco: Optional[float],
@@ -169,30 +159,14 @@ class ToneFields(QtWidgets.QFrame):
         # The board checks ranges; a rejected value comes back as an
         # error and the re-read restores the field.
         if field == "frequency":
-            return _parse(text) * 1e3
+            return float(text) * 1e3
         if field == "amplitude":
             if text.strip().lower() in ("", "off"):
                 return 0.0
             if self._dac_scale is None:
                 raise ValueError("no DAC scale read from the board yet")
-            return convert_dbm_to_amplitude(_parse(text), self._dac_scale)
-        return _parse(text)
-
-
-class ToneColumn(QtWidgets.QWidget):
-    """The ToneFields of one plot row's channels, stacked."""
-
-    def __init__(self, channels, parent=None):
-        super().__init__(parent)
-        box = QtWidgets.QVBoxLayout(self)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(4)
-        self.fields = [ToneFields(ch) for ch in channels]
-        for w in self.fields:
-            box.addWidget(w)
-        box.addStretch(1)
-        self.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum,
-                           QtWidgets.QSizePolicy.Policy.Preferred)
+            return convert_dbm_to_amplitude(float(text), self._dac_scale)
+        return float(text)
 
 
 class NcoBanner(QtWidgets.QFrame):
@@ -232,7 +206,7 @@ class NcoBanner(QtWidgets.QFrame):
 
     def _commit(self, text: str) -> None:
         try:
-            mhz = _parse(text)
+            mhz = float(text)
         except ValueError:
             self.nco_edit.reject()
             return

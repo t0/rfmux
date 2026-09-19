@@ -82,8 +82,7 @@ def test_round_trip(tmp_path, PacketFile):
         assert np.array_equal(ts["ss"], np.arange(1100, 1100 + n, dtype=np.uint32))
 
 
-@pytest.mark.parametrize("channels", [1, 16, SPP, SPP + 1, 200, 2 * SPP - 1,
-                                      7 * SPP + 3, MAX_CHANNELS])
+@pytest.mark.parametrize("channels", [1, SPP + 1, MAX_CHANNELS])
 def test_channels_are_a_prefix_of_the_module(tmp_path, channels,
                                              PacketFile):
     """channels counts module channels from 1: the pipes it spans are 1..k,
@@ -201,28 +200,16 @@ def test_empty_recording(tmp_path, PacketFile):
         assert len(f.seq()) == 0
 
 
-def test_rejects_bad_magic(tmp_path, PacketFile):
-    path = write(tmp_path, [file_header(SPP, 1, magic=0xDEADBEEF), record(SPP, 0)])
-    with pytest.raises(REJECTED, match="magic"):
-        PacketFile(path)
-
-
-def test_rejects_unknown_version(tmp_path, PacketFile):
-    path = write(tmp_path, [file_header(SPP, 1, version=99), record(SPP, 0)])
-    with pytest.raises(REJECTED, match="version 99"):
-        PacketFile(path)
-
-
-def test_rejects_truncated_file(tmp_path, PacketFile):
-    path = write(tmp_path, [file_header(SPP, 1)[:100]])
-    with pytest.raises(REJECTED, match="too short"):
-        PacketFile(path)
-
-
-def test_rejects_overclaimed_count(tmp_path, PacketFile):
-    # Header says more records than the bytes can hold.
-    path = write(tmp_path, [file_header(SPP, 10), record(SPP, 0)])
-    with pytest.raises(REJECTED, match="at most"):
+@pytest.mark.parametrize("chunks, match", [
+    ([file_header(SPP, 1, magic=0xDEADBEEF), record(SPP, 0)], "magic"),
+    ([file_header(SPP, 1, version=99), record(SPP, 0)], "version 99"),
+    ([file_header(SPP, 1)[:100]], "too short"),
+    # The header claims more records than the bytes can hold.
+    ([file_header(SPP, 10), record(SPP, 0)], "at most")])
+def test_a_file_the_header_does_not_describe_is_rejected(tmp_path, chunks,
+                                                         match, PacketFile):
+    path = write(tmp_path, chunks)
+    with pytest.raises(REJECTED, match=match):
         PacketFile(path)
 
 

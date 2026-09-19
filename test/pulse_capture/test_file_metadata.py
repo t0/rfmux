@@ -12,7 +12,7 @@ from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
 
 CONFIG = PulseCaptureConfig(max_pulse_ms=40.0, noise_train_ms=100.0,
                             pre_pulse_ms=4.0, post_pulse_ms=6.0,
-                            trigger_basis="iq",
+                            trigger_basis="iq", min_end_samples=7,
                             noise_capture_interval_s=0.5)
 
 
@@ -57,7 +57,8 @@ def test_a_single_stream_file_records_both_forms(single):
     meta = single
     assert CONFIG.times_ms().items() <= meta.items()
     kwargs = CONFIG.session_kwargs(1000.0)
-    for name in ("pre_samples", "post_samples", "max_capture_samples"):
+    for name in ("pre_samples", "post_samples", "trigger_samples",
+                 "max_capture_samples"):
         assert meta[name] == kwargs[name], name
     assert set(RATE_PARAMS) <= set(meta)
 
@@ -67,7 +68,8 @@ def test_a_both_mode_file_records_both_forms_per_stream(dual):
     assert CONFIG.times_ms().items() <= meta.items()
     for stream, fs in (("slow", 1000.0), ("fast", 20000.0)):
         kwargs = CONFIG.session_kwargs(fs)
-        for name in ("pre_samples", "post_samples", "max_capture_samples"):
+        for name in ("pre_samples", "post_samples", "trigger_samples",
+                     "max_capture_samples"):
             assert meta[f"{name}_{stream}"] == kwargs[name], (name, stream)
         assert {f"{n}_{stream}" for n in RATE_PARAMS} <= set(meta)
 
@@ -76,3 +78,9 @@ def test_the_noise_sample_window_is_recorded(single, dual):
     want = CONFIG.noise_capture_window_ms * 1e-3
     assert single["noise_capture_window_s"] == want
     assert dual["noise_capture_window_s"] == want
+
+
+def test_the_end_confirmation_floor_is_a_plain_count(single, dual):
+    """min_end_samples is a sample count on both streams alike, so both
+    kinds of file record it under the one name."""
+    assert single["min_end_samples"] == dual["min_end_samples"] == 7

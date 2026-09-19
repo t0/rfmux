@@ -8,6 +8,8 @@ rate.  The fastrx files are built byte-by-byte; their stamp spacing is
 arbitrary because the index reads stamps, not a rate.
 """
 
+import pathlib
+
 import numpy as np
 import pytest
 
@@ -55,8 +57,20 @@ def _recording_file(tmp_path, spacing=20e-6, span=(-0.01, 0.04),
     return write(tmp_path, [file_header(CHANNELS, len(recs))] + recs)
 
 
-def _recording(tmp_path, spacing=20e-6, span=(-0.01, 0.04)):
-    return Recording(_recording_file(tmp_path, spacing, span))
+@pytest.fixture(scope="module")
+def recording(tmp_path_factory):
+    """The recording the overlay tests read; a query never writes to it,
+    so one build serves them all."""
+    return Recording(_recording_file(tmp_path_factory.mktemp("fastrx")))
+
+
+@pytest.fixture(scope="module")
+def merge_recording(tmp_path_factory):
+    """The recording path the merge tests read.  merge_fastrx writes the
+    capture, never the recording.  50 us is fast against the 596 Hz slow
+    stream and still reads the decay's peak to within a percent."""
+    return _recording_file(tmp_path_factory.mktemp("fastrx"), spacing=5e-5,
+                           span=(-0.002, 0.035))
 
 
 def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None,
@@ -86,8 +100,9 @@ def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None,
     return path
 
 
-def test_the_window_of_a_corrected_capture_holds_the_event(tmp_path):
-    rec = _recording(tmp_path)
+def test_the_window_of_a_corrected_capture_holds_the_event(tmp_path,
+                                                          recording):
+    rec = recording
     with PulseHDF5Reader(_capture(tmp_path)) as r:
         assert slow_shift_s(r) == 0.0                 # shifted as written
         ov = pulse_overlay(r, rec, CHANNEL, 1)
@@ -112,10 +127,10 @@ def test_the_window_of_a_corrected_capture_holds_the_event(tmp_path):
         assert ov.fast is None and ov.lag_s is None
 
 
-def test_an_older_file_is_shifted_by_its_slow_rate(tmp_path):
+def test_an_older_file_is_shifted_by_its_slow_rate(tmp_path, recording):
     """Written before the session took the delay out: raw, late stamps
     and no slow_time_offset_s attribute."""
-    rec = _recording(tmp_path)
+    rec = recording
     path = str(tmp_path / "old.h5")
     t = T + LATE + np.arange(-3, 12) / FS            # late, as the board stamps
     w = PulseHDF5Writer(path, [CHANNEL], {}, {
@@ -228,8 +243,8 @@ def test_an_older_dirfile_is_shifted_by_the_stage_its_spacing_implies(
     assert w["times"][np.argmax(w["I"])] == pytest.approx(T, abs=1.0 / FS)
 
 
-def test_the_parser_trace_joins_in_the_same_units(tmp_path):
-    rec = _recording(tmp_path)
+def test_the_parser_trace_joins_in_the_same_units(tmp_path, recording):
+    rec = recording
     dirfile = _dirfile(tmp_path)
     with PulseHDF5Reader(_capture(tmp_path)) as r:
         ov = pulse_overlay(r, rec, CHANNEL, 1, dirfile=dirfile)
@@ -257,11 +272,11 @@ def test_the_parser_trace_joins_in_the_same_units(tmp_path):
             float(_shape(ov.pulse["times"][j])) * VOLTS_PER_ROC, rel=0.02)
 
 
-def test_hertz_capture_projects_the_others_onto_its_axis(tmp_path):
+def test_hertz_capture_projects_the_others_onto_its_axis(tmp_path, recording):
     """A channel stored with its df calibration is in hertz along the
     frequency direction; the recording is rotated and scaled the same
     way, so a pulse along that direction reads on I in hertz."""
-    rec = _recording(tmp_path)
+    rec = recording
     cal = 2500.0 * np.exp(1j * 0.4)          # Hz per volt, its direction
     path = str(tmp_path / "hz.h5")
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
@@ -303,7 +318,10 @@ def test_a_dual_file_brings_the_fast_pulse_and_its_lag(tmp_path):
     from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     from rfmux.pulse_capture.capture_session import DualPulseCaptureSession
     fs_fast = PFB_SAMPLING_FREQ
-    rec = _recording(tmp_path, spacing=1.0 / fs_fast, span=(-0.002, 0.035))
+    # The lag is asserted to a couple of PFB samples, so this one
+    # recording is built at the PFB rate.
+    rec = Recording(_recording_file(tmp_path, spacing=1.0 / fs_fast,
+                                    span=(-0.002, 0.035)))
     path = str(tmp_path / "dual.h5")
     cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
                              max_pulse_ms=20.0, noise_train_ms=200.0)
@@ -338,7 +356,7 @@ def test_a_dual_file_brings_the_fast_pulse_and_its_lag(tmp_path):
 
 
 def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
-        tmp_path):
+        tmp_path, merge_recording):
     """The slow side is kept as it was; every slow pulse becomes a pair
     with no fast trigger and the recording over its window, in the
     file's units, so Periscope reviews it as a both-mode capture."""
@@ -348,10 +366,8 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
     with PulseHDF5Reader(path) as r:
         before = r.get_pulse(CHANNEL, 1)
         n = r.pulse_count(CHANNEL)
-    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
-                         span=(-0.002, 0.035))
 
-    assert merge_fastrx(path, fx) == __import__("pathlib").Path(path)
+    assert merge_fastrx(path, merge_recording) == pathlib.Path(path)
 
     with PulseHDF5Reader(path) as r:
         assert r.dual
@@ -401,15 +417,13 @@ def _capture_with_a_quiet_channel(tmp_path, **config_kw):
     return path
 
 
-def test_a_merged_file_keeps_the_captures_events(tmp_path):
+def test_a_merged_file_keeps_the_captures_events(tmp_path, merge_recording):
     """The events index the capture's pulses, which are the merged
     file's pairs under the same numbers."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
     with PulseHDF5Reader(path) as r:
         before = r.get_event(1)
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
     with PulseHDF5Reader(path) as r:
         assert r.dual
         after = r.get_event(1)
@@ -419,13 +433,12 @@ def test_a_merged_file_keeps_the_captures_events(tmp_path):
     assert after["members"] == before["members"]
 
 
-def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(tmp_path):
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
+def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(
+        tmp_path, merge_recording):
     path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
     with PulseHDF5Reader(path) as r:
         before = dict(r.metadata)
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
     with PulseHDF5Reader(path) as r:
         after = dict(r.metadata)
     assert after["pre_samples_slow"] == before["pre_samples"]
@@ -433,14 +446,12 @@ def test_a_merged_file_names_the_slow_counts_as_a_dual_file_does(tmp_path):
     assert "pre_samples" not in after and "pre_samples_fast" not in after
 
 
-def test_a_merged_files_events_link_to_its_pairs(tmp_path):
+def test_a_merged_files_events_link_to_its_pairs(tmp_path, merge_recording):
     """The links are rewritten for the merged layout, not carried over
     from the slow file's."""
     import h5py
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
     with h5py.File(path, "r") as f:
         links = f["events/event_000001/pulses"]
         (name,) = links
@@ -448,17 +459,16 @@ def test_a_merged_files_events_link_to_its_pairs(tmp_path):
         assert links[name] == f[links.get(name, getlink=True).path]
 
 
-def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
+def test_the_merge_slices_the_recording_for_the_dumped_channels(
+        tmp_path, merge_recording):
     """With every channel saved per event, a channel that did not
     trigger gets the recording over the event's window beside the slow
     samples the capture took, as a both-mode capture would hold it."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture_with_a_quiet_channel(tmp_path, dump_all_channels=True)
     with PulseHDF5Reader(path) as r:
         before = r.get_event(1)
     assert before["dumped"] == [CHANNEL + 1]
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
     with PulseHDF5Reader(path) as r:
         after = r.get_event(1)
     quiet = after["dump"][CHANNEL + 1]
@@ -470,17 +480,15 @@ def test_the_merge_slices_the_recording_for_the_dumped_channels(tmp_path):
     assert t0 <= fast[0] and fast[-1] <= t1
 
 
-def test_a_merged_file_keeps_its_noise_samples(tmp_path):
+def test_a_merged_file_keeps_its_noise_samples(tmp_path, merge_recording):
     """Tagged as they were, every channel's slow samples with them; the
     recording is added where it covers the sample's window."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture_with_a_quiet_channel(tmp_path,
                                          noise_capture_interval_s=0.4)
     with PulseHDF5Reader(path) as r:
         before = [r.get_event(k) for k in range(1, r.event_count + 1)]
     assert before and {e["kind"] for e in before} == {"noise"}
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
     with PulseHDF5Reader(path) as r:
         after = [r.get_event(k) for k in range(1, r.event_count + 1)]
     assert [(e["kind"], e["window"], e["dumped"]) for e in after] == \
@@ -491,17 +499,16 @@ def test_a_merged_file_keeps_its_noise_samples(tmp_path):
                                           old["dump"][ch]["Amp_I"])
 
 
-def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
+def test_a_merged_file_can_be_reviewed_by_event(
+        qt_app, tmp_path, merge_recording):
     """In a both-mode file the list holds pairs; an event's members are
     the pairs of the slow pulses it indexes, and its view draws them."""
     pytest.importorskip("PyQt6")
     from PyQt6 import QtCore
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     from rfmux.tools.periscope.pulse_capture_panel import (
         GROUP_EVENTS, PulseCapturePanel)
     path = _capture_with_a_quiet_channel(tmp_path, coincidence_window_ms=1.0)
-    merge_fastrx(path, _recording_file(
-        tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ, span=(-0.002, 0.035)))
+    merge_fastrx(path, merge_recording)
 
     panel = PulseCapturePanel(dark_mode=False)
     panel.group_combo.setCurrentText(GROUP_EVENTS)
@@ -520,9 +527,10 @@ def test_a_merged_file_can_be_reviewed_by_event(qt_app, tmp_path):
     assert drawn() == [f"Ch{CHANNEL} fast"]
 
 
-def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
+def test_merging_to_another_path_leaves_the_source_slow_only(
+        tmp_path, merge_recording):
     path = _capture(tmp_path)
-    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    fx = merge_recording
     out = tmp_path / "both.h5"
     assert merge_fastrx(path, fx, out) == out
     with PulseHDF5Reader(path) as r:
@@ -531,7 +539,7 @@ def test_merging_to_another_path_leaves_the_source_slow_only(tmp_path):
         assert r.dual and r.pair_count(CHANNEL) == r.pulse_count(CHANNEL, "slow")
 
 
-def test_a_fast_capture_is_refused(tmp_path):
+def test_a_fast_capture_is_refused(tmp_path, merge_recording):
     """The recording merges in as the fast stream of a slow capture."""
     path = tmp_path / "fast.h5"
     s = PulseCaptureSession(channels=[CHANNEL], module=1, sample_rate=FS,
@@ -545,14 +553,15 @@ def test_a_fast_capture_is_refused(tmp_path):
     s.feed_block(CHANNEL, rng.normal(0, 1, n), rng.normal(0, 1, n),
                  T0 + np.arange(n) / FS)
     s.stop()
-    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    fx = merge_recording
     with pytest.raises(ValueError, match="a fast capture"):
         merge_fastrx(str(path), fx)
 
 
-def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(tmp_path):
+def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(
+        tmp_path, merge_recording):
     path = _capture(tmp_path)
-    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    fx = merge_recording
 
     def boom(*a):
         raise RuntimeError("h5 write failed")
@@ -568,11 +577,11 @@ def test_a_dual_file_is_refused_and_a_failed_merge_leaves_no_temp(tmp_path):
         merge_fastrx(path, fx)
 
 
-def test_the_commands_write_the_figures_and_merge(tmp_path):
+def test_the_commands_write_the_figures_and_merge(tmp_path, merge_recording):
     from click.testing import CliRunner
     from rfmux.tools.fastrx import cli
     path = _capture(tmp_path)
-    fx = _recording_file(tmp_path, spacing=1e-4, span=(-0.002, 0.035))
+    fx = merge_recording
     dirfile = _dirfile(tmp_path)
     run = CliRunner().invoke
     fig = tmp_path / "overlay.png"
@@ -606,14 +615,12 @@ def test_a_pulse_the_recording_misses_gets_no_fast_window(tmp_path):
         assert "fast_tod" not in pair
 
 
-def test_the_merged_file_carries_fast_histograms_and_templates(tmp_path):
+def test_the_merged_file_carries_fast_histograms_and_templates(
+        tmp_path, merge_recording):
     """The fast side's histograms and templates are built from the
     recording over each pair's window, one entry per pair."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture(tmp_path)
-    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
-                         span=(-0.002, 0.035))
-    merge_fastrx(path, fx)
+    merge_fastrx(path, merge_recording)
     with PulseHDF5Reader(path) as r:
         n = r.pair_count(CHANNEL)
         hist = r.get_histograms("fast")
@@ -646,10 +653,9 @@ def test_a_window_keeps_one_module_of_an_interleaved_recording(tmp_path):
 def test_a_capture_across_modules_merges_each_key_from_its_module(tmp_path):
     """Pair keys take the recording of their own module; the file's
     fast side is keyed like the slow side."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     keys = [(2, CHANNEL), (3, CHANNEL)]
     path = _capture(tmp_path, channels=keys, module=None)
-    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+    fx = _recording_file(tmp_path, spacing=5e-5,
                          span=(-0.002, 0.035), modules=(3, 2))   # pulse on 3
     merge_fastrx(path, fx)
     with PulseHDF5Reader(path) as r:
@@ -669,9 +675,8 @@ def test_a_capture_across_modules_merges_each_key_from_its_module(tmp_path):
 def test_a_one_module_capture_takes_its_module_of_the_recording(tmp_path):
     """A capture of module 2 merged with a recording that carries
     modules 2 and 3 reads module 2's records alone."""
-    from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
     path = _capture(tmp_path, module=2)
-    fx = _recording_file(tmp_path, spacing=1.0 / PFB_SAMPLING_FREQ,
+    fx = _recording_file(tmp_path, spacing=5e-5,
                          span=(-0.002, 0.035), modules=(2, 3))
     merge_fastrx(path, fx)
     rec = Recording(fx)

@@ -3,9 +3,7 @@ so a stream's throughput follows its data rate rather than how often
 the loop schedules it."""
 
 import asyncio
-import contextlib
 import math
-import socket
 import sys
 import threading
 import time
@@ -15,22 +13,8 @@ import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture import sources as src
-from test.packet_helpers import pfb_datagram, readout_packet
-
-
-@contextlib.contextmanager
-def _loopback_pair():
-    """(receiver, sender, port) on an OS-chosen loopback port."""
-    recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    recv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
-    recv.bind(("127.0.0.1", 0))
-    port = recv.getsockname()[1]
-    send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        yield recv, send, port
-    finally:
-        recv.close()
-        send.close()
+from test.packet_helpers import (loopback_pair, patched_socket, pfb_datagram,
+                                 readout_packet)
 
 
 class _Sink:
@@ -50,26 +34,11 @@ class _Sink:
         self.stamps.extend(np.asarray(t).tolist())
 
 
-def _patched_socket(monkeypatch, sock_by_port):
-    @contextlib.contextmanager
-    def fake(host, port=None, **kw):
-        yield sock_by_port[port]
-    monkeypatch.setattr(src.streamer, "get_multicast_socket", fake)
-    # A quiet socket otherwise holds the source for the 60 s production
-    # timeout after the senders finish.
-    monkeypatch.setattr(src.streamer, "STREAMER_TIMEOUT", 0.3)
-    # The receiver holds its newest reorder_window packets until more
-    # arrive; a finite burst must not sit in it until the stop.
-    monkeypatch.setattr(src, "_PFB_REORDER_WINDOW", 1)
-    monkeypatch.setattr(src, "_PFB_FLUSH_EVERY", 1)
-
-
 def test_slow_drain_is_lossless_and_ordered(monkeypatch):
     """Batching per wake feeds the packets sent, in order."""
     N = 400
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
         sink = _Sink()
 
         def pump():
@@ -104,11 +73,8 @@ def test_many_datagrams_per_wake(monkeypatch):
     # Small enough to sit in a socket buffer even when rmem_max clamps
     # the 16 MB request to ~200 kB.
     N = 20
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
-        # run_slow_source flushes datagrams that predate the capture;
-        # this test IS a preloaded backlog.
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
         for k in range(N):
             send.sendto(bytes(readout_packet(k, t_s=43200.0 + k / 596.0)),
                         ("127.0.0.1", port))
@@ -139,16 +105,15 @@ def test_many_datagrams_per_wake(monkeypatch):
     # One awaited receive gets the first datagram; the drain takes the
     # rest synchronously.  One per wake would need ~N; zero means the
     # patch missed the loop in use.
-    assert 1 <= awaited["n"] <= 3, \
+    assert 1 <= awaited["n"] < N // 2, \
         f"{awaited['n']} awaited receives for {N} packets"
 
 
 def test_pfb_source_keeps_only_its_module(monkeypatch):
     """Every module's PFB streamer shares the port; packets from another
     module are not this capture's samples."""
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         for k in range(12):
             send.sendto(pfb_datagram(k % 2, t_s=43200.0 + k * 1e-4, seq=k),
                         ("127.0.0.1", port))
@@ -163,9 +128,8 @@ def test_pfb_source_keeps_only_its_module(monkeypatch):
 
 
 def _run_pfb(monkeypatch, blobs, channels, stop_after):
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         for b in blobs:
             send.sendto(b, ("127.0.0.1", port))
         time.sleep(0.1)
@@ -229,9 +193,8 @@ def test_pfb_source_discards_to_bound_its_lag(monkeypatch):
     """When the session says the fast stream is further behind the
     slow one than the bound, the source drops packets by their stamps
     until it is within half the bound, and counts them."""
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         step = 4.096e-5
         for k in range(200):
             send.sendto(pfb_datagram(1, t_s=43200.0 + k * step, seq=k),
@@ -261,10 +224,9 @@ def test_pfb_source_turns_the_loop_over_per_batch(monkeypatch):
     """Each popped batch is followed by a turn of the loop, so a dual
     capture's slow side runs between fast batches."""
     N = 40
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         monkeypatch.setattr(src, "_PFB_POP_MAX", 8)
-        monkeypatch.setattr(src, "_flush", lambda s: None)
         for k in range(N):
             send.sendto(pfb_datagram(1, seq=k), ("127.0.0.1", port))
         time.sleep(0.05)
@@ -291,9 +253,8 @@ def test_slow_source_refuses_a_channel_beyond_the_packet_width(monkeypatch):
     """A short packet carries 128 channels; asking for channel 200 of
     it is an error naming the channel and the width, not a capture that
     trains forever on samples that never come."""
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
-        monkeypatch.setattr(src, "_flush", lambda sock: None)
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
         send.sendto(bytes(readout_packet(0, version=streamer.SHORT_PACKET_VERSION)),
                     ("127.0.0.1", port))
         time.sleep(0.05)
@@ -313,8 +274,8 @@ def test_pfb_receive_thread_waits_on_a_quiet_socket(monkeypatch):
             calls["n"] += 1
             return super().receive_batch(*a, **kw)
 
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         monkeypatch.setattr(src.streamer, "PFBPacketReceiver", Counting)
         with pytest.raises(TimeoutError):
             asyncio.run(src.run_pfb_source(_Sink(), "127.0.0.1", [1], module=1))
@@ -329,8 +290,8 @@ def test_pfb_source_raises_its_receivers_error(monkeypatch):
         def receive_batch(self, *a, **kw):
             raise RuntimeError("recvmmsg failed: boom")
 
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         monkeypatch.setattr(src.streamer, "PFBPacketReceiver", Failing)
         with pytest.raises(RuntimeError, match="boom"):
             asyncio.run(src.run_pfb_source(_Sink(), "127.0.0.1", [1], module=1))

@@ -116,13 +116,10 @@ Directories mirror the package under test.
 
 ## Notebook tests
 
-Two kinds, both executed as tests rather than checked in as `.ipynb`:
-
-- `test/notebooks/test_*.md`: quantitative checks written as notebooks.
-- `rfmux/reference-notebooks/Demos/*.md`: the user-facing demos, executed in
-  the acquisition tier so they cannot rot.
-
-Both are jupytext markdown; edit them in JupyterLab or as text. A demo that
+`test/notebooks/test_notebooks.py` executes the user-facing demos in
+`rfmux/reference-notebooks/Demos/*.md` so they cannot rot: the two that
+stream from a MockCRS server in the acquisition tier, the fastrx one in the
+quick tier. They are jupytext markdown; edit them in JupyterLab or as text. A demo that
 writes output must write to a temp directory, since the reference copies are
 provisioned read-only. Of the `.py` scripts beside the demos,
 `simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier

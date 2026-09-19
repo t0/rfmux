@@ -20,6 +20,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import ResonatorCatalog
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm
 from rfmux.tuning import (
     AmplitudeSchedule,
     find_resonances_in_netanal,
@@ -49,6 +50,10 @@ def a_netanal(npoints=8, module=MODULE, sweep_direction="upward",
             "iq_counts": iq,
             "iq_volts": iq * 1e-7,
             "sweep_amplitude": 1e-3,
+            "sweep_amplitude_dbm": (
+                None if dac_scale_dbm is None else
+                float(convert_dacunits_to_dbm(1e-3, dac_scale_dbm))
+            ),
             "sweep_direction": sweep_direction,
         },
         module_id=f"crs0000_rmod{module}",
@@ -134,10 +139,18 @@ class TestPacking:
             "iq_counts",
             "iq_volts",
             "sweep_amplitude",
+            "sweep_amplitude_dbm",
             "sweep_direction",
         }
         assert trace["sweep_amplitude"] == 1e-3
+        assert trace["sweep_amplitude_dbm"] is None
         assert trace["sweep_direction"] == "upward"
+
+    def test_the_trace_carries_its_drive_power(self):
+        trace = netanal_trace(
+            a_netanal(dac_scale_dbm=-0.5)["crs0000_rmod1"])
+
+        assert trace["sweep_amplitude_dbm"] == pytest.approx(-60.5)
 
     def test_no_phase_array(self):
         """Phase is np.angle(iq_counts) at the point of use, as for a sweep."""
@@ -310,6 +323,17 @@ class TestTheDriver:
         # One scale factor for the whole trace, not a per-point correction.
         ratios = trace["iq_volts"] / trace["iq_counts"]
         assert np.allclose(ratios, ratios[0])
+
+    def test_the_trace_carries_its_drive_power(self, netanal):
+        crs, result = netanal
+        block = result[crs.module[MODULE].index()]
+        trace = netanal_trace(block)
+
+        assert trace["sweep_amplitude_dbm"] == pytest.approx(
+            convert_dacunits_to_dbm(
+                trace["sweep_amplitude"], block["dac_scale_dbm"]
+            )
+        )
 
     def test_call_params_records_what_it_was_called_with(self, netanal):
         crs, result = netanal

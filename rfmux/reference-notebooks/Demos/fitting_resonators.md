@@ -550,7 +550,8 @@ multi_amplitude_results
                 ├── iq_volts                │ untouched by the fitters
                 ├── original_center_frequency
                 ├── sweep_direction         │
-                ├── sweep_amplitude         ╯
+                ├── sweep_amplitude         │
+                ├── sweep_amplitude_dbm     ╯
                 └── fits                    ← added by the fitters
                     ├── "skewed"    → params, errors, failed_because
                     ├── "nonlinear" → params, errors, residual, gain,
@@ -1155,4 +1156,3 @@ print("Comparison fits left the saved measurement unchanged.")
   amplitude sweeps to select bias points and return an updated catalog.
 - **Use fitting in a GUI:** `progress_callback(completed, total)` can drive a
   progress bar while the headless fitter analyzes completed sweeps.
-

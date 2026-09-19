@@ -264,6 +264,7 @@ async def test_the_sweep_parameters_reach_the_measurement_unchanged(sweeps):
     assert call["span_hz"] == 123e3
     assert call["npoints_per_sweep"] == 57
     assert call["nsamps"] == 42
+    assert call["dac_scale"] == pytest.approx(1.0)
 
 
 @pytest.mark.asyncio

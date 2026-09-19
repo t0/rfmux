@@ -154,7 +154,8 @@ else:
 
 ```python
 {'channel', 'frequencies', 'iq_counts', 'iq_volts',
- 'original_center_frequency', 'sweep_direction', 'sweep_amplitude'}
+ 'original_center_frequency', 'sweep_direction', 'sweep_amplitude',
+ 'sweep_amplitude_dbm'}
 ```
 
 No phase (it is `np.angle(iq_counts)` where it is wanted), no fit, no bias

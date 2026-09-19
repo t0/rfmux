@@ -10,7 +10,11 @@ import numpy as np
 from ...core.dac_scale import dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
-from ...core.transferfunctions import CREST_FACTOR, convert_roc_to_volts
+from ...core.transferfunctions import (
+    CREST_FACTOR,
+    convert_dacunits_to_dbm,
+    convert_roc_to_volts,
+)
 from ...tuning import store
 from ...tuning.sweep_results import merge_modules, pack_netanal, resolve_direction
 
@@ -64,7 +68,8 @@ async def take_netanal(
     Returns:
         dict: ``{module_id: block}``, keyed by ``crs.module[m].index()``.
         ``block["results"]`` holds ``frequencies`` (Hz), complex ``iq_counts``
-        and ``iq_volts``, ``sweep_amplitude``, and ``sweep_direction``.
+        and ``iq_volts``, ``sweep_amplitude``, ``sweep_amplitude_dbm``, and
+        ``sweep_direction``.
         Use :func:`rfmux.tuning.netanal_trace` to read it or
         :func:`rfmux.tuning.find_resonances_in_netanal` to search for dips.
     """
@@ -320,12 +325,17 @@ async def take_netanal(
     # it. A bare {} would be indistinguishable from a caller's own empty dict,
     # and the provenance of a netanal that measured nothing is worth as much as
     # any other's.
+    scale_dbm = await dac_scale_dbm(crs, module)
     netanal = pack_netanal(
         {
             'frequencies': fs_sorted,
             'iq_counts': iq_sorted,
             'iq_volts': convert_roc_to_volts(iq_sorted),
             'sweep_amplitude': amp,
+            'sweep_amplitude_dbm': (
+                None if scale_dbm is None else
+                float(convert_dacunits_to_dbm(amp, scale_dbm))
+            ),
             'sweep_direction': sweep_direction,
         },
         module_id=crs.module[module].index(),
@@ -343,7 +353,7 @@ async def take_netanal(
         # Read here rather than left to whoever opens the file: the amplitudes
         # above are fractions of DAC full scale, and the board that says what
         # full scale is worth is this one, now.
-        dac_scale_dbm=await dac_scale_dbm(crs, module),
+        dac_scale_dbm=scale_dbm,
     )
 
     store.maybe_save(netanal, "netanal", save=save, label=label)

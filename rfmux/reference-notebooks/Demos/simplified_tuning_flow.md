@@ -203,7 +203,8 @@ module_initial = initial_sweeps[module_id]
 
 
 The structure is `results[step][direction][resonator_name]`. A section contains
-`frequencies`, `iq_counts`, `iq_volts`, and `sweep_amplitude`.
+`frequencies`, `iq_counts`, `iq_volts`, `sweep_amplitude`, and
+`sweep_amplitude_dbm`.
 
 The standard `plot_magnitude_panels()` from `example_plotting_multisweep.py`
 plots one panel per resonator. Its dashed vertical line is the bias frequency

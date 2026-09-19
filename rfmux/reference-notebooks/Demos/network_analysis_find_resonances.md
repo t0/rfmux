@@ -147,6 +147,7 @@ netanal[module_id]                  # e.g. "crs0042_rmod1"
         iq_counts                  # complex readout counts
         iq_volts                   # complex volts at the board input
         sweep_amplitude            # normalized amplitude per tone
+        sweep_amplitude_dbm        # per-tone drive power, or None
         sweep_direction            # "upward" or "downward"
         resonance_search           # added by the resonance finder
     file_metadata                  # added when saved

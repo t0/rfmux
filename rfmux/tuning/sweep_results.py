@@ -201,7 +201,8 @@ def pack_netanal(
 
     Args:
         trace: the ``frequencies``/``iq_counts``/``iq_volts`` arrays and the
-            ``sweep_amplitude``/``sweep_direction`` scalars, already assembled.
+            ``sweep_amplitude``/``sweep_amplitude_dbm``/``sweep_direction``
+            scalars, already assembled.
         module_id: the board-and-module identifier this comes back under, from
             ``crs.module[m].index()``.
         module: the module actually measured — resolved, never None.

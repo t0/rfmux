@@ -17,7 +17,11 @@ from ...core.dac_scale import dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import BiasPoint, Resonator, ResonatorCatalog
-from ...core.transferfunctions import ALLOWED_NCO_BANDWIDTH_HZ, convert_roc_to_volts
+from ...core.transferfunctions import (
+    ALLOWED_NCO_BANDWIDTH_HZ,
+    convert_dacunits_to_dbm,
+    convert_roc_to_volts,
+)
 from ...tuning import store
 from ...tuning.multisweep_amplitudes import AmplitudeSchedule, resolve_amplitudes
 from ...tuning.sweep_results import DIRECTIONS, merge_modules, pack_multisweep
@@ -263,6 +267,7 @@ async def _measure_sweep(
     span_hz: float,
     npoints_per_sweep: int,
     nsamps: int,
+    dac_scale: float | None,
     step: int,
     report_progress,
     data_callback,
@@ -430,6 +435,12 @@ async def _measure_sweep(
                 'original_center_frequency': data_entry['original_center_frequency'],
                 'sweep_direction': sweep_direction,
                 'sweep_amplitude': amplitudes[t.name],  # Amplitude this resonator was swept at
+                'sweep_amplitude_dbm': (
+                    None if dac_scale is None else
+                    float(convert_dacunits_to_dbm(
+                        amplitudes[t.name], dac_scale
+                    ))
+                ),
             }
 
         return results
@@ -730,6 +741,7 @@ async def multisweep(
                 span_hz=span_hz,
                 npoints_per_sweep=npoints_per_sweep,
                 nsamps=nsamps,
+                dac_scale=dac_scale,
                 step=step.step,
                 report_progress=report_progress,
                 data_callback=data_callback,

@@ -270,8 +270,10 @@ to program them. Changing the measurement window alone does neither.
 Pass a number as `amp` to use one amplitude for all resonators. Pass a
 `{name: amplitude}` mapping to set each separately; it must include every resonator.
 
-The catalog stays unchanged. Each result section records the amplitude used
-in `sweep_amplitude`.
+The catalog stays unchanged. Each result section records the normalized
+amplitude used in `sweep_amplitude` and its converted drive power in
+`sweep_amplitude_dbm` (or `None` when the board could not report its DAC
+scale).
 
 ```python
 ms_louder = await crs.multisweep(

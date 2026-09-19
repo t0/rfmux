@@ -56,11 +56,13 @@ def test_the_recorded_scale_labels_the_amplitudes_that_were_swept(
     """What it is for: the drive of any sweep in the file, as a power, and it
     agrees with the power the simulator itself thinks it was driven at."""
     sweep = schedule_sweeps["results"][0]["upward"]
-    amplitude = sweep[next(iter(sweep))]["sweep_amplitude"]
+    entry = sweep[next(iter(sweep))]
+    amplitude = entry["sweep_amplitude"]
+    converted = convert_dacunits_to_dbm(
+        amplitude, schedule_sweeps["dac_scale_dbm"])
 
-    assert convert_dacunits_to_dbm(
-        amplitude, schedule_sweeps["dac_scale_dbm"]) == pytest.approx(
-            bias_dbm_from_amplitude(amplitude))
+    assert entry["sweep_amplitude_dbm"] == pytest.approx(converted)
+    assert converted == pytest.approx(bias_dbm_from_amplitude(amplitude))
 
 
 def _fitted_a(schedule_sweeps, name, step):
@@ -85,7 +87,8 @@ def test_a_sweep_entry_is_a_measurement_and_nothing_else(schedule_sweeps, standa
         for direction in ("upward", "downward"):
             for name in catalog.names():
                 entry = schedule_sweeps["results"][step][direction][name]
-                assert {"frequencies", "iq_counts", "iq_volts", "sweep_amplitude",
+                assert {"frequencies", "iq_counts", "iq_volts",
+                        "sweep_amplitude", "sweep_amplitude_dbm",
                         "sweep_direction", "original_center_frequency"} <= set(entry)
                 assert not {"is_bifurcated", "bias_frequency", "df_calibration",
                             "nonlinear_fit_params", "rotation_tod"} & set(entry)

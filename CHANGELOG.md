@@ -1,5 +1,75 @@
 # Changelog
 
+## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-09-19)
+
+
+### Features
+
+* **algorithms:** crs.measure_df_calibrations; bias_kids fit_method, ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **build:** the docs ship in the wheel, so a PyPI install has them in the Jupyter session ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **core:** `rfmux.core.channels`, the channel and per-module range ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+* **fastrx:** adds "rfmux fastrx bench" tool, which is almost useless ([8cba71d](https://github.com/t0/rfmux/commit/8cba71d38003057b05c739c45d208e2976f985ce))
+* **fastrx:** Adds AF_XDP "very fast" receiver path ([336aa0b](https://github.com/t0/rfmux/commit/336aa0bbe6db5c3f48e33b5dbcf123e423d07c91))
+* **fastrx:** fastrxd: attempt to deepen UMEM RX ring on startup ([822b987](https://github.com/t0/rfmux/commit/822b987542a472c0383b1166df99cc54b235596a))
+* **fastrx:** integrate fastrx into CI/CD builds on Linux ([2b2df65](https://github.com/t0/rfmux/commit/2b2df65ea2f3b9d5c49fc3fd8a3baf017cb932e4))
+* **fastrx:** performance optimizations ([fd8401f](https://github.com/t0/rfmux/commit/fd8401faf7d2780131baff3b9cccb76cad3a936d))
+* **fastrx:** play nice with multi-module streams ([dcc470e](https://github.com/t0/rfmux/commit/dcc470ee1e4ed244b9c5cd049a64a6c29d41544e))
+* **fastrx:** use "channels" instead of "pipes" to specify capture geometry ([e370c5f](https://github.com/t0/rfmux/commit/e370c5f5c4de8783a57a75d9ea1a746088cdd5f0))
+* **firmware:** add --crate option to target a crate serial number ([5bc1777](https://github.com/t0/rfmux/commit/5bc1777544c15c4973c670f924eacd2727a3f94e))
+* **firmware:** add "firmware write-backplane-eeprom" and "read-backplane-eeprom" commands ([a628e45](https://github.com/t0/rfmux/commit/a628e45834dd36a7e2f92030e637ce3e3f5317f5))
+* **firmware:** allows verbs to be chained ([d05b63c](https://github.com/t0/rfmux/commit/d05b63c9b4798c85798e7fe4525d0d4df90ed105))
+* **mock:** a bifurcated resonance is hysteretic ([#136](https://github.com/t0/rfmux/issues/136)) ([8749277](https://github.com/t0/rfmux/commit/87492773aff9fec71ef11fa5ad7020c9c44165e1))
+* **mock:** a bifurcated resonance is hysteretic ([#136](https://github.com/t0/rfmux/issues/136)) ([8749277](https://github.com/t0/rfmux/commit/87492773aff9fec71ef11fa5ad7020c9c44165e1))
+* **mock:** a pulsed resonator rings down, tones sharing a resonator shift its resonance ([eb1c7d8](https://github.com/t0/rfmux/commit/eb1c7d81f09c1adce2bdf497899aba2ba4d25b08))
+* **mock:** TLS 1/f frequency wander, block-generated slow stream, PFB ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **parser:** dirfile: demultiplex using PHASE and LINCOM, not MPLEX ([ddd6849](https://github.com/t0/rfmux/commit/ddd6849b8ef8f8b83e5eaf5df6cf3301c8fa204e))
+* **parser:** extend -c option to support per-module channel selection ([fb3b269](https://github.com/t0/rfmux/commit/fb3b269b8cb939ac015d88cf9f43745dac2c0ea2))
+* **periscope:** a multisweep re-run on the fitted frequencies centres each power's sweep on its own fit ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** an IQ Plane tab in the pulse capture panel draws the pulse as points over the tuning sweep and its bias point, in every view ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** app-wide zoom, flow-layout toolbars, Bias KIDs dialog ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **periscope:** Dark Mode dresses the whole window, not only the plots, ([1daf706](https://github.com/t0/rfmux/commit/1daf706a02a1a1ca9ce781c1c8931bc3f2ee5172))
+* **periscope:** pulse capture IQ plane, dialog memory, per-power multisweep re-run, docs in the Jupyter session ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** the IQ Plane tab picks the stream in both mode ([#142](https://github.com/t0/rfmux/issues/142)) ([21942f0](https://github.com/t0/rfmux/commit/21942f08def484de7fd2120b735a2a8215b68cd4))
+* **periscope:** the network analysis and multisweep dialogs remember their fields between opens, saved once they parse; the amplitude generator defaults to -65 to -40 dBm ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** the repository's guides, installation page and release notes are provisioned into the Jupyter session, flat, beside the reference notebooks ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **pulse_capture:** pulse capture engine, dual-stream capture and Periscope panel ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **pulse_capture:** the capture stores each channel's tuning record ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+* **pulse-capture:** each channel's noise training record is kept in the capture file, five max-pulse lengths nearest the capture, and listed under the channel in the pulse tree ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **pulse-capture:** Instructions for how to read a fastrx recording, and routine for writing synthetic ones ([#147](https://github.com/t0/rfmux/issues/147)) ([ab757bc](https://github.com/t0/rfmux/commit/ab757bcfb2429785664ba25fd94791b2f5a05cd9))
+* **pulse-capture:** max pulse defaults to 50 ms ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **qc:** enable QC runs in wheel installs ([cce096a](https://github.com/t0/rfmux/commit/cce096a25a57e9c69a98131b5eb5e740790ee25c))
+* **record:** 100G captures: the channel stream, the parser and the pulse capture on one IRIG axis, recorded by one command ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+* **streamer:** PFB stream through the C++ receiver (pop_pfb_batch) and a ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **tools:** `rfmux fastrx overlay`, `overlay-dirfile` and `merge`; ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+
+
+### Bug Fixes
+
+* **algorithms:** take_netanal's clipping warning compares the comb's ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **bias_kids:** the board turns samples by minus the ADC phase; the chosen ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+* **fastrx:** HUD: don't detrend spectra ([e46fc41](https://github.com/t0/rfmux/commit/e46fc412761e44b2f4a9bf8fee1d45bbc8b0657c))
+* **fastrx:** HUD: fix RMS calculation in status line ([821995b](https://github.com/t0/rfmux/commit/821995b2122688faea04d12255341c7112d3fb28))
+* **mock:** the compiled surface impedance uses the permeability of free space ([#137](https://github.com/t0/rfmux/issues/137)) ([4ab3236](https://github.com/t0/rfmux/commit/4ab32360e0631b8718b164d53ae8c26f88ef1b19))
+* **periscope:** Export follows the tab by name after the new tab shifted the indices ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** flagged pulse rows are tinted against the tree's palette, so they read on a light window theme ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **periscope:** loading a multisweep file no longer writes the NCO to ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+* **periscope:** normalise multisweep traces at their lowest frequency, so ([8749277](https://github.com/t0/rfmux/commit/87492773aff9fec71ef11fa5ad7020c9c44165e1))
+* **periscope:** the blocking DAC-scale fetch waits for its thread, which ([20944a0](https://github.com/t0/rfmux/commit/20944a0a53dcdec9ada64a86a1fbe7688c1c7402))
+* **periscope:** the Jupyter server opens on the port Jupyter took ([#144](https://github.com/t0/rfmux/issues/144)) ([e934c97](https://github.com/t0/rfmux/commit/e934c97c05a2763c8b6ad491fb3c03e3f1d3ed50))
+* **periscope:** the network analysis re-run dialog finds the main window wherever the panel is docked, so the DAC scale no longer goes missing on a re-run ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **pulse_capture:** the slow stream's CIC group delay is taken out ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+* **qc:** ship missing pytest.ini needed for "rfmux qc" invocation ([22b1d47](https://github.com/t0/rfmux/commit/22b1d47d0f7b262bb93f3adf620c2939b7466a16))
+* **record:** enable the channel streamer in whole pipelines ([#135](https://github.com/t0/rfmux/issues/135)) ([20944a0](https://github.com/t0/rfmux/commit/20944a0a53dcdec9ada64a86a1fbe7688c1c7402))
+* **record:** the parser's interface list offers every interface, the 100G one included ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* **streamer:** apply_streamer_config enables the PFB streamer at stage 6 ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2))
+
+
+### Documentation
+
+* pulse capture guide with screenshots, two executed jupytext demo ([efb4407](https://github.com/t0/rfmux/commit/efb44075e15dd0421b5cc7dfe81ce641ef3fbfc2)), closes [#78](https://github.com/t0/rfmux/issues/78)
+* restore the R1.5 release notes walkthrough to the reference notebooks ([3b436d5](https://github.com/t0/rfmux/commit/3b436d501f3e5874fa814966cd40c61f019c13f3))
+* the 100G captures guide; pulse capture guide and both demo ([adb23df](https://github.com/t0/rfmux/commit/adb23dfa4f78f83c74d3cc01801dd3e932412cd6))
+
 ## [1.6.0](https://github.com/t0/rfmux/compare/v1.5.0...v1.6.0) (2026-07-15)
 
 

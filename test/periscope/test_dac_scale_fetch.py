@@ -8,12 +8,7 @@ import pytest
 pytest.importorskip("PyQt6")
 
 from rfmux.tools.periscope import app_runtime, tasks  # noqa: E402
-from test.qt_helpers import bare_periscope  # noqa: E402
-
-
-class _Board:
-    async def get_dac_scale(self, units="DBM", module=None):
-        return -0.5
+from test.qt_helpers import Board, bare_periscope  # noqa: E402
 
 
 def test_the_blocking_fetch_outlives_its_thread(qt_app, monkeypatch):
@@ -32,7 +27,7 @@ def test_the_blocking_fetch_outlives_its_thread(qt_app, monkeypatch):
             self.ended = True
 
     monkeypatch.setattr(app_runtime, "DACScaleFetcher", SlowTail)
-    p = bare_periscope(monkeypatch, crs=_Board())
+    p = bare_periscope(monkeypatch, crs=Board())
     scales = p.fetch_dac_scales_blocking()
     [fetcher] = made
     assert fetcher.ended and not fetcher.isRunning()
@@ -56,7 +51,7 @@ def test_the_rerun_dialog_finds_the_board_above_a_dock(qt_app, monkeypatch):
 
     monkeypatch.setattr(nad, "DACScaleFetcher", Fetcher)
     main = QtWidgets.QMainWindow()
-    main.crs = _Board()
+    main.crs = Board()
     dock = QtWidgets.QDockWidget(main)
     panel = QtWidgets.QWidget(dock)
     dock.setWidget(panel)

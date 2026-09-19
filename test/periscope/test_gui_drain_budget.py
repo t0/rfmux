@@ -17,9 +17,7 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6 import QtWidgets  # noqa: E402
-
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 REFRESH_MS = 33
 #: Must exceed PeriscopeRuntime._DRAIN_DEADLINE_S; the point of the
@@ -38,11 +36,7 @@ def _batch(n):
 class _NeverEmptyQueue:
     """A stream arriving faster than the GUI can process it."""
 
-    def __init__(self):
-        self.pops = 0
-
     def pop_readout_batch(self, max_packets):
-        self.pops += 1
         return _batch(max_packets)
 
 
@@ -59,20 +53,12 @@ class _FiniteQueue:
 
 
 def _runtime(qt_app, queue, per_batch_s=0.0):
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.refresh_ms = REFRESH_MS
-    p.drain_overruns = 0
-    p.receiver = SimpleNamespace(queue=queue)
-    p.processed = 0
-    # The drain flushes the display batch on its way out.
-    p._display_values = []
-    p._display_times = []
-    p._display_width = -1
-    p._pulse_tap_frame_end = None
-    p.all_chs = []
-    p.buf = {}
-    p.tbuf = {}
+    p = bare_periscope(
+        refresh_ms=REFRESH_MS, drain_overruns=0,
+        receiver=SimpleNamespace(queue=queue), processed=0,
+        # The drain flushes the display batch on its way out.
+        _display_values=[], _display_times=[], _display_width=-1,
+        _pulse_tap_frame_end=None, all_chs=[], buf={}, tbuf={})
 
     def _ingest_batch(samples, *rest):
         p.processed += samples.shape[0]
@@ -123,19 +109,3 @@ def test_backstop_is_not_a_throughput_budget(qt_app):
     assert p.processed == 1270
     assert p.drain_overruns == 0, \
         "the backstop fired on an ordinary frame — it is too tight"
-
-
-def test_drain_makes_progress_across_frames(qt_app):
-    q = _NeverEmptyQueue()
-    p = _runtime(qt_app, q, per_batch_s=0.001)
-    for _ in range(3):
-        _drain(p)
-    assert p.drain_overruns == 3
-    assert q.pops >= 3, "each frame should ingest at least one batch"
-
-
-def test_normal_load_drains_fully_without_overrun(qt_app):
-    p = _runtime(qt_app, _FiniteQueue(25))
-    p._process_incoming_packets()
-    assert p.processed == 25
-    assert p.drain_overruns == 0

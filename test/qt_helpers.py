@@ -1,4 +1,5 @@
-"""Event-loop helpers shared by the GUI tests.
+"""Helpers shared by the GUI tests: the event loop, a main window built
+without its startup, and a stand-in board.
 
 These live in a normal module rather than in ``conftest.py`` because
 conftest is not importable by name — ``from conftest import spin`` picks
@@ -33,10 +34,12 @@ def spin_until(qt_app, predicate, timeout=8.0):
     return False
 
 
-def bare_periscope(monkeypatch, *, crs=None):
+def bare_periscope(monkeypatch=None, *, crs=None, **attrs):
     """A main window built without its startup, holding what the
-    multisweep and tuning paths read; a warning dialog fails the
-    test."""
+    multisweep and tuning paths read, with *attrs* set on top.
+
+    Given a *monkeypatch*, a warning or error dialog fails the test.
+    """
     from unittest.mock import MagicMock
 
     import pytest
@@ -44,9 +47,10 @@ def bare_periscope(monkeypatch, *, crs=None):
     from rfmux.tools.periscope.app import Periscope
     from rfmux.tools.periscope.utils import QtWidgets
 
-    for kind in ("warning", "critical"):
-        monkeypatch.setattr(QtWidgets.QMessageBox, kind,
-                            lambda *a, **k: pytest.fail(f"dialog: {a[2]}"))
+    if monkeypatch is not None:
+        for kind in ("warning", "critical"):
+            monkeypatch.setattr(QtWidgets.QMessageBox, kind,
+                                lambda *a, **k: pytest.fail(f"dialog: {a[2]}"))
     p = Periscope.__new__(Periscope)
     QtWidgets.QMainWindow.__init__(p)
     p.crs, p.host, p.dark_mode = crs, "OFFLINE", False
@@ -56,4 +60,24 @@ def bare_periscope(monkeypatch, *, crs=None):
     p.dock_manager = MagicMock()
     p.dock_manager.get_dock.return_value = None
     p.tabifyDockWidget = MagicMock()
+    for name, value in attrs.items():
+        setattr(p, name, value)
     return p
+
+
+class Board:
+    """A stand-in CRS recording what it was told."""
+
+    def __init__(self, nco_frequency_hz=1.05e9, dac_scale=-0.5):
+        self.calls = []
+        self.nco_frequency_hz = nco_frequency_hz
+        self.dac_scale = dac_scale
+
+    async def get_dac_scale(self, units="DBM", module=None):
+        return self.dac_scale
+
+    async def set_nco_frequency(self, f, module=None):
+        self.calls.append(("nco", f, module))
+
+    async def get_nco_frequency(self, module=None):
+        return self.nco_frequency_hz

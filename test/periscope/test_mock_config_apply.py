@@ -16,7 +16,7 @@ pytest.importorskip("PyQt6")
 from PyQt6 import QtWidgets  # noqa: E402
 
 from rfmux.mock import config as mc  # noqa: E402
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 
 class _Crs:
@@ -37,19 +37,13 @@ class _Crs:
 def _periscope(crs, mock_config, pulse_mode):
     """Just enough Periscope for _apply_mock_configuration: no receiver,
     no CRS connection, no startup dialog."""
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.crs = crs
-    p.module = 1
-    p.mock_config = mock_config
-    p.qp_pulse_mode = pulse_mode
-    p.btn_qp_pulses = QtWidgets.QPushButton()
-    p.tuning = {1: {1: {"df_calibration": 1.0 + 1.0j}}}
-    p.df_calibrations = {1: {1: 1.0 + 1.0j}}
-    p.saved = []
+    p = bare_periscope(
+        crs=crs, module=1, mock_config=mock_config, qp_pulse_mode=pulse_mode,
+        btn_qp_pulses=QtWidgets.QPushButton(),
+        tuning={1: {1: {"df_calibration": 1.0 + 1.0j}}},
+        df_calibrations={1: {1: 1.0 + 1.0j}}, saved=[], calibrations_started=[])
     p.session_manager = SimpleNamespace(is_active=True,
                                         save_mock_config=p.saved.append)
-    p.calibrations_started = []
     p._start_df_calibration = p.calibrations_started.append
     return p
 
@@ -76,17 +70,13 @@ def pulse_only_edit(qt_app):
 
 
 def test_pulse_only_edit_keeps_the_mode(pulse_only_edit):
+    """The mode the dialog does not carry survives in the window, the
+    configuration in force and the session."""
     p = pulse_only_edit
     assert p.qp_pulse_mode == "periodic"
     assert p.btn_qp_pulses.text() == "QP Pulses: Periodic"
-
-
-def test_pulse_only_edit_keeps_the_mode_in_mock_config(pulse_only_edit):
-    assert pulse_only_edit.mock_config["pulse_mode"] == "periodic"
-
-
-def test_pulse_only_edit_saves_the_mode_with_the_session(pulse_only_edit):
-    assert pulse_only_edit.saved[-1]["pulse_mode"] == "periodic"
+    assert p.mock_config["pulse_mode"] == "periodic"
+    assert p.saved[-1]["pulse_mode"] == "periodic"
 
 
 def test_second_pulse_only_edit_still_pulses(pulse_only_edit):

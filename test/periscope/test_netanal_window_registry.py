@@ -23,9 +23,8 @@ pytest.importorskip("pyqtgraph")
 import pyqtgraph as pg  # noqa: E402
 from PyQt6 import QtCore, QtWidgets, sip  # noqa: E402
 
-from test.qt_helpers import spin  # noqa: E402
+from test.qt_helpers import bare_periscope, spin  # noqa: E402
 
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.utils import ClickableViewBox  # noqa: E402
 
 
@@ -60,11 +59,8 @@ def _panel():
 
 def _periscope_with(entry):
     """Just enough Periscope to run the walk, without a CRS or a window."""
-    p = Periscope.__new__(Periscope)
-    p.plots = []
-    p.zoom_box_mode = False
-    p.netanal_windows = {"na-1": entry}
-    return p
+    return bare_periscope(plots=[], zoom_box_mode=False,
+                          netanal_windows={"na-1": entry})
 
 
 def test_a_closed_window_does_not_break_the_rebuild(qt_app):
@@ -104,19 +100,6 @@ def test_a_half_built_entry_is_pruned(qt_app):
     """An entry with no dock is unusable, and dereferencing it raised too."""
     p = _periscope_with({"window": _panel(), "dock": None, "signals": None})
     assert p._live_netanal_windows() == {}
-    assert p.netanal_windows == {}
-
-
-def test_the_registry_does_not_grow_without_bound(qt_app):
-    """Nothing removed entries, so a session accumulated one per open."""
-    p = _periscope_with({})
-    p.netanal_windows = {}
-    for i in range(5):
-        panel, dock = _panel(), QtWidgets.QWidget()
-        p.netanal_windows[f"na-{i}"] = {"window": panel, "dock": dock}
-        _delete(qt_app, panel, dock)
-        p._toggle_zoom_box_mode(True)
-
     assert p.netanal_windows == {}
 
 

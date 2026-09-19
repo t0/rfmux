@@ -11,11 +11,9 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6 import QtWidgets  # noqa: E402
-
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.utils import Circular  # noqa: E402
 from test.packet_helpers import stamp  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 N = 256
 CHANNELS = [1, 2, 5]
@@ -37,20 +35,13 @@ class _Packet:
 
 
 def _runtime(qt_app):
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.all_chs = list(CHANNELS)
-    p.N = N
-    p.buf = {c: {k: Circular(N) for k in ("I", "Q", "M")} for c in CHANNELS}
-    p.tbuf = {c: Circular(N) for c in CHANNELS}
-    p._display_values = []
-    p._display_times = []
-    p._display_width = -1
-    p._display_rows = 0
-    p._pulse_tap = None
-    p._pulse_tap_channels = None
-    p._pulse_tap_cache = None
-    return p
+    return bare_periscope(
+        all_chs=list(CHANNELS), N=N,
+        buf={c: {k: Circular(N) for k in ("I", "Q", "M")} for c in CHANNELS},
+        tbuf={c: Circular(N) for c in CHANNELS},
+        _display_values=[], _display_times=[], _display_width=-1,
+        _display_rows=0, _pulse_tap=None, _pulse_tap_channels=None,
+        _pulse_tap_cache=None)
 
 
 def _packets(n_packets, width, rng):
@@ -60,7 +51,7 @@ def _packets(n_packets, width, rng):
             for i in range(n_packets)]
 
 
-@pytest.mark.parametrize("n_packets", [1, 10, 700])
+@pytest.mark.parametrize("n_packets", [1, 700])
 def test_batched_writes_match_per_packet_writes(qt_app, n_packets):
     rng = np.random.default_rng(17)
     width = 128

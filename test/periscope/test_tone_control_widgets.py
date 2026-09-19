@@ -113,16 +113,27 @@ def test_leaving_an_untouched_field_after_a_refresh_sends_nothing(
     assert fields.edits["frequency"].text() == "2000.000"
 
 
-def test_a_context_menu_does_not_send_a_half_typed_value(fields, qt_app):
-    """The focus loss a right-click menu causes, delivered as Qt does."""
+@pytest.mark.parametrize("reason", [
+    Qt.FocusReason.PopupFocusReason,          # the field's context menu
+    Qt.FocusReason.ActiveWindowFocusReason,   # alt-tab, a dialog opening
+])
+def test_focus_taken_from_the_user_does_not_send(fields, qt_app, reason):
+    """Delivered as Qt does; the half-typed value stays for the user."""
     _edit(fields.edits["dac_phase"], "9", qt_app)
     edit = fields.edits["dac_phase"]
     QtWidgets.QApplication.sendEvent(
-        edit, QtGui.QFocusEvent(QtCore.QEvent.Type.FocusOut,
-                                Qt.FocusReason.PopupFocusReason))
+        edit, QtGui.QFocusEvent(QtCore.QEvent.Type.FocusOut, reason))
     qt_app.processEvents()
     assert fields.sent == []
     assert edit.text() == "9"
+
+
+def test_a_dbm_entry_before_any_read_is_reported_not_raised(qt_app):
+    w = ToneFields(1)
+    errors = []
+    w.invalid.connect(errors.append)
+    w._commit("amplitude", "-40")
+    assert errors and "DAC scale" in errors[0]
 
 
 def test_escape_discards_the_edit(fields, qt_app):
@@ -198,6 +209,20 @@ def test_layout_puts_a_column_of_fields_after_the_plots(qt_app):
     # The plots keep the width.
     assert p.grid.columnStretch(2) == 0
     assert p.grid.columnStretch(0) == 1 and p.grid.columnStretch(1) == 1
+
+
+def test_a_rebuild_with_fewer_plots_frees_the_old_columns(qt_app):
+    """A column the grid once had keeps its stretch: after three plot
+    modes go to one, the vacated columns must not take width."""
+    p = Periscope.__new__(Periscope)
+    QtWidgets.QMainWindow.__init__(p)
+    p.channel_list = [[1]]
+    host = QtWidgets.QWidget()
+    p.grid = QtWidgets.QGridLayout(host)
+    p.cb_control = QtWidgets.QCheckBox(checked=False)
+    p._add_tone_columns(3)
+    p._add_tone_columns(1)
+    assert [p.grid.columnStretch(c) for c in range(4)] == [1, 0, 0, 0]
 
 
 def test_layout_adds_nothing_with_control_off(qt_app):

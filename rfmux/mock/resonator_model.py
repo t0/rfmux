@@ -1760,9 +1760,10 @@ class MockResonatorModel:
             for ch in configured_channels:
                 freq = self.mock_crs._frequencies.get((module, ch))
                 amp = self.mock_crs._amplitudes.get((module, ch))
-                # The board turns samples by minus the ADC phase and the
-                # carrier by plus the DAC phase: one rotation, applied
-                # below as exp(-j phase_deg).
+                # The board turns samples by minus the ADC phase
+                # (measured) and the carrier by plus the DAC phase (the
+                # convention, unmeasured): one rotation, applied below
+                # as exp(-j phase_deg).
                 phase_deg = (self.mock_crs._phases.get((module, ch), 0)
                              - self.mock_crs._dac_phases.get((module, ch), 0))
 

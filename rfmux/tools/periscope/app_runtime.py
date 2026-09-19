@@ -233,9 +233,10 @@ class PeriscopeRuntime:
         with no stretch so the plots keep the width.  Rebuilt with the
         layout, so values are delivered to whatever widgets exist."""
         self.tone_fields = {}
-        for col in range(column):
-            self.grid.setColumnStretch(col, 1)
-        self.grid.setColumnStretch(column, 0)
+        # Every column the grid has ever had keeps its stretch, so the
+        # ones no longer holding a plot must be set back to none.
+        for col in range(max(self.grid.columnCount(), column + 1)):
+            self.grid.setColumnStretch(col, 1 if col < column else 0)
         task = getattr(self, "_tone_control_task", None)
         if task is None or not self.cb_control.isChecked():
             return
@@ -269,9 +270,7 @@ class PeriscopeRuntime:
             task.wait(2000)
             self._tone_control_task = None
 
-    def _show_tone_values(self, module: int, result: dict) -> None:
-        if module != self.module:
-            return
+    def _show_tone_values(self, result: dict) -> None:
         nco, dac_scale = result.get("nco"), result.get("dac_scale")
         self.nco_banner.show_values(nco, dac_scale)
         for channel, tone in result.get("channels", {}).items():

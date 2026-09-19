@@ -46,7 +46,7 @@ def test_reads_writes_and_stops(qt_app, mock_crs):
     loop, crs = mock_crs
     signals = ToneControlSignals()
     received, errors = [], []
-    signals.values_ready.connect(lambda m, r: received.append(r))
+    signals.values_ready.connect(received.append)
     signals.error.connect(errors.append)
     task = ToneControlTask(crs, 1, [1, 2], signals)
     task.start()

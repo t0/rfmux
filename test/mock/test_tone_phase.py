@@ -12,6 +12,13 @@ def _response(m, crs, dac_deg, adc_deg):
     return complex(np.atleast_1d(r[1])[0])
 
 
+def test_an_unknown_phase_target_is_refused(kerr_model):
+    import asyncio
+    crs = kerr_model.m.mock_crs
+    with pytest.raises(ValueError, match="target"):
+        asyncio.run(crs.set_phase(1.0, target="DAC", channel=1, module=1))
+
+
 @pytest.mark.parametrize("dac_deg, adc_deg, turn_deg", [
     (90.0, 0.0, 90.0), (0.0, 90.0, -90.0), (30.0, 30.0, 0.0)])
 def test_phases_rotate_the_response(kerr_model, dac_deg, adc_deg, turn_deg):

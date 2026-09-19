@@ -498,6 +498,8 @@ class ServerMockCRS:
             self._phase_store(target)[(module, channel)] = phase_degrees
 
     def _phase_store(self, target):
+        if target is not None:
+            target = self.validate_enum_member(target, Target, "target")
         return self._dac_phases if target == Target.DAC else self._phases
 
     async def get_phase(self, units='DEGREES', target=None, channel=None, module=None):

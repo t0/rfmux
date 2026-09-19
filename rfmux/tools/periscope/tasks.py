@@ -15,7 +15,8 @@ from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alia
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
-from rfmux.algorithms.measurement.tone_control import read_tones, write_tone
+from rfmux.algorithms.measurement.tone_control import (
+    read_tones, write_nco, write_tone)
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -239,9 +240,9 @@ class DfCalibrationTask(QtCore.QThread):
 
 
 class ToneControlSignals(QObject):
-    # module, read_tones() result; a write answers with only the
-    # channel it touched.
-    values_ready = pyqtSignal(int, dict)
+    # A read_tones() result; a write answers with only the channel it
+    # touched.
+    values_ready = pyqtSignal(dict)
     error = pyqtSignal(str)
 
 
@@ -303,7 +304,7 @@ class ToneControlTask(QtCore.QThread):
         except Exception as exc:
             self.signals.error.emit(f"Control read failed: {exc}")
             return
-        self.signals.values_ready.emit(self.module, result)
+        self.signals.values_ready.emit(result)
 
     def _apply(self, loop, request) -> None:
         kind = request[0]
@@ -316,14 +317,16 @@ class ToneControlTask(QtCore.QThread):
                 self.signals.error.emit(f"Ch {channel}: {exc}")
                 self._refresh(loop, [channel])
                 return
-            self.signals.values_ready.emit(self.module, result)
+            self.signals.values_ready.emit(result)
         elif kind == "nco":
             try:
-                loop.run_until_complete(
-                    self.crs.set_nco_frequency(request[1], module=self.module))
+                result = loop.run_until_complete(write_nco(
+                    self.crs, self.module, request[1], self._channels))
             except Exception as exc:
                 self.signals.error.emit(f"NCO: {exc}")
-            self._refresh(loop, self._channels)
+                self._refresh(loop, self._channels)
+                return
+            self.signals.values_ready.emit(result)
 
 
 class IQSignals(QObject):

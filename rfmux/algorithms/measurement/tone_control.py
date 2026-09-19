@@ -32,11 +32,21 @@ async def read_tones(crs, module: int, channels: Iterable[int]) -> dict:
                               target=getattr(crs.TARGET, target),
                               channel=ch, module=module)
         values = await ctx()
+    if values[1] is None:
+        raise ValueError(f"module {module} reports no DAC scale")
     n = len(FIELDS)
     tones = {ch: dict(zip(FIELDS, values[2 + n * i:2 + n * (i + 1)]))
              for i, ch in enumerate(channels)}
     return {"nco": values[0], "dac_scale": values[1] - DAC_SCALE_LABEL_OFFSET_DB,
             "channels": tones}
+
+
+async def write_nco(crs, module: int, frequency_hz: float,
+                    channels: Iterable[int]) -> dict:
+    """Program the module's NCO and return :func:`read_tones` for
+    *channels*: every actual frequency moves, every offset stays."""
+    await crs.set_nco_frequency(float(frequency_hz), module=module)
+    return await read_tones(crs, module, channels)
 
 
 async def write_tone(crs, module: int, channel: int, *,

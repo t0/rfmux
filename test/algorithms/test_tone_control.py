@@ -6,7 +6,8 @@ import asyncio
 import pytest
 
 import rfmux
-from rfmux.algorithms.measurement.tone_control import read_tones, write_tone
+from rfmux.algorithms.measurement.tone_control import (
+    read_tones, write_nco, write_tone)
 
 SESSION = """
 !HardwareMap
@@ -72,6 +73,14 @@ def test_write_touches_only_the_given_fields(mock_crs):
     assert got["channels"][3]["amplitude"] == 0.02
     assert got["channels"][3]["dac_phase"] == 45.0
     assert got["channels"][3]["adc_phase"] == 10.0
+
+
+def test_write_nco_moves_every_actual_frequency(mock_crs):
+    loop, crs = mock_crs
+    got = loop.run_until_complete(write_nco(crs, 1, 501e6, [1]))
+    assert got["nco"] == 501e6
+    assert got["channels"][1]["frequency"] == 1.25e6
+    loop.run_until_complete(crs.set_nco_frequency(500e6, module=1))
 
 
 def test_dac_scale_follows_the_module(mock_crs):

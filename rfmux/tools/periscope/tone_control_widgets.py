@@ -15,16 +15,22 @@ FIELD_WIDTH_PX = 96
 
 class BoardEdit(QtWidgets.QLineEdit):
     """A field mirroring one board value.  Enter sends the text, and so
-    does leaving the field after typing in it; Esc puts the board's
-    value back.  A refresh leaves the field alone while it has focus or
-    while a sent value awaits the board's answer."""
+    does moving to another widget after typing in it; Esc puts the
+    board's value back.  A refresh leaves the field alone while it has
+    focus."""
 
     committed = pyqtSignal(str)
+    # Focus lost by the user's own move: a click, Tab, or Enter
+    # (clearFocus).  A context menu, another window or a dialog taking
+    # focus must not send a half-typed value.
+    SEND_REASONS = (Qt.FocusReason.MouseFocusReason,
+                    Qt.FocusReason.TabFocusReason,
+                    Qt.FocusReason.BacktabFocusReason,
+                    Qt.FocusReason.OtherFocusReason)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._board = ""
-        self._pending = False
         self._edited = False
         self.setAlignment(Qt.AlignmentFlag.AlignRight)
         self.setMaximumWidth(FIELD_WIDTH_PX)
@@ -33,26 +39,21 @@ class BoardEdit(QtWidgets.QLineEdit):
 
     def show_board(self, text: str) -> None:
         self._board = text
-        self._pending = False
         if not self.hasFocus():
             self.setText(text)
 
     def reject(self) -> None:
         """The sent text was not accepted: show the board's value."""
-        self._pending = False
         self.setText(self._board)
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
-        # The field's own context menu takes focus too; a half-typed
-        # value must not be sent for a right-click.
-        if event.reason() == Qt.FocusReason.PopupFocusReason:
+        if event.reason() not in self.SEND_REASONS:
             return
         edited, self._edited = self._edited, False
         if edited and self.text() != self._board:
-            self._pending = True
             self.committed.emit(self.text())
-        elif not self._pending:
+        else:
             self.setText(self._board)
 
     def keyPressEvent(self, event) -> None:
@@ -172,6 +173,8 @@ class ToneFields(QtWidgets.QFrame):
         if field == "amplitude":
             if text.strip().lower() in ("", "off"):
                 return 0.0
+            if self._dac_scale is None:
+                raise ValueError("no DAC scale read from the board yet")
             return convert_dbm_to_amplitude(_parse(text), self._dac_scale)
         return _parse(text)
 

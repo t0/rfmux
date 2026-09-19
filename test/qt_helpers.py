@@ -51,6 +51,7 @@ def bare_periscope(monkeypatch, *, crs=None):
     QtWidgets.QMainWindow.__init__(p)
     p.crs, p.host, p.dark_mode = crs, "OFFLINE", False
     p.multisweep_window_count, p.multisweep_windows = 0, {}
+    p.multisweep_tasks = {}
     p.tuning, p.df_calibrations = {}, {}
     p.dock_manager = MagicMock()
     p.dock_manager.get_dock.return_value = None

@@ -3,6 +3,7 @@ import rfmux
 import gc
 import os
 import socket
+import sys
 import pytest_asyncio
 
 # Fixtures that can only be satisfied by a real board. Requesting one — directly
@@ -222,17 +223,53 @@ def _free_dropped_widgets_between_tests(request):
     thread it destroys widgets off the GUI thread.  Either one
     segfaults a later test.
 
-    So the collector is off while a GUI test runs and is run here, on
-    the main thread with nothing being dispatched.  Everything the test
-    made is still in generation 0, because the collector has not run.
+    So the collector is off while a GUI test runs and is run once the
+    test is over, on the main thread with nothing being dispatched.
+    That is in ``pytest_runtest_logfinish`` below, not here: pytest
+    still holds the test's fixture values when the fixtures finish, and
+    a widget a fixture yielded would survive a collection run here and
+    be promoted to generation 2, where nothing frees it until a full
+    collection happens to run.  Everything the test made is still in
+    generation 0, because the collector has not run, and
     ``gc.collect(1)`` frees it without scanning the whole interpreter.
     """
-    if "qt_app" not in request.fixturenames:
-        yield
-        return
-    gc.disable()
-    try:
-        yield
-    finally:
+    if "qt_app" in request.fixturenames:
+        gc.disable()
+    yield
+
+
+def pytest_runtest_logfinish(nodeid, location):
+    """Free what the GUI test that just ended left behind; pytest has
+    dropped its fixture values by now."""
+    if not gc.isenabled():
         gc.collect(1)
         gc.enable()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    """A GUI test fails when a Qt callback of its raised.
+
+    An exception escaping a slot or a reimplemented virtual (a
+    closeEvent, say) never reaches the test: PyQt prints it through
+    sys.excepthook, where pytest's capture hides it, and leaves it in
+    sys.last_exc, whose traceback keeps every widget the frames touched
+    alive.
+    """
+    if "qt_app" not in item.fixturenames:
+        yield
+        return
+    seen = []
+    prev = sys.excepthook
+
+    def record(exc_type, exc, tb):
+        seen.append(exc)
+        prev(exc_type, exc, tb)
+
+    sys.excepthook = record
+    outcome = yield
+    sys.excepthook = prev
+    sys.last_exc = sys.last_value = sys.last_traceback = None
+    if seen and outcome.excinfo is None:
+        outcome.force_exception(pytest.fail.Exception(
+            f"a Qt callback raised {seen[0]!r}", pytrace=False))

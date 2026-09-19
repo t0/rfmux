@@ -35,6 +35,12 @@ def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
         def start(self):
             started.append(self.kw["params"]["module"])
 
+        def stop(self):
+            pass
+
+        def wait(self, ms):
+            pass
+
     monkeypatch.setattr(app_runtime, "MultisweepTask", Task)
     p = bare_periscope(monkeypatch, crs=object())
     p.multisweep_signals, p.multisweep_tasks = MultisweepSignals(), {}

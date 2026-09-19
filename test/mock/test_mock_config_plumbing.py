@@ -1,23 +1,16 @@
 """
-Mock config plumbing regressions.
+How the mock's configuration and clock reach its physics.
 
-Three bugs found while designing the TLS/1-f noise model:
-
-1. Several sites read ``mock_crs.physics_config`` (no underscore) — an
-   attribute that does not exist — so the dialog's cache-tuning
-   settings and ``get_samples``' scale factor were silently ignored and
-   the hardcoded fallbacks always won. Tested by observing that a
-   setting reaches the value it drives, rather than by grepping the
-   source for the spelling: the failure mode is a silent default, and
-   that is visible in behaviour whatever the lookup looks like.
+1. A configuration setting reaches the value it drives.  Pinned by
+   observing that value rather than the lookup, since the failure mode
+   is a silent fallback to a hardcoded default.
 2. ``update_qp_densities_for_time`` is a monotonic ratchet, and with PFB
-   enabled its batches advance the clock past the slow frame — so the
-   slow emitter must pass ``pulse_time`` explicitly or its samples get
+   enabled its batches advance the clock past the slow frame, so the
+   slow emitter passes ``pulse_time`` explicitly or its samples are
    evaluated at the PFB's (later) time.
 3. ``generate_resonators`` rebuilds mr_lekids / mr_complex_resonators /
-   base_nqp_values incrementally without holding ``_physics_lock``, so a
-   streamer sample landing mid-rebuild saw mismatched lengths and raised
-   "operands could not be broadcast together with shapes (4,) (3,)".
+   base_nqp_values incrementally, so it holds ``_physics_lock`` and the
+   arrays a sample reads are never of mismatched lengths.
 """
 
 import types
@@ -28,11 +21,10 @@ import pytest
 def test_cache_tuning_takes_effect():
     """A dialog setting must reach the convergence-cache key.
 
-    The original bug was a lookup of ``physics_config`` (no underscore),
-    which ``getattr(..., default)`` turned into a silent fallback: the
-    tuning controls appeared to work and changed nothing. Asserting on
-    the returned step, rather than on the source, catches that however
-    it is spelled.
+    A lookup of the wrong attribute name turns into a silent fallback
+    through ``getattr(..., default)``: the tuning controls appear to
+    work and change nothing.  Asserting on the returned step, rather
+    than on the source, catches that however it is spelled.
     """
     from rfmux.mock.resonator_model import MockResonatorModel
 

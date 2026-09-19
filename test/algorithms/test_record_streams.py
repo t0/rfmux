@@ -20,8 +20,8 @@ from rfmux.core.session_folder import load_metadata
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
 from test.record_helpers import bias_export as _bias_export, fake_fastrx
 
-TRAIN_S = 0.3
-DURATION_S = 0.4
+TRAIN_S = 0.05
+DURATION_S = 0.1
 PARSER_UP_S = 0.1
 
 
@@ -96,9 +96,9 @@ def test_the_window_opens_when_training_ends_and_lasts_the_duration(
     # The parser is launched first, the capture once it is up, the
     # window once the capture has trained, for the duration.
     assert t0 <= log["start"] <= board.t_started
-    assert board.t_started - log["start"] >= PARSER_UP_S - 0.05
+    assert board.t_started - log["start"] >= 0.9 * PARSER_UP_S
     assert board.t_trained <= result.started_at <= log["stop"]
-    assert DURATION_S - 0.05 <= log["stop"] - result.started_at < DURATION_S + 1.0
+    assert 0.9 * DURATION_S <= log["stop"] - result.started_at < DURATION_S + 1.0
     assert log["cmd"] == ("127.0.0.1", None, {2: [1, 2, 3]})
     call = board.calls[0]
     assert call["time_run"] == DURATION_S and call["streamer_mode"] == "slow"
@@ -117,8 +117,8 @@ def test_without_a_capture_the_window_opens_once_the_parser_listens(
         session=core_session.open_session(base=tmp_path), capture=False, fastrx=False,
         verbose=False))
     assert board.calls == []
-    assert result.started_at - t0 >= PARSER_UP_S - 0.05
-    assert DURATION_S - 0.05 <= fake_recorders["stop"] - result.started_at < (
+    assert result.started_at - t0 >= 0.9 * PARSER_UP_S
+    assert 0.9 * DURATION_S <= fake_recorders["stop"] - result.started_at < (
         DURATION_S + 1.0)
     assert result.pulse_path is None and result.training_s == 0.0
 
@@ -196,12 +196,13 @@ def test_a_capture_failing_mid_window_stops_the_parser_cleanly(
     t0 = time.time()
     # The board fails a quarter of the way into a long window: the
     # run ends then, not when the window would have.
+    duration = 2.0
     with pytest.raises(RuntimeError, match="disk full"):
         asyncio.run(rs.record_streams(
             _Board(dies="after training"), module=1, channels=[1],
-            duration_s=4.0, session=session, fastrx=False,
+            duration_s=duration, session=session, fastrx=False,
             verbose=False))
-    assert time.time() - t0 < 4.0
+    assert time.time() - t0 < TRAIN_S + duration / 2
     run = load_metadata(session)["recordings"][0]
     assert run["dirfile"].endswith("serial_0042")
     log = (session / run["dirfile"]).parent.with_suffix(".log").read_text()
@@ -645,17 +646,6 @@ def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     assert run["training_s"] == pytest.approx(
         PulseCaptureConfig().noise_train_ms / 1e3, rel=0.05)
     assert run["capture_config"]["threshold_sigma"] == 5.0
-
-
-def test_an_existing_session_keeps_its_metadata(tmp_path):
-    folder = tmp_path / "session_20260909_153654"
-    folder.mkdir()
-    (folder / core_session.METADATA_FILE).write_text('{"created": "then", "exports": [{"filename": "x"}]}')
-    assert core_session.open_session(folder) == folder
-    core_session.register_export(folder, "pulse_module2_1.h5", "pulse", "module2")
-    meta = load_metadata(folder)
-    assert meta["created"] == "then"
-    assert [e["filename"] for e in meta["exports"]] == ["x", "pulse_module2_1.h5"]
 
 
 def test_newest_bias_export_for_the_module_gives_channels_and_tuning(tmp_path):

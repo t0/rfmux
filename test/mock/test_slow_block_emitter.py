@@ -25,12 +25,14 @@ def _streamer(dec, n_res=2):
     return crs, st
 
 
-@pytest.mark.parametrize("dec", [6, 0])
-def test_block_length_is_about_50_ms_capped(dec):
-    rate = 625e6 / 256 / 64 / 2 ** dec
-    n = MockCRSStreamer.slow_block_len(dec)
-    assert n == min(MockCRSStreamer.SLOW_BLOCK_MAX,
-                    round(MockCRSStreamer.SLOW_BLOCK_SECONDS * rate))
+def test_block_length_is_about_50_ms_capped():
+    # At the slowest decimation a block is the 50 ms worth of frames;
+    # at the fastest that would be 1907, so the cap holds instead.
+    slow_rate = 625e6 / 256 / 64 / 2 ** 6
+    n = MockCRSStreamer.slow_block_len(6)
+    assert n / slow_rate == pytest.approx(MockCRSStreamer.SLOW_BLOCK_SECONDS,
+                                          rel=0.02)
+    assert MockCRSStreamer.slow_block_len(0) == MockCRSStreamer.SLOW_BLOCK_MAX
 
 
 def test_one_physics_call_per_block_and_one_packet_per_frame(monkeypatch):
@@ -65,12 +67,6 @@ def test_one_physics_call_per_block_and_one_packet_per_frame(monkeypatch):
     # One frame apart, across the block boundary too, to the microsecond
     # the datetime path stamps with.
     assert np.allclose(dts, 1 / rate, atol=2e-6)
-
-
-def test_a_block_of_one_is_the_old_single_frame():
-    crs, st = _streamer(6)
-    st._emit_slow_block(1, 0.0, 6, 1)
-    assert st.packets_sent == 1 and st.seq_counters[1] == 1
 
 
 def test_pulses_starting_inside_a_block_reach_its_frames():

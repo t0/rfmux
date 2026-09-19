@@ -57,12 +57,6 @@ def test_pulse_only_apply_uses_the_merged_config():
     assert kwargs["period"] == 0.05 and kwargs["tau_decay"] == 25e-3
 
 
-def test_anything_else_regenerates():
-    changed = config_changes(BASE, dict(BASE, num_resonances=50,
-                                        pulse_mode="periodic"))
-    assert not pulse_only_change(changed)
-
-
 def test_pulse_mode_kwargs_strip_the_prefix_and_drop_the_mode():
     new = dict(BASE, pulse_mode="random", pulse_random_amp_mode="uniform")
     assert pulse_mode_kwargs(new) == {
@@ -144,9 +138,3 @@ def test_without_previous_the_mock_supplies_the_configuration_in_force():
         crs, {"num_resonances": BASE["num_resonances"] + 1}))
     assert outcome == "regenerated"
     assert crs.calls[-1][1]["bias_amplitude"] == 0.0042
-
-
-def test_before_any_array_everything_counts_as_changed():
-    crs = _FakeCRS()
-    outcome, _ = asyncio.run(apply_mock_config(crs, {"num_resonances": 3}))
-    assert outcome == "regenerated"

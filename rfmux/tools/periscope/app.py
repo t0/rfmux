@@ -279,6 +279,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Build the plot layout based on initial settings.
         self._build_layout()
+        # Control mode is on from the start when there is a board to
+        # talk to; toggling here, after the grid exists, starts its worker.
+        self.cb_control.setChecked(self.crs is not None)
 
         # Start the timer for periodic GUI updates (QtCore from .utils).
         self._start_timer()
@@ -402,8 +405,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Plot type checkboxes
         self.cb_time = QtWidgets.QCheckBox("TOD", checked=True)
         self.cb_iq = QtWidgets.QCheckBox("IQ", checked=False)
-        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=self.is_mock_mode)
-        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=not self.is_mock_mode)
+        self.cb_fft = QtWidgets.QCheckBox("FFT", checked=False)
+        self.cb_ssb = QtWidgets.QCheckBox("Single Sideband PSD", checked=False)
         self.cb_dsb = QtWidgets.QCheckBox("Dual Sideband PSD", checked=False)
         self.cb_hist = QtWidgets.QCheckBox("Amplitude Histogram", checked=False)
         

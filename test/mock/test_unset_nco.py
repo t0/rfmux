@@ -35,6 +35,21 @@ def test_slow_stream_survives_a_tone_with_no_nco_set():
     assert st.packets_sent == 10
 
 
+def test_slow_stream_survives_a_tone_at_zero_hz():
+    """Offset 0 on the unset NCO puts the tone at DC, where the
+    impedance is a complex zero."""
+    crs = _unbiased_mock()
+    asyncio.run(crs.set_frequency(0.0, channel=1, module=1))
+    asyncio.run(crs.set_amplitude(0.01, channel=1, module=1))
+
+    st = MockCRSStreamer(crs)
+    st.running = True
+    st.slow_socket = None
+    st.start_datetime = datetime(2026, 1, 1)
+    st._emit_slow_block(1, 0.0, 6, 10)
+    assert st.packets_sent == 10
+
+
 @pytest.mark.parametrize("setter, value", [("set_frequency", 1e6),
                                            ("set_amplitude", 0.01)])
 def test_a_missing_channel_is_named(setter, value):

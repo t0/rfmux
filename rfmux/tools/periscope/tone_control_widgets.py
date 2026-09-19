@@ -45,6 +45,10 @@ class BoardEdit(QtWidgets.QLineEdit):
 
     def focusOutEvent(self, event) -> None:
         super().focusOutEvent(event)
+        # The field's own context menu takes focus too; a half-typed
+        # value must not be sent for a right-click.
+        if event.reason() == Qt.FocusReason.PopupFocusReason:
+            return
         edited, self._edited = self._edited, False
         if edited and self.text() != self._board:
             self._pending = True

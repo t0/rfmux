@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
-from PyQt6 import QtCore, QtWidgets  # noqa: E402
+from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
 from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 
@@ -105,6 +105,18 @@ def test_leaving_an_untouched_field_after_a_refresh_sends_nothing(
     qt_app.processEvents()
     assert fields.sent == []
     assert fields.edits["frequency"].text() == "2000.000"
+
+
+def test_a_context_menu_does_not_send_a_half_typed_value(fields, qt_app):
+    """The focus loss a right-click menu causes, delivered as Qt does."""
+    _edit(fields.edits["phase"], "9", qt_app)
+    edit = fields.edits["phase"]
+    QtWidgets.QApplication.sendEvent(
+        edit, QtGui.QFocusEvent(QtCore.QEvent.Type.FocusOut,
+                                Qt.FocusReason.PopupFocusReason))
+    qt_app.processEvents()
+    assert fields.sent == []
+    assert edit.text() == "9"
 
 
 def test_escape_discards_the_edit(fields, qt_app):

@@ -73,6 +73,16 @@ def mock_crs():
     loop.close()
 
 
+@pytest.fixture(autouse=True)
+def _pfb_streamer_off(mock_crs):
+    """The fast and both mode tests turn the mock's PFB streamer on;
+    left on, its 2.44 MHz packets keep the server busy and a slow
+    capture after them takes four times as long."""
+    yield
+    loop, crs = mock_crs
+    loop.run_until_complete(crs.set_pfb_streamer(channel=None, module=1))
+
+
 @pytest.fixture
 def stream_guard(qt_app):
     """Stops capture tasks and tap threads whether or not the test passes.

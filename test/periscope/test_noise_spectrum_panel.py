@@ -1,12 +1,4 @@
-"""
-Offscreen construction/navigation tests for the Noise Spectrum panel.
-
-Replaces the old root-level test_noise_panel_smoke.py, which wrapped the
-constructor in try/except and returned a bool — pytest ignores return
-values, so that "test" passed even when the panel failed to build.  These
-assert instead, and cover the detector navigation the panel adds on top of
-plain construction.
-"""
+"""The Noise Spectrum panel builds offscreen and walks its detectors."""
 
 import pytest
 
@@ -26,9 +18,10 @@ TWO_DETECTORS = {
 }
 
 
-def test_panel_builds_with_multiple_detectors(qt_app):
-    """The panel constructs without data and enables navigation when it has
-    more than one detector to walk."""
+def test_navigation_follows_the_number_of_detectors(qt_app):
+    """The panel builds without data; with one detector there is nowhere
+    to navigate, so both buttons stay dead rather than wrapping onto the
+    same detector."""
     panel = NoiseSpectrumPanel(
         detector_id=1,
         resonance_frequency_ghz=4.0,
@@ -40,21 +33,16 @@ def test_panel_builds_with_multiple_detectors(qt_app):
     assert panel.prev_button.isEnabled()
     assert panel.next_button.isEnabled()
     panel.close()
-    spin(qt_app)
 
-
-def test_navigation_is_disabled_for_a_lone_detector(qt_app):
-    """With a single detector there is nowhere to navigate, so both buttons
-    stay dead rather than wrapping onto the same detector."""
-    panel = NoiseSpectrumPanel(
+    lone = NoiseSpectrumPanel(
         detector_id=1,
         resonance_frequency_ghz=4.0,
         all_detectors_data={1: {"conceptual_freq_hz": 4.0e9}},
         initial_detector_idx=1,
     )
-    assert not panel.prev_button.isEnabled()
-    assert not panel.next_button.isEnabled()
-    panel.close()
+    assert not lone.prev_button.isEnabled()
+    assert not lone.next_button.isEnabled()
+    lone.close()
     spin(qt_app)
 
 

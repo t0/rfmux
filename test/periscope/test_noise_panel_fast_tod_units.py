@@ -7,18 +7,11 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+from test.packet_helpers import stamp  # noqa: E402
 from test.qt_helpers import spin  # noqa: E402
 
 from rfmux.core.transferfunctions import VOLTS_PER_ROC  # noqa: E402
 from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel  # noqa: E402
-
-
-class _Stamp:
-    """The fields the panel reads off a slow-stream packet timestamp."""
-    def __init__(self, seconds):
-        self.h, rem = divmod(int(seconds), 3600)
-        self.m, self.s = divmod(rem, 60)
-        self.ss = int((seconds - int(seconds)) * 156250000)
 
 
 def _spectrum_data(reference):
@@ -35,7 +28,7 @@ def _spectrum_data(reference):
         "pfb_I": [np.full(m, 7.0)], "pfb_Q": [np.full(m, 3.0)],
         "pfb_freq_iq": [freqs], "pfb_freq_dsb": [freqs], "pfb_dual_psd": [np.ones(n)],
         "pfb_ts": np.arange(m) / 2.44e6,
-        "ts": [_Stamp(43200.0 + k / 596.0) for k in range(m)],
+        "ts": [stamp(43200.0 + k / 596.0) for k in range(m)],
     }
 
 

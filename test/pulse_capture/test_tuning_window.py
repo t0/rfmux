@@ -9,11 +9,15 @@ import pytest
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
+from PyQt6 import QtCore  # noqa: E402
+
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
     PulseCapturePanel)
 from rfmux.tools.periscope.utils import QtWidgets  # noqa: E402
 from test.pulse_capture.capture_files import capture_file  # noqa: E402
-from test.qt_helpers import bare_periscope, spin  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
+
+ROLE = QtCore.Qt.ItemDataRole.UserRole
 
 
 def _row(channel, f0, amp=0.01):
@@ -32,7 +36,7 @@ def _file(tmp_path, channels, module, tuning):
 
 def _tuning_items(panel):
     return [(panel.pulse_tree.topLevelItem(i).text(0),
-             panel.pulse_tree.topLevelItem(i).data(0, 0x0100))
+             panel.pulse_tree.topLevelItem(i).data(0, ROLE))
             for i in range(panel.pulse_tree.topLevelItemCount())
             if panel.pulse_tree.topLevelItem(i).text(0).startswith("▦ Tuning")]
 
@@ -42,7 +46,6 @@ def panel(qt_app):
     p = PulseCapturePanel(dark_mode=False)
     yield p
     p.close()
-    spin(qt_app)
 
 
 def test_a_live_capture_lists_its_tuning(qt_app):
@@ -58,7 +61,6 @@ def test_a_live_capture_lists_its_tuning(qt_app):
         assert tops[-2:] == ["▦ Tuning (2 detectors)", "▦ Metadata"]
     finally:
         panel.close()
-        spin(qt_app)
 
 
 def test_a_capture_without_tuning_lists_none(panel):
@@ -87,7 +89,7 @@ def test_double_clicking_the_item_asks_the_main_window(qt_app, tmp_path, panel):
     [(_, data)] = _tuning_items(panel)
     item = next(panel.pulse_tree.topLevelItem(i)
                 for i in range(panel.pulse_tree.topLevelItemCount())
-                if panel.pulse_tree.topLevelItem(i).data(0, 0x0100) == data)
+                if panel.pulse_tree.topLevelItem(i).data(0, ROLE) == data)
     panel._on_tree_double_click(item, 0)
     assert opened == [([4, 6], 2, "tuned.h5")]
 
@@ -115,7 +117,6 @@ def test_the_main_window_opens_the_sweeps_read_only(qt_app, monkeypatch):
         assert set(p.tuning[2]) == {3, 7}
     finally:
         panel.close()
-        spin(qt_app)
 
 
 def test_rows_the_window_produces_later_reach_the_main_window(
@@ -128,7 +129,6 @@ def test_rows_the_window_produces_later_reach_the_main_window(
         assert p.tuning[2] == later
     finally:
         panel.close()
-        spin(qt_app)
 
 
 def test_rows_without_a_sweep_open_nothing(qt_app, monkeypatch):
@@ -149,4 +149,3 @@ def test_the_bias_message_counts_detectors_with_data(qt_app, monkeypatch):
         assert "biased 2 out of 2 detectors" in said[0]
     finally:
         panel.close()
-        spin(qt_app)

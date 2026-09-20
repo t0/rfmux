@@ -16,16 +16,19 @@ def _line_positions(panel, module):
             [line.value() for line in info['resonance_lines_phase']])
 
 
-def test_added_resonance_lands_in_frequency_order(qt_app):
-    panel = NetworkAnalysisPanel(modules=[1], dark_mode=False)
+@pytest.fixture
+def panel(qt_app):
+    return NetworkAnalysisPanel(modules=[1], dark_mode=False)
+
+
+def test_added_resonance_lands_in_frequency_order(panel):
     for freq in (5e8, 3e8, 4e8):
         panel._add_resonance(1, freq)
     assert panel.resonance_freqs[1] == [3e8, 4e8, 5e8]
     assert _line_positions(panel, 1) == ([3e8, 4e8, 5e8], [3e8, 4e8, 5e8])
 
 
-def test_removal_after_an_add_takes_the_matching_lines(qt_app):
-    panel = NetworkAnalysisPanel(modules=[1], dark_mode=False)
+def test_removal_after_an_add_takes_the_matching_lines(panel):
     for freq in (5e8, 3e8, 4e8):
         panel._add_resonance(1, freq)
     panel._remove_resonance(1, 4.01e8)
@@ -33,8 +36,9 @@ def test_removal_after_an_add_takes_the_matching_lines(qt_app):
     assert _line_positions(panel, 1) == ([3e8, 5e8], [3e8, 5e8])
 
 
-def test_loaded_resonances_are_sorted(qt_app):
-    panel = NetworkAnalysisPanel(modules=[1], dark_mode=False)
+def test_loaded_resonances_are_sorted(panel):
+    """Loading replaces the lines wholesale rather than adding one at a
+    time, and sorts on its own."""
     panel._use_loaded_resonances(1, [5e8, 3e8, 4e8])
     assert panel.resonance_freqs[1] == [3e8, 4e8, 5e8]
     assert _line_positions(panel, 1)[0] == [3e8, 4e8, 5e8]

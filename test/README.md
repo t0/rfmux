@@ -7,12 +7,12 @@ developer laptop.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 51 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1251 | ~2 min | Default while editing. |
-| `pytest --tier=acquisition` | 23 | ~3 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1274 | ~4 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 50 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 1057 | ~1 min | Default while editing. |
+| `pytest --tier=acquisition` | 19 | ~2.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 1076 | ~3.5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 1349 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 1151 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -116,13 +116,10 @@ Directories mirror the package under test.
 
 ## Notebook tests
 
-Two kinds, both executed as tests rather than checked in as `.ipynb`:
-
-- `test/notebooks/test_*.md`: quantitative checks written as notebooks.
-- `rfmux/reference-notebooks/Demos/*.md`: the user-facing demos, executed in
-  the acquisition tier so they cannot rot.
-
-Both are jupytext markdown; edit them in JupyterLab or as text. A demo that
+`test/notebooks/test_notebooks.py` executes the user-facing demos in
+`rfmux/reference-notebooks/Demos/*.md` so they cannot rot: the two that
+stream from a MockCRS server in the acquisition tier, the fastrx one in the
+quick tier. They are jupytext markdown; edit them in JupyterLab or as text. A demo that
 writes output must write to a temp directory, since the reference copies are
 provisioned read-only. Of the `.py` scripts beside the demos,
 `simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier
@@ -132,9 +129,16 @@ test, so run it by hand when its notebook changes.
 ## Qt tests
 
 An autouse fixture in `test/conftest.py` turns the cyclic collector off while
-a test that uses `qt_app` runs, and calls `gc.collect(1)` on the main thread
-afterwards. A panel is a reference cycle. One freed during event dispatch, or
-on a worker thread, segfaults a later test.
+a test that uses `qt_app` runs, and `pytest_runtest_logfinish` there calls
+`gc.collect(1)` on the main thread once pytest has dropped the test's fixture
+values. A panel is a reference cycle. One freed during event dispatch, or on
+a worker thread, segfaults a later test. Collecting before the drop would
+promote a fixture-held widget to generation 2, where it waits with every
+other one for a full collection to free them all at once, wherever that
+lands. A GUI test also fails when a Qt callback of its raised: PyQt
+reports such an exception through `sys.excepthook`, where capture hides it,
+and parks it in `sys.last_exc`, whose traceback holds every widget its
+frames touched (`test/periscope/test_gui_fixture_cleanup.py` pins both).
 
 ## Platform skips
 
@@ -152,10 +156,7 @@ pygetdata wheel. Two tests skip on Windows:
 `rfmux record` starts its parser as an asyncio subprocess, which the selector
 event loop used there does not support, and
 `test/mock/test_server_exits_with_parent.py`, which kills its client with
-`SIGKILL`. `test/pulse_capture/test_overlay.py` skips on Windows as a whole:
-with it in the run the Windows quick tier ends in an access violation between
-two later, unrelated tests. The cause is not found; the module's note says
-what is known. With fastrx built and the test group installed, every tier below
+`SIGKILL`. With fastrx built and the test group installed, every tier below
 `hardware` reports zero skips on Linux.
 
 ## CI

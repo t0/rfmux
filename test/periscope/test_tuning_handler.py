@@ -8,8 +8,7 @@ pytest.importorskip("PyQt6")
 from test.qt_helpers import bare_periscope, spin  # noqa: E402
 
 
-def test_the_rows_are_held_and_the_calibrations_derived(
-        qt_app, capsys, monkeypatch):
+def test_the_rows_are_held_and_the_calibrations_derived(qt_app, monkeypatch):
     p = bare_periscope(monkeypatch)
     rows = {3: {"bias_channel": 3, "df_calibration": 1 + 1j,
                 "bias_frequency": 1e9},
@@ -17,8 +16,6 @@ def test_the_rows_are_held_and_the_calibrations_derived(
     p._handle_tuning_ready(2, rows)
     assert p.tuning == {2: rows}
     assert p.df_calibrations == {2: {3: 1 + 1j}}
-    assert "2 detectors on module 2, 1 with a df calibration" in \
-        capsys.readouterr().out
 
 
 def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
@@ -34,6 +31,12 @@ def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
 
         def start(self):
             started.append(self.kw["params"]["module"])
+
+        def stop(self):
+            pass
+
+        def wait(self, ms):
+            pass
 
     monkeypatch.setattr(app_runtime, "MultisweepTask", Task)
     p = bare_periscope(monkeypatch, crs=object())

@@ -10,7 +10,6 @@ from rfmux.pulse_capture.analysis import plot_groups  # noqa: E402
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
     PulseCapturePanel)
 from test.pulse_capture.capture_files import capture_file  # noqa: E402
-from test.qt_helpers import spin  # noqa: E402
 
 KEYS = [(2, 5), (3, 1)]
 
@@ -28,7 +27,6 @@ def panel(qt_app):
     panel = PulseCapturePanel(dark_mode=False)
     yield panel
     panel.close()
-    spin(qt_app)
 
 
 def test_a_capture_across_modules_reviews_with_the_module_named(

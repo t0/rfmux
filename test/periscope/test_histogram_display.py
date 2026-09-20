@@ -7,18 +7,14 @@ import pytest
 pytest.importorskip("PyQt6")
 
 import pyqtgraph as pg  # noqa: E402
-from PyQt6 import QtWidgets  # noqa: E402
 
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 
 def _periscope(unit_mode, real_units, df_calibrations):
-    p = Periscope.__new__(Periscope)
-    p.module = 1
-    p.unit_mode = unit_mode
-    p.real_units = real_units
-    p.df_calibrations = df_calibrations
-    return p
+    return bare_periscope(module=1, unit_mode=unit_mode,
+                          real_units=real_units,
+                          df_calibrations=df_calibrations)
 
 
 def test_histogram_axis_says_df_units_when_binning_df(qt_app):
@@ -36,13 +32,11 @@ def test_histogram_axis_falls_back_to_counts_without_calibration(qt_app):
 
 
 def test_layout_rebuild_forgets_smoothed_histogram_ranges(qt_app):
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.channel_list = []
-    p._clear_current_layout = lambda: None
-    p._get_active_modes = lambda: []
-    p._restore_auto_range_settings = lambda: None
-    p._toggle_iqmag = lambda: None
+    p = bare_periscope(channel_list=[],
+                       _clear_current_layout=lambda: None,
+                       _get_active_modes=lambda: [],
+                       _restore_auto_range_settings=lambda: None,
+                       _toggle_iqmag=lambda: None)
     # A range smoothed while binning counts.
     p._smooth_range((1, "I"), -1e5, 1e5)
     assert p._hist_ranges

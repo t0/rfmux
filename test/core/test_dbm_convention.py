@@ -32,3 +32,18 @@ def test_carrier_power_agrees_between_the_two_paths():
                                  reference="absolute", input_units="volts")
     dc_bin = out["psd_dual_sideband"][np.argmin(np.abs(out["freq_dsb"]))]
     assert dc_bin == pytest.approx(convert_roc_to_dbm(counts), abs=0.05)
+
+
+@pytest.mark.parametrize("carrier", ["i", "q"])
+def test_a_dc_carrier_in_one_quadrature_is_0_dbc_there_and_nowhere_else(carrier):
+    on, off = np.ones(1000), np.zeros(1000)
+    i, q = (on, off) if carrier == "i" else (off, on)
+    with np.errstate(divide="ignore"):
+        out = spectrum_from_slow_tod(i, q, 6, scaling="ps")
+    psd_on, psd_off = out[f"psd_{carrier}"], out["psd_q" if carrier == "i" else "psd_i"]
+    assert np.all(psd_off < -300)
+    assert np.all((psd_on < -300) | (np.abs(out["freq_iq"]) < 1))
+    # The dual-sideband FFT carries float64 roundoff near -300 dB.
+    assert np.all((out["psd_dual_sideband"] < -200) | (np.abs(out["freq_dsb"]) < 1))
+    assert max(psd_on) == pytest.approx(0, abs=1)
+    assert max(out["psd_dual_sideband"]) == pytest.approx(0, abs=1)

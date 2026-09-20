@@ -13,7 +13,6 @@ test touches.
 """
 
 import importlib
-import os
 import pkgutil
 
 import pytest
@@ -24,23 +23,16 @@ pytest.importorskip("PyQt6")
 import rfmux.tools.periscope as periscope  # noqa: E402
 
 
-def _module_names():
-    return sorted(
+def test_every_module_imports():
+    names = sorted(
         f"{periscope.__name__}.{m.name}"
         for m in pkgutil.iter_modules(periscope.__path__)
         # __main__ runs argument parsing at import time.
         if m.name != "__main__"
     )
-
-
-@pytest.mark.parametrize("name", _module_names())
-def test_module_imports(name):
-    importlib.import_module(name)
-
-
-def test_the_sweep_actually_covers_the_package():
-    """A guard on the guard: if iter_modules ever comes back empty the
-    parametrized test above silently passes zero cases."""
-    names = _module_names()
+    # A guard on the guard: an empty sweep would pass without importing
+    # anything.
     assert len(names) > 20, f"only found {len(names)} periscope modules"
     assert f"{periscope.__name__}.utils" in names
+    for name in names:
+        importlib.import_module(name)

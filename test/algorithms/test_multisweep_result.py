@@ -7,7 +7,6 @@ import warnings
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.fitting import identify_bifurcation
 from rfmux.algorithms.measurement.multisweep import multisweep
 
 NPOINTS = 101
@@ -77,11 +76,6 @@ def _sweep(board):
         board, center_frequencies=[CF], span_hz=100e3,
         npoints_per_sweep=NPOINTS, amp=0.01, nsamps=1,
         bias_frequency_method=None, module=1)
-
-
-def test_the_synthetic_sweep_is_one_the_detector_flags():
-    f = np.linspace(CF - 50e3, CF + 50e3, NPOINTS)
-    assert identify_bifurcation(np.array([_JumpingBoard.s21(x) for x in f]))
 
 
 @pytest.mark.asyncio

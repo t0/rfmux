@@ -188,7 +188,7 @@ def test_both_mode_takes_both_streams_of_every_channel():
                 assert times[0] - t0 < 1.5 / fs and t1 - times[-1] < 1.5 / fs
 
 
-def test_config_validation():
+def test_the_noise_sample_interval_is_validated():
     assert any(sev == "error" and "noise sample" in msg.lower() for sev, msg
                in PulseCaptureConfig(noise_capture_interval_s=-1).validate())
     assert any(sev == "warning" and "back to back" in msg for sev, msg in

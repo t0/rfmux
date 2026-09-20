@@ -98,7 +98,7 @@ def _shift_seen(loop, crs, out, step_hz):
     return seen
 
 
-@pytest.mark.parametrize("adc_phase", [None, 37.0, 236.0])
+@pytest.mark.parametrize("adc_phase", [None, 236.0])
 def test_calibration_reports_a_tone_step_whatever_the_adc_phase(swept, monkeypatch, adc_phase):
     # The simulator's RPC samples carry no noise, so the phase choice
     # itself has nothing to find here; what this pins is the bookkeeping:

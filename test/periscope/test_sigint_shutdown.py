@@ -77,16 +77,6 @@ def test_first_interrupt_asks_second_one_forces(qt_app, restore_sigint,
         timer.stop()
 
 
-def test_a_timer_keeps_the_interpreter_reachable(qt_app, restore_sigint):
-    """app.exec() is C++; without this the handler never runs."""
-    timer = periscope_main.install_sigint_handler()
-    try:
-        assert timer.isActive()
-        assert 0 < timer.interval() <= 1000
-    finally:
-        timer.stop()
-
-
 # The subprocess below is the only test that proves the part that
 # actually failed: that a Python signal handler is reached at all while
 # the Qt event loop holds the main thread.

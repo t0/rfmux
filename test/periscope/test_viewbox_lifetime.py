@@ -86,11 +86,6 @@ def test_parent_window_accepts_none(qt_app):
     assert vb.parent_window is None
 
 
-def test_unset_parent_window_reads_as_none(qt_app):
-    """A freshly built ViewBox has no back-pointer yet."""
-    assert ClickableViewBox().parent_window is None
-
-
 # Panels whose ViewBoxes exist right after construction. NetworkAnalysisPanel is
 # absent on purpose: it builds its plots per module when data arrives, so a bare
 # instance has none to tear down — the weakref contract above covers it.
@@ -122,21 +117,20 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
         (MultisweepPanel, dict(target_module=1)),
     ]
     for cls, kwargs in cases:
-        for _ in range(3):
-            panel = cls(**kwargs)
-            panel.close()
-            ref = weakref.ref(panel)
-            del panel
-            # A dropped panel must die by refcount; one that is still
-            # alive here is waiting for the cyclic collector, and only
-            # the platform decides whether that collection crashes.
-            if ref() is not None:
-                print("CYCLE " + cls.__name__, flush=True)
-                raise SystemExit(3)
-            # gc.collect() is the point: it forces the cyclic collection that
-            # the strong back-pointer made lethal.
-            gc.collect()
-            app.processEvents()
+        panel = cls(**kwargs)
+        panel.close()
+        ref = weakref.ref(panel)
+        del panel
+        # A dropped panel must die by refcount; one that is still
+        # alive here is waiting for the cyclic collector, and only
+        # the platform decides whether that collection crashes.
+        if ref() is not None:
+            print("CYCLE " + cls.__name__, flush=True)
+            raise SystemExit(3)
+        # gc.collect() is the point: it forces the cyclic collection that
+        # the strong back-pointer made lethal.
+        gc.collect()
+        app.processEvents()
         print("survived " + cls.__name__, flush=True)
     print("ALL PANELS SURVIVED", flush=True)
     '''

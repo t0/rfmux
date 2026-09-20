@@ -13,9 +13,9 @@ from PyQt6.QtTest import QTest  # noqa: E402
 
 from rfmux.core.transferfunctions import (  # noqa: E402
     convert_amplitude_to_dbm, convert_dbm_to_amplitude)
-from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.tone_control_widgets import (  # noqa: E402
     NcoBanner, ToneFields)
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 NCO, DAC = 500e6, -0.5
 TONE = {"frequency": 1.25e6, "amplitude": 0.01, "dac_phase": 30.0,
@@ -185,12 +185,11 @@ def test_banner_sends_the_nco_in_hz(qt_app):
 
 def _bare_window(channel_list, control_on):
     """A Periscope with only what _add_tone_columns reads."""
-    p = Periscope.__new__(Periscope)
-    QtWidgets.QMainWindow.__init__(p)
-    p.channel_list = channel_list
+    p = bare_periscope(
+        channel_list=channel_list,
+        cb_control=QtWidgets.QCheckBox(checked=control_on),
+        _tone_control_task=SimpleNamespace(write=lambda ch, f: None))
     p.grid = QtWidgets.QGridLayout(QtWidgets.QWidget(p))
-    p.cb_control = QtWidgets.QCheckBox(checked=control_on)
-    p._tone_control_task = SimpleNamespace(write=lambda ch, f: None)
     return p
 
 

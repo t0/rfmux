@@ -5,8 +5,6 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from test.qt_helpers import spin  # noqa: E402
-
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
@@ -37,7 +35,6 @@ def _panel(qt_app, **kw):
     panel = PulseCapturePanel(dark_mode=False, **kw)
     yield panel
     panel.close()
-    spin(qt_app)
 
 
 @pytest.fixture
@@ -254,7 +251,6 @@ def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
     assert all(" df (" in n or " diss (" in n for n in names)
     assert np.max(item.listDataItems()[0].xData) == pytest.approx(2000.0)
     panel.close()
-    spin(qt_app)
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):
@@ -310,7 +306,6 @@ def test_slow_mode_refuses_a_module_periscope_is_not_receiving(
     assert panel.task is None
     assert warned and "module 2" in warned[0]
     panel.close()
-    spin(qt_app)
 
 
 def test_a_both_mode_capture_is_registered_with_the_session(qt_app, tmp_path,

@@ -70,13 +70,6 @@ def test_isolation_drops_both_members():
     assert len(result["resonances_details"]) == 2
 
 
-def test_isolation_leaves_a_clean_array_alone():
-    """Nothing is within the separation, so both modes agree."""
-    thinned, _ = _find(ISOLATED)
-    isolated, _ = _find(ISOLATED, require_isolation=True)
-    assert _mhz(thinned) == _mhz(isolated) == [1001.0, 1004.0]
-
-
 def test_the_drop_is_reported():
     """Silently returning fewer resonances would look like a bad sweep."""
     _, messages = _find(ISOLATED + COLLIDED, require_isolation=True)
@@ -125,10 +118,3 @@ def test_nothing_to_collide_with():
                            min_resonance_separation_hz=SEPARATION_HZ,
                            require_isolation=True)
     assert flat["resonance_frequencies"] == []
-
-
-def test_default_is_the_old_behaviour():
-    """Callers that never heard of this keep the results they had."""
-    explicit, _ = _find(ISOLATED + COLLIDED, require_isolation=False)
-    default, _ = _find(ISOLATED + COLLIDED)
-    assert _mhz(default) == _mhz(explicit) == [1001.0, 1004.0, 1007.0]

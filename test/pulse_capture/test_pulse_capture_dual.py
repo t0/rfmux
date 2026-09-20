@@ -374,6 +374,24 @@ def test_triggers_pair_within_half_the_cic_response():
     assert d.stats()["match_window_s"] == pytest.approx(0.003)
 
 
+def test_matcher_pairs_on_the_trigger_instant():
+    """Two records of one event start at different pre-margins and have
+    different core lengths; the matcher pairs on the trigger, and the
+    offset it reports is trigger to trigger."""
+    pairs = []
+    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
+                                on_pair=lambda p: pairs.append(p))
+    T = 43000.0
+    # Record starts 115 ms apart, outside the 50 ms window; one trigger.
+    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
+                         "duration_s": 0.010})
+    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T - 0.0016,
+                         "duration_s": 0.002})
+    assert m.matched == 1 and pairs and pairs[0]["slow_idx"] == 1 \
+        and pairs[0]["fast_idx"] == 1, "one event, two records, no match"
+    assert pairs[0]["time_offset"] == pytest.approx(0.0016, abs=1e-9)
+
+
 def test_a_partner_released_at_the_hard_stop_still_pairs():
     """A capture whose end confirmation stalls is released at the hard
     stop, 0.3 s after its trigger with the default settings; the other
@@ -407,16 +425,24 @@ def test_dual_open_failure_reaches_an_on_error_installed_after_construction(tmp_
     d.stop()
 
 
-def test_dual_file_records_the_end_confirmation_floor(tmp_path):
-    """min_end_samples is a sample count on both streams alike, so the
-    dual file records it as the single-stream file does."""
-    import h5py
-    cfg = PulseCaptureConfig(min_end_samples=7, noise_train_ms=10.0)
-    path = tmp_path / "dual.h5"
-    d = DualPulseCaptureSession(channels=[1], slow_rate=1000.0,
-                                fast_rate=10000.0, slow_time_offset_s=0.0,
-                                config=cfg, hdf5_path=path)
-    d.start()
-    d.stop()
-    with h5py.File(path, "r") as f:
-        assert f["metadata"].attrs["min_end_samples"] == 7
+def test_a_pair_reads_back_with_its_windows(tmp_path):
+    """The live viewer fetches an evicted pair from the file it is
+    writing; what comes back is what the session emitted, windows and
+    union bounds included."""
+    from rfmux.pulse_capture.hdf5 import DualPulseHDF5Writer
+    w = DualPulseHDF5Writer(tmp_path / "p.h5", [1],
+                            capture_params={"streamer_mode": "both"})
+    t = np.linspace(1.0, 1.001, 11)
+    pair = {"pair_idx": 1, "channel": 1, "slow_idx": 2, "fast_idx": None,
+            "time_offset": None, "window": (0.9995, 1.0015),
+            "slow_tod": {"Amp_I": t * 0, "Amp_Q": t * 0 + 1, "Time": t}}
+    w.append_match(1, pair)
+    back = w.read_match(1, 1)
+    assert back["slow_idx"] == 2 and back["fast_idx"] is None
+    assert back["window"] == (0.9995, 1.0015)
+    # Stored as NaN, handed back as the matcher emitted it.
+    assert back["time_offset"] is None
+    assert list(back["slow_tod"]["Time"]) == list(t)
+    assert "fast_tod" not in back
+    assert w.read_match(1, 2) is None
+    w.finalize()

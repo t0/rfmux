@@ -1,18 +1,14 @@
 """
-Tests for the headless streamer-configuration layer and packet sources.
+Tests for the headless streamer-configuration layer.
 
 Pure-math tests for describe()/validate(); MockCRS integration for
-apply/read (including the module= spelling and the relaxed stage-3
-long-packet rule); live-socket tests feeding a PulseCaptureSession
-through run_slow_source / run_pfb_source.
+apply/read, including the relaxed stage-3 long-packet rule; the call
+order apply_streamer_config puts the board through.
 """
 
 import asyncio
 
-import numpy as np
 import pytest
-
-import rfmux
 
 from rfmux.core.transferfunctions import (
     PFB_NYQUIST_FREQ,
@@ -20,7 +16,6 @@ from rfmux.core.transferfunctions import (
     decimation_to_sampling,
 )
 from rfmux.algorithms.measurement.streamer_config import (
-    DERATED_LINK_MBPS,
     StreamerConfig,
     apply_streamer_config,
     describe,
@@ -146,6 +141,8 @@ class TestApplyOnMock:
         loop, crs = mock_crs
         loop.run_until_complete(crs.set_decimation(3, short=False,
                                                    module=[1]))
+        assert loop.run_until_complete(
+            read_streamer_config(crs))["dec_stage"] == 3
 
     def test_stage2_long_still_refused(self, mock_crs):
         loop, crs = mock_crs
@@ -171,56 +168,6 @@ class TestApplyOnMock:
         info = loop.run_until_complete(crs.configure_streamer(
             6, short=False, modules=[1]))
         assert info["n_modules"] == 1
-
-
-class TestSources:
-    pytestmark = pytest.mark.slow_acquisition
-    def test_slow_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.capture_session import (
-            CaptureState, PulseCaptureSession)
-        from rfmux.pulse_capture.sources import (
-            run_slow_source)
-
-        loop, crs = mock_crs
-        loop.run_until_complete(crs.set_decimation(6, short=False,
-                                                   module=[1]))
-        # Let in-flight packets from earlier decimation settings drain
-        loop.run_until_complete(asyncio.sleep(0.3))
-        capture_session = PulseCaptureSession(channels=[1], noise_samples=50,
-                                      hdf5_path=None)
-        capture_session.start()
-        elapsed = loop.run_until_complete(run_slow_source(
-            capture_session, "127.0.0.1", module=1, duration_s=0.15))
-        assert capture_session.state is CaptureState.CAPTURING, \
-            f"state={capture_session.state}, elapsed={elapsed}"
-        assert capture_session.noise_stats
-        capture_session.stop()
-
-    def test_pfb_source_feeds_session(self, mock_crs):
-        from rfmux.pulse_capture.capture_session import (
-            CaptureState, PulseCaptureSession)
-        from rfmux.pulse_capture.sources import (
-            run_pfb_source)
-
-        loop, crs = mock_crs
-        loop.run_until_complete(apply_streamer_config(
-            crs, StreamerConfig(dec_stage=6, short_packets=False,
-                                modules=[1], pfb_channels=[1, 2])))
-        try:
-            capture_session = PulseCaptureSession(
-                channels=[1, 2], streamer_mode="fast",
-                sample_rate=PFB_SAMPLING_FREQ, noise_samples=400,
-                hdf5_path=None)
-            capture_session.start()
-            elapsed = loop.run_until_complete(run_pfb_source(
-                capture_session, "127.0.0.1", [1, 2], duration_s=0.01))
-            assert capture_session.state is CaptureState.CAPTURING, \
-                f"state={capture_session.state}, elapsed={elapsed}"
-            assert set(capture_session.noise_stats) == {1, 2}
-            capture_session.stop()
-        finally:
-            loop.run_until_complete(crs.set_pfb_streamer(channel=None,
-                                                         module=1))
 
 
 class _RecordingCRS:

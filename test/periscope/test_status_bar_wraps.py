@@ -37,22 +37,16 @@ def _settle(qt_app):
         qt_app.processEvents()
 
 
-def test_status_bar_does_not_set_the_window_width(qt_app):
+def test_the_status_bar_wraps_instead_of_widening_the_window(qt_app):
     win = _window_with_longest_texts(qt_app)
     # Half a 1080p display, the bound the panels are held to.
     assert win.minimumSizeHint().width() < 960
-    win.resize(700, 400)
-    _settle(qt_app)
-    assert win.width() == 700
-
-
-def test_wrapped_status_text_stays_inside_the_bar(qt_app):
-    win = _window_with_longest_texts(qt_app)
     win.resize(1900, 400)
     _settle(qt_app)
     one_row = win.statusBar().height()
     win.resize(700, 400)
     _settle(qt_app)
+    assert win.width() == 700
     bar = win.statusBar()
     assert bar.height() > one_row
     for label in (win.fps_label, win.streaming_info_label, win.info_text):

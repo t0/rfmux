@@ -1,8 +1,54 @@
-"""Packets and timestamps for tests, built as the board builds them."""
+"""Packets and timestamps for tests, built as the board builds them,
+and the loopback socket the stream sources read them from."""
+import contextlib
+import socket
+
 import numpy as np
 
 from rfmux import streamer
 from rfmux.streamer import Timestamp, TimestampSource
+
+
+@contextlib.contextmanager
+def loopback_pair():
+    """(receiver, sender, port) on an OS-chosen loopback port."""
+    recv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    recv.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)
+    recv.bind(("127.0.0.1", 0))
+    port = recv.getsockname()[1]
+    send = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        yield recv, send, port
+    finally:
+        recv.close()
+        send.close()
+
+
+def patched_socket(monkeypatch, sock_by_port):
+    """Hand the stream sources the {port: socket} given instead of the
+    multicast socket, and shorten the waits that would otherwise hold a
+    test for the production timeouts."""
+    from rfmux.pulse_capture import sources as src
+
+    @contextlib.contextmanager
+    def fake(host, port=None, **kw):
+        yield sock_by_port[port]
+
+    monkeypatch.setattr(src.streamer, "get_multicast_socket", fake)
+    # A quiet socket otherwise holds the source for the 60 s production
+    # timeout after the senders finish.
+    monkeypatch.setattr(src.streamer, "STREAMER_TIMEOUT", 0.3)
+    monkeypatch.setattr(src, "MODULE_SILENCE_S", 0.3)
+    # A preloaded backlog is the point of most of these tests, not
+    # datagrams that predate the capture.
+    monkeypatch.setattr(src, "_flush", lambda sock: None)
+    # The receiver holds its newest reorder_window packets until more
+    # arrive; a finite burst must not sit in it until the stop.
+    monkeypatch.setattr(src, "_PFB_REORDER_WINDOW", 1)
+    monkeypatch.setattr(src, "_PFB_FLUSH_EVERY", 1)
+    # The ingest's compiled step: its first call compiles, seconds on a
+    # cold cache, which is not the source's time.
+    src._advance_block(np.array([1.0]), float("nan"), 0.0, 5.0)
 
 
 def stamp(seconds: float, *, y: int = 26, d: int = 245,

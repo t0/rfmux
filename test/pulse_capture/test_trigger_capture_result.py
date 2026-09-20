@@ -80,3 +80,18 @@ def test_a_capture_across_modules_reads_the_slow_stream_only():
             asyncio.run(tc.trigger_capture.__wrapped__(
                 board, channel={1: [1], 2: [1]}, streamer_mode=mode,
                 time_run=0.01))
+
+
+def test_a_run_that_never_trains_says_so(monkeypatch, capsys):
+    """A time_run shorter than the noise training returns nothing; the
+    caller is told, rather than handed an empty result."""
+    async def ends_at_once(session, *a, **k):
+        return 0.01
+    monkeypatch.setattr(tc, "run_slow_source", ends_at_once)
+    result = tc.PulseCaptureResult(streamer_mode="slow",
+                                   config=PulseCaptureConfig(),
+                                   channels=[1], module=1)
+    asyncio.run(tc._run_single(result, "127.0.0.1", [1], 1, "slow", 596.0,
+                               0.01, None, None, True))
+    assert "noise training never completed" in capsys.readouterr().out
+    assert result.slow.noise == {}

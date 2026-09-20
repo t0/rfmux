@@ -8,8 +8,9 @@ pytest.importorskip("PyQt6")
 
 from PyQt6 import QtWidgets  # noqa: E402
 
-from rfmux.tools.periscope.app import DummyReceiver, Periscope  # noqa: E402
+from rfmux.tools.periscope.app import DummyReceiver  # noqa: E402
 from rfmux.tools.periscope.tasks import UDPReceiver  # noqa: E402
+from test.qt_helpers import bare_periscope  # noqa: E402
 
 
 def test_dummy_receiver_answers_every_counter_udp_receiver_has():
@@ -22,12 +23,9 @@ def test_dummy_receiver_answers_every_counter_udp_receiver_has():
 
 def test_offline_status_bar_tick_reads_a_healthy_empty_stream(qt_app):
     """One _update_performance_stats pass, as the GUI timer runs it."""
-    p = Periscope.__new__(Periscope)
-    p.receiver = DummyReceiver()
-    p.t_last = 0.0
-    p.prev_missing = p.prev_qdrops = p.prev_receive = 0
-    p.frame_cnt = p.pkt_cnt = 0
-    p.is_mock_mode = False
+    p = bare_periscope(receiver=DummyReceiver(), t_last=0.0,
+                       prev_missing=0, prev_qdrops=0, prev_receive=0,
+                       frame_cnt=0, pkt_cnt=0, is_mock_mode=False)
     for name in ("fps_label", "pps_label", "packet_loss_label",
                  "info_text", "dropped_label"):
         setattr(p, name, QtWidgets.QLabel())

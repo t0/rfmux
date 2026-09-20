@@ -91,8 +91,8 @@ jobs:
 
       - name: Run quick tier (no server, no board)
         run: |
-          pytest -v --tier=quick test/
+          pytest -v --tier=quick --durations=15 test/
 
       - name: Run acquisition tier (MockCRS servers + UDP streaming)
         run: |
-          pytest -v -s --tier=acquisition test/
+          pytest -v -s --tier=acquisition --durations=15 test/

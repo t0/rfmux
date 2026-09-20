@@ -66,6 +66,8 @@ def test_quiet_when_the_port_is_free(free_port):
 @requires_reuseport
 def test_reports_a_receiver_that_would_take_our_packets(free_port,
                                                         multicast_broken):
+    """The holder sets SO_REUSEPORT, as the streamer's own readers do; a
+    probe that set it too would bind alongside and report the port free."""
     holder = _reuse_socket(free_port)
     try:
         message = find_competing_receiver(port=free_port)
@@ -109,18 +111,6 @@ def test_silent_for_a_real_board(free_port):
             "joined to the group gets its own copy anyway"
     finally:
         holder.close()
-
-
-@pytest.mark.portable
-@requires_reuseport
-def test_the_probe_sees_past_so_reuseport(free_port, multicast_broken):
-    """The holder sets SO_REUSEPORT; a probe that did too would miss it."""
-    holder = _reuse_socket(free_port)
-    try:
-        assert find_competing_receiver(port=free_port) is not None
-    finally:
-        holder.close()
-    assert find_competing_receiver(port=free_port) is None
 
 
 def _drain(s):

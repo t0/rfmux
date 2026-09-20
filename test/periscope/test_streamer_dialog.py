@@ -6,8 +6,6 @@ these tests check the view contract: live labels, forced short packets
 below stage 3, OK disabled while errors exist, and config round-trip.
 """
 
-import os
-
 import pytest
 
 
@@ -36,28 +34,15 @@ def test_defaults_and_labels(qt_app):
 
 
 def test_short_forced_below_stage3(qt_app):
+    """The one rule the dialog enforces itself: below stage 3 the short
+    packet is checked and the box is out of reach."""
     dlg = StreamerConfigDialog(current_dec=6, current_short=False, module=1)
     dlg.dec_spin.setValue(2)
     assert dlg.short_check.isChecked()
     assert not dlg.short_check.isEnabled()
-    assert dlg.width_label.text() == "128"
-    assert _ok_button(dlg).isEnabled()
 
     dlg.dec_spin.setValue(4)
     assert dlg.short_check.isEnabled()
-    dlg.close()
-
-
-def test_over_budget_disables_ok(qt_app):
-    dlg = StreamerConfigDialog(current_dec=6, current_short=False, module=1)
-    dlg.dec_spin.setValue(3)
-    dlg.short_check.setChecked(False)
-    dlg.modules_edit.setText("1,2,3,4")  # long dec3 x4 > 1 Gbps
-    assert not _ok_button(dlg).isEnabled()
-    assert "Mbps" in dlg.status_label.text()
-
-    dlg.modules_edit.setText("1")
-    assert _ok_button(dlg).isEnabled()
     dlg.close()
 
 

@@ -64,9 +64,13 @@ def test_matching_module_adopts_the_queue():
 
 
 def test_unmatched_module_is_reported():
+    """The counters cannot show this: zero packets and zero loss is a
+    dead stream unless the receiver says which module it is watching."""
     rx = _receiver_watching(module=2, streaming=[1])
     rx._discover_queue()
     assert rx.queue is None
+    assert (rx.get_received_packets(), rx.get_dropped_packets(),
+            rx.get_missing_packets()) == (0, 0, 0)
     msg = rx.get_module_mismatch()
     assert msg, "a module that never matches must say so"
     # Both numbers, because the fix is to change one of them.
@@ -98,18 +102,6 @@ def test_mismatch_clears_once_our_module_appears():
     rx._discover_queue()
     assert rx.queue is not None
     assert rx.get_module_mismatch() is None
-
-
-def test_counters_are_flat_zero_during_a_mismatch():
-    """The reason the message exists: the numbers cannot show this."""
-    rx = _receiver_watching(module=2, streaming=[1])
-    rx._discover_queue()
-    assert rx.get_received_packets() == 0
-    assert rx.get_dropped_packets() == 0
-    assert rx.get_missing_packets() == 0
-    assert rx.get_module_mismatch(), \
-        "zero packets and zero loss is indistinguishable from a dead " \
-        "stream unless the receiver says which module it is watching"
 
 
 def test_a_competing_receiver_is_reported_while_we_have_no_queue():

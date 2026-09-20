@@ -19,7 +19,6 @@ from . import channel_selection
 from . import streamer_config
 from . import trigger_capture
 from . import py_run_pfb_streamer
-from . import tone_control
 
 __all__ = [
     "py_get_samples",
@@ -32,5 +31,4 @@ __all__ = [
     "streamer_config",
     "trigger_capture",
     "py_run_pfb_streamer",
-    "tone_control",
 ]

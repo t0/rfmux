@@ -43,7 +43,9 @@ this project have kept asking for.
   existing path does (the toolchain, a helper, a kernel): call it.
 - **Where code lives.** Orchestration and anything that can run
   headlessly lives in `rfmux/algorithms` or `rfmux/mock`; Periscope is
-  a thin caller. A mock property is not a Periscope property.
+  a thin caller. A mock property is not a Periscope property. The one
+  exception is Control mode's tone read and write in `tasks.py`: GUI
+  only, kept as plain coroutines tested against the mock.
 - **Comments say what and why**, never the history of how it got there
   ("used to", "previously"). Narrative belongs in the commit message.
   Minimal docstrings. The release note is a how-to, not a changelog.

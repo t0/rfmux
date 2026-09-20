@@ -15,8 +15,7 @@ from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alia
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
-from rfmux.algorithms.measurement.tone_control import (
-    read_tones, write_nco, write_tone)
+from rfmux.algorithms.measurement.bias_kids import DAC_SCALE_LABEL_OFFSET_DB
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -237,6 +236,73 @@ class DfCalibrationTask(QtCore.QThread):
             self.signals.error.emit(str(exc))
         finally:
             loop.close()
+
+
+# ---- Control mode: the board's tones, read and written in one round trip ----
+#
+# GUI-only, so they live here rather than in rfmux.algorithms; plain
+# coroutines all the same, tested against the mock without a window.
+
+TONE_FIELDS = ("frequency", "amplitude", "dac_phase", "adc_phase")
+PHASE_TARGET = {"dac_phase": "DAC", "adc_phase": "ADC"}
+
+
+async def read_tones(crs, module: int, channels) -> dict:
+    """The module's NCO, its labelled DAC scale (dBm, as Periscope
+    labels amplitudes) and every listed channel's tone, in one batched
+    call: ``{"nco": Hz, "dac_scale": dBm, "channels": {channel:
+    {"frequency": Hz from the NCO, "amplitude": normalized, "dac_phase",
+    "adc_phase": degrees}}}``.  A value the board has never set reads
+    as None."""
+    channels = list(channels)
+    async with crs.tuber_context() as ctx:
+        ctx.get_nco_frequency(module=module)
+        ctx.get_dac_scale('DBM', module=module)
+        for ch in channels:
+            ctx.get_frequency(channel=ch, module=module)
+            ctx.get_amplitude(channel=ch, module=module)
+            for target in PHASE_TARGET.values():
+                ctx.get_phase(units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, target),
+                              channel=ch, module=module)
+        values = await ctx()
+    if values[1] is None:
+        raise ValueError(f"module {module} reports no DAC scale")
+    n = len(TONE_FIELDS)
+    tones = {ch: dict(zip(TONE_FIELDS, values[2 + n * i:2 + n * (i + 1)]))
+             for i, ch in enumerate(channels)}
+    return {"nco": values[0], "dac_scale": values[1] - DAC_SCALE_LABEL_OFFSET_DB,
+            "channels": tones}
+
+
+async def write_nco(crs, module: int, frequency_hz: float, channels) -> dict:
+    """Program the module's NCO and return :func:`read_tones` for
+    *channels*: every actual frequency moves, every offset stays."""
+    await crs.set_nco_frequency(float(frequency_hz), module=module)
+    return await read_tones(crs, module, channels)
+
+
+async def write_tone(crs, module: int, channel: int, *,
+                     frequency: Optional[float] = None,
+                     amplitude: Optional[float] = None,
+                     dac_phase: Optional[float] = None,
+                     adc_phase: Optional[float] = None) -> dict:
+    """Program the given fields of one channel (frequency in Hz from the
+    NCO, amplitude normalized, phases in degrees) and return
+    :func:`read_tones` for that channel, so the caller shows what the
+    board kept rather than what was sent."""
+    async with crs.tuber_context() as ctx:
+        if frequency is not None:
+            ctx.set_frequency(float(frequency), channel=channel, module=module)
+        if amplitude is not None:
+            ctx.set_amplitude(float(amplitude), channel=channel, module=module)
+        for field, phase in (("dac_phase", dac_phase), ("adc_phase", adc_phase)):
+            if phase is not None:
+                ctx.set_phase(float(phase), units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, PHASE_TARGET[field]),
+                              channel=channel, module=module)
+        await ctx()
+    return await read_tones(crs, module, [channel])
 
 
 class ToneControlSignals(QObject):

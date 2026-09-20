@@ -5,6 +5,7 @@ from .tasks import *
 from .ui import *
 import asyncio
 from .extract_params import ParamKeyExtractor
+from .tone_control_widgets import ToneFields
 from PyQt6 import sip
 import numpy as np
 from typing import Optional
@@ -191,6 +192,7 @@ class PeriscopeRuntime:
             rowPlots, rowCurves = self._create_row_plots_and_curves(row_i, group, modes_active, font, single_colors, channel_families)
             self.plots.append(rowPlots)
             self.curves.append(rowCurves)
+        self._add_tone_columns(len(modes_active))
         self._restore_auto_range_settings()
         self._toggle_iqmag()
         if hasattr(self, "zoom_box_mode"): self._toggle_zoom_box_mode(self.zoom_box_mode)
@@ -217,6 +219,72 @@ class PeriscopeRuntime:
         if self.cb_dsb.isChecked(): modes_list.append("D")
         if self.cb_hist.isChecked(): modes_list.append("H")
         return modes_list
+
+    # ---- Control mode: tone fields beside each row, NCO banner above ----
+
+    def _displayed_channels(self) -> list[int]:
+        return [ch for group in self.channel_list for ch in group]
+
+    def _add_tone_columns(self, column: int) -> None:
+        """One column of ToneFields per row after the plots, with no
+        stretch so the plots keep the width.  Rebuilt with the layout,
+        so values are delivered to whatever widgets exist."""
+        self.tone_fields = {}
+        # Every column the grid has ever had keeps its stretch, so the
+        # ones no longer holding a plot must be set back to none.
+        for col in range(max(self.grid.columnCount(), column + 1)):
+            self.grid.setColumnStretch(col, 1 if col < column else 0)
+        task = getattr(self, "_tone_control_task", None)
+        if task is None or not self.cb_control.isChecked():
+            return
+        for row_i, group in enumerate(self.channel_list):
+            host = QtWidgets.QWidget()
+            host.setSizePolicy(QtWidgets.QSizePolicy.Policy.Maximum,
+                               QtWidgets.QSizePolicy.Policy.Preferred)
+            box = QtWidgets.QVBoxLayout(host)
+            box.setContentsMargins(0, 0, 0, 0)
+            for ch in group:
+                fields = ToneFields(ch)
+                fields.write.connect(task.write)
+                fields.invalid.connect(
+                    lambda msg: self.statusBar().showMessage(msg, 8000))
+                self.tone_fields.setdefault(ch, []).append(fields)
+                box.addWidget(fields)
+            box.addStretch(1)
+            self.grid.addWidget(host, row_i, column)
+
+    def _toggle_tone_control(self, on: bool) -> None:
+        self._stop_tone_control()
+        if on and self.crs is not None:
+            signals = ToneControlSignals()
+            signals.values_ready.connect(self._show_tone_values)
+            signals.error.connect(
+                lambda msg: self.statusBar().showMessage(msg, 8000))
+            self._tone_control_task = ToneControlTask(
+                self.crs, self.module, self._displayed_channels(), signals,
+                parent=self)
+            self._tone_control_task.start()
+        self.nco_banner.setVisible(on)
+        self._build_layout()
+
+    def _stop_tone_control(self) -> None:
+        task = getattr(self, "_tone_control_task", None)
+        if task is not None:
+            task.stop()
+            task.wait(2000)
+            self._tone_control_task = None
+
+    def _show_tone_values(self, result: dict) -> None:
+        nco, dac_scale = result.get("nco"), result.get("dac_scale")
+        self.nco_banner.show_values(nco, dac_scale)
+        for channel, tone in result.get("channels", {}).items():
+            for fields in self.tone_fields.get(channel, []):
+                fields.show_values(tone, nco, dac_scale)
+
+    def _send_nco(self, frequency_hz: float) -> None:
+        task = getattr(self, "_tone_control_task", None)
+        if task is not None:
+            task.set_nco(frequency_hz)
 
     def _get_single_channel_colors(self) -> dict[str, str]:
         """
@@ -653,6 +721,9 @@ class PeriscopeRuntime:
                     self.psd_workers[row_i]["S"][c_val] = False
                     self.psd_workers[row_i]["D"][c_val] = False
             self._init_buffers(); self._build_layout()
+            task = getattr(self, "_tone_control_task", None)
+            if task is not None:
+                task.set_channels(self._displayed_channels())
 
     def _change_buffer(self):
         """Update buffer size based on user input and re-initialize buffers."""
@@ -1339,6 +1410,7 @@ class PeriscopeRuntime:
         if task is not None and task.isRunning():
             task.requestInterruption()
             task.wait(2000)
+        self._stop_tone_control()
         # Shutdown Jupyter notebook server if running
         if hasattr(self, 'notebook_dock') and self.notebook_dock is not None:
             if not sip.isdeleted(self.notebook_dock):

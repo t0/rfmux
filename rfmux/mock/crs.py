@@ -211,7 +211,8 @@ class ServerMockCRS:
 
         self._frequencies = {}
         self._amplitudes = {}
-        self._phases = {}
+        self._phases = {}          # ADC (demodulator) phase, degrees
+        self._dac_phases = {}      # DAC (carrier) phase, degrees
         self._tuning_results = {}
 
         self._active_modules = [1, 2, 3, 4]
@@ -494,12 +495,17 @@ class ServerMockCRS:
         else:
             phase_degrees = phase
         with self._config_lock:
-            self._phases[(module, channel)] = phase_degrees
+            self._phase_store(target)[(module, channel)] = phase_degrees
+
+    def _phase_store(self, target):
+        if target is not None:
+            target = self.validate_enum_member(target, Target, "target")
+        return self._dac_phases if target == Target.DAC else self._phases
 
     async def get_phase(self, units='DEGREES', target=None, channel=None, module=None):
         assert channel is not None and isinstance(channel, int)
         assert module is not None and isinstance(module, int)
-        phase_degrees = self._phases.get((module, channel))
+        phase_degrees = self._phase_store(target).get((module, channel))
         if phase_degrees is None:
             return None
         if isinstance(units, str):

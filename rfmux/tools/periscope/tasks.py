@@ -15,6 +15,7 @@ from rfmux.algorithms.measurement import fitting as fitting_module_direct # Alia
 from rfmux.algorithms.measurement import fitting_nonlinear # Import nonlinear fitting module
 from rfmux.core.transferfunctions import exp_bin_noise_data # Import exponential binning function
 from rfmux.pulse_capture.sources import _set_receive_timeout
+from rfmux.algorithms.measurement.bias_kids import DAC_SCALE_LABEL_OFFSET_DB
 
 # Additional imports for async fitting with ThreadPoolExecutor
 import os
@@ -235,6 +236,155 @@ class DfCalibrationTask(QtCore.QThread):
             self.signals.error.emit(str(exc))
         finally:
             loop.close()
+
+
+# ---- Control mode: the board's tones, read and written in one round trip ----
+#
+# GUI-only, so they live here rather than in rfmux.algorithms; plain
+# coroutines all the same, tested against the mock without a window.
+
+TONE_FIELDS = ("frequency", "amplitude", "dac_phase", "adc_phase")
+PHASE_TARGET = {"dac_phase": "DAC", "adc_phase": "ADC"}
+
+
+async def read_tones(crs, module: int, channels) -> dict:
+    """The module's NCO, its labelled DAC scale (dBm, as Periscope
+    labels amplitudes) and every listed channel's tone, in one batched
+    call: ``{"nco": Hz, "dac_scale": dBm, "channels": {channel:
+    {"frequency": Hz from the NCO, "amplitude": normalized, "dac_phase",
+    "adc_phase": degrees}}}``.  A value the board has never set reads
+    as None."""
+    channels = list(channels)
+    async with crs.tuber_context() as ctx:
+        ctx.get_nco_frequency(module=module)
+        ctx.get_dac_scale('DBM', module=module)
+        for ch in channels:
+            ctx.get_frequency(channel=ch, module=module)
+            ctx.get_amplitude(channel=ch, module=module)
+            for target in PHASE_TARGET.values():
+                ctx.get_phase(units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, target),
+                              channel=ch, module=module)
+        values = await ctx()
+    if values[1] is None:
+        raise ValueError(f"module {module} reports no DAC scale")
+    n = len(TONE_FIELDS)
+    tones = {ch: dict(zip(TONE_FIELDS, values[2 + n * i:2 + n * (i + 1)]))
+             for i, ch in enumerate(channels)}
+    return {"nco": values[0], "dac_scale": values[1] - DAC_SCALE_LABEL_OFFSET_DB,
+            "channels": tones}
+
+
+async def write_nco(crs, module: int, frequency_hz: float, channels) -> dict:
+    """Program the module's NCO and return :func:`read_tones` for
+    *channels*: every actual frequency moves, every offset stays."""
+    await crs.set_nco_frequency(float(frequency_hz), module=module)
+    return await read_tones(crs, module, channels)
+
+
+async def write_tone(crs, module: int, channel: int, *,
+                     frequency: Optional[float] = None,
+                     amplitude: Optional[float] = None,
+                     dac_phase: Optional[float] = None,
+                     adc_phase: Optional[float] = None) -> dict:
+    """Program the given fields of one channel (frequency in Hz from the
+    NCO, amplitude normalized, phases in degrees) and return
+    :func:`read_tones` for that channel, so the caller shows what the
+    board kept rather than what was sent."""
+    async with crs.tuber_context() as ctx:
+        if frequency is not None:
+            ctx.set_frequency(float(frequency), channel=channel, module=module)
+        if amplitude is not None:
+            ctx.set_amplitude(float(amplitude), channel=channel, module=module)
+        for field, phase in (("dac_phase", dac_phase), ("adc_phase", adc_phase)):
+            if phase is not None:
+                ctx.set_phase(float(phase), units=crs.UNITS.DEGREES,
+                              target=getattr(crs.TARGET, PHASE_TARGET[field]),
+                              channel=channel, module=module)
+        await ctx()
+    return await read_tones(crs, module, [channel])
+
+
+class ToneControlSignals(QObject):
+    # A read_tones() result; a write answers with only the channel it
+    # touched.
+    values_ready = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+
+class ToneControlTask(QtCore.QThread):
+    """Keeps Control mode current: once a second it re-reads every
+    displayed channel in one batched call, and in between it applies
+    the writes the GUI queues, each answered with an immediate re-read.
+    Pacing is from the end of one read to the start of the next, so
+    slow hardware reads less often rather than queueing requests."""
+
+    PERIOD_S = 1.0
+
+    def __init__(self, crs, module: int, channels, signals: ToneControlSignals,
+                 parent=None):
+        super().__init__(parent)
+        self.crs, self.module, self.signals = crs, module, signals
+        self._channels = list(channels)
+        self._requests: "queue.Queue[tuple]" = queue.Queue()
+
+    def set_channels(self, channels) -> None:
+        # Picked up by the next read; a list swap needs no lock.
+        self._channels = list(channels)
+
+    def write(self, channel: int, fields: dict) -> None:
+        self._requests.put(("tone", channel, dict(fields)))
+
+    def set_nco(self, frequency_hz: float) -> None:
+        self._requests.put(("nco", float(frequency_hz)))
+
+    def stop(self) -> None:
+        self.requestInterruption()
+        self._requests.put(("stop",))
+
+    def run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while not self.isInterruptionRequested():
+                self._refresh(loop, self._channels)
+                deadline = time.monotonic() + self.PERIOD_S
+                while ((remaining := deadline - time.monotonic()) > 0
+                       and not self.isInterruptionRequested()):
+                    try:
+                        request = self._requests.get(timeout=remaining)
+                    except queue.Empty:
+                        break
+                    if request[0] == "stop":
+                        return
+                    self._apply(loop, request)
+        finally:
+            loop.close()
+
+    def _refresh(self, loop, channels) -> None:
+        try:
+            result = loop.run_until_complete(
+                read_tones(self.crs, self.module, channels))
+        except Exception as exc:
+            self.signals.error.emit(f"Control read failed: {exc}")
+            return
+        self.signals.values_ready.emit(result)
+
+    def _apply(self, loop, request) -> None:
+        if request[0] == "tone":
+            _, channel, fields = request
+            coro = write_tone(self.crs, self.module, channel, **fields)
+            label, shown = f"Ch {channel}", [channel]
+        else:
+            coro = write_nco(self.crs, self.module, request[1], self._channels)
+            label, shown = "NCO", self._channels
+        try:
+            result = loop.run_until_complete(coro)
+        except Exception as exc:
+            self.signals.error.emit(f"{label}: {exc}")
+            self._refresh(loop, shown)
+            return
+        self.signals.values_ready.emit(result)
 
 
 class IQSignals(QObject):

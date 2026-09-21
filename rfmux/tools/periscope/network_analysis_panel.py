@@ -384,6 +384,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             plot_info['phase_curve'].setData([], [])
             plot_info['rejected_markers'].setData([], [])
 
+            self._update_plot_titles(module_id_iter)
             self._update_multisweep_button_state(module_id_iter) 
 
 
@@ -640,15 +641,27 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
 
     def _update_resonance_title(self, module: int) -> None:
         """Put the count of kept resonances in the magnitude plot's title."""
-        if module not in self.plots:
-            return
-        search = self.resonance_searches.get(module)
-        count = len(search.candidates) if search else 0
-        title = f"Module {module} - Magnitude"
-        if count:
-            title += f" - {count} resonances"
+        self._update_plot_titles(module)
+
+    def _update_plot_titles(self, module: Optional[int] = None) -> None:
+        """Name the file and view in each plot title."""
+        modules = (module,) if module is not None else tuple(self.plots)
+        path = store.saved_path(self.netanal_container)
+        filename = path.name if path is not None else None
         _, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        self.plots[module]['amp_plot'].getPlotItem().setTitle(title, color=pen_color)
+        for plot_module in modules:
+            if plot_module not in self.plots:
+                continue
+            prefix = f"{filename} — " if filename else ""
+            magnitude = f"{prefix}Module {plot_module} - Magnitude"
+            search = self.resonance_searches.get(plot_module)
+            count = len(search.candidates) if search else 0
+            if count:
+                magnitude += f" - {count} resonances"
+            phase = f"{prefix}Module {plot_module} - Phase"
+            plots = self.plots[plot_module]
+            plots['amp_plot'].getPlotItem().setTitle(magnitude, color=pen_color)
+            plots['phase_plot'].getPlotItem().setTitle(phase, color=pen_color)
 
     def _active_module(self) -> Optional[int]:
         """This panel's module -- one Periscope controls one."""
@@ -797,6 +810,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
             plot_info['phase_curve'].setData(freqs, np.degrees(np.angle(iq)))
             if trace.get('sweep_amplitude') is not None:
                 self._update_legends_for_unit_mode()
+            self._update_plot_titles(module)
         self._update_multisweep_button_state(module)
 
     def _dac_scale(self, module: int):
@@ -841,6 +855,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # A union keyed by module identifier: each module's task returns a
         # container of its own, and a re-measured module replaces its block.
         self.netanal_container.update(container)
+        self._update_plot_titles(module)
         if module in self.progress_bars:
             self.progress_bars[module].setValue(100)
             self._check_all_complete()

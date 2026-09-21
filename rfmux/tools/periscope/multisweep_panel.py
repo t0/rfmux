@@ -388,6 +388,15 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _setup_plot_area(self, layout):
         """Sets up the tabbed plot area: one grid per view."""
+        self.measurement_title = QtWidgets.QLabel()
+        self.measurement_title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.measurement_title.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        title_font = self.measurement_title.font()
+        title_font.setBold(True)
+        self.measurement_title.setFont(title_font)
+        layout.addWidget(self.measurement_title)
+
         # Create tab widget
         self.plot_tabs = QtWidgets.QTabWidget()
         self.plot_tabs.currentChanged.connect(self._on_plot_tab_changed)
@@ -461,6 +470,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # Set default tab to Magnitude Sweeps
         self.plot_tabs.setCurrentIndex(0)
+        self._update_measurement_title()
         
         layout.addWidget(self.plot_tabs)
         
@@ -501,7 +511,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes."""
+        self._update_measurement_title()
         self._redraw_plots()
+
+    def _update_measurement_title(self) -> None:
+        """Show the measurement filename and the selected view above its tab."""
+        path = (store.saved_path(self.multisweep_container)
+                if self.multisweep_container else None)
+        measurement = path.name if path is not None else "Unsaved multisweep"
+        view = self.plot_tabs.tabText(self.plot_tabs.currentIndex())
+        self.measurement_title.setText(f"{measurement} — {view}")
     
     def _apply_batch_size(self):
         """Apply the batch size from the spin box and regenerate plots."""
@@ -669,6 +688,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._populate_fit_amplitudes()
         self._populate_fit_display()
         self.bias_settings.set_directions_swept(call_params.get('directions'))
+        self._update_measurement_title()
         self._redraw_plots()
 
     def _stored_bias_report(self) -> Optional[BiasReport]:
@@ -705,8 +725,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         """
         if not self.multisweep_container:
             return None
-        return store.save(self.multisweep_container, "multisweep",
+        path = store.save(self.multisweep_container, "multisweep",
                           label=self.initial_params.get("label"))
+        self._update_measurement_title()
+        return path
 
     def _save_multisweep_action(self):
         """The Save button: write the file, say where, and dialog only on failure."""
@@ -1428,6 +1450,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.multisweep_container = None
         self.module_sweeps = None
         self._live.clear()
+        self._update_measurement_title()
         self._redraw_plots()
 
         self.progress_bar.setValue(0)

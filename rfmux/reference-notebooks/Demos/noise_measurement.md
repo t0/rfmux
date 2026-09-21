@@ -106,17 +106,18 @@ print(f"bias-check file: {sweep_path}")
 ## 3. Acquire and save noise
 
 `take_noise_spectrum` measures configured tones; it never chooses or applies
-biases. `decimation=None` preserves the stream configuration. A different
-explicit decimation changes the packet width and selects this module alone;
-that configuration remains in effect. Our short example uses the current rate.
+biases. `decimation=None` preserves the current slow-stream configuration. A
+different explicit decimation selects this module and changes the packet width;
+that configuration remains in effect.
 
-One slow UDP capture contains all requested channels. PFB RPC captures follow
-one channel at a time with `reset_NCO=False`. They are **not synchronized**
-with the slow capture or with one another. `pfb_samples=None` omits PFB.
-The PFB UDP sender must be disabled for RPC capture.
+The measurement routine captures slow data from all requested channels
+simultaneously, then, when `pfb_samples is not None`, collects 2.44 MS/s PFB
+data from one channel at a time. The slow and PFB captures, and each channel's
+PFB capture, are sequential rather than synchronized. The PFB UDP sender must
+be disabled while the RPC captures run.
 
-**Mock PFB RPC data is synthetic uniform noise**, not a resonator-noise
-prediction. The slow stream does use the resonator model. On real hardware,
+**Mock-mode PFB data is synthetic uniform noise**, not a resonator-noise
+prediction, although the slow stream does use the resonator model. On real hardware,
 use your existing slow stream and a valid timestamp source; omit the mock
 sender management below. It stops only a sender this cell started, including
 on exceptions and cancellation.

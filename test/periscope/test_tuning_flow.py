@@ -56,6 +56,7 @@ from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
 from rfmux.tools.periscope.utils import (  # noqa: E402
     DEFAULT_SUBPLOTS,
     DEFAULT_SUBPLOT_COLUMNS,
+    LINE_WIDTH,
     TABLEAU10_COLORS,
     UPWARD_SWEEP_STYLE,
     UnitConverter,
@@ -410,6 +411,12 @@ def test_a_saved_multisweep_is_the_measurement_a_notebook_reads(board, qt_app,
 
     assert path.name.startswith("multisweep_")
     assert path.name.endswith("_a_saved_sweep.pkl")
+    assert panel.measurement_title.text() == \
+        f"{path.name} — Magnitude Sweeps"
+    for tab in range(panel.plot_tabs.count()):
+        panel.plot_tabs.setCurrentIndex(tab)
+        assert panel.measurement_title.text() == \
+            f"{path.name} — {panel.plot_tabs.tabText(tab)}"
     reloaded = store.load(path)
     block = reloaded[crs.module[catalog.module].index()]
     assert block["measurement"] == "multisweep"
@@ -482,7 +489,16 @@ def _grid_widgets(panel, tab_idx=MAGNITUDE_TAB):
 
 def _grid_curves(panel, tab_idx=MAGNITUDE_TAB):
     """The curves on each subplot, in the order they were plotted."""
-    return [w.getPlotItem().listDataItems() for w in _grid_widgets(panel, tab_idx)]
+    return [[curve for curve in w.getPlotItem().listDataItems()
+             if not curve.property("bias_highlight")]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def _bias_highlights(panel, tab_idx=MAGNITUDE_TAB):
+    """The translucent wide strokes over the selected bias traces."""
+    return [[curve for curve in w.getPlotItem().listDataItems()
+             if curve.property("bias_highlight")]
+            for w in _grid_widgets(panel, tab_idx)]
 
 
 def test_the_grid_draws_a_curve_for_every_sweep_of_every_resonator(board, qt_app):
@@ -768,6 +784,11 @@ def test_a_saved_netanal_is_the_measurement_a_notebook_reads(board, qt_app, outp
     assert path.parent == output_directory
     assert path.name.startswith("netanal_")
     assert path.name.endswith("_flow_test.pkl")
+    plots = panel.plots[catalog.module]
+    assert path.name in plots["amp_plot"].getPlotItem().titleLabel.text
+    assert "Magnitude" in plots["amp_plot"].getPlotItem().titleLabel.text
+    assert path.name in plots["phase_plot"].getPlotItem().titleLabel.text
+    assert "Phase" in plots["phase_plot"].getPlotItem().titleLabel.text
 
     reloaded = store.load(path)
     trace = netanal_trace(reloaded[crs.module[catalog.module].index()])
@@ -1120,6 +1141,9 @@ def test_a_saved_netanal_loads_back_into_a_panel(board, qt_app, output_directory
 
     loaded = periscope.netanal_windows["netanal_0"]["window"]
     measured = panel.netanal_traces[catalog.module]
+    loaded_plots = loaded.plots[catalog.module]
+    assert path.name in loaded_plots["amp_plot"].getPlotItem().titleLabel.text
+    assert path.name in loaded_plots["phase_plot"].getPlotItem().titleLabel.text
     drawn_freqs, _ = loaded.plots[catalog.module]["amp_curve"].getData()
     assert np.array_equal(drawn_freqs, measured["frequencies"])
     assert np.array_equal(
@@ -1144,6 +1168,8 @@ def test_a_saved_multisweep_loads_back_into_a_panel(board, qt_app, output_direct
     loaded = periscope.multisweep_windows[
         next(iter(periscope.multisweep_windows))]["window"]
     name = panel._selected_names()[0]
+    assert loaded.measurement_title.text() == \
+        f"{path.name} — Magnitude Sweeps"
     assert loaded.catalog.names() == panel.catalog.names()
     assert loaded._amplitudes_drawn() == panel._amplitudes_drawn()
     assert np.array_equal(
@@ -2277,21 +2303,25 @@ def _trace_widths(panel, name, tab_idx=MAGNITUDE_TAB):
             for (step, direction, _amp, _sweep), curve in zip(traces, curves)}
 
 
-def test_the_sweep_the_resonator_is_biased_at_is_drawn_thick(board, qt_app, swept_container):
-    """Colour already means drive and line style already means direction, so
-    width is what is left to say which step was chosen."""
+def test_the_sweep_the_resonator_is_biased_at_gets_a_faint_wide_overlay(
+        board, qt_app, swept_container):
+    """The data stays at its normal width under a translucent highlight."""
     panel = _panel_showing(swept_container, board)
     name = panel._selected_names()[0]
     assert len(set(_trace_widths(panel, name).values())) == 1
+    assert _bias_highlights(panel)[0] == []
 
     _find_bias(panel, qt_app)
 
-    chosen = panel.bias_report[name].iteration
     widths = _trace_widths(panel, name)
-    thick = {step for (step, _direction), width in widths.items()
-             if width == max(widths.values())}
-    assert thick == {chosen}
-    assert max(widths.values()) > min(widths.values())
+    assert set(widths.values()) == {LINE_WIDTH}
+    highlights = _bias_highlights(panel)[0]
+    directions = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[panel.bias_report[name].iteration]
+    assert len(highlights) == len(directions)
+    assert all(curve.opts["pen"].width() > LINE_WIDTH for curve in highlights)
+    assert all(0 < curve.opts["pen"].color().alpha() < 255
+               for curve in highlights)
 
 
 def test_a_line_stands_where_the_tone_will_go(board, qt_app, swept_container):
@@ -2314,7 +2344,7 @@ def test_a_line_stands_where_the_tone_will_go(board, qt_app, swept_container):
 
 
 def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app, swept_container):
-    """Same colour as the thickened trace, so the two marks read as one
+    """Same colour as the highlighted trace, so the two marks read as one
     statement about one sweep."""
     panel = _panel_showing(swept_container, board)
 
@@ -2552,7 +2582,8 @@ def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app, swept
     assert all(abs(line.value()) <= 1.0 + 1e-9 for line in lines)
 
 
-def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app, swept_container):
+def test_the_diagnostics_tab_highlights_the_step_biased_at(
+        board, qt_app, swept_container):
     """The same statement the sweep grids make, on the plot the choice was
     read off."""
     _, crs, catalog = board
@@ -2562,10 +2593,8 @@ def test_the_diagnostics_tab_thickens_the_step_biased_at(board, qt_app, swept_co
 
     _find_bias(panel, qt_app)
 
-    widths = _trace_widths(panel, name, BIAS_TAB)
-    thick = {step for (step, _direction), width in widths.items()
-             if width == max(widths.values())}
-    assert thick == {panel.bias_report[name].iteration}
+    assert set(_trace_widths(panel, name, BIAS_TAB).values()) == {LINE_WIDTH}
+    assert len(_bias_highlights(panel, BIAS_TAB)[0]) == 2
 
 
 def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app, swept_container):
@@ -2882,7 +2911,14 @@ def _digest(panel, qt_app):
 
 def _digest_curves(digest, plot):
     """The curves on one of the digest's three plots, in the order drawn."""
-    return digest._plots[plot].getPlotItem().listDataItems()
+    return [curve for curve in digest._plots[plot].getPlotItem().listDataItems()
+            if not curve.property("bias_highlight")]
+
+
+def _digest_highlights(digest, plot):
+    """The translucent bias highlights on one digest plot."""
+    return [curve for curve in digest._plots[plot].getPlotItem().listDataItems()
+            if curve.property("bias_highlight")]
 
 
 def _digest_lines(digest, plot):
@@ -3108,6 +3144,7 @@ def test_the_bias_plot_draws_the_sweep_the_tone_will_sit_on(
     assert 0 < len(at_bias) < len(digest._traces), \
         "this measurement should have more drives than the one it is biased at"
     assert len(_digest_curves(digest, 2)) == len(at_bias)
+    assert len(_digest_highlights(digest, 2)) == len(at_bias)
 
     finding = panel._bias_by_name()[digest.resonator()]
     sweep = at_bias[0][3]
@@ -3500,9 +3537,12 @@ def test_hysteresis_tab_uses_detector_curve(board, qt_app, swept_container, comp
         x, y = curve.getData()
         np.testing.assert_allclose(x, (frequencies - pair["upward"]["original_center_frequency"]) / 1e3)
         np.testing.assert_allclose(y, separation / 0.2)
-    chosen = list(steps).index(panel.bias_report[name].iteration)
     widths = [curve.opts["pen"].widthF() for curve in curves]
-    assert widths[chosen] > min(widths)
+    assert set(widths) == {LINE_WIDTH}
+    highlight, = _bias_highlights(panel, HYSTERESIS_TAB)[0]
+    chosen = list(steps).index(panel.bias_report[name].iteration)
+    np.testing.assert_allclose(highlight.getData()[0], curves[chosen].getData()[0])
+    np.testing.assert_allclose(highlight.getData()[1], curves[chosen].getData()[1])
     assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [1]
 
 

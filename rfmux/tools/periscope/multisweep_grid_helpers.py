@@ -290,23 +290,41 @@ def _add_legend(plot_item, pen_color):
     plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
 
 
-#: How much wider the sweep a resonator is biased at is drawn than the rest.
+#: The translucent stroke over the sweep a resonator is biased at.
 CHOSEN_TRACE_WIDTH = 2.5
+CHOSEN_TRACE_ALPHA = 100
 
 
-def _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
-               chosen=False):
+def _trace_pen(amplitude, direction, amplitude_to_color, pen_color):
     """Colour says drive amplitude, line style says direction.
 
     Every trace is coloured by its drive, including the only one of a
     single-amplitude sweep, so a colour does not change meaning as the later
-    steps of a schedule arrive. Width is free, so it says which step this
-    resonator is biased at once something has chosen one.
+    steps of a schedule arrive.
     """
     color = amplitude_to_color.get(amplitude, pen_color)
     style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-    width = LINE_WIDTH * CHOSEN_TRACE_WIDTH if chosen else LINE_WIDTH
-    return pg.mkPen(color=color, width=width, style=style)
+    return pg.mkPen(color=color, width=LINE_WIDTH, style=style)
+
+
+def _plot_trace(plot_item, x, y, amplitude, direction, amplitude_to_color,
+                pen_color, *, chosen=False, name=None):
+    """Draw one normal trace, with a faint wide overlay when it was chosen."""
+    curve = plot_item.plot(
+        x, y,
+        pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color),
+        name=name)
+    if chosen:
+        color = pg.mkColor(amplitude_to_color.get(amplitude, pen_color))
+        color.setAlpha(CHOSEN_TRACE_ALPHA)
+        style = (DOWNWARD_SWEEP_STYLE if direction == "downward"
+                 else UPWARD_SWEEP_STYLE)
+        highlight = plot_item.plot(
+            x, y,
+            pen=pg.mkPen(color=color, width=LINE_WIDTH * CHOSEN_TRACE_WIDTH,
+                         style=style))
+        highlight.setProperty("bias_highlight", True)
+    return curve
 
 
 def _biased_at(bias, step) -> bool:
@@ -381,8 +399,8 @@ def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         normalize: Whether to state each sweep against the drive it was taken
             at, rather than as the power that came back
         legend_labels: Optional {(step, direction, amplitude): label}
-        bias: Optional BiasFinding; its step is drawn thick and its frequency
-            gets a line
+        bias: Optional BiasFinding; its step gets a translucent wide overlay
+            and its frequency gets a line
         dac_scale: the module's DAC full scale in dBm, which normalizing to
             volts or dB needs and normalizing to counts does not
     """
@@ -400,10 +418,11 @@ def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
         magnitude = UnitConverter.convert_amplitude(
             np.abs(counts), unit_mode, normalize=normalize,
             drive=amplitude, dac_scale=dac_scale)
-        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
-                         chosen=_biased_at(bias, step))
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
-        plot_item.plot(offset_khz(sweep), magnitude, pen=pen, name=name)
+        _plot_trace(
+            plot_item, offset_khz(sweep), magnitude, amplitude, direction,
+            amplitude_to_color, pen_color,
+            chosen=_biased_at(bias, step), name=name)
         drawn = sweep
 
     # Any drawn sweep will do: they are all centred on the same frequency, and
@@ -664,11 +683,9 @@ def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
         offsets = (midpoints - sweep['original_center_frequency']) / 1e3
         chosen = _biased_at(bias, step)
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
-        plot_item.plot(
-            offsets, np.diff(speed) / bar,
-            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color,
-                           chosen=chosen),
-            name=name)
+        _plot_trace(
+            plot_item, offsets, np.diff(speed) / bar, amplitude, direction,
+            amplitude_to_color, pen_color, chosen=chosen, name=name)
 
         binding_kinds.add(_bar_kind(prominence_bar, noise_bar))
         if chosen:
@@ -775,11 +792,11 @@ def _plot_hysteresis(
         sweep = pair["upward"]
         amplitude = sweep["sweep_amplitude"]
         label = legend_labels.get((step, "upward", amplitude)) if legend_labels else None
-        plot_item.plot(
+        _plot_trace(
+            plot_item,
             (frequencies - sweep["original_center_frequency"]) / 1e3,
-            separation / divisor,
-            pen=_trace_pen(amplitude, "upward", amplitude_to_color, pen_color,
-                           chosen=_biased_at(bias, step)), name=label)
+            separation / divisor, amplitude, "upward", amplitude_to_color,
+            pen_color, chosen=_biased_at(bias, step), name=label)
         drawn = True
     pen = pg.mkPen(color=pen_color, width=1, style=DOWNWARD_SWEEP_STYLE)
     plot_item.addLine(y=limit / divisor, pen=pen)
@@ -844,10 +861,9 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
                 pen=pg.mkPen(color=DERIVATIVE_COLORS[label],
                              width=DERIVATIVE_LINE_WIDTH, style=style),
                 name=_once(label, said))
-        plot_item.plot(
-            offsets, speed,
-            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color,
-                           chosen=True),
+        _plot_trace(
+            plot_item, offsets, speed, amplitude, direction,
+            amplitude_to_color, pen_color, chosen=True,
             name=(legend_labels.get((step, direction, amplitude)) if legend_labels
                   else _once("IQ arc speed", said)))
 
@@ -869,8 +885,8 @@ def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
         unit_mode: 'counts' draws raw IQ, anything else the entry's volts
         normalize: Whether to divide each loop by the drive it was taken at
         legend_labels: Optional {(step, direction, amplitude): label}
-        bias: Optional BiasFinding; its step is drawn thick and the point the
-            tone sits at is marked on it
+        bias: Optional BiasFinding; its step gets a translucent wide overlay
+            and the point the tone sits at is marked on it
         dac_scale: the module's DAC full scale in dBm, which normalizing volts
             needs and normalizing counts does not
 
@@ -900,10 +916,10 @@ def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
             i_vals, q_vals = i_vals / divisor, q_vals / divisor
 
         chosen = _biased_at(bias, step)
-        pen = _trace_pen(amplitude, direction, amplitude_to_color, pen_color,
-                         chosen=chosen)
         name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
-        plot_item.plot(i_vals, q_vals, pen=pen, name=name)
+        _plot_trace(
+            plot_item, i_vals, q_vals, amplitude, direction,
+            amplitude_to_color, pen_color, chosen=chosen, name=name)
 
         if chosen:
             _bias_point_marker(plot_item, bias, sweep, i_vals, q_vals,

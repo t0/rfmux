@@ -44,8 +44,10 @@ class NetworkAnalysisExportMixin:
         """
         if not self.netanal_container:
             return None
-        return store.save(self.netanal_container, "netanal",
+        path = store.save(self.netanal_container, "netanal",
                           label=self.current_params.get("label"))
+        self._update_plot_titles()
+        return path
 
     def _save_netanal_action(self) -> None:
         """The Save button: write the file, say where, and dialog only on failure."""

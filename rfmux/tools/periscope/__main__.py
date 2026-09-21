@@ -27,6 +27,7 @@ import os
 import signal
 import warnings
 import asyncio
+from typing import Any
 
 import click
 from PyQt6 import QtCore
@@ -349,6 +350,8 @@ def main():
     # This object is necessary for network analysis functionalities.
     # load_session and CRS are expected to be imported from .utils.
     crs_obj = None  # Initialize to None; will be set if successful.
+    s = None
+    loop = None
     is_mock = False  # Track if we're using MockCRS
     
     try:
@@ -568,7 +571,7 @@ def main():
     # Held in a local so it outlives this call: a QTimer that goes out
     # of scope is destroyed and stops firing.
     _sigint_wake = install_sigint_handler()
-    sys.exit(app.exec())
+    sys.exit(_run_cli_application(app, viewer, s, loop))
 
 # Note on wildcard imports from .utils:
 # The following names (and potentially others) are expected to be made available
@@ -702,6 +705,36 @@ def _quit_application():
     for widget in app.topLevelWidgets():
         widget.close()
     app.quit()
+
+
+def _run_cli_application(
+    app: QtWidgets.QApplication,
+    viewer: Periscope,
+    session: Any | None,
+    loop: asyncio.AbstractEventLoop | None,
+) -> int:
+    """Run Qt and release CLI-owned resources before returning."""
+    try:
+        return app.exec()
+    finally:
+        _shutdown_cli_resources(viewer, session, loop)
+
+
+def _shutdown_cli_resources(
+    viewer: Periscope,
+    session: Any | None,
+    loop: asyncio.AbstractEventLoop | None,
+) -> None:
+    """Release CLI-owned resources before interpreter teardown."""
+    try:
+        viewer.close()
+    finally:
+        try:
+            if session is not None:
+                session.close()
+        finally:
+            if loop is not None and not loop.is_closed():
+                loop.close()
 
 
 def periscope_excepthook(exctype, value, tb):

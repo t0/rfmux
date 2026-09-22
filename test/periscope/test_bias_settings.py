@@ -77,24 +77,14 @@ def test_a_distance_guard_in_hertz_is_the_number_typed(panel):
     assert window.get_parameters()["max_distance_hz"] == 12.5e3
 
 
-def test_a_fractional_guard_is_a_fraction_of_the_span_swept(panel):
-    """The same setting means the same thing on a measurement swept at
-    another span, which is the point of expressing it this way."""
+def test_a_fractional_guard_is_passed_directly_to_the_finder(panel):
+    """The finder resolves it against the recorded sweep span."""
     window, _ = panel
     window._distance_radios["fraction"].setChecked(True)
     window.fraction_spin.setValue(0.25)
     window.apply_button.click()
-    assert window.get_parameters(span_hz=70e3)["max_distance_hz"] == 17.5e3
-    assert window.get_parameters(span_hz=200e3)["max_distance_hz"] == 50e3
-
-
-def test_a_fraction_with_no_span_to_measure_is_no_guard(panel):
-    """A fraction of an unknown span is not a distance, so it is not passed
-    off as one."""
-    window, _ = panel
-    window._distance_radios["fraction"].setChecked(True)
-    window.apply_button.click()
-    assert window.get_parameters(span_hz=None)["max_distance_hz"] is None
+    assert window.get_parameters()["max_distance_fraction"] == 0.25
+    assert window.get_parameters()["max_distance_hz"] is None
 
 
 def test_no_limit_is_how_the_guard_is_switched_off(panel):
@@ -104,7 +94,8 @@ def test_no_limit_is_how_the_guard_is_switched_off(panel):
     window._distance_radios["absolute"].setChecked(True)
     window._distance_radios["none"].setChecked(True)
     window.apply_button.click()
-    assert window.get_parameters(span_hz=70e3)["max_distance_hz"] is None
+    assert window.get_parameters()["max_distance_hz"] is None
+    assert window.get_parameters()["max_distance_fraction"] is None
 
 
 def test_which_distance_field_was_meant_survives_a_session(panel):

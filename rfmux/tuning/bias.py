@@ -358,6 +358,7 @@ def find_bias_points(
     max_discrepancy: float = 0.1,
     compare: str = "magnitude",
     max_distance_hz: float | None = None,
+    max_distance_fraction: float | None = None,
     save=None,
     label=None,
 ) -> BiasReport:
@@ -368,7 +369,8 @@ def find_bias_points(
     ``sweeps["bias_report"]``, replacing any previous report.
 
     ``report.flagged`` identifies a bifurcated lowest step, a drive with no
-    known bifurcation above it, or a frequency outside ``max_distance_hz``.
+    known bifurcation above it, or a frequency outside the requested distance
+    limit.
     A prior bifurcation amplitude is retained when this run observes none.
     Clear it with ``catalog.clear_bifurcations()`` before taking new sweeps.
 
@@ -387,6 +389,10 @@ def find_bias_points(
         compare: passed to :func:`bifurcated_by_hysteresis`.
         max_distance_hz: maximum allowed offset from the sweep centre. Beyond
             it, use the centre and flag the finding. None imposes no limit.
+        max_distance_fraction: maximum allowed offset as a fraction of the
+            recorded sweep span. Mutually exclusive with ``max_distance_hz``.
+            Beyond it, use the centre and flag the finding. None imposes no
+            limit.
         save: save the sweeps with the report, updating their existing file
             or creating one. None uses ``store.autosave_enabled()``.
         label: filename label for a first save; existing filenames are kept.
@@ -408,6 +414,9 @@ def find_bias_points(
     _check_method("amplitude_method", amplitude_method, BIFURCATION_METHODS)
     _check_method("frequency_method", frequency_method, FREQUENCY_METHODS)
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
+    distance_limit_hz = _distance_limit_hz(
+        sweeps, max_distance_hz, max_distance_fraction
+    )
 
     directions = _directions_swept(sweeps)
     if (
@@ -448,7 +457,7 @@ def find_bias_points(
             resonator,
             direction=direction,
             frequency_method=frequency_method,
-            max_distance_hz=max_distance_hz,
+            max_distance_hz=distance_limit_hz,
             amplitude_settings=amplitude_settings,
         )
         for resonator in biased
@@ -467,6 +476,7 @@ def find_bias_points(
             "max_discrepancy": max_discrepancy,
             "compare": compare,
             "max_distance_hz": max_distance_hz,
+            "max_distance_fraction": max_distance_fraction,
         },
     )
     # Into the sweeps it was found from, so that saving updates that file
@@ -611,6 +621,29 @@ def _too_far(measured_hz: float, centre_hz: float, max_distance_hz: float | None
     None believes anything, which is everything the trace could offer.
     """
     return max_distance_hz is not None and abs(measured_hz - centre_hz) > max_distance_hz
+
+
+def _distance_limit_hz(
+    sweeps, max_distance_hz: float | None, max_distance_fraction: float | None
+) -> float | None:
+    """Resolve either supported distance limit into hertz for one multisweep."""
+    if max_distance_hz is not None and max_distance_fraction is not None:
+        raise ValueError(
+            "Pass at most one of max_distance_hz and max_distance_fraction."
+        )
+    if max_distance_fraction is None:
+        return max_distance_hz
+    try:
+        span_hz = sweeps["call_params"]["span_hz"]
+    except KeyError as error:
+        raise ValueError(
+            "max_distance_fraction needs the sweep's recorded span_hz."
+        ) from error
+    if span_hz is None:
+        raise ValueError(
+            "max_distance_fraction needs the sweep's recorded span_hz."
+        )
+    return max_distance_fraction * span_hz
 
 
 def _check_method(argument: str, value: str, allowed: tuple[str, ...]) -> None:

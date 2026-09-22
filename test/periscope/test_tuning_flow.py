@@ -2155,17 +2155,15 @@ def test_the_settings_window_is_what_the_search_runs_with(board, qt_app, swept_c
 
 def test_a_fractional_distance_guard_is_resolved_against_the_span_swept(
         board, qt_app, swept_container):
-    """The window holds a fraction; what reaches the library is hertz, and the
-    span it is a fraction of is the one this measurement recorded."""
+    """The window passes a fraction; the finder uses this sweep's span."""
     panel = _panel_showing(swept_container, board)
-    span_hz = panel.module_sweeps["call_params"]["span_hz"]
-
     panel.bias_settings._distance_radios["fraction"].setChecked(True)
     panel.bias_settings.fraction_spin.setValue(0.25)
     panel.bias_settings.apply_button.click()
     _find_bias(panel, qt_app)
 
-    assert panel.bias_report.settings["max_distance_hz"] == 0.25 * span_hz
+    assert panel.bias_report.settings["max_distance_fraction"] == 0.25
+    assert panel.bias_report.settings["max_distance_hz"] is None
 
 
 def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, swept_container, output_directory):

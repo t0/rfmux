@@ -1193,6 +1193,25 @@ def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
     )
 
 
+def test_a_fractional_distance_limit_uses_the_recorded_sweep_span():
+    sweeps = with_the_sweep_centre_moved(
+        a_schedule((0.0, 0.0, JUMPED)), "R0001", -20e3
+    )
+
+    report = find_bias_points(sweeps, max_distance_fraction=0.01)
+
+    assert report["R0001"].flagged_kind == FLAG_OFF_CENTRE
+    assert report.settings["max_distance_fraction"] == 0.01
+    assert report.settings["max_distance_hz"] is None
+
+
+def test_distance_limits_in_hertz_and_fraction_cannot_be_combined():
+    with pytest.raises(ValueError, match="at most one"):
+        find_bias_points(
+            a_schedule(), max_distance_hz=5e3, max_distance_fraction=0.1
+        )
+
+
 def test_the_calibration_is_measured_where_the_tone_ended_up():
     """Falling back moves the frequency, so the derivatives have to be read
     there rather than at the peak that was rejected."""
@@ -1274,6 +1293,7 @@ def test_the_settings_come_back_on_the_report_rather_than_on_every_bias_point():
     assert report.settings["frequency_method"] == "iq_derivative"
     assert report.settings["max_discrepancy"] == 0.4
     assert report.settings["max_distance_hz"] is None
+    assert report.settings["max_distance_fraction"] is None
     assert report.settings["module"] == 2
 
 

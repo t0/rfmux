@@ -906,6 +906,7 @@ for every resonator in the sweep’s catalog snapshot.
 | `max_discrepancy` | `0.1` | Hysteresis threshold |
 | `compare` | `"magnitude"` | Hysteresis comparison quantity |
 | `max_distance_hz` | `None` | Maximum accepted offset from sweep centre; farther choices are flagged and kept at the centre |
+| `max_distance_fraction` | `None` | Maximum accepted offset as a fraction of the recorded sweep span; mutually exclusive with `max_distance_hz` |
 | `save` | `None` | Follow autosave settings; save the sweeps with their new report |
 | `label` | `None` | Label when creating a new measurement file |
 

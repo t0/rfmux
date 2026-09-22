@@ -27,9 +27,9 @@ DEFAULTS = {
     and name not in ("save", "label")
 }
 
-#: How the distance guard is expressed. The library takes hertz; a fraction is
-#: resolved against the sweep span at the press, so the same setting means the
-#: same thing on a measurement swept at another span.
+#: How the distance guard is expressed. The finder resolves a fraction against
+#: the recorded sweep span, so the same setting means the same thing on a
+#: measurement swept at another span.
 DISTANCE_MODES = ("none", "absolute", "fraction")
 
 #: What the fraction field starts at. Half a span reaches the edge of the
@@ -114,14 +114,15 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
             self._select(self.direction_combo, None)
         self._update_enabled()
 
-    def get_parameters(self, span_hz: float | None = None) -> dict:
+    def get_parameters(self) -> dict:
         parameters = super().get_parameters()
         mode = parameters.pop("max_distance_mode")
         fraction = parameters.pop("max_distance_fraction")
         khz = parameters.pop("max_distance_khz")
-        parameters["max_distance_hz"] = (
-            khz * 1e3 if mode == "absolute" else
-            fraction * span_hz if mode == "fraction" and span_hz else None)
+        parameters["max_distance_hz"] = khz * 1e3 if mode == "absolute" else None
+        parameters["max_distance_fraction"] = (
+            fraction if mode == "fraction" else None
+        )
         return parameters
 
     def _distance_mode(self) -> str:

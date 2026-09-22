@@ -1153,8 +1153,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self._show_bias_status("Nothing swept yet", level="error")
             return
 
-        span_hz = self.module_sweeps['call_params'].get('span_hz')
-        parameters = self.bias_settings.get_parameters(span_hz=span_hz)
+        parameters = self.bias_settings.get_parameters()
 
         self._set_analysis_enabled(False)
         self._show_bias_status("Finding bias...", transient=False)

@@ -243,7 +243,7 @@ class FitReport:
 
 
 def fit_sweeps(
-    sweeps,
+    ms_module_output,
     *,
     models: Sequence[str] = MODELS,
     names=None,
@@ -269,7 +269,8 @@ def fit_sweeps(
     and records the failure reason. Rerunning a model replaces only its fits.
 
     Args:
-        sweeps: one module's block, ``results[crs.module[m].index()]``.
+        ms_module_output: one module's multisweep output,
+            ``multisweep_output[crs.module[m].index()]``.
         models: model names from :data:`MODELS`; all three by default.
         names: one resonator name, an iterable, or None for all.
         iterations: one amplitude-step index, an iterable, or None for all.
@@ -298,11 +299,14 @@ def fit_sweeps(
         ValueError: unknown model or a filter that selects no sweeps.
     """
     sections = _select(
-        sweeps, names=names, iterations=iterations, directions=directions
+        ms_module_output,
+        names=names,
+        iterations=iterations,
+        directions=directions,
     )
     report = _fit(
         sections,
-        module=sweeps.get("module"),
+        module=ms_module_output.get("module"),
         models=models,
         approx_Qr=approx_Qr,
         normalize=normalize,
@@ -313,12 +317,12 @@ def fit_sweeps(
         max_workers=max_workers,
         progress_callback=progress_callback,
     )
-    store.maybe_save(sweeps, "multisweep", save=save, label=label)
+    store.maybe_save(ms_module_output, "multisweep", save=save, label=label)
     return report
 
 
 def fit_sweeps_at_bias_amplitude(
-    sweeps,
+    ms_module_output,
     *,
     amplitude: float | None = None,
     names=None,
@@ -335,7 +339,7 @@ def fit_sweeps_at_bias_amplitude(
     closeness matters.
 
     Args:
-        sweeps: one module's multisweep block.
+        ms_module_output: one module's multisweep output.
         amplitude: target amplitude in DAC units, or None for each member's
             bias amplitude in the recorded catalog.
         names: resonator names to fit, or None for all.
@@ -347,10 +351,10 @@ def fit_sweeps_at_bias_amplitude(
     Returns:
         FitReport: outcomes and settings; fits are stored in the sweep entries.
     """
-    all_sections = list(_walk(sweeps))
+    all_sections = list(_walk(ms_module_output))
     wanted = _filter_names(names, {s.name for s in all_sections})
     at_bias = {
-        name: _iteration_matching_amplitude(sweeps, name, amplitude)
+        name: _iteration_matching_amplitude(ms_module_output, name, amplitude)
         for name in wanted
     }
     keep_directions = _as_filter(directions, "directions")
@@ -367,8 +371,8 @@ def fit_sweeps_at_bias_amplitude(
             f"Nothing to fit: no sweep of {sorted(wanted)[:4]} at its bias "
             f"amplitude survived directions={directions!r}."
         )
-    report = _fit(sections, module=sweeps.get("module"), **settings)
-    store.maybe_save(sweeps, "multisweep", save=save, label=label)
+    report = _fit(sections, module=ms_module_output.get("module"), **settings)
+    store.maybe_save(ms_module_output, "multisweep", save=save, label=label)
     return report
 
 
@@ -519,7 +523,7 @@ def centered_iq(entry: Mapping) -> np.ndarray:
 
 
 def collect_fit_params(
-    sweeps,
+    ms_module_output,
     model: str,
     *,
     names=None,
@@ -533,7 +537,7 @@ def collect_fit_params(
     drive amplitude each was measured at, which is what a histogram or a table
     of an array is made of::
 
-        rows = collect_fit_params(module_sweeps, "skewed")
+        rows = collect_fit_params(ms_module_output, "skewed")
         plt.hist([r["params"]["Qi"] for r in rows], bins=40)
 
     A sweep with no fit for *model*, or one whose fit did not converge, has no
@@ -543,7 +547,8 @@ def collect_fit_params(
     the clue. Callers that want only the clean fits filter on that.
 
     Args:
-        sweeps: one module's sweep result, as :func:`fit_sweeps` takes it.
+        ms_module_output: one module's multisweep output, as
+            :func:`fit_sweeps` takes it.
         model: which model's parameters, from :data:`FIT_PARAMS`.
         names: resonators to include; every one of them by default.
         iterations: amplitude steps to include; every one by default.
@@ -563,7 +568,7 @@ def collect_fit_params(
                "the entry, or use centered_iq()." if model == "circle" else "")
         )
 
-    sections = list(_walk(sweeps))
+    sections = list(_walk(ms_module_output))
     keep_names = _filter_names(names, {s.name for s in sections})
     keep_iterations = _as_filter(iterations, "iterations")
     keep_directions = _as_filter(directions, "directions")
@@ -622,29 +627,31 @@ class _Section:
     entry: dict
 
 
-def _walk(sweeps):
+def _walk(ms_module_output):
     """Every sweep in one module's result, with its coordinates.
 
     One nesting, because there is only one shape: a call that swept one
     amplitude and a call that walked a schedule of twenty nest identically, the
     single sweep simply being the schedule of length one that it is.
     """
-    _refuse_container(sweeps)
-    _refuse_netanal(sweeps)
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
 
-    if not isinstance(sweeps, Mapping):
+    if not isinstance(ms_module_output, Mapping):
         raise TypeError(
-            f"Expected one module's sweep result — what multisweep "
-            f"returned, indexed by module — got {type(sweeps).__name__}."
+            f"Expected one module's multisweep output — what multisweep "
+            f"returned, indexed by module — got "
+            f"{type(ms_module_output).__name__}."
         )
-    if "results" not in sweeps:
+    if "results" not in ms_module_output:
         raise TypeError(
-            "This is not a sweep result: it has no 'results'. A sweep macro "
+            "This is not a multisweep output: it has no 'results'. Multisweep "
             "returns {module_id: {'results': ..., 'call_params': ...}}, so "
-            "fitting one module means fit_sweeps(sweeps[module_id])."
+            "fitting one module means "
+            "fit_sweeps(multisweep_output[module_id])."
         )
 
-    for iteration, by_direction in sweeps["results"].items():
+    for iteration, by_direction in ms_module_output["results"].items():
         for direction, sections in by_direction.items():
             for name, entry in sections.items():
                 yield _Section(name, int(iteration), direction, entry)
@@ -684,9 +691,9 @@ def _filter_names(names, available: set[str]) -> set[str]:
     return wanted
 
 
-def _select(sweeps, *, names, iterations, directions) -> list[_Section]:
+def _select(ms_module_output, *, names, iterations, directions) -> list[_Section]:
     """The sweeps a fit_sweeps call is about, in the order they were measured."""
-    sections = list(_walk(sweeps))
+    sections = list(_walk(ms_module_output))
     if not sections:
         raise ValueError("There are no sweeps in this result to fit.")
 

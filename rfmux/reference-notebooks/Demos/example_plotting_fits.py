@@ -6,10 +6,10 @@ Fits are read from each sweep entry's ``fits`` dict::
     from rfmux.tuning import fit_sweeps
     import example_plotting_fits as fitplots
 
-    module_sweeps = sweeps[crs.module[1].index()]
-    fit_sweeps(module_sweeps)
-    fitplots.plot_fit_panels(module_sweeps, model="skewed")
-    fitplots.plot_fitted_parameters(module_sweeps, model="skewed")
+    ms_module_output = multisweep_output[crs.module[1].index()]
+    fit_sweeps(ms_module_output)
+    fitplots.plot_fit_panels(ms_module_output, model="skewed")
+    fitplots.plot_fitted_parameters(ms_module_output, model="skewed")
 
 Skewed and nonlinear models use magnitude versus frequency; circle fits use
 IQ counts. Failed fits show their measured data and failure reason. Each call
@@ -225,17 +225,19 @@ def _panel_grid(count, columns, panel_size):
     return fig, axes, panels[:count]
 
 
-def _section_names(results):
-    """Read section names from the first sweep step; require a single module block."""
+def _section_names(ms_module_output):
+    """Read section names from one module's multisweep output."""
     try:
-        iterations = results["results"]
+        iterations = ms_module_output["results"]
     except (TypeError, KeyError):
-        keys = list(results) if isinstance(results, dict) else type(results).__name__
+        keys = (list(ms_module_output) if isinstance(ms_module_output, dict)
+                else type(ms_module_output).__name__)
         raise TypeError(
-            "Expected one module's sweep results — the value of "
-            "sweeps[module_id] — rather than the dict a sweep macro returns "
+            "Expected one module's multisweep output — the value of "
+            "multisweep_output[module_id] — rather than the whole output "
             f"keyed by module identifier. Got {keys}. If there is only one "
-            "module in play, sweeps[list(sweeps)[0]] is the thing to pass."
+            "module in play, multisweep_output[list(multisweep_output)[0]] "
+            "is the thing to pass."
         ) from None
 
     for by_direction in iterations.values():
@@ -253,9 +255,9 @@ def _as_list(value):
     return list(value)
 
 
-def _collect(results, names, iterations, direction):
+def _collect(ms_module_output, names, iterations, direction):
     """``{name: [(iteration, entry), ...]}`` for what was asked for."""
-    measured_names = _section_names(results)
+    measured_names = _section_names(ms_module_output)
     if not measured_names:
         raise ValueError("This measurement holds no sweeps, so there is nothing to draw.")
     wanted_names = _as_list(names) or measured_names
@@ -265,7 +267,7 @@ def _collect(results, names, iterations, direction):
     for name in wanted_names:
         entries = []
         for iteration, by_direction in collect_amplitude_iterations_for(
-            results, name
+            ms_module_output, name
         ).items():
             if wanted_iterations is not None and iteration not in wanted_iterations:
                 continue
@@ -275,7 +277,9 @@ def _collect(results, names, iterations, direction):
             collected[name] = entries
 
     if not collected:
-        available = collect_amplitude_iterations_for(results, wanted_names[0])
+        available = collect_amplitude_iterations_for(
+            ms_module_output, wanted_names[0]
+        )
         directions_swept = sorted(
             {d for by_direction in available.values() for d in by_direction}
         )
@@ -306,7 +310,7 @@ def _batch_title(title, what, count, steps, batch_number, batch_count):
 
 
 def plot_fit_panels(
-    results,
+    ms_module_output,
     model="skewed",
     names=None,
     iterations=None,
@@ -320,8 +324,8 @@ def plot_fit_panels(
     """Measured points with the fitted model over them, a panel per resonator.
 
     Args:
-        results: one module's sweep results — the value of ``sweeps[module_id]``
-            — after ``fit_sweeps`` has run on it.
+        ms_module_output: one module's output from ``multisweep``, after
+            ``fit_sweeps`` has run on it.
         model: "skewed" or "nonlinear" for magnitude versus frequency,
             normalized to the last measured point; "circle" for IQ counts.
         names: which sweep sections to draw. A name, a list of names, or
@@ -353,7 +357,7 @@ def plot_fit_panels(
     if panel_size is None:
         panel_size = (6.0, 6.0) if projection == "iq" else (7.0, 5.0)
 
-    entries_by_name = _collect(results, names, iterations, direction)
+    entries_by_name = _collect(ms_module_output, names, iterations, direction)
     mappable = amplitude_mappable([
         entry["sweep_amplitude"]
         for entries in entries_by_name.values()
@@ -512,7 +516,7 @@ def _draw_fit_batch(
 
 
 def plot_fitted_parameters(
-    results,
+    ms_module_output,
     model="skewed",
     parameters=None,
     names=None,
@@ -526,7 +530,8 @@ def plot_fitted_parameters(
     Failed fits leave gaps in the curves.
 
     Args:
-        results: one module's sweep results, after ``fit_sweeps``.
+        ms_module_output: one module's output from ``multisweep``, after
+            ``fit_sweeps``.
         model: which model's parameters to read.
         parameters: which parameters to draw, as names. ``None`` uses this
             module's defaults for the model — see ``PARAMETER_PANELS``. Names
@@ -548,7 +553,7 @@ def plot_fitted_parameters(
     else:
         panel_specs = tuple({"name": p, "label": p} for p in _as_list(parameters))
 
-    entries_by_name = _collect(results, names, None, direction)
+    entries_by_name = _collect(ms_module_output, names, None, direction)
     batches = _batches(list(entries_by_name.items()), batchlen)
 
     for batch_number, batch in enumerate(batches, start=1):

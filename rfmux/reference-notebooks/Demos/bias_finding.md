@@ -219,7 +219,7 @@ def amplitude_colours(amplitudes):
     return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
 
 
-def plot_amplitude_steps(results, resonator_names, directions=None):
+def plot_amplitude_steps(ms_module_output, resonator_names, directions=None):
     """Every amplitude step of each resonator, one panel per resonator."""
     fig, axes = plt.subplots(
         1, len(resonator_names), figsize=(3.1 * len(resonator_names), 3.0),
@@ -230,11 +230,11 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
     styles = {"upward": "-", "downward": "--"}
 
     for panel, name in zip(panels, resonator_names):
-        iterations = collect_amplitude_iterations_for(results, name)
+        iterations = collect_amplitude_iterations_for(ms_module_output, name)
         amplitudes = [next(iter(e.values()))["sweep_amplitude"] for e in iterations.values()]
         # Use one scale for the whole array, even with different bias amplitudes.
         all_amplitudes = [section["sweep_amplitude"]
-                          for by_direction in results["results"].values()
+                          for by_direction in ms_module_output["results"].values()
                           for sections in by_direction.values() for section in sections.values()]
         _, mappable = amplitude_colours(all_amplitudes)
         colours = [mappable.to_rgba(amplitude) for amplitude in amplitudes]
@@ -247,7 +247,7 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
                 magnitude = (
                     convert_roc_to_dbm(np.abs(sweep["iq_counts"]))
                     - convert_dacunits_to_dbm(
-                        sweep["sweep_amplitude"], results["dac_scale_dbm"]
+                        sweep["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
                     )
                 )
                 panel.plot(((sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3), magnitude,
@@ -260,7 +260,8 @@ def plot_amplitude_steps(results, resonator_names, directions=None):
 
     # One legend entry per direction, shared by every amplitude step.
     for sweep_direction, style in (("upward", "-"), ("downward", "--")):
-        if any(sweep_direction in by_direction for by_direction in results["results"].values()):
+        if any(sweep_direction in by_direction
+               for by_direction in ms_module_output["results"].values()):
             panels[0].plot([], [], color="0.3", ls=style, label=sweep_direction)
     panels[0].legend(fontsize=7)
 
@@ -352,7 +353,7 @@ from example_plotting_multisweep import amplitude_colorbar
 from rfmux.tuning import normalized_arc_speed
 
 
-def plot_derivative_test(results, names):
+def plot_derivative_test(ms_module_output, names):
     """Plot changes in arc speed for each step and direction."""
     fig, axes = plt.subplots(
         1, len(names), figsize=(3.1 * len(names), 3.2),
@@ -361,9 +362,9 @@ def plot_derivative_test(results, names):
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = collect_amplitude_iterations_for(results, name)
+        iterations = collect_amplitude_iterations_for(ms_module_output, name)
         all_amplitudes = [section["sweep_amplitude"]
-                          for by_direction in results["results"].values()
+                          for by_direction in ms_module_output["results"].values()
                           for sections in by_direction.values() for section in sections.values()]
         _, mappable = amplitude_colours(all_amplitudes)
         for entries in iterations.values():
@@ -385,7 +386,8 @@ def plot_derivative_test(results, names):
 
     # One legend entry per direction, shared by every amplitude step.
     for sweep_direction, style in (("upward", "-"), ("downward", "--")):
-        if any(sweep_direction in by_direction for by_direction in results["results"].values()):
+        if any(sweep_direction in by_direction
+               for by_direction in ms_module_output["results"].values()):
             panels[0].plot([], [], color="0.3", ls=style, label=sweep_direction)
     panels[0].legend(fontsize=7)
 
@@ -428,9 +430,11 @@ Start with noise gating disabled:
 
 ```python
 
-def plot_bifurcation_verdict_map(results, noise_gate_factor=50.0, title=None):
+def plot_bifurcation_verdict_map(
+    ms_module_output, noise_gate_factor=50.0, title=None
+):
     """Show the derivative verdict as prominence and noise thresholds change."""
-    steps = results["results"]
+    steps = ms_module_output["results"]
     first_step = next(iter(steps.values()))
     names = list(next(iter(first_step.values())))
     factors = np.linspace(0.02, 1.0, 80)
@@ -510,7 +514,7 @@ plot_bifurcation_verdict_map(
 ### Inspect the threshold on individual traces
 
 ```python
-def plot_prominence_bar(results, names,
+def plot_prominence_bar(ms_module_output, names,
                         spike_prominence_factor=0.5,
                         noise_gate_factor=50.0):
     """The bar each verdict was read off, on the steps that settled it.
@@ -522,7 +526,7 @@ def plot_prominence_bar(results, names,
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = collect_amplitude_iterations_for(results, name)
+        iterations = collect_amplitude_iterations_for(ms_module_output, name)
         choice = find_bias_amplitude(iterations, method="derivative",
             spike_prominence_factor=spike_prominence_factor,
             noise_gate_factor=noise_gate_factor)
@@ -615,7 +619,9 @@ from rfmux.tuning import bifurcated_by_hysteresis
 ```
 
 ```python
-def plot_magnitude_hysteresis(results, names, max_discrepancy=0.1):
+def plot_magnitude_hysteresis(
+    ms_module_output, names, max_discrepancy=0.1
+):
     """The two directions' |S21| at the loudest step and their difference.
     """
     fig, axes = plt.subplots(
@@ -624,7 +630,7 @@ def plot_magnitude_hysteresis(results, names, max_discrepancy=0.1):
     )
 
     for column, name in enumerate(names):
-        iterations = collect_amplitude_iterations_for(results, name)
+        iterations = collect_amplitude_iterations_for(ms_module_output, name)
         amplitude_step = iterations[max(iterations)]
         top, bottom = axes[0][column], axes[1][column]
 
@@ -746,7 +752,7 @@ The methods may choose different samples. Compare them across the array,
 using each resonator’s selected amplitude and the upward sweep:
 
 ```python
-def plot_frequency_methods(results, names, direction="upward"):
+def plot_frequency_methods(ms_module_output, names, direction="upward"):
     """Compare frequency choices on each resonator’s selected sweep."""
     fig, axes = plt.subplots(
         1, len(names), figsize=(3.2 * len(names), 3.4),
@@ -755,7 +761,7 @@ def plot_frequency_methods(results, names, direction="upward"):
     panels = axes[0]
 
     for panel, name in zip(panels, names):
-        iterations = collect_amplitude_iterations_for(results, name)
+        iterations = collect_amplitude_iterations_for(ms_module_output, name)
         choice = find_bias_amplitude(iterations)
         entry = iterations[choice.iteration][direction]
 
@@ -1058,9 +1064,11 @@ from example_plotting_multisweep import amplitude_colorbar
 
 from rfmux.core.transferfunctions import convert_roc_to_dbm
 
-def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
+def plot_bias_points_on_sweeps(
+    ms_module_output: dict, *, direction="upward"
+) -> None:
     """Plot sweeps and operating points from the embedded bias report."""
-    report = BiasReport.from_dict(results["bias_report"])
+    report = BiasReport.from_dict(ms_module_output["bias_report"])
     names = [finding.name for finding in report.findings]
     fig, axes = plt.subplots(
         1, len(names), figsize=(3.2 * len(names), 3.5),
@@ -1069,9 +1077,11 @@ def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
     panels = axes[0]
 
     for panel, finding in zip(panels, report.findings):
-        iterations = collect_amplitude_iterations_for(results, finding.name)
+        iterations = collect_amplitude_iterations_for(
+            ms_module_output, finding.name
+        )
         all_amplitudes = [section["sweep_amplitude"]
-                          for by_direction in results["results"].values()
+                          for by_direction in ms_module_output["results"].values()
                           for sections in by_direction.values() for section in sections.values()]
         _, mappable = amplitude_colours(all_amplitudes)
         for iteration, entries in iterations.items():
@@ -1105,7 +1115,8 @@ def plot_bias_points_on_sweeps(results: dict, *, direction="upward") -> None:
 
     # One legend entry per direction, shared by every amplitude step.
     for sweep_direction, style in (("upward", "-"), ("downward", "--")):
-        if any(sweep_direction in by_direction for by_direction in results["results"].values()):
+        if any(sweep_direction in by_direction
+               for by_direction in ms_module_output["results"].values()):
             panels[0].plot([], [], color="0.3", ls=style, label=sweep_direction)
     panels[0].legend(fontsize=7)
 

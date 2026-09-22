@@ -313,7 +313,7 @@ What this deletes from the GUI:
   `find_max_derivative_frequency`, `compute_*_derivative_spline`. Lifted
   wholesale out of `algorithms/measurement/bias_kids.py`, which today mixes
   pure analysis with one hardware call. Signature becomes
-  `find_bias_points(sweeps, catalog, config) -> BiasReport` — returning results
+  `find_bias_points(ms_module_output, catalog, config) -> BiasReport` — returning results
   rather than mutating in place, with the caller deciding when to merge.
   (`apply_bias` stays in the algorithms layer; it is hardware programming and
   belongs there.)
@@ -374,7 +374,7 @@ A script then reads roughly:
 
 ```python
 catalog, sweeps = await crs.multisweep(config=sweep_cfg, catalog=catalog, module=1)
-report = find_bias_points(sweeps, catalog, bias_cfg)
+report = find_bias_points(ms_module_output, catalog, bias_cfg)
 catalog.update_from(report.catalog)
 await crs.apply_bias(module=1, catalog=catalog)
 store.save(outdir, catalog, sweeps)

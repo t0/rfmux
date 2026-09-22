@@ -29,8 +29,8 @@ whole sequence against the standard mock array over RPC, in the quick tier).
 | Amplitude schedule | `AmplitudeSchedule()` / `(x)` / `.explicit()` / `.ramp()` / `.multiplicative()` | frozen dataclass | `.describe(catalog, n_directions, dac_scale_dbm)` and `.validate(...)` for a live dialog preview; `.resolve_steps()` |
 | Multisweep | one `crs.multisweep(catalog, span_hz=, npoints_per_sweep=, nsamps=, amp=schedule, sweep_direction=(...), progress_callback=, data_callback=, sweep_callback=, save=, label=)` | container, `[module_id]["results"][step][direction][name]` with seven measurement keys | `sweep_callback(record)` once per sweep (`step, direction, amplitudes, factor, completed, total`); `data_callback(module, partial, step, direction)`; progress across the whole call |
 | Read sweeps | `collect_amplitude_iterations_for`, `get_amplitudes_at_iteration`, `find_iteration_matching_amplitude` | plain dicts | the accessors the design doc's `SweepSet` was going to be |
-| Fit | `fit_sweeps(module_sweeps, models=, progress_callback=(completed,total), ...)`, `fit_sweeps_at_bias_amplitude(...)` | `FitReport`; params written to `entry["fits"][model]` | `skewed_model_magnitude(entry)`, `nonlinear_model_iq(entry)`, `centered_iq`, `gain_corrected_iq` rebuild curves; `failed_because` per fit |
-| Find bias | `find_bias_points(module_sweeps, amplitude_method=, frequency_method=, spike_prominence_factor=, noise_gate_factor=, max_discrepancy=, compare=, max_distance_hz=)` | `BiasReport`: a new `catalog`, `findings` with `checks` per step, `flagged`; written into the sweeps as `bias_report` | `BifurcationCheck.metric`/`threshold` per step for a diagnostics view; `iq_arc_speed`, `normalized_arc_speed` |
+| Fit | `fit_sweeps(ms_module_output, models=, progress_callback=(completed,total), ...)`, `fit_sweeps_at_bias_amplitude(...)` | `FitReport`; params written to `entry["fits"][model]` | `skewed_model_magnitude(entry)`, `nonlinear_model_iq(entry)`, `centered_iq`, `gain_corrected_iq` rebuild curves; `failed_because` per fit |
+| Find bias | `find_bias_points(ms_module_output, amplitude_method=, frequency_method=, spike_prominence_factor=, noise_gate_factor=, max_discrepancy=, compare=, max_distance_hz=)` | `BiasReport`: a new `catalog`, `findings` with `checks` per step, `flagged`; written into the sweeps as `bias_report` | `BifurcationCheck.metric`/`threshold` per step for a diagnostics view; `iq_arc_speed`, `normalized_arc_speed` |
 | Apply | `await crs.apply_bias(report.catalog)` | nothing; raises if it cannot | owns the NCO |
 | Files | `store.save/load/maybe_save`, `set_output_directory`, `set_created_by` | pickle of builtins plus ndarrays, `file_metadata` inside each module block | analyses re-save in place |
 
@@ -899,7 +899,7 @@ are now strict xfails that name the stage which clears them.
   amplitude colours, rather than stacked bars that hide each other. `a`
   carries a `BIFURCATION_A` line.
 
-  The reading is a library call, not a walk: `collect_fit_params(module_sweeps,
+  The reading is a library call, not a walk: `collect_fit_params(ms_module_output,
   model)` in `rfmux/tuning/fits.py` returns one row per fitted sweep --
   `name`, `iteration`, `direction`, `amplitude`, `params`, `errors`,
   `failed_because` -- so a notebook makes the same figures from the same rows,

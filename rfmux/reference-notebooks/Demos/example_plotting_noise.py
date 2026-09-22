@@ -2,7 +2,7 @@
 
     block = store.load(path)[module_id]
     plot_iq_panels(block)  # calibration sweeps from the catalog snapshot
-    plot_iq_panels(block, sweeps=verification[module_id])
+    plot_iq_panels(block, ms_module_output=verification[module_id])
     plot_timestreams(block, units="counts")
     plot_psds(block, stream="pfb", dual_sideband=True)
 
@@ -65,22 +65,30 @@ def _panels(records: dict, title: str) -> Iterator[tuple]:
         yield fig, axes, batch
 
 
-def _bias_sweep(block: dict, name: str, record: dict, sweeps: dict | None,
+def _bias_sweep(block: dict, name: str, record: dict,
+                ms_module_output: dict | None,
                 direction: str, catalog: ResonatorCatalog | None) -> dict:
-    if sweeps is not None:
-        if sweeps.get("measurement") != "multisweep" or sweeps["module"] != block["module"]:
-            raise ValueError("sweeps must be a multisweep block for the same module.")
+    if ms_module_output is not None:
+        if (ms_module_output.get("measurement") != "multisweep"
+                or ms_module_output["module"] != block["module"]):
+            raise ValueError(
+                "ms_module_output must be multisweep output for the same module."
+            )
         if record["bias_amplitude"] is None:
             raise ValueError(f"{name} has no measured amplitude for sweep matching.")
         by_direction, _ = find_iteration_matching_amplitude(
-            sweeps, name, record["bias_amplitude"])
+            ms_module_output, name, record["bias_amplitude"])
         sweep = by_direction[direction]
     else:
         if catalog is None:
-            raise ValueError("No catalog snapshot; supply sweeps= for the IQ overlay.")
+            raise ValueError(
+                "No catalog snapshot; supply ms_module_output= for the IQ overlay."
+            )
         sweep = catalog[name].bias.bias_sweep
         if sweep is None:
-            raise ValueError(f"{name} has no stored bias sweep; supply sweeps=.")
+            raise ValueError(
+                f"{name} has no stored bias sweep; supply ms_module_output=."
+            )
     amplitude = sweep.get("sweep_amplitude")
     if (amplitude is None or record["bias_amplitude"] is None or not np.isclose(
             amplitude, record["bias_amplitude"], rtol=BIAS_AMPLITUDE_RTOL, atol=0)):
@@ -89,7 +97,8 @@ def _bias_sweep(block: dict, name: str, record: dict, sweeps: dict | None,
 
 
 def plot_iq_panels(
-    block: dict, *, sweeps: dict | None = None, names: Sequence[str] | str | None = None,
+    block: dict, *, ms_module_output: dict | None = None,
+    names: Sequence[str] | str | None = None,
     stream: str = "slow", units: str = "volts", direction: str = "upward",
     title: str | None = None,
 ) -> list[plt.Figure]:
@@ -97,9 +106,14 @@ def plot_iq_panels(
     records = _records(block, names, stream)
     factor = _factor(units)
     snapshot = block["call_params"].get("catalog")
-    catalog = ResonatorCatalog.from_dict(snapshot) if sweeps is None and snapshot else None
-    traces = {name: _bias_sweep(block, name, record, sweeps, direction, catalog)
-              for name, record in records.items()}
+    catalog = (ResonatorCatalog.from_dict(snapshot)
+               if ms_module_output is None and snapshot else None)
+    traces = {
+        name: _bias_sweep(
+            block, name, record, ms_module_output, direction, catalog
+        )
+        for name, record in records.items()
+    }
     figures = []
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} noise on bias sweeps"):
         for ax, name in zip(axes, batch):

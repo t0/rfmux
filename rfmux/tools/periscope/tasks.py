@@ -601,10 +601,10 @@ class RunFitsTask(QtCore.QThread):
     ``fit_sweeps`` does -- so there is nothing to hand back but the report.
     """
 
-    def __init__(self, module_sweeps: dict, models, amplitude_choice,
+    def __init__(self, ms_module_output: dict, models, amplitude_choice,
                  signals: RunFitsSignals):
         super().__init__()
-        self.module_sweeps = module_sweeps
+        self.ms_module_output = ms_module_output
         self.models = tuple(models)
         # None fits every sweep, "bias" each resonator's own bias amplitude,
         # and an integer one amplitude step.
@@ -617,11 +617,11 @@ class RunFitsTask(QtCore.QThread):
             # autosave cannot put a second copy in a second place.
             if self.amplitude_choice == "bias":
                 report = fit_sweeps_at_bias_amplitude(
-                    self.module_sweeps, models=self.models, save=False,
+                    self.ms_module_output, models=self.models, save=False,
                     progress_callback=self._progress)
             else:
                 report = fit_sweeps(
-                    self.module_sweeps, models=self.models,
+                    self.ms_module_output, models=self.models,
                     iterations=self.amplitude_choice,
                     save=False, progress_callback=self._progress)
         except Exception as e:
@@ -652,10 +652,10 @@ class FindBiasTask(QtCore.QThread):
     ``bias_report``; the panel does the saving.
     """
 
-    def __init__(self, module_sweeps: dict, parameters: dict,
+    def __init__(self, ms_module_output: dict, parameters: dict,
                  signals: FindBiasSignals):
         super().__init__()
-        self.module_sweeps = module_sweeps
+        self.ms_module_output = ms_module_output
         self.parameters = dict(parameters)
         self.signals = signals
 
@@ -663,7 +663,7 @@ class FindBiasTask(QtCore.QThread):
         try:
             # save=False: the panel re-saves through store, so the finder's
             # autosave cannot put a second copy in a second place.
-            report = find_bias_points(self.module_sweeps, save=False,
+            report = find_bias_points(self.ms_module_output, save=False,
                                       **self.parameters)
         except Exception as e:
             traceback.print_exc(file=sys.stderr)

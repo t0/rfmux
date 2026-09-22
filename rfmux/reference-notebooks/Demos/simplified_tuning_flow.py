@@ -152,15 +152,15 @@ async def run_algorithm_flow(
     print(f"Saved initial multisweep: {store.saved_path(initial[module_id])}")
 
     print(f"3. Amplitude scan: {SCHEDULE.nsteps} levels, both directions", flush=True)
-    sweeps = await crs.multisweep(
+    multisweep_output = await crs.multisweep(
         catalog, **MULTISWEEP_PARAMS, amp=SCHEDULE,
         sweep_direction=("upward", "downward"),
         save=True, label="tuning_amplitudes")
-    module_sweeps = sweeps[module_id]
+    ms_module_output = multisweep_output[module_id]
     report = find_bias_points(
-        module_sweeps, **BIAS_SETTINGS,
+        ms_module_output, **BIAS_SETTINGS,
         amplitude_method="derivative" if created_mock else "both", save=True)
-    print(f"Saved amplitude scan and bias report: {store.saved_path(module_sweeps)}")
+    print(f"Saved amplitude scan and bias report: {store.saved_path(ms_module_output)}")
     print(f"Bias report: {len(report.findings)} points, {len(report.flagged)} flagged")
     for finding in report.findings:
         print(f"  {finding.name}: amplitude {finding.amplitude:g}, "

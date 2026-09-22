@@ -12,16 +12,16 @@ class CollisionTask(QtCore.QThread):
     completed = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
 
-    def __init__(self, block: dict, parameters: dict,
+    def __init__(self, ms_module_output: dict, parameters: dict,
                  parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
-        self.block = block
+        self.ms_module_output = ms_module_output
         self.parameters = parameters
 
     def run(self) -> None:
         try:
             names = find_sweeps_with_nearby_resonances(
-                self.block, **self.parameters)
+                self.ms_module_output, **self.parameters)
         except Exception as exc:
             self.error.emit(f"{type(exc).__name__}: {exc}")
         else:

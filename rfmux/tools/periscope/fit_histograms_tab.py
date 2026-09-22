@@ -44,8 +44,8 @@ NBINS = 30
 class FitHistogramsTab(QtWidgets.QWidget):
     """A scatter of ``fr`` and a histogram per parameter, over a whole module.
 
-    :meth:`show_sweeps` hands it the module block to read; it redraws itself
-    when its toolbar's model or amplitude choice changes.
+    :meth:`show_sweeps` hands it one module's multisweep output; it redraws
+    itself when its toolbar's model or amplitude choice changes.
     """
 
     def __init__(self, parent=None):
@@ -66,14 +66,14 @@ class FitHistogramsTab(QtWidgets.QWidget):
 
     # ── what it is showing ───────────────────────────────────────────────────
 
-    def show_sweeps(self, sweeps, amplitude_to_color, dark_mode: bool,
+    def show_sweeps(self, ms_module_output, amplitude_to_color, dark_mode: bool,
                     bias_by_name: dict) -> None:
-        """Draw *sweeps*, one module's block, with the grids' amplitude colours.
+        """Draw one module's multisweep output with the grids' amplitude colours.
 
         *bias_by_name* is ``{name: BiasFinding}``, which is what the toolbar's
         "at bias" choice means: a different step for each resonator.
         """
-        self._sweeps = sweeps
+        self._sweeps = ms_module_output
         self._amplitude_to_color = amplitude_to_color
         self._dark_mode = dark_mode
         self._bias_by_name = bias_by_name

@@ -157,15 +157,15 @@ it already is at the simulator's own bias power.
 
 ```python
 t = time.perf_counter()
-sweeps = await crs.multisweep(
+multisweep_output = await crs.multisweep(
     catalog, span_hz=100e3, npoints_per_sweep=101, nsamps=10, save=False,
 )
 timings["multisweep"] = time.perf_counter() - t
-module_sweeps = sweeps[crs.module[MODULE].index()]
+ms_module_output = multisweep_output[crs.module[MODULE].index()]
 
-report = fit_sweeps(module_sweeps)
+report = fit_sweeps(ms_module_output)
 print(report)
-sections = module_sweeps["results"][0]["upward"]
+sections = ms_module_output["results"][0]["upward"]
 print(f"\n{'name':6s} {'fr MHz':>12s} {'Qr':>9s} {'Qi':>9s} {'depth dB':>9s} {'a':>7s}")
 for name in catalog.names():
     s = sections[name]

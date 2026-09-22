@@ -3,9 +3,9 @@
 
     import example_plotting_multisweep as msplots
 
-    module_sweeps = sweeps[crs.module[1].index()]
-    msplots.plot_magnitude_panels(module_sweeps)
-    msplots.plot_iq_panels(module_sweeps)
+    ms_module_output = multisweep_output[crs.module[1].index()]
+    msplots.plot_magnitude_panels(ms_module_output)
+    msplots.plot_iq_panels(ms_module_output)
 
 Each resonator gets a panel, with amplitude steps coloured by drive and sweep
 directions distinguished by line style. Select traces with ``names``,
@@ -134,17 +134,19 @@ def sweep_iq(sweep, normalize=True):
     return sweep["iq_counts"]
 
 
-def section_names(results):
-    """Read section names from the first sweep step; require a single module block."""
+def section_names(ms_module_output):
+    """Read section names from one module's multisweep output."""
     try:
-        iterations = results["results"]
+        iterations = ms_module_output["results"]
     except (TypeError, KeyError):
-        keys = list(results) if isinstance(results, dict) else type(results).__name__
+        keys = (list(ms_module_output) if isinstance(ms_module_output, dict)
+                else type(ms_module_output).__name__)
         raise TypeError(
-            "Expected one module's sweep results — the value of "
-            "sweeps[module_id] — rather than the dict a sweep macro returns "
+            "Expected one module's multisweep output — the value of "
+            "multisweep_output[module_id] — rather than the whole output "
             f"keyed by module identifier. Got {keys}. If there is only one "
-            "module in play, sweeps[list(sweeps)[0]] is the thing to pass."
+            "module in play, multisweep_output[list(multisweep_output)[0]] "
+            "is the thing to pass."
         ) from None
 
     for by_direction in iterations.values():
@@ -162,11 +164,11 @@ def _as_list(value):
     return list(value)
 
 
-def _collect_traces(results, names, iterations, directions):
+def _collect_traces(ms_module_output, names, iterations, directions):
     """Select sweeps as ``{name: [(iteration, direction, sweep), ...]}``."""
     # Always called, even when names were given, so that being handed the
     # whole per-module container is caught here with a sentence about it.
-    measured_names = section_names(results)
+    measured_names = section_names(ms_module_output)
     if not measured_names:
         raise ValueError("This measurement holds no sweeps, so there is nothing to draw.")
     wanted_names = _as_list(names) or measured_names
@@ -178,7 +180,7 @@ def _collect_traces(results, names, iterations, directions):
         traces = []
         # collect_amplitude_iterations_for raises a helpful KeyError naming the
         # sections in play, so a mistyped resonator name is already covered.
-        measured = collect_amplitude_iterations_for(results, name)
+        measured = collect_amplitude_iterations_for(ms_module_output, name)
         for iteration, by_direction in measured.items():
             if wanted_iterations is not None and iteration not in wanted_iterations:
                 continue
@@ -189,7 +191,9 @@ def _collect_traces(results, names, iterations, directions):
             collected[name] = traces
 
     if not collected:
-        available = collect_amplitude_iterations_for(results, wanted_names[0])
+        available = collect_amplitude_iterations_for(
+            ms_module_output, wanted_names[0]
+        )
         directions_swept = sorted(
             {d for by_direction in available.values() for d in by_direction}
         )
@@ -254,7 +258,7 @@ def _panel_grid(count, ncols, panel_size):
 
 
 def _plot_panels(
-    results,
+    ms_module_output,
     draw,
     xlabel,
     ylabel,
@@ -275,8 +279,12 @@ def _plot_panels(
     The callback receives ``panel, sweep, colour, style, normalize, highlight``.
     Set ``equal_aspect`` for IQ plots.
     """
-    traces_by_name = _collect_traces(results, names, iterations, directions)
-    bias_points = _catalog_bias_points(results) if overlay_bias else {}
+    traces_by_name = _collect_traces(
+        ms_module_output, names, iterations, directions
+    )
+    bias_points = (
+        _catalog_bias_points(ms_module_output) if overlay_bias else {}
+    )
     every_trace = [
         sweep for traces in traces_by_name.values() for _, _, sweep in traces
     ]
@@ -307,9 +315,9 @@ def _plot_panels(
         )
 
 
-def _catalog_bias_points(results):
+def _catalog_bias_points(ms_module_output):
     """Bias points in the catalog snapshot this multisweep was called with."""
-    catalog = results.get("call_params", {}).get("catalog")
+    catalog = ms_module_output.get("call_params", {}).get("catalog")
     if catalog is None:
         return {}
     return {
@@ -422,7 +430,7 @@ def _draw_figure(
 
 
 def plot_magnitude_panels(
-    results,
+    ms_module_output,
     names=None,
     iterations=None,
     directions=("upward", "downward"),
@@ -436,8 +444,8 @@ def plot_magnitude_panels(
     """|S21| against frequency offset, a panel per resonator.
 
     Args:
-        results: one module's sweep results — the value of ``sweeps[module_id]``
-            for whatever ``multisweep`` returned, at whatever width.
+        ms_module_output: one module's output from ``multisweep``, at whatever
+            sweep width was requested.
         names: which sweep sections to draw. A name, a list of names, or
             ``None`` for the whole array.
         iterations: which amplitude steps to draw. A step number, a list of
@@ -467,8 +475,8 @@ def plot_magnitude_panels(
         ValueError: if the selection matches no sweeps, or normalization
             lacks a finite DAC scale or a finite, positive drive amplitude.
     """
-    section_names(results)  # Keep the module/container error explicit.
-    dac_scale = results.get("dac_scale_dbm")
+    section_names(ms_module_output)  # Keep the module/container error explicit.
+    dac_scale = ms_module_output.get("dac_scale_dbm")
     if normalize and (dac_scale is None or not np.isfinite(dac_scale)):
         raise ValueError(
             "Drive-referenced dB requires a finite dac_scale_dbm; "
@@ -492,7 +500,7 @@ def plot_magnitude_panels(
         )
 
     _plot_panels(
-        results,
+        ms_module_output,
         draw,
         xlabel="$f - f_\\mathrm{centre}$ [kHz]",
         ylabel="|S21| [dB, drive-referenced]" if normalize else "received power [dBm]",
@@ -510,7 +518,7 @@ def plot_magnitude_panels(
 
 
 def plot_iq_panels(
-    results,
+    ms_module_output,
     names=None,
     iterations=None,
     directions=("upward", "downward"),
@@ -533,7 +541,7 @@ def plot_iq_panels(
                    color=colour, ls=linestyle)
 
     _plot_panels(
-        results,
+        ms_module_output,
         draw,
         xlabel="I [counts / DAC amplitude]" if normalize else "I [counts]",
         ylabel="Q [counts / DAC amplitude]" if normalize else "Q [counts]",

@@ -709,7 +709,7 @@ def find_resonances_in_netanal(
 
 
 def find_sweeps_with_nearby_resonances(
-    module_sweeps,
+    ms_module_output,
     min_separation_hz: float,
     *,
     min_prominence_db: float = 1.0,
@@ -721,7 +721,7 @@ def find_sweeps_with_nearby_resonances(
     """List multisweep sections containing a pair of nearby resonance dips.
 
     Args:
-        module_sweeps: one module's multisweep block.
+        ms_module_output: one module's output from ``multisweep``.
         min_separation_hz: flag pairs separated by this distance or less.
             Infinity flags any second dip in the window.
         min_prominence_db: minimum dip prominence, in dB.
@@ -751,12 +751,12 @@ def find_sweeps_with_nearby_resonances(
     if min_dip_spacing_hz <= 0:
         raise ValueError(f"min_dip_spacing_hz={min_dip_spacing_hz}: must be positive.")
 
-    _refuse_container(module_sweeps)
+    _refuse_container(ms_module_output)
     try:
-        results = module_sweeps["results"]
+        results = ms_module_output["results"]
     except (TypeError, KeyError):
         raise TypeError(
-            "Expected one module's sweep result (with 'results' and "
+            "Expected one module's multisweep output (with 'results' and "
             "'call_params'), not one of its parts."
         ) from None
 

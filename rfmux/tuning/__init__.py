@@ -8,9 +8,10 @@ returned by ``crs.take_netanal`` or ``crs.multisweep``::
     netanal = await crs.take_netanal(module=2, amp=0.001, fmin=1e9, fmax=2e9)
     search = find_resonances_in_netanal(netanal[crs.module[2].index()])
     catalog = search.to_catalog(module=2, amplitude=0.001)
-    sweeps = await crs.multisweep(catalog)
+    multisweep_output = await crs.multisweep(catalog)
+    ms_module_output = multisweep_output[crs.module[2].index()]
     report = find_bias_points(
-        sweeps[crs.module[2].index()], amplitude_method="derivative")
+        ms_module_output, amplitude_method="derivative")
 
 ``report.catalog`` contains the chosen bias points; ``report.flagged`` lists
 points needing review. Apply them with ``await crs.apply_bias(report.catalog)``.

@@ -267,7 +267,7 @@ Here we supply the saved verification block. For a noise file acquired from a
 `bias_sweep` from its catalog snapshot, as in the simplified tuning flow.
 
 ```python
-noiseplots.plot_iq_panels(block, sweeps=sweep_block)
+noiseplots.plot_iq_panels(block, ms_module_output=sweep_block)
 ```
 
 ## 6. Timestreams and PSDs

@@ -174,13 +174,13 @@ This call has one entry, since we only swept one module. A call across four modu
 Each entry contains that module's data and measurement settings.
 
 ```python
-module_sweeps = ms[crs.module[MODULE].index()]
+ms_module_output = ms[crs.module[MODULE].index()]
 
-print(f"module output  {list(module_sweeps)}")
-print(f"module         {module_sweeps['module']}")
-print(f"span_hz        {module_sweeps['call_params']['span_hz']}")
-print(f"amplitude steps {list(module_sweeps['results'])}")
-print(f"directions     {list(module_sweeps['results'][0])}")
+print(f"module output  {list(ms_module_output)}")
+print(f"module         {ms_module_output['module']}")
+print(f"span_hz        {ms_module_output['call_params']['span_hz']}")
+print(f"amplitude steps {list(ms_module_output['results'])}")
+print(f"directions     {list(ms_module_output['results'][0])}")
 ```
 
 `results` is keyed by amplitude step, frequency direction, then section name.
@@ -191,7 +191,7 @@ This sweep has one amplitude step, numbered `0`:
 The same structure holds for multiple amplitudes and directions.
 
 ```python
-sweep_sections = module_sweeps["results"][0]["upward"]
+sweep_sections = ms_module_output["results"][0]["upward"]
 
 print(f"{len(sweep_sections)} sweep sections, keyed by resonator name: "
       f"{list(sweep_sections)[:4]} …")
@@ -616,10 +616,10 @@ def amplitude_colours(amplitudes):
     return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
 
 
-def plot_amplitude_iterations(results, name):
+def plot_amplitude_iterations(ms_module_output, name):
     """Plot every amplitude step and available direction for one resonator."""
     # Keep the step → direction → resonator structure visible as we read it.
-    steps = results["results"]
+    steps = ms_module_output["results"]
     amplitudes = [
         sections[name]["sweep_amplitude"]
         for by_direction in steps.values()
@@ -645,7 +645,7 @@ def plot_amplitude_iterations(results, name):
             magnitude = (
                 convert_roc_to_dbm(np.abs(section["iq_counts"]))
                 - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
                 )
             )
 
@@ -693,9 +693,9 @@ from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
 
-def plot_sections_at_iteration(results, iteration, ncols=5):
+def plot_sections_at_iteration(ms_module_output, iteration, ncols=5):
     """Plot every direction at one step, with one panel per resonator."""
-    by_direction = results["results"][iteration]
+    by_direction = ms_module_output["results"][iteration]
     # The same resonators occur in each direction. Use the first direction
     # to get panel names; this also works for downward-only measurements.
     first_direction = next(iter(by_direction))
@@ -727,7 +727,7 @@ def plot_sections_at_iteration(results, iteration, ncols=5):
             magnitude = (
                 convert_roc_to_dbm(np.abs(section["iq_counts"]))
                 - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
                 )
             )
             panel.plot(offset_khz, magnitude, lw=1.0,

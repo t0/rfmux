@@ -2,6 +2,7 @@
 
 import ast
 import importlib.util
+import inspect
 from pathlib import Path
 import re
 from types import SimpleNamespace
@@ -30,7 +31,7 @@ def plotters(monkeypatch):
     monkeypatch.syspath_prepend(str(DEMOS))
     monkeypatch.setattr(plt, "show", lambda: None)
     modules = {}
-    for name in ("multisweep", "bias", "netanal", "noise"):
+    for name in ("multisweep", "bias", "fits", "netanal", "noise"):
         spec = importlib.util.spec_from_file_location(
             name, DEMOS / f"example_plotting_{name}.py"
         )
@@ -39,6 +40,29 @@ def plotters(monkeypatch):
         modules[name] = module
     yield SimpleNamespace(**modules)
     plt.close("all")
+
+
+def test_multisweep_plotters_name_the_module_output_consistently(plotters):
+    functions = (
+        plotters.multisweep.section_names,
+        plotters.multisweep.plot_magnitude_panels,
+        plotters.multisweep.plot_iq_panels,
+        plotters.bias.plot_bias_points,
+        plotters.bias.plot_bifurcation_checks,
+        plotters.bias.plot_hysteresis_checks,
+        plotters.bias.plot_bifurcation_verdict_map,
+        plotters.bias.plot_arc_speed_panels,
+        plotters.fits.plot_fit_panels,
+        plotters.fits.plot_fitted_parameters,
+    )
+
+    assert {
+        next(iter(inspect.signature(function).parameters))
+        for function in functions
+    } == {"ms_module_output"}
+    noise_parameters = inspect.signature(plotters.noise.plot_iq_panels).parameters
+    assert "ms_module_output" in noise_parameters
+    assert "sweeps" not in noise_parameters
 
 
 def measurement(scale: float = 0.0) -> dict:
@@ -440,8 +464,13 @@ def test_noise_iq_overlay_uses_same_units_and_measured_tone(plotters, units, exp
         for stream in ("slow", "pfb"):
             data = block["results"]["resonators"]["R1"][f"{stream}_data"]
             data["iq_volts"] = data.pop("iq_counts") * VOLTS_PER_ROC
-    sweeps = dict(measurement(), measurement="multisweep", module=1) if explicit else None
-    figures = plotters.noise.plot_iq_panels(block, units=units, sweeps=sweeps)
+    ms_module_output = (
+        dict(measurement(), measurement="multisweep", module=1)
+        if explicit else None
+    )
+    figures = plotters.noise.plot_iq_panels(
+        block, units=units, ms_module_output=ms_module_output
+    )
     panel = figures[0].axes[0]
     factor = VOLTS_PER_ROC if units == "volts" else 1.
     sweep = measurement()["results"][0]["upward"]["R1"]
@@ -455,9 +484,11 @@ def test_noise_iq_overlay_uses_same_units_and_measured_tone(plotters, units, exp
 def test_noise_iq_refuses_nearest_sweep_at_wrong_drive(plotters):
     block = noise_measurement()
     block["results"]["resonators"]["R1"]["bias_amplitude"] = .03
-    sweeps = dict(measurement(), measurement="multisweep", module=1)
+    ms_module_output = dict(measurement(), measurement="multisweep", module=1)
     with pytest.raises(ValueError, match="amplitudes must match"):
-        plotters.noise.plot_iq_panels(block, sweeps=sweeps)
+        plotters.noise.plot_iq_panels(
+            block, ms_module_output=ms_module_output
+        )
 
 
 @pytest.mark.parametrize("stream", ["slow", "pfb"])
@@ -510,7 +541,7 @@ def test_noise_plots_explain_missing_pfb(plotters):
 def test_noise_iq_explicit_channels_need_supplied_sweep(plotters):
     block = noise_measurement()
     block["call_params"]["catalog"] = None
-    with pytest.raises(ValueError, match="supply sweeps="):
+    with pytest.raises(ValueError, match="supply ms_module_output="):
         plotters.noise.plot_iq_panels(block)
 
 

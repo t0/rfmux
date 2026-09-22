@@ -246,9 +246,9 @@ def amplitude_colours(amplitudes):
     return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
 
 
-def plot_sections_at_iteration(results, iteration, ncols=4):
+def plot_sections_at_iteration(ms_module_output, iteration, ncols=4):
     """Plot every direction at one step, with one panel per resonator."""
-    by_direction = results["results"][iteration]
+    by_direction = ms_module_output["results"][iteration]
     # The same resonators occur in each direction. Use the first direction
     # to get panel names; this also works for downward-only measurements.
     first_direction = next(iter(by_direction))
@@ -280,7 +280,7 @@ def plot_sections_at_iteration(results, iteration, ncols=4):
             magnitude = (
                 convert_roc_to_dbm(np.abs(section["iq_counts"]))
                 - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
                 )
             )
             panel.plot(offset_khz, magnitude, lw=1.0,
@@ -319,10 +319,10 @@ from rfmux.core.transferfunctions import (
     convert_roc_to_dbm, convert_dacunits_to_dbm,
 )
 
-def plot_amplitude_iterations(results, name):
+def plot_amplitude_iterations(ms_module_output, name):
     """Plot every amplitude step and available direction for one resonator."""
     # Keep the step → direction → resonator structure visible as we read it.
-    steps = results["results"]
+    steps = ms_module_output["results"]
     amplitudes = [
         sections[name]["sweep_amplitude"]
         for by_direction in steps.values()
@@ -348,7 +348,7 @@ def plot_amplitude_iterations(results, name):
             magnitude = (
                 convert_roc_to_dbm(np.abs(section["iq_counts"]))
                 - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], results["dac_scale_dbm"]
+                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
                 )
             )
 
@@ -589,9 +589,9 @@ from rfmux.tuning import (
 )
 
 
-def plot_skewed_fits(results, iteration=0, linewidths=6):
+def plot_skewed_fits(ms_module_output, iteration=0, linewidths=6):
     """Every resonator at one amplitude step, with its skewed fit over it."""
-    by_direction = results["results"][iteration]
+    by_direction = ms_module_output["results"][iteration]
     first_direction = next(iter(by_direction))
     sections = by_direction[first_direction]
     styles = {"upward": "-", "downward": "--"}
@@ -938,12 +938,12 @@ that depth as a reliable estimate.
 ```python
 from example_plotting_multisweep import amplitude_colorbar
 
-def plot_fitted_traces(results, name, linewidths=8):
+def plot_fitted_traces(ms_module_output, name, linewidths=8):
     """One resonator at every amplitude, each trace with its skewed fit over it."""
     # Keep direction with each section so both sweeps can be drawn.
     traces = [
         (direction, sections[name])
-        for by_direction in results["results"].values()
+        for by_direction in ms_module_output["results"].values()
         for direction, sections in by_direction.items()
     ]
     amplitudes = [section["sweep_amplitude"] for direction, section in traces]
@@ -1008,9 +1008,9 @@ Read each parameter from the section’s `fits` dictionary. The plot below uses
 with a separate line style for each direction.
 
 ```python
-def plot_fitted_parameters_vs_amplitude(results, model="skewed"):
+def plot_fitted_parameters_vs_amplitude(ms_module_output, model="skewed"):
     """Plot parameter curves for every resonator and available direction."""
-    steps = results["results"]
+    steps = ms_module_output["results"]
     # Use all measured directions, preserving their measurement order.
     directions = list(dict.fromkeys(
         direction for by_direction in steps.values() for direction in by_direction

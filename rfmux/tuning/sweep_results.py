@@ -4,7 +4,7 @@ Both measurements return ``{module_id: block}``. Each block records the
 measurement type, module, DAC scale, call parameters, and results. A network
 analysis holds one trace; a multisweep holds ``results[step][direction][name]``.
 
-The readers below take one module's block.
+The readers below take one module's multisweep output.
 """
 
 from __future__ import annotations
@@ -288,12 +288,15 @@ def _is_container(obj) -> bool:
     )
 
 
-def _refuse_container(obj, *, what: str = "sweep result", variable: str = "sweeps") -> None:
+def _refuse_container(
+    obj, *, what: str = "multisweep output", variable: str = "multisweep_output"
+) -> None:
     """Raise if handed the container where one module's output was wanted.
 
     *what* and *variable* name the measurement in the message, since every
     driver returns this shape: a netanal handed to the resonance finder wants
-    to be told about ``netanal[module_id]``, not ``sweeps[module_id]``.
+    to be told about ``netanal_output[module_id]``, not
+    ``multisweep_output[module_id]``.
     """
     if _is_container(obj):
         keys = list(obj)
@@ -324,37 +327,40 @@ def _refuse_netanal(obj) -> None:
         )
 
 
-def _iterations(results: Mapping) -> dict:
+def _iterations(ms_module_output: Mapping) -> dict:
     """The ``results`` block, with a useful error when handed the wrong dict."""
-    _refuse_container(results)
-    _refuse_netanal(results)
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
     try:
-        return results["results"]
+        return ms_module_output["results"]
     except (TypeError, KeyError):
         raise TypeError(
-            "Expected one module's sweep result (with 'results' and "
+            "Expected one module's multisweep output (with 'results' and "
             "'call_params'), not one of its parts."
         ) from None
 
 
-def _section_names(results: Mapping) -> list[str]:
+def _section_names(ms_module_output: Mapping) -> list[str]:
     """Every section name that appears in the first sweep, in its order."""
-    for by_direction in _iterations(results).values():
+    for by_direction in _iterations(ms_module_output).values():
         for sections in by_direction.values():
             return list(sections)
     return []
 
 
-def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
+def collect_amplitude_iterations_for(
+    ms_module_output: Mapping, name: str
+) -> dict:
     """Every sweep of one resonator, across the amplitude iterations.
 
     Args:
-        results: what ``multisweep`` returned, for a single module.
+        ms_module_output: one module's output from ``multisweep``.
         name: the resonator or section to pull out.
 
     Returns:
         dict: ``{iteration: {direction: sweep}}`` — the same shape as
-        ``results["results"]``, one resonator deep, in the order measured.
+        ``ms_module_output["results"]``, one resonator deep, in the order
+        measured.
         Measured order, not sorted by amplitude: an ``explicit`` schedule may run
         in any order, and re-sorting silently would lose the order things
         actually happened in.
@@ -363,7 +369,7 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
         KeyError: if *name* was not swept.
     """
     collected = {}
-    for iteration, by_direction in _iterations(results).items():
+    for iteration, by_direction in _iterations(ms_module_output).items():
         entries = {
             direction: sections[name]
             for direction, sections in by_direction.items()
@@ -373,7 +379,7 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
             collected[iteration] = entries
 
     if not collected:
-        available = _section_names(results)
+        available = _section_names(ms_module_output)
         raise KeyError(
             f"{name!r} was not swept. The section names in play are "
             f"{_named(available)}."
@@ -381,14 +387,16 @@ def collect_amplitude_iterations_for(results: Mapping, name: str) -> dict:
     return collected
 
 
-def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
+def get_amplitudes_at_iteration(
+    ms_module_output: Mapping, iteration: int
+) -> dict:
     """What every sweep was probed at on one iteration.
 
     Reads each sweep's own ``sweep_amplitude`` rather than a stored copy, which
     is why the packed dict does not carry one.
 
     Args:
-        results: what ``multisweep`` returned, for a single module.
+        ms_module_output: one module's output from ``multisweep``.
         iteration: which amplitude iteration.
 
     Returns:
@@ -397,7 +405,7 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
     Raises:
         KeyError: if there is no such iteration.
     """
-    iterations = _iterations(results)
+    iterations = _iterations(ms_module_output)
     if iteration not in iterations:
         raise KeyError(
             f"No iteration {iteration}. This result has "
@@ -412,12 +420,12 @@ def get_amplitudes_at_iteration(results: Mapping, iteration: int) -> dict:
 
 
 def find_iteration_matching_amplitude(
-    results: Mapping, name: str, amplitude: float | None = None
+    ms_module_output: Mapping, name: str, amplitude: float | None = None
 ) -> tuple[dict, int]:
     """The sweep of *name* taken closest to *amplitude*.
 
     Args:
-        results: what ``multisweep`` returned, for a single module.
+        ms_module_output: one module's output from ``multisweep``.
         name: whose amplitudes to match against. Required, because a relative
             schedule gives every resonator its own: BOTA walking 1→2→4 µ and
             KOZR walking 3→6→12 µ share an iteration number and nothing else,
@@ -445,13 +453,15 @@ def find_iteration_matching_amplitude(
             result records no catalog to take a bias amplitude from — which
             only a file older than schema_version 6 does.
     """
-    collected = collect_amplitude_iterations_for(results, name)
-    iteration = _iteration_matching_amplitude(results, name, amplitude, collected)
+    collected = collect_amplitude_iterations_for(ms_module_output, name)
+    iteration = _iteration_matching_amplitude(
+        ms_module_output, name, amplitude, collected
+    )
     return collected[iteration], iteration
 
 
 def _iteration_matching_amplitude(
-    results: Mapping,
+    ms_module_output: Mapping,
     name: str,
     amplitude: float | None,
     collected: Mapping | None = None,
@@ -463,9 +473,9 @@ def _iteration_matching_amplitude(
     every section's iteration and has no use for the sweep.
     """
     if amplitude is None:
-        amplitude = _bias_amplitude_of(results, name)
+        amplitude = _bias_amplitude_of(ms_module_output, name)
     if collected is None:
-        collected = collect_amplitude_iterations_for(results, name)
+        collected = collect_amplitude_iterations_for(ms_module_output, name)
 
     per_iteration = {
         iteration: float(next(iter(entries.values()))["sweep_amplitude"])
@@ -477,16 +487,16 @@ def _iteration_matching_amplitude(
     return min(per_iteration, key=lambda i: abs(per_iteration[i] - amplitude))
 
 
-def _bias_amplitude_of(results: Mapping, name: str) -> float:
+def _bias_amplitude_of(ms_module_output: Mapping, name: str) -> float:
     """*name*'s bias amplitude, from the catalog snapshot in call_params."""
     # The one read that does not go through _iterations, so it needs its own
     # guards: a container has no call_params of its own, and a netanal's have no
     # catalog in them, so without these either would be reported as a sweep that
     # had no catalog rather than as the wrong dict.
-    _refuse_container(results)
-    _refuse_netanal(results)
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
 
-    catalog = results.get("call_params", {}).get("catalog")
+    catalog = ms_module_output.get("call_params", {}).get("catalog")
     if catalog is None:
         raise ValueError(
             "No amplitude given and no catalog to take one from. Every "

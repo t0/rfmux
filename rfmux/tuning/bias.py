@@ -348,7 +348,7 @@ class BiasReport:
 
 
 def find_bias_points(
-    sweeps,
+    ms_module_output,
     *,
     amplitude_method: str = "derivative",
     frequency_method: str = "iq_derivative",
@@ -366,7 +366,7 @@ def find_bias_points(
 
     Reads the catalog recorded in the sweep, leaving it and the measured
     entries unchanged. Returns a new catalog and stores the report in
-    ``sweeps["bias_report"]``, replacing any previous report.
+    ``ms_module_output["bias_report"]``, replacing any previous report.
 
     ``report.flagged`` identifies a bifurcated lowest step, a drive with no
     known bifurcation above it, or a frequency outside the requested distance
@@ -375,7 +375,8 @@ def find_bias_points(
     Clear it with ``catalog.clear_bifurcations()`` before taking new sweeps.
 
     Args:
-        sweeps: one module's block, ``results[crs.module[m].index()]``.
+        ms_module_output: one module's multisweep output,
+            ``multisweep_output[crs.module[m].index()]``.
         amplitude_method: ``"derivative"`` (default) works with one sweep
             direction. ``"both"`` and ``"hysteresis"`` require both.
         frequency_method: ``"iq_derivative"`` or ``"minimum"``; see
@@ -415,10 +416,10 @@ def find_bias_points(
     _check_method("frequency_method", frequency_method, FREQUENCY_METHODS)
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
     distance_limit_hz = _distance_limit_hz(
-        sweeps, max_distance_hz, max_distance_fraction
+        ms_module_output, max_distance_hz, max_distance_fraction
     )
 
-    directions = _directions_swept(sweeps)
+    directions = _directions_swept(ms_module_output)
     if (
         amplitude_method in NEEDS_BOTH_DIRECTIONS
         and not {"upward", "downward"} <= directions
@@ -439,7 +440,7 @@ def find_bias_points(
     # the only one they can speak for. Built fresh out of the snapshot, and it
     # is what we hand back, so the record in the file still reads as the
     # catalog that was swept.
-    biased = _catalog_swept(sweeps)
+    biased = _catalog_swept(ms_module_output)
 
     amplitude_settings = dict(
         method=amplitude_method,
@@ -453,7 +454,7 @@ def find_bias_points(
     # iterating a catalog gives you.
     findings = [
         _bias_one(
-            sweeps,
+            ms_module_output,
             resonator,
             direction=direction,
             frequency_method=frequency_method,
@@ -467,7 +468,7 @@ def find_bias_points(
         catalog=biased,
         findings=findings,
         settings={
-            "module": sweeps.get("module"),
+            "module": ms_module_output.get("module"),
             "amplitude_method": amplitude_method,
             "frequency_method": frequency_method,
             "direction": direction,
@@ -484,13 +485,13 @@ def find_bias_points(
     # class records its import path and skips its constructor coming back, so
     # the file would outlive a rename only by restoring into a state BiasReport
     # would have refused to build.
-    sweeps["bias_report"] = report.to_dict()
-    store.maybe_save(sweeps, "multisweep", save=save, label=label)
+    ms_module_output["bias_report"] = report.to_dict()
+    store.maybe_save(ms_module_output, "multisweep", save=save, label=label)
     return report
 
 
 def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias one" implies applying the bias to the resonator.
-    sweeps,
+    ms_module_output,
     resonator,
     *,
     direction: str | None,
@@ -508,7 +509,9 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
     """
     # 1. Every sweep this resonator was measured at, one entry per amplitude
     #    step per direction. Raises if these sweeps do not cover it.
-    iterations = collect_amplitude_iterations_for(sweeps, resonator.name)
+    iterations = collect_amplitude_iterations_for(
+        ms_module_output, resonator.name
+    )
 
     # 2. Which amplitude to sit at: the step below where it bifurcates.
     choice = find_bias_amplitude(iterations, **amplitude_settings)
@@ -624,7 +627,9 @@ def _too_far(measured_hz: float, centre_hz: float, max_distance_hz: float | None
 
 
 def _distance_limit_hz(
-    sweeps, max_distance_hz: float | None, max_distance_fraction: float | None
+    ms_module_output,
+    max_distance_hz: float | None,
+    max_distance_fraction: float | None,
 ) -> float | None:
     """Resolve either supported distance limit into hertz for one multisweep."""
     if max_distance_hz is not None and max_distance_fraction is not None:
@@ -634,7 +639,7 @@ def _distance_limit_hz(
     if max_distance_fraction is None:
         return max_distance_hz
     try:
-        span_hz = sweeps["call_params"]["span_hz"]
+        span_hz = ms_module_output["call_params"]["span_hz"]
     except KeyError as error:
         raise ValueError(
             "max_distance_fraction needs the sweep's recorded span_hz."
@@ -1221,7 +1226,7 @@ def _stored_sweep(entry: Mapping) -> dict:
 # ─── Reading the sweeps ───────────────────────────────────────────────────────
 
 
-def _directions_swept(sweeps) -> set[str]:
+def _directions_swept(ms_module_output) -> set[str]:
     """Every sweep direction present in one module's result.
 
     Read once, up front, so that a request the whole call cannot satisfy —
@@ -1230,19 +1235,19 @@ def _directions_swept(sweeps) -> set[str]:
     """
     return {
         direction
-        for by_direction in _iterations(sweeps).values()
+        for by_direction in _iterations(ms_module_output).values()
         for direction in by_direction
     }
 
 
-def _catalog_swept(sweeps) -> ResonatorCatalog:
+def _catalog_swept(ms_module_output) -> ResonatorCatalog:
     """The catalog this sweep recorded, rebuilt from its snapshot.
 
     A fresh object every call, which is what lets the caller be handed it: the
     snapshot in the file is a dict and stays one, so the report's catalog is
     never the record of what was swept.
     """
-    snapshot = (sweeps.get("call_params") or {}).get("catalog")
+    snapshot = (ms_module_output.get("call_params") or {}).get("catalog")
     if snapshot is None:
         raise ValueError(
             "No catalog in these sweeps to bias. Every multisweep records one "

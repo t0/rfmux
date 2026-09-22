@@ -6,11 +6,11 @@ Run ``find_bias_points`` to store ``bias_report`` in the module dict::
     from rfmux.tuning import find_bias_points
     import example_plotting_bias as biasplots
 
-    module_sweeps = sweeps[crs.module[1].index()]
-    find_bias_points(module_sweeps)
-    biasplots.plot_bias_points(module_sweeps)
-    biasplots.plot_bifurcation_checks(module_sweeps)
-    biasplots.plot_hysteresis_checks(module_sweeps)
+    ms_module_output = multisweep_output[crs.module[1].index()]
+    find_bias_points(ms_module_output)
+    biasplots.plot_bias_points(ms_module_output)
+    biasplots.plot_bifurcation_checks(ms_module_output)
+    biasplots.plot_hysteresis_checks(ms_module_output)
 
 ``plot_arc_speed_panels`` and ``plot_bifurcation_verdict_map`` evaluate the
 sweeps directly and do not require a saved report. Flagged bias points are
@@ -240,17 +240,19 @@ def _batch_title(title, what, count, batch_number, batch_count):
     return title
 
 
-def _section_names(results):
-    """Read section names from the first sweep step; require a single module block."""
+def _section_names(ms_module_output):
+    """Read section names from one module's multisweep output."""
     try:
-        iterations = results["results"]
+        iterations = ms_module_output["results"]
     except (TypeError, KeyError):
-        keys = list(results) if isinstance(results, dict) else type(results).__name__
+        keys = (list(ms_module_output) if isinstance(ms_module_output, dict)
+                else type(ms_module_output).__name__)
         raise TypeError(
-            "Expected one module's sweep results — the value of "
-            "sweeps[module_id] — rather than the dict a sweep macro returns "
+            "Expected one module's multisweep output — the value of "
+            "multisweep_output[module_id] — rather than the whole output "
             f"keyed by module identifier. Got {keys}. If there is only one "
-            "module in play, sweeps[list(sweeps)[0]] is the thing to pass."
+            "module in play, multisweep_output[list(multisweep_output)[0]] "
+            "is the thing to pass."
         ) from None
 
     for by_direction in iterations.values():
@@ -268,14 +270,15 @@ def _as_list(value):
     return list(value)
 
 
-def _bias_report(results: dict) -> BiasReport:
+def _bias_report(ms_module_output: dict) -> BiasReport:
     """Read the bias report embedded in one module's multisweep."""
-    _section_names(results)
-    if "bias_report" not in results:
+    _section_names(ms_module_output)
+    if "bias_report" not in ms_module_output:
         raise ValueError(
-            "Multisweep has no bias_report; run find_bias_points(results) first."
+            "Multisweep has no bias_report; run "
+            "find_bias_points(ms_module_output) first."
         )
-    return BiasReport.from_dict(results["bias_report"])
+    return BiasReport.from_dict(ms_module_output["bias_report"])
 
 
 def _findings(report, names):
@@ -291,7 +294,7 @@ def _findings(report, names):
     return findings
 
 
-def _direction_for(report, results, direction):
+def _direction_for(report, ms_module_output, direction):
     """Use the requested or recorded direction, then prefer upward if available."""
     if direction is not None:
         return direction
@@ -301,16 +304,16 @@ def _direction_for(report, results, direction):
 
     swept = [
         d
-        for by_direction in results["results"].values()
+        for by_direction in ms_module_output["results"].values()
         for d in by_direction
     ]
     return PREFERRED_DIRECTION if PREFERRED_DIRECTION in swept else swept[0]
 
 
-def _entry_for(results, name, iteration, direction):
+def _entry_for(ms_module_output, name, iteration, direction):
     """The one sweep a finding came off, with a readable error if it is absent."""
     try:
-        return results["results"][iteration][direction][name]
+        return ms_module_output["results"][iteration][direction][name]
     except (KeyError, TypeError):
         raise ValueError(
             f"The sweeps passed in do not hold {name!r} at amplitude step "
@@ -321,7 +324,7 @@ def _entry_for(results, name, iteration, direction):
 
 
 def plot_bias_points(
-    results: dict,
+    ms_module_output: dict,
     *,
     projection="magnitude",
     names=None,
@@ -336,8 +339,8 @@ def plot_bias_points(
     Flagged findings use FLAGGED_COLOUR and include the reason.
 
     Args:
-        results: one module's multisweep dict, including the ``bias_report``
-            stored by ``find_bias_points``.
+        ms_module_output: one module's output from ``multisweep``, including
+            the ``bias_report`` stored by ``find_bias_points``.
         projection: "magnitude" for received power in dBm versus frequency,
             or "iq" for the loop in readout counts. Both mark the bias point.
         names: which resonators to draw. A name, a list of names, or ``None``
@@ -352,7 +355,7 @@ def plot_bias_points(
 
     Raises:
         KeyError: if a requested name has no finding.
-        TypeError: if handed the whole per-module container as *results*.
+        TypeError: if handed the whole per-module output container.
         ValueError: for a missing report, unknown projection or missing bias sweep.
     """
     if projection not in ("magnitude", "iq"):
@@ -362,9 +365,9 @@ def plot_bias_points(
     if panel_size is None:
         panel_size = (6.0, 6.0) if projection == "iq" else (7.0, 5.0)
 
-    report = _bias_report(results)
+    report = _bias_report(ms_module_output)
     findings = _findings(report, names)
-    swept_direction = _direction_for(report, results, direction)
+    swept_direction = _direction_for(report, ms_module_output, direction)
 
     batches = _batches(findings, batchlen)
     columns = _columns_for(batches, ncols)
@@ -375,7 +378,8 @@ def plot_bias_points(
 
             for panel, finding in zip(panels, batch):
                 entry = _entry_for(
-                    results, finding.name, finding.iteration, swept_direction
+                    ms_module_output, finding.name, finding.iteration,
+                    swept_direction,
                 )
                 colour = FLAGGED_COLOUR if not finding.good else BIAS_COLOUR
                 iq = np.asarray(entry["iq_counts"])
@@ -442,7 +446,7 @@ def plot_bias_points(
 
 
 def plot_bifurcation_checks(
-    results: dict,
+    ms_module_output: dict,
     *,
     names: str | list[str] | None = None,
     direction: str | None = None,
@@ -462,9 +466,9 @@ def plot_bifurcation_checks(
     separation test, which can also trigger a combined verdict.
 
     Args:
-        results: one module's multisweep dict with an embedded ``bias_report``.
-            Its saved spike_prominence_factor and noise_gate_factor are used,
-            defaulting to 0.5 and 50.0 when absent.
+        ms_module_output: one module's output from ``multisweep`` with an
+            embedded ``bias_report``. Its saved spike_prominence_factor and
+            noise_gate_factor are used, defaulting to 0.5 and 50.0 when absent.
         names: resonator name(s), or None for every finding.
         direction: one sweep direction, or None for all measured directions.
             Upward traces are solid and downward traces dashed.
@@ -479,13 +483,13 @@ def plot_bifurcation_checks(
     "Noise threshold" is the configured multiple of the noise estimate.
     Unusable or zero-threshold traces are skipped, as in Periscope.
     """
-    report = _bias_report(results)
+    report = _bias_report(ms_module_output)
     findings = _findings(report, names)
     traces = {
         finding.name: [
             (step, swept_direction, entry)
             for step, entries in collect_amplitude_iterations_for(
-                results, finding.name
+                ms_module_output, finding.name
             ).items()
             for swept_direction, entry in entries.items()
             if direction is None or swept_direction == direction
@@ -575,7 +579,7 @@ def plot_bifurcation_checks(
 
 
 def plot_hysteresis_checks(
-    results: dict, *, names: str | list[str] | None = None,
+    ms_module_output: dict, *, names: str | list[str] | None = None,
     ncols: int | None = None, panel_size: tuple[float, float] = (7.0, 5.0),
     title: str | None = None, batchlen: int | None = BATCH_SIZE,
 ) -> None:
@@ -587,14 +591,17 @@ def plot_hysteresis_checks(
     zero limit, show those fractions directly with the threshold at zero.
     Missing or unusable sweep pairs are skipped. The selected amplitude is bold.
     """
-    report = _bias_report(results)
+    report = _bias_report(ms_module_output)
     findings = _findings(report, names)
     compare = report.settings.get("compare", "magnitude")
     limit = report.settings.get("max_discrepancy", 0.1)
     divisor = limit if limit > 0 else 1.0
     units = "dip depth" if compare == "magnitude" else "loop radius"
     ylabel = "Up/down difference / limit" if limit > 0 else f"Up/down difference / {units}"
-    entries = {f.name: collect_amplitude_iterations_for(results, f.name) for f in findings}
+    entries = {
+        f.name: collect_amplitude_iterations_for(ms_module_output, f.name)
+        for f in findings
+    }
     amplitudes = [sweep["sweep_amplitude"] for steps in entries.values()
                   for pair in steps.values() for sweep in pair.values()]
     if not amplitudes:
@@ -663,7 +670,7 @@ def _verdict_row(entries, factors, noise_gate_factor):
 
 
 def plot_bifurcation_verdict_map(
-    results,
+    ms_module_output,
     names=None,
     factors=None,
     noise_gate_factor=50.0,
@@ -679,8 +686,9 @@ def plot_bifurcation_verdict_map(
     mark factors where the noise gate dominates, separately for each direction.
 
     Args:
-        results: one module's multisweep dict. No bias report is required;
-            the detector is evaluated directly on the sweeps.
+        ms_module_output: one module's output from ``multisweep``. No bias
+            report is required; the detector is evaluated directly on the
+            sweeps.
         names: which resonators to draw. ``None`` for every one swept.
         factors: the ``spike_prominence_factor`` values to test, or ``None`` for
             80 points from 0.02 to 1.0.
@@ -696,9 +704,9 @@ def plot_bifurcation_verdict_map(
 
     Raises:
         KeyError: if a requested name was not swept.
-        TypeError: if handed the whole per-module container as *results*.
+        TypeError: if handed the whole per-module output container.
     """
-    swept = _section_names(results)
+    swept = _section_names(ms_module_output)
     wanted = _as_list(names)
     if wanted is None:
         wanted = swept
@@ -717,7 +725,7 @@ def plot_bifurcation_verdict_map(
             # A panel is as tall as it has steps, so a five-step schedule is five
             # readable rows rather than five slivers.
             iterations = {
-                name: collect_amplitude_iterations_for(results, name)
+                name: collect_amplitude_iterations_for(ms_module_output, name)
                 for name in batch
             }
             tallest = max(len(steps) for steps in iterations.values())
@@ -828,7 +836,7 @@ def _arc_quantity(quantity, entry):
 
 
 def plot_arc_speed_panels(
-    results,
+    ms_module_output,
     quantity="arc_speed",
     names=None,
     iterations=None,
@@ -852,8 +860,7 @@ def plot_arc_speed_panels(
     bifurcation recorded by the amplitude search.
 
     Args:
-        results: one module's sweep results — the value of
-            ``sweeps[module_id]``.
+        ms_module_output: one module's output from ``multisweep``.
         quantity: which of :data:`ARC_QUANTITIES` to draw. ``"arc_speed"`` is
             what the ``iq_derivative`` frequency method maximizes;
             ``"normalized_speed"`` is what the ``derivative`` bifurcation test
@@ -883,7 +890,7 @@ def plot_arc_speed_panels(
             f"{', '.join(sorted(ARC_QUANTITIES))}."
         )
 
-    measured_names = _section_names(results)
+    measured_names = _section_names(ms_module_output)
     if not measured_names:
         raise ValueError("This measurement holds no sweeps, so there is nothing to draw.")
     wanted_names = _as_list(names) or measured_names
@@ -893,7 +900,7 @@ def plot_arc_speed_panels(
     for name in wanted_names:
         entries = []
         for iteration, by_direction in collect_amplitude_iterations_for(
-            results, name
+            ms_module_output, name
         ).items():
             if wanted_iterations is not None and iteration not in wanted_iterations:
                 continue
@@ -903,7 +910,9 @@ def plot_arc_speed_panels(
             entries_by_name[name] = entries
 
     if not entries_by_name:
-        available = collect_amplitude_iterations_for(results, wanted_names[0])
+        available = collect_amplitude_iterations_for(
+            ms_module_output, wanted_names[0]
+        )
         directions_swept = sorted(
             {d for by_direction in available.values() for d in by_direction}
         )

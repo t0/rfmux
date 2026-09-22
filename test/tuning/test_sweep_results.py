@@ -1,5 +1,6 @@
 """Test measurement packing and per-module result readers."""
 
+import inspect
 import math
 import pickle
 
@@ -7,6 +8,13 @@ import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import convert_dacunits_to_dbm
+from rfmux.tuning import (
+    collect_fit_params,
+    find_bias_points,
+    find_sweeps_with_nearby_resonances,
+    fit_sweeps,
+    fit_sweeps_at_bias_amplitude,
+)
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
@@ -20,6 +28,24 @@ from rfmux.tuning.sweep_results import (
 pytestmark = pytest.mark.portable
 
 MODULE_ID = "crs0030_rmod2"
+
+
+def test_multisweep_consumers_name_the_module_output_consistently():
+    functions = (
+        find_bias_points,
+        fit_sweeps,
+        fit_sweeps_at_bias_amplitude,
+        collect_fit_params,
+        collect_amplitude_iterations_for,
+        get_amplitudes_at_iteration,
+        find_iteration_matching_amplitude,
+        find_sweeps_with_nearby_resonances,
+    )
+
+    assert {
+        next(iter(inspect.signature(function).parameters))
+        for function in functions
+    } == {"ms_module_output"}
 
 
 def a_catalog(amplitudes=(0.001, 0.002, 0.004)):

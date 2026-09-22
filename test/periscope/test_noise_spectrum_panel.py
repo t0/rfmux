@@ -1,98 +1,122 @@
-"""
-Offscreen construction/navigation tests for the Noise Spectrum panel.
+"""Current noise files display one subplot per named resonator."""
 
-Replaces the old root-level test_noise_panel_smoke.py, which wrapped the
-constructor in try/except and returned a bool — pytest ignores return
-values, so that "test" passed even when the panel failed to build.  These
-assert instead, and cover the detector navigation the panel adds on top of
-plain construction.
-"""
+from unittest.mock import AsyncMock
 
+import numpy as np
 import pytest
-
-from test.qt_helpers import spin
-
 
 pytest.importorskip("PyQt6")
 
-from rfmux.tools.periscope.noise_spectrum_panel import (  # noqa: E402
-    NoiseSpectrumPanel,
-)
+from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
+from rfmux.tools.periscope.tasks import NoiseSpectrumTask
+from test.algorithms.test_noise_display import noise_block
+from test.qt_helpers import spin
 
 
-TWO_DETECTORS = {
-    1: {"conceptual_freq_hz": 4.0e9},
-    2: {"conceptual_freq_hz": 4.1e9},
-}
+@pytest.fixture
+def panel(qt_app):
+    widget = NoiseSpectrumPanel(noise_block(calibrated=True))
+    yield widget
+    widget.close()
+    widget.deleteLater()
+    spin(qt_app)
 
 
-def test_panel_builds_with_multiple_detectors(qt_app):
-    """The panel constructs without data and enables navigation when it has
-    more than one detector to walk."""
-    panel = NoiseSpectrumPanel(
-        detector_id=1,
-        resonance_frequency_ghz=4.0,
-        all_detectors_data=TWO_DETECTORS,
-        initial_detector_idx=1,
-    )
-    assert panel.detector_indices == [1, 2]
-    assert panel.current_detector_index_in_list == 0
-    assert panel.prev_button.isEnabled()
+def test_named_resonators_have_timestream_and_psd_panels(panel):
+    assert panel.plot_tabs.count() == 2
+    assert len(panel.plots[0]) == 2
+    assert "A · channel 2" in panel.plots[0][0].getPlotItem().titleLabel.text
+    assert "B · channel 7" in panel.plots[0][1].getPlotItem().titleLabel.text
+    panel.plot_tabs.setCurrentIndex(1)
+    assert len(panel.plots[1]) == 2
+
+
+def test_mean_subtraction_defaults_on_and_does_not_mutate_saved_data(panel):
+    original = panel.block["results"]["resonators"]["A"]["slow_data"]["iq_counts"].copy()
+    assert panel.mean_subtract.isChecked()
+    curves = panel.plots[0][0].listDataItems()
+    assert abs(curves[0].getData()[1].mean()) < 1e-14
+    panel.mean_subtract.setChecked(False)
+    assert panel.plots[0][0].listDataItems()[0].getData()[1].mean() == pytest.approx(3)
+    np.testing.assert_array_equal(
+        panel.block["results"]["resonators"]["A"]["slow_data"]["iq_counts"], original)
+
+
+def test_psd_omits_only_zero_and_is_independent_of_mean_subtraction(panel):
+    panel.plot_tabs.setCurrentIndex(1)
+    curve = panel.plots[1][0].listDataItems()[0]
+    x, y = curve.getOriginalDataset()
+    frequencies = panel.block["results"]["shared_slow"]["freq_iq"]
+    np.testing.assert_array_equal(x, frequencies[1:])
+    panel.mean_subtract.setChecked(False)
+    np.testing.assert_array_equal(panel.plots[1][0].listDataItems()[0].getOriginalDataset()[1], y)
+
+
+def test_df_available_from_catalog_and_rotates_timestream(panel):
+    panel.units_combo.setCurrentIndex(1)
+    assert panel.units_combo.currentData() == "df"
+    curves = panel.plots[0][0].listDataItems()
+    assert [c.name() for c in curves] == ["df", "diss"]
+    np.testing.assert_allclose(curves[1].getData()[1], 0, atol=1e-15)
+
+
+def test_uncalibrated_files_offer_volts_only(qt_app):
+    panel = NoiseSpectrumPanel(noise_block())
+    assert panel.units_combo.count() == 1
+    panel.close()
+
+
+def test_noise_task_calls_headless_driver_and_returns_container(qt_app):
+    from types import SimpleNamespace
+    result = {"module1": noise_block()}
+    board = SimpleNamespace(measure_noise=AsyncMock(return_value=result))
+    params = dict(module=1, channels=[2, 7], nsegments=2)
+    task = NoiseSpectrumTask(board, params)
+    received = []
+    task.completed.connect(received.append)
+    task.run()
+    assert received == [result]
+    arguments = board.measure_noise.call_args.kwargs
+    assert arguments["channels"] == [2, 7]
+    assert arguments["save"] is True
+    assert arguments["nsegments"] == 2
+    assert callable(arguments["progress_callback"])
+
+
+def test_loader_rejects_legacy_noise_payload(qt_app):
+    from rfmux.tools.periscope.app import Periscope
+    with pytest.raises(ValueError, match="current noise"):
+        Periscope._load_noise_from_session(object(), {"noise_data": {}}, "old.pkl")
+
+
+def test_pages_keep_resonator_names_and_reuse_grid_slots(panel):
+    records = panel.block["results"]["resonators"]
+    for index in range(21):
+        records[f"extra{index}"] = dict(records["A"], channel=index + 8)
+    panel.names = list(records)
+    panel._redraw()
     assert panel.next_button.isEnabled()
-    panel.close()
-    spin(qt_app)
-
-
-def test_navigation_is_disabled_for_a_lone_detector(qt_app):
-    """With a single detector there is nowhere to navigate, so both buttons
-    stay dead rather than wrapping onto the same detector."""
-    panel = NoiseSpectrumPanel(
-        detector_id=1,
-        resonance_frequency_ghz=4.0,
-        all_detectors_data={1: {"conceptual_freq_hz": 4.0e9}},
-        initial_detector_idx=1,
-    )
-    assert not panel.prev_button.isEnabled()
+    panel.next_button.click()
+    assert "extra18" in panel.plots[0][0].getPlotItem().titleLabel.text
+    assert panel.grids[0].count() == 3
+    assert panel.prev_button.isEnabled()
     assert not panel.next_button.isEnabled()
-    panel.close()
-    spin(qt_app)
 
 
-def test_navigation_wraps_and_retitles(qt_app):
-    """Next/previous move the selection modulo the detector list and pull the
-    new detector's frequency through for the title."""
-    panel = NoiseSpectrumPanel(
-        detector_id=1,
-        resonance_frequency_ghz=4.0,
-        all_detectors_data=TWO_DETECTORS,
-        initial_detector_idx=1,
-    )
-
-    panel._navigate_next()
-    assert panel.detector_id == 2
-    assert panel.resonance_frequency_ghz_title == pytest.approx(4.1)
-
-    # Two detectors, so one more step wraps back to the first.
-    panel._navigate_next()
-    assert panel.detector_id == 1
-    assert panel.resonance_frequency_ghz_title == pytest.approx(4.0)
-
-    # And previous wraps the other way.
-    panel._navigate_previous()
-    assert panel.detector_id == 2
-    panel.close()
-    spin(qt_app)
-
-
-def test_initial_detector_falls_back_when_unknown(qt_app):
-    """An initial_detector_idx that is not in the data must not raise; the
-    panel falls back to the first detector."""
-    panel = NoiseSpectrumPanel(
-        detector_id=99,
-        resonance_frequency_ghz=0.0,
-        all_detectors_data=TWO_DETECTORS,
-        initial_detector_idx=99,
-    )
-    assert panel.current_detector_index_in_list == 0
-    panel.close()
+def test_saved_current_container_opens_without_a_board(qt_app, tmp_path):
+    from PyQt6 import QtWidgets
+    from rfmux.tools.periscope.app import Periscope
+    from rfmux.tools.periscope.dock_manager import PeriscopeDockManager
+    from rfmux.tuning import store
+    window = QtWidgets.QMainWindow()
+    window.dark_mode = False
+    window.dock_manager = PeriscopeDockManager(window)
+    path = store.save({"module1": noise_block()}, "noise", directory=tmp_path)
+    Periscope._load_noise_from_session(window, store.load(path), str(path))
+    panels = window.findChildren(NoiseSpectrumPanel)
+    assert len(panels) == 1
+    assert panels[0].names == ["A", "B"]
+    assert len(panels[0].plots[0]) == 2
+    window.close()
+    window.deleteLater()
     spin(qt_app)

@@ -39,7 +39,7 @@ Then:
 - **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
   find resonators, select bias points, park the carriers, and measure noise.
 - **`Demos/noise_measurement.md`** — start with a biased mock array, verify it
-  with a multisweep, call `take_noise_spectrum`, and reopen the files for IQ
+  with a multisweep, call `measure_noise`, and reopen the files for IQ
   overlays, timestreams and PSDs. `example_plotting_noise.py` supplies reusable
   plotters for saved noise module blocks, including optional PFB captures.
 - **`Demos/pulse_capture.md`** — detect and record detector pulses, with

@@ -94,7 +94,7 @@ class TestPacking:
 
         # A literal, not the constant: bumping the version should mean editing
         # a test, because it is a claim about what readers of older files need.
-        assert module_netanal["schema_version"] == 9
+        assert module_netanal["schema_version"] == 11
         assert module_netanal["schema_version"] == RESULTS_SCHEMA_VERSION
         assert module_netanal["measurement"] == "netanal"
         assert module_netanal["module"] == 1

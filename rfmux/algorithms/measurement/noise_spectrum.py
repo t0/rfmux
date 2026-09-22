@@ -15,7 +15,8 @@ from ...core.hardware_map import macro
 from ...core.resonators import ResonatorCatalog
 from ...core.schema import CRS
 from ...core.transferfunctions import (
-    PFB_SAMPLING_FREQ, VOLTS_PER_ROC, decimation_to_sampling,
+    PFB_SAMPLING_FREQ, convert_dacunits_to_dbm,
+    decimation_to_sampling,
 )
 from ...tuning import store
 from ...tuning.sweep_results import _packed
@@ -44,11 +45,9 @@ def _record(data: Any, reference: str, index: int | None = None) -> dict:
     def values(value: Any) -> np.ndarray:
         return np.array(value if index is None else value[index], copy=True)
 
-    counts = values(data.i) + 1j * values(data.q)
-    if reference == "absolute":
-        counts /= VOLTS_PER_ROC
+    iq_key = "iq_volts" if reference == "absolute" else "iq_counts"
     return {
-        "iq_counts": counts,
+        iq_key: values(data.i) + 1j * values(data.q),
         **{key: values(getattr(data.spectrum, key)) for key in
            ("psd_i", "psd_q", "psd_dual_sideband")},
     }
@@ -60,7 +59,7 @@ def _axes(data: Any) -> dict:
 
 
 @macro(CRS, register=True)
-async def take_noise_spectrum(
+async def measure_noise(
     crs: CRS,
     catalog: ResonatorCatalog | None = None,
     *,
@@ -90,10 +89,14 @@ async def take_noise_spectrum(
     capture (one slow capture plus one per PFB channel). Cancellation or an
     acquisition failure propagates without saving a partial measurement.
 
-    Results contain shared slow timestamps/axes and named resonator records
-    with complex readout counts and unchanged helper spectra. Absolute helper
-    TOD is converted back from volts. Relative spectra retain the helpers'
-    carrier-power bin exception, recorded in acquisition metadata.
+    Results contain shared stream axes and named resonator records with the
+    measured bias point, native complex IQ and unchanged helper spectra.
+    PFB spectral axes remain with each resonator because droop correction can
+    give channels different axes. TOD is in volts for absolute reference and
+    counts for relative reference. Relative spectra retain the helpers'
+    carrier-power bin exception, recorded in the results info.
+    Each stream also carries display_psds: voltage PSDs in V²/Hz and, when
+    calibrated, df/diss PSDs in Hz²/Hz, using the same spectral settings.
     """
     requested_module = module
     if catalog is not None:
@@ -135,7 +138,7 @@ async def take_noise_spectrum(
     if progress_callback is not None and not callable(progress_callback):
         raise ValueError("progress_callback must be callable.")
 
-    if module not in crs.modules.module:
+    if module not in crs.module:
         raise ValueError(f"Module {module} is unavailable on this board.")
     high_bank = await crs.get_analog_bank()
     if (module > 4) != bool(high_bank):
@@ -162,9 +165,12 @@ async def take_noise_spectrum(
             bindings, tones[::2], tones[1::2]):
         records[name] = {
             "channel": channel,
-            "tone_frequency_hz": (None if frequency is None or nco is None
+            "bias_frequency_hz": (None if frequency is None or nco is None
                                   else float(nco + frequency)),
-            "amplitude": None if amplitude is None else float(amplitude),
+            "bias_amplitude": None if amplitude is None else float(amplitude),
+            "bias_amplitude_dbm": (
+                None if amplitude is None or scale is None else
+                float(convert_dacunits_to_dbm(amplitude, scale))),
         }
     changed = stage != current_decimation
     if changed:
@@ -184,21 +190,26 @@ async def take_noise_spectrum(
     for name, channel in bindings:
         if channel > len(slow.i):
             raise ValueError(f"Channel {channel} is absent from slow packets.")
-        records[name]["slow"] = _record(slow, reference, channel - 1)
+        records[name]["slow_data"] = _record(slow, reference, channel - 1)
     slow_axes = {"timestamps": [store.plain(vars(ts)) for ts in slow.ts],
                  **_axes(slow)}
     del slow
     progress("slow", None, 1)
+    shared_pfb = None
     if pfb_samples is not None:
         for completed, (name, channel) in enumerate(bindings, start=2):
+            # TODO: Revisit optional NCO shifts to center each tone in its PFB
+            # bin, including restoration and effects on other configured tones.
             pfb = await crs.py_get_pfb_samples(
                 nsamps=pfb_samples, channel=channel, module=module,
                 nsegments=pfb_nsegments, reference=reference,
                 reset_NCO=False, binlim=1e6, trim=False)
-            records[name]["pfb"] = {
-                **_record(pfb, reference), **_axes(pfb),
-                "time_s": np.arange(len(pfb.i)) / PFB_SAMPLING_FREQ,
-            }
+            time_s = np.arange(len(pfb.i)) / PFB_SAMPLING_FREQ
+            if shared_pfb is None:
+                shared_pfb = {"time_s": time_s}
+            elif len(time_s) != len(shared_pfb["time_s"]):
+                raise ValueError("PFB captures returned different sample counts.")
+            records[name]["pfb_data"] = {**_record(pfb, reference), **_axes(pfb)}
             progress("pfb", channel, completed)
 
     result = _packed(
@@ -209,18 +220,23 @@ async def take_noise_spectrum(
              num_samples=num_samples, nsegments=nsegments, reference=reference,
              spectrum_cutoff=float(spectrum_cutoff), pfb_samples=pfb_samples,
              pfb_nsegments=requested_pfb_nsegments),
-        dict(acquisition=dict(
+        dict(info=dict(
             decimation=stage, decimation_changed=changed,
+            nco_frequency_hz=nco,
             slow_sample_rate_hz=decimation_to_sampling(stage),
             pfb_sample_rate_hz=PFB_SAMPLING_FREQ if pfb_samples else None,
             pfb_nsegments=pfb_nsegments, pfb_binlim_hz=1e6 if pfb_samples else None,
             pfb_trim=False if pfb_samples else None,
             pfb_reset_nco=False if pfb_samples else None,
-            reference=reference, iq_units="adc_counts", frequency_units="Hz",
+            reference=reference,
+            iq_units="volts" if reference == "absolute" else "counts",
             spectrum_units="dBm/Hz" if reference == "absolute" else "dBc/Hz",
             carrier_bin_units="dBm/Hz" if reference == "absolute" else "dBc",
             carrier_bin_rule="nearest zero frequency in each spectrum",
-        ), slow=slow_axes, resonators=records),
+        ), shared_slow=slow_axes, shared_pfb=shared_pfb,
+        resonators=records),
         measurement="noise", dac_scale_dbm=scale)
+    from .noise_display import prepare_noise_display
+    prepare_noise_display(next(iter(result.values())))
     store.maybe_save(result, "noise", save=save, label=label)
     return result

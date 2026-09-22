@@ -610,6 +610,10 @@ class PeriscopeRuntime:
                 if panel and hasattr(panel, 'apply_theme'):
                     panel.apply_theme(self.dark_mode)
 
+        from .noise_spectrum_panel import NoiseSpectrumPanel
+        for panel in self.findChildren(NoiseSpectrumPanel):
+            panel.apply_theme(self.dark_mode)
+
         # Update Pulse Capture panels (in docks)
         for window_data in self._live_pulse_capture_windows():
             panel = window_data.get('window')
@@ -1314,6 +1318,10 @@ class PeriscopeRuntime:
 
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
+        if getattr(self, "_noise_task", None) is not None:
+            self.statusBar().showMessage("Waiting for the noise measurement to finish")
+            event.ignore()
+            return
         settings.set_window_geometry(self.saveGeometry())
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
         # Stop any active network analysis tasks (QThread needs proper termination)
@@ -1550,377 +1558,42 @@ class PeriscopeRuntime:
         except Exception:
             return f"module{module}"
 
-    def _create_multisweep_panel_from_loaded_data(self, load_params: dict) -> tuple:
-        """
-        Create and display a MultisweepPanel from a noise payload.
-
-        The multisweep lane loads through ``_load_multisweep_analysis`` and the
-        container ``store`` writes; this reads ``_prepare_export_data``'s flat
-        payload, which only the noise path still produces. It goes with it.
-
-        Args:
-            load_params: Loaded data dictionary containing 'initial_parameters',
-                        'dac_scales_used' and 'noise_data'.
-
-        Returns:
-            tuple: (panel, dock, window_id, target_module) or (None, None, None, None) on error
-        """
-        
-        try:
-            # Allow loading without CRS in offline mode
-            if self.crs is None and self.host != "OFFLINE": 
-                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available for multisweep. Make sure your board is correctly setup.")
-                return None, None, None, None
-                
-            window_id = f"multisweep_window_{self.multisweep_window_count}"
-            self.multisweep_window_count += 1
-            
-            params = load_params['initial_parameters']
-            target_module = params.get('module')
-            if target_module is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified. Please check your file.")
-                return None, None, None, None
-
-            if source_type == "capture":
-                dac_scales_for_panel = dict(load_params.get('dac_scales_used') or {})
-            else:
-                try:
-                    dac_scales_for_panel = self.fetch_dac_scales_blocking() #### Gets the dac scale directly from the board #####
-                except:
-                    QtWidgets.QMessageBox.critical(self, "Error", "Unable to compute dac scales for the board.")
-                    return
-
-                dac_scale_for_mod = load_params['dac_scales_used'][target_module]
-                dac_scale_for_board = dac_scales_for_panel[target_module]
-
-                if dac_scale_for_mod != dac_scale_for_board:
-                    QtWidgets.QMessageBox.warning(self, "Warning", f"Mismatch in Dac scales File Value : {dac_scale_for_mod}, Board Value : {dac_scale_for_board}. Exact data won't be reproduced.")
-            
-            # Check if noise data exists in the loaded file
-            has_noise_data = 'noise_data' in load_params and load_params['noise_data'] is not None
-
-            # Create panel
-            panel = MultisweepPanel(parent=self, target_module=target_module, initial_params=params.copy(), 
-                                   dac_scales=dac_scales_for_panel, dark_mode=self.dark_mode, 
-                                   loaded_bias=has_noise_data, is_loaded_data=True)
-            
-            # Load noise spectrum data if it exists
-            if has_noise_data:
-                panel.spectrum_noise_data = load_params['noise_data']
-                panel.noise_spectrum_btn.setEnabled(True)
-            
-            # MultisweepPanel dock is always named "Multisweep" regardless of source type
-            dock_title = f"Multisweep #{self.multisweep_window_count} (Loaded)"
-            
-            # Wrap in dock
-            dock = self.dock_manager.create_dock(panel, dock_title, window_id)
-            
-            self.multisweep_windows[window_id] = {'window': panel, 'dock': dock, 'params': params.copy()}
-            
-            # The tuning rows Apply Bias publishes land in the main window
-            if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
-                panel.tuning_ready.connect(self._handle_tuning_ready)
-            
-            # Connect data_ready signal for session auto-export
-            if getattr(self, 'session_manager', None) is not None:
-                panel.data_ready.connect(self.session_manager.handle_data_ready)
-
-            panel._hide_progress_bars()
-
-
-            # Tabify with Main dock by default
-            main_dock = self.dock_manager.get_dock("main_plots")
-            if main_dock:
-                self.tabifyDockWidget(main_dock, dock)
-            
-            # Show the dock and activate it
-            dock.show()
-            dock.raise_()
-            
-            return panel, dock, window_id, target_module
-            
-        except Exception as e:
-            error_msg = f"Error creating multisweep panel: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            QtWidgets.QMessageBox.critical(self, "Error", error_msg)
-            return None, None, None, None
-
-    def _adjust_decimation(self, crs, decimation):
-        print("Setting decimation to", decimation)
-
-        if decimation > 4:
-            asyncio.run(crs.set_decimation(decimation , short = False))
-        elif decimation == 4:
-            asyncio.run(crs.set_decimation(decimation , module = self.module, short = False))
-        else:
-            asyncio.run(crs.set_decimation(decimation, module = self.module, short = True))
-    
-    def _collect_channel_noise(self, params: dict, loaded=False):
-        if loaded:
-            channel_noise_data = params['channel_noise_data']
-            self.channel_noise_data['noise_parameters'] = channel_noise_data['noise_parameters']
-            self.channel_noise_data['data'] = channel_noise_data['data']
-            self.loaded_channel_noise = True
-            self._create_channel_noise_panel(1)
-        else:
-            if self.crs is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available") 
-                return
-    
-            if params is None:
-                QtWidgets.QMessageBox.critical(self, "Error", "Received Parameter file is empty")
-                return
-    
-            crs = self.crs
-        
-            time_taken = params['time_taken']
-            pfb_enabled = params['pfb_enabled']
-            
-            if pfb_enabled:
-                pfb_time_taken = params['pfb_time']
-            else:
-                pfb_time_taken = 0
-                
-            t = time.time() + time_taken + pfb_time_taken
-            formatted_time = time.strftime("%H:%M:%S", time.localtime(t))
-            # Show a progress dialog
-            progress = QtWidgets.QProgressDialog(f"Getting noise spectrum...\n\nEstimated Completion Time {formatted_time}", None, 0, 0, self)
-            progress.setWindowTitle("Please wait")
-            progress.setCancelButton(None)
-            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
-            progress.show()
-            
-            QtWidgets.QApplication.processEvents()# Show a simple "busy" message and spinner cursor
-    
-            try:
-                decimation = params['decimation']
-                num_samples = params['num_samples']
-                num_segments = params['num_segments']
-                reference = params['reference']
-                spec_lim = params['spectrum_limit']
-                channels = params['channel_noise']
-                module = self.module
-                curr_decimation = asyncio.run(crs.get_decimation())
-        
-                if pfb_enabled:
-                    overlap = params['overlap']
-                    pfb_samples = params['pfb_samples']
-        
-                if curr_decimation != decimation:
-                    self._adjust_decimation(crs, decimation)
-        
-                spectrum_data  = asyncio.run(crs.py_get_samples(num_samples, 
-                                                                return_spectrum=True, 
-                                                                scaling='psd', 
-                                                                reference=reference, 
-                                                                nsegments=num_segments, 
-                                                                spectrum_cutoff=spec_lim,
-                                                                channel=None, 
-                                                                module=module))
-        
-                self.channel_noise_data['noise_parameters'] = params
-                # num_res = len(self.conceptual_resonance_frequencies)
-        
-                amplitudes = []
-                channel_frequencies = []
-                dac_scale_for_module = self.dac_scales.get(self.module)
-    
-                #### pfb spectrum ###
-                pfb_psd_i = []
-                pfb_psd_q = []
-                pfb_dual = []
-                pfb_i = []
-                pfb_q = []
-                pfb_freq_iq = []
-                pfb_freq_dsb = []
-    
-                ### Slow spectrum ###
-                slow_i = []
-                slow_q = []
-                slow_psd_i = []
-                slow_psd_q = []
-                slow_dual = []
-    
-                for c in channels:
-                    #### Since there is no amplitude being set here 
-                    amp = asyncio.run(crs.get_amplitude(channel = c, module = self.module))
-                    if amp is None:
-                        amplitudes.append(0)
-                    else:
-                        amp_dmb = convert_dacunits_to_dbm(amp, dac_scale_for_module)
-                        amplitudes.append(amp_dmb)
-    
-                    nco = asyncio.run(crs.get_nco_frequency(module = self.module))
-                    f = asyncio.run(crs.get_frequency(channel = c, module = self.module))
-                    if f is None:
-                        channel_frequencies.append(float(nco + 0))
-                    else:
-                        channel_frequencies.append(float(nco + f))
-    
-                    slow_i.append(spectrum_data.i[c-1])
-                    slow_q.append(spectrum_data.q[c-1])
-                    slow_psd_i.append(spectrum_data.spectrum.psd_i[c-1])
-                    slow_psd_q.append(spectrum_data.spectrum.psd_q[c-1])
-                    slow_dual.append(spectrum_data.spectrum.psd_dual_sideband[c-1])
-        
-                    #### Also running pfb_samples ####
-                    if pfb_enabled:
-                        pfb_data = asyncio.run(crs.py_get_pfb_samples(pfb_samples,
-                                                                      channel = c,
-                                                                      module = module,
-                                                                      binlim = 1e6,
-                                                                      trim = False,
-                                                                      nsegments = num_segments,
-                                                                      reference = reference,
-                                                                      reset_NCO = False))
-        
-                        psd_i = pfb_data.spectrum.psd_i
-                        pfb_psd_i.append(psd_i)
-                        
-                        psd_q = pfb_data.spectrum.psd_q
-                        pfb_psd_q.append(psd_q)
-                        
-                        I = pfb_data.i
-                        pfb_i.append(I)
-                        
-                        Q = pfb_data.q
-                        pfb_q.append(Q)
-                        
-                        dual = pfb_data.spectrum.psd_dual_sideband
-                        pfb_dual.append(dual)
-                        
-                        freq_iq = pfb_data.spectrum.freq_iq
-                        pfb_freq_iq.append(freq_iq)
-                        
-                        freq_dsb = pfb_data.spectrum.freq_dsb
-                        pfb_freq_dsb.append(freq_dsb)
-        
-                #### Getting pfb time stamps for plotting #####
-                if pfb_enabled:
-                    total_time = (1/PFB_SAMPLING_FREQ) * pfb_samples #### 2.44 MSS is the rate 
-                    ts_pfb = list(np.linspace(0, total_time, pfb_samples))
-                    
-                slow_freq = max(spectrum_data.spectrum.freq_iq)/spec_lim
-                fast_freq = PFB_SAMPLING_FREQ/2   
-        
-                data = {}
-                data['reference'] = reference
-                data['ts'] = spectrum_data.ts
-                data['I'] = slow_i
-                data['Q'] = slow_q
-                data['freq_iq'] = spectrum_data.spectrum.freq_iq
-                data['single_psd_i'] = slow_psd_i
-                data['single_psd_q'] = slow_psd_q
-                data['freq_dsb'] = spectrum_data.spectrum.freq_dsb
-                data['dual_psd'] = slow_dual
-                data['amplitudes_dbm'] = amplitudes
-                data['channel_frequencies'] = channel_frequencies
-                data['slow_freq_hz'] = slow_freq
-                data['fast_freq_hz'] = fast_freq
-        
-                ##### pfb data ####
-                if pfb_enabled:
-                    data['pfb_enabled'] = True
-                    data['pfb_ts'] = ts_pfb
-                    data['pfb_I'] = pfb_i
-                    data['pfb_Q'] = pfb_q
-                    data['pfb_freq_iq'] = pfb_freq_iq
-                    data['pfb_psd_i'] = pfb_psd_i
-                    data['pfb_psd_q'] = pfb_psd_q
-                    data['pfb_freq_dsb'] = pfb_freq_dsb
-                    data['pfb_dual_psd'] = pfb_dual
-                    data['overlap'] = overlap
-        
-                else:
-                    data['pfb_enabled'] = False
-                
-                self.channel_noise_data['data'] = data
-                self.loaded_channel_noise = False
-                
-                # Emit data_ready signal for session auto-export
-                export_data = self._export_channel_noise_data()
-                identifier = f"module{module}_channel_noise"
-                self.main_plot_panel.emit_channel_noise_export(identifier, export_data)
-    
-                if self.channel_noise_data.get('data'):
-                    # Default to opening for the first detector
-                    self._create_channel_noise_panel(1)
-                    
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", str(e))
-                traceback.print_exc()
-                raise
-            finally:
-                progress.close()
-
-    def _export_channel_noise_data(self):
-        
-        return {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'target_module': self.module,
-            'dac_scales_used': self.dac_scales,
-            'channel_noise_data': self.channel_noise_data
-        }
-    
-    def _create_channel_noise_panel(self, detector_idx: int = 1):
-        """
-        Open a NoiseSpectrumPanel for a specific detector index.
-        
-        Args:
-            detector_idx: Detector index (1-based) to open panel for
-        """
-        # Get spectrum data
-        data = self.channel_noise_data
-        spectrum_data = self.channel_noise_data.get('data')
-        noise_params = self.channel_noise_data.get('noise_parameters')
-        channels = noise_params['channel_noise']
-        
-        if not spectrum_data:
-            print("Warning: No noise spectrum data available")
+    def _start_noise_measurement(self, params: dict, *, catalog=None) -> None:
+        from .tasks import NoiseSpectrumTask
+        if self.crs is None:
             return
+        if getattr(self, "_noise_task", None) is not None:
+            self.statusBar().showMessage("A noise measurement is already running")
+            return
+        arguments = dict(params, module=self.module if catalog is None else catalog.module)
+        if catalog is not None:
+            arguments["catalog"] = catalog.copy()
+        task = NoiseSpectrumTask(self.crs, arguments, parent=self)
+        self._noise_task = task
+        task.completed.connect(self._noise_completed)
+        task.error.connect(self._noise_failed)
+        task.progress.connect(self._noise_progress)
+        task.finished.connect(self._noise_finished)
+        self.statusBar().showMessage("Measuring noise…")
+        task.start()
 
-        channel_frequencies = spectrum_data['channel_frequencies']
-        
-        all_detectors_data = {}
-        # We need conceptual frequencies for navigation
-        for i, freq in enumerate(channel_frequencies):
-            det_id = i + 1
-            all_detectors_data[det_id] = {
-                'conceptual_freq_hz': freq
-            }
-            
-        # Create panel
-        from .noise_spectrum_panel import NoiseSpectrumPanel
-        
-        panel = NoiseSpectrumPanel(
-            parent=self,
-            detector_id=detector_idx,
-            resonance_frequency_ghz= channel_frequencies[detector_idx-1] / 1e9,
-            dark_mode=self.dark_mode,
-            all_detectors_data=all_detectors_data,
-            initial_detector_idx=detector_idx,
-            spectrum_data=spectrum_data,
-            channels = channels
-        )
-        
-        # Increment counter and use for tab name
-        self.channel_noise_panel_count += 1
-        loaded_suffix = " (Loaded)" if self.loaded_channel_noise else ""
-        dock_title = f"Channel Noise Spectrum #{self.channel_noise_panel_count}{loaded_suffix}"
-        dock_id = f"noise_{self.channel_noise_panel_count}_{int(time.time())}"
-        
-        # Create dock
-        dock = self.dock_manager.create_dock(panel, dock_title, dock_id)
-        
-        main_dock = self.dock_manager.get_dock("main_plots")
-        if main_dock:
-            self.tabifyDockWidget(main_dock, dock)        # Track panel reference
-        
-        # Show and activate the dock
-        dock.show()
-        dock.raise_()
-        
+    def _noise_progress(self, progress: dict) -> None:
+        self.statusBar().showMessage(
+            f"Noise: {progress['completed']} / {progress['total']} captures")
+
+    def _noise_completed(self, container: dict) -> None:
+        from rfmux.tuning import store
+        path = store.saved_path(container)
+        self._load_noise_from_session(container, str(path) if path else "")
+        self.statusBar().showMessage(f"Noise saved to {path}" if path else "Noise measured")
+
+    def _noise_failed(self, message: str) -> None:
+        self.statusBar().showMessage(f"Noise measurement failed: {message}")
+
+    def _noise_finished(self) -> None:
+        self._noise_task.deleteLater()
+        self._noise_task = None
+
     def _load_multisweep_analysis(self, container: dict):
         """Show a saved multisweep in a docked panel, one panel per module.
 

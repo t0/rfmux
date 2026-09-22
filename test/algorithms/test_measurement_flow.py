@@ -39,7 +39,7 @@ def fake_crs() -> Mock:
     fake_crs.get_decimation = AsyncMock(return_value=6)
     fake_crs.start_udp_streaming = AsyncMock(return_value=True)
     fake_crs.stop_udp_streaming = AsyncMock(return_value=True)
-    fake_crs.take_noise_spectrum = AsyncMock(return_value={"crs0000_rmod2": {"results": {}}})
+    fake_crs.measure_noise = AsyncMock(return_value={"crs0000_rmod2": {"results": {}}})
     return fake_crs
 
 
@@ -63,9 +63,9 @@ async def test_noise_uses_public_algorithm(
     fake_crs: Mock, catalog: ResonatorCatalog,
 ) -> None:
     noise = await demo._acquire_noise(fake_crs, catalog, created_mock=False)
-    fake_crs.take_noise_spectrum.assert_awaited_once_with(
+    fake_crs.measure_noise.assert_awaited_once_with(
         catalog, **demo.NOISE_PARAMS, save=True, label="tuning_noise")
-    assert noise is fake_crs.take_noise_spectrum.return_value
+    assert noise is fake_crs.measure_noise.return_value
 
 
 @pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_capture_failure_stops_owned_stream(
     fake_crs: Mock, catalog: ResonatorCatalog, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(demo, "find_streamer_conflict", lambda: None)
-    fake_crs.take_noise_spectrum.side_effect = RuntimeError("PFB capture failed")
+    fake_crs.measure_noise.side_effect = RuntimeError("PFB capture failed")
     with pytest.raises(RuntimeError, match="PFB capture failed"):
         await demo._acquire_noise(fake_crs, catalog, created_mock=True)
     fake_crs.stop_udp_streaming.assert_awaited_once()
@@ -88,7 +88,7 @@ async def test_conflict_does_not_touch_existing_stream(
         await demo._acquire_noise(fake_crs, catalog, created_mock=True)
     fake_crs.start_udp_streaming.assert_not_awaited()
     fake_crs.stop_udp_streaming.assert_not_awaited()
-    fake_crs.take_noise_spectrum.assert_not_awaited()
+    fake_crs.measure_noise.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -145,9 +145,9 @@ async def test_mock_flow_saves_bias_and_noise_and_stops_stream(
         record = records[resonator.name]
         assert record["channel"] == resonator.channel
         for stream, count in (("slow", 1000), ("pfb", 20000)):
-            data = record[stream]
-            assert data["iq_counts"].shape == (count,)
-            axes = noise["results"]["slow"] if stream == "slow" else data
+            data = record[f"{stream}_data"]
+            assert data[f"iq_{noise['results']['info']['iq_units']}"].shape == (count,)
+            axes = noise["results"]["shared_slow"] if stream == "slow" else data
             assert axes["freq_iq"].shape == data["psd_i"].shape == data["psd_q"].shape
             positive = axes["freq_iq"] > 0
             assert np.all(np.isfinite(data["psd_i"][positive]))

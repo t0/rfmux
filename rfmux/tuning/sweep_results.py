@@ -27,7 +27,7 @@ __all__ = [
 
 
 # Bump when the saved measurement format changes incompatibly.
-RESULTS_SCHEMA_VERSION = 9
+RESULTS_SCHEMA_VERSION = 11
 
 
 # The directions a sweep can run in. Here rather than in either driver, because

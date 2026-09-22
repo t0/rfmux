@@ -181,7 +181,7 @@ Periscope go through. None where the board reported none.
 
 `results_by_detector` — `{detector_id: {iteration_index: entry}}`, keyed by an
 integer index — was the old GUI's own shape. Nothing produces it; the legacy
-bias and noise paths are its last readers.
+bias paths are its last readers.
 
 ### Unit Conversion (UnitConverter class)
 - Raw ADC counts ↔ Volts ↔ dBm
@@ -255,10 +255,10 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 2307 tests
-pytest --tier=portable              # No CRS, no GUI: 823 tests
-pytest --tier=full                  # All 2345 that run without a board, including demos
-pytest --tier=acquisition           # MockCRS server + real UDP: 38 tests, including demos (inside full)
+pytest --tier=quick                 # Edit loop: 2327 tests
+pytest --tier=portable              # No CRS, no GUI: 837 tests
+pytest --tier=full                  # All 2367 that run without a board, including demos
+pytest --tier=acquisition           # MockCRS server + real UDP: 40 tests, including demos (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope

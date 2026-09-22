@@ -428,14 +428,14 @@ await crs.apply_bias(bias_report.catalog)
 
 ## 7. Acquire slow-stream and PFB noise
 
-`take_noise_spectrum()` measures the configured catalog channels and returns
+`measure_noise()` measures the configured catalog channels and returns
 `{module_id: block}`, just like multisweep. It reads actual tone frequencies
 and amplitudes, keeps a snapshot of the catalog, and saves through `store`.
 It does not select or apply biases. `decimation=None` preserves stream settings.
 
 These short captures use `reference="absolute"`: saved time-domain IQ is in
-**readout counts**, and spectra are in **dBm/Hz**. Convert counts to volts with
-`VOLTS_PER_ROC`, as the example plotters do. `nsegments` sets spectral averaging;
+**volts** (`iq_volts`), and spectra are in **dBm/Hz**. Relative captures retain
+**counts** (`iq_counts`); the example plotters accept either. `nsegments` sets spectral averaging;
 increase sample counts to measure for longer and resolve lower frequencies.
 Slow UDP and per-channel PFB RPC captures are sequential, not synchronized.
 The PFB UDP streamer must be off for RPC capture; the NCO is not reset.
@@ -462,7 +462,7 @@ try:
         if conflict:
             raise RuntimeError(f"Cannot start a second mock stream: {conflict}")
         started_mock_stream = await crs.start_udp_streaming()
-    noise_results = await crs.take_noise_spectrum(
+    noise_results = await crs.measure_noise(
         bias_report.catalog, **NOISE_PARAMS, save=True, label="tuning_noise")
 finally:
     if started_mock_stream:

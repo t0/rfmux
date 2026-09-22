@@ -101,22 +101,14 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
     from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
-    from test.periscope.test_noise_panel_fast_tod_units import _spectrum_data
+    from test.algorithms.test_noise_display import noise_block
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     detectors = {1: {"conceptual_freq_hz": 4.0e9},
                  2: {"conceptual_freq_hz": 4.1e9}}
     cases = [
         (NetworkAnalysisPanel, dict(module=1)),
-        (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
-                                  all_detectors_data=detectors,
-                                  initial_detector_idx=1)),
-        # With data the panel draws its plots and installs the hover
-        # handler; that handler must not own the panel either.
-        (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
-                                  all_detectors_data=detectors,
-                                  initial_detector_idx=1,
-                                  spectrum_data=_spectrum_data("absolute"))),
+        (NoiseSpectrumPanel, dict(block=noise_block())),
         (MultisweepPanel, dict(target_module=1)),
     ]
     for cls, kwargs in cases:

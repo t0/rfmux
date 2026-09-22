@@ -1148,7 +1148,7 @@ The call is shown for reference; the cells above only measure and analyze sweeps
 ## 7. Next steps
 
 - **Measure noise:** after applying the catalog, use
-  `await crs.take_noise_spectrum(bias_report.catalog)`. See
+  `await crs.measure_noise(bias_report.catalog)`. See
   [noise_measurement.md](noise_measurement.md) for stream setup, saved data,
   and IQ overlays on the bias sweep.
 - **IQ rotation:** the bias point has a field for it, but this analysis does not

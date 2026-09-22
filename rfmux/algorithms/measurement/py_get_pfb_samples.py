@@ -437,8 +437,8 @@ async def py_get_pfb_samples(
       for the dual-sideband data this will be exactly 0dB.
     """
 
-    assert module in crs.modules.module, (
-        f"Module {module} invalid. Available: {crs.modules.module}"
+    assert module in crs.module, (
+        f"Module {module} invalid. Available: {crs.module}"
     )
     assert 1 <= channel <= 1024, f"Invalid channel: {channel}"
 

@@ -873,3 +873,26 @@ class MultisweepTask(QtCore.QThread):
         if task.cancelled():
             return None
         return await task
+
+
+class NoiseSpectrumTask(QtCore.QThread):
+    """Run the headless noise driver and return its saved container."""
+
+    completed = pyqtSignal(dict)
+    progress = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, crs, parameters: dict, parent=None) -> None:
+        super().__init__(parent)
+        self.crs = crs
+        self.parameters = parameters
+
+    def run(self) -> None:
+        try:
+            result = asyncio.run(self.crs.measure_noise(
+                **self.parameters, save=True,
+                progress_callback=self.progress.emit))
+        except Exception as exc:
+            self.error.emit(f"{type(exc).__name__}: {exc}")
+        else:
+            self.completed.emit(result)

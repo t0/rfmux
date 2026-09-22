@@ -77,10 +77,6 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
     if not traces_by_name:
         return
 
-    # Remove all items from grid without deleting widgets (we'll reuse them)
-    while grid_layout.count():
-        grid_layout.takeAt(0)
-
     names = list(traces_by_name)
 
     # Calculate batch range
@@ -91,28 +87,8 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
     if not batch_names:
         return
 
-    # A fixed number of columns, so a subplot is the same size whichever page
-    # of a batch is on screen. Narrowed for a batch that does not fill a row,
-    # which would otherwise be one plot beside four gaps.
-    num_plots = len(batch_names)
-    ncols = max(1, min(columns, num_plots))
-    nrows = int(np.ceil(num_plots / ncols))
-
-    # Theme colors
     bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
-
-    # Reset ALL existing stretch factors to 0 (clears stale rows/cols from
-    # a previously-larger grid that would otherwise keep consuming space).
-    for r in range(grid_layout.rowCount()):
-        grid_layout.setRowStretch(r, 0)
-    for c in range(grid_layout.columnCount()):
-        grid_layout.setColumnStretch(c, 0)
-
-    # Set uniform stretch factors for the active grid
-    for r in range(nrows):
-        grid_layout.setRowStretch(r, 1)
-    for c in range(ncols):
-        grid_layout.setColumnStretch(c, 1)
+    num_plots = len(batch_names)
 
     # Ensure widget cache exists
     if widget_cache is None:
@@ -138,9 +114,6 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
     # Populate grid
     for idx, name in enumerate(batch_names):
-        row = idx // ncols
-        col = idx % ncols
-
         plot_widget = widget_cache[idx]
         plot_widget.setBackground(bg_color)
         plot_item = plot_widget.getPlotItem()
@@ -220,8 +193,9 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
 
-        grid_layout.addWidget(plot_widget, row, col)
         plot_widget.show()
+
+    arrange_plot_widgets(grid_layout, widget_cache[:num_plots], columns)
 
     # Update batch navigation
     total_batches = max(1, (len(names) + batch_size - 1) // batch_size)
@@ -236,6 +210,23 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 # ---------------------------------------------------------------------------
 # Per-resonator plotting helpers
 # ---------------------------------------------------------------------------
+
+def arrange_plot_widgets(grid: QtWidgets.QGridLayout, widgets: list,
+                         columns: int = DEFAULT_SUBPLOT_COLUMNS) -> None:
+    """Arrange equal-size subplots, clearing stale row and column stretches."""
+    while grid.count():
+        grid.takeAt(0)
+    for row in range(grid.rowCount()):
+        grid.setRowStretch(row, 0)
+    for column in range(grid.columnCount()):
+        grid.setColumnStretch(column, 0)
+    columns = max(1, min(columns, len(widgets)))
+    for index, widget in enumerate(widgets):
+        row, column = divmod(index, columns)
+        grid.addWidget(widget, row, column)
+        grid.setRowStretch(row, 1)
+        grid.setColumnStretch(column, 1)
+
 
 def _new_subplot(on_resonator_double_click):
     """One grid subplot, wired to say which resonator was double-clicked.

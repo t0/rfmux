@@ -105,7 +105,7 @@ print(f"bias-check file: {sweep_path}")
 
 ## 3. Acquire and save noise
 
-`take_noise_spectrum` measures configured tones; it never chooses or applies
+`measure_noise` measures configured tones; it never chooses or applies
 biases. `decimation=None` preserves the current slow-stream configuration. A
 different explicit decimation selects this module and changes the packet width;
 that configuration remains in effect.
@@ -138,7 +138,7 @@ try:
     if conflict:
         raise RuntimeError(f"Cannot start a second mock stream: {conflict}")
     started_sender = await crs.start_udp_streaming()
-    noise = await crs.take_noise_spectrum(
+    noise = await crs.measure_noise(
         catalog, **NOISE_PARAMS, progress_callback=report_progress,
         save=True, label="biased_array_noise")
 finally:
@@ -168,37 +168,92 @@ saved_sweeps = store.load(sweep_path)
 block = saved_noise[module_id]
 sweep_block = saved_sweeps[module_id]
 results = block["results"]
-settings = results["acquisition"]
+settings = results["info"]
 restored_catalog = ResonatorCatalog.from_dict(block["call_params"]["catalog"])
 
 print("block fields:", list(block))
 print("measurement:", block["measurement"], "schema:", block["schema_version"])
 print("requested:", block["call_params"])
 print("acquired:", settings)
-print("first packet timestamp:", results["slow"]["timestamps"][0])
+print("first packet timestamp:", results["shared_slow"]["timestamps"][0])
 for name, record in results["resonators"].items():
     print(name, "channel", record["channel"],
-          "tone [Hz]", record["tone_frequency_hz"], "DAC fraction", record["amplitude"])
+          "bias [Hz]", record["bias_frequency_hz"],
+          "DAC fraction", record["bias_amplitude"],
+          "power [dBm]", record["bias_amplitude_dbm"])
     for stream in ("slow", "pfb"):
-        if stream in record:
-            data = record[stream]
-            print(" ", stream, "IQ", data["iq_counts"].shape,
-                  data["iq_counts"].dtype, "I PSD", data["psd_i"].shape)
+        key = f"{stream}_data"
+        if key in record:
+            data = record[key]
+            iq = data[f"iq_{settings['iq_units']}"]
+            print(" ", stream, "IQ", iq.shape, iq.dtype,
+                  settings["iq_units"], "I PSD", data["psd_i"].shape)
 print("nominal slow duration [s]:",
       block["call_params"]["num_samples"] / settings["slow_sample_rate_hz"])
 ```
 
-Slow timestamps, `freq_iq` and `freq_dsb` are shared under `results.slow`.
-Each named resonator has complex `iq_counts` and the three spectra `psd_i`,
-`psd_q`, `psd_dual_sideband`. PFB records also carry their own axes and
-`time_s = arange(n) / sample_rate`. Slow and PFB time origins are independent.
+Slow timestamps, `freq_iq` and `freq_dsb` are shared under
+`results.shared_slow`. The nominal PFB time axis is under
+`results.shared_pfb`; PFB spectral axes stay in each resonator's `pfb_data`
+because the channel-dependent droop correction can give them different spans.
+Each named resonator has `slow_data` and, when requested, `pfb_data`, containing
+complex `iq_volts` (absolute) or `iq_counts` (relative) and the three spectra `psd_i`, `psd_q`, and
+`psd_dual_sideband`. Slow and PFB time origins are independent.
 
-Time-domain values are readout counts for both references. The plotters use
-`VOLTS_PER_ROC` for volts. Absolute spectra are dBm/Hz. With
+Time-domain values retain the helpers' units: volts for absolute reference,
+counts for relative reference. The plotters convert either representation to
+the requested units using `VOLTS_PER_ROC`; they also read older `adc_counts`
+records. All frequency axes are in Hz. Absolute spectra are dBm/Hz. With
 `reference="relative"`, spectra are dBc/Hz except the carrier bins, stored
-as dBc; `carrier_bin_units` records that exception. All bins stay in the file.
-Measured DAC amplitude and module DAC scale describe the drive independently
-of the received-noise spectrum.
+as dBc; `carrier_bin_units` records that exception. All returned bins stay in
+the file, including the carrier neighborhood.
+`bias_amplitude` is the normalized DAC fraction and `bias_amplitude_dbm` is its
+power using the measured module DAC scale; it is `None` when either readback is
+unavailable. These describe the drive independently of the received spectrum.
+
+`results.info` records the settings and unit declarations needed to
+interpret the arrays: the resolved `decimation`, whether it was changed, the
+NCO and slow/PFB sample rates, the effective PFB segmentation/correction
+settings, the absolute/relative reference, and the IQ, spectrum and
+carrier-bin units. Requested arguments remain separately under `call_params`.
+
+| Field | Meaning and source |
+| --- | --- |
+| `decimation` | Effective board stage: the existing stage when the call omitted `decimation`, otherwise the validated requested stage. |
+| `decimation_changed` | Whether that effective stage differed from the stage read before acquisition. |
+| `nco_frequency_hz` | Module NCO read from the board before capture; it may be `None` if unavailable. |
+| `slow_sample_rate_hz` | Rate calculated by `decimation_to_sampling(decimation)`. |
+| `pfb_sample_rate_hz` | Fixed `PFB_SAMPLING_FREQ` when PFB capture was requested, otherwise `None`. |
+| `pfb_nsegments` | Effective PFB segment count: the explicit value, or slow `nsegments` when omitted; `None` without PFB capture. |
+| `pfb_binlim_hz` | The ±1 MHz limit about the PFB bin center: frequencies outside it are discarded before droop correction. `None` without PFB capture. |
+| `pfb_trim` | `False` retains the full corrected dual-sideband span. `True` would further crop it to equal bin counts on either side of zero (with one endpoint excluded). I/Q spectra are clipped independently to the common sideband span. `None` without PFB capture. |
+| `pfb_reset_nco` | `False` for a PFB capture because the routine preserves the programmed NCO; otherwise `None`. |
+| `reference` | Validated `absolute` or `relative` value requested by the caller and passed to both spectral helpers. |
+| `iq_units` | `volts` for absolute reference (`iq_volts`), `counts` for relative reference (`iq_counts`), matching the helpers without rescaling. |
+| `spectrum_units` | `dBm/Hz` for absolute spectra or `dBc/Hz` for relative spectra. |
+| `carrier_bin_units` | `dBm/Hz` in absolute mode; `dBc` in relative mode because the helper multiplies its density by the FFT bin width. |
+| `carrier_bin_rule` | Identifies the carrier as the bin nearest zero frequency in each spectrum. |
+
+Carrier handling in both helpers uses the complex dual-sideband DC bin as the
+common I/Q reference. In absolute mode every bin remains a density in dBm/Hz,
+including DC. In relative mode the reference is the DC density multiplied by
+`sample_rate / segment_length`; every spectrum is divided by that reference.
+The helpers also multiply the I, Q and dual-sideband DC entries themselves by
+that bin width, so those entries are powers in dBc while other entries remain
+dBc/Hz. Dual-sideband DC is therefore 0 dBc; I and Q DC show their respective
+fractions of the combined carrier power.
+
+This single-bin estimate is not the full Hann-windowed carrier power. For a
+constant `3+4j` volt signal, 4,096 samples and one segment, the expected received
+power is 0.25 W under the helpers' peak-voltage/50-ohm convention. The slow
+helper estimates 0.166667 W and the PFB helper (tone at bin center) 0.166626 W:
+about 1.76 dB low, making relative noise densities about 1.76 dB high. The slow
+helper uses a periodic Hann window and PFB uses a symmetric Hann window, which
+accounts for the small difference. Absolute PSD normalization does not have
+this single-bin integration error; carrier power requires integration over
+its window-broadened peak. A future correction should keep every spectral bin
+in density units and report a separate, window-corrected carrier power. The
+current helpers and their mixed-unit carrier entries are preserved here.
 
 ## 5. Overlay noise on the bias sweep
 

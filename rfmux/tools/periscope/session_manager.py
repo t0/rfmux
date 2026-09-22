@@ -62,7 +62,6 @@ class SessionManager(QtCore.QObject):
         'netanal': 'Network Analysis',
         'multisweep': 'Multisweep Analysis',
         'noise': 'Noise Spectrum',
-        'channel_noise':'Channel Noise',
         'screenshot': 'Screenshot' ,
     }
 
@@ -549,7 +548,6 @@ class SessionManager(QtCore.QObject):
         Detection priority:
         1. Check store's file_metadata (for files written through store)
         2. Check '_session_export' metadata (for files exported by session manager)
-        3. Inspect data structure (for older files or external files)
         
         Args:
             file_path: Path to the pickle file
@@ -587,15 +585,6 @@ class SessionManager(QtCore.QObject):
             metadata = data['_session_export']
             if isinstance(metadata, dict) and 'data_type' in metadata:
                 return metadata['data_type']
-        
-        # 3. Fall back to structure-based detection for files with neither
-
-        # Noise files: a spectrum beside the settings it was taken under.
-        if 'noise_data' in data and data['noise_data'] is not None:
-            return 'noise'
-
-        if 'channel_noise_data' in data and data['channel_noise_data'] is not None:
-            return 'channel_noise'
         
         # Unknown file type
         return None

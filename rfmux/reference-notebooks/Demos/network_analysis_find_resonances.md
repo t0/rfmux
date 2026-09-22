@@ -137,7 +137,7 @@ only one module is measured:
 
 ```text
 netanal[module_id]                  # e.g. "crs0042_rmod1"
-    schema_version                 # measurement schema version (9)
+    schema_version                 # measurement schema version (11)
     measurement                    # "netanal"
     module                         # numeric module
     dac_scale_dbm                  # DAC full scale reported by the board, or None

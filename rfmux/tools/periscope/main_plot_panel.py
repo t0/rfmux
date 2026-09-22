@@ -10,7 +10,6 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
     This panel includes the toolbar, configuration options, and plot grid.
     It can be docked, floated, or tabbed alongside other analysis panels.
     """
-    data_ready = QtCore.pyqtSignal(str, str, dict)
     
     def __init__(self, parent_window, chan_str="1"):
         """
@@ -40,10 +39,6 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.grid = QtWidgets.QGridLayout(self.container)
         layout.addWidget(self.container)
         
-    def emit_channel_noise_export(self, identifier: str, data: dict) -> None:
-        """Emit channel noise data for session auto-export."""
-        self.data_ready.emit("channel_noise", identifier, data)
-    
     def get_grid(self):
         """Get the grid layout for adding plots."""
         return self.grid

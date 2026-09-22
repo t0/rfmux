@@ -19,6 +19,7 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import SymmetricalLogLocator
 import numpy as np
 
+from rfmux.algorithms.measurement.noise_display import noise_display_products
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.tuning import find_iteration_matching_amplitude
@@ -37,15 +38,13 @@ def _records(block: dict, names: Sequence[str] | str | None, stream: str) -> dic
         raise ValueError("Pass one noise module block: noise[module_id].")
     if stream not in ("slow", "pfb"):
         raise ValueError("stream must be 'slow' or 'pfb'.")
-    if block["results"]["acquisition"]["iq_units"] != "adc_counts":
-        raise ValueError("Expected noise IQ in adc_counts.")
     records = block["results"]["resonators"]
     names = list(records) if names is None else [names] if isinstance(names, str) else names
     selected = {name: records[name] for name in names}
     if not selected:
         raise ValueError("Select at least one resonator.")
     for name, record in selected.items():
-        if stream not in record:
+        if f"{stream}_data" not in record:
             raise ValueError(f"{name} has no {stream} capture.")
     return selected
 
@@ -71,9 +70,10 @@ def _bias_sweep(block: dict, name: str, record: dict, sweeps: dict | None,
     if sweeps is not None:
         if sweeps.get("measurement") != "multisweep" or sweeps["module"] != block["module"]:
             raise ValueError("sweeps must be a multisweep block for the same module.")
-        if record["amplitude"] is None:
+        if record["bias_amplitude"] is None:
             raise ValueError(f"{name} has no measured amplitude for sweep matching.")
-        by_direction, _ = find_iteration_matching_amplitude(sweeps, name, record["amplitude"])
+        by_direction, _ = find_iteration_matching_amplitude(
+            sweeps, name, record["bias_amplitude"])
         sweep = by_direction[direction]
     else:
         if catalog is None:
@@ -82,8 +82,8 @@ def _bias_sweep(block: dict, name: str, record: dict, sweeps: dict | None,
         if sweep is None:
             raise ValueError(f"{name} has no stored bias sweep; supply sweeps=.")
     amplitude = sweep.get("sweep_amplitude")
-    if (amplitude is None or record["amplitude"] is None or not np.isclose(
-            amplitude, record["amplitude"], rtol=BIAS_AMPLITUDE_RTOL, atol=0)):
+    if (amplitude is None or record["bias_amplitude"] is None or not np.isclose(
+            amplitude, record["bias_amplitude"], rtol=BIAS_AMPLITUDE_RTOL, atol=0)):
         raise ValueError(f"{name}: sweep and measured tone amplitudes must match.")
     return sweep
 
@@ -104,7 +104,9 @@ def plot_iq_panels(
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} noise on bias sweeps"):
         for ax, name in zip(axes, batch):
             record, sweep = records[name], traces[name]
-            iq = np.asarray(record[stream]["iq_counts"]) * factor
+            iq = noise_display_products(
+                block, name, stream=stream, include_psd=False)["iq"]
+            iq = iq * (factor / VOLTS_PER_ROC)
             curve = np.asarray(sweep["iq_volts"]) * factor / VOLTS_PER_ROC
             ax.plot(curve.real, curve.imag, color="0.4", lw=1, label="bias sweep")
             ax.scatter(iq.real, iq.imag, s=4, alpha=.25, color=IQ_COLORS[0],
@@ -112,7 +114,7 @@ def plot_iq_panels(
             ax.plot(iq.real.mean(), iq.imag.mean(), "+", color="C3", ms=10,
                     label="noise mean")
             frequencies = np.asarray(sweep["frequencies"])
-            tone = record["tone_frequency_hz"]
+            tone = record["bias_frequency_hz"]
             if tone is not None and frequencies.min() <= tone <= frequencies.max():
                 order = np.argsort(frequencies)
                 point = np.interp(tone, frequencies[order], curve[order])
@@ -136,13 +138,13 @@ def plot_timestreams(
     figures = []
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} timestreams"):
         for ax, name in zip(axes, batch):
-            data = records[name][stream]
-            iq = np.asarray(data["iq_counts"])
+            products = noise_display_products(
+                block, name, stream=stream, include_psd=False)
+            iq = products["iq"]
             if demean:
                 iq = iq - iq.mean()
-            iq = iq * factor
-            time = (np.asarray(data["time_s"]) if stream == "pfb" else
-                    np.arange(len(iq)) / block["results"]["acquisition"]["slow_sample_rate_hz"])
+            iq = iq * (factor / VOLTS_PER_ROC)
+            time = products["time_s"]
             for values, label, color in zip((iq.real, iq.imag), ("I", "Q"), IQ_COLORS):
                 ax.plot(time, values, color=color, lw=.7, label=label)
             ax.set(xlabel="nominal elapsed time [s]",
@@ -163,13 +165,13 @@ def plot_psds(
     on a symmetric log axis. No binning, folding or spectral recalibration.
     """
     records = _records(block, names, stream)
-    units = block["results"]["acquisition"]["spectrum_units"]
+    units = block["results"]["info"]["spectrum_units"]
     figures = []
     kind = "dual-sideband" if dual_sideband else "I/Q"
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} {kind} noise spectra"):
         for ax, name in zip(axes, batch):
-            data = records[name][stream]
-            shared = block["results"]["slow"] if stream == "slow" else data
+            data = records[name][f"{stream}_data"]
+            shared = block["results"]["shared_slow"] if stream == "slow" else data
             freq = np.asarray(shared["freq_dsb" if dual_sideband else "freq_iq"])
             if not len(freq):
                 raise ValueError(f"{name} has an empty spectral frequency axis.")

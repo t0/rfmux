@@ -17,13 +17,8 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     Dialog for configuring noise spectrum parameters with live dependency updates.
     """
 
-    def __init__(self, parent=None, num_resonances = 0, crs = None, channel = False): #### Remmove the decimation function
-        """
-        Args:
-            parent: Parent QWidget.
-            get_decimation_func: Optional callable returning highest frequency
-                                 based on decimation (e.g., from hardware config).
-        """
+    def __init__(self, parent=None, num_resonances=0, crs=None,
+                 channel=False) -> None:
         super().__init__(parent)
         self.setWindowTitle("Noise Spectrum Configuration")
         self.setModal(True)
@@ -46,7 +41,6 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
 
 
 
-        ##### Add here the number of resonances/frequencies here ####
         
 
     # ------------------------------------------------------
@@ -96,7 +90,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.reference_input = QtWidgets.QComboBox()
         self.reference_input.addItems(["dBc", "dBm"])
         self.reference_input.setCurrentText("dBm")
-        layout.addRow("Units:", self.reference_input)
+        layout.addRow("Saved PSD reference:", self.reference_input)
 
         # Time Taken (s) — Read-only label
         self.time_taken_label = QtWidgets.QLabel("0.00 s")
@@ -147,11 +141,6 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         self.pfb_samples.setToolTip("Number of PFB samples.")
         pfb_layout.addRow("PFB Samples:", self.pfb_samples)
         
-        self.overlap_sample = QtWidgets.QLabel("0")
-        self.overlap_sample.setToolTip("Estimated overlapping frequency samples.")
-        pfb_layout.addRow("Overlapping Samples:", self.overlap_sample)
-
-        
         # Hide by default
         self.pfb_group.setVisible(False)
         layout.addRow(self.pfb_group)
@@ -200,7 +189,6 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         segments = self._safe_int(self.segments_edit.text(), 10)
         spectrum_limit = self.spectrum_limit_input.value()
         decimation = self.decimation_input.value()
-        pfb_samps = self.pfb_samples.text()
 
         # --- Compute base & effective highest frequency ---
         base_highest_freq = self._get_frequency(decimation)
@@ -209,50 +197,17 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
         # --- Compute estimated time (example heuristic) ---
         time_taken = samples/(base_highest_freq*2)
 
-        nperseg = self._safe_int(samples // segments, 500)
+        nperseg = max(1, samples // segments)
         freq_resolution = (base_highest_freq*2)/nperseg
-
-        #### Calculating overlapping samples #######
-        #### 7840 - Number of pfb frequency samples at segmentation 1, less than the maximum frequency at decimation 0. Determined manually
-        #### This was estimated for million samples, hence we calculate a ratio
-        #### 0.6 - keeping 60% of overlapping sample
-
-        samp_ratio = 1000000/int(pfb_samps)
-
-        overlap = ((7840 * spectrum_limit)/(2**decimation * segments * samp_ratio)) * 0.6            
 
         # --- Update UI ---
         self.highest_freq_label.setText(f"{effective_highest_freq:.2f} Hz")
         self.time_taken_label.setText(f"{time_taken:.2f} s")
         self.freq_resolution_label.setText(f"{freq_resolution:.4f} Hz")
-        self.overlap_sample.setText(f"{int(overlap)}")
 
-        if self.channel_noise:
-            chan = max(self._safe_channel(self.channel_edit.text(), 1))
-            if (decimation < 4) and (chan > 128):
-                self.status_label.setText(
-                    "Decimation < 4: Only channel 1-128 allowed, please check!!"
-                )
-                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
-            else:
-                self.status_label.setText("")
-                self.status_label.setStyleSheet("")
-        
-        else:
-            if decimation <= 1:
-                self.status_label.setText(
-                    "Decimation ≤ 1: You will drop packets in Mac and Windows, increase UDP buffer in Linux (see Help).\nOnly 128 channels available."
-                )
-                self.status_label.setStyleSheet("background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 6px;")
-            elif 1 < decimation <=3:
-                self.status_label.setText("Decimation = 2 or 3: 128 channels but only for the current module.")
-                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
-            elif decimation == 4:
-                self.status_label.setText("Decimation = 4: 1024 channels but only for the current module.")
-                self.status_label.setStyleSheet("background-color: #fff3cd; color: #856404; padding: 5px; border-radius: 6px;")
-            else:
-                self.status_label.setText("")
-                self.status_label.setStyleSheet("")
+        self.status_label.setText(
+            "Channels 1–128 only below decimation 3. A changed decimation "
+            "selects this module alone and remains in effect.")
 
         self._updating = False
 
@@ -292,46 +247,30 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     # ------------------------------------------------------
     # Get User Parameters
     # ------------------------------------------------------
-    def get_parameters(self):
-        """Return all configuration parameters."""
-        
-        highest_freq = self.highest_freq_label.text().split()[0]
-        time_taken = self.time_taken_label.text().split()[0]
-        freq_res = self.freq_resolution_label.text().split()[0]
-        
-        pfb_samps = self.pfb_samples.text()
-        pfb_time = self.pfb_time_taken_label.text().split()[0]
-        overlap_samps = self.overlap_sample.text()
-        
-        # Map UI units back to backend reference mode
-        # dBc -> relative, dBm -> absolute
-        ref_text = self.reference_input.currentText()
-        reference_mode = "relative" if ref_text == "dBc" else "absolute"
-        
+    def get_parameters(self) -> dict:
+        """Arguments for measure_noise."""
         params = {
-            "num_samples": self._safe_int(self.samples_edit.text(), 10000),
-            "spectrum_limit": self.spectrum_limit_input.value(),
-            "num_segments": self._safe_int(self.segments_edit.text(), 10),
+            "num_samples": int(self.samples_edit.text()),
+            "spectrum_cutoff": self.spectrum_limit_input.value(),
+            "nsegments": int(self.segments_edit.text()),
             "decimation": self.decimation_input.value(),
-            "reference" : reference_mode,
-            "effective_highest_freq": float(highest_freq),
-            "time_taken": float(time_taken),
-            "freq_resolution" : float(freq_res)
+            "reference": ("relative" if self.reference_input.currentText() == "dBc"
+                          else "absolute"),
         }
-
         if self.channel_noise:
-            channels = self._safe_channel(self.channel_edit.text(), 1)
-            params["channel_noise"] = channels
-            pfb_time = float(pfb_time) * len(channels) ### increasing it depending on how many channels were provided
-        else:
-            params["channel_noise"] = None
-        
+            params["channels"] = [int(c.strip()) for c in self.channel_edit.text().split(",")]
         if self.pfb_checkbox.isChecked():
-            params["pfb_enabled"] = True
-            params["pfb_samples"] = self._safe_int(pfb_samps, 1000000)
-            params["pfb_time"] = float(pfb_time)
-            params["overlap"] = int(overlap_samps)
-        else:
-            params["pfb_enabled"] = False
-
+            params["pfb_samples"] = int(self.pfb_samples.text())
         return params
+
+    def accept(self) -> None:
+        try:
+            params = self.get_parameters()
+            from rfmux.algorithms.measurement.noise_spectrum import _segments
+            _segments(params["num_samples"], params["nsegments"], "slow")
+            if "pfb_samples" in params:
+                _segments(params["pfb_samples"], params["nsegments"], "PFB")
+        except ValueError as exc:
+            self.status_label.setText(str(exc))
+            return
+        super().accept()

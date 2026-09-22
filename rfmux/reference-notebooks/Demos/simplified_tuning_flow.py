@@ -115,7 +115,7 @@ async def _acquire_noise(
                     "to measure the existing session.")
             started_mock_stream = await crs.start_udp_streaming()
             print("Mock PFB RPC capture is synthetic uniform noise.")
-        noise = await crs.take_noise_spectrum(
+        noise = await crs.measure_noise(
             catalog, **NOISE_PARAMS, save=True, label="tuning_noise")
     finally:
         if started_mock_stream:

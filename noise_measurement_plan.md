@@ -6,26 +6,26 @@ Status: stages 1–2 implemented, 2026-09-18. Periscope migration remains.
 
 The shared acquisition boundary fits the existing helpers and persistence.
 The first implementation is `rfmux/algorithms/measurement/noise_spectrum.py`.
-It reuses the measurement wrapper and its schema version 9: adding a new
-measurement kind does not change existing sweep blocks.
+It reuses the measurement wrapper. The current noise layout is schema version
+11; the incompatible field-name cleanup moved every packed measurement to that
+shared version.
 
 ```python
-noise = await crs.take_noise_spectrum(
+noise = await crs.measure_noise(
     catalog, num_samples=10_000, nsegments=10, save=False)
 block = noise[crs.module[catalog.module].index()]
 record = block["results"]["resonators"][catalog.names()[0]]
-counts = record["slow"]["iq_counts"]
-frequencies = block["results"]["slow"]["freq_iq"]
+volts = record["slow_data"]["iq_volts"]
+frequencies = block["results"]["shared_slow"]["freq_iq"]
 ```
 
 Implementation decisions from the source audit:
 
 - Both helpers return volts for absolute TOD and counts for relative TOD.
-  The routine reverses the absolute TOD conversion with `VOLTS_PER_ROC`;
-  it copies spectra unchanged. Counts are floating point, not a claim of
-  bit-exact integer recovery after a volts round trip.
-- Both relative spectral helpers replace carrier bins with integrated
-  carrier power. `spectrum_units` is `dBc/Hz`, but `carrier_bin_units` is
+  The routine preserves those units in `iq_volts` or `iq_counts`, with
+  `info.iq_units` set to `volts` or `counts`; it copies spectra unchanged.
+- Both relative spectral helpers multiply carrier-bin densities by the FFT
+  bin width; this single-bin estimate omits Hann-window leakage. `spectrum_units` is `dBc/Hz`, but `carrier_bin_units` is
   `dBc`; the carrier bin is the nearest-to-zero frequency of each spectrum.
 - Firmware cannot read back packet width or the streamed-module selection.
   A different explicit decimation therefore selects the requested module
@@ -40,8 +40,9 @@ Implementation decisions from the source audit:
   PFB uses the helper's documented maximum of 10,000,000 samples.
 - Explicit channel names are `CH{channel:04d}`. `call_params.channel_names`
   maps names to channels. Shared slow fields are `timestamps`, `freq_iq`
-  and `freq_dsb`; each stream record has `iq_counts`, `psd_i`, `psd_q` and
-  `psd_dual_sideband`. PFB adds its own axes and `time_s`.
+  and `freq_dsb`; each stream record has `iq_volts` or `iq_counts`, `psd_i`, `psd_q` and
+  `psd_dual_sideband`. PFB keeps channel-specific spectral axes in each record
+  and shares its nominal `time_s` axis at the results level.
 - Progress is a synchronous callback receiving a dictionary after each
   capture. Cancellation propagates at existing awaits; synchronous spectral
   processing and saving are not interruptible. No latency bound is promised.
@@ -143,14 +144,14 @@ existing lower-level facilities.
 
 ## Proposed public API
 
-Register `take_noise_spectrum` as a CRS macro in
+Register `measure_noise` as a CRS macro in
 `rfmux/algorithms/measurement/noise_spectrum.py` and expose it through the
 existing measurement registration path.
 
 Proposed signature (design, not an existing API):
 
 ```python
-async def take_noise_spectrum(
+async def measure_noise(
     crs,
     catalog=None,
     *,
@@ -242,13 +243,15 @@ module_id
     catalog snapshot or explicit channel/name mapping
     requested acquisition arguments
   results
-    acquisition: resolved decimation, sample rates, reference and units
-    slow: shared time/frequency axes
+    info: resolved decimation, sample rates, reference and units
+    shared_slow: shared timestamps and frequency axes
+    shared_pfb: shared nominal time axis, or None
     resonators
       name
-        channel, tone_frequency_hz, amplitude
-        slow: IQ arrays and I/Q/dual-sideband spectra
-        pfb: IQ arrays, time/frequency axes and spectra (when requested)
+        channel, bias_frequency_hz, bias_amplitude, bias_amplitude_dbm
+        slow_data: IQ arrays and I/Q/dual-sideband spectra
+        pfb_data: IQ arrays, channel-specific frequency axes and spectra
+                  (when requested)
 ```
 
 Finalize exact field names and schema versioning alongside a small packer

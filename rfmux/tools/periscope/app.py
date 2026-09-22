@@ -230,9 +230,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
 
 
-        self.channel_noise_data = {}
-        self.channel_noise_panel_count = 0
-        self.loaded_channel_noise = False
         
         # --- Tuning storage ---
         # The tuning rows per module, {module: {channel: bias_kids entry}},
@@ -762,8 +759,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create the MainPlotPanel
         self.main_plot_panel = MainPlotPanel(self)
 
-        if hasattr(self.main_plot_panel, 'data_ready') and hasattr(self, 'session_manager'):
-            self.main_plot_panel.data_ready.connect(self.session_manager.handle_data_ready)
         
         # Set up references for backward compatibility with PeriscopeRuntime
         self.container = self.main_plot_panel.container
@@ -1541,16 +1536,13 @@ grid. This tab needs a selected bias step to display its curves.
         self.pulse_capture_windows[key] = {"window": panel, "dock": dock}
 
     def _get_channel_noise(self) -> None:
-        ''' Open Dialog to get noise spectrum dialog '''
-
         from .noise_spectrum_dialog import NoiseSpectrumDialog
-        num_res = 0 ### a place holder from the dialog 
-        noise_dialog = NoiseSpectrumDialog(self, num_res, self.crs, channel=True)
-        if noise_dialog.exec():
-            params = noise_dialog.get_parameters()
-            self._collect_channel_noise(params)
+        dialog = NoiseSpectrumDialog(self, 0, self.crs, channel=True)
+        dialog.accepted.connect(
+            lambda: self._start_noise_measurement(dialog.get_parameters()))
+        self._noise_dialog = dialog
+        dialog.open()
 
-    
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
@@ -2664,8 +2656,6 @@ grid. This tab needs a selected bias step to display its curves.
                 self._load_multisweep_analysis(data)
             elif file_type == 'noise':
                 self._load_noise_from_session(data, file_path)
-            elif file_type == 'channel_noise':
-                self._load_channel_noise_from_session(data, file_path)
             else:
                 QtWidgets.QMessageBox.information(
                     self,
@@ -2711,44 +2701,25 @@ grid. This tab needs a selected bias step to display its curves.
             panel, f"Pulses: {Path(file_path).stem}", f"pulse_review_{n}")
 
     def _load_noise_from_session(self, data: dict, file_path: str):
-        """
-        Load noise spectrum data from session file.
-        
-        Noise files contain complete multisweep data plus noise spectrum data.
-        Creates a MultisweepPanel and a separate NoiseSpectrumPanel for the
-        noise visualization.
-        """
-        panel, dock, window_id, target_module = \
-            self._create_multisweep_panel_from_loaded_data(data)
-        
-        if panel is None:
-            return  # Error already displayed by helper
-        
-        # Load noise data if present and open the NoiseSpectrumPanel
-        if data.get('noise_data') is not None:
-            noise_data = data['noise_data']
-            panel._get_spectrum(noise_data, use_loaded_noise=True)
-        else:
-            print("[Noise] File loaded but no noise_data found")
-        
-        # Re-raise the multisweep dock to keep focus on it
-        if dock:
+        """Open current noise measurement containers."""
+        from .noise_spectrum_panel import NoiseSpectrumPanel
+
+        blocks = list(data.values())
+        if not blocks or any(not isinstance(block, dict) or
+                             block.get("measurement") != "noise" for block in blocks):
+            raise ValueError("Expected a current noise measurement container")
+        for block in blocks:
+            panel = NoiseSpectrumPanel(
+                block, self, dark_mode=self.dark_mode, file_path=file_path)
+            dock = self.dock_manager.create_dock(
+                panel, f"Noise: module {block['module']}",
+                f"noise_review_{time.time_ns()}")
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            dock.show()
             dock.raise_()
 
-    def _load_channel_noise_from_session(self, data: dict, file_path: str):
-        """Load multisweep data from session file into a new panel."""
-        if 'channel_noise_data' not in data:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid Channel Noise File",
-                f"File does not contain multisweep data:\n{file_path}\n\n"
-                "Cannot load this noise file."
-            )
-            return
-        
-        # Use existing load mechanism
-        self._collect_channel_noise(data, loaded=True)
-        
     def _open_file_with_system_default(self, file_path: str):
         """
         Open a file with the system's default application.

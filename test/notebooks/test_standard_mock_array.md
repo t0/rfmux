@@ -174,7 +174,8 @@ for name in catalog.names():
     depth = 20 * np.log10(np.abs(s["iq_counts"]).max() / np.abs(s["iq_counts"]).min())
     print(f"{name:6s} {sk['fr']/1e6:12.6f} {sk['Qr']:9.0f} {sk['Qi']:9.0f} {depth:9.2f} {nl['a']:7.3f}")
 
-assert len(report.failed) == 0, report.failed
+failed = [f for f in report["fits"] if f["failed_because"] is not None]
+assert not failed, failed
 assert all(sections[n]["fits"]["nonlinear"]["params"]["a"] < BIFURCATION_A for n in catalog.names())
 ```
 

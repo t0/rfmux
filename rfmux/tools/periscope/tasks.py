@@ -586,7 +586,7 @@ class FindResonancesTask(QtCore.QThread):
 
 class RunFitsSignals(QObject):
     progress = pyqtSignal(int, int)             # sweeps fitted, sweeps to fit
-    completed = pyqtSignal(object)              # the FitReport
+    completed = pyqtSignal(object)              # fit report dictionary
     error = pyqtSignal(str)
 
 

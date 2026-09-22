@@ -265,8 +265,8 @@ class BiasReport:
     ``catalog`` is the answer; the findings are how it was reached, one per
     resonator in bias-frequency order. The settings come back here rather than being
     copied onto a thousand bias points, as with
-    :class:`~rfmux.tuning.fits.FitReport` — recording them alongside the data
-    is the output folder's job.
+    the report dictionary returned by :func:`~rfmux.tuning.fits.fit_sweeps`.
+    The output folder handles saving.
     """
 
     # Stamped into to_dict output and required exactly by from_dict, so a file

@@ -178,7 +178,7 @@ def df_calibration_for_entry(entry, *, prefer="nonlinear"):
     return complex(1.0 / convert_roc_to_volts(_slope(model, f_bias, 1e-4 * lw)))
 
 
-@deprecated("rfmux.tuning.fits.FitReport / entry['fits'] after rfmux.tuning.fit_sweeps")
+@deprecated("fit report dictionary / entry['fits'] after rfmux.tuning.fit_sweeps")
 def fits_present(entries) -> set:
     """Which resonance fits the *entries* carry: a subset of
     {"nonlinear", "skewed"}."""

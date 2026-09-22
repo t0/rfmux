@@ -442,15 +442,16 @@ for key, value in sweep_section.items():
 ## 3. Fit the data
 
 `fit_sweeps()` takes one module’s output. It fits the selected sections and adds
-results under each section’s `fits` key. The return value is a `FitReport`,
-which records successes, failures, and settings.
+results under each section’s `fits` key. The returned dictionary contains
+`schema_version`, `fits`, and `settings`. Each fit row records its coordinates,
+model, and failure reason (`None` on success).
 
 ```python
 from rfmux.tuning import fit_sweeps
 
 fit_report = fit_sweeps(multi_amplitude_results)
 
-print(fit_report)
+print(f"{len(fit_report['fits'])} model fits completed")
 ```
 
 ### Fit options
@@ -491,13 +492,14 @@ fit settings and module information. Selection is recorded by the report’s fit
 entries. Keep the report if you need to reproduce the fitting settings.
 
 ```python
-print(f"total fits    {len(fit_report)}")
-print(f"fitted        {len(fit_report.fitted)}")
-print(f"failed        {len(fit_report.failed)}")
-print(f"skewed only   {len(fit_report.for_model('skewed'))}")
+fits = fit_report["fits"]
+print(f"total fits    {len(fits)}")
+print(f"fitted        {sum(f['failed_because'] is None for f in fits)}")
+print(f"failed        {sum(f['failed_because'] is not None for f in fits)}")
+print(f"skewed only   {sum(f['model'] == 'skewed' for f in fits)}")
 
 print("\nsettings:")
-for key, value in fit_report.settings.items():
+for key, value in fit_report["settings"].items():
     print(f"  {key:<18} {value!r}")
 ```
 
@@ -888,10 +890,10 @@ at_bias_report = fit_sweeps_at_bias_amplitude(
 
 print(at_bias_report)
 print()
-for fit in at_bias_report.fits:
-    measured_at = unfitted_results["results"][fit.iteration][fit.direction][fit.name]["sweep_amplitude"]
-    print(f"{fit.name}  biased at {catalog[fit.name].bias.amplitude:.5f}  "
-          f"→ step {fit.iteration}, measured at {measured_at:.5f}")
+for fit in at_bias_report["fits"]:
+    measured_at = unfitted_results["results"][fit['iteration']][fit['direction']][fit['name']]["sweep_amplitude"]
+    print(f"{fit['name']}  biased at {catalog[fit['name']].bias.amplitude:.5f}  "
+          f"→ step {fit['iteration']}, measured at {measured_at:.5f}")
 ```
 
 Every resonator selects step 1 here because that step multiplies its own bias
@@ -916,9 +918,9 @@ fixed_report = fit_sweeps_at_bias_amplitude(
     directions="upward",
     models=("circle",),
 )
-for fit in fixed_report.fits:
-    measured_at = unfitted_results["results"][fit.iteration][fit.direction][fit.name]["sweep_amplitude"]
-    print(f"0.00200 for {fit.name}  → step {fit.iteration} "
+for fit in fixed_report["fits"]:
+    measured_at = unfitted_results["results"][fit['iteration']][fit['direction']][fit['name']]["sweep_amplitude"]
+    print(f"0.00200 for {fit['name']}  → step {fit['iteration']} "
           f"(actually {measured_at:.5f})")
 ```
 
@@ -1148,7 +1150,9 @@ print("Comparison fits left the saved measurement unchanged.")
   separate analysis variant, use `store.save(copy_of_sweeps, "multisweep",
   new=True)` before fitting it; `directory=` alone does not change a saved path.
 - **Keep fit settings:** settings belong to the report, not each section.
-  Use `fit_report.to_dict()` to retain the report separately from the sweeps.
+  Save `fit_report` directly to retain the report separately from the sweeps.
+  Each row in `fit_report["fits"]` records the sweep coordinates, model, and
+  `failed_because` (`None` on success). No class conversion is needed.
 - **Calibrate frequency shifts:** current df calibration uses IQ derivatives
   measured at the bias point. These examples do not derive it from a fit.
   See `bias_finding.md`.

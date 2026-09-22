@@ -8,7 +8,6 @@ from rfmux.tuning.fits import (
     FIT_PARAMS,
     MODELS,
     FitFailed,
-    FitReport,
     centered_iq,
     collect_fit_params,
     fit_nonlinear_iq,
@@ -182,8 +181,8 @@ def test_the_settings_come_back_on_the_report_rather_than_on_every_entry():
     sweeps = a_multisweep()
     report = fit_sweeps(sweeps, models=("skewed",), approx_Qr=3e4)
 
-    assert report.settings["approx_Qr"] == 3e4
-    assert report.settings["module"] == 2
+    assert report["settings"]["approx_Qr"] == 3e4
+    assert report["settings"]["module"] == 2
     entry = sweeps["results"][0]["upward"]["R0001"]
     assert "settings" not in entry["fits"]["skewed"]
 
@@ -321,8 +320,10 @@ def test_one_malformed_entry_does_not_throw_away_the_rest_of_the_batch():
 
     report = fit_sweeps(sweeps, models=("circle",))
 
-    assert [f.name for f in report.fitted] == ["good"]
-    assert "nothing to fit" in report.failed[0].failed_because
+    successful = [f["name"] for f in report["fits"] if f["failed_because"] is None]
+    failed = [f for f in report["fits"] if f["failed_because"] is not None]
+    assert successful == ["good"]
+    assert "nothing to fit" in failed[0]["failed_because"]
 
 
 def test_mismatched_arrays_are_the_callers_mistake_and_raise():
@@ -476,9 +477,9 @@ def test_a_single_multisweep_is_fitted_as_one_iteration():
 
     report = fit_sweeps(sweeps, models=("circle",))
 
-    assert len(report) == 2
-    assert {f.iteration for f in report.fits} == {0}
-    assert {f.direction for f in report.fits} == {"downward"}
+    assert len(report["fits"]) == 2
+    assert {f["iteration"] for f in report["fits"]} == {0}
+    assert {f["direction"] for f in report["fits"]} == {"downward"}
 
 
 def test_a_packed_schedule_is_fitted_across_every_iteration_and_direction():
@@ -487,9 +488,9 @@ def test_a_packed_schedule_is_fitted_across_every_iteration_and_direction():
     report = fit_sweeps(sweeps, models=("circle",))
 
     # 2 resonators x 3 amplitude steps x 2 directions
-    assert len(report) == 12
-    assert {f.iteration for f in report.fits} == {0, 1, 2}
-    assert {f.direction for f in report.fits} == {"upward", "downward"}
+    assert len(report["fits"]) == 12
+    assert {f["iteration"] for f in report["fits"]} == {0, 1, 2}
+    assert {f["direction"] for f in report["fits"]} == {"upward", "downward"}
 
 
 def test_the_selection_arguments_narrow_what_is_fitted():
@@ -499,8 +500,9 @@ def test_the_selection_arguments_narrow_what_is_fitted():
         sweeps, models=("circle",), names="R0001", iterations=1, directions="upward"
     )
 
-    assert len(report) == 1
-    assert (report.fits[0].name, report.fits[0].iteration) == ("R0001", 1)
+    assert len(report["fits"]) == 1
+    row = report["fits"][0]
+    assert (row["name"], row["iteration"]) == ("R0001", 1)
     assert "fits" not in sweeps["results"][0]["upward"]["R0001"]
 
 
@@ -509,7 +511,7 @@ def test_a_single_name_is_one_name_and_not_a_sequence_of_characters():
 
     report = fit_sweeps(sweeps, models=("circle",), names="R0001")
 
-    assert {f.name for f in report.fits} == {"R0001"}
+    assert {f["name"] for f in report["fits"]} == {"R0001"}
 
 
 def test_a_name_that_was_not_swept_says_which_ones_were():
@@ -527,7 +529,7 @@ def test_iteration_zero_selects_the_one_sweep_a_multisweep_has():
     sweep has an iteration like any other, it just has one."""
     report = fit_sweeps(a_multisweep(), models=("circle",), iterations=0)
 
-    assert {f.iteration for f in report.fits} == {0}
+    assert {f["iteration"] for f in report["fits"]} == {0}
 
 
 def test_an_iteration_a_single_sweep_does_not_have_says_what_it_has():
@@ -553,7 +555,7 @@ def test_the_whole_container_is_refused_with_the_subscript_to_use():
 
 
 def test_something_that_is_not_a_sweep_result_says_so():
-    with pytest.raises(TypeError, match="no 'results'"):
+    with pytest.raises(TypeError, match="Expected one module's multisweep output"):
         fit_sweeps({"R0001": a_sweep()})
 
 
@@ -577,7 +579,7 @@ def test_fitting_at_the_bias_amplitude_picks_one_iteration_per_resonator():
 
     # ramp(1e-3, 4e-3, 3) is [1e-3, 2.5e-3, 4e-3]; R0001 is biased at 2e-3 and
     # R0002 at 4e-3, so they are matched to different steps of the same schedule.
-    at = {f.name: f.iteration for f in report.fits}
+    at = {f["name"]: f["iteration"] for f in report["fits"]}
     assert at == {"R0001": 1, "R0002": 2}
 
 
@@ -588,7 +590,7 @@ def test_an_explicit_amplitude_overrides_the_catalogs_bias_amplitudes():
         sweeps, amplitude=1e-3, models=("circle",)
     )
 
-    assert {f.iteration for f in report.fits} == {0}
+    assert {f["iteration"] for f in report["fits"]} == {0}
 
 
 def test_a_single_multisweep_matches_the_one_iteration_it_has():
@@ -596,7 +598,7 @@ def test_a_single_multisweep_matches_the_one_iteration_it_has():
     bracket the bias amplitude — see find_iteration_matching_amplitude."""
     report = fit_sweeps_at_bias_amplitude(a_multisweep(), models=("circle",))
 
-    assert {f.iteration for f in report.fits} == {0}
+    assert {f["iteration"] for f in report["fits"]} == {0}
 
 
 # ─── the report ───────────────────────────────────────────────────────────────
@@ -607,9 +609,9 @@ def test_the_report_counts_each_model_separately():
 
     report = fit_sweeps(sweeps, models=("skewed", "circle"))
 
-    assert len(report.for_model("skewed")) == 6
-    assert len(report.for_model("circle")) == 6
-    assert len(report) == 12
+    assert sum(f["model"] == "skewed" for f in report["fits"]) == 6
+    assert sum(f["model"] == "circle" for f in report["fits"]) == 6
+    assert len(report["fits"]) == 12
 
 
 def test_the_report_says_where_a_failure_was_as_well_as_why():
@@ -617,10 +619,12 @@ def test_the_report_says_where_a_failure_was_as_well_as_why():
 
     report = fit_sweeps(sweeps, models=("circle",))
 
-    assert isinstance(report, FitReport)
-    assert report.fitted == []
-    assert report.failed[0].where == "R0001@0 upward"
-    assert "failed" in repr(report)
+    assert report["fits"] == [{
+        "name": "R0001", "model": "circle", "iteration": 0,
+        "direction": "upward",
+        "failed_because": report["fits"][0]["failed_because"],
+    }]
+    assert "nothing to fit" in report["fits"][0]["failed_because"]
 
 
 def test_the_report_labels_a_schedule_fit_with_both_of_its_coordinates():
@@ -628,10 +632,11 @@ def test_the_report_labels_a_schedule_fit_with_both_of_its_coordinates():
 
     report = fit_sweeps(sweeps, models=("circle",), names="R0001", iterations=2)
 
-    assert {f.where for f in report.fits} == {
-        "R0001@2 upward",
-        "R0001@2 downward",
-    }
+    assert [(f["name"], f["iteration"], f["direction"])
+            for f in report["fits"]] == [
+        ("R0001", 2, "upward"),
+        ("R0001", 2, "downward"),
+    ]
 
 
 def test_progress_is_reported_per_sweep_and_not_per_fit():
@@ -650,36 +655,32 @@ def test_progress_is_reported_per_sweep_and_not_per_fit():
 # ─── Persistence ──────────────────────────────────────────────────────────────
 
 
-def test_a_report_survives_a_round_trip_through_builtins():
-    report = fit_sweeps(a_multisweep(), models=("circle",), save=False)
-    restored = FitReport.from_dict(report.to_dict())
+def test_a_report_can_be_saved_directly_as_json():
+    import json
 
-    assert restored.fits == report.fits
-    # settings is provenance, and comes back in its plain form: the tuple of
-    # model names is a list on the way out, because that is what a file holds.
-    assert restored.settings["models"] == list(report.settings["models"])
-    assert {k: v for k, v in restored.settings.items() if k != "models"} == {
-        k: v for k, v in report.settings.items() if k != "models"
+    report = fit_sweeps(a_multisweep(), models=("circle",), save=False)
+    assert json.loads(json.dumps(report)) == report
+
+
+def test_a_report_keeps_the_serialized_shape():
+    report = fit_sweeps(a_multisweep(), models=("circle",), save=False)
+
+    assert set(report) == {"schema_version", "fits", "settings"}
+    assert report["schema_version"] == 1
+    assert report["settings"]["models"] == ["circle"]
+    assert report["fits"][0] == {
+        "name": "R0001", "model": "circle", "iteration": 0,
+        "direction": "upward", "failed_because": None,
     }
 
 
-def test_a_reports_dict_holds_no_rfmux_classes():
-    """Files have to open on a machine that has never heard of rfmux."""
-    d = fit_sweeps(a_multisweep(), models=("circle", "skewed"), save=False).to_dict()
-
-    assert d["schema_version"] == FitReport.SCHEMA_VERSION
-    assert all(type(f).__name__ == "dict" for f in d["fits"])
-    assert all(
-        type(v).__module__ in ("builtins", "numpy") for v in d["settings"].values()
-    )
-
-
-def test_a_report_from_another_version_is_refused():
-    d = fit_sweeps(a_multisweep(), models=("circle",), save=False).to_dict()
-    d["schema_version"] = FitReport.SCHEMA_VERSION + 1
-
-    with pytest.raises(ValueError, match="schema_version"):
-        FitReport.from_dict(d)
+def test_collecting_an_empty_selection_returns_no_rows():
+    sweeps = a_multisweep()
+    for results in (sweeps["results"], {}):
+        sweeps["results"] = results
+        assert collect_fit_params(sweeps, "skewed", iterations=999) == []
+        with pytest.raises(ValueError):
+            fit_sweeps(sweeps, iterations=999, save=False)
 
 
 def test_fitting_saves_the_sweeps_over_the_file_they_came_from(tmp_path):

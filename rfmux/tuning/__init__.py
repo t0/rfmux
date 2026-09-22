@@ -52,8 +52,6 @@ from .fits import (
     FIT_PARAMS,
     MODELS,
     FitFailed,
-    FitReport,
-    SweepFit,
     centered_iq,
     collect_fit_params,
     fit_section,
@@ -67,6 +65,7 @@ from .multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
 )
+from .noise import remove_common_mode
 from . import store
 from .tuning_record import (catalog_from_tuning, multisweep_from_tuning,
                             tuning_rows)
@@ -109,8 +108,6 @@ __all__ = [
     "FIT_PARAMS",
     "MODELS",
     "FitFailed",
-    "FitReport",
-    "SweepFit",
     "centered_iq",
     "collect_fit_params",
     "fit_section",
@@ -121,6 +118,7 @@ __all__ = [
     "skewed_model_magnitude",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    "remove_common_mode",
     # Keep file operations namespaced as store.save() and store.load().
     "store",
     "RESULTS_SCHEMA_VERSION",

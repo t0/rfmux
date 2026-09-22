@@ -65,7 +65,11 @@ from .multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
 )
-from .noise import remove_common_mode
+from .noise import (
+    apply_pfb_correction,
+    noise_to_df,
+    remove_common_mode,
+)
 from . import store
 from .tuning_record import (catalog_from_tuning, multisweep_from_tuning,
                             tuning_rows)
@@ -118,6 +122,8 @@ __all__ = [
     "skewed_model_magnitude",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    "apply_pfb_correction",
+    "noise_to_df",
     "remove_common_mode",
     # Keep file operations namespaced as store.save() and store.load().
     "store",

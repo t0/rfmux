@@ -266,7 +266,7 @@ class NoiseSpectrumDialog(QtWidgets.QDialog):
     def accept(self) -> None:
         try:
             params = self.get_parameters()
-            from rfmux.algorithms.measurement.noise_spectrum import _segments
+            from rfmux.algorithms.measurement.measure_noise import _segments
             _segments(params["num_samples"], params["nsegments"], "slow")
             if "pfb_samples" in params:
                 _segments(params["pfb_samples"], params["nsegments"], "PFB")

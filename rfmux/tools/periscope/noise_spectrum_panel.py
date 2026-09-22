@@ -6,21 +6,75 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
-from rfmux.algorithms.measurement.noise_display import (
-    noise_catalog, noise_display_products,
+from rfmux.core.transferfunctions import (
+    VOLTS_PER_ROC, convert_dbm_to_volts, spectrum_from_slow_tod,
 )
+from rfmux.tuning.noise import apply_pfb_correction, noise_to_df
 from .layouts import FlowLayout, labelled, WrappingLabel
 from .multisweep_grid_helpers import arrange_plot_widgets, _new_subplot
 from .utils import DEFAULT_SUBPLOTS, IQ_COLORS, LINE_WIDTH, ScreenshotMixin
+
+
+def _noise_display_products(
+    block: dict, name: str, *, stream: str, units: str,
+    include_psd: bool, include_tod: bool,
+) -> dict:
+    """Adapt stored scientific products to the selected plot."""
+    results, params = block["results"], block["call_params"]
+    info = results["info"]
+    record = results["resonators"][name]
+    data = record[f"{stream}_data"]
+    if units == "df":
+        if "df_hz" not in data:
+            raise ValueError(f"{name} has no df calibration.")
+        iq = np.asarray(data["df_hz"])
+    elif info["iq_units"] == "volts":
+        iq = np.asarray(data["iq_volts"])
+    else:
+        iq = np.asarray(data["iq_counts"]) * VOLTS_PER_ROC
+    products = {}
+    if include_tod:
+        time = (np.asarray(results["shared_pfb"]["time_s"])
+                if stream == "pfb" else
+                np.arange(len(iq)) / info["slow_sample_rate_hz"])
+        products.update(time_s=time, iq=iq)
+    if not include_psd:
+        return products
+    shared = results["shared_slow"] if stream == "slow" else data
+    frequency = np.asarray(shared["freq_iq"])
+    if units == "df":
+        psd_i, psd_q = data["psd_df"], data["psd_dissipation"]
+        return dict(products, frequency_hz=frequency,
+                    psd_i=np.asarray(psd_i), psd_q=np.asarray(psd_q))
+    if info["reference"] == "absolute":
+        psd_i, psd_q = data["psd_i"], data["psd_q"]
+    elif stream == "slow":
+        spectrum = spectrum_from_slow_tod(
+            iq.real, iq.imag, dec_stage=info["decimation"],
+            nsegments=params["nsegments"], reference="absolute",
+            spectrum_cutoff=params["spectrum_cutoff"], input_units="volts")
+        frequency = spectrum["freq_iq"]
+        psd_i, psd_q = spectrum["psd_i"], spectrum["psd_q"]
+    else:
+        nco = info.get("nco_frequency_hz")
+        if nco is None:
+            raise ValueError("The NCO frequency is unavailable for this PFB plot.")
+        frequency, psd_i, psd_q, _, _ = apply_pfb_correction(
+            iq / VOLTS_PER_ROC, nco, record["bias_frequency_hz"],
+            binlim=info["pfb_binlim_hz"], trim=info["pfb_trim"],
+            nsegments=info["pfb_nsegments"], reference="absolute")
+    return dict(products, frequency_hz=frequency,
+                psd_i=convert_dbm_to_volts(psd_i) ** 2,
+                psd_q=convert_dbm_to_volts(psd_q) ** 2)
 
 
 class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
     def __init__(self, block: dict, parent=None, *, dark_mode: bool = False,
                  file_path: str = "") -> None:
         super().__init__(parent)
-        self.block = block
+        self.block = noise_to_df(block)
         self.dark_mode = dark_mode
-        self.names = list(block["results"]["resonators"])
+        self.names = list(self.block["results"]["resonators"])
         self._products = {}
         self._page = 0
         layout = QtWidgets.QVBoxLayout(self)
@@ -30,8 +84,8 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
         controls = FlowLayout(toolbar)
         self.units_combo = QtWidgets.QComboBox()
         self.units_combo.addItem("Volts", "volts")
-        self.catalog = catalog = noise_catalog(block)
-        if catalog and any(r.bias.df_calibration is not None for r in catalog):
+        if any("df_hz" in record.get("slow_data", {})
+               for record in self.block["results"]["resonators"].values()):
             self.units_combo.addItem("df", "df")
         controls.addWidget(labelled("Units:", self.units_combo))
         self.stream_combo = QtWidgets.QComboBox()
@@ -126,10 +180,9 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
             try:
                 key = (name, stream, units, bool(tab))
                 if key not in self._products:
-                    self._products[key] = noise_display_products(
+                    self._products[key] = _noise_display_products(
                         self.block, name, stream=stream, units=units,
-                        include_psd=bool(tab), include_tod=not tab,
-                        catalog=self.catalog)
+                        include_psd=bool(tab), include_tod=not tab)
                 products = self._products[key]
             except (ValueError, KeyError) as exc:
                 errors.append(f"{name}: {exc}")

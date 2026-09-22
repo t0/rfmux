@@ -9,7 +9,7 @@ pytest.importorskip("PyQt6")
 
 from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
 from rfmux.tools.periscope.tasks import NoiseSpectrumTask
-from test.algorithms.test_noise_display import noise_block
+from test.tuning.test_noise_display import noise_block
 from test.qt_helpers import spin
 
 

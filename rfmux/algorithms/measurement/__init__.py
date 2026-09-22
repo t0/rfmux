@@ -19,7 +19,7 @@ from . import channel_selection
 from . import streamer_config
 from . import trigger_capture
 from . import py_run_pfb_streamer
-from . import noise_spectrum
+from . import measure_noise
 
 __all__ = [
     "py_get_samples",
@@ -32,5 +32,5 @@ __all__ = [
     "streamer_config",
     "trigger_capture",
     "py_run_pfb_streamer",
-    "noise_spectrum",
+    "measure_noise",
 ]

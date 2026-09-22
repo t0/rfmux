@@ -7,7 +7,7 @@ pytest.importorskip("PyQt6")
 
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
-from test.algorithms.test_noise_display import noise_block
+from test.tuning.test_noise_display import noise_block
 
 
 def test_pfb_timestream_volts_and_elapsed_time(qt_app):

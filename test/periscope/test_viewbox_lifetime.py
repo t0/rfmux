@@ -101,7 +101,7 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
     from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
-    from test.algorithms.test_noise_display import noise_block
+    from test.tuning.test_noise_display import noise_block
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     detectors = {1: {"conceptual_freq_hz": 4.0e9},

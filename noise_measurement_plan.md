@@ -1,11 +1,11 @@
 # Shared headless noise measurement
 
-Status: stages 1–2 implemented, 2026-09-18. Periscope migration remains.
+Status: implemented, including the Periscope migration, 2026-09-22.
 
 ## Review and first implementation
 
 The shared acquisition boundary fits the existing helpers and persistence.
-The first implementation is `rfmux/algorithms/measurement/noise_spectrum.py`.
+The implementation is `rfmux/algorithms/measurement/measure_noise.py`.
 It reuses the measurement wrapper. The current noise layout is schema version
 11; the incompatible field-name cleanup moved every packed measurement to that
 shared version.
@@ -43,6 +43,11 @@ Implementation decisions from the source audit:
   and `freq_dsb`; each stream record has `iq_volts` or `iq_counts`, `psd_i`, `psd_q` and
   `psd_dual_sideband`. PFB keeps channel-specific spectral axes in each record
   and shares its nominal `time_s` axis at the results level.
+- `rfmux.tuning.noise_to_df` returns a copy-on-write module block. Calibrated
+  stream records retain those native arrays and gain complex `df_hz`,
+  `psd_df`, and `psd_dissipation`; their units are Hz and Hz²/Hz. It recomputes
+  component spectra from the rotated timestream so I/Q correlation is not
+  discarded. No display products are stored in the measurement.
 - Progress is a synchronous callback receiving a dictionary after each
   capture. Cancellation propagates at existing awaits; synchronous spectral
   processing and saving are not interruptible. No latency bound is promised.
@@ -142,13 +147,13 @@ Live rolling PSD plots and pulse-capture noise training/periodic noise
 windows serve different purposes and remain separate consumers of the
 existing lower-level facilities.
 
-## Proposed public API
+## Public API
 
-Register `measure_noise` as a CRS macro in
-`rfmux/algorithms/measurement/noise_spectrum.py` and expose it through the
-existing measurement registration path.
+`measure_noise` is registered as a CRS macro in
+`rfmux/algorithms/measurement/measure_noise.py` and exposed through the
+measurement registration path.
 
-Proposed signature (design, not an existing API):
+Current signature:
 
 ```python
 async def measure_noise(
@@ -249,9 +254,10 @@ module_id
     resonators
       name
         channel, bias_frequency_hz, bias_amplitude, bias_amplitude_dbm
-        slow_data: IQ arrays and I/Q/dual-sideband spectra
+        slow_data: native IQ and I/Q/dual-sideband spectra; calibrated
+                   df_hz and df/dissipation spectra when available
         pfb_data: IQ arrays, channel-specific frequency axes and spectra
-                  (when requested)
+                  plus calibrated df products when requested and available
 ```
 
 Finalize exact field names and schema versioning alongside a small packer

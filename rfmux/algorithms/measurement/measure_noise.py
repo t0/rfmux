@@ -19,6 +19,7 @@ from ...core.transferfunctions import (
     decimation_to_sampling,
 )
 from ...tuning import store
+from ...tuning.noise import noise_to_df
 from ...tuning.sweep_results import _packed
 
 
@@ -84,19 +85,15 @@ async def measure_noise(
     packets otherwise; that configuration remains in effect. No sender or
     tone programming is started, stopped or restored.
 
-    PFB RPC captures follow the slow capture sequentially, without resetting
-    the NCO. Progress receives {stream, channel, completed, total} after each
-    capture (one slow capture plus one per PFB channel). Cancellation or an
-    acquisition failure propagates without saving a partial measurement.
-
     Results contain shared stream axes and named resonator records with the
     measured bias point, native complex IQ and unchanged helper spectra.
     PFB spectral axes remain with each resonator because droop correction can
     give channels different axes. TOD is in volts for absolute reference and
     counts for relative reference. Relative spectra retain the helpers'
     carrier-power bin exception, recorded in the results info.
-    Each stream also carries display_psds: voltage PSDs in V²/Hz and, when
-    calibrated, df/diss PSDs in Hz²/Hz, using the same spectral settings.
+    Calibrated streams also carry the complex ``df_hz`` timestream and
+    ``psd_df`` / ``psd_dissipation`` in Hz²/Hz. Native IQ and helper spectra
+    remain unchanged.
     """
     requested_module = module
     if catalog is not None:
@@ -236,7 +233,7 @@ async def measure_noise(
         ), shared_slow=slow_axes, shared_pfb=shared_pfb,
         resonators=records),
         measurement="noise", dac_scale_dbm=scale)
-    from .noise_display import prepare_noise_display
-    prepare_noise_display(next(iter(result.values())))
+    module_id = next(iter(result))
+    result[module_id] = noise_to_df(result[module_id])
     store.maybe_save(result, "noise", save=save, label=label)
     return result

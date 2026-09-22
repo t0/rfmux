@@ -30,7 +30,7 @@ from ...core.transferfunctions import PFB_SAMPLING_FREQ, VOLTS_PER_ROC
 STALE_TIMESTAMP_GRACE_S = 5.0
 from ... import streamer
 
-from .py_get_pfb_samples import apply_pfb_correction
+from ...tuning.noise import apply_pfb_correction
 
 
 @macro(CRS, register=True)

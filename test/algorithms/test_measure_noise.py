@@ -13,7 +13,7 @@ from rfmux.core.schema import CRS
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ, VOLTS_PER_ROC, convert_dacunits_to_dbm,
 )
-from rfmux.algorithms.measurement.noise_spectrum import measure_noise
+from rfmux.algorithms.measurement.measure_noise import measure_noise
 from rfmux.tuning import store
 from rfmux.tuning.sweep_results import RESULTS_SCHEMA_VERSION
 
@@ -270,8 +270,7 @@ async def test_channel_absent_from_current_packet_width_is_rejected(board):
         await measure(board)
 
 
-async def test_calibrated_noise_saves_display_spectra(board, tmp_path):
-    from rfmux.algorithms.measurement.noise_display import noise_display_products
+async def test_calibrated_noise_saves_df_products_with_native_data(board, tmp_path):
     catalog = ResonatorCatalog([
         Resonator(name="calibrated", channel=2,
                   bias=BiasPoint(1e9, .1, dI_df=2., dQ_df=3.)),
@@ -282,11 +281,15 @@ async def test_calibrated_noise_saves_display_spectra(board, tmp_path):
     assert block["results"]["info"]["nco_frequency_hz"] == \
         await board.get_nco_frequency()
     data = block["results"]["resonators"]["calibrated"]["slow_data"]
-    assert set(data["display_psds"]) == {"volts", "df"}
+    assert set(data) == {
+        "iq_volts", "psd_i", "psd_q", "psd_dual_sideband",
+        "df_hz", "psd_df", "psd_dissipation",
+    }
     path = store.save(result, "noise", directory=tmp_path)
     loaded = next(iter(store.load(path).values()))
-    plotted = noise_display_products(loaded, "calibrated", units="df")
-    np.testing.assert_array_equal(plotted["psd_i"], data["display_psds"]["df"]["psd_i"])
+    loaded_data = loaded["results"]["resonators"]["calibrated"]["slow_data"]
+    np.testing.assert_array_equal(loaded_data["df_hz"], data["df_hz"])
+    np.testing.assert_array_equal(loaded_data["psd_df"], data["psd_df"])
 
 
 @pytest.mark.parametrize("pfb", [False, True])

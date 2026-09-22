@@ -187,7 +187,8 @@ for name, record in results["resonators"].items():
             data = record[key]
             iq = data[f"iq_{settings['iq_units']}"]
             print(" ", stream, "IQ", iq.shape, iq.dtype,
-                  settings["iq_units"], "I PSD", data["psd_i"].shape)
+                  settings["iq_units"], "I PSD", data["psd_i"].shape,
+                  "df", data.get("df_hz", np.array([])).shape)
 print("nominal slow duration [s]:",
       block["call_params"]["num_samples"] / settings["slow_sample_rate_hz"])
 ```
@@ -198,7 +199,25 @@ Slow timestamps, `freq_iq` and `freq_dsb` are shared under
 because the channel-dependent droop correction can give them different spans.
 Each named resonator has `slow_data` and, when requested, `pfb_data`, containing
 complex `iq_volts` (absolute) or `iq_counts` (relative) and the three spectra `psd_i`, `psd_q`, and
-`psd_dual_sideband`. Slow and PFB time origins are independent.
+`psd_dual_sideband`. When the catalog has a df calibration, each stream also
+contains complex `df_hz` (df + j·dissipation), `psd_df`, and
+`psd_dissipation`; the latter two are in Hz²/Hz. The native IQ and spectra are
+retained unchanged. Slow timestamps and spectral frequency axes remain shared
+under `results.shared_slow`, rather than being copied into every resonator.
+Slow and PFB time origins are independent.
+
+The same conversion is available independently of acquisition. It returns a
+copy-on-write module block and does not mutate `block`; pass `catalog=` when
+the measurement was made from explicit channels and therefore has no catalog
+snapshot.
+
+```python
+from rfmux.tuning import noise_to_df
+
+converted = noise_to_df(block)
+df_slow = converted["results"]["resonators"]["KID01"]["slow_data"]
+print(df_slow["df_hz"], df_slow["psd_df"])
+```
 
 Time-domain values retain the helpers' units: volts for absolute reference,
 counts for relative reference. The plotters convert either representation to

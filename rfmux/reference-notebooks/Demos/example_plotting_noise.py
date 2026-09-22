@@ -19,7 +19,6 @@ import matplotlib.pyplot as plt
 from matplotlib.ticker import SymmetricalLogLocator
 import numpy as np
 
-from rfmux.algorithms.measurement.noise_display import noise_display_products
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
 from rfmux.tuning import find_iteration_matching_amplitude
@@ -53,6 +52,19 @@ def _factor(units: str) -> float:
     if units not in ("volts", "counts"):
         raise ValueError("units must be 'volts' or 'counts'.")
     return VOLTS_PER_ROC if units == "volts" else 1.
+
+
+def _iq_volts(block: dict, record: dict, stream: str) -> np.ndarray:
+    data = record[f"{stream}_data"]
+    if block["results"]["info"]["iq_units"] == "volts":
+        return np.asarray(data["iq_volts"])
+    return np.asarray(data["iq_counts"]) * VOLTS_PER_ROC
+
+
+def _time(block: dict, length: int, stream: str) -> np.ndarray:
+    if stream == "pfb":
+        return np.asarray(block["results"]["shared_pfb"]["time_s"])
+    return np.arange(length) / block["results"]["info"]["slow_sample_rate_hz"]
 
 
 def _panels(records: dict, title: str) -> Iterator[tuple]:
@@ -118,8 +130,7 @@ def plot_iq_panels(
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} noise on bias sweeps"):
         for ax, name in zip(axes, batch):
             record, sweep = records[name], traces[name]
-            iq = noise_display_products(
-                block, name, stream=stream, include_psd=False)["iq"]
+            iq = _iq_volts(block, record, stream)
             iq = iq * (factor / VOLTS_PER_ROC)
             curve = np.asarray(sweep["iq_volts"]) * factor / VOLTS_PER_ROC
             ax.plot(curve.real, curve.imag, color="0.4", lw=1, label="bias sweep")
@@ -152,13 +163,11 @@ def plot_timestreams(
     figures = []
     for fig, axes, batch in _panels(records, title or f"{stream.upper()} timestreams"):
         for ax, name in zip(axes, batch):
-            products = noise_display_products(
-                block, name, stream=stream, include_psd=False)
-            iq = products["iq"]
+            iq = _iq_volts(block, records[name], stream)
             if demean:
                 iq = iq - iq.mean()
             iq = iq * (factor / VOLTS_PER_ROC)
-            time = products["time_s"]
+            time = _time(block, len(iq), stream)
             for values, label, color in zip((iq.real, iq.imag), ("I", "Q"), IQ_COLORS):
                 ax.plot(time, values, color=color, lw=.7, label=label)
             ax.set(xlabel="nominal elapsed time [s]",

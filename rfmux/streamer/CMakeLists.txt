@@ -100,7 +100,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(FASTRX_LIBXDP QUIET IMPORTED_TARGET libxdp>=1.3)
-        pkg_check_modules(FASTRX_LIBBPF QUIET IMPORTED_TARGET libbpf>=1.0)
+        # 1.3: bpf_xdp_query reports xdp_zc_max_segs, which sizes the AF_XDP
+        # socket to what the NIC's driver can actually do.
+        pkg_check_modules(FASTRX_LIBBPF QUIET IMPORTED_TARGET libbpf>=1.3)
         pkg_check_modules(FASTRX_LIBURING QUIET IMPORTED_TARGET liburing>=2.0)
     endif()
 endif()

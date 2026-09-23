@@ -72,6 +72,27 @@ def test_uncalibrated_resonators_keep_only_native_products():
     assert "df_timestream_units" not in converted["results"]["info"]
 
 
+def test_df_conversion_saves_into_the_noise_own_file(tmp_path):
+    from rfmux.tuning import store
+
+    store.set_output_directory(tmp_path)
+    try:
+        container = {"crs0000_rmod1": noise_block(calibrated=True)}
+        path = store.save(container, "noise", label="cooldown3")
+        block = store.load(path)["crs0000_rmod1"]
+
+        converted = noise_to_df(block, save=True)
+
+        assert store.saved_path(converted) == path
+        assert [p.name for p in tmp_path.glob("*.pkl")] == [path.name]
+        restored = store.load(path)["crs0000_rmod1"]
+        data = restored["results"]["resonators"]["A"]["slow_data"]
+        expected = converted["results"]["resonators"]["A"]["slow_data"]
+        np.testing.assert_allclose(data["df_hz"], expected["df_hz"])
+    finally:
+        store.set_output_directory(None)
+
+
 @pytest.mark.parametrize("reference", ["absolute", "relative"])
 def test_pfb_df_psd_uses_same_calibration_and_correction(reference):
     from rfmux.tuning.noise import apply_pfb_correction

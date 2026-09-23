@@ -234,6 +234,9 @@ async def measure_noise(
         resonators=records),
         measurement="noise", dac_scale_dbm=scale)
     module_id = next(iter(result))
-    result[module_id] = noise_to_df(result[module_id])
+    # The driver saves the complete container below.  The standalone helper
+    # saves its module block when it owns the call.
+    if snapshot is not None:
+        result[module_id] = noise_to_df(result[module_id], save=False)
     store.maybe_save(result, "noise", save=save, label=label)
     return result

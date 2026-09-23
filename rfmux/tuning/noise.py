@@ -370,7 +370,8 @@ def apply_pfb_correction(
 def noise_to_df(
     noise_module_output: dict,
     *,
-    catalog: ResonatorCatalog | None = None,
+    save: bool | None = None,
+    label: str | None = None,
 ) -> dict:
     """Return one noise module block with calibrated df products.
 
@@ -381,7 +382,15 @@ def noise_to_df(
     cross-spectrum.  Resonators without a df calibration remain unchanged.
 
     The returned block uses copy-on-write dictionaries and shares unchanged
-    arrays with the input; the input itself is not modified.
+    arrays with the input; the input itself is not modified.  Saving updates
+    the noise file the input came from, or creates one for an unsaved block.
+
+    Args:
+        noise_module_output: one module block from ``measure_noise``, such as
+            ``noise_output[crs.module[m].index()]``.
+        save: save the converted block to its existing file, or create a noise
+            file.  None follows the configured autosave setting.
+        label: filename label for a first save; an existing filename is kept.
     """
     if not isinstance(noise_module_output, dict):
         raise TypeError("Expected one module's noise output as a dict.")
@@ -394,9 +403,9 @@ def noise_to_df(
         params = noise_module_output["call_params"]
     except KeyError as error:
         raise ValueError("Noise output lacks results or acquisition settings.") from error
-    if catalog is None:
-        snapshot = params.get("catalog")
-        catalog = ResonatorCatalog.from_dict(snapshot) if snapshot else None
+
+    snapshot = params.get("catalog")
+    catalog = ResonatorCatalog.from_dict(snapshot)
 
     converted = dict(noise_module_output)
     results = dict(source_results)
@@ -462,6 +471,7 @@ def noise_to_df(
     if converted_any:
         converted_info["df_timestream_units"] = "Hz"
         converted_info["df_spectrum_units"] = "Hz²/Hz"
+    store.maybe_save(converted, "noise", save=save, label=label)
     return converted
 
 

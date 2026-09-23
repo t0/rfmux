@@ -207,14 +207,15 @@ under `results.shared_slow`, rather than being copied into every resonator.
 Slow and PFB time origins are independent.
 
 The same conversion is available independently of acquisition. It returns a
-copy-on-write module block and does not mutate `block`; pass `catalog=` when
-the measurement was made from explicit channels and therefore has no catalog
-snapshot.
+copy-on-write module block and does not mutate `block`. With autosave enabled
+(the default), it saves the converted block back to the noise file that
+`block` came from; pass `save=False` to convert only in memory. An unsaved
+block gets a new noise file when saving is enabled.
 
 ```python
 from rfmux.tuning import noise_to_df
 
-converted = noise_to_df(block)
+converted = noise_to_df(block)  # use save=False to leave its file unchanged
 df_slow = converted["results"]["resonators"]["KID01"]["slow_data"]
 print(df_slow["df_hz"], df_slow["psd_df"])
 ```

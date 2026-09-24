@@ -31,9 +31,27 @@ _SHOW = ("periscope", "overlay", "none")
 _FAST_MBPS = 100_000
 
 
+#: The parser's entry for a mock on this host, which streams on the
+#: loopback.
+_LOOPBACK = "lo"
+
+
+def _operstate(name: str):
+    """``up``, ``down`` or ``unknown`` from sysfs; None off Linux."""
+    try:
+        return Path("/sys/class/net", name, "operstate").read_text().strip()
+    except OSError:
+        return None
+
+
 def _label(name: str, speed) -> str:
+    if name == _LOOPBACK:
+        return f"{name} (loopback: a mock on this host)"
     if speed is None:
-        return f"{name} (no link)"
+        # No negotiated rate: the link is down, or the driver (wifi,
+        # for one) does not report a rate.
+        return (f"{name} (down)" if _operstate(name) == "down"
+                else f"{name} (no rate reported)")
     return (f"{name} ({speed / 1000:g} Gb/s)" if speed >= 1000
             else f"{name} ({speed} Mb/s)")
 
@@ -83,9 +101,18 @@ class RecordDialog(QtWidgets.QDialog):
 
         # ── Board ────────────────────────────────────────────────
         self.serial_edit = QtWidgets.QLineEdit()
-        self.serial_edit.setPlaceholderText("0156")
+        self.serial_edit.setPlaceholderText("0156, or MOCK for a simulated board")
+        self.serial_edit.setToolTip(
+            "A serial names a board at rfmux<NNNN>.local.  MOCK starts a "
+            "simulated board of the run's own.  To record from a mock "
+            "already running, Periscope's for one, give its serial (0000) "
+            "and its address as the hostname.")
         self.hostname_edit = QtWidgets.QLineEdit()
-        self.hostname_edit.setPlaceholderText("only when not <serial>.local")
+        self.hostname_edit.setPlaceholderText(
+            "only when not <serial>.local; 127.0.0.1:<port> for a running mock")
+        self.hostname_edit.setToolTip(
+            "Periscope prints its mock's address at startup: "
+            "[MockCRS] serial 0000 served at 127.0.0.1:<port>")
         self.modules_edit = QtWidgets.QLineEdit()
         self.modules_edit.setPlaceholderText(
             "1, or 2,3 for one RF line over several modules")
@@ -347,7 +374,8 @@ class RecordDialog(QtWidgets.QDialog):
         fast = running + [n for n, v in speeds.items()
                           if v is not None and v >= _FAST_MBPS
                           and n not in running]
-        for combo, names in ((self.parser_iface_combo, list(speeds)),
+        for combo, names in ((self.parser_iface_combo,
+                              list(speeds) + [_LOOPBACK]),
                              (self.fastrx_iface_combo, fast)):
             current = _combo_value(combo)
             combo.blockSignals(True)

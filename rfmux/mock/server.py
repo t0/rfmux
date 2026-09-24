@@ -114,6 +114,10 @@ def yaml_hook(hwm):
 
         sockets.append(s)
         crs.hostname = f"{hostname}:{port}"
+        # The address another client gives as its hostname to share
+        # this board: rfmux record --serial 0000 --hostname <address>.
+        print(f"[MockCRS] serial {crs.serial or '%05d' % port} served at "
+              f"{crs.hostname}")
         # Store configuration for MockCRS instantiation in subprocess
         model_configs[port] = {
             'serial': crs.serial if crs.serial else ("%05d" % port),

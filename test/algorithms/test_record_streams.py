@@ -697,6 +697,26 @@ def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
         str(tmp_path / "pulse.h5")]
 
 
+def test_an_unreachable_board_is_one_line_naming_the_mock_options(
+        tmp_path, monkeypatch):
+    """A serial that resolves nowhere (0000 given for a running mock,
+    say) is an error that says how to reach a mock, not a traceback."""
+    import aiohttp
+    from click.testing import CliRunner
+    from rfmux.tools import record
+
+    async def unreachable(*a, **kw):
+        raise aiohttp.ClientConnectionError("Cannot connect to host rfmux0000.local:80")
+    monkeypatch.setattr(record, "_main", unreachable)
+    r = CliRunner().invoke(record.cli, [
+        "--serial", "0000", "--duration", "1", "--channels", "1-2",
+        "--session-dir", str(tmp_path), "--no-parser", "--no-fastrx"])
+    assert r.exit_code == 1
+    assert "Traceback" not in r.output
+    assert "Cannot connect to host rfmux0000.local:80" in r.output
+    assert "--hostname" in r.output and "--serial MOCK" in r.output
+
+
 def test_a_bare_record_command_asks_the_dialog(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record

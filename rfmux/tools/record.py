@@ -22,6 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import aiohttp
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
@@ -63,9 +64,13 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 
 @click.command()
 @click.option("--serial", default=None,
-              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board; "
-                   "with no options at all, a dialog asks for everything")
-@click.option("--hostname", default=None, help="Board address when it is not <serial>.local")
+              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board "
+                   "of the command's own; with no options at all, a dialog asks "
+                   "for everything")
+@click.option("--hostname", default=None,
+              help="Board address when it is not <serial>.local; 127.0.0.1:<port> "
+                   "records from a mock server already running, Periscope's for "
+                   "one (it prints the address at startup), with --serial 0000")
 @click.option("--module", "modules", type=int, multiple=True, default=(1,),
               show_default=True,
               help="Module to record; repeat it for one RF line over several")
@@ -230,6 +235,13 @@ def _run(*, serial, hostname, modules, channels, duration, session,
             sample_trunc=sample_trunc, verbose=not quiet))
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
+    except aiohttp.ClientConnectionError as e:
+        raise click.ClickException(
+            f"cannot reach the board: {e}. A serial names a board at "
+            "rfmux<NNNN>.local; --hostname gives another address, "
+            "127.0.0.1:<port> for a mock server already running (Periscope "
+            "prints its mock's address at startup); --serial MOCK starts a "
+            "simulated board of its own")
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")

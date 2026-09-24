@@ -16,7 +16,9 @@ from test.record_helpers import bias_export  # noqa: E402
 def _dialog(tmp_path, monkeypatch, running=()):
     monkeypatch.setattr(rd, "interface_speeds",
                         lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
-                                 "wlan0": None})
+                                 "wlan0": None, "enp1s0f0": None})
+    monkeypatch.setattr(rd, "_operstate",
+                        {"wlan0": "up", "enp1s0f0": "down"}.get)
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
                            start_command=lambda i: f"sudo fastrxd -i {i}",
                            record_stride=lambda c: (86 + 4 * c + 7) & ~7)
@@ -171,8 +173,11 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     dlg, _ = _dialog(tmp_path, monkeypatch)
     parser = [dlg.parser_iface_combo.itemText(i)
               for i in range(dlg.parser_iface_combo.count())]
+    # A wifi driver reports no rate; a port without a link is down; the
+    # loopback is where a mock on this host streams.
     assert parser == ["eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
-                      "wlan0 (no link)"]
+                      "wlan0 (no rate reported)", "enp1s0f0 (down)",
+                      "lo (loopback: a mock on this host)"]
     fast = [dlg.fastrx_iface_combo.itemText(i)
             for i in range(dlg.fastrx_iface_combo.count())]
     assert fast == ["enp2s0f0np0 (100 Gb/s)"]

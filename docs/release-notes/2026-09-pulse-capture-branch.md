@@ -69,7 +69,9 @@ simulator files are unchanged in meaning.
   `TimeoutError` instead of ending silently.
 - Periscope Pulse Capture panel: live capture with a pulse list, stacked I/Q
   or df/dissipation plots with the decision marks and bands, histograms,
-  trigger-aligned templates, review mode for any capture file, and CSV export.
+  trigger-aligned templates, review mode for any capture file, and Export
+  Config and Load Config for trigger config files (the toolbar's CSV export
+  is gone).
   A **Tuning** item in the pulse list opens the sweeps the channels were
   tuned with as a multisweep window, live or in review, without touching
   the board.

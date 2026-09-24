@@ -336,6 +336,10 @@ def test_identify_and_register(qt_app, tmp_path):
 
     assert sm.identify_file_type(str(h5)) == "pulse"
     assert sm.identify_file_type(str(fake)) is None
+    from rfmux.pulse_capture import PulseCaptureConfig, write_trigger_config
+    config = write_trigger_config(tmp_path / "trigger_config.h5",
+                                  PulseCaptureConfig())   # no channels
+    assert sm.identify_file_type(str(config)) == "pulse"
 
     exported = []
     sm.file_exported.connect(lambda p, t: exported.append((p, t)))

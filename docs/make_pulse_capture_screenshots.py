@@ -127,7 +127,7 @@ def _shoot_dialogs(dec):
 
     dlg = PulseCaptureSettingsDialog(
         config=PulseCaptureConfig(), sample_rate=decimation_to_sampling(dec),
-        mode="slow", n_channels=len(CHANNELS), df_available=True)
+        mode="slow", channels=CHANNELS, df_available=True)
     dlg.adv_box.setChecked(True)
     _grab(app, dlg, "pulse-capture-settings-dialog.png")
 

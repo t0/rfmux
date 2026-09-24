@@ -55,7 +55,7 @@ import matplotlib.pyplot as plt
 import rfmux
 from rfmux.pulse_capture import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession,
-    PulseHDF5Reader,
+    PulseHDF5Reader, read_trigger_config, write_trigger_config,
     run_dual_source, run_pfb_source, run_slow_source,
 )
 from rfmux.core.transferfunctions import (
@@ -443,6 +443,44 @@ for rate, label in [(596.0, "slow, stage 6"), (fs, f"slow, stage {dec}"),
     print(f"{label:<18} {rate:>10,.0f} Hz → confirm "
           f"{dd['trigger_samples']} sample(s), "
           f"{dd['accidental_per_min']:.2e} accidentals/min")
+```
+
+### Per-channel settings
+
+`per_channel` gives a channel its own `threshold_sigma` and `end_sigma`, or
+takes it out of triggering with `"trigger": False`. A channel that does not
+trigger is saved with every event and every noise sample, and turns events
+on by itself. A channel not listed takes the capture's values. Each pulse
+records the `threshold_sigma` and `end_sigma` its channel ran with.
+
+```python
+from dataclasses import replace
+
+per_channel_config = replace(capture_config, per_channel={
+    CHANNELS[0]: {"threshold_sigma": 6.0, "end_sigma": 1.0},  # its own σ
+    CHANNELS[1]: {"trigger": False},                          # record only
+})
+for severity, message in per_channel_config.validate(fs):
+    print(f"  [{severity}] {message}")
+```
+
+### Save and load a trigger config
+
+`write_trigger_config` saves a config as a trigger config file: an HDF5 file
+with a capture file's `metadata` group and nothing else. `read_trigger_config`
+reads it back with the channels, module and mode it names. It reads a capture
+file the same way, since every capture records the config it ran with.
+Periscope's **Export Config** and **Load Config…** buttons make the same two
+calls.
+
+```python
+path = write_trigger_config(
+    OUTPUT_DIR / "trigger_config.h5", per_channel_config,
+    channels=CHANNELS, module=MODULE, streamer_mode="slow")
+
+loaded, setup = read_trigger_config(path)
+assert loaded == per_channel_config
+print(setup)   # pass these to trigger_capture with config=loaded
 ```
 
 ## 5. One-shot capture
@@ -1166,6 +1204,8 @@ The panel sets the same objects this notebook does:
 | **Channels** field: `all` / `*` | `crs.get_biased_channels(module)` |
 | **Settings…** dialog | `PulseCaptureConfig` fields |
 | **Thresh σ** / **End σ** / **Pileup** | `threshold_sigma`, `end_sigma`, `enable_pileup` |
+| **Settings…** per-channel table | `PulseCaptureConfig(per_channel=...)` |
+| **Export Config** / **Load Config…** | `write_trigger_config(...)` / `read_trigger_config(...)` |
 | Mode: slow / fast / both | `run_slow_source` / `run_pfb_source` / `run_dual_source` |
 | **▶ Start** | `capture_session.start()` + a source coroutine |
 | (how the GUI feeds the session) | `SlowIngest`, the class `run_slow_source` uses too |

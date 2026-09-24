@@ -144,7 +144,8 @@ class _PulseFileWriter:
     #: missing here is dropped without complaint.
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
-        (str, ("streamer_mode", "trigger_basis", "stored_units")),
+        (str, ("streamer_mode", "trigger_basis", "stored_units",
+               "trigger_config")),
         (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
                  "post_pulse_ms", "coincidence_window_s",
                  "noise_capture_interval_s", "noise_capture_window_s",

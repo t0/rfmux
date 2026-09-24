@@ -103,6 +103,26 @@ EDGE_LOOKBACK_FRACTION: float = 0.1
 END_CONFIRM_FRACTION: float = 0.1
 
 
+#: What a per-channel trigger setting may hold.  ``trigger`` False
+#: records the channel without triggering on it; the sigmas replace
+#: the capture's for that channel.
+CHANNEL_SETTINGS = ("trigger", "threshold_sigma", "end_sigma")
+
+
+def channel_sigmas(setting: Optional[dict], threshold_sigma: float,
+                   end_sigma: float) -> Tuple[float, float]:
+    """(threshold, end band) a channel runs with: the capture's unless
+    *setting* overrides them.  A channel that does not trigger has an
+    infinite threshold: no sample crosses it, so the engine only keeps
+    its ring, which event dumps and noise samples read."""
+    setting = setting or {}
+    thr = setting.get("threshold_sigma")
+    end = setting.get("end_sigma")
+    return (math.inf if setting.get("trigger", True) is False
+            else float(threshold_sigma if thr is None else thr),
+            float(end_sigma if end is None else end))
+
+
 # ───────────────────────── Circular Buffer ──────────────────────────
 
 class Circular:
@@ -344,6 +364,11 @@ class PulseCapture:
         derives it from the ring (~80%, i.e. 1.2x the max pulse the ring
         was sized for), so a capture can never outlive the buffer and
         silently lose its rising edge.  0 disables the stop.
+    per_channel : dict[int, dict], optional
+        ``{channel: {"trigger", "threshold_sigma", "end_sigma"}}``, any
+        subset: a channel's own threshold and end band, or
+        ``"trigger": False`` to record it without triggering on it.
+        Each pulse records the sigmas its channel ran with.
     """
 
     #: Walk blocks with the transcribed state machine (walk.walk) rather
@@ -398,11 +423,18 @@ class PulseCapture:
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
+        per_channel: Optional[Dict[int, dict]] = None,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size
         self.threshold_sigma = threshold_sigma
         self.end_sigma = end_sigma
+        #: Each channel's threshold and end band (see channel_sigmas).
+        per_channel = per_channel or {}
+        sigmas = {c: channel_sigmas(per_channel.get(c), threshold_sigma,
+                                    end_sigma) for c in self.channels}
+        self.threshold_by_ch = {c: t for c, (t, _) in sigmas.items()}
+        self.end_by_ch = {c: e for c, (_, e) in sigmas.items()}
         if pre_samples is None:
             pre_samples = self.default_edge_lookback(buf_size)
         # At least 2, so a record always shows what it triggered from.
@@ -626,11 +658,12 @@ class PulseCapture:
                 ns = ChannelNoiseStats()
             si = max(ns.std_I, 1e-30)
             sq = max(ns.std_Q, 1e-30)
+            thr = self.threshold_by_ch[channel]
             seg_I = I[pos:end]
             seg_Q = Q[pos:end]
-            above = ((np.abs(seg_I - ns.mean_I) / si > self.threshold_sigma)
+            above = ((np.abs(seg_I - ns.mean_I) / si > thr)
                      | (np.abs(seg_Q - ns.mean_Q) / sq
-                        > self.threshold_sigma))
+                        > thr))
 
             hits = np.flatnonzero(above)
             if hits.shape[0] == 0:
@@ -785,7 +818,7 @@ class PulseCapture:
                        float(ns.mean_I), float(ns.mean_Q),
                        float(ns.std_I), float(ns.std_Q),
                        float(ns.jump_std_I), float(ns.jump_std_Q),
-                       float(self.threshold_sigma), float(self.end_sigma),
+                       self.threshold_by_ch[channel], self.end_by_ch[channel],
                        int(self.trigger_samples), int(self.edge_lookback),
                        int(self.min_end_samples), float(END_CONFIRM_FRACTION),
                        int(self.post_samples),
@@ -889,6 +922,8 @@ class PulseCapture:
 
         # Get noise stats for this channel
         ns = self.noise_stats.get(channel, ChannelNoiseStats())
+        thr = self.threshold_by_ch[channel]
+        end_band = self.end_by_ch[channel]
         st = self.state[channel]
         st.ch_sample_n += 1  # Per-channel counter for buffer arithmetic
 
@@ -928,7 +963,7 @@ class PulseCapture:
         # real pulse nothing — anything above threshold for a single
         # sample carries no measurable rise or decay anyway — while
         # cutting the accidental rate by orders of magnitude.
-        if max_dev > self.threshold_sigma:
+        if max_dev > thr:
             if st.above_run == 0:
                 st.run_start_abs = st.ch_sample_n
                 st.run_quad = "I" if dev_I >= dev_Q else "Q"
@@ -987,9 +1022,9 @@ class PulseCapture:
                 ref_Q = devs_Q[len(devs_Q) // 2]
                 edge_ok = (
                     (raw_I - ref_I) / max(js_I, 1e-30)
-                    > self.threshold_sigma
+                    > thr
                     or (raw_Q - ref_Q) / max(js_Q, 1e-30)
-                    > self.threshold_sigma)
+                    > thr)
                 edge_taps = (tap_vals_I, tap_vals_Q)
 
         # ── Trigger: amplitude AND edge ───────────────────────────
@@ -1122,7 +1157,7 @@ class PulseCapture:
                             hi = max(hi, math.hypot(
                                 (bI.recent(tap) - ns.mean_I) / sI,
                                 (bQ.recent(tap) - ns.mean_Q) / sQ))
-                    decaying_now = (mag - hi) / jn < -self.threshold_sigma
+                    decaying_now = (mag - hi) / jn < -thr
                     # The pulse's own recent level: min_end_samples
                     # back, as far as the decay evidence had to wait.
                     near = max(1, min(self.min_end_samples, span))
@@ -1130,7 +1165,7 @@ class PulseCapture:
                         (bI.recent(near) - ns.mean_I) / sI,
                         (bQ.recent(near) - ns.mean_Q) / sQ)
                     rising_above_self = (
-                        (mag - near_mag) / jn > self.threshold_sigma)
+                        (mag - near_mag) / jn > thr)
             st.rise_run = st.rise_run + 1 if rising_above_self else 0
 
             # ── Baseline-free return test ─────────────────────────
@@ -1143,9 +1178,9 @@ class PulseCapture:
             # capture no matter what the mean estimate is doing.
             returned = (
                 abs(i_val - st.anchor_I)
-                < self.end_sigma * max(ns.std_I, 1e-30)
+                < end_band * max(ns.std_I, 1e-30)
                 and abs(q_val - st.anchor_Q)
-                < self.end_sigma * max(ns.std_Q, 1e-30))
+                < end_band * max(ns.std_Q, 1e-30))
 
             # ── Freeze active_duration / arm pileup re-trigger ────
             # The duration freezes once the signal starts returning to
@@ -1154,7 +1189,7 @@ class PulseCapture:
             # arms the pileup re-trigger: dropping below threshold, or —
             # for large pulses whose tails stay above it — sitting far
             # below the capture's own recent level.
-            if max_dev < self.threshold_sigma or returned:
+            if max_dev < thr or returned:
                 st.re_trigger_ready = True
                 if st.active_duration is None:
                     st.active_duration = since_trig
@@ -1177,8 +1212,8 @@ class PulseCapture:
             # ── Normal end: baseline confirmation ─────────────────
             # Fed by either test: inside the end band of the tracked
             # mean, or back at the pre-pulse anchor.
-            if returned or (dev_I < self.end_sigma
-                            and dev_Q < self.end_sigma):
+            if returned or (dev_I < end_band
+                            and dev_Q < end_band):
                 if st.end_ptr_count == 0:
                     st.settled_abs = st.ch_sample_n
                 st.end_ptr_count += 1
@@ -1303,8 +1338,8 @@ class PulseCapture:
             "trigger_quad": st.trig_quad,
             "end_baseline_I": float(st.anchor_I),
             "end_baseline_Q": float(st.anchor_Q),
-            "threshold_sigma": float(self.threshold_sigma),
-            "end_sigma": float(self.end_sigma),
+            "threshold_sigma": self.threshold_by_ch[channel],
+            "end_sigma": self.end_by_ch[channel],
             "end_confirm_samples": int(st.end_ptr_count),
             "end_confirm_target": self._end_confirm_target(
                 st.active_duration if st.active_duration is not None

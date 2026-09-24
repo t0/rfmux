@@ -4,7 +4,6 @@ fastrxd check and its start command in view."""
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import shutil
 from pathlib import Path
@@ -494,6 +493,6 @@ class RecordDialog(QtWidgets.QDialog):
                 ("sample_trunc", o["sample_trunc"]),
                 ("show", o["show"]),
                 ("capture_config",
-                 json.dumps(dataclasses.asdict(o["config"])))):
+                 json.dumps(o["config"].to_dict()))):
             s.setValue(_KEY + key, value)
         s.sync()

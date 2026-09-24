@@ -19,6 +19,7 @@ from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
+from ...pulse_capture.channel_keys import channel_arg, describe
 from ...pulse_capture.events import NoiseSampler
 from ...pulse_capture.detection import (
     EDGE_LOOKBACK_FRACTION,
@@ -42,7 +43,8 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
     """Edit a PulseCaptureConfig with live unit conversions.
 
     *gate* is a button enabled only while the settings validate;
-    ``updated`` fires after every recomputation."""
+    ``updated`` fires after every recomputation.  Given *channels*, a
+    table sets each one's trigger settings."""
 
     updated = QtCore.pyqtSignal()
 
@@ -50,14 +52,15 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
                  config: PulseCaptureConfig | None = None,
                  sample_rate: float = decimation_to_sampling(6),
                  mode: str = "slow",
-                 n_channels: int = 2,
+                 channels=None,
                  df_available: bool = True,
                  gate: QtWidgets.QAbstractButton | None = None):
         super().__init__(parent)
         self.gate = gate
         self.sample_rate = float(sample_rate)
         self.mode = mode
-        self.n_channels = max(1, n_channels)
+        self.channels = list(channels or [])
+        self.n_channels = max(1, len(self.channels) if channels else 2)
         self.df_available = bool(df_available)
         config = config or PulseCaptureConfig()
         self._updating = False
@@ -195,6 +198,17 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "record is memory-bounded on the PFB stream and floored "
             "against the ring buffer.")
         form.addRow("Window at this rate:", self.noise_label)
+
+        # Settings for channels not in the table travel through as they
+        # came, so opening the dialog never drops them.
+        self._other_channels = {k: dict(v) for k, v
+                                in config.per_channel.items()
+                                if k not in self.channels}
+        self._bad_cells: list = []
+        self.channel_table = None
+        if self.channels:
+            self.channel_table = self._channel_table(config)
+            form.addRow(self.channel_table)
 
         adv_box = QtWidgets.QGroupBox("Advanced")
         adv_box.setCheckable(True)
@@ -340,8 +354,73 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             w.valueChanged.connect(self._update_dependent_values)
         self.pileup_check.toggled.connect(self._update_dependent_values)
         self.dump_check.toggled.connect(self._update_dependent_values)
+        if self.channel_table is not None:
+            self.channel_table.itemChanged.connect(
+                self._update_dependent_values)
         adv_box.toggled.emit(False)
         self._update_dependent_values()
+
+    _SIGMA_COLUMNS = ((2, "threshold_sigma"), (3, "end_sigma"))
+
+    def _channel_table(self, config: PulseCaptureConfig):
+        table = QtWidgets.QTableWidget(len(self.channels), 4)
+        table.setHorizontalHeaderLabels(
+            ["Channel", "Trigger", "Threshold σ", "End σ"])
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(
+            QtWidgets.QHeaderView.ResizeMode.Stretch)
+        # Up to six rows before it scrolls.
+        table.setFixedHeight(
+            table.horizontalHeader().sizeHint().height()
+            + table.verticalHeader().defaultSectionSize()
+            * min(len(self.channels), 6) + 2 * table.frameWidth())
+        table.setToolTip(
+            "Each channel's own trigger settings.\n\n"
+            "Trigger: unchecked records the channel with every event and "
+            "noise sample, without triggering on it.\n"
+            "Threshold σ and End σ: blank takes the values above.")
+        for row, key in enumerate(self.channels):
+            setting = config.per_channel.get(key, {})
+            item = QtWidgets.QTableWidgetItem(channel_arg(key))
+            item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
+            table.setItem(row, 0, item)
+            item = QtWidgets.QTableWidgetItem()
+            item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled
+                          | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(
+                QtCore.Qt.CheckState.Unchecked
+                if setting.get("trigger", True) is False
+                else QtCore.Qt.CheckState.Checked)
+            table.setItem(row, 1, item)
+            for col, name in self._SIGMA_COLUMNS:
+                value = setting.get(name)
+                table.setItem(row, col, QtWidgets.QTableWidgetItem(
+                    "" if value is None else f"{value:g}"))
+        return table
+
+    def _per_channel(self) -> dict:
+        """The table's settings, only those that differ from the
+        capture's; unreadable cells are noted in ``_bad_cells``."""
+        out = {k: dict(v) for k, v in self._other_channels.items()}
+        self._bad_cells = []
+        table = self.channel_table
+        for row, key in enumerate(self.channels if table else []):
+            setting = {}
+            if (table.item(row, 1).checkState()
+                    == QtCore.Qt.CheckState.Unchecked):
+                setting["trigger"] = False
+            for col, name in self._SIGMA_COLUMNS:
+                text = table.item(row, col).text().strip()
+                if not text:
+                    continue
+                try:
+                    setting[name] = float(text)
+                except ValueError:
+                    self._bad_cells.append(
+                        f"{describe(key)}: {text!r} is not a number.")
+            if setting:
+                out[key] = setting
+        return out
 
     def get_config(self) -> PulseCaptureConfig:
         return PulseCaptureConfig(
@@ -360,6 +439,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             min_end_samples=int(self.min_end_spin.value()),
             trigger_basis=("df" if self.basis_combo.currentIndex() == 1
                            else "iq"),
+            per_channel=self._per_channel(),
         )
 
     def _update_dependent_values(self):
@@ -426,7 +506,8 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
                               "amplitude floor in white noise)"),
             ]))
 
-            issues = cfg.validate(self.sample_rate)
+            issues = cfg.validate(self.sample_rate) + [
+                ("error", message) for message in self._bad_cells]
             self.valid = apply_issue_banner(self.status_label, self.gate,
                                             issues)
         finally:

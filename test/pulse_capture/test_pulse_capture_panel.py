@@ -692,42 +692,52 @@ def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
     panel.close()
 
 
-def test_csv_exports(qt_app, tmp_path):
-    """Each viewer tab exports its own CSV."""
-    import csv as _csv
-
-    path = _build_capture_file(tmp_path)
+def test_an_exported_config_loads_into_a_fresh_panel(qt_app, tmp_path):
+    """Export Config writes the trigger configuration, channels, module
+    and mode; loading that file sets them all, ready to capture."""
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
     panel = PulseCapturePanel(dark_mode=False)
-    panel.load_from_hdf5(path)
     panel._browse_dir = str(tmp_path)
-
-    # Pulse View tab
-    panel.viewer_tabs.setCurrentIndex(0)
-    panel._show_pulse(*panel._pulse_order[-1])
-    panel._on_export()
-    # Histograms tab
-    panel.viewer_tabs.setCurrentIndex(2)
-    assert panel.viewer_tabs.tabText(2) == "Histograms"
-    panel._on_export()
-    # Template tab (needs template data from the file)
-    panel._template_data = panel.reader.get_templates()
-    panel.viewer_tabs.setCurrentIndex(3)
-    assert panel.viewer_tabs.tabText(3) == "Template"
-    panel._on_export()
-
-    written = sorted(p.name for p in tmp_path.glob("*.csv"))
-    assert any(n.startswith("pulse_ch") for n in written), written
-    assert any(n.startswith("pulse_histograms") for n in written), written
-    assert any(n.startswith("pulse_template") for n in written), written
-
-    hist_csv = next(tmp_path.glob("pulse_histograms_*.csv"))
-    with open(hist_csv) as fh:
-        rows = list(_csv.reader(fh))
-    assert rows[0] == ["metric", "channel", "bin_left", "bin_right",
-                       "count"]
-    assert len(rows) > 10
-
+    panel.capture_config = PulseCaptureConfig(
+        max_pulse_ms=20.0, per_channel={3: {"trigger": False}})
+    panel.threshold_spin.setValue(6.5)
+    panel.channels_edit.setText("1,3")
+    panel.module_spin.setValue(2)
+    panel.mode_combo.setCurrentText("fast")
+    panel._on_export_config()
+    (path,) = tmp_path.glob("trigger_config_*.h5")
     panel.close()
+
+    fresh = PulseCapturePanel(dark_mode=False)
+    fresh.load_from_hdf5(path)
+    assert fresh.capture_config == PulseCaptureConfig(
+        threshold_sigma=6.5, max_pulse_ms=20.0,
+        per_channel={3: {"trigger": False}})
+    assert fresh.threshold_spin.value() == 6.5
+    assert (fresh.channels_edit.text(), fresh.module_spin.value(),
+            fresh.mode_combo.currentText()) == ("1,3", 2, "fast")
+    assert fresh.reader is None
+    fresh.close()
+
+
+def test_the_settings_table_sets_each_channels_trigger(qt_app):
+    from PyQt6 import QtCore
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    from rfmux.tools.periscope.pulse_capture_settings_dialog import (
+        PulseCaptureSettingsForm)
+    form = PulseCaptureSettingsForm(config=PulseCaptureConfig(
+        per_channel={2: {"end_sigma": 1.0}, 9: {"trigger": False}}),
+        channels=[1, 2])
+    table = form.channel_table
+    table.item(0, 1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    table.item(1, 2).setText("7")
+    assert form.get_config().per_channel == {
+        1: {"trigger": False},
+        2: {"threshold_sigma": 7.0, "end_sigma": 1.0},
+        9: {"trigger": False}}
+    table.item(1, 3).setText("x")
+    assert not form.valid
+    form.close()
 
 
 def test_keyboard_navigation(qt_app, tmp_path):

@@ -47,8 +47,10 @@ RAM constraints, and will be preserved if the capture is interrupted.
 3. Set **Mode** (slow, fast, or both), **Channels** (`1,2`, `2-19`, or `all`
    for every biased channel) and **Module**.
 4. Set **Thresh σ** and **End σ**.
-5. **Settings** holds the rest of the individual settings; see
+5. **Settings** holds the rest of the individual settings, each channel's
+   among them; see
    [Configuring the pulse capture engine](#configuring-the-pulse-capture-engine).
+   **Load Config…** takes them all from a saved trigger config instead.
 6. To configure the data-stream used for the capture, press **Streamer**,
    which provides access to the PFB and decimated streamer settings; see
    [Selecting the stream](#selecting-the-stream).
@@ -59,7 +61,7 @@ time. **Pulse View** shows whatever displayed unit, (I,Q) or (df,diss), against
 a common time axis with vertical annotations for each of the pulse detection
 parameters (trigger; drop below threshold; settled point). 
 Left and Right move through the pulses, Home and End jump to the first and
-last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
+last, Space cycles the tabs, and Ctrl+E exports the trigger config. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
 **IQ Plane** draws the same pulse as points in the plane, grey before the
@@ -189,6 +191,35 @@ toolbar. The **Settings** dialog includes:
 
 A text box below dervies the relevant timescales and expectations for the selected
 parameters.
+
+### Per-channel settings
+
+The **Settings** dialog lists the capture's channels in a table, one row
+each:
+
+- **Trigger** (checked): unchecked records the channel without triggering
+  on it. Its samples are saved with every event, over the event's span,
+  and with every noise sample. Such a channel turns events on by itself,
+  so each pulse on another channel is then an event.
+- **Threshold σ** and **End σ**: the channel's own values. Blank takes the
+  capture's. A channel's End σ must sit below its threshold.
+
+Each pulse records the `threshold_sigma` and `end_sigma` its channel ran
+with.
+
+### Save and load a trigger config
+
+**Export Config** saves the trigger configuration, with the channels, module
+and mode, as `trigger_config_<HHMMSS>.h5` in the session folder (without
+a session, the output file's folder or your home folder). The file is
+a capture file's `metadata` group and nothing else, and it appears in the
+Session Browser under the Pulse Capture filter.
+
+**Load Config…** reads a trigger config file, or any capture file, and sets
+the panel from it, ready for a new capture. Every capture records the
+config it ran with, so an earlier run can be repeated as it was.
+Double-clicking a trigger config file in the Session Browser opens a panel
+set from it.
 
 ## Histograms and templates
 
@@ -369,6 +400,8 @@ and under `dump/`, and a `members` row then starts with the module.
 **`metadata`** holds `streamer_mode`, `module`, `channels`, the sample rate
 (`sample_rate_slow` or `sample_rate_fast`), `stored_units`, `trigger_basis`,
 `volts_per_count`, `slow_time_offset_s`, `capture_start` and `capture_end`.
+`trigger_config` is the whole `PulseCaptureConfig` as JSON, per-channel
+settings included; `read_trigger_config` loads it.
 `time_origin_epoch` and `time_origin_utc` are midnight of the packet clock's
 day. A capture configured through `PulseCaptureConfig` records its times in
 milliseconds (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`,
@@ -456,6 +489,19 @@ result = await crs.trigger_capture(
     config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5),
     hdf5_path="capture.h5",
 )
+```
+
+A trigger config saved from Periscope, or any earlier capture, supplies the
+config and the channels:
+
+```python
+from rfmux.pulse_capture import read_trigger_config
+
+config, setup = read_trigger_config("trigger_config_142501.h5")
+result = await crs.trigger_capture(
+    channel=setup["channels"], module=setup["module"],
+    streamer_mode=setup["streamer_mode"], time_run=15.0,
+    config=config, hdf5_path="capture.h5")
 ```
 
 Everything else, from configuring the streamers and choosing thresholds to

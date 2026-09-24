@@ -204,3 +204,33 @@ def test_a_config_saved_with_a_retired_field_keeps_the_rest(
     cfg = rd.RecordDialog(settings=settings).get_options()["config"]
     assert cfg.threshold_sigma == 6.5
     assert cfg.pre_pulse_ms == rd.PulseCaptureConfig().pre_pulse_ms
+
+
+def test_the_capture_table_follows_the_channels_and_keeps_its_settings(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.modules_edit.setText("2")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-3")
+    form = dlg.capture_form
+    assert form.channels == [1, 2, 3]
+    form.channel_table.item(1, 1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.channels_edit.setText("2:1-3,3:1")
+    assert dlg.capture_form.channels == [(2, 1), (2, 2), (2, 3), (3, 1)]
+    dlg.channels_edit.setText("1-3")
+    assert dlg.get_options()["config"].per_channel == {2: {"trigger": False}}
+
+
+def test_a_loaded_trigger_config_sets_the_capture_and_its_channels(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import write_trigger_config
+    config = rd.PulseCaptureConfig(threshold_sigma=6.0, per_channel={
+        3: {"trigger": False}, 5: {"end_sigma": 1.0}})
+    path = write_trigger_config(tmp_path / "trigger_config.h5", config,
+                                channels=[1, 3, 4, 5], module=2)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.load_trigger_config(path)
+    assert (dlg.modules_edit.text(), dlg.rb_ranges.isChecked(),
+            dlg.channels_edit.text()) == ("2", True, "1,3-5")
+    assert dlg.capture_form.channels == [1, 3, 4, 5]
+    assert dlg.get_options()["config"] == config

@@ -99,7 +99,13 @@ The **Run** tab:
 
 The **Pulse capture** tab holds the capture settings: threshold and end
 sigma, the pulse length limits, the noise-training span and the trigger
-basis. They validate as you type.
+basis. They validate as you type. A table below them lists the channels the
+Run tab resolves to, one row each: uncheck **Trigger** to record a channel
+without triggering on it, or give it its own **Threshold σ** and **End σ**
+(see [Per-channel settings](pulse-capture.md#per-channel-settings)).
+**Load Config…** takes all of it from a trigger config file exported from
+Periscope, or from an earlier capture, and sets **Modules** and **Channels**
+to the ones it names.
 
 ## 3. Recording from the command line
 

@@ -219,7 +219,9 @@ Session Browser under the Pulse Capture filter.
 the panel from it, ready for a new capture. Every capture records the
 config it ran with, so an earlier run can be repeated as it was.
 Double-clicking a trigger config file in the Session Browser opens a panel
-set from it.
+set from it. The `rfmux record` dialog has the same table and **Load
+Config…** on its Pulse capture tab (see the
+[100G captures guide](100g-captures.md)).
 
 ## Histograms and templates
 

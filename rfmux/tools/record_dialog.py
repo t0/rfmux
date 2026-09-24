@@ -15,8 +15,11 @@ from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
     fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
-from ..pulse_capture.capture_session import PulseCaptureConfig
-from ..core.channels import MAX_MODULE, parse_channel_spec
+from ..pulse_capture.capture_session import (PulseCaptureConfig,
+                                             read_trigger_config)
+from ..pulse_capture.channel_keys import pair_keys
+from ..core.channels import (MAX_MODULE, format_channel_spec,
+                             parse_channel_spec)
 from ..core.session_folder import newest_session
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
@@ -181,9 +184,14 @@ class RecordDialog(QtWidgets.QDialog):
         # ── Pulse capture settings, on their own tab ─────────────
         capture_page = QtWidgets.QWidget()
         box = QtWidgets.QVBoxLayout(capture_page)
-        self.capture_form = PulseCaptureSettingsForm(
-            capture_page, config=self._saved_config(),
-            sample_rate=decimation_to_sampling(6), mode="slow")
+        self._capture_box = box
+        self.load_config_btn = QtWidgets.QPushButton("Load Config…")
+        self.load_config_btn.setToolTip(
+            "Take the trigger configuration of a trigger config file or "
+            "of an earlier capture, with the modules and channels it names")
+        self.load_config_btn.clicked.connect(self._on_load_config)
+        box.addWidget(self._row(self.load_config_btn, QtWidgets.QWidget()))
+        self.capture_form = self._capture_form(self._saved_config())
         box.addWidget(self.capture_form)
         stage_note = QtWidgets.QLabel(
             "Sample counts and time scales above are for decimation "
@@ -191,7 +199,11 @@ class RecordDialog(QtWidgets.QDialog):
         stage_note.setWordWrap(True)
         box.addWidget(stage_note)
         box.addStretch(1)
-        self.tabs.addTab(capture_page, "Pulse capture")
+        # Scrolls: the channel table can make it taller than the dialog.
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(capture_page)
+        self.tabs.addTab(scroll, "Pulse capture")
 
         self.status_label = QtWidgets.QLabel()
         self.status_label.setWordWrap(True)
@@ -233,6 +245,65 @@ class RecordDialog(QtWidgets.QDialog):
             lay.addWidget(x, 1 if isinstance(x, (QtWidgets.QLineEdit,
                                                   QtWidgets.QComboBox)) else 0)
         return w
+
+    def _capture_form(self, config: PulseCaptureConfig,
+                      channels=()) -> PulseCaptureSettingsForm:
+        return PulseCaptureSettingsForm(
+            config=config, sample_rate=decimation_to_sampling(6),
+            mode="slow", channels=channels)
+
+    def _on_load_config(self) -> None:
+        dlg = QtWidgets.QFileDialog(
+            self, "Load trigger config",
+            str(self._session_folder() or Path.cwd()),
+            "HDF5 files (*.h5 *.hdf5)")
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+
+        def _chosen(path):
+            try:
+                self.load_trigger_config(path)
+            except (OSError, ValueError) as e:
+                self.status_label.setText(
+                    f"Could not load a trigger config from {path}: {e}")
+        dlg.fileSelected.connect(_chosen)
+        dlg.open()
+
+    def load_trigger_config(self, path) -> None:
+        """Take the trigger configuration of a trigger config file or a
+        capture file, and the modules and channels it records."""
+        config, setup = read_trigger_config(path)
+        channels = setup.get("channels")
+        if channels:
+            if isinstance(channels[0], tuple):
+                by_module: dict = {}
+                for m, c in channels:
+                    by_module.setdefault(m, []).append(c)
+                self.modules_edit.setText(",".join(map(str, by_module)))
+                spec = ",".join(f"{m}:{format_channel_spec(chs)}"
+                                for m, chs in by_module.items())
+            else:
+                if "module" in setup:
+                    self.modules_edit.setText(str(setup["module"]))
+                spec = format_channel_spec(channels)
+            self.rb_ranges.setChecked(True)
+            self.channels_edit.setText(spec)
+        old = self.capture_form
+        self.capture_form = self._capture_form(config, old.channels)
+        self._capture_box.replaceWidget(old, self.capture_form)
+        old.hide()
+        old.deleteLater()
+        self.capture_form.updated.connect(self._refresh)
+        self._refresh()
+
+    @staticmethod
+    def _capture_keys(wanted) -> list:
+        """The channel keys the capture of *wanted* runs with: channel
+        numbers on one module, (module, channel) across several."""
+        if not wanted:
+            return []
+        if len(wanted) > 1:
+            return pair_keys(wanted)
+        return list(next(iter(wanted.values())))
 
     def _browse(self, edit: QtWidgets.QLineEdit) -> QtWidgets.QPushButton:
         btn = QtWidgets.QPushButton("Browse…")
@@ -326,6 +397,11 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _refresh(self, *_) -> None:
         chans, note = self._channels()
+        keys = self._capture_keys(chans)
+        if keys != self.capture_form.channels:
+            self.capture_form.blockSignals(True)
+            self.capture_form.set_channels(keys)
+            self.capture_form.blockSignals(False)
         self.bias_label.setText(note if self.rb_bias.isChecked() else "")
         problems = []
         if not self.serial_edit.text().strip():

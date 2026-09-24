@@ -274,6 +274,19 @@ def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
     assert panel._tuning_row(CHANNEL)["df_calibration"] == cal
     assert panel._pulse_order == [] and panel._counts.get(CHANNEL, 0) == 0
     assert panel._tuning_by_module() == {}     # no sweep in this row
+    # The Metadata item lists every attribute of the file and, per
+    # channel, the calibration scalars of its tuning row.
+    tree = panel.pulse_tree
+    meta = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                if "Metadata" in tree.topLevelItem(i).text(0))
+    lines = [meta.child(i).text(0) for i in range(meta.childCount())]
+    assert "trigger_basis = df" in lines and "stored_units = Hz" in lines
+    assert any(l.startswith("sample_rate_fast = 2441406.25") for l in lines)
+    cal_item = next(meta.child(i) for i in range(meta.childCount())
+                    if meta.child(i).text(0) == f"calibration, channel {CHANNEL}")
+    fields = [cal_item.child(i).text(0) for i in range(cal_item.childCount())]
+    assert fields == ["df_calibration = 3e+06-4e+06j",
+                      f"bias_channel = {CHANNEL}"]
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):

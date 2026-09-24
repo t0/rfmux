@@ -166,6 +166,22 @@ def _noise_detail(stats: dict, names=("I", "Q"), unit: str = "") -> str:
         for c, ns in sorted(stats.items()))
 
 
+def _attr_text(value) -> str:
+    """A metadata attribute or tuning scalar for the tree: floats to
+    ten figures, complex as re+imj, an array as its list."""
+    if isinstance(value, np.ndarray):
+        return str(value.tolist())
+    if isinstance(value, (bool, np.bool_)):
+        return str(bool(value))
+    if isinstance(value, (complex, np.complexfloating)):
+        return f"{value.real:.6g}{value.imag:+.6g}j"
+    if isinstance(value, (float, np.floating)):
+        return f"{float(value):.10g}"
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return str(value)
+
+
 def _channel_color(channel) -> str:
     """Channels 1 and 2 reuse IQ_COLORS so the two default channels
     match the I/Q hues; further channels come from Tableau10.  A
@@ -2090,13 +2106,42 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 self._add_noise_rows(stream)
         self._add_tuning_items()
         meta = QtWidgets.QTreeWidgetItem(["▦ Metadata", "", ""])
-        for text in (f"mode={self.mode_combo.currentText()}",
-                     f"σ={self.threshold_spin.value():g}  "
-                     f"end={self.end_spin.value():g}",
-                     f"started {self._started}"):
+        for text in self._metadata_lines():
             meta.addChild(QtWidgets.QTreeWidgetItem([text, "", ""]))
+        self._add_calibration_items(meta)
         self.pulse_tree.addTopLevelItem(meta)
         self._autosize_tree()
+
+    def _metadata_lines(self) -> List[str]:
+        """Every attribute of the file under review; the live capture's
+        settings otherwise."""
+        if self.reader is None:
+            return [f"mode={self.mode_combo.currentText()}",
+                    f"σ={self.threshold_spin.value():g}  "
+                    f"end={self.end_spin.value():g}",
+                    f"started {self._started}"]
+        return [f"{k} = {_attr_text(v)}"
+                for k, v in sorted(self.reader.metadata.items())]
+
+    def _add_calibration_items(self, parent) -> None:
+        """Under the metadata, one item per channel with a tuning row
+        holding the row's scalars, the df calibration first; the sweep
+        arrays are the Tuning item's."""
+        channels = (self.reader.channels if self.reader is not None
+                    else list(self._flat_tuning()))
+        for c in channels:
+            row = self._tuning_row(c)
+            scalars = {k: v for k, v in row.items()
+                       if isinstance(v, (str, bool, int, float, complex,
+                                         np.generic))}
+            if not scalars:
+                continue
+            item = QtWidgets.QTreeWidgetItem(
+                [f"calibration, channel {channel_arg(c)}", "", ""])
+            for k in sorted(scalars, key=lambda k: (k != "df_calibration", k)):
+                item.addChild(QtWidgets.QTreeWidgetItem(
+                    [f"{k} = {_attr_text(scalars[k])}", "", ""]))
+            parent.addChild(item)
 
     # ── Events ────────────────────────────────────────────────────
 

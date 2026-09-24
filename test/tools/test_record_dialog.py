@@ -85,6 +85,68 @@ def test_the_channel_streamer_is_off_unless_asked_and_remembered(
     assert not dlg.streamer_check.isEnabled()
 
 
+def test_the_units_choice_is_the_captures_trigger_basis(
+        qt_app, tmp_path, monkeypatch):
+    """One setting seen twice: the pulse file and the TOD are written
+    in the same units whichever view changed it."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    assert dlg.units_combo.currentIndex() == dlg.capture_form.basis_combo.currentIndex()
+    dlg.units_combo.setCurrentIndex(0)
+    assert dlg.get_options()["config"].trigger_basis == "iq"
+    dlg.capture_form.basis_combo.setCurrentIndex(1)
+    assert dlg.units_combo.currentData() == "df"
+    assert dlg.get_options()["config"].trigger_basis == "df"
+    dlg._save()
+    again = rd.RecordDialog(settings=settings)
+    assert again.units_combo.currentData() == "df"
+
+
+def test_the_tod_needs_a_stream_and_the_merge_a_pulse_file(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.serial_edit.setText("0156")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-4")
+    dlg.fastrx_check.setChecked(False)
+    dlg.parser_check.setChecked(True)
+    dlg.tod_check.setChecked(True)
+    dlg.merge_tod_check.setChecked(True)
+    assert dlg.tod_check.isEnabled() and dlg.merge_tod_check.isEnabled()
+    assert "fifth of real time" in dlg.tod_note.text()
+    assert "grows by the whole TOD" in dlg.merge_tod_note.text()
+    # Without a pulse capture the TOD is still written; there is
+    # nothing to merge it into.
+    dlg.capture_check.setChecked(False)
+    assert dlg.tod_check.isEnabled() and not dlg.merge_tod_check.isEnabled()
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    dlg.parser_check.setChecked(False)
+    assert not dlg.tod_check.isEnabled()
+
+
+def test_a_tod_without_a_bias_export_warns_but_records(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.serial_edit.setText("0156")
+    dlg.fastrx_check.setChecked(False)
+    dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(False)
+    dlg.tod_check.setChecked(True)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("2:1-4")
+    assert "warning: the TOD metadata" in dlg.status_label.text()
+    assert dlg.record_btn.isEnabled()
+    # A session whose bias export covers the module supplies the tuning.
+    folder = _session_with_bias(tmp_path)
+    dlg.rb_existing.setChecked(True)
+    dlg.session_path_edit.setText(str(folder))
+    assert "warning" not in dlg.status_label.text(), dlg.status_label.text()
+    dlg.tod_check.setChecked(False)
+    dlg.rb_new.setChecked(True)
+    assert "warning" not in dlg.status_label.text()
+
+
 def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     dlg.serial_edit.setText("0042")

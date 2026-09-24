@@ -140,7 +140,11 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--noise-train-ms", type=float, default=_DEFAULTS.noise_train_ms, show_default=True,
               help="Noise-training span; the other recorders start when it ends")
 @click.option("--trigger-basis", type=click.Choice(["df", "iq"]), default=_DEFAULTS.trigger_basis,
-              show_default=True)
+              show_default=True,
+              help="The units both the pulse file and the time-ordered data "
+                   "store, and what the capture triggers on: df rotates each "
+                   "calibrated channel onto its frequency direction and stores "
+                   "hertz (df, dissipation), iq stores the quadratures in volts")
 @click.option("-q", "--quiet", is_flag=True)
 def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,

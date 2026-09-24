@@ -87,6 +87,20 @@ def test_slow_stamps_of_a_late_module_follow_the_stream_clock():
     assert first_stamp[2] == first_stamp[1]
 
 
+def test_stamps_carry_the_second_of_day_as_straight_binary_seconds():
+    """The parser's timebase is sbs + ss: a stamp whose sbs is the
+    second of its own h:m:s reads as one monotone seconds-of-day axis,
+    as a board's does, instead of wrapping every second."""
+    st = _streamer(_crs())
+    st.start_datetime = datetime(2026, 1, 1, 23, 59, 59)
+    for seconds in (0.25, 0.75, 1.25):
+        ts = st._timestamp_at(seconds)
+        assert ts.sbs == ts.h * 3600 + ts.m * 60 + ts.s
+        assert ts.sbs + ts.ss / SS_PER_SECOND == pytest.approx(
+            (86399.0 + seconds) % 86400.0, abs=1e-6)
+    assert st._timestamp_at(1.25).d == 2
+
+
 def test_pfb_frames_leave_the_block_pulses_for_the_slow_stream():
     """With PFB enabled, a pulse a few decay times shorter than the
     block still shows on the slow stream: the PFB frames' bookkeeping

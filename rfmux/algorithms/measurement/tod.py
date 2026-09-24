@@ -41,15 +41,16 @@ from typing import Dict, Iterable, List, Optional
 import h5py
 import numpy as np
 
-from ..core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
+from ...core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       decimation_to_sampling)
-from ..streamer import TIMESTAMP_RECENT, day_epoch, epoch_to_utc
-from .analysis import calibration_of, storage_transform
-from .channel_keys import (ChannelKey, channel_group, check_keys,
-                           keys_by_module)
-from .hdf5 import _store_tuning, _store_units, write_metadata
-from .overlay import _PROBE, Recording, dirfile_stage
+from ...streamer import TIMESTAMP_RECENT, day_epoch, epoch_to_utc
+from ...pulse_capture.analysis import calibration_of, storage_transform
+from ...pulse_capture.channel_keys import (ChannelKey, channel_group,
+                                           check_keys, describe,
+                                           keys_by_module, keys_from_attr)
+from ...pulse_capture.hdf5 import _store_tuning, _store_units, write_metadata
+from ...pulse_capture.overlay import _PROBE, Recording, dirfile_stage
 
 #: Records converted and written at a time.
 BLOCK = 1 << 16
@@ -251,6 +252,31 @@ def _write_fast(sgrp, rec: Recording, keys, module, factors, units, tuning,
                 _append(q_ds, np.ascontiguousarray(z.imag[:, j]))
 
 
+def _check_same_units(pulse: h5py.File, tod: h5py.File, pulse_path,
+                      tod_path) -> None:
+    """Every channel the two files share must be stored in the same
+    units: a merged file's pulses and streams compare directly or not
+    at all."""
+    slow = pulse["slow"] if "slow" in pulse and "fast" in pulse else pulse
+    basis = (pulse["metadata"].attrs.get("trigger_basis"),
+             tod["metadata"].attrs.get("trigger_basis"))
+    if None not in basis and basis[0] != basis[1]:
+        raise ValueError(f"{pulse_path.name} is in the {basis[0]} basis, "
+                         f"{tod_path.name} in the {basis[1]} basis")
+    for key in keys_from_attr(tod["metadata"].attrs.get("channels", [])):
+        group = channel_group(key)
+        if group not in slow:
+            continue
+        theirs = slow[group].attrs.get("stored_units")
+        for stream in tod["tod"].values():
+            if group in stream and theirs is not None \
+                    and stream[group].attrs.get("stored_units") != theirs:
+                raise ValueError(
+                    f"{describe(key)}: {pulse_path.name} stores it in "
+                    f"{theirs}, {tod_path.name} in "
+                    f"{stream[group].attrs.get('stored_units')}")
+
+
 def merge_tod(pulse_path, tod_path, out=None) -> Path:
     """Copy a time-ordered data file's ``tod/`` group into a pulse
     capture file of the same run, so one file holds the pulses and the
@@ -267,6 +293,7 @@ def merge_tod(pulse_path, tod_path, out=None) -> Path:
             if "tod" not in src:
                 raise ValueError(f"{tod_path}: no tod/ group; not a "
                                  "time-ordered data file")
+            _check_same_units(dst, src, pulse_path, tod_path)
             src.copy(src["tod"], dst, name="tod")
             # The clock facts the capture did not record, the fast
             # rate above all; what it did record stands.

@@ -12,7 +12,7 @@ from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ, VOLTS_PER_ROC, decimated_stream_delay_s)
 from rfmux.pulse_capture.analysis import storage_transform
 from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
-from rfmux.pulse_capture.tod import merge_tod, write_tod
+from rfmux.algorithms.measurement.tod import merge_tod, write_tod
 from rfmux.streamer import day_epoch
 from test.pulse_capture.test_overlay import (
     AMP, CHANNEL, CHANNELS, FS, LATE, _capture, _dirfile, _recording_file,
@@ -173,6 +173,30 @@ def test_merge_copies_the_streams_into_the_pulse_file(tmp_path, recording,
     with pytest.raises(ValueError, match="already holds tod/"):
         merge_tod(pulse, tod)
     assert not list(tmp_path.glob("*.merging"))
+
+
+def test_merge_refuses_a_tod_in_other_units_than_the_pulses(tmp_path,
+                                                             recording):
+    """A merged file's pulses and streams compare directly, so a TOD
+    written in the quadratures does not join a capture in the frequency
+    basis, and the pulse file is left as it was."""
+    pulse = _capture(tmp_path, tuning=TUNING, trigger_basis="df")
+    with h5py.File(pulse, "r") as f:
+        assert f[f"channel_{CHANNEL}"].attrs["stored_units"] == "Hz"
+    tod = _tod(tmp_path, fastrx=recording, trigger_basis="iq")
+    with h5py.File(tod, "r") as f:
+        assert f[f"tod/fast/channel_{CHANNEL}"].attrs["stored_units"] == "V"
+    with pytest.raises(ValueError, match="iq basis"):
+        merge_tod(pulse, tod)
+    with h5py.File(pulse, "r") as f:
+        assert "tod" not in f
+    assert not list(tmp_path.glob("*.merging"))
+    # The same basis with a channel stored differently is refused too:
+    # a df capture whose channel had no calibration stays in volts.
+    (tmp_path / "v").mkdir()
+    pulse_v = _capture(tmp_path / "v", tuning=None, trigger_basis="df")
+    with pytest.raises(ValueError, match="stores it in V"):
+        merge_tod(pulse_v, _tod(tmp_path, fastrx=recording))
 
 
 def test_merge_to_another_path_leaves_the_source(tmp_path, recording):

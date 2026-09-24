@@ -3,7 +3,7 @@ Record the slow stream (a pulse capture and a parser dirfile) and the
 channel stream (a fastrx recording) of a module, or of several feeding
 one RF line, together into one session folder, then repack the dirfile
 and the recording as one HDF5 file of time-ordered data in the
-capture's units (:mod:`rfmux.pulse_capture.tod`).  ``rfmux record`` is
+capture's units (:mod:`rfmux.algorithms.measurement.tod`).  ``rfmux record`` is
 the command-line front.
 
 The board is read, and its channel streamer turned on for the modules
@@ -55,7 +55,7 @@ from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
 from ...pulse_capture.channel_keys import (describe, keys_by_module,
                                            pair_keys)
-from ...pulse_capture.tod import tod_bytes_per_s
+from .tod import tod_bytes_per_s
 from .df_calibration import tuning_rows
 
 PARSER_EXIT_S = 10.0
@@ -271,7 +271,7 @@ async def record_streams(
     After the run, ``merge_fastrx`` adds the recording to the pulse
     file as its fast stream; ``tod`` repacks the dirfile and the
     recording into one HDF5 file of time-ordered data in the capture's
-    units (:func:`~rfmux.pulse_capture.tod.write_tod`), which
+    units (:func:`~rfmux.algorithms.measurement.tod.write_tod`), which
     ``merge_tod`` then copies into the pulse file.
     """
     wanted = by_module(module, channels)
@@ -598,7 +598,7 @@ def _tod(result: RecordResult, path: Path, tuning, trigger_basis: str) -> Path:
     """The run's time-ordered data at *path*, its clock's day taken from
     the pulse file when there is one."""
     from ...pulse_capture.hdf5 import PulseHDF5Reader
-    from ...pulse_capture.tod import write_tod
+    from .tod import write_tod
     origin = None
     if result.pulse_path and result.pulse_path.exists():
         with PulseHDF5Reader(result.pulse_path) as reader:
@@ -628,7 +628,7 @@ def _write_tod(result: RecordResult, path: Path, tuning, trigger_basis: str,
     if not (merge and result.pulse_path and result.pulse_path.exists()):
         return
     try:
-        from ...pulse_capture.tod import merge_tod
+        from .tod import merge_tod
         merge_tod(result.pulse_path, result.tod_path)
         result.merged_tod = True
     except Exception as e:

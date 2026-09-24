@@ -414,7 +414,7 @@ def _tod_result(tmp_path, pulse=True):
 
 def test_write_tod_repacks_both_products_and_merges_when_asked(
         tmp_path, monkeypatch):
-    from rfmux.pulse_capture import tod as tod_module
+    from rfmux.algorithms.measurement import tod as tod_module
     calls = []
     monkeypatch.setattr(rs, "_tod", lambda r, p, t, b: calls.append(
         ("write", p, r.fastrx_path, r.dirfile_path, t, b)) or p)
@@ -432,7 +432,7 @@ def test_write_tod_repacks_both_products_and_merges_when_asked(
 
 
 def test_a_failed_repack_or_merge_is_a_warning(tmp_path, monkeypatch):
-    from rfmux.pulse_capture import tod as tod_module
+    from rfmux.algorithms.measurement import tod as tod_module
 
     def boom(*a):
         raise ValueError("no disciplined timestamp")
@@ -869,6 +869,7 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
         t = f["tod/slow/time"][()]
         assert t.shape == f["tod/slow/channel_1/I"].shape
         assert df.nframes - 1 <= len(t) <= df.nframes
+        assert np.all(np.diff(t) > 0)       # one seconds-of-day axis
         assert np.median(np.diff(t)) == pytest.approx(1.0 / rate, rel=1e-3)
         assert f["tod/slow/channel_1"].attrs["stored_units"] == "V"
         m = f["metadata"].attrs

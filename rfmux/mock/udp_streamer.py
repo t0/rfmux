@@ -349,6 +349,9 @@ class MockCRSStreamer(threading.Thread):
     # ── Shared packet pieces ──────────────────────────────────
 
     def _timestamp_at(self, seconds):
+        """The stamp as an IRIG-disciplined board sends it: the fields
+        of the calendar time, and ``sbs`` the straight binary seconds
+        of day the parser's timebase counts from."""
         pkt_dt = self.start_datetime + timedelta(seconds=seconds)
         return Timestamp(
             y=int(pkt_dt.year % 100),
@@ -357,7 +360,8 @@ class MockCRSStreamer(threading.Thread):
             m=int(pkt_dt.minute),
             s=int(pkt_dt.second),
             ss=int(pkt_dt.microsecond * SS_PER_SECOND / 1e6),
-            c=0, sbs=0,
+            c=0,
+            sbs=pkt_dt.hour * 3600 + pkt_dt.minute * 60 + pkt_dt.second,
             source=TimestampSource.TEST,
             recent=True,
         )

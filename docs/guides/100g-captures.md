@@ -94,9 +94,18 @@ The **Run** tab:
   the highest rounded up to whole pipelines of 128, and lets the stream
   flow for a second before checking it.
 - **Merge the recording into the pulse file after the run.**
-- **Repack the dirfile and recording as one HDF5 file of time-ordered
-  data**, and **Copy the time-ordered data into the pulse file** (see
-  section 4).
+- **Data products**: **TODs as HDF5 with metadata** repacks the dirfile
+  and the recording after the run (section 4); it converts at about a
+  fifth of real time, so a 20 s recording takes about 100 s. **Merge
+  pulse and TOD HDF5s** copies that file into the pulse file, which then
+  grows by the whole TOD (the size for this run is shown) where the pulse
+  record alone is a few MB; it needs the pulse capture. Either works
+  without the pulse capture, but the file's tuning and df calibrations
+  come from the session's bias export, and the status line warns when
+  none was found for the modules. **Units** chooses what both files store,
+  I,Q voltages or df/diss units (hertz along the frequency direction, for
+  calibrated channels); it is the same setting as the trigger basis on
+  the Pulse capture tab.
 - **After the run**: Periscope in review mode on the pulse file, the
   overlay viewer on the channel with the most pulses, or nothing.
 
@@ -180,9 +189,11 @@ Periscope in review mode on the pulse file, in its session folder.
 unless given an output name. `--no-tod` skips the repack; `--merge-tod`
 copies the time-ordered data into the pulse file as its `tod/` group, so
 one file holds the pulses and the streams they were cut from (the
-standalone file stays). The repacked fast stream is float32 I and Q per
-channel, twice the bytes per channel of the recording's int16; the disk
-check before the run counts both. The command exits 1 after
+standalone file stays). Both files are written in the units
+`--trigger-basis` chooses, and the merge refuses a TOD whose basis or
+channel units differ from the pulses'. The repacked fast stream is float32
+I and Q per channel, twice the bytes per channel of the recording's int16;
+the disk check before the run counts both. The command exits 1 after
 a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a
 parser that wrote nothing, a recording that could not be merged, or
@@ -295,14 +306,14 @@ with PulseHDF5Reader("pulse_module2_143012.h5") as r:
 ```
 
 The time-ordered data file comes from `write_tod` in
-`rfmux.pulse_capture.tod`, given either product or both, the channels, and
+`rfmux.algorithms.measurement.tod`, given either product or both, the channels, and
 the tuning rows the capture used (`tuning_rows` in
 `rfmux.algorithms.measurement.df_calibration`, from a bias export's
 `bias_kids_output` and `nco_frequency_hz`); `merge_tod` copies its `tod/`
 group into the run's pulse file:
 
 ```python
-from rfmux.pulse_capture.tod import merge_tod, write_tod
+from rfmux.algorithms.measurement.tod import merge_tod, write_tod
 
 write_tod("tod_module2_143012.h5", channels=range(1, 89), module=2,
           fastrx="fastrx_module2_143012.fastrx",

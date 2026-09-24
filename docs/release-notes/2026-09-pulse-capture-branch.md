@@ -597,9 +597,12 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   recording into `tod_module<M>_HHMMSS.h5`, one HDF5 file of
   time-ordered data with every channel in the units the pulse file
   stores it in and the same metadata and tuning (`--no-tod`;
-  `--merge-tod` copies it into the pulse file as its `tod/` group;
-  `write_tod` and `merge_tod` in `rfmux.pulse_capture.tod` do the same
-  by hand),
+  `--merge-tod` copies it into the pulse file as its `tod/` group, and
+  refuses a TOD whose basis or channel units differ from the pulses';
+  `--trigger-basis` sets the units of both files; the dialog's Data
+  products group holds the two choices with their costs and a Units
+  choice tied to the trigger basis; `write_tod` and `merge_tod` in
+  `rfmux.algorithms.measurement.tod` do the same by hand),
   and opens Periscope in review mode on the file (`--show overlay` for
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording

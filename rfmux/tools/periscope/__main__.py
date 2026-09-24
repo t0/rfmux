@@ -358,9 +358,12 @@ def main():
         # 3. #### (just the serial number)
         # 4. Any other string (treated as direct hostname or IP address)
         crs_board = args.crs_board
-        
+
+        if crs_board.upper() == "OFFLINE":
+            # Review of a file: no board to reach, nothing to resolve.
+            crs_obj = None
         # Special case for MOCK demo mode
-        if crs_board.upper() == "MOCK":
+        elif crs_board.upper() == "MOCK":
             is_mock = True
             # Use the mock flavour to create a MockCRS instance
             s = load_session("""

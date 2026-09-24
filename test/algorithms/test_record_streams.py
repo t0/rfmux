@@ -673,7 +673,7 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
     assert capsys.readouterr().out == ""
     record._show(result, "periscope")
     assert capsys.readouterr().out == (
-        "[record] no display; to review: -m rfmux.tools.periscope "
+        "[record] no display; to review: rfmux periscope "
         f"--review {tmp_path / 'pulse.h5'}\n")
     record._show(result, "overlay")
     assert capsys.readouterr().out == (
@@ -692,8 +692,10 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
     import sys
     from rfmux.tools.record import periscope_review_command
+    # Through the tools entry point: -m on the periscope package runs
+    # its __main__ twice (the package imports it) and runpy says so.
     assert periscope_review_command(tmp_path / "pulse.h5") == [
-        sys.executable, "-m", "rfmux.tools.periscope", "--review",
+        sys.executable, "-m", "rfmux.tools.cli", "periscope", "--review",
         str(tmp_path / "pulse.h5")]
 
 

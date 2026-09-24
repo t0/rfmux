@@ -122,6 +122,44 @@ def _store_tuning(grp, tuning, channel) -> None:
         tgrp.attrs[TUNING_JSON_FIELDS] = json_fields
 
 
+#: capture_params written to ``metadata``, grouped by attribute type.
+#: Must cover everything in
+#: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
+#: missing here is dropped without complaint.
+#: test_every_detection_param_reaches_the_file pins it.
+META_ATTRS = (
+    (str, ("streamer_mode", "trigger_basis", "stored_units")),
+    (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
+             "post_pulse_ms", "coincidence_window_s",
+             "noise_capture_interval_s", "noise_capture_window_s",
+             "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
+             "sample_rate_slow", "sample_rate_fast",
+             "volts_per_count", "slow_time_offset_s")),
+    (int, ("module", "min_end_samples",
+           *(name + suffix for name in RATE_PARAMS
+             for suffix in ("", "_slow", "_fast")))),
+    (bool, ("enable_pileup", "dump_all_channels")),
+)
+
+
+def write_metadata(f: h5py.File, channels: List[ChannelKey],
+                   params: Dict[str, Any]) -> None:
+    """The ``metadata`` group of a capture file, or of a time-ordered
+    data file of the same channels: the attributes of
+    :data:`META_ATTRS` that *params* gives, ``channels`` and
+    ``fast_channels``."""
+    meta = f.create_group("metadata")
+    meta.attrs["format_version"] = 1
+    for cast, keys in META_ATTRS:
+        for k in keys:
+            if params.get(k) is not None:
+                meta.attrs[k] = cast(params[k])
+    meta.attrs["channels"] = np.asarray(check_keys(channels), dtype=np.int64)
+    if "fast_channels" in params:
+        meta.attrs["fast_channels"] = np.asarray(
+            check_keys(params["fast_channels"]), dtype=np.int64)
+
+
 # ───────────────────────── Shared writer plumbing ───────────────────
 
 class _PulseFileWriter:
@@ -138,43 +176,13 @@ class _PulseFileWriter:
     #: Where an event's member lives: a pulse under its channel.
     _MEMBER_PATH = "/{group}/pulse_{idx:06d}"
 
-    #: capture_params written to ``metadata``, grouped by attribute type.
-    #: Must cover everything in
-    #: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
-    #: missing here is dropped without complaint.
-    #: test_every_detection_param_reaches_the_file pins it.
-    _META = (
-        (str, ("streamer_mode", "trigger_basis", "stored_units")),
-        (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
-                 "post_pulse_ms", "coincidence_window_s",
-                 "noise_capture_interval_s", "noise_capture_window_s",
-                 "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
-                 "sample_rate_slow", "sample_rate_fast",
-                 "volts_per_count", "slow_time_offset_s")),
-        (int, ("module", "min_end_samples",
-               *(name + suffix for name in RATE_PARAMS
-                 for suffix in ("", "_slow", "_fast")))),
-        (bool, ("enable_pileup", "dump_all_channels")),
-    )
-
     def __init__(self, path: str | Path, channels: List[ChannelKey],
                  capture_params: Dict[str, Any]):
         self.path = Path(path)
-        channels = check_keys(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
-
-        meta = self.f.create_group("metadata")
-        meta.attrs["capture_start"] = time.time()
-        meta.attrs["format_version"] = 1
-        for cast, keys in self._META:
-            for k in keys:
-                if capture_params.get(k) is not None:
-                    meta.attrs[k] = cast(capture_params[k])
-        meta.attrs["channels"] = np.asarray(channels, dtype=np.int64)
-        if "fast_channels" in capture_params:
-            meta.attrs["fast_channels"] = np.asarray(
-                check_keys(capture_params["fast_channels"]), dtype=np.int64)
+        write_metadata(self.f, channels, capture_params)
+        self.f["metadata"].attrs["capture_start"] = time.time()
 
     # ── Shared helpers ────────────────────────────────────────────
 

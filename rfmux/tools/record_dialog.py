@@ -162,6 +162,19 @@ class RecordDialog(QtWidgets.QDialog):
         self.trunc_combo.setToolTip(TRUNC_HELP)
         self.merge_check = QtWidgets.QCheckBox(
             "Merge the recording into the pulse file after the run")
+        self.tod_check = QtWidgets.QCheckBox(
+            "Repack the dirfile and recording as one HDF5 file of "
+            "time-ordered data")
+        self.tod_check.setToolTip(
+            "After the run: every channel of the dirfile and the recording "
+            "in the units the pulse file stores it in (volts, or hertz for a "
+            "calibrated channel in the frequency basis), with the same "
+            "metadata and tuning, readable without pygetdata or fastrx")
+        self.merge_tod_check = QtWidgets.QCheckBox(
+            "Copy the time-ordered data into the pulse file")
+        self.merge_tod_check.setToolTip(
+            "The pulse file gains a tod/ group holding the streams, so one "
+            "file carries the pulses and what they were cut from")
         self.show_combo = QtWidgets.QComboBox()
         self.show_combo.addItems(["Periscope in review mode",
                                   "the overlay viewer", "nothing"])
@@ -177,6 +190,8 @@ class RecordDialog(QtWidgets.QDialog):
         add("", self._row(self.streamer_check, QtWidgets.QLabel("sample bits"),
                           self.trunc_combo))
         add("", self.merge_check)
+        add("", self.tod_check)
+        add("", self.merge_tod_check)
         add("After the run:", self.show_combo)
 
         # ── Pulse capture settings, on their own tab ─────────────
@@ -407,6 +422,8 @@ class RecordDialog(QtWidgets.QDialog):
             "fastrx_interface": _combo_value(self.fastrx_iface_combo) or None,
             "fastrx_socket": None,
             "merge_fastrx": self.merge_check.isChecked(),
+            "tod": self.tod_check.isChecked(),
+            "merge_tod": self.merge_tod_check.isChecked(),
             "channel_streamer": self.streamer_check.isChecked(),
             "sample_trunc": self.trunc_combo.currentData(),
             "show": _SHOW[self.show_combo.currentIndex()],
@@ -463,6 +480,8 @@ class RecordDialog(QtWidgets.QDialog):
                 "" if saved_iface == "auto" else saved_iface)
         _select(self.fastrx_iface_combo, str(v("fastrx_interface", "")))
         self.merge_check.setChecked(v("merge_fastrx", "true") in (True, "true"))
+        self.tod_check.setChecked(v("tod", "true") in (True, "true"))
+        self.merge_tod_check.setChecked(v("merge_tod", "false") in (True, "true"))
         self.streamer_check.setChecked(
             v("channel_streamer", "false") in (True, "true"))
         _select(self.trunc_combo, str(v("sample_trunc", "LOW")))
@@ -490,6 +509,8 @@ class RecordDialog(QtWidgets.QDialog):
                 ("parser_interface", o["parser_interface"] or ""),
                 ("fastrx_interface", o["fastrx_interface"] or ""),
                 ("merge_fastrx", "true" if o["merge_fastrx"] else "false"),
+                ("tod", "true" if o["tod"] else "false"),
+                ("merge_tod", "true" if o["merge_tod"] else "false"),
                 ("channel_streamer", "true" if o["channel_streamer"] else "false"),
                 ("sample_trunc", o["sample_trunc"]),
                 ("show", o["show"]),

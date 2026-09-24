@@ -2,7 +2,8 @@
 """
 rfmux record - a pulse capture, a parser dirfile and a fastrx recording
 of a module, or of several feeding one RF line, for the same stretch,
-into one session folder.
+into one session folder, and the dirfile and recording repacked as one
+HDF5 file of time-ordered data in the capture's units.
 
     rfmux record --serial 0156 --module 2 --duration 20 \\
         --session ~/data/session_20260909_153654
@@ -101,6 +102,14 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="After the run, add the fastrx recording to the pulse file as its "
                    "fast stream (a both-mode file, as Periscope reviews it), "
                    f"renamed to end in {MERGED_SUFFIX}")
+@click.option("--tod/--no-tod", default=True, show_default=True,
+              help="After the run, repack the dirfile and the fastrx recording "
+                   "into one HDF5 file of time-ordered data, every channel in "
+                   "the units the pulse file stores it in, with the same "
+                   "metadata and tuning")
+@click.option("--merge-tod/--no-merge-tod", default=False, show_default=True,
+              help="Copy the time-ordered data into the pulse file as its tod/ "
+                   "group, so one file holds the pulses and the streams")
 @click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
               default="periscope", show_default=True,
               help="After the run: Periscope in review mode on the pulse file, the "
@@ -135,7 +144,8 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("-q", "--quiet", is_flag=True)
 def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
-        fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, show,
+        fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, tod,
+        merge_tod, show,
         bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
         pre_pulse_ms, post_pulse_ms, coincidence_window_ms,
         noise_capture_interval_s, dump_all_channels, noise_train_ms,
@@ -170,7 +180,8 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
          duration=duration, session=session, session_dir=session_dir,
          capture=capture, parser=parser, fastrx=fastrx,
          parser_interface=parser_interface, fastrx_interface=fastrx_interface,
-         fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, show=show,
+         fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, tod=tod,
+         merge_tod=merge_tod, show=show,
          bias=bias, config=config, channel_streamer=channel_streamer,
          sample_trunc=sample_trunc, quiet=quiet)
 
@@ -178,7 +189,8 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
 def _run(*, serial, hostname, modules, channels, duration, session,
          session_dir, capture, parser, fastrx, parser_interface,
          fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
-         quiet, channel_streamer=False, sample_trunc="LOW"):
+         quiet, channel_streamer=False, sample_trunc="LOW", tod=True,
+         merge_tod=False):
     """One recording, from the command line's options or the dialog's.
     *channels* is a range spec for every module of *modules*, a
     per-module spec (which names the modules itself), or None for each
@@ -209,20 +221,24 @@ def _run(*, serial, hostname, modules, channels, duration, session,
             tuning=tuning or None,
             parser_interface=parser_interface,
             fastrx_interface=fastrx_interface, fastrx_socket=fastrx_socket,
-            merge_fastrx=merge_fastrx, channel_streamer=channel_streamer,
+            merge_fastrx=merge_fastrx, tod=tod, merge_tod=merge_tod,
+            channel_streamer=channel_streamer,
             sample_trunc=sample_trunc, verbose=not quiet))
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")
-    for name in ("pulse_path", "dirfile_path", "fastrx_path"):
+    for name in ("pulse_path", "dirfile_path", "fastrx_path", "tod_path"):
         path = getattr(result, name)
         if path is not None:
             click.echo(f"[record] {name.split('_')[0]:7s} {path}")
     if result.merged_fastrx:
         click.echo("[record] fastrx merged into the pulse file as its fast "
                    f"stream: {result.pulse_path.name}")
+    if result.merged_tod:
+        click.echo("[record] time-ordered data copied into the pulse file's "
+                   f"tod/ group: {result.pulse_path.name}")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
     _show(result, show)

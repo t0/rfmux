@@ -441,6 +441,24 @@ histograms/slow/, histograms/fast/
 templates/slow/,  templates/fast/
 ```
 
+**A time-ordered data file**, `rfmux record`'s `tod_module<M>_HHMMSS.h5`,
+has the same `metadata` (with `sample_rate_slow`, `sample_rate_fast`,
+`slow_time_offset_s` and `fast_channels` as the streams it holds give
+them) and the parser dirfile and fastrx recording of the run under `tod/`,
+each channel in its stored units, on the PFB clock, as float32.
+`--merge-tod` copies the `tod/` group into the pulse file.
+
+```
+tod/slow/time                  seconds of day, the dirfile's timebase
+tod/slow/channel_<n>/          I, Q, tuning/, stored_units
+tod/fast/time                  seconds of day, NaN for an undisciplined stamp
+tod/fast/seq, pipe_snapshot    the record's sequence number and sent pipes
+tod/fast/channel_<n>/          I, Q, tuning/, stored_units
+```
+
+Across modules each stream nests `module_<m>/` with that module's `time`
+(and `seq`, `pipe_snapshot`) and channel groups.
+
 ## From a script
 
 One call captures and writes the file:

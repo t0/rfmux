@@ -12,6 +12,7 @@ import time
 from types import SimpleNamespace
 
 import click
+import numpy as np
 import pytest
 
 from rfmux.algorithms.measurement import record_streams as rs
@@ -80,6 +81,13 @@ def fake_recorders(monkeypatch):
     monkeypatch.setattr(rs, "_stop_parser", stop)
     # The parser is faked, so its pygetdata requirement is too.
     monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
+
+    def tod(result, path, tuning, trigger_basis):
+        log["tod"] = (tuning, trigger_basis)
+        path.touch()
+        return path
+    # The products are fakes, so their repacking is too: an empty file.
+    monkeypatch.setattr(rs, "_tod", tod)
     return log
 
 
@@ -180,7 +188,8 @@ def test_the_parser_subprocess_is_started_stopped_and_logged(
     board = _Board()
     result = asyncio.run(rs.record_streams(
         board, module=2, channels=[1, 2], duration_s=DURATION_S,
-        session=core_session.open_session(base=tmp_path), fastrx=False, verbose=False))
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tod=False, verbose=False))       # the fake child writes no dirfile
     assert result.dirfile_path.name == "serial_0042"
     log = result.parser_log.read_text()
     assert log.startswith("parser up") and "Drop Statistics" in log
@@ -351,6 +360,106 @@ def test_nothing_is_merged_without_both_products(tmp_path, monkeypatch):
     pulse.touch()
     rs._merge_recording(_result(tmp_path, pulse_path=pulse))
     assert calls == []
+
+
+def test_the_time_ordered_data_is_written_from_the_run_and_its_tuning(
+        tmp_path, fake_recorders):
+    tuning = {1: {"bias_channel": 1, "df_calibration": 1e6 + 0j}}
+    result = asyncio.run(rs.record_streams(
+        _Board(), module=2, channels=[1], duration_s=DURATION_S,
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tuning=tuning, trigger_basis="iq", verbose=False))
+    assert result.tod_path.name.startswith("tod_module2_")
+    assert result.tod_path.suffix == ".h5" and result.tod_path.exists()
+    assert fake_recorders["tod"] == (tuning, "iq")
+    assert result.warnings == [] and not result.merged_tod
+
+
+def test_no_time_ordered_data_when_not_asked(tmp_path, fake_recorders):
+    result = asyncio.run(rs.record_streams(
+        _Board(), module=2, channels=[1], duration_s=DURATION_S,
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tod=False, verbose=False))
+    assert result.tod_path is None and "tod" not in fake_recorders
+
+
+def test_the_disk_estimate_includes_the_time_ordered_data(
+        tmp_path, fake_recorders, monkeypatch):
+    """The repacked fast stream costs more than the recording it comes
+    from (float32 I and Q against int16), so the check before the run
+    counts both."""
+    fx = fake_fastrx(monkeypatch, tmp_path, packets=1)
+    recording = DURATION_S * rs.fastrx_bytes_per_s(fx, 1)
+    monkeypatch.setattr(rs.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(free=recording * 1.05))
+    for tod, warned in ((False, False), (True, True)):
+        result = asyncio.run(rs.record_streams(
+            _Board(), module=1, channels=[1], duration_s=DURATION_S,
+            session=core_session.open_session(base=tmp_path / str(tod)),
+            capture=False, merge_fastrx=False, tod=tod, verbose=False))
+        assert any("GB free" in w for w in result.warnings) is warned
+
+
+def _tod_result(tmp_path, pulse=True):
+    paths = {}
+    for name, key in (("pulse.h5", "pulse_path"), ("run.fastrx", "fastrx_path")):
+        (tmp_path / name).touch()
+        paths[key] = tmp_path / name
+    (tmp_path / "run.dirfile" / "serial_0042").mkdir(parents=True, exist_ok=True)
+    paths["dirfile_path"] = tmp_path / "run.dirfile" / "serial_0042"
+    if not pulse:
+        del paths["pulse_path"]
+    return _result(tmp_path, **paths)
+
+
+def test_write_tod_repacks_both_products_and_merges_when_asked(
+        tmp_path, monkeypatch):
+    from rfmux.pulse_capture import tod as tod_module
+    calls = []
+    monkeypatch.setattr(rs, "_tod", lambda r, p, t, b: calls.append(
+        ("write", p, r.fastrx_path, r.dirfile_path, t, b)) or p)
+    monkeypatch.setattr(tod_module, "merge_tod",
+                        lambda p, t: calls.append(("merge", p, t)))
+    result = _tod_result(tmp_path)
+    out = tmp_path / "tod.h5"
+    rs._write_tod(result, out, {1: {}}, "df", merge=False)
+    assert calls == [("write", out, result.fastrx_path, result.dirfile_path,
+                      {1: {}}, "df")]
+    assert result.tod_path == out and not result.merged_tod
+    rs._write_tod(result, out, None, "df", merge=True)
+    assert calls[-1] == ("merge", result.pulse_path, out) and result.merged_tod
+    assert result.warnings == []
+
+
+def test_a_failed_repack_or_merge_is_a_warning(tmp_path, monkeypatch):
+    from rfmux.pulse_capture import tod as tod_module
+
+    def boom(*a):
+        raise ValueError("no disciplined timestamp")
+    monkeypatch.setattr(rs, "_tod", boom)
+    result = _tod_result(tmp_path)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    assert result.tod_path is None and not result.merged_tod
+    assert result.warnings == [
+        "time-ordered data not written: no disciplined timestamp"]
+
+    monkeypatch.setattr(rs, "_tod", lambda r, p, t, b: p)
+    monkeypatch.setattr(tod_module, "merge_tod", boom)
+    result = _tod_result(tmp_path)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    assert result.tod_path == tmp_path / "tod.h5" and not result.merged_tod
+    assert result.warnings == [
+        "time-ordered data not merged into pulse.h5: no disciplined timestamp"]
+
+
+def test_nothing_is_repacked_without_a_dirfile_or_recording(tmp_path,
+                                                            monkeypatch):
+    monkeypatch.setattr(rs, "_tod", lambda *a: pytest.fail("repacked"))
+    pulse = tmp_path / "pulse.h5"
+    pulse.touch()
+    result = _result(tmp_path, pulse_path=pulse)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    assert result.tod_path is None and result.warnings == []
 
 
 def test_pulse_summary_lines_name_the_busiest_channel_first():
@@ -639,9 +748,10 @@ def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
         session=session, fastrx=False, verbose=False))
     meta = load_metadata(session)
     assert [(e["data_type"], e["identifier"]) for e in meta["exports"]] == [
-        ("parser", "module2")]          # the fake capture wrote no file
+        ("parser", "module2"), ("tod", "module2")]   # the fake capture wrote no file
     run = meta["recordings"][0]
     assert run["dirfile"] == str(result.dirfile_path.relative_to(session))
+    assert run["tod"] == result.tod_path.name and run["merged_tod"] is False
     assert run["duration_s"] == DURATION_S
     assert run["training_s"] == pytest.approx(
         PulseCaptureConfig().noise_train_ms / 1e3, rel=0.05)
@@ -737,6 +847,7 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     with PulseHDF5Reader(result.pulse_path) as reader:
         assert reader.channels == [1, 2]
         rate = float(reader.metadata["sample_rate_slow"])
+        reader_origin = reader.metadata["time_origin_epoch"]
     assert result.dirfile_path.name == "serial_0000"
     df = gd.dirfile(str(result.dirfile_path), gd.RDONLY)
     # The parser drops the batch in flight when it is stopped, up to
@@ -746,6 +857,20 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     assert "Drop Statistics" in result.parser_log.read_text()
 
     meta = load_metadata(result.session)
-    assert sorted(e["data_type"] for e in meta["exports"]) == ["parser", "pulse"]
+    assert sorted(e["data_type"] for e in meta["exports"]) == ["parser", "pulse", "tod"]
     run_meta = meta["recordings"][0]
     assert run_meta["started_at"] - result.capture.start_time >= 0.9 * result.training_s
+
+    # The dirfile repacked: every frame, in volts (no tuning was given),
+    # at the capture's rate, on the capture's clock and day.
+    import h5py
+    with h5py.File(result.tod_path, "r") as f:
+        assert "tod/fast" not in f
+        t = f["tod/slow/time"][()]
+        assert t.shape == f["tod/slow/channel_1/I"].shape
+        assert df.nframes - 1 <= len(t) <= df.nframes
+        assert np.median(np.diff(t)) == pytest.approx(1.0 / rate, rel=1e-3)
+        assert f["tod/slow/channel_1"].attrs["stored_units"] == "V"
+        m = f["metadata"].attrs
+        assert m["sample_rate_slow"] == pytest.approx(rate)
+        assert m["time_origin_epoch"] == reader_origin

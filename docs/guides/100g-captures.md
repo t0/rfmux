@@ -94,6 +94,9 @@ The **Run** tab:
   the highest rounded up to whole pipelines of 128, and lets the stream
   flow for a second before checking it.
 - **Merge the recording into the pulse file after the run.**
+- **Repack the dirfile and recording as one HDF5 file of time-ordered
+  data**, and **Copy the time-ordered data into the pulse file** (see
+  section 4).
 - **After the run**: Periscope in review mode on the pulse file, the
   overlay viewer on the channel with the most pulses, or nothing.
 
@@ -123,7 +126,8 @@ rfmux record --serial <NNNN> --module 2 --module 3 --duration 20 \
 Channel ranges instead of the bias export: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules
 itself; `--bias <file>` names a bias export instead of the newest.
-`--no-capture`, `--no-parser` and `--no-fastrx` leave a product out.
+`--no-capture`, `--no-parser`, `--no-fastrx` and `--no-tod` leave a product
+out; `--merge-tod` copies the time-ordered data into the pulse file.
 `--parser-interface` names the parser's interface when the board's address
 does not find it; `--fastrx-interface` names the 100G NIC when several fastrxd
 run. The capture settings are `--threshold-sigma`, `--end-sigma`,
@@ -154,20 +158,35 @@ The products, sharing one time stamp, named `module2` for one module and
   the same channels, and a `.log` with its drop statistics.
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of
   channels 1 to the highest of them.
+- `tod_module<M>_HHMMSS.h5`, the dirfile and the recording repacked as
+  one HDF5 file of time-ordered data: the recorded channels of each
+  stream, every one in the units the pulse file stores it in (volts, or
+  hertz for a calibrated channel in the frequency basis), on the PFB
+  clock, with the pulse file's `metadata` and each channel's `tuning`
+  beside them. It reads with h5py alone. Its layout is in the pulse
+  capture guide's file layout section.
 
-All three are listed in the session's metadata, so Periscope's session
+All four are listed in the session's metadata, so Periscope's session
 browser shows them.
 
 After the run the command lists the channels that triggered with their
 pulse counts. It merges the recording into the pulse file as its fast
 stream and renames the file to end in `_100G`, so its name says it holds
-the 100G data. It then opens Periscope in review mode on that file, in its
-session folder. `--no-merge-fastrx` leaves the file slow-only under its own
-name. `rfmux fastrx merge <pulse.h5> <run.fastrx>` merges later, in place
-unless given an output name. The command exits 1 after
+the 100G data. It then repacks the dirfile and the recording into the
+time-ordered data file, a block of records at a time, and opens
+Periscope in review mode on the pulse file, in its session folder.
+`--no-merge-fastrx` leaves the file slow-only under its own name.
+`rfmux fastrx merge <pulse.h5> <run.fastrx>` merges later, in place
+unless given an output name. `--no-tod` skips the repack; `--merge-tod`
+copies the time-ordered data into the pulse file as its `tod/` group, so
+one file holds the pulses and the streams they were cut from (the
+standalone file stays). The repacked fast stream is float32 I and Q per
+channel, twice the bytes per channel of the recording's int16; the disk
+check before the run counts both. The command exits 1 after
 a run that warned: a capture that ended before its noise training was
 done, no channel-stream packets, a disk too small for the recording, a
-parser that wrote nothing, or a recording that could not be merged.
+parser that wrote nothing, a recording that could not be merged, or
+time-ordered data that could not be written or merged.
 
 The capture settings in the dialog, and `--coincidence-window-ms`,
 `--dump-all-channels` and `--noise-capture-interval-s` on the command
@@ -273,6 +292,23 @@ with PulseHDF5Reader("pulse_module2_143012.h5") as r:
     ov = pulse_overlay(r, rec, channel=5, pulse_idx=1,
                        dirfile="~/data/run.dirfile/serial_0156")
 # ov.pulse, ov.dirfile, ov.fastrx: dicts of times, I, Q in ov.units
+```
+
+The time-ordered data file comes from `write_tod` in
+`rfmux.pulse_capture.tod`, given either product or both, the channels, and
+the tuning rows the capture used (`tuning_rows` in
+`rfmux.algorithms.measurement.df_calibration`, from a bias export's
+`bias_kids_output` and `nco_frequency_hz`); `merge_tod` copies its `tod/`
+group into the run's pulse file:
+
+```python
+from rfmux.pulse_capture.tod import merge_tod, write_tod
+
+write_tod("tod_module2_143012.h5", channels=range(1, 89), module=2,
+          fastrx="fastrx_module2_143012.fastrx",
+          dirfile="parser_module2_143012.dirfile/serial_0156",
+          tuning=tuning, trigger_basis="df")
+merge_tod("pulse_module2_143012_100G.h5", "tod_module2_143012.h5")
 ```
 
 The reference notebook `Demos/fastrx_recording.md` works through reading a

@@ -593,7 +593,13 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `on_noise=` for that. After the run it lists the channels that
   triggered, merges the recording into the pulse file as its fast
   stream and renames it to end in `_100G` (`--no-merge-fastrx`;
-  `rfmux fastrx merge` for an older run)
+  `rfmux fastrx merge` for an older run), repacks the dirfile and the
+  recording into `tod_module<M>_HHMMSS.h5`, one HDF5 file of
+  time-ordered data with every channel in the units the pulse file
+  stores it in and the same metadata and tuning (`--no-tod`;
+  `--merge-tod` copies it into the pulse file as its `tod/` group;
+  `write_tod` and `merge_tod` in `rfmux.pulse_capture.tod` do the same
+  by hand),
   and opens Periscope in review mode on the file (`--show overlay` for
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording

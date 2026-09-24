@@ -697,15 +697,60 @@ def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
         str(tmp_path / "pulse.h5")]
 
 
-def test_the_mock_serial_resolves_to_the_running_mock_server(monkeypatch):
+def test_mock_and_its_serial_resolve_to_the_running_mock_server(monkeypatch):
     from rfmux.mock import server
     from rfmux.tools.record import resolve_hostname
     monkeypatch.setattr(server, "running_mock", lambda: "127.0.0.1:9878")
+    assert resolve_hostname("MOCK", None) == "127.0.0.1:9878"
     assert resolve_hostname("0000", None) == "127.0.0.1:9878"
-    assert resolve_hostname("0000", "127.0.0.1:57013") == "127.0.0.1:57013"
+    assert resolve_hostname("mock", "127.0.0.1:57013") == "127.0.0.1:57013"
     assert resolve_hostname("0156", None) is None                # a board
     monkeypatch.setattr(server, "running_mock", lambda: None)
     assert resolve_hostname("0000", None) is None                # none runs
+
+
+def test_mock_attaches_to_the_running_mock_and_simulates_only_without_one(
+        monkeypatch):
+    """MOCK is the mock already running, reached as serial 0000 at its
+    address; a new simulated board is started only when none runs."""
+    from rfmux.mock import server
+    from rfmux.tools import record
+    import rfmux
+    seen = {}
+
+    class Session:
+        def __init__(self, hwm):
+            seen["hwm"] = hwm
+
+        def query(self, cls):
+            return SimpleNamespace(one=lambda: SimpleNamespace(
+                resolve=_ok, kind="attached"))
+
+    async def _ok():
+        pass
+
+    async def created(**kw):
+        seen["created"] = kw
+        return SimpleNamespace(kind="simulated", stop_udp_streaming=_ok)
+
+    async def recorded(crs, **kw):
+        return crs.kind
+    monkeypatch.setattr(rfmux, "load_session", Session)
+    monkeypatch.setattr(record, "record_streams", recorded)
+    monkeypatch.setattr("rfmux.mock.helpers.create_mock_crs", created)
+    monkeypatch.setattr(record.asyncio, "sleep", lambda s: _ok())
+
+    monkeypatch.setattr(server, "running_mock", lambda: "127.0.0.1:9878")
+    assert asyncio.run(record._main("MOCK", None, module=1, channels=[1])) \
+        == "attached"
+    assert seen["hwm"] == \
+        '!HardwareMap [ !CRS { serial: "0000", hostname: "127.0.0.1:9878" } ]'
+    assert "created" not in seen
+
+    monkeypatch.setattr(server, "running_mock", lambda: None)
+    assert asyncio.run(record._main("MOCK", None, module=1, channels=[1])) \
+        == "simulated"
+    assert seen["created"]["module"] == 1
 
 
 def test_an_unreachable_board_is_one_line_naming_the_mock_options(

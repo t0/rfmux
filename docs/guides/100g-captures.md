@@ -68,12 +68,11 @@ while the status line at the bottom lists what is missing.
 The **Run** tab:
 
 - **CRS serial** and, when the board is not `rfmux<NNNN>.local`, its
-  **Hostname**. `MOCK` starts a simulated board of the run's own. To
-  record from a mock already running, Periscope's for one, give its
-  serial, `0000`: the mock server on this host is filled in as the
-  hostname, and the parser listens on `lo`, listed for that. A second
-  mock, on a port of its own, is typed in (Periscope prints its mock's
-  address at startup).
+  **Hostname**. `MOCK` or `0000` is the mock running on this host,
+  Periscope's for one: its address is filled in as the hostname, and the
+  parser listens on `lo`, listed for that. `MOCK` with no mock running
+  starts a simulated board of the run's own. A second mock, on a port of
+  its own, is typed in (Periscope prints its mock's address at startup).
 - **Modules**: `1`, or `2,3` for one RF line fed by several modules.
 - **Session**: an existing session folder, the newest under the default
   path filled in, or a new `session_YYYYMMDD_HHMMSS` folder under a
@@ -141,15 +140,16 @@ Channel ranges instead of the bias export: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules
 itself; `--bias <file>` names a bias export instead of the newest.
 
-Without a board, `--serial MOCK` starts a simulated one for the run. To
-record from the mock Periscope is running, with its tuned detectors, give
-its serial: the first mock server on a host serves at a fixed port
-(`MOCK_PORT` in `rfmux.mock.server`) and is found there; a second mock is
-named with `--hostname 127.0.0.1:<port>` (Periscope prints its mock's
-address at startup). The parser listens on the loopback:
+Without a board, `--serial MOCK` records from the mock Periscope is
+running, with its tuned detectors: the first mock server on a host serves
+at a fixed port (`MOCK_PORT` in `rfmux.mock.server`) and is found there
+(`0000`, the mock's serial, does the same). With no mock running, `MOCK`
+starts a simulated board for the run. A second mock is named with
+`--hostname 127.0.0.1:<port>` (Periscope prints its mock's address at
+startup). The parser listens on the loopback:
 
 ```bash
-rfmux record --serial 0000 --module 1 --duration 20 --no-fastrx \
+rfmux record --serial MOCK --module 1 --duration 20 --no-fastrx \
     --parser-interface lo --session <folder>
 ```
 `--no-capture`, `--no-parser`, `--no-fastrx` and `--no-tod` leave a product

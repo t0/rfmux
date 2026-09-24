@@ -620,10 +620,10 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   capture across modules. Periscope reviews such a file with the module
   named beside each channel, its histogram Plot field taking `2:1-8` for
   module 2's channels; a one-module file reads as before. The first mock
-  server on a host serves at a fixed port, so `--serial 0000` records
-  from Periscope's mock with its tuned detectors, the parser on `lo`; the
-  dialog fills that address in for the serial. See the 100G captures
-  guide.
+  server on a host serves at a fixed port, so `--serial MOCK` (or `0000`)
+  records from Periscope's mock with its tuned detectors, the parser on
+  `lo`, and starts a simulated board only when no mock runs; the dialog
+  fills the address in for either serial. See the 100G captures guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

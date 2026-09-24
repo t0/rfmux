@@ -39,18 +39,22 @@ _DEFAULTS = PulseCaptureConfig()
 
 
 async def _main(serial: str, hostname: str | None, **kw):
-    """Connect, record, and for a simulated board stop its stream."""
+    """Connect and record.  MOCK or 0000 is the mock server running on
+    this host; MOCK with none running starts a simulated board for the
+    run and stops its stream after."""
     import rfmux
-    if serial.upper() == "MOCK":
-        from rfmux.mock.helpers import create_mock_crs
-        crs = await create_mock_crs(
-            module=kw["module"] or min(kw["channels"]), verbose=False)
-        await asyncio.sleep(2.0)             # stream warm-up
-        try:
-            return await record_streams(crs, **kw)
-        finally:
-            await crs.stop_udp_streaming()
     hostname = resolve_hostname(serial, hostname)
+    if serial.upper() == MOCK_NAME:
+        if hostname is None:
+            from rfmux.mock.helpers import create_mock_crs
+            crs = await create_mock_crs(
+                module=kw["module"] or min(kw["channels"]), verbose=False)
+            await asyncio.sleep(2.0)             # stream warm-up
+            try:
+                return await record_streams(crs, **kw)
+            finally:
+                await crs.stop_udp_streaming()
+        serial = MOCK_SERIAL
     host = f', hostname: "{hostname}"' if hostname else ""
     session = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{serial}"{host} }} ]')
@@ -60,19 +64,24 @@ async def _main(serial: str, hostname: str | None, **kw):
 
 
 def resolve_hostname(serial: str, hostname: str | None) -> str | None:
-    """*hostname* as given; for the mock serial 0000, the mock server
-    running on this host at its port (``running_mock`` in
+    """*hostname* as given; for MOCK or the mock serial 0000, the mock
+    server running on this host at its port (``running_mock`` in
     ``rfmux.mock.server``); else None, for ``<serial>.local``."""
     if hostname:
         return hostname
-    if serial == MOCK_SERIAL:
+    if is_mock(serial):
         from rfmux.mock.server import running_mock
         return running_mock()
     return None
 
 
-#: The serial a mock board reports.
+#: The serial a mock board reports, and the name that means the mock.
 MOCK_SERIAL = "0000"
+MOCK_NAME = "MOCK"
+
+
+def is_mock(serial: str) -> bool:
+    return serial.strip().upper() in (MOCK_NAME, MOCK_SERIAL)
 
 
 #: What the sample truncation choices mean, for the option and the dialog.
@@ -81,9 +90,10 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 
 @click.command()
 @click.option("--serial", default=None,
-              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board "
-                   "of the command's own; with no options at all, a dialog asks "
-                   "for everything")
+              help="CRS serial (rfmux<NNNN>.local); MOCK or 0000 for the mock "
+                   "server running on this host (Periscope's, say), MOCK with "
+                   "none running for a simulated board of the command's own; "
+                   "with no options at all, a dialog asks for everything")
 @click.option("--hostname", default=None,
               help="Board address when it is not <serial>.local. A mock server "
                    "already running on this host, Periscope's for one, is found "
@@ -256,9 +266,9 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     except aiohttp.ClientConnectionError as e:
         raise click.ClickException(
             f"cannot reach the board: {e}. A serial names a board at "
-            "rfmux<NNNN>.local, or a mock server running on this host with "
-            "that serial (none was found); --hostname gives another address; "
-            "--serial MOCK starts a simulated board of its own")
+            "rfmux<NNNN>.local; MOCK or 0000 the mock server running on this "
+            "host (none was found); --hostname gives another address; "
+            "--serial MOCK with no mock running starts a simulated board")
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")

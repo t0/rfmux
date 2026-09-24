@@ -157,6 +157,10 @@ def test_the_running_mock_fills_the_hostname_for_its_serial(
     typed stays."""
     dlg, settings = _dialog(tmp_path, monkeypatch)
     monkeypatch.setattr(rd, "running_mock", lambda: "127.0.0.1:9878")
+    dlg.serial_edit.setText("MOCK")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
     dlg.serial_edit.setText("0000")
     assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
     dlg.serial_edit.setText("0156")

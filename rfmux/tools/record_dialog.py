@@ -20,7 +20,7 @@ from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import newest_session
 from ..mock.server import running_mock
-from .record import MOCK_SERIAL, TRUNC_HELP
+from .record import TRUNC_HELP, is_mock
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -102,16 +102,16 @@ class RecordDialog(QtWidgets.QDialog):
 
         # ── Board ────────────────────────────────────────────────
         self.serial_edit = QtWidgets.QLineEdit()
-        self.serial_edit.setPlaceholderText("0156, or MOCK for a simulated board")
+        self.serial_edit.setPlaceholderText("0156, or MOCK")
         self.serial_edit.setToolTip(
-            "A serial names a board at rfmux<NNNN>.local.  MOCK starts a "
-            "simulated board of the run's own.  To record from a mock "
-            "already running, Periscope's for one, give its serial (0000) "
-            "and its address as the hostname.")
+            "A serial names a board at rfmux<NNNN>.local.  MOCK or 0000 is "
+            "the mock server running on this host, Periscope's for one, "
+            "whose address is filled in below; MOCK with none running "
+            "starts a simulated board of the run's own.")
         self.hostname_edit = QtWidgets.QLineEdit()
         self.hostname_edit.setPlaceholderText("only when not <serial>.local")
         self.hostname_edit.setToolTip(
-            "For serial 0000, the mock server running on this host is "
+            "For MOCK or 0000, the mock server running on this host is "
             "filled in when the field is empty (a second mock, on another "
             "port, is typed here: Periscope prints its address at startup)")
         #: The address filled in for the running mock, cleared again when
@@ -403,8 +403,7 @@ class RecordDialog(QtWidgets.QDialog):
         """For the mock serial, the mock server running on this host
         fills an empty hostname field; a typed address is kept, and the
         autofill goes when the serial no longer names a mock."""
-        host = running_mock() \
-            if self.serial_edit.text().strip() == MOCK_SERIAL else None
+        host = running_mock() if is_mock(self.serial_edit.text()) else None
         edit = self.hostname_edit
         if host and not edit.text().strip():
             edit.setText(host)

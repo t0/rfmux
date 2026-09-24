@@ -621,6 +621,64 @@ def test_the_event_options_reach_the_capture_config(monkeypatch):
     assert cfg.noise_capture_interval_s == 30.0
 
 
+def _record_with(monkeypatch, args):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    runs = []
+    monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", *args])
+    assert result.exit_code == 0, result.output
+    return runs[0]
+
+
+@pytest.mark.parametrize("channels, module, spec, modules", [
+    ([1, 3, 4, 5], 2, "1,3-5", [2]),
+    ([(2, 1), (2, 2), (3, 5)], None, "2:1-2,3:5", [2, 3])])
+def test_a_config_file_sets_the_capture_and_its_channels(
+        tmp_path, monkeypatch, channels, module, spec, modules):
+    from rfmux.pulse_capture import write_trigger_config
+    config = PulseCaptureConfig(threshold_sigma=6.0, per_channel={
+        channels[0]: {"trigger": False}})
+    path = write_trigger_config(tmp_path / "tc.h5", config,
+                                channels=channels, module=module)
+    run = _record_with(monkeypatch, ["--config", str(path)])
+    assert (run["config"], run["channels"], run["modules"]) == \
+        (config, spec, modules)
+
+
+def test_an_option_given_overrides_the_config_file_and_the_rest_stays(
+        tmp_path, monkeypatch):
+    from rfmux.pulse_capture import write_trigger_config
+    config = PulseCaptureConfig(threshold_sigma=6.0, max_pulse_ms=20.0)
+    path = write_trigger_config(tmp_path / "tc.h5", config, channels=[1, 2],
+                                module=1)
+    run = _record_with(monkeypatch, ["--config", str(path), "--end-sigma",
+                                     "1.0", "--channels", "5-6"])
+    assert run["config"] == PulseCaptureConfig(
+        threshold_sigma=6.0, max_pulse_ms=20.0, end_sigma=1.0)
+    assert (run["channels"], run["modules"]) == ("5-6", [1])
+
+
+def test_a_file_without_a_config_is_refused(tmp_path):
+    import h5py
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    path = tmp_path / "other.h5"
+    h5py.File(path, "w").close()
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", "--config", str(path)])
+    assert result.exit_code == 2
+    assert "no trigger configuration" in result.output
+
+
+def test_the_help_describes_the_config_option():
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    out = CliRunner().invoke(record.cli, ["--help"]).output
+    assert "--config" in out and "Trigger config file" in out
+
+
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record

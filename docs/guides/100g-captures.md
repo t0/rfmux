@@ -136,8 +136,23 @@ itself; `--bias <file>` names a bias export instead of the newest.
 `--parser-interface` names the parser's interface when the board's address
 does not find it; `--fastrx-interface` names the 100G NIC when several fastrxd
 run. The capture settings are `--threshold-sigma`, `--end-sigma`,
-`--min-pulse-ms`, `--max-pulse-ms`, `--noise-train-ms` and
-`--trigger-basis`.
+`--min-pulse-ms`, `--max-pulse-ms`, `--pre-pulse-ms`, `--post-pulse-ms`,
+`--coincidence-window-ms`, `--dump-all-channels`,
+`--noise-capture-interval-s`, `--noise-train-ms` and `--trigger-basis`.
+
+A saved trigger config supplies all of them, per-channel settings included,
+and the modules and channels:
+
+```bash
+rfmux record --serial <NNNN> --duration 20 \
+    --session ~/data/session_20260909_153654 \
+    --config ~/data/session_20260909_153654/trigger_config_142501.h5
+```
+
+`--config` takes a file from **Export Config** in Periscope or in the
+dialog, or any earlier capture file. A capture option typed beside it
+overrides that one value (`--end-sigma 1.0`), and `--module` or
+`--channels` replaces the file's channel selection.
 
 ## 4. What a run does
 

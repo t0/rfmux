@@ -106,6 +106,26 @@ def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
     return sorted(rows), rows
 
 
+def config_selection(setup: Dict[str, Any]
+                     ) -> Optional[Tuple[Optional[List[int]], str]]:
+    """``(modules, spec)`` for the channels a trigger config file names,
+    from :func:`~rfmux.pulse_capture.read_trigger_config`'s *setup*: a
+    per-module spec (``2:1-3,3:5``) for pair keys, a plain one for channel
+    numbers, with the file's module or None.  None when it names none."""
+    channels = setup.get("channels")
+    if not channels:
+        return None
+    if isinstance(channels[0], tuple):
+        by_module: Dict[int, List[int]] = {}
+        for m, c in channels:
+            by_module.setdefault(m, []).append(c)
+        return list(by_module), ",".join(
+            f"{m}:{format_channel_spec(chs)}" for m, chs in by_module.items())
+    module = setup.get("module")
+    return ([module] if module is not None else None,
+            format_channel_spec(channels))
+
+
 def resolve_channels(modules: List[int], spec: Optional[str],
                      folder: Optional[Path], bias: Optional[Path] = None,
                      ) -> Tuple[Dict[int, List[int]], Dict[Any, dict], List[str]]:

@@ -14,14 +14,14 @@ from PyQt6 import QtCore, QtWidgets
 
 from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
+    config_selection,
     fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import (PulseCaptureConfig,
                                              read_trigger_config,
                                              write_trigger_config)
 from ..pulse_capture.channel_keys import pair_keys
-from ..core.channels import (MAX_MODULE, format_channel_spec,
-                             parse_channel_spec)
+from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import (is_session, newest_session,
                                    register_export)
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
@@ -316,19 +316,11 @@ class RecordDialog(QtWidgets.QDialog):
         """Take the trigger configuration of a trigger config file or a
         capture file, and the modules and channels it records."""
         config, setup = read_trigger_config(path)
-        channels = setup.get("channels")
-        if channels:
-            if isinstance(channels[0], tuple):
-                by_module: dict = {}
-                for m, c in channels:
-                    by_module.setdefault(m, []).append(c)
-                self.modules_edit.setText(",".join(map(str, by_module)))
-                spec = ",".join(f"{m}:{format_channel_spec(chs)}"
-                                for m, chs in by_module.items())
-            else:
-                if "module" in setup:
-                    self.modules_edit.setText(str(setup["module"]))
-                spec = format_channel_spec(channels)
+        selection = config_selection(setup)
+        if selection is not None:
+            modules, spec = selection
+            if modules:
+                self.modules_edit.setText(",".join(map(str, modules)))
             self.rb_ranges.setChecked(True)
             self.channels_edit.setText(spec)
         old = self.capture_form

@@ -12,6 +12,12 @@ the modules, nothing else is configured.  With --session the run joins
 an existing folder and takes its channels and tuning from the newest
 bias export there; otherwise a new session_YYYYMMDD_HHMMSS folder is
 made under --session-dir.
+
+    rfmux record --serial 0156 --duration 20 --config trigger_config.h5
+
+--config takes the pulse capture settings, per-channel ones included,
+and the modules and channels from a trigger config file (Export Config
+in Periscope or the record dialog) or an earlier capture file.
 """
 
 import asyncio
@@ -25,12 +31,14 @@ import click
 
 from rfmux.algorithms.measurement.record_streams import (
     MERGED_SUFFIX,
+    config_selection,
     resolve_channels,
     pulse_summary_lines,
     record_streams,
 )
 from rfmux.core.session_folder import open_session
-from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+from rfmux.pulse_capture.capture_session import (PulseCaptureConfig,
+                                                read_trigger_config)
 from rfmux.pulse_capture.channel_keys import channel_arg
 
 _DEFAULTS = PulseCaptureConfig()
@@ -107,6 +115,15 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
                    "overlay viewer on the channel with the most pulses, or nothing")
 @click.option("--bias", type=click.Path(dir_okay=False, exists=True), default=None,
               help="bias_kids export for the df calibrations; default: the session's newest")
+@click.option("--config", "config_path",
+              type=click.Path(dir_okay=False, exists=True), default=None,
+              help="Trigger config file (Export Config in Periscope or the "
+                   "record dialog) or an earlier capture file: its pulse "
+                   "capture settings, per-channel ones included, and its "
+                   "modules and channels unless --module or --channels is "
+                   "given.  A capture option typed on the command line "
+                   "overrides the file's value; the defaults shown below "
+                   "apply without --config")
 @click.option("--threshold-sigma", type=float, default=_DEFAULTS.threshold_sigma, show_default=True)
 @click.option("--end-sigma", type=float, default=_DEFAULTS.end_sigma, show_default=True)
 @click.option("--min-pulse-ms", type=float, default=_DEFAULTS.min_pulse_ms, show_default=True)
@@ -139,14 +156,18 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
         bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
         pre_pulse_ms, post_pulse_ms, coincidence_window_ms,
         noise_capture_interval_s, dump_all_channels, noise_train_ms,
-        trigger_basis, quiet):
+        trigger_basis, config_path, quiet):
     """Record the slow and channel streams of a module, or of several
-    feeding one RF line, into a session."""
+    feeding one RF line, into a session.
+
+    The pulse capture takes the options below, or starts from a saved
+    trigger config with --config trigger_config.h5.  With no options at
+    all, a dialog asks for everything."""
+    ctx = click.get_current_context()
+    given = [name for name in ctx.params if name != "quiet"
+             and ctx.get_parameter_source(name)
+             != click.core.ParameterSource.DEFAULT]
     if serial is None:
-        ctx = click.get_current_context()
-        given = [name for name in ctx.params if name != "quiet"
-                 and ctx.get_parameter_source(name)
-                 != click.core.ParameterSource.DEFAULT]
         if given:
             raise click.UsageError("--serial is required (with no options "
                                    "at all, a dialog asks for everything)")
@@ -158,14 +179,27 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
         return
     if duration is None:
         raise click.UsageError("--duration is required")
-    config = dataclasses.replace(
-        _DEFAULTS, threshold_sigma=threshold_sigma, end_sigma=end_sigma,
+    # Named as the config fields they set.
+    options = dict(
+        threshold_sigma=threshold_sigma, end_sigma=end_sigma,
         min_pulse_ms=min_pulse_ms, max_pulse_ms=max_pulse_ms,
         pre_pulse_ms=pre_pulse_ms, post_pulse_ms=post_pulse_ms,
         coincidence_window_ms=coincidence_window_ms,
         dump_all_channels=dump_all_channels,
         noise_capture_interval_s=noise_capture_interval_s,
         noise_train_ms=noise_train_ms, trigger_basis=trigger_basis)
+    config = dataclasses.replace(_DEFAULTS, **options)
+    if config_path is not None:
+        try:
+            loaded, setup = read_trigger_config(config_path)
+        except (OSError, ValueError) as e:
+            raise click.BadParameter(str(e), param_hint="--config")
+        config = dataclasses.replace(loaded, **{
+            k: v for k, v in options.items() if k in given})
+        selection = config_selection(setup)
+        if selection and not {"modules", "channels"} & set(given):
+            file_modules, channels = selection
+            modules = file_modules or modules
     _run(serial=serial, hostname=hostname, modules=list(modules), channels=channels,
          duration=duration, session=session, session_dir=session_dir,
          capture=capture, parser=parser, fastrx=fastrx,

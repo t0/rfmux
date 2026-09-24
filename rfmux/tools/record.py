@@ -244,6 +244,10 @@ def _run(*, serial, hostname, modules, channels, duration, session,
         click.echo(f"[record] session {folder}")
         for note in notes:
             click.echo(f"[record] bias export {note}")
+        if tod and not tuning:
+            click.echo("[record] no bias export for these modules: the "
+                       "time-ordered data carries no tuning, its channels "
+                       "stored in volts (--session or --bias names one)")
         for module, chosen in wanted.items():
             click.echo(f"[record] module {module}, channels "
                        f"{chosen[0]}-{chosen[-1]} ({len(chosen)}), "

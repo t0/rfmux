@@ -253,6 +253,29 @@ def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
     panel.close()
 
 
+def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
+                                                          panel):
+    """A file of time-ordered data alone opens in review: the status
+    line says what it holds per stream, the channel's tuning row is the
+    file's, and nothing is listed as a pulse."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _dirfile, _recording_file)
+    cal = complex(3.0e6, -4.0e6)
+    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path),
+                     dirfile=_dirfile(tmp_path),
+                     tuning={CHANNEL: {"bias_channel": CHANNEL,
+                                       "df_calibration": cal}})
+    panel.load_from_hdf5(path)
+    status = panel.status_label.text()
+    assert "time-ordered data slow:" in status and "fast:" in status
+    assert "pulses" not in status
+    assert panel._tuning_row(CHANNEL)["df_calibration"] == cal
+    assert panel._pulse_order == [] and panel._counts.get(CHANNEL, 0) == 0
+    assert panel._tuning_by_module() == {}     # no sweep in this row
+
+
 def test_idle_axes_name_the_default_view(qt_app, panel):
     """Before any data, every tab names the units the selector shows."""
     assert panel.units_combo.currentText() == m.UNITS_VOLTS

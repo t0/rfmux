@@ -753,6 +753,24 @@ def test_mock_attaches_to_the_running_mock_and_simulates_only_without_one(
     assert seen["created"]["module"] == 1
 
 
+def test_a_tod_without_a_bias_export_is_said_before_the_run(
+        tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+
+    async def ran(*a, **kw):
+        return rs.RecordResult(session=tmp_path, module=1, channels=[1, 2],
+                               duration_s=1.0, training_s=0.0)
+    monkeypatch.setattr(record, "_main", ran)
+    args = ["--serial", "0156", "--duration", "1", "--channels", "1-2",
+            "--session-dir", str(tmp_path), "--no-fastrx", "--show", "none"]
+    r = CliRunner().invoke(record.cli, args)
+    assert r.exit_code == 0, r.output
+    assert "no bias export for these modules" in r.output
+    r = CliRunner().invoke(record.cli, args + ["--no-tod"])
+    assert "no bias export" not in r.output
+
+
 def test_an_unreachable_board_is_one_line_naming_the_mock_options(
         tmp_path, monkeypatch):
     """A serial that resolves nowhere (0000 given for a running mock,

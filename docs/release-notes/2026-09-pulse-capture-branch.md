@@ -599,6 +599,9 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   stores it in and the same metadata and tuning (`--no-tod`;
   `--merge-tod` copies it into the pulse file as its `tod/` group, and
   refuses a TOD whose basis or channel units differ from the pulses';
+  review names the file's time-ordered data in its status line and opens
+  a TOD file of its own with its tuning; the command says before the run
+  when no bias export supplies the tuning;
   `--trigger-basis` sets the units of both files; the dialog's Data
   products group holds the two choices with their costs and a Units
   choice tied to the trigger basis; `write_tod` and `merge_tod` in

@@ -86,7 +86,7 @@ def test_the_metadata_is_the_capture_files(tmp_path, recording, dirfile):
         assert list(m["fast_channels"]) == [CHANNEL]
         assert m["time_origin_epoch"] == day_epoch(26, 245)
         assert m["time_origin_utc"].startswith("2026-09-02")
-        assert r.stored_units(CHANNEL) == "counts"     # no channel groups at the root
+        assert r.stored_units(CHANNEL) == "Hz"     # read from the tod/ groups
 
 
 def test_an_uncalibrated_channel_is_stored_in_volts(tmp_path, recording):
@@ -197,6 +197,31 @@ def test_merge_refuses_a_tod_in_other_units_than_the_pulses(tmp_path,
     pulse_v = _capture(tmp_path / "v", tuning=None, trigger_basis="df")
     with pytest.raises(ValueError, match="stores it in V"):
         merge_tod(pulse_v, _tod(tmp_path, fastrx=recording))
+
+
+def test_the_reader_finds_a_tod_files_tuning_units_and_streams(
+        tmp_path, recording, dirfile):
+    """Review reads a file of time-ordered data alone through the same
+    reader: the tuning and units come from the tod/ channel groups, the
+    streams are listed, and there are no pulses."""
+    path = _tod(tmp_path, fastrx=recording, dirfile=dirfile)
+    with PulseHDF5Reader(path) as r:
+        assert not r.has_pulses and r.tod_streams == ["slow", "fast"]
+        assert r.tuning(CHANNEL)["df_calibration"] == CAL
+        assert r.df_calibration(CHANNEL) == CAL
+        assert r.stored_units(CHANNEL) == "Hz"
+        assert r.pulse_count(CHANNEL) == 0 and r.event_count == 0
+        info = r.tod_info()
+        assert info["fast"]["channels"] == [CHANNEL]
+        with h5py.File(path) as f:
+            assert info["fast"]["samples"] == f["tod/fast/time"].shape[0]
+            assert info["slow"]["samples"] == f["tod/slow/time"].shape[0]
+    # A pulse file's own groups win over the tod/ copies once merged.
+    pulse = _capture(tmp_path, tuning=TUNING, trigger_basis="df")
+    merge_tod(pulse, path)
+    with PulseHDF5Reader(pulse) as r:
+        assert r.has_pulses and r.tod_streams == ["slow", "fast"]
+        assert r.pulse_count(CHANNEL) > 0
 
 
 def test_merge_to_another_path_leaves_the_source(tmp_path, recording):

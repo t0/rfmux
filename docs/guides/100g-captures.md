@@ -231,7 +231,10 @@ The merged file is a both-mode file: the Pulse Capture panel shows the
 recording's samples under every pulse, and names the module beside each
 channel for a run across modules. Any capture file opens that way with
 `periscope --review <pulse.h5>`, offline, or by double-clicking it in the
-session browser.
+session browser. The status line says what time-ordered data the file
+holds beside its pulses, per stream. A time-ordered data file of its own
+opens the same way, with its metadata and each channel's tuning (the
+Tuning item browses the sweeps) and no pulses.
 
 The pulse list carries a **Tuning** item, one per module, for a capture
 taken after Bias KIDs. Double-click it to browse the sweeps the channels

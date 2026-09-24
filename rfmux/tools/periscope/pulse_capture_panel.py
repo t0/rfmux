@@ -1790,8 +1790,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_templates()
         self._add_noise_rows()
 
-        self._enter_review_state(path, f"{sum(self._counts.values())} "
-                                       f"pulses")
+        self._enter_review_state(path, self._review_what(
+            f"{sum(self._counts.values())} pulses"))
         if self._events_grouping():
             self._rebuild_tree()
         if self._pulse_order:
@@ -1840,8 +1840,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_templates()
         for stream in ("slow", "fast"):
             self._add_noise_rows(stream)
-        self._enter_review_state(
-            path, f"{sum(self._counts.values())} pulses")
+        self._enter_review_state(path, self._review_what(
+            f"{sum(self._counts.values())} pulses"))
         if self._events_grouping():
             self._rebuild_tree()
         if self._pulse_order:
@@ -1857,6 +1857,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return None
         attrs = self.reader.get_pulse_metadata(channel, idx, stream)
         return summary_from_attrs(attrs) if attrs else None
+
+    def _review_what(self, pulses: str) -> str:
+        """The status line's summary: the pulses, and the time-ordered
+        data the file holds beside them, or alone."""
+        parts = [f"{s}: {info['samples']:,} samples on "
+                 f"{len(info['channels'])} channels"
+                 for s, info in self.reader.tod_info().items()]
+        if not parts:
+            return pulses
+        tod = "time-ordered data " + ", ".join(parts)
+        return f"{pulses}; {tod}" if self.reader.has_pulses else tod
 
     def _enter_review_state(self, path, what: str) -> None:
         self._review_mode = True

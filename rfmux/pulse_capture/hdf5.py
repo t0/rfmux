@@ -621,6 +621,15 @@ class DualPulseHDF5Writer(_PulseFileWriter):
 
 # ───────────────────────── Reader ───────────────────────────────────
 
+def _time_datasets(stream_grp) -> List[str]:
+    """The ``time`` datasets of a time-ordered data stream: one, or one
+    per ``module_<m>/`` for a run across modules."""
+    if "time" in stream_grp:
+        return ["time"]
+    return [f"{name}/time" for name in stream_grp
+            if name.startswith("module_") and "time" in stream_grp[name]]
+
+
 class PulseHDF5Reader:
     """Lazy reader for pulse capture HDF5 files.
 
@@ -650,6 +659,13 @@ class PulseHDF5Reader:
         #: True for dual-layout ("both" mode) files
         self.dual: bool = "slow" in self.f and "fast" in self.f
         self.streams: List[str] = ["slow", "fast"] if self.dual else []
+        #: The streams a ``tod/`` group holds: the run's time-ordered
+        #: data, in a merged pulse file or a file of its own.
+        self.tod_streams: List[str] = [s for s in ("slow", "fast")
+                                       if f"tod/{s}" in self.f]
+        #: False for a file of time-ordered data alone.
+        self.has_pulses: bool = any(self._ch_key(c, None) in self.f
+                                    for c in self.channels)
 
     @property
     def modules(self) -> List[int]:
@@ -723,9 +739,7 @@ class PulseHDF5Reader:
         ``"counts"`` for files written before samples were stored in
         physical units, which is what those actually hold.
         """
-        if self.f is None:
-            return "counts"
-        grp = self.f.get(self._ch_key(channel, stream))
+        grp = self._channel_group(channel, stream)
         if grp is None:
             return "counts"
         return str(grp.attrs.get("stored_units", "counts"))
@@ -743,11 +757,35 @@ class PulseHDF5Reader:
             return "iq"
         return str(meta.attrs.get("trigger_basis", "iq"))
 
-    def _tuning_group(self, channel, stream):
+    def _channel_group(self, channel, stream):
+        """*channel*'s group: its pulse group, or, in a file without one,
+        its group under the time-ordered data (which carries the same
+        tuning and units)."""
         if self.f is None:
             return None
         grp = self.f.get(self._ch_key(channel, stream))
+        for s in self.tod_streams if grp is None else ():
+            grp = self.f.get(f"tod/{s}/{channel_group(channel)}")
+            if grp is not None:
+                break
+        return grp
+
+    def _tuning_group(self, channel, stream):
+        grp = self._channel_group(channel, stream)
         return None if grp is None else grp.get("tuning")
+
+    def tod_info(self) -> Dict[str, Dict[str, Any]]:
+        """Per stream of the time-ordered data: its channels, and its
+        records (summed over modules for a run across them)."""
+        info = {}
+        for s in self.tod_streams:
+            sgrp = self.f[f"tod/{s}"]
+            channels = [c for c in self.channels
+                        if channel_group(c) in sgrp]
+            info[s] = {"channels": channels,
+                       "samples": sum(int(sgrp[g].shape[0]) for g in
+                                      _time_datasets(sgrp))}
+        return info
 
     def tuning(self, channel: int, stream: Optional[str] = None) -> dict:
         """The tuning row *channel* was captured with, as the writer was

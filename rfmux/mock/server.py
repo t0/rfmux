@@ -109,7 +109,11 @@ def yaml_hook(hwm):
 
         # Create a socket to be shared with the server process.
         s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-        s.bind(("localhost", 0))
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind(("localhost", MOCK_PORT))
+        except OSError:                     # another mock has it
+            s.bind(("localhost", 0))
         (hostname, port) = s.getsockname()
 
         sockets.append(s)
@@ -147,6 +151,24 @@ PARENT_POLL_S = 1.0
 
 
 # Start up a web server. This is a distinct process, so COW semantics.
+#: The localhost TCP port the first mock server on a host serves at, so
+#: a client finds it untold (``rfmux record --serial 0000``).  A second
+#: mock takes an ephemeral port and must be named by it.
+MOCK_PORT = 9878
+#: Seconds a probe of that port waits.
+PROBE_S = 0.2
+
+
+def running_mock():
+    """``127.0.0.1:MOCK_PORT`` when a mock server answers there, else
+    None."""
+    try:
+        with socket.create_connection(("127.0.0.1", MOCK_PORT), timeout=PROBE_S):
+            return f"127.0.0.1:{MOCK_PORT}"
+    except OSError:
+        return None
+
+
 class ServerProcess(mp_ctx.Process):
     daemon = True
 

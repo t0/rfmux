@@ -50,12 +50,29 @@ async def _main(serial: str, hostname: str | None, **kw):
             return await record_streams(crs, **kw)
         finally:
             await crs.stop_udp_streaming()
+    hostname = resolve_hostname(serial, hostname)
     host = f', hostname: "{hostname}"' if hostname else ""
     session = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{serial}"{host} }} ]')
     crs = session.query(rfmux.CRS).one()
     await crs.resolve()
     return await record_streams(crs, **kw)
+
+
+def resolve_hostname(serial: str, hostname: str | None) -> str | None:
+    """*hostname* as given; for the mock serial 0000, the mock server
+    running on this host at its port (``running_mock`` in
+    ``rfmux.mock.server``); else None, for ``<serial>.local``."""
+    if hostname:
+        return hostname
+    if serial == MOCK_SERIAL:
+        from rfmux.mock.server import running_mock
+        return running_mock()
+    return None
+
+
+#: The serial a mock board reports.
+MOCK_SERIAL = "0000"
 
 
 #: What the sample truncation choices mean, for the option and the dialog.
@@ -68,9 +85,10 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
                    "of the command's own; with no options at all, a dialog asks "
                    "for everything")
 @click.option("--hostname", default=None,
-              help="Board address when it is not <serial>.local; 127.0.0.1:<port> "
-                   "records from a mock server already running, Periscope's for "
-                   "one (it prints the address at startup), with --serial 0000")
+              help="Board address when it is not <serial>.local. A mock server "
+                   "already running on this host, Periscope's for one, is found "
+                   "by its serial (0000) without this; 127.0.0.1:<port> names "
+                   "one explicitly")
 @click.option("--module", "modules", type=int, multiple=True, default=(1,),
               show_default=True,
               help="Module to record; repeat it for one RF line over several")
@@ -238,10 +256,9 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     except aiohttp.ClientConnectionError as e:
         raise click.ClickException(
             f"cannot reach the board: {e}. A serial names a board at "
-            "rfmux<NNNN>.local; --hostname gives another address, "
-            "127.0.0.1:<port> for a mock server already running (Periscope "
-            "prints its mock's address at startup); --serial MOCK starts a "
-            "simulated board of its own")
+            "rfmux<NNNN>.local, or a mock server running on this host with "
+            "that serial (none was found); --hostname gives another address; "
+            "--serial MOCK starts a simulated board of its own")
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")

@@ -70,9 +70,10 @@ The **Run** tab:
 - **CRS serial** and, when the board is not `rfmux<NNNN>.local`, its
   **Hostname**. `MOCK` starts a simulated board of the run's own. To
   record from a mock already running, Periscope's for one, give its
-  serial `0000` and, as the hostname, the address Periscope printed at
-  startup (`[MockCRS] serial 0000 served at 127.0.0.1:<port>`); the
-  parser then listens on `lo`, listed for that.
+  serial, `0000`: the mock server on this host is filled in as the
+  hostname, and the parser listens on `lo`, listed for that. A second
+  mock, on a port of its own, is typed in (Periscope prints its mock's
+  address at startup).
 - **Modules**: `1`, or `2,3` for one RF line fed by several modules.
 - **Session**: an existing session folder, the newest under the default
   path filled in, or a new `session_YYYYMMDD_HHMMSS` folder under a
@@ -142,12 +143,14 @@ itself; `--bias <file>` names a bias export instead of the newest.
 
 Without a board, `--serial MOCK` starts a simulated one for the run. To
 record from the mock Periscope is running, with its tuned detectors, give
-its address instead; Periscope prints it at startup, and the parser
-listens on the loopback:
+its serial: the first mock server on a host serves at a fixed port
+(`MOCK_PORT` in `rfmux.mock.server`) and is found there; a second mock is
+named with `--hostname 127.0.0.1:<port>` (Periscope prints its mock's
+address at startup). The parser listens on the loopback:
 
 ```bash
-rfmux record --serial 0000 --hostname 127.0.0.1:<port> --module 1 \
-    --duration 20 --no-fastrx --parser-interface lo --session <folder>
+rfmux record --serial 0000 --module 1 --duration 20 --no-fastrx \
+    --parser-interface lo --session <folder>
 ```
 `--no-capture`, `--no-parser`, `--no-fastrx` and `--no-tod` leave a product
 out; `--merge-tod` copies the time-ordered data into the pulse file.

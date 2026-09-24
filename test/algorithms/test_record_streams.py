@@ -697,6 +697,17 @@ def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
         str(tmp_path / "pulse.h5")]
 
 
+def test_the_mock_serial_resolves_to_the_running_mock_server(monkeypatch):
+    from rfmux.mock import server
+    from rfmux.tools.record import resolve_hostname
+    monkeypatch.setattr(server, "running_mock", lambda: "127.0.0.1:9878")
+    assert resolve_hostname("0000", None) == "127.0.0.1:9878"
+    assert resolve_hostname("0000", "127.0.0.1:57013") == "127.0.0.1:57013"
+    assert resolve_hostname("0156", None) is None                # a board
+    monkeypatch.setattr(server, "running_mock", lambda: None)
+    assert resolve_hostname("0000", None) is None                # none runs
+
+
 def test_an_unreachable_board_is_one_line_naming_the_mock_options(
         tmp_path, monkeypatch):
     """A serial that resolves nowhere (0000 given for a running mock,

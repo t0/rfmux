@@ -12,7 +12,6 @@ from typing import List, Optional
 
 from PyQt6 import QtCore, QtWidgets
 
-from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
     fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..algorithms.measurement.tod import tod_bytes_per_s
@@ -20,6 +19,8 @@ from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import newest_session
+from ..mock.server import running_mock
+from .record import MOCK_SERIAL, TRUNC_HELP
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -108,11 +109,14 @@ class RecordDialog(QtWidgets.QDialog):
             "already running, Periscope's for one, give its serial (0000) "
             "and its address as the hostname.")
         self.hostname_edit = QtWidgets.QLineEdit()
-        self.hostname_edit.setPlaceholderText(
-            "only when not <serial>.local; 127.0.0.1:<port> for a running mock")
+        self.hostname_edit.setPlaceholderText("only when not <serial>.local")
         self.hostname_edit.setToolTip(
-            "Periscope prints its mock's address at startup: "
-            "[MockCRS] serial 0000 served at 127.0.0.1:<port>")
+            "For serial 0000, the mock server running on this host is "
+            "filled in when the field is empty (a second mock, on another "
+            "port, is typed here: Periscope prints its address at startup)")
+        #: The address filled in for the running mock, cleared again when
+        #: the serial no longer names one; a typed address is kept.
+        self._autofilled = None
         self.modules_edit = QtWidgets.QLineEdit()
         self.modules_edit.setPlaceholderText(
             "1, or 2,3 for one RF line over several modules")
@@ -395,7 +399,22 @@ class RecordDialog(QtWidgets.QDialog):
         iface = _combo_value(self.fastrx_iface_combo)
         return fx.start_command(iface) if fx and iface else ""
 
+    def _offer_running_mock(self) -> None:
+        """For the mock serial, the mock server running on this host
+        fills an empty hostname field; a typed address is kept, and the
+        autofill goes when the serial no longer names a mock."""
+        host = running_mock() \
+            if self.serial_edit.text().strip() == MOCK_SERIAL else None
+        edit = self.hostname_edit
+        if host and not edit.text().strip():
+            edit.setText(host)
+            self._autofilled = host
+        elif not host and edit.text().strip() == self._autofilled:
+            edit.clear()
+            self._autofilled = None
+
     def _refresh(self, *_) -> None:
+        self._offer_running_mock()
         chans, note, tuned = self._channels()
         self.bias_label.setText(note if self.rb_bias.isChecked() else "")
         problems = []

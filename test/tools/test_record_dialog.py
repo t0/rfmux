@@ -19,6 +19,7 @@ def _dialog(tmp_path, monkeypatch, running=()):
                                  "wlan0": None, "enp1s0f0": None})
     monkeypatch.setattr(rd, "_operstate",
                         {"wlan0": "up", "enp1s0f0": "down"}.get)
+    monkeypatch.setattr(rd, "running_mock", lambda: None)
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
                            start_command=lambda i: f"sudo fastrxd -i {i}",
                            record_stride=lambda c: (86 + 4 * c + 7) & ~7)
@@ -147,6 +148,25 @@ def test_a_tod_without_a_bias_export_warns_but_records(
     dlg.tod_check.setChecked(False)
     dlg.rb_new.setChecked(True)
     assert "warning" not in dlg.status_label.text()
+
+
+def test_the_running_mock_fills_the_hostname_for_its_serial(
+        qt_app, tmp_path, monkeypatch):
+    """Serial 0000 with a mock server up fills the hostname in; another
+    serial takes the autofill away again, while an address the user
+    typed stays."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    monkeypatch.setattr(rd, "running_mock", lambda: "127.0.0.1:9878")
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
+    dlg.hostname_edit.setText("rfmux0156.lan")
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "rfmux0156.lan"
+    dlg._save()
+    assert rd.RecordDialog(settings=settings).get_options()["hostname"] == \
+        "rfmux0156.lan"
 
 
 def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):

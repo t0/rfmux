@@ -103,9 +103,12 @@ basis. They validate as you type. A table below them lists the channels the
 Run tab resolves to, one row each: uncheck **Trigger** to record a channel
 without triggering on it, or give it its own **Threshold σ** and **End σ**
 (see [Per-channel settings](pulse-capture.md#per-channel-settings)).
-**Load Config…** takes all of it from a trigger config file exported from
-Periscope, or from an earlier capture, and sets **Modules** and **Channels**
-to the ones it names.
+**Export Config…** saves all of it, with the modules and channels, as a
+trigger config file (`trigger_config_<HHMMSS>.h5` unless you name it). One
+saved into a session folder is listed in its exports, so Periscope's Session
+Browser shows it. **Load Config…** takes all of it back from a trigger config
+file, exported here or from Periscope, or from an earlier capture, and sets
+**Modules** and **Channels** to the ones it names.
 
 ## 3. Recording from the command line
 

@@ -234,3 +234,27 @@ def test_a_loaded_trigger_config_sets_the_capture_and_its_channels(
             dlg.channels_edit.text()) == ("2", True, "1,3-5")
     assert dlg.capture_form.channels == [1, 3, 4, 5]
     assert dlg.get_options()["config"] == config
+
+
+@pytest.mark.parametrize("modules, channels", [
+    ("2", "1-4"), ("2,3", "2:1-2,3:5")])
+def test_an_exported_config_loads_back_into_a_fresh_dialog(
+        qt_app, tmp_path, monkeypatch, modules, channels):
+    from rfmux.core.session_folder import exports, open_session
+    session = open_session(None, tmp_path)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.modules_edit.setText(modules)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText(channels)
+    dlg.capture_form.threshold_spin.setValue(6.5)
+    dlg.capture_form.channel_table.item(0, 1).setCheckState(
+        QtCore.Qt.CheckState.Unchecked)
+    config = dlg.get_options()["config"]
+    path = dlg.export_trigger_config(session / "trigger_config.h5")
+    assert [e["filename"] for e in exports(session, "pulse")] == \
+        ["trigger_config.h5"]
+
+    fresh, _ = _dialog(tmp_path / "other", monkeypatch)
+    fresh.load_trigger_config(path)
+    assert fresh.get_options()["config"] == config
+    assert fresh.capture_form.channels == dlg.capture_form.channels

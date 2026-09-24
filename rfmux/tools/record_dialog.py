@@ -4,6 +4,7 @@ fastrxd check and its start command in view."""
 
 from __future__ import annotations
 
+import datetime
 import json
 import shutil
 from pathlib import Path
@@ -16,11 +17,13 @@ from ..algorithms.measurement.record_streams import (
     fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import (PulseCaptureConfig,
-                                             read_trigger_config)
+                                             read_trigger_config,
+                                             write_trigger_config)
 from ..pulse_capture.channel_keys import pair_keys
 from ..core.channels import (MAX_MODULE, format_channel_spec,
                              parse_channel_spec)
-from ..core.session_folder import newest_session
+from ..core.session_folder import (is_session, newest_session,
+                                   register_export)
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -190,7 +193,14 @@ class RecordDialog(QtWidgets.QDialog):
             "Take the trigger configuration of a trigger config file or "
             "of an earlier capture, with the modules and channels it names")
         self.load_config_btn.clicked.connect(self._on_load_config)
-        box.addWidget(self._row(self.load_config_btn, QtWidgets.QWidget()))
+        self.export_config_btn = QtWidgets.QPushButton("Export Config…")
+        self.export_config_btn.setToolTip(
+            "Save these settings, with the modules and channels of the Run "
+            "tab, as a trigger config file (HDF5) that this dialog and "
+            "Periscope load")
+        self.export_config_btn.clicked.connect(self._on_export_config)
+        box.addWidget(self._row(self.load_config_btn, self.export_config_btn,
+                                QtWidgets.QWidget()))
         self.capture_form = self._capture_form(self._saved_config())
         box.addWidget(self.capture_form)
         stage_note = QtWidgets.QLabel(
@@ -267,6 +277,40 @@ class RecordDialog(QtWidgets.QDialog):
                     f"Could not load a trigger config from {path}: {e}")
         dlg.fileSelected.connect(_chosen)
         dlg.open()
+
+    def _on_export_config(self) -> None:
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        folder = self._session_folder() or \
+            Path(self.session_dir_edit.text() or ".").expanduser()
+        dlg = QtWidgets.QFileDialog(
+            self, "Export trigger config",
+            str(folder / f"trigger_config_{stamp}.h5"),
+            "HDF5 files (*.h5 *.hdf5)")
+        dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
+        dlg.setDefaultSuffix("h5")
+
+        def _chosen(path):
+            try:
+                self.export_trigger_config(path)
+            except OSError as e:
+                self.status_label.setText(f"Could not write {path}: {e}")
+        dlg.fileSelected.connect(_chosen)
+        dlg.open()
+
+    def export_trigger_config(self, path) -> Path:
+        """Write the capture settings, with the modules and channels the
+        Run tab resolves to, as a trigger config file.  One written into a
+        session folder is listed in its exports."""
+        wanted, _ = self._channels()
+        keys = self._capture_keys(wanted)
+        path = write_trigger_config(
+            path, self.capture_form.get_config(), channels=keys or None,
+            module=(next(iter(wanted)) if wanted and len(wanted) == 1
+                    else None),
+            streamer_mode="slow")
+        if is_session(path.parent):
+            register_export(path.parent, path.name, "pulse", "trigger_config")
+        return path
 
     def load_trigger_config(self, path) -> None:
         """Take the trigger configuration of a trigger config file or a

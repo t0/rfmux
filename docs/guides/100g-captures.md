@@ -133,8 +133,17 @@ first, into a new session folder under `~/data`:
 
 ```bash
 rfmux record --serial <NNNN> --module 2 --module 3 --duration 20 \
-    --session-dir ~/data --channel-streamer --sample-trunc LOW
+    --session-dir ~/data --channel-streamer
 ```
+
+`--sample-trunc` defaults to AUTO: record turns each module's streamer on
+at HIGH, which cannot wrap, reads about 27 ms of its channel stream
+through fastrxd, and sets the finest truncation whose window holds the
+largest |I| or |Q| seen with 2x headroom. Name LOW, MID or HIGH yourself
+when pulses reach past that headroom.
+In the dialog (a bare `rfmux record`) the sample bits start empty:
+*Measure bit depth* runs the same measurement and suggests the coarsest
+window any module needs, which you can still change before Record.
 
 Channel ranges instead of the bias export: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules

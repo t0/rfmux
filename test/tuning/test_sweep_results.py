@@ -388,7 +388,7 @@ def test_collecting_a_resonator_that_was_not_swept_is_an_error():
 
 def test_a_reader_handed_the_wrong_dict_says_so():
     result = packed()
-    with pytest.raises(TypeError, match="not one of its parts"):
+    with pytest.raises(KeyError, match="results"):
         collect_amplitude_iterations_for(result["results"], "R0001")
 
 
@@ -468,19 +468,15 @@ def test_without_an_amplitude_it_finds_where_the_resonator_is_biased():
         assert matched_iteration(result, name) == 2
 
 
-def test_a_sweep_holding_an_older_catalog_snapshot_still_answers():
-    """Catalog schema_version 1 listed its resonators instead of keying them."""
+def test_matching_uses_the_recorded_catalogs_current_bias():
     catalog = a_catalog(amplitudes=(0.001, 0.002, 0.004))
     result = packed(
         schedule=AmplitudeSchedule.multiplicative(0.25, 4.0, 5), catalog=catalog
     )
     snapshot = result["call_params"]["catalog"]
-    snapshot["schema_version"] = 1
-    snapshot["resonators"] = [
-        {"name": name, **entry} for name, entry in snapshot["resonators"].items()
-    ]
+    snapshot["resonators"]["R0002"]["bias"]["amplitude"] = 0.004
 
-    assert matched_iteration(result, "R0002") == 2
+    assert matched_iteration(result, "R0002") == 3
 
 
 def test_a_relative_schedule_gives_each_resonator_its_own_answer():
@@ -494,14 +490,11 @@ def test_a_relative_schedule_gives_each_resonator_its_own_answer():
 
 
 def test_a_result_with_no_catalog_recorded_has_no_bias_amplitude_to_fall_back_on():
-    """Every multisweep records a catalog since schema_version 6 — a bare
-    center_frequencies call generates one from the list — so nothing writes this
-    any more. Files that predate it are still readable, and this is what one of
-    them costs: the fallback has nowhere to read an amplitude from."""
+    """An explicit amplitude needs only the measured sweeps."""
     result = packed(schedule=AmplitudeSchedule.ramp(1e-3, 1e-2, 2))
-    result["call_params"]["catalog"] = None
+    del result["call_params"]["catalog"]
 
-    with pytest.raises(ValueError, match="no catalog to take one from"):
+    with pytest.raises(KeyError, match="catalog"):
         find_iteration_matching_amplitude(result, "R0001")
 
     # but an explicit amplitude still works

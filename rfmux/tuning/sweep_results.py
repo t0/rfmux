@@ -58,9 +58,7 @@ def _call_params(
         "names": list(names) if names is not None else None,
         "span_hz": float(span_hz),
         "npoints_per_sweep": int(npoints_per_sweep),
-        # None where the sweep came from somewhere that does not record it --
-        # a capture file's tuning group. Absent, rather than a number nothing
-        # measured.
+        # Capture tuning rows may not record the sample count.
         "nsamps": int(nsamps) if nsamps is not None else None,
         "module": requested_module,
     }
@@ -149,13 +147,10 @@ def pack_multisweep(
 
 
 def resolve_direction(sweep_direction) -> str:
-    """One direction, validated — what a netanal measures per call.
+    """Validate and return one sweep direction.
 
-    A netanal is a comb: up to a thousand tones are on at once, so a call
-    sweeps the band once, in one direction, and both directions is two calls
-    whose results a caller keeps side by side. Hence one string in and one
-    string out, and a sequence refused with a message that says so rather than
-    quietly measuring its first element.
+    A network-analysis call measures one direction. To measure both, make
+    separate calls with ``"upward"`` and ``"downward"``.
     """
     if sweep_direction in DIRECTIONS:
         return sweep_direction
@@ -190,37 +185,16 @@ def pack_netanal(
     requested_module=None,
     dac_scale_dbm: float | None = None,
 ) -> dict:
-    """Assemble what ``take_netanal`` returns.
+    """Pack one network-analysis trace as ``{module_id: block}``.
 
-    The container :func:`pack_multisweep` builds, with the one wideband trace a
-    netanal is under ``results`` where a sweep has its amplitude iterations. No
-    iteration and no direction key above it: a netanal has no amplitude
-    schedule and measures one direction per call, so those levels could only
-    ever be constants a reader had to type. Which direction it was is beside
-    the arrays, in the trace's own ``sweep_direction``.
+    The block stores the trace directly under ``results``. The trace contains
+    frequency, IQ counts, IQ volts, amplitude, power, and sweep direction.
+    There are no amplitude-step or direction dictionaries around it.
 
-    Args:
-        trace: the ``frequencies``/``iq_counts``/``iq_volts`` arrays and the
-            ``sweep_amplitude``/``sweep_amplitude_dbm``/``sweep_direction``
-            scalars, already assembled.
-        module_id: the board-and-module identifier this comes back under, from
-            ``crs.module[m].index()``.
-        module: the module actually measured — resolved, never None.
-        sweep_direction: the direction measured, recorded in ``call_params``.
-            The copy the trace carries is what a reader of the arrays wants;
-            this one is the argument, alongside every other argument.
-        requested_module: the ``module`` argument as the caller passed it, which
-            is the list itself for a call that fanned out over several. Recorded
-            as-is, because *call_params* says what was asked for and not what
-            was worked out from it.
-        dac_scale_dbm: what DAC full scale was worth on this module, read from
-            the board as the netanal was taken. The trace's ``sweep_amplitude``
-            is a fraction of it.
-
-    Returns:
-        dict: ``{module_id: output}``, one module's output holding
-        ``schema_version``, ``measurement``, ``module``, ``dac_scale_dbm``,
-        ``call_params`` and ``results``.
+    ``module`` and ``module_id`` identify the measured module. The remaining
+    settings go into ``call_params``, including ``requested_module`` exactly
+    as supplied by the caller. ``dac_scale_dbm`` records the board's DAC
+    full-scale power, or None when unavailable.
     """
     call_params = {
         "amp": float(amp),
@@ -246,16 +220,9 @@ def pack_netanal(
 
 
 def merge_modules(containers) -> dict:
-    """One container from several, for a sweep that ran on several modules.
+    """Combine measurement containers, keeping their module identifiers.
 
-    Each per-module call already returns a container of its own, so merging is a
-    union — and a keyed one, which is what the multi-module return used to lack:
-    it was a bare list, with nothing but argument order to say which element was
-    which module.
-
-    Raises:
-        ValueError: on a repeated module identifier, which would otherwise
-            overwrite a module's data with another's.
+    Raise ValueError if an identifier appears more than once.
     """
     merged: dict = {}
     for container in containers:
@@ -271,11 +238,10 @@ def merge_modules(containers) -> dict:
 
 
 def _is_container(obj) -> bool:
-    """Is this the whole return, keyed by module, rather than one module's?
+    """Return whether the input is a nonempty mapping of module result blocks.
 
-    One module's output carries ``results`` and ``call_params`` at the top; a
-    container carries those. Recognized only in order to be refused — nothing
-    dispatches on it, so there is still exactly one accepted input everywhere.
+    Each block must contain ``results`` and ``call_params``. A single module
+    block has ``results`` at the top level and is not a container.
     """
     return (
         isinstance(obj, Mapping)
@@ -291,12 +257,9 @@ def _is_container(obj) -> bool:
 def _refuse_container(
     obj, *, what: str = "multisweep output", variable: str = "multisweep_output"
 ) -> None:
-    """Raise if handed the container where one module's output was wanted.
+    """Reject a container where one module's result is required.
 
-    *what* and *variable* name the measurement in the message, since every
-    driver returns this shape: a netanal handed to the resonance finder wants
-    to be told about ``netanal_output[module_id]``, not
-    ``multisweep_output[module_id]``.
+    Use ``what`` and ``variable`` to show the correct indexing in the error.
     """
     if _is_container(obj):
         keys = list(obj)
@@ -307,15 +270,10 @@ def _refuse_container(
 
 
 def _refuse_netanal(obj) -> None:
-    """Raise if handed a netanal's output where a sweep's was wanted.
+    """Reject a network-analysis block where multisweep results are required.
 
-    Everything down to ``results`` is identical between the two, and a netanal
-    has the arrays there where a sweep has its amplitude iterations. So a reader
-    that walked a netanal would find ``frequencies`` and ``iq_counts`` where it
-    expected iteration numbers and hand back arrays dressed as sweeps — no
-    exception anywhere, just results that are wrong. Hence a guard rather than
-    a docstring: this is the one confusion the shared container makes possible,
-    and it is silent.
+    Both have a ``results`` field, but only multisweeps organize it by
+    amplitude step, direction, and resonator name.
     """
     if isinstance(obj, Mapping) and obj.get("measurement") == "netanal":
         raise TypeError(
@@ -327,49 +285,19 @@ def _refuse_netanal(obj) -> None:
         )
 
 
-def _iterations(ms_module_output: Mapping) -> dict:
-    """The ``results`` block, with a useful error when handed the wrong dict."""
-    _refuse_container(ms_module_output)
-    _refuse_netanal(ms_module_output)
-    try:
-        return ms_module_output["results"]
-    except (TypeError, KeyError):
-        raise TypeError(
-            "Expected one module's multisweep output (with 'results' and "
-            "'call_params'), not one of its parts."
-        ) from None
-
-
-def _section_names(ms_module_output: Mapping) -> list[str]:
-    """Every section name that appears in the first sweep, in its order."""
-    for by_direction in _iterations(ms_module_output).values():
-        for sections in by_direction.values():
-            return list(sections)
-    return []
-
-
 def collect_amplitude_iterations_for(
     ms_module_output: Mapping, name: str
 ) -> dict:
-    """Every sweep of one resonator, across the amplitude iterations.
+    """Return all measured sweeps for one resonator.
 
-    Args:
-        ms_module_output: one module's output from ``multisweep``.
-        name: the resonator or section to pull out.
-
-    Returns:
-        dict: ``{iteration: {direction: sweep}}`` — the same shape as
-        ``ms_module_output["results"]``, one resonator deep, in the order
-        measured.
-        Measured order, not sorted by amplitude: an ``explicit`` schedule may run
-        in any order, and re-sorting silently would lose the order things
-        actually happened in.
-
-    Raises:
-        KeyError: if *name* was not swept.
+    The result is ``{iteration: {direction: sweep}}`` in acquisition order,
+    which may differ from amplitude order. Sweep dictionaries are shared
+    with the input. Raise KeyError if the name was not swept.
     """
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
     collected = {}
-    for iteration, by_direction in _iterations(ms_module_output).items():
+    for iteration, by_direction in ms_module_output["results"].items():
         entries = {
             direction: sections[name]
             for direction, sections in by_direction.items()
@@ -379,10 +307,15 @@ def collect_amplitude_iterations_for(
             collected[iteration] = entries
 
     if not collected:
-        available = _section_names(ms_module_output)
+        available = {
+            section_name
+            for by_direction in ms_module_output["results"].values()
+            for sections in by_direction.values()
+            for section_name in sections
+        }
         raise KeyError(
             f"{name!r} was not swept. The section names in play are "
-            f"{_named(available)}."
+            f"{_named(sorted(available))}."
         )
     return collected
 
@@ -405,7 +338,9 @@ def get_amplitudes_at_iteration(
     Raises:
         KeyError: if there is no such iteration.
     """
-    iterations = _iterations(ms_module_output)
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
+    iterations = ms_module_output["results"]
     if iteration not in iterations:
         raise KeyError(
             f"No iteration {iteration}. This result has "
@@ -422,36 +357,18 @@ def get_amplitudes_at_iteration(
 def find_iteration_matching_amplitude(
     ms_module_output: Mapping, name: str, amplitude: float | None = None
 ) -> tuple[dict, int]:
-    """The sweep of *name* taken closest to *amplitude*.
+    """Return the measured step nearest a resonator's target amplitude.
 
-    Args:
-        ms_module_output: one module's output from ``multisweep``.
-        name: whose amplitudes to match against. Required, because a relative
-            schedule gives every resonator its own: BOTA walking 1→2→4 µ and
-            KOZR walking 3→6→12 µ share an iteration number and nothing else,
-            so "the iteration at 4 µ" is only a question about one of them.
-        amplitude: the amplitude to match, in normalized DAC units. Defaults to
-            *name*'s own bias amplitude, read from the catalog snapshot in
-            ``call_params`` — which is the usual question, "which iteration was
-            taken where this resonator is actually biased?"
+    ``amplitude`` is in fractions of DAC full scale. If omitted, use the
+    resonator's bias amplitude from the catalog in ``call_params``.
+    Matching is per resonator because amplitudes can differ within a step.
 
-    Returns:
-        tuple: ``({direction: sweep}, iteration)`` — the matching sweeps, one
-        per direction measured, and the iteration they were taken at. The sweep
-        comes first because it is what a caller wants next; the number is there
-        for indexing anything else by the same step, and can be dropped with
-        ``sweeps, _ =``.
+    Return ``({direction: sweep}, iteration)``. There is no maximum matching
+    distance; inspect a returned sweep's ``sweep_amplitude`` if needed.
+    Equal-distance matches use the first step in acquisition order.
 
-    Nearest wins, and there is always a nearest — floats from a schedule rarely
-    compare equal, so matching on equality would find nothing. A caller who
-    needs the match to be close can read it off the sweeps it got back:
-    ``sweeps["upward"]["sweep_amplitude"]``.
-
-    Raises:
-        KeyError: if *name* was not swept.
-        ValueError: if nothing was measured, or if *amplitude* is None and the
-            result records no catalog to take a bias amplitude from — which
-            only a file older than schema_version 6 does.
+    Raise KeyError if the name was not swept or the recorded catalog lacks
+    its bias amplitude, or ValueError if no amplitude can be matched.
     """
     collected = collect_amplitude_iterations_for(ms_module_output, name)
     iteration = _iteration_matching_amplitude(
@@ -466,14 +383,10 @@ def _iteration_matching_amplitude(
     amplitude: float | None,
     collected: Mapping | None = None,
 ) -> int:
-    """Just the iteration number, for callers indexing by it.
-
-    The matching itself, kept apart from the entry the public reader hands
-    back: :func:`~rfmux.tuning.fits.fit_sweeps_at_bias` compares one against
-    every section's iteration and has no use for the sweep.
-    """
+    """Return only the nearest amplitude-step index, for fitting and other readers."""
     if amplitude is None:
-        amplitude = _bias_amplitude_of(ms_module_output, name)
+        resonators = ms_module_output["call_params"]["catalog"]["resonators"]
+        amplitude = float(resonators[name]["bias"]["amplitude"])
     if collected is None:
         collected = collect_amplitude_iterations_for(ms_module_output, name)
 
@@ -485,36 +398,3 @@ def _iteration_matching_amplitude(
         raise ValueError(f"No sweep sections for {name!r} to match against.")
 
     return min(per_iteration, key=lambda i: abs(per_iteration[i] - amplitude))
-
-
-def _bias_amplitude_of(ms_module_output: Mapping, name: str) -> float:
-    """*name*'s bias amplitude, from the catalog snapshot in call_params."""
-    # The one read that does not go through _iterations, so it needs its own
-    # guards: a container has no call_params of its own, and a netanal's have no
-    # catalog in them, so without these either would be reported as a sweep that
-    # had no catalog rather than as the wrong dict.
-    _refuse_container(ms_module_output)
-    _refuse_netanal(ms_module_output)
-
-    catalog = ms_module_output.get("call_params", {}).get("catalog")
-    if catalog is None:
-        raise ValueError(
-            "No amplitude given and no catalog to take one from. Every "
-            "multisweep records one since schema_version 6, so this is an "
-            "older result — a bare center_frequencies sweep from back when "
-            "those had no catalog at all. Pass amplitude= explicitly."
-        )
-
-    # Keyed by name since catalog schema_version 2, and a list of entries each
-    # carrying their own name before that. Absorbing the old shape is why the
-    # snapshot changing did not have to move RESULTS_SCHEMA_VERSION.
-    resonators = catalog["resonators"]
-    if not isinstance(resonators, dict):
-        resonators = {rd["name"]: rd for rd in resonators}
-
-    if name not in resonators:
-        raise KeyError(
-            f"{name!r} is not in the catalog this result was swept from. Its "
-            f"resonators are {_named(list(resonators))}."
-        )
-    return float(resonators[name]["bias"]["amplitude"])

@@ -470,7 +470,8 @@ class NetworkAnalysisTask(QtCore.QThread):
                 # Process results if available and task wasn't interrupted
                 if not self.isInterruptionRequested() and result:
                     self.signals.data_update.emit(
-                        self.module, self._trace_of(result))
+                        self.module,
+                        result[self.crs.module[self.module].index()]["results"])
                     self.signals.completed.emit(self.module, result)
             
         except asyncio.CancelledError:
@@ -495,10 +496,6 @@ class NetworkAnalysisTask(QtCore.QThread):
     def _create_progress_callback(self):
         return lambda module_idx, prog: self.signals.progress.emit(module_idx, prog) if self._running else None # Renamed module, progress
         
-    def _trace_of(self, container):
-        """The module's measured arrays, out of what take_netanal returned."""
-        return container[self.crs.module[self.module].index()]['results']
-
     def _create_data_callback(self):
         def data_cb(module_idx, partial):
             if not self._running:

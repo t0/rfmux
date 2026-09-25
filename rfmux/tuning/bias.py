@@ -27,7 +27,9 @@ from scipy.signal import find_peaks
 from ..core.resonators import BiasPoint, ResonatorCatalog
 from . import store
 from .store import plain
-from .sweep_results import _iterations, collect_amplitude_iterations_for
+from .sweep_results import (
+    _refuse_container, _refuse_netanal, collect_amplitude_iterations_for,
+)
 
 __all__ = [
     "BIFURCATION_METHODS",
@@ -61,10 +63,7 @@ BIFURCATION_METHODS = ("both", "derivative", "hysteresis")
 #: Methods requiring upward and downward sweeps.
 NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
 
-#: What :func:`bifurcated_by_hysteresis` compares the two sweep directions in,
-#: and the default. ``"magnitude"`` compares their ``|S21|`` against frequency;
-#: ``"iq"`` measures how far apart the two traces are on the IQ plane. Same
-#: test, two projections of it — see the detector for what each is blind to.
+# Hysteresis can compare magnitudes or distances in the complex IQ plane.
 HYSTERESIS_COMPARISONS = ("magnitude", "iq")
 
 #: How :func:`find_bias_frequency` places the tone inside the chosen sweep, and
@@ -129,15 +128,14 @@ class BifurcationCheck(NamedTuple):
 
 
 class AmplitudeChoice(NamedTuple):
-    """Which amplitude step one resonator should be biased at.
+    """The selected amplitude step and the bifurcation checks used to choose it.
 
-    What :func:`find_bias_amplitude` answers with. A tuple, so it unpacks::
+    This named tuple unpacks as::
 
         iteration, amplitude, bifurcated_at, checks = find_bias_amplitude(...)
 
-    ``checks`` holds only the steps that were examined — the search stops at
-    the first bifurcated one, so the steps above it were never looked at and
-    have no verdict to report.
+    Only examined steps appear in ``checks``. The search stops at the first
+    bifurcated step.
     """
 
     iteration: int
@@ -147,10 +145,10 @@ class AmplitudeChoice(NamedTuple):
 
     @property
     def is_bifurcated_at_bias(self) -> bool:
-        """Is the *chosen* amplitude step itself bifurcated?
+        """Return whether the selected amplitude itself showed bifurcation.
 
-        True only when there was nothing below it to go back to. See
-        :func:`find_bias_amplitude` for why that is still the answer.
+        This occurs when the lowest measured amplitude bifurcates, so there is
+        no lower step to select.
         """
         return self.bifurcated_at is not None and self.bifurcated_at == self.amplitude
 
@@ -195,15 +193,13 @@ class BiasFinding:
 
     @property
     def good(self) -> bool:
-        """Nothing about this bias point needs a second look."""
+        """Return whether bias finding recorded no concern for this point."""
         return self.flagged_because is None
 
     def to_dict(self) -> dict:
-        """Plain builtins only — files never contain these classes.
+        """Return finding fields as Python values.
 
-        No version of its own: a finding is only ever written as part of a
-        :class:`BiasReport`, and one stamp on the thing that becomes a file is
-        the version that matters.
+        The enclosing BiasReport provides the saved format version.
         """
         return {
             "name": self.name,
@@ -235,22 +231,12 @@ class BiasFinding:
 
 
 def _or_none(value):
-    """``float(value)``, but ``None`` survives as ``None``.
-
-    ``bifurcated_at`` is an amplitude or the statement that no amplitude step
-    bifurcated, and those are different answers — coercing the second to 0.0
-    would say the detector bifurcates at zero drive.
-    """
+    """Convert a value to float, preserving None for an absent measurement."""
     return None if value is None else float(value)
 
 
 def _checks_to_dict(checks: Mapping) -> dict:
-    """A ``{iteration: BifurcationCheck}`` map, as builtins.
-
-    The keys stay integers. They are amplitude-step numbers and get compared
-    and sorted as such; JSON would force them to strings, but this goes into a
-    pickle, which has no such quarrel with an int.
-    """
+    """Convert checks to dictionaries, preserving integer amplitude-step keys."""
     return {int(k): v.to_dict() for k, v in checks.items()}
 
 
@@ -260,22 +246,12 @@ def _checks_from_dict(d: Mapping) -> dict:
 
 @dataclass(slots=True)
 class BiasReport:
-    """What one call to :func:`find_bias_points` concluded, and the catalog.
+    """The selected catalog, per-resonator findings, and bias-finding settings.
 
-    ``catalog`` is the answer; the findings are how it was reached, one per
-    resonator in bias-frequency order. The settings come back here rather than being
-    copied onto a thousand bias points, as with
-    the report dictionary returned by :func:`~rfmux.tuning.fits.fit_sweeps`.
-    The output folder handles saving.
+    Findings follow the input catalog's bias-frequency order.
     """
 
-    # Stamped into to_dict output and required exactly by from_dict, so a file
-    # from another version of this module fails loudly rather than being half
-    # understood. Bump whenever the dict shape changes in a way from_dict
-    # cannot absorb. Version 2 made BifurcationCheck.metric a dict of named
-    # quantities where version 1 had a single float, which from_dict cannot
-    # tell apart from a legitimate value — so a version 1 report is refused
-    # rather than read as though one number meant the same thing.
+    # Saved report format. Version 2 requires named metrics in each check.
     SCHEMA_VERSION = 2
 
     catalog: ResonatorCatalog
@@ -303,12 +279,9 @@ class BiasReport:
     # -- persistence ----------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Plain builtins only — files never contain these classes.
+        """Return the report and catalog as dictionaries for saving.
 
-        The catalog goes in through its own ``to_dict``, keeping its version
-        stamp beside this one: the answer and the working behind it can be read
-        back independently, and a catalog that outgrows this file's shape says
-        so on its own terms.
+        The catalog retains its own format version.
         """
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -399,7 +372,7 @@ def find_bias_points(
         label: filename label for a first save; existing filenames are kept.
 
     Returns:
-        BiasReport: new catalog and findings in bias-frequency order. Each
+        BiasReport: new catalog and findings in input bias-frequency order. Each
         bias point carries derivatives in V/Hz at its grid-aligned frequency
         and the sweep used to compute them. IQ rotation is left unset.
 
@@ -409,9 +382,7 @@ def find_bias_points(
             missing, or the result has no catalog.
         KeyError: a catalog resonator has no sweep data.
     """
-    # Everything the caller could have got wrong about the *whole* call is
-    # checked here, once, before a single resonator is analysed. A thousand
-    # copies of the same complaint is worse than one.
+    # Check shared settings once before analyzing individual resonators.
     _check_method("amplitude_method", amplitude_method, BIFURCATION_METHODS)
     _check_method("frequency_method", frequency_method, FREQUENCY_METHODS)
     _check_method("compare", compare, HYSTERESIS_COMPARISONS)
@@ -436,10 +407,7 @@ def find_bias_points(
             f"{sorted(directions)}."
         )
 
-    # The array being biased: the one these sweeps were taken from, which is
-    # the only one they can speak for. Built fresh out of the snapshot, and it
-    # is what we hand back, so the record in the file still reads as the
-    # catalog that was swept.
+    # Rebuild the measured catalog so bias updates leave its snapshot unchanged.
     biased = _catalog_swept(ms_module_output)
 
     amplitude_settings = dict(
@@ -453,7 +421,7 @@ def find_bias_points(
     # One finding per resonator, in bias-frequency order, because that is what
     # iterating a catalog gives you.
     findings = [
-        _bias_one(
+        _find_bias_for_one(
             ms_module_output,
             resonator,
             direction=direction,
@@ -480,17 +448,13 @@ def find_bias_points(
             "max_distance_fraction": max_distance_fraction,
         },
     )
-    # Into the sweeps it was found from, so that saving updates that file
-    # rather than starting a second one. to_dict, not the report: a pickled
-    # class records its import path and skips its constructor coming back, so
-    # the file would outlive a rename only by restoring into a state BiasReport
-    # would have refused to build.
+    # Store a dictionary report in the measurement so it saves to the same file.
     ms_module_output["bias_report"] = report.to_dict()
     store.maybe_save(ms_module_output, "multisweep", save=save, label=label)
     return report
 
 
-def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias one" implies applying the bias to the resonator.
+def _find_bias_for_one(
     ms_module_output,
     resonator,
     *,
@@ -499,37 +463,35 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
     max_distance_hz: float | None,
     amplitude_settings: dict,
 ) -> BiasFinding:
-    """Bias one resonator of the copied catalog, in place, and say how.
+    """Choose and store one resonator's bias point in the copied catalog.
 
-    The whole of bias finding for one detector, in the order the decisions are
-    made. Nothing here is caught and turned into a per-resonator failure: a
-    resonator with no sweeps, or a sweep with no volts, means the catalog and
-    the data did not come from the same measurement, which is the caller's
-    mistake to hear about rather than this detector's problem.
+    Missing sweeps or voltage data raise an error for the caller to resolve.
     """
-    # 1. Every sweep this resonator was measured at, one entry per amplitude
-    #    step per direction. Raises if these sweeps do not cover it.
+    # 1. Collect this resonator's measured amplitude steps and directions.
     iterations = collect_amplitude_iterations_for(
         ms_module_output, resonator.name
     )
 
-    # 2. Which amplitude to sit at: the step below where it bifurcates.
+    # 2. Select the amplitude using the requested bifurcation test.
     choice = find_bias_amplitude(iterations, **amplitude_settings)
 
-    # 3. Of that step's sweeps, the one we take the bias point off. Both
-    #    directions were tested for bifurcation, but a frequency and a
-    #    calibration have to come from a single trace.
-    entry = _entry_for(iterations[choice.iteration], direction)
+    # 3. Select one trace for frequency selection and calibration.
+    entries = iterations[choice.iteration]
+    if direction is None:
+        entry = _directions(entries)[0]
+    else:
+        if direction not in entries:
+            raise ValueError(
+                f"The chosen amplitude step has no {direction!r} sweep; "
+                f"it has {sorted(entries)}."
+            )
+        entry = entries[direction]
 
-    # 4. Where in that trace the tone belongs. The sweep centre is only where
-    #    we looked; this is where the resonance turned out to be.
+    # 4. Select a frequency from that trace.
     measured_hz = find_bias_frequency(entry, method=frequency_method)
 
-    # 5. Unless that is implausibly far from where the sweep was centred, in
-    #    which case it is usually a neighbour in the span or noise in a trace
-    #    the resonance has left — not this resonator. Leaving the tone where it
-    #    already was beats moving it somewhere we do not believe, so that is
-    #    what happens, and step 7 flags it.
+    # 5. Fall back to the sweep centre if the selected frequency is too far away.
+    #    The report flags this choice below.
     centre_hz = float(entry["original_center_frequency"])
     frequency_hz = (
         centre_hz
@@ -537,10 +499,7 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
         else measured_hz
     )
 
-    # 6. Onto the tone grid, by building the BiasPoint first. The derivatives
-    #    are then read at the frequency the hardware will actually play rather
-    #    than at the peak we found up to half a grid step away — and, when we
-    #    fell back, at the frequency we actually settled on.
+    # 6. Quantize the bias frequency before evaluating calibration derivatives.
     bias = BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude)
     dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
 
@@ -557,8 +516,7 @@ def _bias_one( ## TODO this should be called "_find_bias_for_one", since "bias o
         bias_sweep=_stored_sweep(entry),
     )
 
-    # 7. Finally, is this an operating point we actually established, or a
-    #    default we fell back to? _concern is the one place that decides.
+    # 7. Record any concern about the amplitude or frequency choice.
     flagged_kind, flagged_because = _concern(
         choice,
         known_bifurcation=resonator.bias.bifurcated_at,
@@ -617,11 +575,10 @@ def _concern(
 
 
 def _too_far(measured_hz: float, centre_hz: float, max_distance_hz: float | None):
-    """Is this frequency further from the sweep centre than we will believe?
+    """Return whether the frequency exceeds the allowed offset from the centre.
 
-    The one predicate behind both halves of that decision: which frequency the
-    bias point gets, and what the flag says about it. ``max_distance_hz`` of
-    None believes anything, which is everything the trace could offer.
+    None disables the distance limit. Used for both frequency selection and
+    report flags.
     """
     return max_distance_hz is not None and abs(measured_hz - centre_hz) > max_distance_hz
 
@@ -673,21 +630,14 @@ def find_bias_amplitude(
 ) -> AmplitudeChoice:
     """Search one resonator's amplitude steps for the one to bias at.
 
-    The steps are examined quietest first — in ascending *amplitude*, not in
-    the order they were measured, which an ``explicit`` amplitude schedule is
-    free to shuffle. Each is put to the chosen bifurcation test, and the first
-    step that bifurcates ends the search: the step *below* it is the answer, as
-    much drive as the resonator takes while its sweep still describes a
-    resonance.
+    Test steps in ascending amplitude, regardless of acquisition order.
+    Stop at the first step that shows bifurcation and select the step below it.
 
-    Two ends of that, both of which still return an amplitude — the best the
-    measurement supports — and are flagged by :func:`find_bias_points`:
-
-    * If no step bifurcates, the loudest is chosen. The schedule did not reach
-      the limit, so the most drive measured is the most drive known to be safe.
-    * If the *quietest* step bifurcates there is nothing below it, so it is
-      chosen and :attr:`AmplitudeChoice.is_bifurcated_at_bias` says so. The schedule
-      started too high.
+    If no step shows bifurcation, select the highest measured amplitude. This
+    does not establish the bifurcation limit. If the lowest step bifurcates,
+    select it and set :attr:`AmplitudeChoice.is_bifurcated_at_bias` to True.
+    :func:`find_bias_points` reports concerns for these fallback choices,
+    unless a clean selected step is below a retained bifurcation amplitude.
 
     Args:
         iterations: one resonator's sweeps, ``{iteration: {direction: entry}}``
@@ -718,9 +668,7 @@ def find_bias_amplitude(
         raise ValueError("No sweeps here, so there is no amplitude to choose.")
 
     detector = _BIFURCATION[method]
-    # Each detector takes only its own settings, so a caller passing all of
-    # them does not hand the hysteresis test a spike threshold it has no use
-    # for. "both" runs the two tests, so it is the one that takes both sets.
+    # Pass only the settings used by the selected detector.
     spikes = {
         "spike_prominence_factor": spike_prominence_factor,
         "noise_gate_factor": noise_gate_factor,
@@ -734,12 +682,13 @@ def find_bias_amplitude(
 
     # What each step probed at, and the steps in ascending order of it. Every
     # direction of a step shares one amplitude, so this is one number per step.
-    amplitude = {i: _amplitude_of(entries) for i, entries in iterations.items()}
+    amplitude = {
+        i: float(_directions(entries)[0]["sweep_amplitude"])
+        for i, entries in iterations.items()
+    }
     quietest_first = sorted(iterations, key=amplitude.get)
 
-    # Walking pairs rather than indices: each step alongside the one below it,
-    # and None below the quietest. `previous` is the answer whenever the step
-    # in hand turns out to be bifurcated.
+    # Keep the preceding amplitude step to select if the current one bifurcates.
     checks: dict[int, BifurcationCheck] = {}
     for previous, iteration in zip([None, *quietest_first], quietest_first):
         checks[iteration] = detector(iterations[iteration], **settings)
@@ -756,9 +705,8 @@ def find_bias_amplitude(
             checks=checks,
         )
 
-    # Nothing bifurcated. The loudest step is as much drive as we know to be
-    # safe, so it is the answer; bifurcated_at stays None to say we never
-    # found the limit.
+    # No bifurcation detected: select the highest measured amplitude.
+    # The bifurcation limit remains unknown.
     loudest = quietest_first[-1]
     return AmplitudeChoice(
         iteration=loudest,
@@ -830,10 +778,7 @@ def bifurcated_by_derivative(
             "negative_spike_prominence": _tallest(down_prominence),
             "adjacency": adjacency,
         }
-        # One direction's numbers are reported, and it is the one that came
-        # closest: a direction that fired outranks one that did not, and among
-        # equals the harder spike wins. So the metric explains the verdict
-        # rather than describing whichever sweep happened to be quieter.
+        # Report a triggering direction if available. Break ties by spike prominence.
         rank = (
             adjacency,
             max(
@@ -996,9 +941,7 @@ def _separation_in_iq(
     f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
 ) -> np.ndarray:
     """Pointwise IQ separation in upward-sweep loop radii."""
-    # Onto one grid. Exact where the grids agree, which for two directions of
-    # one sweep is everywhere — the interpolation is for the case where a
-    # re-centring or a dropped point has moved one of them.
+    # Interpolate the downward trace onto the upward frequency grid.
     on_up = np.interp(f_up, f_down, z_down.real) + 1j * np.interp(
         f_up, f_down, z_down.imag
     )
@@ -1016,16 +959,10 @@ def _separation_in_iq(
 def _separation_in_magnitude(
     f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
 ) -> np.ndarray:
-    """Pointwise magnitude separation in upward-sweep dip depths.
+    """Return pointwise magnitude differences in upward-sweep dip depths.
 
-    The magnitudes are interpolated, not the complex traces — the curve being
-    compared is the one you would plot, so a phase difference between the
-    passes cannot leak into the answer through the interpolation either.
-
-    The scale is the upward sweep's own depth, peak to trough: the deepest the
-    resonance got minus the baseline it sat on. That is the magnitude plane's
-    equivalent of the loop radius, and it is what makes one threshold portable
-    between a deep resonator and a shallow one.
+    Interpolate magnitudes so phase differences do not affect the result.
+    Divide by the upward trace's maximum minus minimum magnitude.
     """
     up, down = np.abs(z_up), np.abs(z_down)
     on_up = np.interp(f_up, f_down, down)
@@ -1041,8 +978,7 @@ def _separation_in_magnitude(
 
 
 def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Every local maximum in *values*, and how far each stands out of its own
-    neighbourhood. ``prominence=0`` keeps them all; the bar is applied after."""
+    """Return local maxima and their prominences, without a prominence cutoff."""
     peaks, properties = find_peaks(values, prominence=0)
     return peaks, properties["prominences"]
 
@@ -1227,25 +1163,20 @@ def _stored_sweep(entry: Mapping) -> dict:
 
 
 def _directions_swept(ms_module_output) -> set[str]:
-    """Every sweep direction present in one module's result.
-
-    Read once, up front, so that a request the whole call cannot satisfy —
-    hysteresis on a single direction — is refused before anything is measured
-    against it.
-    """
+    """Collect available directions so requirements can be checked before analysis."""
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
     return {
         direction
-        for by_direction in _iterations(ms_module_output).values()
+        for by_direction in ms_module_output["results"].values()
         for direction in by_direction
     }
 
 
 def _catalog_swept(ms_module_output) -> ResonatorCatalog:
-    """The catalog this sweep recorded, rebuilt from its snapshot.
+    """Rebuild the catalog from the snapshot in the measurement.
 
-    A fresh object every call, which is what lets the caller be handed it: the
-    snapshot in the file is a dict and stays one, so the report's catalog is
-    never the record of what was swept.
+    The returned catalog can be updated without changing the saved snapshot.
     """
     snapshot = (ms_module_output.get("call_params") or {}).get("catalog")
     if snapshot is None:
@@ -1267,31 +1198,8 @@ def _directions(entries: Mapping[str, dict]) -> list[dict]:
     ]
 
 
-def _entry_for(entries: Mapping[str, dict], direction: str | None) -> dict:
-    """The one sweep of an amplitude step to measure the bias point on."""
-    if direction is None:
-        return _directions(entries)[0]
-    if direction not in entries:
-        raise ValueError(
-            f"The chosen amplitude step has no {direction!r} sweep; it has "
-            f"{sorted(entries)}."
-        )
-    return entries[direction]
-
-
-def _amplitude_of(entries: Mapping[str, dict]) -> float:
-    """What this step probed at. Every direction of a step shares one amplitude."""
-    return float(_directions(entries)[0]["sweep_amplitude"])
-
-
 def _sorted_trace(entry: Mapping, key: str) -> tuple[np.ndarray, np.ndarray]:
-    """One entry's frequencies and IQ, in ascending frequency order.
-
-    Downward sweeps arrive high-to-low, and everything here — splines,
-    differences, interpolation — wants them the other way round. Sorting on the
-    way in rather than asking each caller to remember is what keeps a downward
-    sweep from quietly producing sign-flipped derivatives.
-    """
+    """Return an entry's frequency and IQ arrays sorted by ascending frequency."""
     frequencies = entry.get("frequencies")
     iq = entry.get(key)
     if frequencies is None or iq is None:
@@ -1316,21 +1224,11 @@ def _sorted_trace(entry: Mapping, key: str) -> tuple[np.ndarray, np.ndarray]:
 def _point_to_point_speed(
     frequencies: np.ndarray, iq: np.ndarray
 ) -> np.ndarray | None:
-    """How far the IQ trace moves per hertz, point to point, in units of itself.
+    """Return IQ distance per hertz after scaling I and Q by their own ranges.
 
-    I and Q are each divided by their own range before differencing, so the
-    result depends on the *shape* of the loop and not on how deep the resonance
-    is or how big the readout gain was. That is what lets one spike factor mean
-    the same thing on every resonator of an array.
-
-    Deliberately finite differences rather than the spline
-    :func:`iq_derivatives` uses: a spline smooths a jump across several
-    samples, which is exactly the feature this is trying to catch — and it
-    smears the down-spike far enough from the up-spike that the adjacency test
-    stops finding the pair.
-
-    None when the trace is degenerate: a flat I or Q axis, or a repeated
-    frequency.
+    Use finite differences to preserve the adjacent spikes at a jump;
+    spline interpolation could spread them over more samples.
+    Return None for a flat I or Q axis or repeated frequency.
     """
     frequencies = np.asarray(frequencies, dtype=float)
     i_range = float(np.ptp(iq.real))
@@ -1350,26 +1248,20 @@ def _point_to_point_speed(
     )
 
 
-#: Name → detector, so a new way of spotting bifurcation is a function and an
-#: entry here. Each takes one amplitude step's ``{direction: entry}``, because
-#: whether a test needs one direction or both is the test's business.
+# Bifurcation detectors take one amplitude step as {direction: entry}.
 _BIFURCATION = {
     "derivative": bifurcated_by_derivative,
     "hysteresis": bifurcated_by_hysteresis,
     "both": bifurcated_by_either,
 }
 
-#: Name → what the hysteresis test measures the two directions apart in. Each
-#: takes both traces already sorted and returns one number, normalized by the
-#: scale of its own plane so that one threshold travels between resonators.
+# Hysteresis comparisons take sorted traces and return normalized separations.
 _HYSTERESIS_COMPARISON = {
     "magnitude": _separation_in_magnitude,
     "iq": _separation_in_iq,
 }
 
-#: Name → placer, each taking a whole sweep entry. The fitted ``fr`` joins here
-#: when it is wired up; it reads the entry's ``fits`` rather than its trace,
-#: which is why these do not take bare arrays.
+# Frequency-selection methods take one sweep entry.
 _FREQUENCY = {
     "iq_derivative": _frequency_by_iq_derivative,
     "minimum": _frequency_by_minimum,

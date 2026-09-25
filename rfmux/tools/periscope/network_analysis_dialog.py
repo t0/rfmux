@@ -9,17 +9,14 @@ from .utils import (
     SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback
 )
 from ...tuning import store
-from ...tuning.find_resonances import netanal_trace
 from .field_memory import remember_fields
 
 
 def load_network_analysis_container(parent: QtWidgets.QWidget, file_path: str | None = None):
     """Read a netanal file, or say why it is not one.
 
-    A netanal file holds what take_netanal returned: one output block per
-    module, keyed by module identifier. ``netanal_trace`` is what says so —
-    it refuses a sweep result and anything else that is not a netanal, with
-    a message naming what it got.
+    A netanal file holds one output block per module, keyed by module
+    identifier. Check the measurement type and trace before loading it.
     """
     if file_path is None:
         options = QtWidgets.QFileDialog.Options()
@@ -38,7 +35,10 @@ def load_network_analysis_container(parent: QtWidgets.QWidget, file_path: str | 
     try:
         container = store.load(file_path)
         for block in container.values():
-            netanal_trace(block)
+            if block.get("measurement") != "netanal":
+                raise TypeError("This result is not a netanal.")
+            if not block["results"]:
+                raise ValueError("This netanal has no trace in it — nothing was measured.")
     except Exception as exc:
         QtWidgets.QMessageBox.critical(
             parent,

@@ -25,7 +25,6 @@ from rfmux.tuning import (
     AmplitudeSchedule,
     find_resonances_in_netanal,
     fit_sweeps,
-    netanal_trace,
 )
 from rfmux.tuning.sweep_results import (
     RESULTS_SCHEMA_VERSION,
@@ -119,7 +118,7 @@ class TestPacking:
         """No iteration and no direction above it: a netanal measures once."""
         module_netanal = a_netanal()["crs0000_rmod1"]
 
-        assert netanal_trace(module_netanal) is module_netanal["results"]
+        assert module_netanal["results"]["frequencies"].shape == (8,)
 
     def test_a_direction_is_one_direction(self):
         """Both directions is two calls, so a sequence is refused rather than
@@ -132,7 +131,7 @@ class TestPacking:
             a_netanal(sweep_direction="sideways")
 
     def test_the_trace_carries_counts_volts_and_what_it_was_probed_at(self):
-        trace = netanal_trace(a_netanal()["crs0000_rmod1"])
+        trace = a_netanal()["crs0000_rmod1"]["results"]
 
         assert set(trace) == {
             "frequencies",
@@ -147,14 +146,13 @@ class TestPacking:
         assert trace["sweep_direction"] == "upward"
 
     def test_the_trace_carries_its_drive_power(self):
-        trace = netanal_trace(
-            a_netanal(dac_scale_dbm=-0.5)["crs0000_rmod1"])
+        trace = a_netanal(dac_scale_dbm=-0.5)["crs0000_rmod1"]["results"]
 
         assert trace["sweep_amplitude_dbm"] == pytest.approx(-60.5)
 
     def test_no_phase_array(self):
         """Phase is np.angle(iq_counts) at the point of use, as for a sweep."""
-        assert "phase_degrees" not in netanal_trace(a_netanal()["crs0000_rmod1"])
+        assert "phase_degrees" not in a_netanal()["crs0000_rmod1"]["results"]
 
 
 # ─── the guards ───────────────────────────────────────────────────────────────
@@ -203,14 +201,14 @@ class TestGuards:
         with pytest.raises(TypeError, match="not a sweep"):
             fit_sweeps(module_netanal)
 
-    def test_netanal_trace_refuses_a_sweep(self):
+    def test_resonance_search_refuses_a_sweep(self):
         with pytest.raises(TypeError, match="not a netanal"):
-            netanal_trace(a_sweep_output())
+            find_resonances_in_netanal(a_sweep_output())
 
-    def test_netanal_trace_refuses_the_container(self):
+    def test_resonance_search_refuses_the_container(self):
         """Named for what it holds, and for the index that gets past it."""
         with pytest.raises(TypeError, match=r"whole netanal.*netanal\['crs"):
-            netanal_trace(a_netanal())
+            find_resonances_in_netanal(a_netanal())
 
     def test_the_sweep_readers_still_read_a_sweep(self):
         """The guard is on 'measurement', so it must not catch what it is for."""
@@ -293,7 +291,7 @@ class TestTheDriver:
         """The property the NCO stitch used to break: chunks overlapped by one
         frequency, which was measured twice and then dropped."""
         crs, result = netanal
-        frequencies = netanal_trace(result[crs.module[MODULE].index()])["frequencies"]
+        frequencies = result[crs.module[MODULE].index()]["results"]["frequencies"]
 
         assert len(frequencies) == self.NPOINTS
         assert len(np.unique(frequencies)) == self.NPOINTS
@@ -301,13 +299,13 @@ class TestTheDriver:
     def test_the_trace_is_sorted_by_frequency(self, netanal):
         """Not the interleaved order the comb takes them in."""
         crs, result = netanal
-        frequencies = netanal_trace(result[crs.module[MODULE].index()])["frequencies"]
+        frequencies = result[crs.module[MODULE].index()]["results"]["frequencies"]
 
         assert np.all(np.diff(frequencies) > 0)
 
     def test_it_spans_the_band_it_was_asked_for(self, netanal):
         crs, result = netanal
-        frequencies = netanal_trace(result[crs.module[MODULE].index()])["frequencies"]
+        frequencies = result[crs.module[MODULE].index()]["results"]["frequencies"]
 
         # Each tone is dithered by tens of Hz off the grid, so the ends land
         # near the requested limits rather than on them.
@@ -316,7 +314,7 @@ class TestTheDriver:
 
     def test_volts_and_counts_describe_the_same_measurement(self, netanal):
         crs, result = netanal
-        trace = netanal_trace(result[crs.module[MODULE].index()])
+        trace = result[crs.module[MODULE].index()]["results"]
 
         assert trace["iq_volts"].shape == trace["iq_counts"].shape
         assert np.all(np.isfinite(trace["iq_volts"]))
@@ -327,7 +325,7 @@ class TestTheDriver:
     def test_the_trace_carries_its_drive_power(self, netanal):
         crs, result = netanal
         block = result[crs.module[MODULE].index()]
-        trace = netanal_trace(block)
+        trace = block["results"]
 
         assert trace["sweep_amplitude_dbm"] == pytest.approx(
             convert_dacunits_to_dbm(
@@ -373,14 +371,14 @@ class TestDownward(TestTheDriver):
     def test_the_trace_is_sorted_by_frequency(self, netanal):
         """Descending: the order it was measured in, as for a downward sweep."""
         crs, result = netanal
-        trace = netanal_trace(result[crs.module[MODULE].index()])
+        trace = result[crs.module[MODULE].index()]["results"]
 
         assert np.all(np.diff(trace["frequencies"]) < 0)
         assert trace["sweep_direction"] == "downward"
 
     def test_it_spans_the_band_it_was_asked_for(self, netanal):
         crs, result = netanal
-        frequencies = netanal_trace(result[crs.module[MODULE].index()])["frequencies"]
+        frequencies = result[crs.module[MODULE].index()]["results"]["frequencies"]
 
         # Highest first, and dithered by tens of Hz off the grid at each end.
         assert frequencies[0] == pytest.approx(self.FMAX, abs=1e3)
@@ -400,7 +398,7 @@ class TestDownward(TestTheDriver):
         # A copy: the finder writes its search into the netanal, and this
         # fixture is shared with the tests above.
         module_netanal = copy.deepcopy(result[crs.module[MODULE].index()])
-        frequencies = netanal_trace(module_netanal)["frequencies"]
+        frequencies = module_netanal["results"]["frequencies"]
 
         search = find_resonances_in_netanal(module_netanal, save=False)
 

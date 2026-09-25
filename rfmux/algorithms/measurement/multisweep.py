@@ -230,16 +230,11 @@ def _resolve_schedule(
     names: list[str],
     defaults: dict[str, float] | None,
 ) -> AmplitudeSchedule:
-    """The amplitude axis, as a schedule, whichever way it was spelled.
+    """Return a supplied schedule or wrap ``amp`` in a one-step schedule.
 
-    A bare ``amp`` is a one-step schedule — that is what one amplitude is — so
-    the loop below has one thing to walk either way. It is checked here, in
-    ``amp``'s own words, before becoming a schedule's ``base``: the two speak
-    the same vocabulary (see
-    :func:`~rfmux.tuning.multisweep_amplitudes.resolve_amplitudes`) but a
-    caller who wrote ``amp=`` should not be told about ``base=``. The resolved
-    mapping is then thrown away and *amp* kept verbatim, so ``call_params``
-    still records the request rather than what was worked out from it.
+    Validate ordinary amplitudes before wrapping them so error messages refer
+    to ``amp``. Keep the supplied value in the schedule for recording in
+    ``call_params``.
     """
     if isinstance(amp, AmplitudeSchedule):
         return amp
@@ -272,25 +267,14 @@ async def _measure_sweep(
     report_progress,
     data_callback,
 ) -> dict:
-    """One sweep: every target once, at *amplitudes*, in one direction.
+    """Measure all targets once at the supplied amplitudes and direction.
 
-    The only part of this module that touches a board, and the part the loop
-    above it calls once per amplitude step per direction. Returns the
-    ``{name: entry}`` that step and direction measured; the caller files it.
-
-    *report_progress* takes a fraction in [0, 1] of *this* sweep — turning that
-    into progress across the whole call is the caller's arithmetic, since only
-    it knows how many sweeps there are.
+    Return ``{name: entry}``. ``report_progress`` receives a fraction from
+    zero to one for this sweep; the caller converts it to overall progress.
     """
-    # The channels this sweep owns, and the only ones it will ever silence.
-    # Everything else on the module is somebody else's: a tone parked by hand,
-    # another algorithm's channel, a bias tone left live on purpose. Zeroing
-    # the whole module would be tidier for us and destructive for them.
-    #
-    # The flip side, and the caller's job now: multisweep no longer guarantees
-    # a quiet module. A foreign tone left live can intermodulate with the sweep
-    # or land inside a span, so a measurement that needs silence has to arrange
-    # it — crs.clear_channels(module=...) before the call.
+    # Only silence channels included in this sweep. Other active tones can
+    # interfere with the measurement; call crs.clear_channels(module=...) first
+    # when the measurement requires a quiet module.
     swept_channels = {t.channel for t in targets}
 
     # --- Generate sweep frequencies ---

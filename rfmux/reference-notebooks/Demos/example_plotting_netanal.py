@@ -22,7 +22,7 @@ import numpy as np
 from matplotlib.lines import Line2D
 
 from rfmux.core.transferfunctions import convert_dacunits_to_dbm, convert_roc_to_dbm
-from rfmux.tuning import magnitude_db, netanal_trace
+from rfmux.tuning import magnitude_db
 
 __all__ = [
     "BATCH_SIZE",
@@ -94,22 +94,6 @@ def _titled(fig, text):
     fig.suptitle("\n".join(lines), y=1 - band / 2, va="center")
 
 
-def _netanal_arrays(module_netanal):
-    """Read one module's frequency and complex readout-count arrays."""
-    try:
-        trace = netanal_trace(module_netanal)
-    except (TypeError, ValueError) as e:
-        raise TypeError(
-            f"Expected one module's netanal — what take_netanal returned, "
-            f"indexed by module. For several modules pass the whole dict it "
-            f"returned; this unpacks it. ({e})"
-        ) from None
-    return (
-        np.asarray(trace["frequencies"]),
-        np.asarray(trace["iq_counts"]),
-    )
-
-
 def plot_netanal(
     netanal, phase=True, reference=None, figsize=(14.0, 8.0), title=None,
     *, normalize: bool = True,
@@ -132,12 +116,13 @@ def plot_netanal(
             no DAC scale. An explicit reference takes precedence.
 
     Raises:
-        TypeError: if handed something that is not a netanal result.
         ValueError: if drive normalization lacks a finite DAC scale or a
             finite, positive drive amplitude.
     """
     for label, module_netanal in labelled_traces(netanal, "sweep").items():
-        frequencies, iq = _netanal_arrays(module_netanal)
+        trace = module_netanal["results"]
+        frequencies = np.asarray(trace["frequencies"])
+        iq = np.asarray(trace["iq_counts"])
         if reference is not None:
             magnitude = magnitude_db(iq, reference)
             ylabel = "|S21| [dB, reference-normalized]"
@@ -151,7 +136,7 @@ def plot_netanal(
                         "Drive-referenced dB requires a finite dac_scale_dbm; "
                         "use normalize=False to plot received power in dBm."
                     )
-                drive = netanal_trace(module_netanal).get("sweep_amplitude")
+                drive = trace.get("sweep_amplitude")
                 if drive is None or not np.isfinite(drive) or drive <= 0:
                     raise ValueError(
                         "Drive normalization requires a finite, positive amplitude."

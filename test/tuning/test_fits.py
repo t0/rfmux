@@ -555,7 +555,7 @@ def test_the_whole_container_is_refused_with_the_subscript_to_use():
 
 
 def test_something_that_is_not_a_sweep_result_says_so():
-    with pytest.raises(TypeError, match="Expected one module's multisweep output"):
+    with pytest.raises(KeyError, match="results"):
         fit_sweeps({"R0001": a_sweep()})
 
 

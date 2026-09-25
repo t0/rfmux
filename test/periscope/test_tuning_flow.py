@@ -36,7 +36,6 @@ from rfmux.tuning.bias import (  # noqa: E402
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
-    netanal_trace,
 )
 from rfmux.tools.periscope.app import Periscope  # noqa: E402
 from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
@@ -192,7 +191,7 @@ def test_network_analysis_task_finishes_without_error(board, qt_app):
     module, container = completed[0]
     assert module == catalog.module
     assert list(container) == [crs.module[catalog.module].index()]
-    assert netanal_trace(container[crs.module[catalog.module].index()])
+    assert container[crs.module[catalog.module].index()]["results"]
 
 
 def test_network_analysis_task_emits_the_measured_trace(board, qt_app):
@@ -791,7 +790,7 @@ def test_a_saved_netanal_is_the_measurement_a_notebook_reads(board, qt_app, outp
     assert "Phase" in plots["phase_plot"].getPlotItem().titleLabel.text
 
     reloaded = store.load(path)
-    trace = netanal_trace(reloaded[crs.module[catalog.module].index()])
+    trace = reloaded[crs.module[catalog.module].index()]["results"]
     measured = panel.netanal_traces[catalog.module]
     assert trace["sweep_amplitude"] == 0.004
     assert np.array_equal(trace["frequencies"], measured["frequencies"])
@@ -898,7 +897,7 @@ def test_a_search_updates_the_file_the_netanal_is_in(board, qt_app, output_direc
     search = _search_on(panel, catalog.module, qt_app)
 
     assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
-    trace = netanal_trace(store.load(path)[crs.module[catalog.module].index()])
+    trace = store.load(path)[crs.module[catalog.module].index()]["results"]
     assert ResonanceSearch.from_dict(
         trace["resonance_search"]).resonance_frequencies_hz == pytest.approx(
             list(search.resonance_frequencies_hz))
@@ -930,7 +929,7 @@ def _searched_panel(crs, catalog, qt_app):
 def _block_search(panel, module):
     """The search as the netanal block holds it -- what a file would carry."""
     return ResonanceSearch.from_dict(
-        netanal_trace(panel._module_block(module))["resonance_search"])
+        panel._module_block(module)["results"]["resonance_search"])
 
 
 def test_removing_a_resonance_rejects_it_rather_than_deleting_it(board, qt_app):
@@ -1026,7 +1025,7 @@ def test_an_edit_by_hand_updates_the_file_the_search_is_in(board, qt_app, output
 
     assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
     stored = ResonanceSearch.from_dict(
-        netanal_trace(store.load(path)[crs.module[catalog.module].index()])
+        store.load(path)[crs.module[catalog.module].index()]["results"]
         ["resonance_search"])
     assert dropped not in stored.resonance_frequencies_hz
     assert dropped in [c.frequency_hz for c in stored.rejected]
@@ -1293,7 +1292,7 @@ def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory
 
     module_id = crs.module[catalog.module].index()
     assert np.array_equal(
-        netanal_trace(dialog.loaded_container[module_id])["iq_counts"],
+        dialog.loaded_container[module_id]["results"]["iq_counts"],
         panel.netanal_traces[catalog.module]["iq_counts"])
     assert float(dialog.amp_edit.text()) == 0.004
     assert dialog.direction_combo.currentText() == "upward"

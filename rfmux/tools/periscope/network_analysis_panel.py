@@ -9,7 +9,7 @@ from .layouts import FlowLayout, grouped, labelled
 from .dialogs import NetworkAnalysisDialog
 from .find_resonances_settings_panel import FindResonancesSettingsPanel
 from .tasks import FindResonancesSignals, FindResonancesTask
-from ...tuning import netanal_trace, store
+from ...tuning import store
 from .network_analysis_export import NetworkAnalysisExportMixin
 
 
@@ -473,7 +473,7 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
         # The search lives in the netanal, so the edit goes there before the
         # file is written; store's save overwrites the file the container
         # already knows it came from.
-        netanal_trace(block)["resonance_search"] = search.to_dict()
+        block["results"]["resonance_search"] = search.to_dict()
         self.draw_search(module, search)
         message = f"Module {module}: {len(search.candidates)} resonances"
         if store.saved_path(self.netanal_container):

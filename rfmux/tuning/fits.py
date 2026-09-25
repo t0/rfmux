@@ -24,7 +24,8 @@ from . import store
 from .store import plain
 from .sweep_results import (
     _iteration_matching_amplitude,
-    _iterations,
+    _refuse_container,
+    _refuse_netanal,
 )
 
 __all__ = [
@@ -148,7 +149,8 @@ def fit_sweeps(
         The report uses builtin values and can be saved directly.
 
     Raises:
-        TypeError: input is not a supported module result.
+        TypeError: input is a whole container or a network-analysis result.
+        KeyError: the module result is missing required fields.
         ValueError: unknown model or a filter that selects no sweeps.
     """
     sections = _select(
@@ -291,7 +293,14 @@ def skewed_model_magnitude(entry: Mapping) -> np.ndarray:
     Raises:
         ValueError: if this entry has no converged skewed fit.
     """
-    params = _params_of(entry, "skewed")
+    fit = (entry.get("fits") or {}).get("skewed")
+    if fit is None:
+        raise ValueError("This sweep has no skewed fit. Run fit_sweeps first.")
+    params = fit["params"]
+    if params is None:
+        raise ValueError(
+            f"The skewed fit did not converge: {fit.get('failed_because')}"
+        )
     return s21_skewed(
         np.asarray(entry["frequencies"], dtype=float),
         params["fr"],
@@ -310,8 +319,15 @@ def nonlinear_model_iq(entry: Mapping) -> np.ndarray:
     Raises:
         ValueError: if this entry has no converged nonlinear fit.
     """
-    params = _params_of(entry, "nonlinear")
-    gain = entry["fits"]["nonlinear"].get("gain")
+    fit = (entry.get("fits") or {}).get("nonlinear")
+    if fit is None:
+        raise ValueError("This sweep has no nonlinear fit. Run fit_sweeps first.")
+    params = fit["params"]
+    if params is None:
+        raise ValueError(
+            f"The nonlinear fit did not converge: {fit.get('failed_because')}"
+        )
+    gain = fit.get("gain")
     model = nonlinear_iq(
         np.asarray(entry["frequencies"], dtype=float),
         *(params[p] for p in NONLINEAR_PARAMS),
@@ -321,7 +337,7 @@ def nonlinear_model_iq(entry: Mapping) -> np.ndarray:
 
 
 def gain_corrected_iq(entry: Mapping) -> np.ndarray:
-    """``iq_counts`` with the readout gain the nonlinear fit estimated divided out.
+    """Divide ``iq_counts`` by the readout gain estimated by the nonlinear fit.
 
     Raises:
         ValueError: if this entry has no nonlinear fit with a gain estimate.
@@ -414,28 +430,14 @@ def collect_fit_params(
     return rows
 
 
-def _params_of(entry: Mapping, model: str) -> dict:
-    """Return stored parameters, raising ValueError if absent."""
-    fit = (entry.get("fits") or {}).get(model)
-    if fit is None:
-        raise ValueError(
-            f"This sweep has no {model} fit. Run "
-            f"fit_sweeps(..., models=({model!r},)) on it first."
-        )
-    if fit.get("params") is None:
-        raise ValueError(
-            f"The {model} fit on this sweep did not converge: "
-            f"{fit.get('failed_because')}"
-        )
-    return fit["params"]
-
-
 # ─── Selecting what to fit ────────────────────────────────────────────────────
 
 
 def _walk(ms_module_output):
     """Yield sweep dictionaries with their coordinates and original entry."""
-    for iteration, by_direction in _iterations(ms_module_output).items():
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
+    for iteration, by_direction in ms_module_output["results"].items():
         for direction, sections in by_direction.items():
             for name, entry in sections.items():
                 yield {
@@ -748,8 +750,8 @@ def fit_skewed(
         normalize (bool): Divide the trace by its last point first, so ``A``
             comes out near 1.
         fr_limit_hz (float | None): Bound ``fr`` to within this much of the
-            trace's middle frequency. None uses 37.5% of the span, which keeps
-            the fit off a neighbour that leaked into the edge.
+            trace's middle frequency. None uses 37.5% of the span to limit fits
+            to the central part of the sweep.
 
     Returns:
         tuple[dict, dict]: ``(params, errors)``.

@@ -238,15 +238,19 @@ df calibration first; the Tuning item browses the sweeps. A time-ordered
 data file of its own opens the same way, with those and no pulses.
 
 The **Time-ordered data** item lists each channel the file's streams
-hold. Double-click one to draw it over the run: I and Q (df and
+hold. Double-click one to draw it over the run in the **Channel TOD View**
+tab, shown beside Pulse View while the file holds time-ordered data; its
+Channel box switches channels. It draws I and Q (df and
 dissipation for a channel stored in hertz) on one time axis, the fast and
 slow streams either or both, the fast drawn under the slow. The plot is
 never more than 500 bins, each drawn as its minimum and maximum, so a
 spike of one sample in the whole run still shows. The whole run comes
 from the file's overview; zooming in reads only the window's slice, until
 at most 1000 samples are in view and each is drawn. On a 5 s, 8-channel
-file any view read in under 45 ms with the file's pages evicted. The wheel
-zooms time; the vertical axis follows what is in view; Whole run returns.
+file any view read in under 45 ms with the file's pages evicted. Drag a
+box to zoom to it; the wheel zooms time, the vertical axis following what
+is in view; Whole run returns to the whole run with the vertical axis
+following again.
 
 The pulse list carries a **Tuning** item, one per module, for a capture
 taken after Bias KIDs. Double-click it to browse the sweeps the channels

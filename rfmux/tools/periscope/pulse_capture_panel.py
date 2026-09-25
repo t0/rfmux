@@ -579,6 +579,12 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.viewer_tabs.addTab(self._build_iq_view(), "IQ Plane")
         self.viewer_tabs.addTab(self._build_histograms_view(), "Histograms")
         self.viewer_tabs.addTab(self._build_template_view(), "Template")
+        # Shown while the file under review holds time-ordered data.
+        from .tod_viewer import TodViewer
+        self.tod_view = TodViewer(dark_mode=self.dark_mode)
+        self.viewer_tabs.addTab(self.tod_view, "Channel TOD View")
+        self.viewer_tabs.setTabVisible(
+            self.viewer_tabs.indexOf(self.tod_view), False)
         # The plane draws only while its tab is up, so catch up on entry.
         self.viewer_tabs.currentChanged.connect(
             lambda _i: self._render_iq_plane())
@@ -1676,6 +1682,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.reader is not None:
             self.reader.close()
             self.reader = None
+        self._set_tod_file()
 
         self._both_mode = (mode == "both")
         self._reset_results(channels)
@@ -1752,6 +1759,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if self.reader is not None:
             self.reader.close()
             self.reader = None
+        self.tod_view.close_file()
         super().closeEvent(event)
 
     # ── Review mode (existing HDF5 file, no live capture) ─────────
@@ -1759,6 +1767,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def load_from_hdf5(self, path) -> None:
         """Open an existing pulse-capture HDF5 for browsing."""
         self.reader = PulseHDF5Reader(path)
+        self._set_tod_file()
         meta = self.reader.metadata
         channels = list(self.reader.channels)
 
@@ -3091,12 +3100,24 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             item.addChild(child)
         self.pulse_tree.addTopLevelItem(item)
 
-    def _open_tod_viewer(self, key) -> "TodViewer":
-        from .tod_viewer import TodViewer
-        viewer = TodViewer(self.reader.path, key, self,
-                           dark_mode=self.dark_mode)
-        viewer.show()
-        return viewer
+    def _set_tod_file(self) -> None:
+        """The Channel TOD View tab on the file under review when it
+        holds time-ordered data; hidden, and its file closed, otherwise."""
+        index = self.viewer_tabs.indexOf(self.tod_view)
+        if self.reader is None or not self.reader.tod_streams:
+            self.tod_view.close_file()
+            self.viewer_tabs.setTabVisible(index, False)
+            return
+        held = {c for s in self.reader.tod_info().values()
+                for c in s["channels"]}
+        self.tod_view.set_file(self.reader.path,
+                               [c for c in self.reader.channels if c in held])
+        self.viewer_tabs.setTabVisible(index, True)
+
+    def _open_tod_viewer(self, key) -> None:
+        """*key* in the Channel TOD View tab, brought forward."""
+        self.tod_view.show_channel(key)
+        self.viewer_tabs.setCurrentWidget(self.tod_view)
 
     def _add_tuning_items(self) -> None:
         """One tree item per module whose channels carry their tuning:
@@ -3714,6 +3735,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 ax = item.getAxis(side)
                 ax.setPen(pen_color)
                 ax.setTextPen(pen_color)
+        self.tod_view.apply_theme(dark_mode)
         self._render_histograms()
         self._render_templates()
         self._render_iq_plane()

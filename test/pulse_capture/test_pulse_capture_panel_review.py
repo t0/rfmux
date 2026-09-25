@@ -289,49 +289,96 @@ def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
                       f"bias_channel = {CHANNEL}"]
 
 
-def test_a_tod_channel_opens_a_viewer_that_draws_a_few_hundred_points(
-        qt_app, tmp_path, panel):
-    """The review tree lists the file's time-ordered data per channel;
-    double-clicking one opens a viewer whose curves never hold more
-    than two points per bin, the fast stream drawn under the slow, and
-    whose narrow views are the samples themselves."""
-    from rfmux.algorithms.measurement.tod import VIEW_BINS, write_tod
+def _tod_file(tmp_path):
+    from rfmux.algorithms.measurement.tod import write_tod
     from test.pulse_capture.test_overlay import (
         CHANNEL, _dirfile, _recording_file)
-    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+    return write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
                      fastrx=_recording_file(tmp_path),
-                     dirfile=_dirfile(tmp_path), trigger_basis="iq")
-    panel.load_from_hdf5(path)
-    tree = panel.pulse_tree
-    tod = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
-               if "Time-ordered data" in tree.topLevelItem(i).text(0))
-    assert tod.text(0) == "≋ Time-ordered data (slow, fast)"
-    assert tod.childCount() == 1
-    from rfmux.tools.periscope.tod_viewer import TodViewer
-    panel._on_tree_double_click(tod.child(0), 0)
-    viewer = panel.findChildren(TodViewer)[-1]
-    try:
-        fast, slow = viewer.curves["fast"], viewer.curves["slow"]
-        items = viewer.plots[0].getPlotItem().listDataItems()
-        assert items.index(fast[0]) < items.index(slow[0])
-        assert fast[0].zValue() < slow[0].zValue()
-        for curve in fast + slow:
-            assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
-        assert "fast: 2,500 samples, 500 bins from the samples" in viewer.info.text()
+                     dirfile=_dirfile(tmp_path), trigger_basis="iq"), CHANNEL
 
-        # A millisecond is 50 fast samples (20 us apart): drawn as they are.
-        viewer.plots[0].setXRange(0.010, 0.011, padding=0)
-        viewer._refresh()
-        x, _ = fast[0].getData()
-        assert "each drawn" in viewer.info.text().split(";")[0]
-        assert 49 <= len(x) <= 51
-        viewer.stream_checks["slow"].setChecked(False)
-        assert all(c.getData()[0] is None or len(c.getData()[0]) == 0
-                   for c in slow)
-        assert "slow" not in viewer.info.text()
-    finally:
-        viewer.close()
-    assert viewer.f is None
+
+def _tod_item(panel):
+    tree = panel.pulse_tree
+    return next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                if "Time-ordered data" in tree.topLevelItem(i).text(0))
+
+
+def test_a_tod_channel_is_drawn_in_its_tab_from_a_few_hundred_points(
+        qt_app, tmp_path, panel):
+    """The review tree lists the file's time-ordered data per channel;
+    double-clicking one brings the Channel TOD View tab forward on it.
+    Its curves never hold more than two points per bin, the fast stream
+    drawn under the slow, and narrow views are the samples themselves."""
+    from rfmux.algorithms.measurement.tod import VIEW_BINS
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    assert tabs.isTabVisible(tabs.indexOf(view))
+    assert tabs.currentWidget() is not view
+    tod = _tod_item(panel)
+    assert tod.text(0) == "≋ Time-ordered data (slow, fast)"
+    panel._on_tree_double_click(tod.child(0), 0)
+    assert tabs.currentWidget() is view
+    assert view.channel_combo.currentData() == channel
+
+    fast, slow = view.curves["fast"], view.curves["slow"]
+    items = view.plots[0].getPlotItem().listDataItems()
+    assert items.index(fast[0]) < items.index(slow[0])
+    assert fast[0].zValue() < slow[0].zValue()
+    for curve in fast + slow:
+        assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
+    assert "fast: 2,500 samples, 500 bins from the samples" in view.info.text()
+
+    # A millisecond is 50 fast samples (20 us apart): drawn as they are.
+    view.plots[0].setXRange(0.010, 0.011, padding=0)
+    view._refresh()
+    x, _ = fast[0].getData()
+    assert "each drawn" in view.info.text().split(";")[0]
+    assert 49 <= len(x) <= 51
+    view.stream_checks["slow"].setChecked(False)
+    assert all(c.getData()[0] is None or len(c.getData()[0]) == 0
+               for c in slow)
+    assert "slow:" not in view.info.text()
+
+
+def test_the_tod_tab_zooms_to_a_dragged_box_and_back_to_the_whole_run(
+        qt_app, tmp_path, panel):
+    """Dragging draws a zoom box (the pulse view's viewbox), which sets
+    both axes; the wheel is time only; Whole run returns with the
+    vertical axis following the data again."""
+    import pyqtgraph as pg
+    from PyQt6 import QtCore as QC
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    view = panel.tod_view
+    vb = view.plots[0].getPlotItem().getViewBox()
+    assert vb.state["mouseMode"] == pg.ViewBox.RectMode
+    assert vb.state["mouseEnabled"] == [True, False]
+    vb.showAxRect(QC.QRectF(0.010, -50.0, 0.001, 100.0), padding=0)
+    view._refresh()
+    (x0, x1), (y0, y1) = vb.viewRange()
+    assert (x0, x1) == pytest.approx((0.010, 0.011))
+    assert (y0, y1) == pytest.approx((-50.0, 50.0))
+    assert "each drawn" in view.info.text()
+    view.reset_btn.click()
+    (x0, x1), _ = vb.viewRange()
+    assert x1 - x0 == pytest.approx(view.span * 1.02, rel=1e-3)
+    assert vb.state["autoRange"][1]
+
+
+def test_the_tod_tab_is_hidden_for_a_file_without_time_ordered_data(
+        qt_app, tmp_path, panel):
+    from test.pulse_capture.test_overlay import _capture
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    (tmp_path / "plain").mkdir()
+    panel.load_from_hdf5(_capture(tmp_path / "plain"))
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    assert not tabs.isTabVisible(tabs.indexOf(view))
+    assert view.f is None and view.channel_combo.count() == 0
 
 
 def test_idle_axes_name_the_default_view(qt_app, panel):

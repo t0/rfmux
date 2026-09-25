@@ -16,6 +16,7 @@ made under --session-dir.
 """
 
 import asyncio
+import contextlib
 import dataclasses
 import os
 import subprocess
@@ -28,6 +29,7 @@ import click
 from rfmux.algorithms.measurement.record_streams import (
     AUTO_TRUNC_MARGIN,
     MERGED_SUFFIX,
+    measure_sample_trunc,
     resolve_channels,
     pulse_summary_lines,
     record_streams,
@@ -39,29 +41,53 @@ from rfmux.pulse_capture.channel_keys import channel_arg
 _DEFAULTS = PulseCaptureConfig()
 
 
-async def _main(serial: str, hostname: str | None, **kw):
-    """Connect and record.  MOCK or 0000 is the mock server running on
-    this host; MOCK with none running starts a simulated board for the
-    run and stops its stream after."""
+@contextlib.asynccontextmanager
+async def _board(serial: str, hostname: str | None, module: int):
+    """The board, connected.  MOCK or 0000 is the mock server running
+    on this host; MOCK with none running starts a simulated board and
+    stops its stream after."""
     import rfmux
     hostname = resolve_hostname(serial, hostname)
     if serial.upper() == MOCK_NAME:
         if hostname is None:
             from rfmux.mock.helpers import create_mock_crs
-            crs = await create_mock_crs(
-                module=kw["module"] or min(kw["channels"]), verbose=False)
+            crs = await create_mock_crs(module=module, verbose=False)
             await asyncio.sleep(2.0)             # stream warm-up
             try:
-                return await record_streams(crs, **kw)
+                yield crs
             finally:
                 await crs.stop_udp_streaming()
+            return
         serial = MOCK_SERIAL
     host = f', hostname: "{hostname}"' if hostname else ""
     session = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{serial}"{host} }} ]')
     crs = session.query(rfmux.CRS).one()
     await crs.resolve()
-    return await record_streams(crs, **kw)
+    yield crs
+
+
+async def _main(serial: str, hostname: str | None, **kw):
+    """Connect and record."""
+    async with _board(serial, hostname,
+                      kw["module"] or min(kw["channels"])) as crs:
+        return await record_streams(crs, **kw)
+
+
+def measure_bit_depth(serial: str, hostname: str | None,
+                      wanted: dict, fastrx_interface: str | None):
+    """``{module: (peak counts, truncation)}`` for the channels of
+    *wanted* (``{module: channels}``), measured on the channel stream
+    with the streamer turned on at HIGH; the dialog's Measure button."""
+    from rfmux import fastrx as fx
+    socket = fx.resolve_socket(fastrx_interface, None)
+
+    async def run():
+        async with _board(serial, hostname, min(wanted)) as crs:
+            return await measure_sample_trunc(
+                crs, list(wanted), max(max(c) for c in wanted.values()),
+                fx.MAX_SAMPLES, fx, socket)
+    return asyncio.run(run())
 
 
 def resolve_hostname(serial: str, hostname: str | None) -> str | None:

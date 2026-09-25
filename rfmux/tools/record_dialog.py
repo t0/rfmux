@@ -21,7 +21,7 @@ from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import newest_session
 from ..mock.server import running_mock
-from .record import TRUNC_HELP, is_mock
+from .record import TRUNC_HELP, is_mock, measure_bit_depth
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -182,9 +182,20 @@ class RecordDialog(QtWidgets.QDialog):
             "(fastrxd drops a partial pipeline); otherwise the board is only "
             "read, and a module whose channel stream is off is refused")
         self.trunc_combo = QtWidgets.QComboBox()
-        for choice in ("AUTO", "LOW", "MID", "HIGH"):
+        for choice in ("LOW", "MID", "HIGH"):
             self.trunc_combo.addItem(choice, choice)
+        # Empty until measured or chosen, every time the dialog opens.
+        self.trunc_combo.setPlaceholderText("measure or choose")
+        self.trunc_combo.setCurrentIndex(-1)
         self.trunc_combo.setToolTip(TRUNC_HELP)
+        self.measure_btn = QtWidgets.QPushButton("Measure bit depth")
+        self.measure_btn.setToolTip(
+            "Turn the channel streamer on at HIGH for these modules, read "
+            "about 27 ms of each through fastrxd and suggest the finest "
+            "sample bits that hold the largest |I| or |Q| with 2x headroom "
+            "(the coarsest any module needs); you can still change it")
+        self.trunc_note = QtWidgets.QLabel()
+        self.trunc_note.setWordWrap(True)
         self.merge_check = QtWidgets.QCheckBox(
             "Merge the recording into the pulse file after the run")
         self.show_combo = QtWidgets.QComboBox()
@@ -200,7 +211,8 @@ class RecordDialog(QtWidgets.QDialog):
         add("", self._row(self.copy_btn, self.recheck_btn))
         add("", self.disk_label)
         add("", self._row(self.streamer_check, QtWidgets.QLabel("sample bits"),
-                          self.trunc_combo))
+                          self.trunc_combo, self.measure_btn))
+        add("", self.trunc_note)
         add("", self.merge_check)
 
         # ── Data products ────────────────────────────────────────
@@ -276,8 +288,10 @@ class RecordDialog(QtWidgets.QDialog):
             w.textChanged.connect(self._refresh)
         for w in (self.rb_existing, self.rb_new, self.rb_bias, self.rb_ranges,
                   self.fastrx_check, self.parser_check, self.capture_check,
-                  self.tod_check, self.merge_tod_check):
+                  self.tod_check, self.merge_tod_check, self.streamer_check):
             w.toggled.connect(self._refresh)
+        self.trunc_combo.currentIndexChanged.connect(self._refresh)
+        self.measure_btn.clicked.connect(self._measure)
         self.modules_edit.textChanged.connect(self._refresh)
         self.duration_spin.valueChanged.connect(self._refresh)
         self.fastrx_iface_combo.currentTextChanged.connect(self._refresh)
@@ -452,8 +466,15 @@ class RecordDialog(QtWidgets.QDialog):
         iface = _combo_value(self.fastrx_iface_combo)
         for w in (self.fastrx_iface_combo, self.fastrx_status, self.copy_btn,
                   self.recheck_btn, self.disk_label, self.merge_check,
-                  self.streamer_check, self.trunc_combo):
+                  self.streamer_check, self.trunc_combo, self.trunc_note):
             w.setEnabled(self.fastrx_check.isChecked())
+        streamer = self.fastrx_check.isChecked() and \
+            self.streamer_check.isChecked()
+        self.measure_btn.setEnabled(
+            streamer and bool(chans) and bool(self.serial_edit.text().strip())
+            and fx is not None and iface in running)
+        if streamer and self.trunc_combo.currentIndex() < 0:
+            problems.append("measure the bit depth or choose the sample bits")
         self.parser_iface_combo.setEnabled(self.parser_check.isChecked())
         if self.parser_check.isChecked() and \
                 not _combo_value(self.parser_iface_combo):
@@ -497,6 +518,32 @@ class RecordDialog(QtWidgets.QDialog):
             problems + [f"warning: {w}" for w in warnings]))
         self.record_btn.setEnabled(not problems)
 
+    def _measure(self) -> None:
+        """Measure each module's channel stream and suggest the sample
+        bits: the coarsest any module needs, one window for the run."""
+        chans, _, _ = self._channels()
+        o = self.get_options()
+        self.trunc_note.setText("measuring…")
+        # ponytail: blocks the dialog for the few seconds the board and
+        # fastrxd take; a worker thread if that ever runs long.
+        QtWidgets.QApplication.setOverrideCursor(
+            QtCore.Qt.CursorShape.WaitCursor)
+        try:
+            measured = measure_bit_depth(o["serial"], o["hostname"], chans,
+                                         o["fastrx_interface"])
+        except Exception as e:     # the board, the network, fastrxd
+            self.trunc_note.setText(f"measuring failed: {e}")
+            return
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+        order = ("LOW", "MID", "HIGH")
+        trunc = max((t for _, t in measured.values()), key=order.index)
+        self.trunc_note.setText(
+            "; ".join(f"module {m}: peak {peak:.0f} counts"
+                      for m, (peak, _) in measured.items())
+            + f": suggested {trunc}")
+        _select(self.trunc_combo, trunc)
+
     # ── Options ──────────────────────────────────────────────────
 
     def get_options(self) -> dict:
@@ -523,7 +570,9 @@ class RecordDialog(QtWidgets.QDialog):
             "tod": self.tod_check.isChecked(),
             "merge_tod": self.merge_tod_check.isChecked(),
             "channel_streamer": self.streamer_check.isChecked(),
-            "sample_trunc": self.trunc_combo.currentData(),
+            # Unchosen only when the streamer is left alone, where it
+            # is not used.
+            "sample_trunc": self.trunc_combo.currentData() or "AUTO",
             "show": _SHOW[self.show_combo.currentIndex()],
             "bias": None,
             "config": self.capture_form.get_config(),
@@ -582,7 +631,6 @@ class RecordDialog(QtWidgets.QDialog):
         self.merge_tod_check.setChecked(v("merge_tod", "false") in (True, "true"))
         self.streamer_check.setChecked(
             v("channel_streamer", "false") in (True, "true"))
-        _select(self.trunc_combo, str(v("sample_trunc", "AUTO")))
         show = str(v("show", "periscope"))
         self.show_combo.setCurrentIndex(
             _SHOW.index(show) if show in _SHOW else 0)
@@ -610,7 +658,6 @@ class RecordDialog(QtWidgets.QDialog):
                 ("tod", "true" if o["tod"] else "false"),
                 ("merge_tod", "true" if o["merge_tod"] else "false"),
                 ("channel_streamer", "true" if o["channel_streamer"] else "false"),
-                ("sample_trunc", o["sample_trunc"]),
                 ("show", o["show"]),
                 ("capture_config",
                  json.dumps(dataclasses.asdict(o["config"])))):

@@ -636,6 +636,13 @@ def test_auto_truncation_reads_each_module_at_high_then_sets_it(
     # All on at HIGH first; then each module that fits finer is reset.
     assert board.streamer == [(1, "HIGH"), (2, "HIGH"), (3, "HIGH"),
                               (1, "LOW"), (2, "MID")]
+    # The measurement alone reports each module and leaves it at HIGH.
+    board.streamer.clear()
+    asked.clear()
+    assert asyncio.run(rs.measure_sample_trunc(
+        board, [1, 2], 9, 128, fx, fx.socket)) == {
+        1: (20 * 256.0, "LOW"), 2: (400 * 256.0, "MID")}
+    assert board.streamer == [(1, "HIGH"), (2, "HIGH")]
 
 
 def test_auto_truncation_without_packets_says_so(tmp_path, monkeypatch):

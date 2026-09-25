@@ -104,7 +104,7 @@ Run tab resolves to, one row each: uncheck **Trigger** to record a channel
 without triggering on it, or give it its own **Threshold σ** and **End σ**
 (see [Per-channel settings](pulse-capture.md#per-channel-settings)).
 **Export Config…** saves all of it, with the modules and channels, as a
-trigger config file (`trigger_config_<HHMMSS>.h5` unless you name it). One
+trigger config file (`pulse_trigger_config_<HHMMSS>.h5` unless you name it). One
 saved into a session folder is listed in its exports, and Periscope's Session
 Browser lists it with the capture files. Export before the channels resolve
 and the file holds none; the status line says so. **Load Config…** takes all
@@ -150,7 +150,7 @@ and the modules and channels:
 ```bash
 rfmux record --serial <NNNN> --duration 20 \
     --session ~/data/session_20260909_153654 \
-    --config ~/data/session_20260909_153654/trigger_config_142501.h5
+    --config ~/data/session_20260909_153654/pulse_trigger_config_142501.h5
 ```
 
 `--config` takes a file from **Export Config** in Periscope or in the

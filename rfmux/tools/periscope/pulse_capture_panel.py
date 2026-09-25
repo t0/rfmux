@@ -59,6 +59,7 @@ from ...pulse_capture.channel_keys import (channel_arg, channel_selection,
 from ...pulse_capture.events import (
     event_counts, events_from_triggers, pair_trigger_time)
 from ...pulse_capture.hdf5 import PulseHDF5Reader
+from ...core.session_folder import export_filename
 from ...core.transferfunctions import (
     apply_iq_conversion,
     PFB_SAMPLING_FREQ,
@@ -1381,8 +1382,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_export_config(self) -> None:
         """Write the trigger configuration to a trigger config file."""
         self._sync_config_from_toolbar()
-        stamp = datetime.datetime.now().strftime("%H%M%S")
-        path = self._export_dir() / f"trigger_config_{stamp}.h5"
+        path = self._export_dir() / export_filename(
+            "pulse", "trigger_config", ".h5")
         try:
             write_trigger_config(
                 path, self.capture_config,

@@ -214,7 +214,7 @@ they take effect only while the channel is captured.
 ### Save and load a trigger config
 
 **Export Config** saves the trigger configuration, with the channels, module
-and mode, as `trigger_config_<HHMMSS>.h5` in the session folder. Without a
+and mode, as `pulse_trigger_config_<HHMMSS>.h5` in the session folder. Without a
 session it goes to the folder of the output file chosen with **…**, or to
 your home folder. The file is HDF5 with only a `metadata` group, holding
 `trigger_config` and the `channels`, `module` and `streamer_mode`, and it
@@ -511,7 +511,7 @@ capture that recorded its config, supplies the config and the channels:
 ```python
 from rfmux.pulse_capture import read_trigger_config
 
-config, setup = read_trigger_config("trigger_config_142501.h5")
+config, setup = read_trigger_config("pulse_trigger_config_142501.h5")
 result = await crs.trigger_capture(
     channel=setup["channels"], module=setup["module"],
     streamer_mode=setup["streamer_mode"], time_run=15.0,

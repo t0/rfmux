@@ -714,7 +714,7 @@ def test_an_exported_config_loads_into_a_fresh_panel(qt_app, tmp_path):
     panel.module_spin.setValue(2)
     panel.mode_combo.setCurrentText("fast")
     panel._on_export_config()
-    (path,) = tmp_path.glob("trigger_config_*.h5")
+    (path,) = tmp_path.glob("pulse_trigger_config_*.h5")
     panel.close()
 
     fresh = PulseCapturePanel(dark_mode=False)

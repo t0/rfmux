@@ -4,7 +4,6 @@ fastrxd check and its start command in view."""
 
 from __future__ import annotations
 
-import datetime
 import json
 import shutil
 from pathlib import Path
@@ -22,8 +21,8 @@ from ..pulse_capture.capture_session import (PulseCaptureConfig,
 from ..pulse_capture.channel_keys import (ChannelKey, capture_keys,
                                           channel_selection)
 from ..core.channels import MAX_MODULE, parse_channel_spec
-from ..core.session_folder import (is_session, newest_session,
-                                   register_export)
+from ..core.session_folder import (export_filename, is_session,
+                                   newest_session, register_export)
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -287,12 +286,11 @@ class RecordDialog(QtWidgets.QDialog):
             self._failed(f"Could not load a trigger config from {path}: {e}")
 
     def _on_export_config(self) -> None:
-        stamp = datetime.datetime.now().strftime("%H%M%S")
         folder = self._session_folder() or \
             Path(self.session_dir_edit.text() or ".").expanduser()
         dlg = QtWidgets.QFileDialog(
             self, "Export trigger config",
-            str(folder / f"trigger_config_{stamp}.h5"),
+            str(folder / export_filename("pulse", "trigger_config", ".h5")),
             "HDF5 files (*.h5 *.hdf5)")
         dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
         dlg.setDefaultSuffix("h5")

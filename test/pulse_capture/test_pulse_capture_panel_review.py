@@ -368,6 +368,44 @@ def test_the_tod_tab_zooms_to_a_dragged_box_and_back_to_the_whole_run(
     assert vb.state["autoRange"][1]
 
 
+def test_entering_the_tod_tab_draws_the_selected_pulses_channel(
+        qt_app, tmp_path, panel):
+    """No trip to the Channel box: the tab opens on the channel of the
+    pulse selected in Pulse View, and on the first channel with the
+    time-ordered data when the selection is on a channel it lacks."""
+    from rfmux.algorithms.measurement.tod import merge_tod, write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _capture, _recording_file)
+    pulse = _capture(tmp_path, channels=(CHANNEL, 5))
+    tod = write_tod(tmp_path / "tod.h5", [CHANNEL, 7], 1,
+                    fastrx=_recording_file(tmp_path), trigger_basis="iq")
+    import h5py
+    with h5py.File(pulse, "a") as f:            # the capture stored volts
+        for c in (CHANNEL, 5):
+            f[f"channel_{c}"].attrs["stored_units"] = "V"
+        f["metadata"].attrs["trigger_basis"] = "iq"
+    merge_tod(pulse, tod)
+    panel.load_from_hdf5(pulse)
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    panel._show_pulse(CHANNEL, 1)
+    tabs.setCurrentWidget(view)
+    assert view.key == CHANNEL and view.curves
+    assert view.info.text().startswith("Channel 200:")
+    # A selection on a channel the TOD lacks leaves what is drawn.
+    tabs.setCurrentIndex(0)
+    panel._current_view = (5, 1)
+    tabs.setCurrentWidget(view)
+    assert view.key == CHANNEL
+
+
+def test_the_tod_tab_opens_on_its_first_channel_with_nothing_selected(
+        qt_app, tmp_path, panel):
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.tod_view)
+    assert panel.tod_view.key == channel and panel.tod_view.curves
+
+
 def test_the_tod_tab_is_hidden_for_a_file_without_time_ordered_data(
         qt_app, tmp_path, panel):
     from test.pulse_capture.test_overlay import _capture

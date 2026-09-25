@@ -588,6 +588,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # The plane draws only while its tab is up, so catch up on entry.
         self.viewer_tabs.currentChanged.connect(
             lambda _i: self._render_iq_plane())
+        self.viewer_tabs.currentChanged.connect(self._tod_follow_selection)
         splitter.addWidget(self.viewer_tabs)
         splitter.setSizes([260, 740])
         layout.addWidget(splitter, stretch=1)
@@ -3113,6 +3114,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.tod_view.set_file(self.reader.path,
                                [c for c in self.reader.channels if c in held])
         self.viewer_tabs.setTabVisible(index, True)
+
+    def _tod_follow_selection(self, _index=None) -> None:
+        """Entering the Channel TOD View tab draws the selected pulse's
+        channel, or, with none the file's time-ordered data holds, the
+        first channel it does hold if nothing is drawn yet."""
+        view = self.tod_view
+        if self.viewer_tabs.currentWidget() is not view or view.f is None:
+            return
+        selected = self._current_pair or self._current_view
+        key = selected[0] if selected else None
+        if key is not None and view.channel_combo.findData(key) >= 0:
+            if key != view.key:
+                view.show_channel(key)
+        elif view.key is None and view.channel_combo.count():
+            view.show_channel(view.channel_combo.itemData(0))
 
     def _open_tod_viewer(self, key) -> None:
         """*key* in the Channel TOD View tab, brought forward."""

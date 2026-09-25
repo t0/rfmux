@@ -411,8 +411,6 @@ def test_netanal_notebook_transmission_matches_module(plotters):
 
 
 @pytest.mark.parametrize("notebook,function,argument", [
-    ("multisweep", "plot_amplitude_iterations", "R1"),
-    ("multisweep", "plot_sections_at_iteration", 0),
     ("fitting_resonators", "plot_amplitude_iterations", "R1"),
     ("fitting_resonators", "plot_sections_at_iteration", 0),
     ("bias_finding", "plot_amplitude_steps", ["R1"]),

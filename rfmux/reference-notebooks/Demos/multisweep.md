@@ -28,7 +28,7 @@ two ways:
 | A frequency list | `center_frequencies=` and `amp=` | Section names, such as `"S0001"` |
 
 A catalog stores each resonator's frequency, probe amplitude, hardware channel,
-and module. Both inputs produce the same output structure, shown in section 2.
+and module. For more info on these, see `resonator_catalogs.md`.
 
 | Task | Module |
 |---|---|
@@ -194,17 +194,15 @@ This sweep has one amplitude step, numbered `0`:
 
 The same structure holds for multiple amplitudes and directions.
 
-```python
-sweep_sections = ms_module_output["results"][0]["upward"]
 
-print(f"{len(sweep_sections)} sweep sections, keyed by resonator name: "
-      f"{list(sweep_sections)[:4]} …")
-```
-
-Each section contains measurement arrays and information about the sweep.
+Inside each sweep iteration, the data is organized into sections, one for each resonator for that sweep iteration.
+These are keyed by the resonators' names.
+Each resonator's sweep section contains measurement arrays and information about the sweep.
 Print the keys, array shapes, and other values for one resonator:
 
 ```python
+sweep_sections = ms_module_output["results"][0]["upward"]
+
 entry = sweep_sections[first_resonator]
 for key, value in entry.items():
     if isinstance(value, np.ndarray):
@@ -241,16 +239,18 @@ def plot_ms(sections, keys, title):
 plot_ms(sweep_sections, list(sweep_sections)[:4], "example multisweep")
 ```
 
-### Move sweep centers without changing bias points
+### Move sweep centers without changing resonator bias points
 
-Pass `center_frequencies={name: absolute_hz}` alongside a catalog to move the
+When running from a catalog, the centres of each sweep section are the bias frequencies
+of the resonators. If you want to change these without changing the catalog or creating a new one,
+you can pass `center_frequencies={name: absolute_hz}` alongside a catalog to move the
 measurement windows. The mapping must contain every catalog name exactly once.
 The catalog keeps its bias frequencies, calibration and bifurcation observations;
 `call_params["center_frequencies"]` records the override, and each section's
 `original_center_frequency` records where that sweep was centered.
 
 ```python
-sweep_centers = {r.name: r.bias.frequency_hz + 1e3 for r in catalog}
+sweep_centers = {r.name: r.bias.frequency_hz + 10e3 for r in catalog}
 original_biases = {r.name: r.bias for r in catalog}
 recentered = await crs.multisweep(
     catalog, center_frequencies=sweep_centers,
@@ -262,12 +262,15 @@ for name, section in recentered_module["results"][0]["upward"].items():
     assert catalog[name].bias is original_biases[name]
     assert (recentered_module["call_params"]["catalog"]["resonators"][name]
             ["bias"]["frequency_hz"] == original_biases[name].frequency_hz)
-print("Sweep centers moved by 1 kHz; catalog bias points preserved.")
+print("Sweep centers moved by 10 kHz; catalog bias points preserved.")
+
+recentered_sweep_sections = recentered[crs.module[MODULE].index()]['results'][0]['upward']
+plot_ms(recentered_sweep_sections,
+        list(recentered_sweep_sections)[:4], "example recentered multisweep")
 ```
 
-Use this for another look at a shifted dip. Use `find_bias_points()` on the new
-measurement to choose new operating points, then `crs.apply_bias(report.catalog)`
-to program them. Changing the measurement window alone does neither.
+<!-- #region -->
+
 
 ### Override the amplitude
 
@@ -276,8 +279,8 @@ Pass a number as `amp` to use one amplitude for all resonators. Pass a
 
 The catalog stays unchanged. Each result section records the normalized
 amplitude used in `sweep_amplitude` and its converted drive power in
-`sweep_amplitude_dbm` (or `None` when the board could not report its DAC
-scale).
+`sweep_amplitude_dbm`.
+<!-- #endregion -->
 
 ```python
 ms_louder = await crs.multisweep(
@@ -367,7 +370,7 @@ for section_name, s in no_catalog_sections.items():
           f"amp {s['sweep_amplitude']}")
 ```
 
-These frequencies are off-resonance in the simulated array, so the traces are flat.
+These frequencies are off-resonance in the simulated array, so the traces are flat-ish.
 
 ```python
 plot_ms(no_catalog_sections, list(no_catalog_sections),
@@ -554,23 +557,27 @@ we only multiswept a single amplitude.
 `call_params` records the requested settings, including `amp_schedule`.
 A scalar `amp` is stored as a one-step schedule.
 
-```python
-first_sweep_iteration_sections = multi_amplitude_ms[crs.module[MODULE].index()]["results"][0]["upward"]
-print(f"step 0, upward: {list(first_sweep_iteration_sections)[:4]} …")
-print(f"{first_resonator} swept at "
-      f"{first_sweep_iteration_sections[first_resonator]['sweep_amplitude']:.5f}")
 
-print(f"\ncall_params: {list(multi_amplitude_module_results['call_params'])}")
-print(f"schedule as stored: {multi_amplitude_module_results['call_params']['amp_schedule']}")
-```
-
-The amplitude used is stored in each section's `sweep_amplitude` field.
+The amplitude used for any particular sweep section is stored in the section's `sweep_amplitude` field.
 
 ## 7. Read and plot the results
 
 Access the data directly through `module_results["results"][step][direction][name]`.
 Let’s follow those keys through a few examples. Each starts with one module’s
 output, `multi_amplitude_module_results`.
+
+You can manually extract a particular set of resonators' data at one amplitude, or one resonator across multiple amplitudes, etc, but we provide a few helper functions to make common tasks easier.
+
+For complete magnitude and IQ figures, use `plot_magnitude_panels()` and
+`plot_iq_panels()` from
+[`example_plotting_multisweep.py`](example_plotting_multisweep.py). They handle
+amplitude colours, sweep directions, normalization, and panel layout.
+`names=` selects resonators and `iterations=` selects amplitude steps. The
+examples below stay deliberately simple so that the result structure is clear.
+
+```python
+import example_plotting_multisweep as msplots
+```
 
 ### Get one resonator across every amplitude
 
@@ -580,183 +587,17 @@ resonator_iterations = collect_amplitude_iterations_for(
 )
 for step, entries in resonator_iterations.items():
     for direction, section in entries.items():
-        print(f"step {step}  {direction}  {section['sweep_amplitude']:.5f}")
-```
+        plt.plot(
+            section["frequencies"] / 1e6,
+            np.abs(section["iq_counts"]),
+            label=f"{section['sweep_amplitude']:.3g}, {direction}",
+        )
 
-### Plot one resonator across amplitudes
-
-The plot below reads sections directly from `results`. Colours show amplitude
-on a logarithmic scale; line styles show direction. Both directions are plotted
-when present. The IQ axes show counts divided by DAC amplitude. Magnitude
-uses received power minus drive power in dBm, using the saved
-`dac_scale_dbm`, to show transmission in dB. This includes the intervening
-gain and loss; it does not set the off-resonance baseline to zero.
-
-```python
-from example_plotting_multisweep import amplitude_colorbar
-
-from rfmux.core.transferfunctions import (
-    convert_roc_to_dbm, convert_dacunits_to_dbm,
-)
-
-from matplotlib.colors import LinearSegmentedColormap, LogNorm
-
-# Omit the pale end of gnuplot so traces remain visible on white.
-AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
-    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
-)
-
-
-def amplitude_colours(amplitudes):
-    """Map amplitudes to log-scaled colours and a colourbar."""
-    lo, hi = min(amplitudes), max(amplitudes)
-    if hi > lo:
-        norm = LogNorm(vmin=lo, vmax=hi)
-        colours = [AMPLITUDE_CMAP(norm(a)) for a in amplitudes]
-    else:
-        # One amplitude, or several identical ones: nothing to grade.
-        norm = LogNorm(vmin=lo * 0.9, vmax=lo * 1.1)
-        colours = [AMPLITUDE_CMAP(0.5)] * len(amplitudes)
-    return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
-
-
-def plot_amplitude_iterations(ms_module_output, name):
-    """Plot every amplitude step and available direction for one resonator."""
-    # Keep the step → direction → resonator structure visible as we read it.
-    steps = ms_module_output["results"]
-    amplitudes = [
-        sections[name]["sweep_amplitude"]
-        for by_direction in steps.values()
-        for sections in by_direction.values()
-    ]
-    colours, mappable = amplitude_colours(amplitudes)
-    colours = iter(colours)  # One colour per trace, in the same order as above.
-    styles = {"upward": "-", "downward": "--"}
-    shown_directions = set()
-
-    fig, (ax_mag, ax_iq) = plt.subplots(
-        1, 2, figsize=(11, 4), constrained_layout=True
-    )
-    for step, by_direction in steps.items():
-        for direction, sections in by_direction.items():
-            section = sections[name]
-            colour = next(colours)
-            offset_khz = (
-                section["frequencies"] - section["original_center_frequency"]
-            ) / 1e3
-            # Normalize by drive amplitude to compare shapes.
-            iq = section["iq_counts"] / section["sweep_amplitude"]
-            magnitude = (
-                convert_roc_to_dbm(np.abs(section["iq_counts"]))
-                - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
-                )
-            )
-
-            # Label each direction once, even when it appears at several steps.
-            label = direction if direction not in shown_directions else None
-            ax_mag.plot(offset_khz, magnitude, lw=1.0,
-                        color=colour, ls=styles[direction], label=label)
-            ax_iq.plot(iq.real, iq.imag, lw=1.0,
-                       color=colour, ls=styles[direction])
-            shown_directions.add(direction)
-
-    ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("|S21| [dB, drive-referenced]")
-    ax_mag.legend(title="frequency direction", fontsize=8)
-    ax_iq.set_xlabel("I [counts / DAC amplitude]")
-    ax_iq.set_ylabel("Q [counts / DAC amplitude]")
-    ax_iq.set_aspect("equal", "datalim")
-    amplitude_colorbar(fig, mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
-    fig.suptitle(f"{name}, {len(steps)} amplitude steps")
-    plt.show()
-
-
-plot_amplitude_iterations(multi_amplitude_module_results, first_resonator)
-```
-
-### Get amplitudes at one step
-
-```python
-# Select amplitude step 2, then read each direction's sections.
-by_direction = multi_amplitude_module_results["results"][2]
-for direction, sections in by_direction.items():
-    for name, section in list(sections.items())[:4]:
-        print(f"{name}  {direction}  {section['sweep_amplitude']:.5f}")
-```
-
-Plot all sections at one step, with one panel per resonator.
-Multiplicative steps can give each resonator a different amplitude and colour.
-Absolute ramp steps give all resonators the same amplitude and colour.
-Each panel includes all available directions, using solid and dashed lines.
-
-```python
-from example_plotting_multisweep import amplitude_colorbar
-
-from rfmux.core.transferfunctions import (
-    convert_roc_to_dbm, convert_dacunits_to_dbm,
-)
-
-def plot_sections_at_iteration(ms_module_output, iteration, ncols=5):
-    """Plot every direction at one step, with one panel per resonator."""
-    by_direction = ms_module_output["results"][iteration]
-    # The same resonators occur in each direction. Use the first direction
-    # to get panel names; this also works for downward-only measurements.
-    first_direction = next(iter(by_direction))
-    sections = by_direction[first_direction]
-    amplitudes = [
-        section["sweep_amplitude"]
-        for direction_sections in by_direction.values()
-        for section in direction_sections.values()
-    ]
-    _, mappable = amplitude_colours(amplitudes)
-    styles = {"upward": "-", "downward": "--"}
-
-    nrows = -(-len(sections) // ncols)   # ceiling division, no import needed
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(2.4 * ncols, 2.5 * nrows),
-        constrained_layout=True, squeeze=False,
-    )
-    panels = axes.ravel()
-
-    for panel, name in zip(panels, sections):
-        # Read this resonator's section separately for each direction.
-        for direction, direction_sections in by_direction.items():
-            section = direction_sections[name]
-            amplitude = section["sweep_amplitude"]
-            colour = mappable.to_rgba(amplitude)
-            offset_khz = (
-                section["frequencies"] - section["original_center_frequency"]
-            ) / 1e3
-            magnitude = (
-                convert_roc_to_dbm(np.abs(section["iq_counts"]))
-                - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
-                )
-            )
-            panel.plot(offset_khz, magnitude, lw=1.0,
-                       color=colour, ls=styles[direction], label=direction)
-        panel.set_title(f"{name}\n{sections[name]['sweep_amplitude']:.5f}", fontsize=8)
-        panel.tick_params(labelsize=7)
-
-    panels[0].legend(fontsize=7)
-
-    # Axis labels only on the outer edge, and hide any panel left over when the
-    # section count does not fill the grid.
-    for panel in panels[len(sections):]:
-        panel.set_visible(False)
-    for panel in axes[-1, :]:
-        if panel.get_visible():
-            panel.set_xlabel("offset [kHz]", fontsize=8)
-    for panel in axes[:, 0]:
-        panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
-
-    amplitude_colorbar(fig, mappable, ax=axes, label="sweep amplitude")
-    fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
-    plt.show()
-
-
-plot_sections_at_iteration(multi_amplitude_module_results, 2)
+plt.xlabel("frequency [MHz]")
+plt.ylabel("|IQ| [counts]")
+plt.title(first_resonator)
+plt.legend(title="amplitude, direction")
+plt.show()
 ```
 
 ### Find the sweep nearest an amplitude
@@ -776,40 +617,9 @@ for name in (first_resonator, second_resonator, third_resonator):
           f"swept at {at_bias['upward']['sweep_amplitude']:.5f}")
 ```
 
-A fixed amplitude can match a different step for each resonator because their
-base amplitudes differ:
-
-```python
-print(f"{'':<8}" + "".join(f"{s:>10}" for s in multi_amplitude_module_results["results"]))
-for name in (first_resonator, second_resonator, third_resonator):
-    amplitudes = [
-        # This measurement used upward sweeps. Select that direction and name.
-        by_direction["upward"][name]["sweep_amplitude"]
-        for by_direction in multi_amplitude_module_results["results"].values()
-    ]
-    print(f"{name:<8}" + "".join(f"{a:>10.5f}" for a in amplitudes))
-
-print()
-for name in (first_resonator, second_resonator, third_resonator):
-    matched, step = find_iteration_matching_amplitude(
-        multi_amplitude_module_results, name, 0.002
-    )
-    got = matched["upward"]["sweep_amplitude"]
-    print(f"0.00200 for {name}  → step {step}  (actually {got:.5f})")
-```
-
 The match is the nearest available amplitude, even if it is far from the request.
-Here, only the second resonator reaches 0.016. The others return their highest
-available amplitude:
 
-```python
-for name in (first_resonator, second_resonator, third_resonator):
-    matched, step = find_iteration_matching_amplitude(
-        multi_amplitude_module_results, name, 0.016
-    )
-    got = matched["upward"]["sweep_amplitude"]
-    print(f"0.01600 for {name}  → step {step}  (actually {got:.5f})")
-```
+
 
 Check the returned section's `sweep_amplitude` when the match needs to be close.
 
@@ -844,8 +654,10 @@ bifurcation; low-drive traces should largely overlap apart from noise.
 
 ```python
 # The same plotters include both directions automatically.
-plot_amplitude_iterations(both_ways_module_results, first_resonator)
-plot_sections_at_iteration(both_ways_module_results, 0)
+msplots.plot_magnitude_panels(
+    both_ways_module_results, names=first_resonator
+)
+msplots.plot_magnitude_panels(both_ways_module_results, iterations=0)
 ```
 
 The result contains only the requested directions. A downward-only sweep uses
@@ -867,7 +679,7 @@ print(f"directions present: "
 
 ### Sweep a frequency list at several amplitudes
 
-Without a catalog, the schedule must supply its own amplitudes. `ramp` and
+Without a catalog, the schedule must supply its own specific amplitudes. `ramp` and
 `explicit` do this directly. A `multiplicative` schedule needs an explicit `base`.
 Use these sweeps to explore probe amplitudes before tuning.
 
@@ -889,7 +701,7 @@ for step, by_direction in untuned_module_results["results"].items():
 
 # Frequency-list results use section names as keys. These off-resonance
 # traces show the three amplitudes.
-plot_amplitude_iterations(untuned_module_results, "S0001")
+msplots.plot_magnitude_panels(untuned_module_results, names="S0001")
 
 try:
     await crs.multisweep(
@@ -905,16 +717,13 @@ except ValueError as e:
 
 ## 8. Next steps and saving
 
-- **Choose an operating amplitude:** `rfmux.tuning.find_bias_points` finds
+- **Choose bias points (amplitude and frequency):** `rfmux.tuning.find_bias_points` finds
   bifurcation in an amplitude sequence and returns a new catalog biased one
   step below it. See `bias_finding.md`.
 - **Fit resonators:** `rfmux.tuning.fit_sweeps` stores model results under `fits`
   in each fitted sweep section, leaving the catalog unchanged. See
   `fitting_resonators.md`.
-- **Measure noise:** reapply the desired bias catalog, then use
-  `crs.measure_noise`. See [noise_measurement.md](noise_measurement.md)
-  for saved noise products and plots against the verification sweeps.
-- **Save data:** measurements follow the store autosave settings and use the
+- **Saving data:** measurements follow the store autosave settings and use the
   session folder printed above (default `~/rfmux_data/ipy_session_YYYYMMDD/`).
   The result records the path under `file_metadata`. Pass
   `save=False` to skip saving, or `label="cooldown3"` to label the file.

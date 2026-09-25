@@ -406,9 +406,10 @@ Pickle is the current format for tuning outputs. Save `catalog.to_dict()` so the
 file does not depend on the catalog class’s import path. Rebuild it with
 `from_dict()` after loading.
 
-`store.save()` chooses a filename and adds a `file_metadata` block describing the
-file and its path. Measurement routines use it to save their outputs automatically.
-Here, we’ll use it to save a catalog ourselves.
+`crs.apply_bias()` saves the successfully applied catalog as a dictionary through
+the same store used by measurement routines. Its `save=None` default follows the
+autosave setting; `save=True` forces a write and `save=False` applies the tones
+without writing. `label` is appended to the generated filename.
 
 Use the same session folder as the measurement routines. Files remain there
 after the notebook finishes.
@@ -417,8 +418,9 @@ after the notebook finishes.
 output_dir = store.session_directory()
 print(f"saving files to: {output_dir}")
 
-catalog_pkl_path = store.save(by_hand_catalog.to_dict(), "catalog",
-                              label="by_hand")
+catalog_files_before = set(output_dir.glob("catalog_*.pkl"))
+await crs.apply_bias(by_hand_catalog, save=True, label="by_hand")
+catalog_pkl_path, = set(output_dir.glob("catalog_*.pkl")) - catalog_files_before
 print(f"wrote {catalog_pkl_path.name} "
       f"({catalog_pkl_path.stat().st_size} bytes)")
 
@@ -431,8 +433,11 @@ The default measurement folder is `~/rfmux_data/ipy_session_YYYYMMDD/`.
 `RFMUX_DATA_DIR`, `store.directory` in the config, or a session override from
 `store.set_output_directory(path)`.
 
-The filename includes a timestamp. The saved dictionary also gains `file_metadata`,
-which `ResonatorCatalog.from_dict()` ignores when rebuilding the catalog.
+The save happens only after every tone has been programmed. The filename includes
+a timestamp. The saved dictionary also gains `file_metadata`, which
+`ResonatorCatalog.from_dict()` ignores when rebuilding the catalog. For a catalog
+that should be stored without being applied, use
+`store.save(catalog.to_dict(), "catalog")` directly.
 
 Only load pickle files you trust: unpickling can execute code from the file.
 

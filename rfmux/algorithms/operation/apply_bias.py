@@ -13,6 +13,7 @@ from ...core.transferfunctions import (
     BASE_FREQUENCY,
     FREQ_QUANTUM,
 )
+from ...tuning import store
 
 
 def _unreachable(nco_hz: float, resonators: list) -> list:
@@ -50,6 +51,8 @@ async def apply_bias(
     catalog: ResonatorCatalog,
     *,
     allow_nco_reset: bool = True,
+    save: bool | None = None,
+    label: str | None = None,
 ):
     """Program each catalog member's bias frequency and amplitude.
 
@@ -62,6 +65,9 @@ async def apply_bias(
         allow_nco_reset: if True, move an unreachable or off-grid NCO to the
             catalog's grid-aligned midpoint. A usable NCO is left unchanged.
             Moving the NCO also shifts tones on channels outside the catalog.
+        save: save the applied catalog as a dictionary. None uses
+            ``store.autosave_enabled()``.
+        label: label appended to the catalog filename when saving.
 
     Raises:
         ValueError: the catalog is empty, spans more than
@@ -140,3 +146,7 @@ async def apply_bias(
             )
             ctx.set_amplitude(r.bias.amplitude, channel=r.channel, module=module)
         await ctx()
+
+    store.maybe_save(
+        catalog.to_dict(), "catalog", save=save, label=label, module=module
+    )

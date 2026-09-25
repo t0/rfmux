@@ -1157,8 +1157,13 @@ After reviewing the report, apply its catalog with:
 
     await crs.apply_bias(bias_report.catalog)
 
-This returns nothing. The catalog’s frequencies must fit within one NCO bandwidth.
-The call is shown for reference; the cells above only measure and analyze sweeps.
+This returns nothing. After the tones have been programmed successfully, it saves
+`bias_report.catalog.to_dict()` as a timestamped `catalog_*.pkl` in the same
+`store` session directory as the measurements. The default `save=None` follows
+the autosave setting; pass `save=True` to force a write, `save=False` to suppress
+one, or `label="chosen_bias"` to label the filename. The catalog’s frequencies
+must fit within one NCO bandwidth. The call is shown for reference; the cells
+above only measure and analyze sweeps.
 
 ## 7. Next steps
 

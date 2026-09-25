@@ -19,7 +19,7 @@ from rfmux.core.transferfunctions import (
     BASE_FREQUENCY,
     FREQ_QUANTUM,
 )
-from rfmux.tuning import BiasReport
+from rfmux.tuning import BiasReport, store
 
 SESSION = """
 !HardwareMap
@@ -86,6 +86,28 @@ async def test_every_tone_lands_on_its_channel(crs_mock):
         assert await crs.get_amplitude(
             channel=r.channel, module=MODULE
         ) == pytest.approx(r.bias.amplitude)
+
+
+@pytest.mark.asyncio
+async def test_a_successful_apply_saves_the_catalog_as_a_dictionary(
+    crs_mock,
+    tmp_path,
+    monkeypatch,
+):
+    crs = crs_mock
+    await crs.resolve()
+    await crs.set_nco_frequency(SETTLED_NCO_HZ, module=MODULE)
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+
+    catalog = a_catalog(-1e6, +1e6)
+    await crs.apply_bias(catalog, save=True, label="chosen_bias")
+
+    paths = list(tmp_path.glob("catalog_*_chosen_bias.pkl"))
+    assert len(paths) == 1
+    saved = store.load(paths[0])
+    assert isinstance(saved, dict)
+    assert ResonatorCatalog.from_dict(saved).to_dict() == catalog.to_dict()
+    assert saved["file_metadata"]["module"] == MODULE
 
 
 @pytest.mark.asyncio

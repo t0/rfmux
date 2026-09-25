@@ -105,15 +105,19 @@ without triggering on it, or give it its own **Threshold σ** and **End σ**
 (see [Per-channel settings](pulse-capture.md#per-channel-settings)).
 **Export Config…** saves all of it, with the modules and channels, as a
 trigger config file (`trigger_config_<HHMMSS>.h5` unless you name it). One
-saved into a session folder is listed in its exports, so Periscope's Session
-Browser shows it. **Load Config…** takes all of it back from a trigger config
-file, exported here or from Periscope, or from an earlier capture, and sets
-**Modules** and **Channels** to the ones it names.
+saved into a session folder is listed in its exports, and Periscope's Session
+Browser lists it with the capture files. Export before the channels resolve
+and the file holds none; the status line says so. **Load Config…** takes all
+of it back from a trigger config file, exported here or from Periscope, or
+from a capture that recorded its config, and sets **Modules** and
+**Channels** to the ones it names. A file it cannot read is reported in a
+dialog and on the console.
 
 ## 3. Recording from the command line
 
-Every choice of the dialog is an option; `rfmux record --help` lists them
-with their defaults. `--serial` and `--duration` are required. One module,
+Every choice of the dialog is an option, except the per-channel table,
+which reaches the command line through `--config`; `rfmux record --help`
+lists them with their defaults. `--serial` and `--duration` are required. One module,
 into an existing session, channels from its newest bias export:
 
 ```bash
@@ -150,9 +154,11 @@ rfmux record --serial <NNNN> --duration 20 \
 ```
 
 `--config` takes a file from **Export Config** in Periscope or in the
-dialog, or any earlier capture file. A capture option typed beside it
-overrides that one value (`--end-sigma 1.0`), and `--module` or
-`--channels` replaces the file's channel selection.
+dialog, or a capture that recorded its config (one made in Periscope, with
+`trigger_capture` or with `rfmux record`). A capture option typed beside it
+overrides that one value (`--end-sigma 1.0`). `--channels` replaces the
+file's channels on its modules; `--module` replaces its modules, and its
+channels then come from `--channels` or the bias export.
 
 ## 4. What a run does
 
@@ -179,8 +185,8 @@ The products, sharing one time stamp, named `module2` for one module and
 - `fastrx_module<M>_HHMMSS.fastrx`, the channel-stream recording of
   channels 1 to the highest of them.
 
-All three are listed in the session's metadata, so Periscope's session
-browser shows them.
+All three are listed in the session's metadata, and Periscope's session
+browser shows them with the other files in the folder.
 
 After the run the command lists the channels that triggered with their
 pulse counts. It merges the recording into the pulse file as its fast

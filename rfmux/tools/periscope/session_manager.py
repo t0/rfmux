@@ -555,9 +555,8 @@ class SessionManager(QtCore.QObject):
         # the file layout: a file it opens with captured channels, or
         # with a trigger config, is one.
         if str(file_path).lower().endswith(('.h5', '.hdf5')):
-            from rfmux.pulse_capture.capture_session import (
-                TRIGGER_CONFIG_ATTR)
-            from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
+            from rfmux.pulse_capture.hdf5 import (
+                TRIGGER_CONFIG_ATTR, PulseHDF5Reader)
             try:
                 with PulseHDF5Reader(file_path) as reader:
                     return ('pulse' if reader.channels

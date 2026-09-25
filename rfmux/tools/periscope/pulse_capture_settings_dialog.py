@@ -19,7 +19,9 @@ from ...core.transferfunctions import decimation_to_sampling
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
 )
-from ...pulse_capture.channel_keys import channel_arg, describe
+from typing import Iterable, Optional
+
+from ...pulse_capture.channel_keys import ChannelKey, channel_arg, describe
 from ...pulse_capture.events import NoiseSampler
 from ...pulse_capture.detection import (
     EDGE_LOOKBACK_FRACTION,
@@ -53,7 +55,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
                  config: PulseCaptureConfig | None = None,
                  sample_rate: float = decimation_to_sampling(6),
                  mode: str = "slow",
-                 channels=None,
+                 channels: Optional[Iterable[ChannelKey]] = None,
                  df_available: bool = True,
                  gate: QtWidgets.QAbstractButton | None = None):
         super().__init__(parent)
@@ -360,7 +362,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
 
     _SIGMA_COLUMNS = ((2, "threshold_sigma"), (3, "end_sigma"))
 
-    def _channel_table(self):
+    def _channel_table(self) -> QtWidgets.QTableWidget:
         table = QtWidgets.QTableWidget(0, 4)
         table.setHorizontalHeaderLabels(
             ["Channel", "Trigger", "Threshold σ", "End σ"])
@@ -371,7 +373,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             "Each channel's own trigger settings.\n\n"
             "Trigger: unchecked records the channel with every event and "
             "noise sample, without triggering on it.\n"
-            "Threshold σ and End σ: blank takes the values above.")
+            "Threshold σ and End σ: blank takes the capture's values.")
         return table
 
     def _fill_channel_table(self) -> None:
@@ -404,7 +406,7 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
             * min(len(self.channels), 6) + 2 * table.frameWidth())
         table.setVisible(bool(self.channels))
 
-    def set_channels(self, channels) -> None:
+    def set_channels(self, channels: Iterable[ChannelKey]) -> None:
         """Show *channels* in the table, keeping every setting made."""
         self._settings = self._per_channel()
         self.channels = list(channels)
@@ -413,8 +415,9 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
         self._update_dependent_values()
 
     def _per_channel(self) -> dict:
-        """The table's settings, only those that differ from the
-        capture's; unreadable cells are noted in ``_bad_cells``."""
+        """What each row sets (an unchecked Trigger, a σ that is not
+        blank), with the settings kept for channels not in the table;
+        unreadable cells are noted in ``_bad_cells``."""
         out = {k: dict(v) for k, v in self._settings.items()
                if k not in self.channels}
         self._bad_cells = []
@@ -523,6 +526,13 @@ class PulseCaptureSettingsForm(QtWidgets.QWidget):
 
             issues = cfg.validate(self.sample_rate) + [
                 ("error", message) for message in self._bad_cells]
+            kept = [k for k in cfg.per_channel if k not in self.channels]
+            if kept and self.channels:
+                issues.append((
+                    "info",
+                    "Settings are kept for channels not captured ("
+                    + ", ".join(channel_arg(k) for k in kept)
+                    + "); they apply once those channels are."))
             self.valid = apply_issue_banner(self.status_label, self.gate,
                                             issues)
         finally:

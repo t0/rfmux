@@ -56,11 +56,11 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 import h5py
 import numpy as np
@@ -85,6 +85,7 @@ from .detection import (
     PulseCapture,
     channel_sigmas,
     estimate_noise_stats,
+    is_record_only,
 )
 from . import walk
 from .channel_keys import (ChannelKey, channel_arg, check_keys, describe,
@@ -99,7 +100,8 @@ from .analysis import (
 )
 from .accumulators import PulseHistogramSet, PulseTemplateSet
 
-from .hdf5 import DualPulseHDF5Writer, PulseHDF5Writer
+from .hdf5 import (TRIGGER_CONFIG_ATTR, DualPulseHDF5Writer,
+                   PulseHDF5Writer)
 
 
 #: The detection knobs, named once.
@@ -183,19 +185,19 @@ class _EventHost(_CallbackHost):
     noise: Optional[NoiseSampler] = None
     on_event: Optional[Callable] = None
     time_origin_epoch: Optional[float] = None
-    _dump_untriggered = False
-    _record_only: frozenset = frozenset()
-
+    #: Channels saved with every event they did not trigger in.
+    _dump_channels: frozenset = frozenset()
 
     def _make_events(self, window_s: Optional[float], hold_s: float, *,
                      dump: bool, interval_s: float, noise_window_s: float,
-                     pre_s: float, rng=None, record_only=()) -> None:
+                     pre_s: float, rng=None,
+                     record_only: Iterable[ChannelKey] = ()) -> None:
         """*hold_s* is the hard stop: no pulse outlives it, so none that
         triggered inside an event's window is still open that long
-        after it.  *record_only* channels are saved with every event
-        whether or not *dump* saves the rest."""
-        self._dump_untriggered = bool(dump)
-        self._record_only = frozenset(record_only)
+        after it.  *dump* saves every channel with each event,
+        *record_only* those channels whether or not *dump* is set."""
+        self._dump_channels = frozenset(self.channels if dump
+                                        else record_only)
         if window_s is not None or interval_s > 0:
             self.events = EventGrouper(window_s, hold_s,
                                        on_event=self._on_event)
@@ -221,13 +223,12 @@ class _EventHost(_CallbackHost):
         buffers if asked to, then write and announce it.  A noise sample
         comes with every channel already; its time is when it was taken."""
         stamp_utc(event, self.time_origin_epoch)
-        if ((self._dump_untriggered or self._record_only)
-                and event["kind"] == "pulses"
+        if (self._dump_channels and event["kind"] == "pulses"
                 and event["window"] is not None):
             triggered = set(event_channels(event))
             event["dump"] = self._read_channels(
-                [ch for ch in self.channels if ch not in triggered
-                 and (self._dump_untriggered or ch in self._record_only)],
+                [ch for ch in self.channels
+                 if ch in self._dump_channels and ch not in triggered],
                 *event["window"])
         self._to_writer("append_event", event,
                         what=f"write for event #{event['event_idx']}")
@@ -402,11 +403,19 @@ class PulseCaptureConfig:
                               for k, v in self.per_channel.items()}
         return out
 
+    def for_channels(self, channels: Iterable[ChannelKey]
+                     ) -> "PulseCaptureConfig":
+        """This config for a capture of *channels*: settings for any
+        other channel are dropped, so a leftover one can neither turn
+        events on nor grow the ring."""
+        wanted = set(channels)
+        return replace(self, per_channel={
+            k: dict(v) for k, v in self.per_channel.items() if k in wanted})
+
     @property
     def record_only(self) -> List[ChannelKey]:
         """The channels recorded without triggering on them."""
-        return [k for k, v in self.per_channel.items()
-                if v.get("trigger", True) is False]
+        return [k for k, v in self.per_channel.items() if is_record_only(v)]
 
     @property
     def dumps(self) -> bool:
@@ -633,6 +642,18 @@ class PulseCaptureConfig:
                 issues.append(("error", f"Unknown setting for {name}: "
                                f"{', '.join(unknown)}."))
                 continue
+            if not isinstance(setting.get("trigger", True), bool):
+                issues.append(("error", f"Trigger of {name} must be true "
+                               "or false."))
+                continue
+            bad = [k for k in ("threshold_sigma", "end_sigma")
+                   if setting.get(k) is not None
+                   and not (isinstance(setting[k], (int, float))
+                            and math.isfinite(setting[k]))]
+            if bad:
+                issues.append(("error", f"The σ of {name} must be a "
+                               "finite number."))
+                continue
             thr, end = channel_sigmas(setting, self.threshold_sigma,
                                       self.end_sigma)
             if thr <= 0 or end <= 0:
@@ -721,18 +742,15 @@ class PulseCaptureConfig:
         return issues
 
 
-#: The ``metadata`` attribute holding a :class:`PulseCaptureConfig` as
-#: JSON (:meth:`~PulseCaptureConfig.to_dict`): in a capture file the
-#: config it ran with, in a trigger config file all there is.
-TRIGGER_CONFIG_ATTR = "trigger_config"
-
 
 def write_trigger_config(path: str | Path, config: PulseCaptureConfig, *,
-                         channels=None, module: Optional[int] = None,
+                         channels: Optional[List[ChannelKey]] = None,
+                         module: Optional[int] = None,
                          streamer_mode: Optional[str] = None) -> Path:
-    """Write a trigger config file: a capture file's ``metadata`` group
-    and nothing else, holding *config* and, when given, the channels,
-    module and stream to capture with it."""
+    """Write a trigger config file: an HDF5 file with only a
+    ``metadata`` group, holding *config* as ``trigger_config`` and,
+    when given, the ``channels``, ``module`` and ``streamer_mode`` to
+    capture with it."""
     path = Path(path)
     with h5py.File(path, "w") as f:
         meta = f.create_group("metadata")
@@ -749,9 +767,11 @@ def write_trigger_config(path: str | Path, config: PulseCaptureConfig, *,
 
 def read_trigger_config(path: str | Path
                         ) -> Tuple[PulseCaptureConfig, Dict[str, Any]]:
-    """``(config, setup)`` from a trigger config file or a capture file.
-    *setup* holds whichever of ``channels``, ``module`` and
-    ``streamer_mode`` the file records."""
+    """``(config, setup)`` from a trigger config file or a capture file
+    that recorded its config.  *setup* holds whichever of ``channels``,
+    ``module`` and ``streamer_mode`` the file records.  A recording
+    merged into a slow capture reads as ``"slow"``: no engine ran on
+    its fast stream."""
     with h5py.File(path, "r") as f:
         meta = dict(f["metadata"].attrs) if "metadata" in f else {}
     raw = meta.get(TRIGGER_CONFIG_ATTR)
@@ -764,6 +784,9 @@ def read_trigger_config(path: str | Path
         setup["module"] = int(meta["module"])
     if "streamer_mode" in meta:
         setup["streamer_mode"] = str(meta["streamer_mode"])
+        if (setup["streamer_mode"] == "both" and "capture_start" in meta
+                and "pre_samples_fast" not in meta):
+            setup["streamer_mode"] = "slow"
     return PulseCaptureConfig.from_dict(json.loads(raw)), setup
 
 
@@ -807,8 +830,9 @@ class PulseCaptureSession(_EventHost):
         stored in the HDF5 file.
     per_channel : dict, optional
         :attr:`PulseCaptureConfig.per_channel`, handed to the engine.  A
-        channel with ``"trigger": False`` is saved with every event, and
-        the config turns events on for it.
+        channel with ``"trigger": False`` is saved with every event
+        while events are on; ``PulseCaptureConfig.session_kwargs``
+        turns them on for it.
     trigger_config : str, optional
         The config as JSON, recorded in the file for
         :func:`read_trigger_config`.
@@ -871,7 +895,7 @@ class PulseCaptureSession(_EventHost):
         noise_capture_window_s: float = 0.0,
         noise_rng: Optional[np.random.Generator] = None,
         config_times_ms: Optional[Dict[str, float]] = None,
-        per_channel: Optional[Dict[int, dict]] = None,
+        per_channel: Optional[Dict[ChannelKey, dict]] = None,
         trigger_config: Optional[str] = None,
         histogram_flush_every: int = 50,
         histogram_flush_interval_s: float = 0.5,
@@ -1447,7 +1471,7 @@ class PulseCaptureSession(_EventHost):
                 self.pcap.max_capture_samples / self.sample_rate,
                 dump=self.dump_all_channels,
                 record_only=[c for c in self.channels
-                             if self.pcap.threshold_by_ch[c] == math.inf],
+                             if is_record_only(self.per_channel.get(c))],
                 interval_s=self.noise_capture_interval_s,
                 noise_window_s=self.noise_capture_window_s,
                 pre_s=self.pcap.pre_samples / self.sample_rate,
@@ -1765,7 +1789,8 @@ class DualPulseCaptureSession(_EventHost):
         self.fast_channels = self._checked_fast(
             self.channels if fast_channels is None else fast_channels)
         self.module = module
-        self.config = config or PulseCaptureConfig()
+        self.config = (config or PulseCaptureConfig()).for_channels(
+            self.channels)
         #: Added to every slow timestamp before it reaches the engine,
         #: the matcher or the file: the slow stream session's
         #: ``time_offset_s``, which pulls the CIC-delayed slow clock

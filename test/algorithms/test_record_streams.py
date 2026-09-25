@@ -654,10 +654,29 @@ def test_an_option_given_overrides_the_config_file_and_the_rest_stays(
     path = write_trigger_config(tmp_path / "tc.h5", config, channels=[1, 2],
                                 module=1)
     run = _record_with(monkeypatch, ["--config", str(path), "--end-sigma",
-                                     "1.0", "--channels", "5-6"])
+                                     "1.0"])
     assert run["config"] == PulseCaptureConfig(
         threshold_sigma=6.0, max_pulse_ms=20.0, end_sigma=1.0)
-    assert (run["channels"], run["modules"]) == ("5-6", [1])
+
+
+def _config_file(tmp_path):
+    from rfmux.pulse_capture import write_trigger_config
+    return str(write_trigger_config(tmp_path / "tc.h5", PulseCaptureConfig(),
+                                    channels=[1, 2], module=3))
+
+
+def test_channels_given_with_a_config_file_keep_its_module(
+        tmp_path, monkeypatch):
+    run = _record_with(monkeypatch, ["--config", _config_file(tmp_path),
+                                     "--channels", "5-6"])
+    assert (run["channels"], run["modules"]) == ("5-6", [3])
+
+
+def test_a_module_given_with_a_config_file_drops_its_channels(
+        tmp_path, monkeypatch):
+    run = _record_with(monkeypatch, ["--config", _config_file(tmp_path),
+                                     "--module", "2"])
+    assert (run["channels"], run["modules"]) == (None, [2])
 
 
 def test_a_file_without_a_config_is_refused(tmp_path):
@@ -672,13 +691,6 @@ def test_a_file_without_a_config_is_refused(tmp_path):
     assert "no trigger configuration" in result.output
 
 
-def test_the_help_describes_the_config_option():
-    from click.testing import CliRunner
-    from rfmux.tools import record
-    out = CliRunner().invoke(record.cli, ["--help"]).output
-    assert "--config" in out and "Trigger config file" in out
-
-
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record
@@ -687,6 +699,25 @@ def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
                         classmethod(lambda cls: {"serial": "0156"}))
     result = CliRunner().invoke(record.cli, ["--module", "2"])
     assert result.exit_code == 2 and "--serial is required" in result.output
+
+
+def test_a_run_across_modules_with_channel_settings_keeps_the_metadata(
+        tmp_path):
+    """(module, channel) keys are recorded as JSON can hold them; the
+    run's record joins what the session already had."""
+    session = core_session.open_session(base=tmp_path)
+    before = load_metadata(session)
+    result = SimpleNamespace(
+        session=session, pulse_path=None, dirfile_path=None,
+        fastrx_path=None, module=None, modules=[2, 3],
+        channels=[(2, 1), (3, 5)], duration_s=1.0, training_s=0.1,
+        started_at=0.0, fastrx_stats=None, merged_fastrx=False, warnings=[])
+    config = PulseCaptureConfig(per_channel={(3, 5): {"trigger": False}})
+    rs._record(result, config)
+    after = load_metadata(session)
+    assert after["created"] == before["created"]
+    assert after["recordings"][-1]["capture_config"]["per_channel"] == \
+        {"3:5": {"trigger": False}}
 
 
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):

@@ -74,12 +74,12 @@ def merge_recording(tmp_path_factory):
 
 
 def _capture(tmp_path, channels=(CHANNEL,), module=1, tuning=None,
-             **config_kw):
+             threshold_sigma=5.0, name="slow.h5", **config_kw):
     """A slow-only capture of the event on the first of *channels*
     (keys), stamps fed late as the board stamps them; the others see
     noise."""
-    path = str(tmp_path / "slow.h5")
-    cfg = PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5,
+    path = str(tmp_path / name)
+    cfg = PulseCaptureConfig(threshold_sigma=threshold_sigma, end_sigma=1.5,
                              max_pulse_ms=30.0, noise_train_ms=300.0,
                              **config_kw)
     got = []
@@ -391,6 +391,30 @@ def test_merging_a_recording_makes_a_both_mode_file_of_slow_triggered_pairs(
         assert pair["fast_tod"]["Amp_I"].max() == \
             pytest.approx(AMP * factor.real, rel=0.02)
         assert "noise_std_I" in r.f[f"fast/channel_{CHANNEL}"].attrs
+
+
+def test_the_fast_side_is_measured_at_the_channels_own_threshold(
+        tmp_path, merge_recording):
+    """A channel's own threshold sets the fast side's decay constants
+    as the capture's would."""
+    own = _capture(tmp_path, name="own.h5",
+                   per_channel={CHANNEL: {"threshold_sigma": 200.0}})
+    whole = _capture(tmp_path, name="whole.h5", threshold_sigma=200.0)
+    taus = []
+    for path in (own, whole):
+        merge_fastrx(path, merge_recording)
+        with PulseHDF5Reader(path) as r:
+            taus.append(r.get_histograms("fast")[f"tau_ms_counts_ch{CHANNEL}"])
+    np.testing.assert_array_equal(*taus)
+
+
+def test_a_merged_files_config_is_a_slow_capture(tmp_path, merge_recording):
+    """No engine ran on the recording: the config it loads captures
+    the slow stream, as the capture did."""
+    from rfmux.pulse_capture import read_trigger_config
+    path = _capture(tmp_path)
+    merge_fastrx(path, merge_recording)
+    assert read_trigger_config(path)[1]["streamer_mode"] == "slow"
 
 
 def _capture_with_a_quiet_channel(tmp_path, **config_kw):

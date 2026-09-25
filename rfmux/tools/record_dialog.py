@@ -8,19 +8,19 @@ import datetime
 import json
 import shutil
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterable, List, Optional, Tuple
 
 from PyQt6 import QtCore, QtWidgets
 
 from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
-    config_selection,
     fastrx_bytes_per_s, interface_speeds, resolve_channels)
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import (PulseCaptureConfig,
                                              read_trigger_config,
                                              write_trigger_config)
-from ..pulse_capture.channel_keys import pair_keys
+from ..pulse_capture.channel_keys import (ChannelKey, capture_keys,
+                                          channel_selection)
 from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import (is_session, newest_session,
                                    register_export)
@@ -191,7 +191,8 @@ class RecordDialog(QtWidgets.QDialog):
         self.load_config_btn = QtWidgets.QPushButton("Load Config…")
         self.load_config_btn.setToolTip(
             "Take the trigger configuration of a trigger config file or "
-            "of an earlier capture, with the modules and channels it names")
+            "of a capture that recorded its config, with the modules and "
+            "channels it names")
         self.load_config_btn.clicked.connect(self._on_load_config)
         self.export_config_btn = QtWidgets.QPushButton("Export Config…")
         self.export_config_btn.setToolTip(
@@ -257,10 +258,17 @@ class RecordDialog(QtWidgets.QDialog):
         return w
 
     def _capture_form(self, config: PulseCaptureConfig,
-                      channels=()) -> PulseCaptureSettingsForm:
+                      channels: Iterable[ChannelKey] = ()
+                      ) -> PulseCaptureSettingsForm:
         return PulseCaptureSettingsForm(
             config=config, sample_rate=decimation_to_sampling(6),
             mode="slow", channels=channels)
+
+    def _failed(self, message: str) -> None:
+        """A load or export the user has to redo: on the console and in a
+        dialog."""
+        print(f"[record] {message}")
+        QtWidgets.QMessageBox.warning(self, "rfmux record", message)
 
     def _on_load_config(self) -> None:
         dlg = QtWidgets.QFileDialog(
@@ -269,14 +277,14 @@ class RecordDialog(QtWidgets.QDialog):
             "HDF5 files (*.h5 *.hdf5)")
         dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
 
-        def _chosen(path):
-            try:
-                self.load_trigger_config(path)
-            except (OSError, ValueError) as e:
-                self.status_label.setText(
-                    f"Could not load a trigger config from {path}: {e}")
-        dlg.fileSelected.connect(_chosen)
+        dlg.fileSelected.connect(self._load_config_file)
         dlg.open()
+
+    def _load_config_file(self, path: str) -> None:
+        try:
+            self.load_trigger_config(path)
+        except (OSError, ValueError) as e:
+            self._failed(f"Could not load a trigger config from {path}: {e}")
 
     def _on_export_config(self) -> None:
         stamp = datetime.datetime.now().strftime("%H%M%S")
@@ -289,36 +297,43 @@ class RecordDialog(QtWidgets.QDialog):
         dlg.setAcceptMode(QtWidgets.QFileDialog.AcceptMode.AcceptSave)
         dlg.setDefaultSuffix("h5")
 
-        def _chosen(path):
+        def _chosen(path: str) -> None:
             try:
                 self.export_trigger_config(path)
             except OSError as e:
-                self.status_label.setText(f"Could not write {path}: {e}")
+                self._failed(f"Could not write {path}: {e}")
         dlg.fileSelected.connect(_chosen)
         dlg.open()
 
-    def export_trigger_config(self, path) -> Path:
+    def _capture_keys(self) -> Tuple[Optional[int], List[ChannelKey]]:
+        """``(module, keys)`` the Run tab's channels capture with; no
+        keys while they do not resolve."""
+        wanted, _ = self._channels()
+        return capture_keys(wanted) if wanted else (None, [])
+
+    def export_trigger_config(self, path: str | Path) -> Path:
         """Write the capture settings, with the modules and channels the
         Run tab resolves to, as a trigger config file.  One written into a
         session folder is listed in its exports."""
-        wanted, _ = self._channels()
-        keys = self._capture_keys(wanted)
+        module, keys = self._capture_keys()
         path = write_trigger_config(
             path, self.capture_form.get_config(), channels=keys or None,
-            module=(next(iter(wanted)) if wanted and len(wanted) == 1
-                    else None),
-            streamer_mode="slow")
+            module=module, streamer_mode="slow")
         if is_session(path.parent):
             register_export(path.parent, path.name, "pulse", "trigger_config")
+        note = "" if keys else " without channels: they do not resolve yet"
+        print(f"[record] Exported trigger config {path}{note}")
+        self.status_label.setText(f"Exported {path.name}{note}")
         return path
 
-    def load_trigger_config(self, path) -> None:
+    def load_trigger_config(self, path: str | Path) -> None:
         """Take the trigger configuration of a trigger config file or a
-        capture file, and the modules and channels it records."""
+        capture file that recorded its config, and the modules and
+        channels it names."""
         config, setup = read_trigger_config(path)
-        selection = config_selection(setup)
-        if selection is not None:
-            modules, spec = selection
+        if setup.get("channels"):
+            modules, spec = channel_selection(setup["channels"],
+                                              setup.get("module"))
             if modules:
                 self.modules_edit.setText(",".join(map(str, modules)))
             self.rb_ranges.setChecked(True)
@@ -330,16 +345,6 @@ class RecordDialog(QtWidgets.QDialog):
         old.deleteLater()
         self.capture_form.updated.connect(self._refresh)
         self._refresh()
-
-    @staticmethod
-    def _capture_keys(wanted) -> list:
-        """The channel keys the capture of *wanted* runs with: channel
-        numbers on one module, (module, channel) across several."""
-        if not wanted:
-            return []
-        if len(wanted) > 1:
-            return pair_keys(wanted)
-        return list(next(iter(wanted.values())))
 
     def _browse(self, edit: QtWidgets.QLineEdit) -> QtWidgets.QPushButton:
         btn = QtWidgets.QPushButton("Browse…")
@@ -433,7 +438,7 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _refresh(self, *_) -> None:
         chans, note = self._channels()
-        keys = self._capture_keys(chans)
+        _, keys = self._capture_keys()
         if keys != self.capture_form.channels:
             self.capture_form.blockSignals(True)
             self.capture_form.set_channels(keys)

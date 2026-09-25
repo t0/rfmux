@@ -35,6 +35,11 @@ from typing import Any, Dict, Iterator, List, Optional
 import h5py
 
 from .detection import RATE_PARAMS, ChannelNoiseStats
+
+#: The ``metadata`` attribute holding a ``PulseCaptureConfig`` as JSON
+#: (``to_dict``): in a capture file the config it ran with, in a
+#: trigger config file the config to capture with.
+TRIGGER_CONFIG_ATTR = "trigger_config"
 from ..streamer import epoch_to_utc
 from .analysis import pulse_summary
 from .channel_keys import (ChannelKey, channel_group, check_keys,
@@ -145,7 +150,7 @@ class _PulseFileWriter:
     #: test_every_detection_param_reaches_the_file pins it.
     _META = (
         (str, ("streamer_mode", "trigger_basis", "stored_units",
-               "trigger_config")),
+               TRIGGER_CONFIG_ATTR)),
         (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
                  "post_pulse_ms", "coincidence_window_s",
                  "noise_capture_interval_s", "noise_capture_window_s",

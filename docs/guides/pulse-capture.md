@@ -189,7 +189,7 @@ toolbar. The **Settings** dialog includes:
   everywhere. A trigger in the df basis is likely to be more sensitive than
   a trigger in an arbitrary (un-rotated) (I,Q) basis.
 
-A text box below dervies the relevant timescales and expectations for the selected
+A text box below derives the relevant timescales and expectations for the selected
 parameters.
 
 ### Per-channel settings
@@ -199,29 +199,40 @@ each:
 
 - **Trigger** (checked): unchecked records the channel without triggering
   on it. Its samples are saved with every event, over the event's span,
-  and with every noise sample. Such a channel turns events on by itself,
-  so each pulse on another channel is then an event.
+  and with every noise sample. Such a channel turns events on even with
+  the coincidence window off; each pulse is then an event of its own,
+  unless two channels trigger on the same sample. The ring buffer grows as
+  it does for **Save every channel with each event**.
 - **Threshold σ** and **End σ**: the channel's own values. Blank takes the
   capture's. A channel's End σ must sit below its threshold.
 
 Each pulse records the `threshold_sigma` and `end_sigma` its channel ran
-with.
+with, and its decay constant and template alignment use them. Settings for
+a channel taken out of **Channels** are kept, and named below the table;
+they take effect only while the channel is captured.
 
 ### Save and load a trigger config
 
 **Export Config** saves the trigger configuration, with the channels, module
-and mode, as `trigger_config_<HHMMSS>.h5` in the session folder (without
-a session, the output file's folder or your home folder). The file is
-a capture file's `metadata` group and nothing else, and it appears in the
-Session Browser under the Pulse Capture filter.
+and mode, as `trigger_config_<HHMMSS>.h5` in the session folder. Without a
+session it goes to the folder of the output file chosen with **…**, or to
+your home folder. The file is HDF5 with only a `metadata` group, holding
+`trigger_config` and the `channels`, `module` and `streamer_mode`, and it
+appears in the Session Browser under the Pulse Capture filter.
 
-**Load Config…** reads a trigger config file, or any capture file, and sets
-the panel from it, ready for a new capture. Every capture records the
-config it ran with, so an earlier run can be repeated as it was.
-Double-clicking a trigger config file in the Session Browser opens a panel
-set from it. The `rfmux record` dialog has the same table, **Export
-Config…** and **Load Config…** on its Pulse capture tab, and reads and
-writes the same files (see the [100G captures guide](100g-captures.md)).
+**Load Config…** reads a trigger config file, or a capture file that
+recorded its config, and sets the panel from it, ready for a new capture.
+Captures made in Periscope, with `trigger_capture` or with `rfmux record`
+record the config they ran with, so such a run can be repeated as it was;
+files from before trigger configs existed hold none. Double-clicking a
+trigger config file in the Session Browser opens a panel set from it. The
+panel captures one module, so it refuses a config across several.
+
+The `rfmux record` dialog has the same table, **Export Config…** and
+**Load Config…** on its Pulse capture tab, and reads and writes the same
+files, a config across several modules included (see the
+[100G captures guide](100g-captures.md)). Load Config is off while a
+capture runs and in review mode.
 
 ## Histograms and templates
 
@@ -402,15 +413,16 @@ and under `dump/`, and a `members` row then starts with the module.
 **`metadata`** holds `streamer_mode`, `module`, `channels`, the sample rate
 (`sample_rate_slow` or `sample_rate_fast`), `stored_units`, `trigger_basis`,
 `volts_per_count`, `slow_time_offset_s`, `capture_start` and `capture_end`.
-`trigger_config` is the whole `PulseCaptureConfig` as JSON, per-channel
-settings included; `read_trigger_config` loads it.
 `time_origin_epoch` and `time_origin_utc` are midnight of the packet clock's
 day. A capture configured through `PulseCaptureConfig` records its times in
 milliseconds (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`,
 `max_pulse_ms`, `noise_train_ms`) beside the sample counts the engine ran
 with (`pre_samples`, `post_samples`, `min_pulse_samples`, `trigger_samples`,
 `baseline_window`, `edge_lookback`, `max_capture_samples`), with
-`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`. With
+`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`
+(the capture's; each pulse carries its channel's), and `trigger_config`,
+the whole `PulseCaptureConfig` as JSON, per-channel settings included,
+which `read_trigger_config` loads. With
 events on it records `coincidence_window_s` and `dump_all_channels`. With
 noise samples on it records `noise_capture_interval_s` and
 `noise_capture_window_s`, the length of a noise sample until five pulse
@@ -493,8 +505,8 @@ result = await crs.trigger_capture(
 )
 ```
 
-A trigger config saved from Periscope, or any earlier capture, supplies the
-config and the channels:
+A one-module trigger config, saved from Periscope or the record dialog, or a
+capture that recorded its config, supplies the config and the channels:
 
 ```python
 from rfmux.pulse_capture import read_trigger_config

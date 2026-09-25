@@ -29,7 +29,6 @@ calibrations come from by default::
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import datetime
 import importlib.util
 import os
@@ -51,8 +50,8 @@ from ...core.session_folder import (is_session, latest_export, load_metadata,
                              register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
-from ...pulse_capture.channel_keys import (describe, keys_by_module,
-                                           pair_keys)
+from ...pulse_capture.channel_keys import (capture_keys, describe,
+                                           keys_by_module, pair_keys)
 from .df_calibration import tuning_rows
 
 PARSER_EXIT_S = 10.0
@@ -104,26 +103,6 @@ def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
     rows = tuning_rows(export.get("bias_kids_output"),
                        export.get("nco_frequency_hz"))
     return sorted(rows), rows
-
-
-def config_selection(setup: Dict[str, Any]
-                     ) -> Optional[Tuple[Optional[List[int]], str]]:
-    """``(modules, spec)`` for the channels a trigger config file names,
-    from :func:`~rfmux.pulse_capture.read_trigger_config`'s *setup*: a
-    per-module spec (``2:1-3,3:5``) for pair keys, a plain one for channel
-    numbers, with the file's module or None.  None when it names none."""
-    channels = setup.get("channels")
-    if not channels:
-        return None
-    if isinstance(channels[0], tuple):
-        by_module: Dict[int, List[int]] = {}
-        for m, c in channels:
-            by_module.setdefault(m, []).append(c)
-        return list(by_module), ",".join(
-            f"{m}:{format_channel_spec(chs)}" for m, chs in by_module.items())
-    module = setup.get("module")
-    return ([module] if module is not None else None,
-            format_channel_spec(channels))
 
 
 def resolve_channels(modules: List[int], spec: Optional[str],
@@ -281,12 +260,7 @@ async def record_streams(
     if not wanted:
         raise ValueError("no channels to record")
     modules = list(wanted)
-    if len(modules) == 1:
-        module = modules[0]
-        channels = list(wanted[module])
-    else:
-        module = None
-        channels = pair_keys(wanted)
+    module, channels = capture_keys(wanted)
     if duration_s <= 0:
         raise ValueError(f"duration must be positive, got {duration_s}")
     if not (capture or parser or fastrx):
@@ -640,7 +614,7 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         "fastrx": result.fastrx_path.name if result.fastrx_path else None,
         "fastrx_stats": result.fastrx_stats,
         "merged_fastrx": result.merged_fastrx,
-        "capture_config": dataclasses.asdict(config),
+        "capture_config": config.to_dict(),
         "warnings": result.warnings,
     })
     save_metadata(result.session, metadata)

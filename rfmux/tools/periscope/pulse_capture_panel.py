@@ -52,7 +52,8 @@ from ...pulse_capture.capture_session import (
     read_trigger_config,
     write_trigger_config,
 )
-from ...pulse_capture.channel_keys import (channel_arg, channel_suffix,
+from ...pulse_capture.channel_keys import (channel_arg, channel_selection,
+                                           channel_suffix,
                                            keys_by_module, short_label,
                                            title_label)
 from ...pulse_capture.events import (
@@ -63,7 +64,7 @@ from ...core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     decimation_to_sampling,
 )
-from ...pulse_capture.detection import ChannelNoiseStats
+from ...pulse_capture.detection import ChannelNoiseStats, channel_sigmas
 from ...pulse_capture.analysis import (
     baseline_level,
     calibration_of,
@@ -487,13 +488,15 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_export.setToolTip(
             "Save the trigger configuration, with the channels, module "
             "and mode, as a trigger config file (HDF5) in the session "
-            "folder")
+            "folder; without a session, in the folder of the output file "
+            "chosen with …, or your home folder")
         self.btn_export.clicked.connect(self._on_export_config)
         h.addWidget(self.btn_export)
         self.btn_load_config = QtWidgets.QPushButton("Load Config…")
         self.btn_load_config.setToolTip(
-            "Take the trigger configuration of a trigger config file or "
-            "of an earlier capture, ready for a new capture")
+            "Take the trigger configuration of a trigger config file, or "
+            "of an earlier capture that recorded its config, ready for a "
+            "new capture")
         self.btn_load_config.clicked.connect(self._on_load_config)
         h.addWidget(self.btn_load_config)
 
@@ -867,6 +870,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  f"±{thr:g}σ trigger"),
                 (end_mean, end, QtCore.Qt.PenStyle.DotLine,
                  f"±{end:g}σ end")):
+            if not np.isfinite(level):   # a channel that does not trigger
+                continue
             # One item per +/- pair, joined by a NaN gap, so one legend
             # entry hides and shows both lines.
             band = centre + level * std
@@ -1404,33 +1409,39 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             "HDF5 files (*.h5 *.hdf5)")
         dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
 
-        def _chosen():
-            files = dlg.selectedFiles()
-            if not files:
-                return
-            try:
-                self.load_trigger_config(files[0])
-            except (OSError, ValueError) as e:
-                QtWidgets.QMessageBox.warning(
-                    self, "Pulse Capture",
-                    f"Could not load a trigger config from {files[0]}:\n{e}")
+        dlg.fileSelected.connect(self._load_config_file)
+        dlg.open()  # non-modal: modal exec() can hang on Linux
 
-        dlg.accepted.connect(_chosen)
-        dlg.open()  # non-modal — modal exec() can hang on Linux
+    def _load_config_file(self, path: str) -> None:
+        """Load Config's file, or why not: on the console and in a
+        dialog, since the user has to choose again."""
+        try:
+            self.load_trigger_config(path)
+        except (OSError, ValueError) as e:
+            message = f"Could not load a trigger config from {path}: {e}"
+            print(f"[PulseCapture] {message}")
+            QtWidgets.QMessageBox.warning(self, "Pulse Capture", message)
 
-    def load_trigger_config(self, path) -> None:
+    def load_trigger_config(self, path: str | Path) -> None:
         """Take the trigger configuration of a trigger config file or a
-        capture file, and the channels, module and mode it records."""
+        capture file that recorded its config, and the channels, module
+        and mode it records.  A config across several modules is
+        refused: the panel captures one."""
         config, setup = read_trigger_config(path)
+        modules, spec = channel_selection(setup.get("channels") or [],
+                                          setup.get("module"))
+        if len(modules) > 1:
+            raise ValueError(
+                f"it captures modules {', '.join(map(str, modules))}; this "
+                "panel captures one module (rfmux record captures several)")
         self.capture_config = config
         self._sync_toolbar_from_config()
         if "streamer_mode" in setup:
             self.mode_combo.setCurrentText(setup["streamer_mode"])
-        if "module" in setup:
-            self.module_spin.setValue(setup["module"])
-        if "channels" in setup:
-            self.channels_edit.setText(
-                ",".join(channel_arg(c) for c in setup["channels"]))
+        if modules:
+            self.module_spin.setValue(modules[0])
+        if setup.get("channels"):
+            self.channels_edit.setText(spec)
         self._set_status(f"● Loaded trigger config from {Path(path).name}",
                          "#3366CC")
 
@@ -1593,7 +1604,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 hdf5_path=path,
                 tuning=self._flat_tuning(),
                 sample_rate=fs,
-                **self.capture_config.session_kwargs(fs),
+                **self.capture_config.for_channels(channels)
+                .session_kwargs(fs),
             )
         self.signals = PulseCaptureSignals()
         self.task = PulseCaptureTask(capture_session, self.signals, mode=mode,
@@ -1834,7 +1846,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                   "existing capture file")
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse):
+                  self.btn_browse, self.btn_load_config):
             w.setEnabled(False)
         self._show_path(path)
         self._set_status(
@@ -1851,7 +1863,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.setEnabled(running)
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse, self.btn_streamer, self.btn_settings):
+                  self.btn_browse, self.btn_streamer, self.btn_settings,
+                  self.btn_load_config):
             w.setEnabled(not running)
         if not running:
             self._set_status("● Idle", "#9A9A9A")
@@ -2915,8 +2928,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if arr is None or channel not in stats:
             return
         ns = stats[channel]
-        thr = float(self.threshold_spin.value())
-        end = float(self.end_spin.value())
+        thr, end = channel_sigmas(
+            self.capture_config.per_channel.get(channel),
+            float(self.threshold_spin.value()), float(self.end_spin.value()))
         # The training record is drawn as stored, so the text and the
         # axes name the stored basis and unit, not the view.
         basis, unit = self._stored_state(channel)
@@ -2930,7 +2944,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"({len(arr)} samples)\n"
             f"{names[0]} = {ns.mean_I:.4g} ± {ns.std_I:.3g} {unit}   "
             f"{names[1]} = {ns.mean_Q:.4g} ± {ns.std_Q:.3g} {unit}\n"
-            f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)")
+            + (f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)"
+               if np.isfinite(thr) else
+               f"bands: ±{end:g}σ end (dotted); recorded without a trigger"))
 
         x = np.arange(len(arr))
         self.pulse_plot_i.clear()
@@ -2946,7 +2962,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             plot.getPlotItem().setLabel("left", f"{name} ({unit})")
             plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
                       name=f"{name} (training)")
-            self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
+            self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888",
+                                       thr=thr, end=end)
         self._render_iq_plane()
 
     def _set_status(self, text: str, color: str) -> None:

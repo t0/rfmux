@@ -17,7 +17,8 @@ made under --session-dir.
 
 --config takes the pulse capture settings, per-channel ones included,
 and the modules and channels from a trigger config file (Export Config
-in Periscope or the record dialog) or an earlier capture file.
+in Periscope or the record dialog) or a capture that recorded its
+config.
 """
 
 import asyncio
@@ -31,7 +32,6 @@ import click
 
 from rfmux.algorithms.measurement.record_streams import (
     MERGED_SUFFIX,
-    config_selection,
     resolve_channels,
     pulse_summary_lines,
     record_streams,
@@ -39,7 +39,7 @@ from rfmux.algorithms.measurement.record_streams import (
 from rfmux.core.session_folder import open_session
 from rfmux.pulse_capture.capture_session import (PulseCaptureConfig,
                                                 read_trigger_config)
-from rfmux.pulse_capture.channel_keys import channel_arg
+from rfmux.pulse_capture.channel_keys import channel_arg, channel_selection
 
 _DEFAULTS = PulseCaptureConfig()
 
@@ -119,11 +119,13 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               type=click.Path(dir_okay=False, exists=True), default=None,
               help="Trigger config file (Export Config in Periscope or the "
                    "record dialog) or an earlier capture file: its pulse "
-                   "capture settings, per-channel ones included, and its "
-                   "modules and channels unless --module or --channels is "
-                   "given.  A capture option typed on the command line "
-                   "overrides the file's value; the defaults shown below "
-                   "apply without --config")
+                   "capture settings, per-channel ones included, its "
+                   "modules unless --module is given, and its channels "
+                   "unless --module or --channels is.  A capture option "
+                   "typed on the command line overrides the file's value; "
+                   "the defaults shown below apply without --config.  The "
+                   "file must have recorded its config: a trigger config "
+                   "file, or a capture made through PulseCaptureConfig")
 @click.option("--threshold-sigma", type=float, default=_DEFAULTS.threshold_sigma, show_default=True)
 @click.option("--end-sigma", type=float, default=_DEFAULTS.end_sigma, show_default=True)
 @click.option("--min-pulse-ms", type=float, default=_DEFAULTS.min_pulse_ms, show_default=True)
@@ -196,10 +198,14 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
             raise click.BadParameter(str(e), param_hint="--config")
         config = dataclasses.replace(loaded, **{
             k: v for k, v in options.items() if k in given})
-        selection = config_selection(setup)
-        if selection and not {"modules", "channels"} & set(given):
-            file_modules, channels = selection
+        # The file's modules unless --module names others, and its
+        # channels unless --module or --channels does.
+        if setup.get("channels") and "modules" not in given:
+            file_modules, spec = channel_selection(setup["channels"],
+                                                   setup.get("module"))
             modules = file_modules or modules
+            if "channels" not in given:
+                channels = spec
     _run(serial=serial, hostname=hostname, modules=list(modules), channels=channels,
          duration=duration, session=session, session_dir=session_dir,
          capture=capture, parser=parser, fastrx=fastrx,

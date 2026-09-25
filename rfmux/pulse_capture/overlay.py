@@ -567,6 +567,11 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                     fast = fast_window(c, window[0], window[1])
                     if fast is not None:
                         pair["fast_tod"] = fast
+                        # The threshold the channel triggered at, for
+                        # its decay constant and template alignment.
+                        if "threshold_sigma" in pulse:
+                            fast = {**fast, "threshold_sigma":
+                                    pulse["threshold_sigma"]}
                         hists.add_pulse(c, fast, noise[c], to_raw=to_raw[c])
                         templates.add_pulse(c, fast, noise[c])
                 writer.append_match(c, pair)

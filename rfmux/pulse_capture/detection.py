@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple
 
 from . import walk as _walk
+from .channel_keys import ChannelKey
 
 _SQRT2 = math.sqrt(2.0)
 
@@ -104,9 +105,15 @@ END_CONFIRM_FRACTION: float = 0.1
 
 
 #: What a per-channel trigger setting may hold.  ``trigger`` False
-#: records the channel without triggering on it; the sigmas replace
-#: the capture's for that channel.
+#: keeps the channel's ring without triggering on it; the sigmas
+#: replace the capture's for that channel.
 CHANNEL_SETTINGS = ("trigger", "threshold_sigma", "end_sigma")
+
+
+def is_record_only(setting: Optional[dict]) -> bool:
+    """Whether a per-channel *setting* takes the channel out of
+    triggering."""
+    return (setting or {}).get("trigger", True) is False
 
 
 def channel_sigmas(setting: Optional[dict], threshold_sigma: float,
@@ -118,7 +125,7 @@ def channel_sigmas(setting: Optional[dict], threshold_sigma: float,
     setting = setting or {}
     thr = setting.get("threshold_sigma")
     end = setting.get("end_sigma")
-    return (math.inf if setting.get("trigger", True) is False
+    return (math.inf if is_record_only(setting)
             else float(threshold_sigma if thr is None else thr),
             float(end_sigma if end is None else end))
 
@@ -364,10 +371,10 @@ class PulseCapture:
         derives it from the ring (~80%, i.e. 1.2x the max pulse the ring
         was sized for), so a capture can never outlive the buffer and
         silently lose its rising edge.  0 disables the stop.
-    per_channel : dict[int, dict], optional
+    per_channel : dict, optional
         ``{channel: {"trigger", "threshold_sigma", "end_sigma"}}``, any
         subset: a channel's own threshold and end band, or
-        ``"trigger": False`` to record it without triggering on it.
+        ``"trigger": False`` to keep its ring without triggering on it.
         Each pulse records the sigmas its channel ran with.
     """
 
@@ -423,7 +430,7 @@ class PulseCapture:
         baseline_window: int = 0,
         edge_lookback: Optional[int] = None,
         max_capture_samples: Optional[int] = None,
-        per_channel: Optional[Dict[int, dict]] = None,
+        per_channel: Optional[Dict[ChannelKey, dict]] = None,
     ):
         self.channels = list(channels)
         self.buf_size = buf_size

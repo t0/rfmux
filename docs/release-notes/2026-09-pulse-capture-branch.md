@@ -70,8 +70,7 @@ simulator files are unchanged in meaning.
 - Periscope Pulse Capture panel: live capture with a pulse list, stacked I/Q
   or df/dissipation plots with the decision marks and bands, histograms,
   trigger-aligned templates, review mode for any capture file, and Export
-  Config and Load Config for trigger config files (the toolbar's CSV export
-  is gone).
+  Config and Load Config for trigger config files.
   A **Tuning** item in the pulse list opens the sweeps the channels were
   tuned with as a multisweep window, live or in review, without touching
   the board.
@@ -229,13 +228,34 @@ Old values are main at the merge base (e46fc41).
   both-mode file names the counts per stream, `pre_samples_slow` and
   `pre_samples_fast`. A merged file has the `_slow` names only, since no
   engine ran on the recording. `noise_capture_window_s` is the length of a
-  noise sample until five records have been saved.
+  noise sample until five records have been saved. `trigger_config` is
+  the whole `PulseCaptureConfig` as JSON (`to_dict`), per-channel settings
+  included; `hdf5.TRIGGER_CONFIG_ATTR` names it.
   `DETECTION_PARAMS` is `SCALAR_PARAMS + RATE_PARAMS`.
+- Per-channel trigger settings: `PulseCaptureConfig.per_channel`,
+  `{channel: {"trigger", "threshold_sigma", "end_sigma"}}`, any subset.
+  `"trigger": False` records the channel with every event and noise sample
+  without triggering on it, and turns events on. The engine takes
+  `per_channel=` (`detection.channel_sigmas`, `is_record_only`), and each
+  pulse records its channel's `threshold_sigma` and `end_sigma`, which its
+  decay constant and template alignment use. `for_channels(channels)`
+  drops the settings for channels not captured; `trigger_capture`, the
+  dual session and Periscope call it.
+- Trigger config files: `write_trigger_config(path, config, channels=,
+  module=, streamer_mode=)` writes one, and `read_trigger_config(path)`
+  returns `(config, setup)` from one or from a capture that recorded its
+  config. `channel_keys.capture_keys` and `channel_selection` convert
+  between a `{module: channels}` selection, the capture's keys and the
+  Modules and Channels spellings. Periscope's Settings dialog has a
+  per-channel table, and its toolbar Export Config (Ctrl+E) and Load
+  Config; the `rfmux record` dialog has the table, Export Config and Load
+  Config; `rfmux record --config FILE` takes a file on the command line.
 - Headless helpers: `rfmux.pulse_capture.events` has `EventGrouper`,
   `group_by_trigger`, `events_of`, `events_from_triggers`,
   `pair_trigger_time`, `event_counts`, `lean_event` and `stamp_utc`;
   `analysis` has `baseline_level` and `project_noise_stats`;
-  `PulseCaptureConfig.from_dict` and `times_ms`; `PulseCapture.MIN_PRE_SAMPLES`.
+  `PulseCaptureConfig.from_dict`, `to_dict`, `for_channels` and
+  `times_ms`; `PulseCapture.MIN_PRE_SAMPLES`.
 - `merge_fastrx` refuses a fast capture: the recording merges into a slow
   capture as its fast stream.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the

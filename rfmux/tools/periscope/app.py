@@ -2947,7 +2947,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             getattr(self, 'pulse_capture_windows', {})).values())
 
     def _load_pulse_capture_from_session(self, file_path: str):
-        """Open a pulse-capture HDF5 file in a review-mode panel."""
+        """Open a pulse-capture HDF5 file in a review-mode panel, or a
+        trigger config file in a panel set up to capture with it."""
         from pathlib import Path
         self.pulse_capture_window_count += 1
         n = self.pulse_capture_window_count

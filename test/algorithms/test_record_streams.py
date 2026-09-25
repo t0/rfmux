@@ -885,6 +885,76 @@ def test_the_event_options_reach_the_capture_config(monkeypatch):
     assert cfg.noise_capture_interval_s == 30.0
 
 
+def _record_with(monkeypatch, args):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    runs = []
+    monkeypatch.setattr(record, "_run", lambda **kw: runs.append(kw))
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", *args])
+    assert result.exit_code == 0, result.output
+    return runs[0]
+
+
+@pytest.mark.parametrize("channels, module, spec, modules", [
+    ([1, 3, 4, 5], 2, "1,3-5", [2]),
+    ([(2, 1), (2, 2), (3, 5)], None, "2:1-2,3:5", [2, 3])])
+def test_a_config_file_sets_the_capture_and_its_channels(
+        tmp_path, monkeypatch, channels, module, spec, modules):
+    from rfmux.pulse_capture import write_trigger_config
+    config = PulseCaptureConfig(threshold_sigma=6.0, per_channel={
+        channels[0]: {"trigger": False}})
+    path = write_trigger_config(tmp_path / "tc.h5", config,
+                                channels=channels, module=module)
+    run = _record_with(monkeypatch, ["--config", str(path)])
+    assert (run["config"], run["channels"], run["modules"]) == \
+        (config, spec, modules)
+
+
+def test_an_option_given_overrides_the_config_file_and_the_rest_stays(
+        tmp_path, monkeypatch):
+    from rfmux.pulse_capture import write_trigger_config
+    config = PulseCaptureConfig(threshold_sigma=6.0, max_pulse_ms=20.0)
+    path = write_trigger_config(tmp_path / "tc.h5", config, channels=[1, 2],
+                                module=1)
+    run = _record_with(monkeypatch, ["--config", str(path), "--end-sigma",
+                                     "1.0"])
+    assert run["config"] == PulseCaptureConfig(
+        threshold_sigma=6.0, max_pulse_ms=20.0, end_sigma=1.0)
+
+
+def _config_file(tmp_path):
+    from rfmux.pulse_capture import write_trigger_config
+    return str(write_trigger_config(tmp_path / "tc.h5", PulseCaptureConfig(),
+                                    channels=[1, 2], module=3))
+
+
+def test_channels_given_with_a_config_file_keep_its_module(
+        tmp_path, monkeypatch):
+    run = _record_with(monkeypatch, ["--config", _config_file(tmp_path),
+                                     "--channels", "5-6"])
+    assert (run["channels"], run["modules"]) == ("5-6", [3])
+
+
+def test_a_module_given_with_a_config_file_drops_its_channels(
+        tmp_path, monkeypatch):
+    run = _record_with(monkeypatch, ["--config", _config_file(tmp_path),
+                                     "--module", "2"])
+    assert (run["channels"], run["modules"]) == (None, [2])
+
+
+def test_a_file_without_a_config_is_refused(tmp_path):
+    import h5py
+    from click.testing import CliRunner
+    from rfmux.tools import record
+    path = tmp_path / "other.h5"
+    h5py.File(path, "w").close()
+    result = CliRunner().invoke(record.cli, [
+        "--serial", "0156", "--duration", "5", "--config", str(path)])
+    assert result.exit_code == 2
+    assert "no trigger configuration" in result.output
+
+
 def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record
@@ -893,6 +963,26 @@ def test_options_without_a_serial_are_refused_not_dropped(monkeypatch):
                         classmethod(lambda cls: {"serial": "0156"}))
     result = CliRunner().invoke(record.cli, ["--module", "2"])
     assert result.exit_code == 2 and "--serial is required" in result.output
+
+
+def test_a_run_across_modules_with_channel_settings_keeps_the_metadata(
+        tmp_path):
+    """(module, channel) keys are recorded as JSON can hold them; the
+    run's record joins what the session already had."""
+    session = core_session.open_session(base=tmp_path)
+    before = load_metadata(session)
+    result = SimpleNamespace(
+        session=session, pulse_path=None, dirfile_path=None,
+        fastrx_path=None, module=None, modules=[2, 3],
+        channels=[(2, 1), (3, 5)], duration_s=1.0, training_s=0.1,
+        started_at=0.0, fastrx_stats=None, merged_fastrx=False, tod_path=None,
+        merged_tod=False, warnings=[])
+    config = PulseCaptureConfig(per_channel={(3, 5): {"trigger": False}})
+    rs._record(result, config)
+    after = load_metadata(session)
+    assert after["created"] == before["created"]
+    assert after["recordings"][-1]["capture_config"]["per_channel"] == \
+        {"3:5": {"trigger": False}}
 
 
 def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):

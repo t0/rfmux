@@ -331,6 +331,7 @@ async def trigger_capture(
         # through session_kwargs, so it must not also be passed
         # alongside.  None here means 'whatever the config says'.
         config = dataclasses.replace(config, trigger_basis=trigger_basis)
+    config = config.for_channels(channels)
 
     host = streamer.resolve_host(crs.tuber_hostname)
     dec = await crs.get_decimation()

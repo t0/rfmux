@@ -8,9 +8,11 @@ as ``module_<M>/channel_<n>`` and ``..._m<M>ch<n>``.
 
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
+
+from ..core.channels import format_channel_spec
 
 ChannelKey = Union[int, Tuple[int, int]]
 
@@ -56,8 +58,10 @@ def channel_arg(key: ChannelKey) -> str:
     return str(key)
 
 
-def parse_key(text: str) -> ChannelKey:
-    """The key ``5`` or ``2:5`` spells."""
+def parse_key(text) -> ChannelKey:
+    """The key ``5`` or ``2:5`` spells; a key passes through."""
+    if isinstance(text, (tuple, list)):
+        return (int(text[0]), int(text[1]))
     module, colon, channel = str(text).partition(":")
     if colon:
         return (int(module), int(channel))
@@ -88,6 +92,31 @@ def pair_keys(wanted: Dict[int, Iterable[int]]) -> List[Tuple[int, int]]:
     """Every channel of ``{module: channels}`` as a (module, channel)
     key, modules in order."""
     return [(int(m), int(c)) for m in sorted(wanted) for c in wanted[m]]
+
+
+def capture_keys(wanted: Dict[int, List[int]]
+                 ) -> Tuple[Optional[int], List[ChannelKey]]:
+    """``(module, keys)`` a capture of ``{module: channels}`` runs
+    with: the module and its channel numbers for one module, None and
+    (module, channel) pairs for several."""
+    if len(wanted) == 1:
+        (module, channels), = wanted.items()
+        return int(module), [int(c) for c in channels]
+    return None, pair_keys(wanted)
+
+
+def channel_selection(keys: List[ChannelKey], module: Optional[int] = None
+                      ) -> Tuple[List[int], str]:
+    """``(modules, spec)`` that select *keys* again: ``[2], "1,3-5"``
+    for channel numbers on *module* (no modules when it is None),
+    ``[2, 3], "2:1-2,3:5"`` for pairs."""
+    if keys and isinstance(keys[0], tuple):
+        by_module = keys_by_module(keys)
+        return list(by_module), ",".join(
+            f"{m}:{format_channel_spec(c for c, _ in chs)}"
+            for m, chs in by_module.items())
+    return ([] if module is None else [int(module)],
+            format_channel_spec(keys))
 
 
 def check_keys(keys: Iterable) -> List[ChannelKey]:

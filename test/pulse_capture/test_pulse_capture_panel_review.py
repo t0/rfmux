@@ -601,13 +601,6 @@ def test_a_both_mode_capture_is_registered_with_the_session(qt_app, tmp_path,
     panel.task = None
 
 
-def test_an_empty_export_goes_to_the_status_line(qt_app, panel, monkeypatch):
-    _no_dialogs(monkeypatch)
-    panel.viewer_tabs.setCurrentIndex(1)
-    panel._on_export()
-    assert "Nothing to export" in panel.status_label.text()
-
-
 def test_relabelling_with_all_never_reads_the_board(qt_app, panel,
                                                     monkeypatch):
     _no_dialogs(monkeypatch)

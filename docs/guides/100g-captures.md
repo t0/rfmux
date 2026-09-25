@@ -115,12 +115,25 @@ The **Run** tab:
 
 The **Pulse capture** tab holds the capture settings: threshold and end
 sigma, the pulse length limits, the noise-training span and the trigger
-basis. They validate as you type.
+basis. They validate as you type. A table below them lists the channels the
+Run tab resolves to, one row each: uncheck **Trigger** to record a channel
+without triggering on it, or give it its own **Threshold σ** and **End σ**
+(see [Per-channel settings](pulse-capture.md#per-channel-settings)).
+**Export Config…** saves all of it, with the modules and channels, as a
+trigger config file (`pulse_trigger_config_<HHMMSS>.h5` unless you name it). One
+saved into a session folder is listed in its exports, and Periscope's Session
+Browser lists it with the capture files. Export before the channels resolve
+and the file holds none; the status line says so. **Load Config…** takes all
+of it back from a trigger config file, exported here or from Periscope, or
+from a capture that recorded its config, and sets **Modules** and
+**Channels** to the ones it names and **Units** to its trigger basis. A
+file it cannot read is reported in a dialog and on the console.
 
 ## 3. Recording from the command line
 
-Every choice of the dialog is an option; `rfmux record --help` lists them
-with their defaults. `--serial` and `--duration` are required. One module,
+Every choice of the dialog is an option, except the per-channel table,
+which reaches the command line through `--config`; `rfmux record --help`
+lists them with their defaults. `--serial` and `--duration` are required. One module,
 into an existing session, channels from its newest bias export:
 
 ```bash
@@ -157,8 +170,25 @@ out; `--merge-tod` copies the time-ordered data into the pulse file.
 `--parser-interface` names the parser's interface when the board's address
 does not find it; `--fastrx-interface` names the 100G NIC when several fastrxd
 run. The capture settings are `--threshold-sigma`, `--end-sigma`,
-`--min-pulse-ms`, `--max-pulse-ms`, `--noise-train-ms` and
-`--trigger-basis`.
+`--min-pulse-ms`, `--max-pulse-ms`, `--pre-pulse-ms`, `--post-pulse-ms`,
+`--coincidence-window-ms`, `--dump-all-channels`,
+`--noise-capture-interval-s`, `--noise-train-ms` and `--trigger-basis`.
+
+A saved trigger config supplies all of them, per-channel settings included,
+and the modules and channels:
+
+```bash
+rfmux record --serial <NNNN> --duration 20 \
+    --session ~/data/session_20260909_153654 \
+    --config ~/data/session_20260909_153654/pulse_trigger_config_142501.h5
+```
+
+`--config` takes a file from **Export Config** in Periscope or in the
+dialog, or a capture that recorded its config (one made in Periscope, with
+`trigger_capture` or with `rfmux record`). A capture option typed beside it
+overrides that one value (`--end-sigma 1.0`). `--channels` replaces the
+file's channels on its modules; `--module` replaces its modules, and its
+channels then come from `--channels` or the bias export.
 
 ## 4. What a run does
 
@@ -193,8 +223,8 @@ The products, sharing one time stamp, named `module2` for one module and
   channel's `tuning` beside them. It reads with h5py alone. Its layout is in the pulse
   capture guide's file layout section.
 
-All four are listed in the session's metadata, so Periscope's session
-browser shows them.
+All four are listed in the session's metadata, and Periscope's session
+browser shows them with the other files in the folder.
 
 After the run the command lists the channels that triggered with their
 pulse counts. It merges the recording into the pulse file as its fast

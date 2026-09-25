@@ -19,7 +19,6 @@ and draws.
 from __future__ import annotations
 
 import asyncio
-import csv
 import datetime
 import time
 from pathlib import Path
@@ -51,19 +50,23 @@ from ...algorithms.measurement.channel_selection import (
 from ...pulse_capture.capture_session import (
     PulseCaptureConfig,
     PulseCaptureSession,
+    read_trigger_config,
+    write_trigger_config,
 )
-from ...pulse_capture.channel_keys import (channel_arg, channel_suffix,
+from ...pulse_capture.channel_keys import (channel_arg, channel_selection,
+                                           channel_suffix,
                                            keys_by_module, short_label,
                                            title_label)
 from ...pulse_capture.events import (
     event_counts, events_from_triggers, pair_trigger_time)
-from ...pulse_capture.hdf5 import PulseHDF5Reader
+from ...pulse_capture.hdf5 import TRIGGER_CONFIG_ATTR, PulseHDF5Reader
+from ...core.session_folder import export_filename
 from ...core.transferfunctions import (
     apply_iq_conversion,
     PFB_SAMPLING_FREQ,
     decimation_to_sampling,
 )
-from ...pulse_capture.detection import ChannelNoiseStats
+from ...pulse_capture.detection import ChannelNoiseStats, channel_sigmas
 from ...pulse_capture.analysis import (
     baseline_level,
     calibration_of,
@@ -369,7 +372,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         add(QtCore.Qt.Key.Key_Space, self._cycle_tab)
         add(QtCore.Qt.Key.Key_Home, lambda: self._navigate_end(first=True))
         add(QtCore.Qt.Key.Key_End, lambda: self._navigate_end(first=False))
-        add("Ctrl+E", self._on_export)
+        add("Ctrl+E", self._on_export_config)
 
     def _cycle_tab(self) -> None:
         count = self.viewer_tabs.count()
@@ -499,11 +502,21 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_browse.clicked.connect(self._on_browse)
         h.addWidget(self.btn_browse)
 
-        self.btn_export = QtWidgets.QPushButton("Export…")
+        self.btn_export = QtWidgets.QPushButton("Export Config")
         self.btn_export.setToolTip(
-            "Export the current pulse/pair, histograms or template to CSV")
-        self.btn_export.clicked.connect(self._on_export)
+            "Save the trigger configuration, with the channels, module "
+            "and mode, as a trigger config file (HDF5) in the session "
+            "folder; without a session, in the folder of the output file "
+            "chosen with …, or your home folder")
+        self.btn_export.clicked.connect(self._on_export_config)
         h.addWidget(self.btn_export)
+        self.btn_load_config = QtWidgets.QPushButton("Load Config…")
+        self.btn_load_config.setToolTip(
+            "Take the trigger configuration of a trigger config file, or "
+            "of an earlier capture that recorded its config, ready for a "
+            "new capture")
+        self.btn_load_config.clicked.connect(self._on_load_config)
+        h.addWidget(self.btn_load_config)
 
         screenshot_btn = QtWidgets.QPushButton("📷")
         screenshot_btn.setToolTip("Export a screenshot of this panel")
@@ -883,6 +896,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                  f"±{thr:g}σ trigger"),
                 (end_mean, end, QtCore.Qt.PenStyle.DotLine,
                  f"±{end:g}σ end")):
+            if not np.isfinite(level):   # a channel that does not trigger
+                continue
             # One item per +/- pair, joined by a NaN gap, so one legend
             # entry hides and shows both lines.
             band = centre + level * std
@@ -1389,29 +1404,17 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             return Path(self._browse_dir)
         return Path.home()
 
-    def _on_export(self) -> None:
-        """Export what the active tab is showing, as CSV."""
-        tab = self.viewer_tabs.tabText(self.viewer_tabs.currentIndex())
-        stamp = datetime.datetime.now().strftime("%H%M%S")
+    def _on_export_config(self) -> None:
+        """Write the trigger configuration to a trigger config file."""
+        self._sync_config_from_toolbar()
+        path = self._export_dir() / export_filename(
+            "pulse", "trigger_config", ".h5")
         try:
-            if tab == "Histograms":
-                rows, name = self._export_histogram_rows(stamp)
-            elif tab == "Template":
-                rows, name = self._export_template_rows(stamp)
-            else:   # the pulse's samples, which the IQ plane draws too
-                rows, name = self._export_waveform_rows(stamp)
-        except Exception as e:
-            QtWidgets.QMessageBox.warning(
-                self, "Pulse Capture", f"Nothing to export:\n{e}")
-            return
-        if not rows:
-            self._set_status("● Nothing to export from this tab", "#9A9A9A")
-            return
-
-        path = self._export_dir() / name
-        try:
-            with open(path, "w", newline="") as fh:
-                csv.writer(fh).writerows(rows)
+            write_trigger_config(
+                path, self.capture_config,
+                channels=self._parse_channels(quiet=True),
+                module=int(self.module_spin.value()),
+                streamer_mode=self.mode_combo.currentText())
         except OSError as e:
             QtWidgets.QMessageBox.warning(
                 self, "Pulse Capture", f"Could not write {path}:\n{e}")
@@ -1420,87 +1423,53 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 getattr(self.session_manager, "is_active", False):
             try:
                 self.session_manager.register_external_file(
-                    str(path), "pulse", "export")
+                    str(path), "pulse", "trigger_config")
             except Exception:
                 pass
-        print(f"[PulseCapture] Exported {path}")
+        print(f"[PulseCapture] Exported trigger config {path}")
         self._set_status(f"● Exported {path.name}", "#3366CC")
 
-    def _export_waveform_rows(self, stamp):
-        """Current pulse (or pair) waveform(s), one column set per stream."""
-        if self._both_mode and self._current_pair is not None:
-            ch, idx = self._current_pair
-            pair = self._get_pair(ch, idx) or {}
-            meta = self._pair_meta.get((ch, idx), {})
-            slow = pair.get("slow_tod") or (
-                self._get_waveform(ch, meta.get("slow_idx"), "slow")
-                if meta.get("slow_idx") else None)
-            fast = pair.get("fast_tod") or (
-                self._get_waveform(ch, meta.get("fast_idx"), "fast")
-                if meta.get("fast_idx") else None)
-            rows = [["stream", "time_s", "Amp_I", "Amp_Q"]]
-            for label, wf in (("slow", slow), ("fast", fast)):
-                if not wf:
-                    continue
-                for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
-                    rows.append([label, float(t), float(i), float(q)])
-            return rows, f"pulse_pair_{channel_suffix(ch)}_{idx:04d}_{stamp}.csv"
+    def _on_load_config(self) -> None:
+        dlg = QtWidgets.QFileDialog(
+            self, "Load trigger config", str(self._export_dir()),
+            "HDF5 files (*.h5 *.hdf5)")
+        dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
 
-        if self._current_view is None:
-            return [], ""
-        ch, idx = self._current_view
-        wf = self._get_waveform(ch, idx)
-        if not wf:
-            return [], ""
-        rows = [["time_s", "Amp_I", "Amp_Q"]]
-        for t, i, q in zip(wf["Time"], wf["Amp_I"], wf["Amp_Q"]):
-            rows.append([float(t), float(i), float(q)])
-        return rows, f"pulse_{channel_suffix(ch)}_{idx:06d}_{stamp}.csv"
+        dlg.fileSelected.connect(self._load_config_file)
+        dlg.open()  # non-modal: modal exec() can hang on Linux
 
-    def _export_histogram_rows(self, stamp):
-        data = self._hist_data
-        if not data:
-            return [], ""
-        rows = [["metric", "channel", "bin_left", "bin_right", "count"]]
-        for metric, _title, _x in _HIST_METRICS:
-            edges = data.get(f"{metric}_edges")
-            if edges is None:
-                continue
-            edges = np.asarray(edges, dtype=np.float64)
-            for ch in sorted(self._counts):
-                counts = data.get(f"{metric}_counts_{channel_suffix(ch)}")
-                if counts is None:
-                    continue
-                for k, n in enumerate(np.asarray(counts)):
-                    rows.append([metric, ch, float(edges[k]),
-                                 float(edges[k + 1]), int(n)])
-        return rows, f"pulse_histograms_{stamp}.csv"
+    def _load_config_file(self, path: str) -> None:
+        """Load Config's file, or why not: on the console and in a
+        dialog, since the user has to choose again."""
+        try:
+            self.load_trigger_config(path)
+        except (OSError, ValueError) as e:
+            message = f"Could not load a trigger config from {path}: {e}"
+            print(f"[PulseCapture] {message}")
+            QtWidgets.QMessageBox.warning(self, "Pulse Capture", message)
 
-    def _export_template_rows(self, stamp):
-        data = self._template_data
-        if not data:
-            return [], ""
-        rows = [["channel", "time_s", "template_I", "template_Q",
-                 "residual_I", "residual_Q", "n_stacked"]]
-        for ch in sorted(self._counts):
-            t = data.get(f"time_s_{channel_suffix(ch)}")
-            if t is None:
-                continue
-            ti = data.get(f"template_I_{channel_suffix(ch)}")
-            tq = data.get(f"template_Q_{channel_suffix(ch)}")
-            ri = data.get(f"residual_I_{channel_suffix(ch)}")
-            rq = data.get(f"residual_Q_{channel_suffix(ch)}")
-            counts = data.get(f"counts_{channel_suffix(ch)}")
-            for k in range(len(t)):
-                rows.append([
-                    ch, float(t[k]),
-                    float(ti[k]) if ti is not None else "",
-                    float(tq[k]) if tq is not None else "",
-                    float(ri[k]) if ri is not None else "",
-                    float(rq[k]) if rq is not None else "",
-                    int(counts[k]) if counts is not None else "",
-                ])
-        return rows, f"pulse_template_{stamp}.csv"
+    def load_trigger_config(self, path: str | Path) -> None:
+        """Take the trigger configuration of a trigger config file or a
+        capture file that recorded its config, and the channels, module
+        and mode it records.  A config across several modules is
+        refused: the panel captures one."""
+        config, setup = read_trigger_config(path)
+        modules, spec = channel_selection(setup.get("channels") or [],
+                                          setup.get("module"))
+        if len(modules) > 1:
+            raise ValueError(
+                f"it captures modules {', '.join(map(str, modules))}; this "
+                "panel captures one module (rfmux record captures several)")
+        self.capture_config = config
+        self._sync_toolbar_from_config()
+        if "streamer_mode" in setup:
+            self.mode_combo.setCurrentText(setup["streamer_mode"])
+        if modules:
+            self.module_spin.setValue(modules[0])
+        if setup.get("channels"):
+            self.channels_edit.setText(spec)
+        self._set_status(f"● Loaded trigger config from {Path(path).name}",
+                         "#3366CC")
 
     def _on_capture_settings(self) -> None:
         self._sync_config_from_toolbar()
@@ -1511,7 +1480,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             config=self.capture_config,
             sample_rate=self._current_sample_rate(mode),
             mode=mode,
-            n_channels=len(channels),
+            channels=channels,
             df_available=any(self._channel_cal(ch) is not None
                              for ch in channels),
         )
@@ -1661,7 +1630,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 hdf5_path=path,
                 tuning=self._flat_tuning(),
                 sample_rate=fs,
-                **self.capture_config.session_kwargs(fs),
+                **self.capture_config.for_channels(channels)
+                .session_kwargs(fs),
             )
         self.signals = PulseCaptureSignals()
         self.task = PulseCaptureTask(capture_session, self.signals, mode=mode,
@@ -1768,10 +1738,23 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     # ── Review mode (existing HDF5 file, no live capture) ─────────
 
     def load_from_hdf5(self, path) -> None:
-        """Open an existing pulse-capture HDF5 for browsing."""
+        """Open an existing pulse-capture HDF5 for browsing, or take a
+        trigger config file's settings for a new capture."""
         self.reader = PulseHDF5Reader(path)
         self._set_tod_file()
         meta = self.reader.metadata
+        if TRIGGER_CONFIG_ATTR in meta and "capture_start" not in meta:
+            # A trigger config file: a capture writes capture_start, and
+            # a time-ordered data file holds no config.
+            self.reader.close()
+            self.reader = None
+            self.load_trigger_config(path)
+            return
+        try:
+            # The config the capture ran with, for the next one.
+            self.capture_config, _ = read_trigger_config(path)
+        except ValueError:
+            pass
         channels = list(self.reader.channels)
 
         # Restore capture parameters so bands/labels reflect the file
@@ -1905,7 +1888,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                                   "existing capture file")
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse):
+                  self.btn_browse, self.btn_load_config):
             w.setEnabled(False)
         self._show_path(path)
         self._set_status(
@@ -1922,7 +1905,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self.btn_reestimate.setEnabled(running)
         for w in (self.mode_combo, self.channels_edit, self.module_spin,
                   self.threshold_spin, self.end_spin, self.pileup_check,
-                  self.btn_browse, self.btn_streamer, self.btn_settings):
+                  self.btn_browse, self.btn_streamer, self.btn_settings,
+                  self.btn_load_config):
             w.setEnabled(not running)
         if not running:
             self._set_status("● Idle", "#9A9A9A")
@@ -3041,8 +3025,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if arr is None or channel not in stats:
             return
         ns = stats[channel]
-        thr = float(self.threshold_spin.value())
-        end = float(self.end_spin.value())
+        thr, end = channel_sigmas(
+            self.capture_config.per_channel.get(channel),
+            float(self.threshold_spin.value()), float(self.end_spin.value()))
         # The training record is drawn as stored, so the text and the
         # axes name the stored basis and unit, not the view.
         basis, unit = self._stored_state(channel)
@@ -3056,7 +3041,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             f"({len(arr)} samples)\n"
             f"{names[0]} = {ns.mean_I:.4g} ± {ns.std_I:.3g} {unit}   "
             f"{names[1]} = {ns.mean_Q:.4g} ± {ns.std_Q:.3g} {unit}\n"
-            f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)")
+            + (f"bands: ±{thr:g}σ trigger (dashed), ±{end:g}σ end (dotted)"
+               if np.isfinite(thr) else
+               f"bands: ±{end:g}σ end (dotted); recorded without a trigger"))
 
         x = np.arange(len(arr))
         self.pulse_plot_i.clear()
@@ -3072,7 +3059,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             set_axis_label(plot, "left", f"{name} ({unit})")
             plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
                       name=f"{name} (training)")
-            self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
+            self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888",
+                                       thr=thr, end=end)
         self._render_iq_plane()
 
     def _set_status(self, text: str, color: str) -> None:

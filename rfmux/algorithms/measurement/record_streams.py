@@ -31,7 +31,6 @@ calibrations come from by default::
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import datetime
 import importlib.util
 import os
@@ -53,8 +52,8 @@ from ...core.session_folder import (is_session, latest_export, load_metadata,
                              register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
-from ...pulse_capture.channel_keys import (describe, keys_by_module,
-                                           pair_keys)
+from ...pulse_capture.channel_keys import (capture_keys, describe,
+                                           keys_by_module, pair_keys)
 from ...pulse_capture.hdf5 import PulseHDF5Reader
 from .tod import merge_tod, tod_bytes_per_s, write_tod
 from .df_calibration import tuning_rows
@@ -288,12 +287,7 @@ async def record_streams(
     if not wanted:
         raise ValueError("no channels to record")
     modules = list(wanted)
-    if len(modules) == 1:
-        module = modules[0]
-        channels = list(wanted[module])
-    else:
-        module = None
-        channels = pair_keys(wanted)
+    module, channels = capture_keys(wanted)
     if duration_s <= 0:
         raise ValueError(f"duration must be positive, got {duration_s}")
     if not (capture or parser or fastrx):
@@ -694,7 +688,7 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         "merged_fastrx": result.merged_fastrx,
         "tod": result.tod_path.name if result.tod_path else None,
         "merged_tod": result.merged_tod,
-        "capture_config": dataclasses.asdict(config),
+        "capture_config": config.to_dict(),
         "warnings": result.warnings,
     })
     save_metadata(result.session, metadata)

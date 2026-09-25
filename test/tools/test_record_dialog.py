@@ -324,3 +324,114 @@ def test_a_config_saved_with_a_retired_field_keeps_the_rest(
     cfg = rd.RecordDialog(settings=settings).get_options()["config"]
     assert cfg.threshold_sigma == 6.5
     assert cfg.pre_pulse_ms == rd.PulseCaptureConfig().pre_pulse_ms
+
+
+def test_the_capture_table_follows_the_channels_and_keeps_its_settings(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.modules_edit.setText("2")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-3")
+    form = dlg.capture_form
+    assert form.channels == [1, 2, 3]
+    form.channel_table.item(1, 1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.channels_edit.setText("2:1-3,3:1")
+    assert dlg.capture_form.channels == [(2, 1), (2, 2), (2, 3), (3, 1)]
+    dlg.channels_edit.setText("1-3")
+    assert dlg.get_options()["config"].per_channel == {2: {"trigger": False}}
+
+
+def test_a_loaded_trigger_config_sets_the_capture_and_its_channels(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import write_trigger_config
+    config = rd.PulseCaptureConfig(threshold_sigma=6.0, per_channel={
+        3: {"trigger": False}, 5: {"end_sigma": 1.0}})
+    path = write_trigger_config(tmp_path / "trigger_config.h5", config,
+                                channels=[1, 3, 4, 5], module=2)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.load_trigger_config(path)
+    assert (dlg.modules_edit.text(), dlg.rb_ranges.isChecked(),
+            dlg.channels_edit.text()) == ("2", True, "1,3-5")
+    assert dlg.capture_form.channels == [1, 3, 4, 5]
+    assert dlg.get_options()["config"] == config
+
+
+def _ranges(dlg, modules, channels):
+    dlg.modules_edit.setText(modules)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText(channels)
+
+
+@pytest.mark.parametrize("modules, channels", [
+    ("2", "1-4"), ("2,3", "2:1-2,3:5")])
+def test_an_exported_config_loads_back_into_a_fresh_dialog(
+        qt_app, tmp_path, monkeypatch, modules, channels):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, modules, channels)
+    dlg.capture_form.threshold_spin.setValue(6.5)
+    dlg.capture_form.channel_table.item(0, 1).setCheckState(
+        QtCore.Qt.CheckState.Unchecked)
+    config = dlg.get_options()["config"]
+    path = dlg.export_trigger_config(tmp_path / "trigger_config.h5")
+
+    fresh, _ = _dialog(tmp_path / "other", monkeypatch)
+    fresh.load_trigger_config(path)
+    assert fresh.get_options()["config"] == config
+    assert (fresh.modules_edit.text(), fresh.capture_form.channels) == \
+        (modules, dlg.capture_form.channels)
+
+
+def test_an_export_into_a_session_is_listed_in_its_exports(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.core.session_folder import exports, open_session
+    session = open_session(None, tmp_path)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "1-4")
+    dlg.export_trigger_config(session / "trigger_config.h5")
+    assert [e["filename"] for e in exports(session, "pulse")] == \
+        ["trigger_config.h5"]
+
+
+def test_an_export_of_one_module_names_it(qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import read_trigger_config
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "1-4")
+    path = dlg.export_trigger_config(tmp_path / "tc.h5")
+    assert read_trigger_config(path)[1]["module"] == 2
+
+
+def test_an_export_before_the_channels_resolve_says_it_has_none(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import read_trigger_config
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "")
+    path = dlg.export_trigger_config(tmp_path / "tc.h5")
+    assert "channels" not in read_trigger_config(path)[1]
+    assert "without channels" in dlg.status_label.text()
+
+
+def test_a_failed_load_is_shown_and_printed(qt_app, tmp_path, monkeypatch,
+                                            capsys):
+    from PyQt6 import QtWidgets
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *a: shown.append(a[2]))
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg._load_config_file(str(tmp_path / "missing.h5"))
+    assert len(shown) == 1 and "Could not load" in shown[0]
+    assert "Could not load" in capsys.readouterr().out
+
+
+def test_a_loaded_config_sets_the_units_and_stays_bound_to_them(
+        qt_app, tmp_path, monkeypatch):
+    """The Units choice and the trigger basis are one setting, before a
+    load and after it."""
+    from rfmux.pulse_capture import write_trigger_config
+    path = write_trigger_config(tmp_path / "tc.h5",
+                                rd.PulseCaptureConfig(trigger_basis="iq"))
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.capture_form.basis_combo.setCurrentIndex(1)          # df
+    dlg.load_trigger_config(path)
+    assert dlg.units_combo.currentIndex() == 0               # iq
+    dlg.units_combo.setCurrentIndex(1)
+    assert dlg.get_options()["config"].trigger_basis == "df"

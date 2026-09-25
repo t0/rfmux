@@ -323,6 +323,15 @@ def test_review_mode(qt_app, tmp_path):
     panel.close()
 
 
+def test_a_trigger_config_file_without_channels_is_a_pulse_file(
+        qt_app, tmp_path):
+    from rfmux.pulse_capture import PulseCaptureConfig, write_trigger_config
+    from rfmux.tools.periscope.session_manager import SessionManager
+    config = write_trigger_config(tmp_path / "trigger_config.h5",
+                                  PulseCaptureConfig())
+    assert SessionManager().identify_file_type(str(config)) == "pulse"
+
+
 def test_identify_and_register(qt_app, tmp_path):
     from rfmux.tools.periscope.session_manager import SessionManager
 
@@ -692,41 +701,130 @@ def test_review_mode_reads_calibration_from_the_file(qt_app, tmp_path):
     panel.close()
 
 
-def test_csv_exports(qt_app, tmp_path):
-    """Each viewer tab exports its own CSV."""
-    import csv as _csv
+def test_an_exported_config_loads_into_a_fresh_panel(qt_app, tmp_path):
+    """Export Config writes the trigger configuration, channels, module
+    and mode; loading that file sets them all, ready to capture."""
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._browse_dir = str(tmp_path)
+    panel.capture_config = PulseCaptureConfig(
+        max_pulse_ms=20.0, per_channel={3: {"trigger": False}})
+    panel.threshold_spin.setValue(6.5)
+    panel.channels_edit.setText("1,3")
+    panel.module_spin.setValue(2)
+    panel.mode_combo.setCurrentText("fast")
+    panel._on_export_config()
+    (path,) = tmp_path.glob("pulse_trigger_config_*.h5")
+    panel.close()
 
-    path = _build_capture_file(tmp_path)
+    fresh = PulseCapturePanel(dark_mode=False)
+    fresh.load_from_hdf5(path)
+    assert fresh.capture_config == PulseCaptureConfig(
+        threshold_sigma=6.5, max_pulse_ms=20.0,
+        per_channel={3: {"trigger": False}})
+    assert fresh.threshold_spin.value() == 6.5
+    assert (fresh.channels_edit.text(), fresh.module_spin.value(),
+            fresh.mode_combo.currentText()) == ("1,3", 2, "fast")
+    assert fresh.reader is None
+    fresh.close()
+
+
+def test_the_settings_table_sets_each_channels_trigger(qt_app):
+    from PyQt6 import QtCore
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    from rfmux.tools.periscope.pulse_capture_settings_dialog import (
+        PulseCaptureSettingsForm)
+    form = PulseCaptureSettingsForm(config=PulseCaptureConfig(
+        per_channel={2: {"end_sigma": 1.0}, 9: {"trigger": False}}),
+        channels=[1, 2])
+    table = form.channel_table
+    table.item(0, 1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    table.item(1, 2).setText("7")
+    assert form.get_config().per_channel == {
+        1: {"trigger": False},
+        2: {"threshold_sigma": 7.0, "end_sigma": 1.0},
+        9: {"trigger": False}}
+    form.close()
+
+
+def _form(**kw):
+    from rfmux.pulse_capture.capture_session import PulseCaptureConfig
+    from rfmux.tools.periscope.pulse_capture_settings_dialog import (
+        PulseCaptureSettingsForm)
+    return PulseCaptureSettingsForm(
+        config=PulseCaptureConfig(**kw), channels=[1, 2])
+
+
+def test_a_cell_that_is_not_a_number_invalidates_the_settings(qt_app):
+    form = _form()
+    form.channel_table.item(1, 3).setText("x")
+    assert not form.valid
+    form.close()
+
+
+def test_settings_kept_for_channels_not_captured_are_named(qt_app):
+    form = _form(per_channel={9: {"trigger": False}})
+    assert "kept for channels not captured (9)" in form.status_label.text()
+    assert form.valid
+    form.close()
+
+
+# ── Load Config ───────────────────────────────────────────────────
+
+def test_a_config_across_modules_is_refused_and_the_panel_kept(
+        qt_app, tmp_path):
+    from rfmux.pulse_capture import PulseCaptureConfig, write_trigger_config
+    path = write_trigger_config(tmp_path / "tc.h5", PulseCaptureConfig(
+        threshold_sigma=7.0), channels=[(2, 1), (3, 5)])
+    panel = PulseCapturePanel(dark_mode=False)
+    before = panel.capture_config
+    with pytest.raises(ValueError, match="captures one module"):
+        panel.load_trigger_config(path)
+    assert panel.capture_config == before
+    panel.close()
+
+
+def test_a_failed_load_is_shown_and_printed(qt_app, tmp_path, monkeypatch,
+                                            capsys):
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *a: shown.append(a[2]))
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._load_config_file(str(tmp_path / "missing.h5"))
+    assert len(shown) == 1 and "Could not load" in shown[0]
+    assert "Could not load" in capsys.readouterr().out
+    panel.close()
+
+
+def test_load_config_is_off_while_capturing(qt_app):
+    panel = PulseCapturePanel(dark_mode=False)
+    panel._set_run_state(True)
+    assert not panel.btn_load_config.isEnabled()
+    panel._set_run_state(False)
+    assert panel.btn_load_config.isEnabled()
+    panel.close()
+
+
+def test_a_reviewed_capture_brings_its_config(qt_app, tmp_path):
+    from test.pulse_capture.test_trigger_config import _capture
+    _, _, path = _capture(tmp_path, per_channel={2: {"trigger": False}})
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
-    panel._browse_dir = str(tmp_path)
+    assert panel.capture_config.per_channel == {2: {"trigger": False}}
+    assert not panel.btn_load_config.isEnabled()
+    panel.close()
 
-    # Pulse View tab
-    panel.viewer_tabs.setCurrentIndex(0)
-    panel._show_pulse(*panel._pulse_order[-1])
-    panel._on_export()
-    # Histograms tab
-    panel.viewer_tabs.setCurrentIndex(2)
-    assert panel.viewer_tabs.tabText(2) == "Histograms"
-    panel._on_export()
-    # Template tab (needs template data from the file)
-    panel._template_data = panel.reader.get_templates()
-    panel.viewer_tabs.setCurrentIndex(3)
-    assert panel.viewer_tabs.tabText(3) == "Template"
-    panel._on_export()
 
-    written = sorted(p.name for p in tmp_path.glob("*.csv"))
-    assert any(n.startswith("pulse_ch") for n in written), written
-    assert any(n.startswith("pulse_histograms") for n in written), written
-    assert any(n.startswith("pulse_template") for n in written), written
-
-    hist_csv = next(tmp_path.glob("pulse_histograms_*.csv"))
-    with open(hist_csv) as fh:
-        rows = list(_csv.reader(fh))
-    assert rows[0] == ["metric", "channel", "bin_left", "bin_right",
-                       "count"]
-    assert len(rows) > 10
-
+def test_the_noise_view_draws_a_channels_own_bands(qt_app, tmp_path):
+    from test.pulse_capture.test_trigger_config import _capture
+    _, _, path = _capture(tmp_path, per_channel={
+        2: {"trigger": False}, 3: {"threshold_sigma": 8.0}})
+    panel = PulseCapturePanel(dark_mode=False)
+    panel.load_from_hdf5(path)
+    panel._show_noise_segment(channel=2)
+    assert "recorded without a trigger" in panel.pulse_info.text()
+    panel._show_noise_segment(channel=3)
+    assert "±8σ trigger" in panel.pulse_info.text()
     panel.close()
 
 

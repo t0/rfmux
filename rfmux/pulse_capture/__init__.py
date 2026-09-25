@@ -73,6 +73,8 @@ from .capture_session import (
     IncrementalPulseMatcher,
     PulseCaptureConfig,
     PulseCaptureSession,
+    read_trigger_config,
+    write_trigger_config,
 )
 from .sources import (
     SlowIngest,
@@ -114,6 +116,8 @@ __all__ = [
     "IncrementalPulseMatcher",
     "PulseCaptureConfig",
     "PulseCaptureSession",
+    "read_trigger_config",
+    "write_trigger_config",
     # sources
     "SlowIngest",
     "columns_for_width",

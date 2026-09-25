@@ -120,8 +120,10 @@ class Recording:
         #: recording has none near its start, in which case there is no
         #: time axis to index by.
         self.t_first = None
-        t, _ = self._second_from(0)
+        t, j = self._second_from(0)
         self.t_first = None if t != t else float(t)
+        #: Record index of that stamp; None without one.
+        self.first_index = None if t != t else j
 
     @property
     def num_packets(self) -> int:

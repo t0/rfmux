@@ -13,7 +13,8 @@ from typing import List, Optional
 from PyQt6 import QtCore, QtWidgets
 
 from ..algorithms.measurement.record_streams import (
-    fastrx_bytes_per_s, interface_speeds, resolve_channels)
+    fastrx_bytes_per_s, interface_operstate, interface_speeds,
+    resolve_channels)
 from ..algorithms.measurement.tod import tod_bytes_per_s
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
@@ -37,21 +38,13 @@ _FAST_MBPS = 100_000
 _LOOPBACK = "lo"
 
 
-def _operstate(name: str):
-    """``up``, ``down`` or ``unknown`` from sysfs; None off Linux."""
-    try:
-        return Path("/sys/class/net", name, "operstate").read_text().strip()
-    except OSError:
-        return None
-
-
 def _label(name: str, speed) -> str:
     if name == _LOOPBACK:
         return f"{name} (loopback: a mock on this host)"
     if speed is None:
         # No negotiated rate: the link is down, or the driver (wifi,
         # for one) does not report a rate.
-        return (f"{name} (down)" if _operstate(name) == "down"
+        return (f"{name} (down)" if interface_operstate(name) == "down"
                 else f"{name} (no rate reported)")
     return (f"{name} ({speed / 1000:g} Gb/s)" if speed >= 1000
             else f"{name} ({speed} Mb/s)")
@@ -433,11 +426,12 @@ class RecordDialog(QtWidgets.QDialog):
         self.merge_tod_check.setEnabled(tod and self.capture_check.isChecked())
         merge = self.merge_tod_check.isEnabled() and \
             self.merge_tod_check.isChecked()
+        # Bytes the fast stream's TOD takes for this run.
+        tod_size = self.duration_spin.value() * tod_bytes_per_s(
+            sum(len(c) for c in chans.values())) if chans else 0.0
         if merge and chans:
             if self.fastrx_check.isChecked():
-                size = self.duration_spin.value() * tod_bytes_per_s(
-                    sum(len(c) for c in chans.values()))
-                grows = f"about {size / 1e9:.1f} GB for this run"
+                grows = f"about {tod_size / 1e9:.1f} GB for this run"
             else:
                 grows = "the slow stream alone, a few MB"
             self.merge_tod_note.setText(
@@ -483,8 +477,7 @@ class RecordDialog(QtWidgets.QDialog):
                 need = self.duration_spin.value() * fastrx_bytes_per_s(
                     fx, max(c for chs in chans.values() for c in chs))
                 if tod:
-                    need += self.duration_spin.value() * tod_bytes_per_s(
-                        sum(len(c) for c in chans.values()))
+                    need += tod_size
                 if self._disk[0] != folder or self.sender() is self.recheck_btn:
                     self._disk = (folder, shutil.disk_usage(folder).free)
                 free = self._disk[1]

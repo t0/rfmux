@@ -44,10 +44,9 @@ class TodViewer(QtWidgets.QWidget):
         self.curves = {}
         self.origin, self.span = 0.0, 1.0
         #: key -> (factor, (first axis name, second)) taking the stored
-        #: samples to the view Periscope's units choice asks for, or None
-        #: to draw them as stored; the panel sets it.
+        #: samples to the view Periscope's units choice asks for; the
+        #: panel sets it, and the samples are drawn as stored without.
         self.view_for = None
-        self._stored_names = ("I", "Q")
         self._setup_ui()
         self.apply_theme(dark_mode)
 
@@ -177,9 +176,6 @@ class TodViewer(QtWidgets.QWidget):
                         if f"tod/{s}/{group}" in self.f]
         for s, check in self.stream_checks.items():
             check.setEnabled(s in self.streams)
-        units = {str(self.f[f"tod/{s}/{group}"].attrs.get("stored_units", ""))
-                 for s in self.streams}
-        units = units.pop() if len(units) == 1 else ""
         extents = [tod_extent(self.f, s, key) for s in self.streams]
         firsts = [e[0] for e in extents if np.isfinite(e[0])]
         lasts = [e[1] for e in extents if np.isfinite(e[1])]
@@ -187,9 +183,6 @@ class TodViewer(QtWidgets.QWidget):
         self.origin = min(firsts) if firsts else 0.0
         self.span = (max(lasts) - self.origin) if lasts else 1.0
 
-        names = ("df", "dissipation") if units == "Hz" else ("I", "Q")
-        suffix = f" ({units})" if units else ""
-        self._stored_names = tuple(n + suffix for n in names)
         self._set_labels()
         epoch = self.f["metadata"].attrs.get("time_origin_epoch") \
             if "metadata" in self.f else None
@@ -212,9 +205,7 @@ class TodViewer(QtWidgets.QWidget):
             self.reset_view()
             return
         # The time window stays; the levels are the new channel's.
-        for plot in self.plots:
-            plot.getPlotItem().enableAutoRange(axis="y")
-            plot.getPlotItem().setAutoVisible(y=True)
+        self._follow_levels()
         self.plots[0].setXRange(window[0] - self.origin,
                                 window[1] - self.origin, padding=0)
         self._refresh()
@@ -222,10 +213,16 @@ class TodViewer(QtWidgets.QWidget):
     # ── Drawing ───────────────────────────────────────────────────
 
     def _view(self):
-        """(factor, axis names) for the channel drawn: the panel's view
-        when it can be produced, else the stored samples as they are."""
-        view = self.view_for(self.key) if self.view_for else None
-        return view if view is not None else (1, self._stored_names)
+        """(factor, axis names) for the channel drawn: the panel's, or
+        the stored samples under their own names without a panel."""
+        return (self.view_for(self.key) if self.view_for
+                else (1, ("I", "Q")))
+
+    def _follow_levels(self) -> None:
+        """The vertical axes follow the data in view again."""
+        for plot in self.plots:
+            plot.getPlotItem().enableAutoRange(axis="y")
+            plot.getPlotItem().setAutoVisible(y=True)
 
     def _set_labels(self) -> None:
         for plot, name in zip(self.plots, self._view()[1]):
@@ -237,17 +234,13 @@ class TodViewer(QtWidgets.QWidget):
         if self.key is None:
             return
         self._set_labels()
-        for plot in self.plots:
-            plot.getPlotItem().enableAutoRange(axis="y")
-            plot.getPlotItem().setAutoVisible(y=True)
+        self._follow_levels()
         self._refresh()
 
     def reset_view(self) -> None:
         if self.key is None:
             return
-        for plot in self.plots:
-            plot.getPlotItem().enableAutoRange(axis="y")
-            plot.getPlotItem().setAutoVisible(y=True)
+        self._follow_levels()
         self.plots[0].setXRange(0.0, self.span, padding=0.01)
         self._refresh()
 

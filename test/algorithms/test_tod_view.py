@@ -186,27 +186,6 @@ def test_a_view_factor_converts_samples_exactly_and_bounds_the_overview(tod):
         assert conv.imag[inside].min() >= wide["q_min"][k] * (1 + 1e-6) - 1e-9
 
 
-def test_a_file_without_an_overview_still_views(tod, tmp_path):
-    """A TOD written before overviews existed reads the samples
-    instead: slower for a wide window, the same answer."""
-    import shutil
-    path, iq, seconds = tod
-    old = tmp_path / "old.h5"
-    shutil.copy(path, old)
-    with h5py.File(old, "a") as f:
-        del f["tod/fast/time_overview"]
-        for c in (1, 2, 3):
-            del f[f"tod/fast/channel_{c}/overview"]
-        del f["tod/fast"].attrs["overview_samples"]
-    with h5py.File(old, "r") as f, h5py.File(path, "r") as g:
-        assert tod_extent(f, "fast", 2) == tod_extent(g, "fast", 2)
-        wide = tod_window(f, "fast", 2, seconds[0], seconds[-1], bins=100)
-        assert wide["source"] == "samples"
-        assert wide["i_max"].max() == pytest.approx(
-            iq[:, 1, 0].max() * VOLTS_PER_ROC, rel=1e-6)
-        assert index_at(f, "fast", 2, seconds[7000]) == 7000
-
-
 def test_the_slow_stream_has_its_overview_too(tmp_path):
     from test.pulse_capture.test_overlay import CHANNEL, _dirfile
     path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,

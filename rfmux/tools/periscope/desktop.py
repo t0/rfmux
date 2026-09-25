@@ -22,10 +22,10 @@ import shutil
 import struct
 import subprocess
 import sys
-import sysconfig
 from pathlib import Path
 from typing import List
 
+from ..cli import periscope_command
 from .utils import ICON_PATH
 
 APP_ID = "rfmux-periscope"
@@ -40,13 +40,8 @@ ICO_SIZES = (16, 32, 48, 256)
 
 
 def launcher() -> List[str]:
-    """The command that starts Periscope from this environment: its
-    ``periscope`` script, or the interpreter running rfmux's command."""
-    scripts = Path(sysconfig.get_path("scripts"))
-    exe = scripts / ("periscope.exe" if os.name == "nt" else "periscope")
-    if exe.exists():
-        return [str(exe)]
-    return [sys.executable, "-m", "rfmux.tools.cli", "periscope"]
+    """The command that starts Periscope from this environment."""
+    return periscope_command()
 
 
 def install(default: bool = False, desktop_icon: bool = False) -> List[str]:

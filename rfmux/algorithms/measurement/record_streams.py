@@ -55,7 +55,8 @@ from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
 from ...pulse_capture.channel_keys import (describe, keys_by_module,
                                            pair_keys)
-from .tod import tod_bytes_per_s
+from ...pulse_capture.hdf5 import PulseHDF5Reader
+from .tod import merge_tod, tod_bytes_per_s, write_tod
 from .df_calibration import tuning_rows
 
 PARSER_EXIT_S = 10.0
@@ -83,6 +84,15 @@ def interface_speeds() -> dict:
             speed = None
         speeds[name] = speed if speed and speed > 0 else None
     return speeds
+
+
+def interface_operstate(name: str) -> Optional[str]:
+    """``up``, ``down`` or ``unknown`` for an interface, as the kernel
+    reports it; None where there is no such report (off Linux)."""
+    try:
+        return Path("/sys/class/net", name, "operstate").read_text().strip()
+    except OSError:
+        return None
 
 
 #: The parser as a child: it says so on stderr once imported, which is
@@ -441,11 +451,10 @@ async def record_streams(
                          and t.exception() is None for t in tasks):
             if merge_fastrx:
                 await asyncio.to_thread(_merge_recording, result)
-            if tod and (result.dirfile_path or result.fastrx_path):
-                say("[record] repacking the time-ordered data")
+            if tod:
                 await asyncio.to_thread(
                     _write_tod, result, name("tod", ".h5"), tuning,
-                    trigger_basis or config.trigger_basis, merge_tod)
+                    trigger_basis or config.trigger_basis, merge_tod, say)
         _record(result, config)
     # The one that failed first raised; the other was cancelled to end
     # the run, and its cancellation is not the error.
@@ -594,46 +603,41 @@ def _merge_recording(result: RecordResult) -> None:
             f"fastrx not merged into {result.pulse_path.name}: {e}")
 
 
-def _tod(result: RecordResult, path: Path, tuning, trigger_basis: str) -> Path:
-    """The run's time-ordered data at *path*, its clock's day taken from
-    the pulse file when there is one."""
-    from ...pulse_capture.hdf5 import PulseHDF5Reader
-    from .tod import write_tod
-    origin = None
-    if result.pulse_path and result.pulse_path.exists():
-        with PulseHDF5Reader(result.pulse_path) as reader:
-            origin = reader.metadata.get("time_origin_epoch")
-    return write_tod(
-        path, result.channels, result.module,
-        fastrx=result.fastrx_path if result.fastrx_path
-        and result.fastrx_path.exists() else None,
-        dirfile=result.dirfile_path if result.dirfile_path
-        and result.dirfile_path.exists() else None,
-        tuning=tuning, trigger_basis=trigger_basis, time_origin_epoch=origin)
+def _existing(path: Optional[Path]) -> Optional[Path]:
+    return path if path is not None and path.exists() else None
 
 
 def _write_tod(result: RecordResult, path: Path, tuning, trigger_basis: str,
-               merge: bool) -> None:
-    """The dirfile and the recording into one time-ordered data file,
-    and that into the pulse file when *merge*; a failure is a warning,
-    the run itself having succeeded."""
-    if not ((result.dirfile_path and result.dirfile_path.exists())
-            or (result.fastrx_path and result.fastrx_path.exists())):
+               merge: bool, say=print) -> None:
+    """The dirfile and the recording into one time-ordered data file at
+    *path*, its clock's day taken from the pulse file when there is one,
+    and that file into the pulse file when *merge*; a failure is a
+    warning, the run itself having succeeded."""
+    fastrx, dirfile = _existing(result.fastrx_path), _existing(result.dirfile_path)
+    if fastrx is None and dirfile is None:
         return
+    pulse = _existing(result.pulse_path)
+    origin = None
+    if pulse is not None:
+        with PulseHDF5Reader(pulse) as reader:
+            origin = reader.metadata.get("time_origin_epoch")
+    say("[record] repacking the time-ordered data")
     try:
-        result.tod_path = _tod(result, path, tuning, trigger_basis)
+        result.tod_path = write_tod(
+            path, result.channels, result.module, fastrx=fastrx,
+            dirfile=dirfile, tuning=tuning, trigger_basis=trigger_basis,
+            time_origin_epoch=origin)
     except Exception as e:
         result.warnings.append(f"time-ordered data not written: {e}")
         return
-    if not (merge and result.pulse_path and result.pulse_path.exists()):
+    if not (merge and pulse is not None):
         return
     try:
-        from .tod import merge_tod
-        merge_tod(result.pulse_path, result.tod_path)
+        merge_tod(pulse, result.tod_path)
         result.merged_tod = True
     except Exception as e:
         result.warnings.append(
-            f"time-ordered data not merged into {result.pulse_path.name}: {e}")
+            f"time-ordered data not merged into {pulse.name}: {e}")
 
 
 def pulse_summary_lines(capture) -> List[str]:

@@ -17,7 +17,7 @@ def _dialog(tmp_path, monkeypatch, running=()):
     monkeypatch.setattr(rd, "interface_speeds",
                         lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
                                  "wlan0": None, "enp1s0f0": None})
-    monkeypatch.setattr(rd, "_operstate",
+    monkeypatch.setattr(rd, "interface_operstate",
                         {"wlan0": "up", "enp1s0f0": "down"}.get)
     monkeypatch.setattr(rd, "running_mock", lambda: None)
     fake = SimpleNamespace(running_interfaces=lambda: list(running),

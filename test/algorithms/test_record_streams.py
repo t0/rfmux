@@ -82,12 +82,12 @@ def fake_recorders(monkeypatch):
     # The parser is faked, so its pygetdata requirement is too.
     monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
 
-    def tod(result, path, tuning, trigger_basis):
-        log["tod"] = (tuning, trigger_basis)
+    def write_tod(path, channels, module, **kw):
+        log["tod"] = kw
         path.touch()
         return path
     # The products are fakes, so their repacking is too: an empty file.
-    monkeypatch.setattr(rs, "_tod", tod)
+    monkeypatch.setattr(rs, "write_tod", write_tod)
     return log
 
 
@@ -371,7 +371,8 @@ def test_the_time_ordered_data_is_written_from_the_run_and_its_tuning(
         tuning=tuning, trigger_basis="iq", verbose=False))
     assert result.tod_path.name.startswith("tod_module2_")
     assert result.tod_path.suffix == ".h5" and result.tod_path.exists()
-    assert fake_recorders["tod"] == (tuning, "iq")
+    assert fake_recorders["tod"]["tuning"] == tuning
+    assert fake_recorders["tod"]["trigger_basis"] == "iq"
     assert result.warnings == [] and not result.merged_tod
 
 
@@ -400,66 +401,100 @@ def test_the_disk_estimate_includes_the_time_ordered_data(
         assert any("GB free" in w for w in result.warnings) is warned
 
 
-def _tod_result(tmp_path, pulse=True):
-    paths = {}
-    for name, key in (("pulse.h5", "pulse_path"), ("run.fastrx", "fastrx_path")):
-        (tmp_path / name).touch()
-        paths[key] = tmp_path / name
-    (tmp_path / "run.dirfile" / "serial_0042").mkdir(parents=True, exist_ok=True)
-    paths["dirfile_path"] = tmp_path / "run.dirfile" / "serial_0042"
-    if not pulse:
-        del paths["pulse_path"]
+def _tod_result(tmp_path, recording=True, day=None):
+    """A run's products: a pulse file (with the clock's day when given),
+    a dirfile and, with *recording*, a fastrx recording."""
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    pulse = tmp_path / "pulse.h5"
+    w = PulseHDF5Writer(pulse, [1], {}, {})
+    if day is not None:
+        w.set_time_origin(day)
+    w.finalize()
+    dirfile = tmp_path / "run.dirfile" / "serial_0042"
+    dirfile.mkdir(parents=True, exist_ok=True)
+    paths = {"pulse_path": pulse, "dirfile_path": dirfile}
+    if recording:
+        (tmp_path / "run.fastrx").touch()
+        paths["fastrx_path"] = tmp_path / "run.fastrx"
     return _result(tmp_path, **paths)
 
 
-def test_write_tod_repacks_both_products_and_merges_when_asked(
-        tmp_path, monkeypatch):
-    from rfmux.algorithms.measurement import tod as tod_module
-    calls = []
-    monkeypatch.setattr(rs, "_tod", lambda r, p, t, b: calls.append(
-        ("write", p, r.fastrx_path, r.dirfile_path, t, b)) or p)
-    monkeypatch.setattr(tod_module, "merge_tod",
-                        lambda p, t: calls.append(("merge", p, t)))
+@pytest.fixture
+def repack(monkeypatch):
+    """write_tod and merge_tod replaced; their calls, by name."""
+    calls = {}
+
+    def write_tod(path, channels, module, **kw):
+        calls["write"] = kw
+        return path
+    monkeypatch.setattr(rs, "write_tod", write_tod)
+    monkeypatch.setattr(rs, "merge_tod",
+                        lambda pulse, tod: calls.setdefault("merge", (pulse, tod)))
+    return calls
+
+
+def test_the_tod_is_repacked_from_the_products_the_run_left(tmp_path, repack):
+    result = _tod_result(tmp_path, recording=False)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert repack["write"]["dirfile"] == result.dirfile_path
+    assert repack["write"]["fastrx"] is None
+    assert result.tod_path == tmp_path / "tod.h5"
+
+
+def test_the_tod_takes_the_clock_day_from_the_pulse_file(tmp_path, repack):
+    result = _tod_result(tmp_path, day=1.7e9)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert repack["write"]["time_origin_epoch"] == 1.7e9
+
+
+def test_the_tod_is_merged_into_the_pulse_file_only_when_asked(tmp_path,
+                                                              repack):
     result = _tod_result(tmp_path)
-    out = tmp_path / "tod.h5"
-    rs._write_tod(result, out, {1: {}}, "df", merge=False)
-    assert calls == [("write", out, result.fastrx_path, result.dirfile_path,
-                      {1: {}}, "df")]
-    assert result.tod_path == out and not result.merged_tod
-    rs._write_tod(result, out, None, "df", merge=True)
-    assert calls[-1] == ("merge", result.pulse_path, out) and result.merged_tod
-    assert result.warnings == []
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert "merge" not in repack and not result.merged_tod
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
+    assert repack["merge"] == (result.pulse_path, tmp_path / "tod.h5")
+    assert result.merged_tod
 
 
-def test_a_failed_repack_or_merge_is_a_warning(tmp_path, monkeypatch):
-    from rfmux.algorithms.measurement import tod as tod_module
+def _boom(*a, **k):
+    raise ValueError("no disciplined timestamp")
 
-    def boom(*a):
-        raise ValueError("no disciplined timestamp")
-    monkeypatch.setattr(rs, "_tod", boom)
+
+def test_a_failed_repack_is_a_warning(tmp_path, repack, monkeypatch):
+    monkeypatch.setattr(rs, "write_tod", _boom)
     result = _tod_result(tmp_path)
-    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
     assert result.tod_path is None and not result.merged_tod
     assert result.warnings == [
         "time-ordered data not written: no disciplined timestamp"]
 
-    monkeypatch.setattr(rs, "_tod", lambda r, p, t, b: p)
-    monkeypatch.setattr(tod_module, "merge_tod", boom)
+
+def test_a_failed_merge_is_a_warning_and_keeps_the_tod(tmp_path, repack,
+                                                       monkeypatch):
+    monkeypatch.setattr(rs, "merge_tod", _boom)
     result = _tod_result(tmp_path)
-    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
     assert result.tod_path == tmp_path / "tod.h5" and not result.merged_tod
     assert result.warnings == [
         "time-ordered data not merged into pulse.h5: no disciplined timestamp"]
 
 
 def test_nothing_is_repacked_without_a_dirfile_or_recording(tmp_path,
-                                                            monkeypatch):
-    monkeypatch.setattr(rs, "_tod", lambda *a: pytest.fail("repacked"))
+                                                            repack):
     pulse = tmp_path / "pulse.h5"
     pulse.touch()
     result = _result(tmp_path, pulse_path=pulse)
-    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
     assert result.tod_path is None and result.warnings == []
+    assert repack == {}
 
 
 def test_pulse_summary_lines_name_the_busiest_channel_first():
@@ -673,7 +708,7 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
     assert capsys.readouterr().out == ""
     record._show(result, "periscope")
     assert capsys.readouterr().out == (
-        "[record] no display; to review: rfmux periscope "
+        "[record] no display; to review: periscope "
         f"--review {tmp_path / 'pulse.h5'}\n")
     record._show(result, "overlay")
     assert capsys.readouterr().out == (
@@ -690,13 +725,28 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
 
 
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
-    import sys
+    from rfmux.tools.cli import periscope_command
     from rfmux.tools.record import periscope_review_command
-    # Through the tools entry point: -m on the periscope package runs
-    # its __main__ twice (the package imports it) and runpy says so.
-    assert periscope_review_command(tmp_path / "pulse.h5") == [
-        sys.executable, "-m", "rfmux.tools.cli", "periscope", "--review",
-        str(tmp_path / "pulse.h5")]
+    cmd = periscope_review_command(tmp_path / "pulse.h5")
+    assert cmd == [*periscope_command(), "--review", str(tmp_path / "pulse.h5")]
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_periscope_starts_from_this_environment(tmp_path, monkeypatch,
+                                                installed):
+    """Its script by full path, which works with the environment
+    inactive; else rfmux's command.  Never -m on the periscope package,
+    which imports its own __main__ and so runs it twice."""
+    import os
+    import sys
+    from rfmux.tools import cli
+    script = tmp_path / ("periscope.exe" if os.name == "nt" else "periscope")
+    if installed:
+        script.touch()
+    monkeypatch.setattr(cli.sysconfig, "get_path", lambda name: str(tmp_path))
+    assert cli.periscope_command() == ([str(script)] if installed else
+                                       [sys.executable, "-m",
+                                        "rfmux.tools.cli", "periscope"])
 
 
 def test_mock_and_its_serial_resolve_to_the_running_mock_server(monkeypatch):

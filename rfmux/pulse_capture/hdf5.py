@@ -160,6 +160,13 @@ def write_metadata(f: h5py.File, channels: List[ChannelKey],
             check_keys(params["fast_channels"]), dtype=np.int64)
 
 
+def write_time_origin(meta, day_epoch: float) -> None:
+    """The calendar day a file's seconds-of-day count from, on its
+    ``metadata`` group: seconds since 1970 and the UTC time."""
+    meta.attrs["time_origin_epoch"] = float(day_epoch)
+    meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+
+
 # ───────────────────────── Shared writer plumbing ───────────────────
 
 class _PulseFileWriter:
@@ -348,8 +355,7 @@ class _PulseFileWriter:
         meta = self.f["metadata"]
         if "time_origin_epoch" in meta.attrs:
             return
-        meta.attrs["time_origin_epoch"] = float(day_epoch)
-        meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+        write_time_origin(meta, day_epoch)
         self.f.flush()
 
     @property
@@ -786,6 +792,14 @@ class PulseHDF5Reader:
                        "samples": sum(int(sgrp[g].shape[0]) for g in
                                       _time_datasets(sgrp))}
         return info
+
+    @property
+    def tod_channels(self) -> List[ChannelKey]:
+        """The channels any stream of the time-ordered data holds, in
+        the file's channel order."""
+        groups = [self.f[f"tod/{s}"] for s in self.tod_streams]
+        return [c for c in self.channels
+                if any(channel_group(c) in g for g in groups)]
 
     def tuning(self, channel: int, stream: Optional[str] = None) -> dict:
         """The tuning row *channel* was captured with, as the writer was

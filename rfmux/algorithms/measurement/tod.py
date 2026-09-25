@@ -50,13 +50,15 @@ import numpy as np
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ, VOLTS_PER_ROC,
                                       decimated_stream_delay_s,
                                       decimation_to_sampling)
-from ...streamer import TIMESTAMP_RECENT, day_epoch, epoch_to_utc
+from ...streamer import day_epoch
 from ...pulse_capture.analysis import calibration_of, storage_transform
 from ...pulse_capture.channel_keys import (ChannelKey, channel_group,
                                            check_keys, describe,
-                                           keys_by_module, keys_from_attr)
-from ...pulse_capture.hdf5 import _store_tuning, _store_units, write_metadata
-from ...pulse_capture.overlay import _PROBE, Recording, dirfile_stage
+                                           keys_by_module, keys_from_attr,
+                                           split_key)
+from ...pulse_capture.hdf5 import (_store_tuning, _store_units,
+                                   write_metadata, write_time_origin)
+from ...pulse_capture.overlay import Recording, dirfile_stage
 
 #: Records converted and written at a time.
 BLOCK = 1 << 16
@@ -118,7 +120,7 @@ def write_tod(out, channels: Iterable[ChannelKey], module: Optional[int] = None,
         rec = Recording(fastrx)
         params["sample_rate_fast"] = PFB_SAMPLING_FREQ
         params["fast_channels"] = [c for c in keys
-                                   if _number(c) <= rec.channels]
+                                   if split_key(c)[1] <= rec.channels]
         if time_origin_epoch is None:
             time_origin_epoch = _recording_day_epoch(rec)
     df = None
@@ -136,8 +138,7 @@ def write_tod(out, channels: Iterable[ChannelKey], module: Optional[int] = None,
         with h5py.File(tmp, "w") as f:
             write_metadata(f, keys, params)
             if time_origin_epoch is not None:
-                f["metadata"].attrs["time_origin_epoch"] = float(time_origin_epoch)
-                f["metadata"].attrs["time_origin_utc"] = epoch_to_utc(time_origin_epoch)
+                write_time_origin(f["metadata"], time_origin_epoch)
             if df is not None:
                 sgrp = f.create_group("tod/slow")
                 sgrp.attrs["overview_samples"] = overview
@@ -158,18 +159,12 @@ def write_tod(out, channels: Iterable[ChannelKey], module: Optional[int] = None,
     return out
 
 
-def _number(key: ChannelKey) -> int:
-    return key[1] if isinstance(key, tuple) else int(key)
-
-
 def _recording_day_epoch(rec: Recording) -> Optional[float]:
     """Midnight of the packet clock's day, from the recording's first
     disciplined stamp; None without one near the start."""
-    ts = rec.file.ts()[:_PROBE]
-    ok = np.flatnonzero(ts["c"] & TIMESTAMP_RECENT)
-    if not ok.size:
+    if rec.first_index is None:
         return None
-    first = ts[ok[0]]
+    first = rec.file.ts()[rec.first_index]
     return day_epoch(int(first["y"]), int(first["d"]))
 
 
@@ -416,17 +411,14 @@ def index_at(f: h5py.File, stream: str, key: ChannelKey, t: float,
     sgrp, tgrp, _ = _groups(f, stream, key)
     t_ds = tgrp["time"]
     n = t_ds.shape[0]
-    size = int(sgrp.attrs.get("overview_samples", 0))
-    if "time_overview" in tgrp and size:
-        # Each bin's first stamp, a NaN bin taking the next bin's: the
-        # stamp its first sample is placed with.  The sample sought
-        # then lies in the bin before the first at or after t.
-        # ponytail: the column is read whole per lookup, 8 bytes per
-        # 4096 samples (100 kB for 20 s); bisect it on disk if hour-long
-        # runs make refreshes slow.
-        first = _backfill(tgrp["time_overview"][:, 0])
-    else:
-        size, first = max(n, 1), np.empty(0)
+    size = int(sgrp.attrs["overview_samples"])
+    # Each bin's first stamp, a NaN bin taking the next bin's: the stamp
+    # its first sample is placed with.  The sample sought then lies in
+    # the bin before the first at or after t.
+    # ponytail: the column is read whole per lookup, 8 bytes per 4096
+    # samples (100 kB for 20 s); bisect it on disk if hour-long runs make
+    # refreshes slow.
+    first = _backfill(tgrp["time_overview"][:, 0])
     k = int(np.searchsorted(first, t, side=side))
     if k == 0 and len(first):
         return 0
@@ -440,11 +432,8 @@ def tod_extent(f: h5py.File, stream: str, key: ChannelKey):
     """(first, last) finite stamp of *key*'s stream, from its time
     overview; (NaN, NaN) for an empty stream."""
     _, tgrp, _ = _groups(f, stream, key)
-    if "time_overview" in tgrp:
-        ov = tgrp["time_overview"][()]
-        first, last = ov[:, 0], ov[:, 1]
-    else:                                  # a file written without one
-        first = last = tgrp["time"][()]
+    ov = tgrp["time_overview"][()]
+    first, last = ov[:, 0], ov[:, 1]
     first, last = first[np.isfinite(first)], last[np.isfinite(last)]
     return ((float(first[0]), float(last[-1])) if first.size
             else (np.nan, np.nan))
@@ -508,26 +497,21 @@ def tod_window(f: h5py.File, stream: str, key: ChannelKey, t0: float,
         i, q = _convert(cgrp["I"][a:b], cgrp["Q"][a:b], factor)
         return {"kind": "raw", "samples": n, "time": t_ds[a:b],
                 "I": i, "Q": q}
-    size = int(sgrp.attrs.get("overview_samples", 0))
-    if size and "overview" in cgrp and n >= size * bins:
+    size = int(sgrp.attrs["overview_samples"])
+    if n >= size * bins:
         ka, kb = a // size, -(-b // size)
         ov = cgrp["overview"][ka:kb].astype(np.float64)
         tov = tgrp["time_overview"][ka:kb]
         view = _reduce(tov[:, 0], tov[:, 1], *ov.T, bins)
+        # I' = c I - s Q and Q' = s I + c Q, each term bounded: exact
+        # for a pure scale (s = 0), bounds for a rotation.
         c, s = complex(factor).real, complex(factor).imag
-        if s == 0:
-            view["i_min"], view["i_max"] = _bounds(view["i_min"],
-                                                   view["i_max"], c)
-            view["q_min"], view["q_max"] = _bounds(view["q_min"],
-                                                   view["q_max"], c)
-        else:
-            # I' = c I - s Q and Q' = s I + c Q, each term bounded.
-            ci = _bounds(view["i_min"], view["i_max"], c)
-            si = _bounds(view["i_min"], view["i_max"], s)
-            cq = _bounds(view["q_min"], view["q_max"], c)
-            sq = _bounds(view["q_min"], view["q_max"], -s)
-            view["i_min"], view["i_max"] = ci[0] + sq[0], ci[1] + sq[1]
-            view["q_min"], view["q_max"] = si[0] + cq[0], si[1] + cq[1]
+        ci = _bounds(view["i_min"], view["i_max"], c)
+        si = _bounds(view["i_min"], view["i_max"], s)
+        cq = _bounds(view["q_min"], view["q_max"], c)
+        sq = _bounds(view["q_min"], view["q_max"], -s)
+        view["i_min"], view["i_max"] = ci[0] + sq[0], ci[1] + sq[1]
+        view["q_min"], view["q_max"] = si[0] + cq[0], si[1] + cq[1]
         return {"kind": "envelope", "source": "overview", "samples": n,
                 "bounds": s != 0, **view}
     t = t_ds[a:b]

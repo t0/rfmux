@@ -2963,10 +2963,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
 
     def _tod_view_for(self, channel):
         """The Channel TOD View's conversion for *channel*: the factor
-        and axis names the pulse view draws it with, or None to draw
-        the stored samples."""
+        and axis names the pulse view draws it with, the stored samples
+        as they are when the view cannot be produced."""
         view = self._view_coeffs(channel)
-        return None if view is None else (view[0], self._axis_names(channel))
+        return (1 if view is None else view[0]), self._axis_names(channel)
 
     def _any_channel_calibrated(self) -> bool:
         """Whether any displayed channel has a df calibration.
@@ -3115,13 +3115,10 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         double-click draws that channel over the run."""
         if self.reader is None or not self.reader.tod_streams:
             return
-        info = self.reader.tod_info()
         item = QtWidgets.QTreeWidgetItem(
-            [f"≋ Time-ordered data ({', '.join(info)})", "", ""])
-        held = {c for s in info.values() for c in s["channels"]}
-        for c in self.reader.channels:
-            if c not in held:
-                continue
+            [f"≋ Time-ordered data ({', '.join(self.reader.tod_info())})",
+             "", ""])
+        for c in self.reader.tod_channels:
             child = QtWidgets.QTreeWidgetItem([title_label(c), "", ""])
             child.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("tod", c))
             child.setToolTip(0, "Double-click: this channel over the run")
@@ -3136,10 +3133,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             self.tod_view.close_file()
             self.viewer_tabs.setTabVisible(index, False)
             return
-        held = {c for s in self.reader.tod_info().values()
-                for c in s["channels"]}
-        self.tod_view.set_file(self.reader.path,
-                               [c for c in self.reader.channels if c in held])
+        self.tod_view.set_file(self.reader.path, self.reader.tod_channels)
         self.viewer_tabs.setTabVisible(index, True)
 
     def _tod_follow_selection(self, _index=None) -> None:

@@ -297,12 +297,9 @@ def _run(*, serial, hostname, modules, channels, duration, session,
 
 
 def periscope_review_command(pulse_path) -> list:
-    """Periscope in review mode on *pulse_path*, offline, in its session:
-    ``rfmux periscope --review``, through the tools entry point (the
-    periscope package imports its own ``__main__``, which ``-m`` on the
-    package runs twice)."""
-    return [sys.executable, "-m", "rfmux.tools.cli", "periscope",
-            "--review", str(pulse_path)]
+    """Periscope in review mode on *pulse_path*, offline, in its session."""
+    from rfmux.tools.cli import periscope_command
+    return [*periscope_command(), "--review", str(pulse_path)]
 
 
 def _show(result, how: str) -> None:
@@ -316,8 +313,8 @@ def _show(result, how: str) -> None:
     if how == "periscope":
         cmd = periscope_review_command(result.pulse_path)
         if headless:
-            click.echo("[record] no display; to review: rfmux "
-                       + " ".join(cmd[3:]))
+            click.echo("[record] no display; to review: periscope "
+                       f"--review {result.pulse_path}")
             return
         subprocess.Popen(cmd, start_new_session=True)
         return

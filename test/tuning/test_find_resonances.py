@@ -11,7 +11,6 @@ from rfmux.tuning import (
     find_resonances,
     find_resonances_in_netanal,
     find_sweeps_with_nearby_resonances,
-    netanal_trace,
 )
 from rfmux.tuning.sweep_results import pack_netanal
 
@@ -507,7 +506,7 @@ def test_wrapper_unpacks_one_modules_netanal():
 
 def test_wrapper_matches_calling_the_search_directly():
     module_netanal = a_module_netanal()
-    trace = netanal_trace(module_netanal)
+    trace = module_netanal["results"]
     direct = find_resonances(trace["frequencies"], trace["iq_counts"])
 
     assert np.array_equal(
@@ -533,7 +532,7 @@ def test_a_downward_search_carries_the_grid_it_searched():
     """candidate.index indexes search.frequencies_hz, which is ascending — not
     the descending array sitting beside it in the netanal."""
     module_netanal = a_module_netanal(sweep_direction="downward")
-    measured = netanal_trace(module_netanal)["frequencies"]
+    measured = module_netanal["results"]["frequencies"]
 
     found = find_resonances_in_netanal(module_netanal)
 
@@ -588,13 +587,13 @@ def test_wrapper_refuses_a_sweep():
     )
 
     with pytest.raises(TypeError, match="not a netanal"):
-        netanal_trace(module_netanal)
+        find_resonances_in_netanal(module_netanal)
 
 
 def test_wrapper_refuses_an_output_that_does_not_say_what_it_is():
     """Silence is not permission: {name: section} sits where the trace would."""
     with pytest.raises(TypeError, match="not a netanal"):
-        netanal_trace(a_multisweep({"R0001": a_section()}))
+        find_resonances_in_netanal(a_multisweep({"R0001": a_section()}))
 
 
 # ─── the search left in the netanal ───────────────────────────────────────────
@@ -603,7 +602,7 @@ def test_wrapper_refuses_an_output_that_does_not_say_what_it_is():
 def stored_search(module_netanal) -> ResonanceSearch:
     """The search out of a netanal: an index and a from_dict, as a caller does it."""
     return ResonanceSearch.from_dict(
-        netanal_trace(module_netanal)["resonance_search"]
+        module_netanal["results"]["resonance_search"]
     )
 
 
@@ -611,7 +610,7 @@ def test_the_search_goes_into_the_netanal_beside_the_trace():
     module_netanal = a_module_netanal()
     found = find_resonances_in_netanal(module_netanal, save=False)
 
-    trace = netanal_trace(module_netanal)
+    trace = module_netanal["results"]
     # As builtins and ndarrays, the way everything else in a file is: this goes
     # into a pickle, and a pickled class records its own import path.
     assert isinstance(trace["resonance_search"], dict)
@@ -630,7 +629,7 @@ def test_a_search_lands_only_in_the_module_that_was_searched():
     found = find_resonances_in_netanal(netanal["crs0000_rmod1"], save=False)
 
     assert stored_search(netanal["crs0000_rmod1"]).candidates == found.candidates
-    assert "resonance_search" not in netanal_trace(netanal["crs0000_rmod2"])
+    assert "resonance_search" not in netanal["crs0000_rmod2"]["results"]
 
 
 def test_searching_again_replaces_the_search_that_was_there():
@@ -647,7 +646,7 @@ def test_searching_again_replaces_the_search_that_was_there():
 
 
 def test_an_unsearched_netanal_simply_has_no_search_in_it():
-    assert "resonance_search" not in netanal_trace(a_module_netanal())
+    assert "resonance_search" not in a_module_netanal()["results"]
 
 
 # ─── editing a search by hand ─────────────────────────────────────────────────
@@ -809,6 +808,43 @@ def test_result_seeds_a_catalog():
     assert all(r.bias.amplitude == 0.01 for r in catalog)
 
 
+def test_netanal_search_seeds_a_catalog_with_its_recorded_provenance():
+    netanal = a_module_netanal(module=2)
+    find_resonances_in_netanal(netanal, min_Q=1e4)
+
+    catalog = stored_search(netanal).to_catalog()
+
+    assert catalog.module == 2
+    assert all(r.bias.amplitude == 0.001 for r in catalog)
+
+
+def test_explicit_catalog_provenance_overrides_the_searches_record():
+    found = find_resonances_in_netanal(a_module_netanal(module=2), min_Q=1e4)
+
+    catalog = found.to_catalog(module=3, amplitude=0.01)
+
+    assert catalog.module == 3
+    assert all(r.bias.amplitude == 0.01 for r in catalog)
+
+
+def test_direct_search_still_needs_catalog_provenance():
+    found = find_resonances(*a_sweep(), min_Q=1e4)
+
+    with pytest.raises(ValueError, match="no recorded module and amplitude"):
+        found.to_catalog()
+
+
+def test_an_old_search_without_provenance_still_loads():
+    record = find_resonances(*a_sweep(), min_Q=1e4).to_dict()
+    del record["module"]
+    del record["amplitude"]
+
+    restored = ResonanceSearch.from_dict(record)
+
+    assert restored.module is None
+    assert restored.amplitude is None
+
+
 def test_repr_summarises_without_dumping_the_array():
     found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6)
     text = repr(found)
@@ -821,7 +857,11 @@ def test_repr_summarises_without_dumping_the_array():
 
 
 def test_a_search_survives_a_round_trip_through_builtins():
-    found = find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6, label="module 2")
+    found = replace(
+        find_resonances(*a_sweep(), min_Q=1e4, max_Q=1e6, label="module 2"),
+        module=2,
+        amplitude=0.001,
+    )
     restored = ResonanceSearch.from_dict(found.to_dict())
 
     assert restored.label == found.label
@@ -829,6 +869,8 @@ def test_a_search_survives_a_round_trip_through_builtins():
     assert restored.rejected == found.rejected
     assert np.array_equal(restored.frequencies_hz, found.frequencies_hz)
     assert np.array_equal(restored.magnitude_db, found.magnitude_db)
+    assert restored.module == 2
+    assert restored.amplitude == 0.001
 
 
 def test_a_searchs_dict_holds_no_rfmux_classes():

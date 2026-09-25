@@ -11,7 +11,6 @@ from rfmux.tuning import store
 from rfmux.tuning.find_resonances import (
     ResonanceSearch,
     find_resonances_in_netanal,
-    netanal_trace,
 )
 from rfmux.tuning.sweep_results import _is_container
 
@@ -468,7 +467,7 @@ def a_searchable_module_netanal(module=2):
 def stored_search(module_netanal) -> ResonanceSearch:
     """The search out of a netanal: an index and a from_dict, as a caller does it."""
     return ResonanceSearch.from_dict(
-        netanal_trace(module_netanal)["resonance_search"]
+        module_netanal["results"]["resonance_search"]
     )
 
 
@@ -515,7 +514,7 @@ def test_searching_one_module_leaves_the_others_in_the_file(output_dir):
     reloaded = store.load(path)
     assert set(reloaded) == {"crs0042_rmod2", "crs0042_rmod3"}
     assert len(stored_search(reloaded["crs0042_rmod2"])) >= 1
-    assert "resonance_search" not in netanal_trace(reloaded["crs0042_rmod3"])
+    assert "resonance_search" not in reloaded["crs0042_rmod3"]["results"]
 
 
 def test_the_module_label_a_search_derives_never_names_a_file(output_dir):

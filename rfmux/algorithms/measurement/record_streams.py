@@ -588,6 +588,38 @@ def _fastrx_peak(fx, socket: str, module: int, channels: int) -> float:
     return float(peak) * 256.0          # HIGH's counts per LSB
 
 
+async def measure_sample_trunc(crs, modules: List[int], channels: int,
+                               pipeline: int, fx, socket: str,
+                               say=lambda *a: None) -> Dict[int, Tuple[float, str]]:
+    """Turn the channel streamer on at HIGH (which cannot wrap) for
+    *modules*, channels 1 to *channels* in whole pipelines, and read
+    each module's channel stream through fastrx (*fx* on *socket*):
+    ``{module: (peak in ADC counts, the finest truncation holding it)}``.
+    The streamer is left on at HIGH."""
+    for m in modules:
+        await _set_channel_streamer(crs, m, channels, pipeline, "HIGH", say)
+    await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
+    measured = {}
+    for m in modules:
+        peak = await asyncio.to_thread(
+            _fastrx_peak, fx, socket, m, -(-channels // pipeline) * pipeline)
+        measured[m] = (peak, choose_sample_trunc(peak))
+        say(f"[record] module {m}: channel-stream peak {peak:.0f} counts, "
+            f"so {measured[m][1]}")
+    return measured
+
+
+async def _set_channel_streamer(crs, module: int, channels: int,
+                                pipeline: int, trunc: str, say) -> None:
+    if not hasattr(crs, "set_channel_streamer"):
+        raise RuntimeError("this board has no channel streamer to turn on")
+    channels = -(-channels // pipeline) * pipeline
+    say(f"[record] channel streamer on for module {module}: channels "
+        f"1-{channels}, {trunc} bits")
+    await crs.set_channel_streamer(channels=channels, module=module,
+                                   sample_trunc=trunc)
+
+
 async def _enable_channel_streamer(crs, modules: List[int], channels: int,
                                    pipeline: int, sample_trunc: str,
                                    say, fx=None, socket: str = "") -> None:
@@ -595,32 +627,21 @@ async def _enable_channel_streamer(crs, modules: List[int], channels: int,
     *channels* as the recording keeps them, rounded up to whole
     pipelines of *pipeline* channels: fastrxd drops a packet whose
     pipelines are not all full.  Then let it flow before the stream is
-    probed.  AUTO turns it on at HIGH, reads each module's peak through
-    fastrx (*fx* on *socket*) and sets the finest window that holds it."""
-    if not hasattr(crs, "set_channel_streamer"):
-        raise RuntimeError("this board has no channel streamer to turn on")
-    channels = -(-channels // pipeline) * pipeline
-
-    async def turn_on(m, trunc):
-        say(f"[record] channel streamer on for module {m}: channels "
-            f"1-{channels}, {trunc} bits")
-        await crs.set_channel_streamer(channels=channels, module=m,
-                                       sample_trunc=trunc)
-
-    auto = sample_trunc == "AUTO"
-    for m in modules:
-        await turn_on(m, "HIGH" if auto else sample_trunc)
-    await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
-    if not auto:
-        return
-    for m in modules:
-        peak = await asyncio.to_thread(_fastrx_peak, fx, socket, m, channels)
-        trunc = choose_sample_trunc(peak)
-        say(f"[record] module {m}: channel-stream peak {peak:.0f} counts, "
-            f"so {trunc}")
-        if trunc != "HIGH":
-            await turn_on(m, trunc)
-    await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
+    probed.  AUTO measures each module first
+    (:func:`measure_sample_trunc`) and sets the finest window that
+    holds it."""
+    if sample_trunc == "AUTO":
+        chosen = {m: t for m, (_, t) in (await measure_sample_trunc(
+            crs, modules, channels, pipeline, fx, socket, say)).items()}
+    else:
+        chosen = dict.fromkeys(modules, sample_trunc)
+    changed = False
+    for m, trunc in chosen.items():
+        if sample_trunc != "AUTO" or trunc != "HIGH":
+            await _set_channel_streamer(crs, m, channels, pipeline, trunc, say)
+            changed = True
+    if changed:
+        await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
 
 
 def _fastrx_silent_modules(fx, socket: str, modules: List[int],

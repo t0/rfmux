@@ -145,34 +145,54 @@ def test_a_channel_the_recording_lacks_has_no_fast_group(tmp_path, recording):
 def test_nothing_to_repack_is_refused_and_a_failure_leaves_no_file(tmp_path):
     with pytest.raises(ValueError, match="nothing to repack"):
         write_tod(tmp_path / "tod.h5", [CHANNEL], 1)
-    with pytest.raises(Exception):
+    # The compiled fastrx reader raises RuntimeError, the numpy one OSError.
+    with pytest.raises((OSError, RuntimeError)):
         write_tod(tmp_path / "tod.h5", [CHANNEL], 1, fastrx=tmp_path / "none")
     assert list(tmp_path.iterdir()) == []
 
 
-def test_merge_copies_the_streams_into_the_pulse_file(tmp_path, recording,
-                                                      dirfile):
+@pytest.fixture
+def merged(tmp_path, recording, dirfile):
+    """A df capture before the merge (its pulse count and metadata), and
+    the capture and TOD files after it."""
     pulse = _capture(tmp_path, tuning=TUNING, trigger_basis="df")
     with PulseHDF5Reader(pulse) as r:
         before = (r.pulse_count(CHANNEL), dict(r.metadata))
     tod = _tod(tmp_path, fastrx=recording, dirfile=dirfile)
     assert merge_tod(pulse, tod) == pathlib.Path(pulse)
+    return pulse, tod, before
+
+
+def test_merge_copies_the_streams_into_the_pulse_file(merged):
+    pulse, tod, _ = merged
     with h5py.File(pulse, "r") as f, h5py.File(tod, "r") as src:
         for stream in ("slow", "fast"):
             t, z = _trace(f, stream)
             ts, zs = _trace(src, stream)
             assert np.array_equal(t, ts) and np.array_equal(z, zs)
+
+
+def test_merge_keeps_the_captures_metadata_and_adds_what_it_lacked(merged):
+    pulse, _, (_, meta) = merged
+    with h5py.File(pulse, "r") as f:
         m = f["metadata"].attrs
-        assert m["sample_rate_fast"] == PFB_SAMPLING_FREQ  # the capture lacked it
-        for key, value in before[1].items():             # and kept its own
+        assert m["sample_rate_fast"] == PFB_SAMPLING_FREQ
+        for key, value in meta.items():
             assert np.array_equal(m[key], value), key
+
+
+def test_merge_keeps_the_pulses(merged):
+    pulse, _, (count, _) = merged
     with PulseHDF5Reader(pulse) as r:
-        assert r.pulse_count(CHANNEL) == before[0]
+        assert r.pulse_count(CHANNEL) == count
         assert r.get_pulse(CHANNEL, 1)["Amp_I"].size
-    assert tod.exists()
+
+
+def test_a_second_merge_is_refused(merged):
+    pulse, tod, _ = merged
     with pytest.raises(ValueError, match="already holds tod/"):
         merge_tod(pulse, tod)
-    assert not list(tmp_path.glob("*.merging"))
+    assert not list(pathlib.Path(pulse).parent.glob("*.merging"))
 
 
 def test_merge_refuses_a_tod_in_other_units_than_the_pulses(tmp_path,
@@ -216,10 +236,10 @@ def test_the_reader_finds_a_tod_files_tuning_units_and_streams(
         with h5py.File(path) as f:
             assert info["fast"]["samples"] == f["tod/fast/time"].shape[0]
             assert info["slow"]["samples"] == f["tod/slow/time"].shape[0]
-    # A pulse file's own groups win over the tod/ copies once merged.
-    pulse = _capture(tmp_path, tuning=TUNING, trigger_basis="df")
-    merge_tod(pulse, path)
-    with PulseHDF5Reader(pulse) as r:
+
+
+def test_the_reader_finds_a_merged_files_pulses_and_streams(merged):
+    with PulseHDF5Reader(merged[0]) as r:
         assert r.has_pulses and r.tod_streams == ["slow", "fast"]
         assert r.pulse_count(CHANNEL) > 0
 

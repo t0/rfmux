@@ -130,8 +130,12 @@ def test_an_undisciplined_stretch_over_whole_bins_is_placed_with_the_next(
         assert index_at(f, "fast", 2, s[3331]) == 3331
         # Everywhere: the search over the whole axis, NaN taking the
         # next finite stamp.
-        from rfmux.algorithms.measurement.tod import _backfill
-        axis = _backfill(s)
+        axis, following = s.copy(), np.inf
+        for i in range(len(s) - 1, -1, -1):
+            if np.isnan(s[i]):
+                axis[i] = following
+            else:
+                following = s[i]
         for t in np.random.default_rng(2).uniform(s[0] - 1e-5, s[-1] + 1e-5, 300):
             for side in ("left", "right"):
                 assert index_at(f, "fast", 2, t, side) == \

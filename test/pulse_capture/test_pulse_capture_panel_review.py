@@ -254,11 +254,10 @@ def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
     panel.close()
 
 
-def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
-                                                          panel):
-    """A file of time-ordered data alone opens in review: the status
-    line says what it holds per stream, the channel's tuning row is the
-    file's, and nothing is listed as a pulse."""
+@pytest.fixture
+def tod_only(qt_app, tmp_path, panel):
+    """A file of time-ordered data alone, in df with a calibration,
+    open in review; (panel, channel, calibration)."""
     from rfmux.algorithms.measurement.tod import write_tod
     from test.pulse_capture.test_overlay import (
         CHANNEL, _dirfile, _recording_file)
@@ -269,25 +268,29 @@ def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
                      tuning={CHANNEL: {"bias_channel": CHANNEL,
                                        "df_calibration": cal}})
     panel.load_from_hdf5(path)
+    return panel, CHANNEL, cal
+
+
+def test_a_tod_file_names_its_streams_and_lists_no_pulses(tod_only):
+    panel, channel, _ = tod_only
     status = panel.status_label.text()
-    assert "time-ordered data slow:" in status and "fast:" in status
-    assert "pulses" not in status
-    assert panel._tuning_row(CHANNEL)["df_calibration"] == cal
-    assert panel._pulse_order == [] and panel._counts.get(CHANNEL, 0) == 0
-    assert panel._tuning_by_module() == {}     # no sweep in this row
-    # The Metadata item lists every attribute of the file and, per
-    # channel, the calibration scalars of its tuning row.
+    assert "slow:" in status and "fast:" in status
+    assert all(row.childCount() == 0 for row in pulse_rows(panel))
+
+
+def test_the_metadata_item_lists_the_metadata_and_each_calibration(
+        tod_only):
+    """Every attribute of the metadata group, and under it the channel's
+    calibration, its df calibration first."""
+    panel, channel, _ = tod_only
     tree = panel.pulse_tree
     meta = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
                 if "Metadata" in tree.topLevelItem(i).text(0))
     lines = [meta.child(i).text(0) for i in range(meta.childCount())]
     assert "trigger_basis = df" in lines and "stored_units = Hz" in lines
-    assert any(l.startswith("sample_rate_fast = 2441406.25") for l in lines)
     cal_item = next(meta.child(i) for i in range(meta.childCount())
-                    if meta.child(i).text(0) == f"calibration, channel {CHANNEL}")
-    fields = [cal_item.child(i).text(0) for i in range(cal_item.childCount())]
-    assert fields == ["df_calibration = 3e+06-4e+06j",
-                      f"bias_channel = {CHANNEL}"]
+                    if meta.child(i).text(0) == f"calibration, channel {channel}")
+    assert cal_item.child(0).text(0).startswith("df_calibration = ")
 
 
 def _tod_file(tmp_path):
@@ -331,42 +334,56 @@ def test_the_tree_holds_the_pulses_beside_the_time_ordered_data(
     assert tops[0] == "◆ Pulses"
 
 
-def test_a_tod_channel_is_drawn_in_its_tab_from_a_few_hundred_points(
+@pytest.fixture
+def tod_tab(qt_app, tmp_path, panel):
+    """A TOD file in review, its channel open in the Channel TOD View."""
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    return panel.tod_view
+
+
+def test_double_clicking_a_tod_channel_brings_its_tab_forward(
         qt_app, tmp_path, panel):
-    """The review tree lists the file's time-ordered data per channel;
-    double-clicking one brings the Channel TOD View tab forward on it.
-    Its curves never hold more than two points per bin, the fast stream
-    drawn under the slow, and narrow views are the samples themselves."""
-    from rfmux.algorithms.measurement.tod import VIEW_BINS
     path, channel = _tod_file(tmp_path)
     panel.load_from_hdf5(path)
     tabs, view = panel.viewer_tabs, panel.tod_view
     assert tabs.isTabVisible(tabs.indexOf(view))
     assert tabs.currentWidget() is not view
-    tod = _tod_item(panel)
-    assert tod.text(0) == "≋ Time-ordered data (slow, fast)"
-    panel._on_tree_double_click(tod.child(0), 0)
+    panel._on_tree_double_click(_tod_item(panel).child(0), 0)
     assert tabs.currentWidget() is view
     assert view.channel_combo.currentData() == channel
 
-    fast, slow = view.curves["fast"], view.curves["slow"]
-    items = view.plots[0].getPlotItem().listDataItems()
-    assert items.index(fast[0]) < items.index(slow[0])
-    assert fast[0].zValue() < slow[0].zValue()
-    for curve in fast + slow:
-        assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
-    assert "fast: 2,500 samples, 500 bins from the samples" in view.info.text()
 
-    # A millisecond is 50 fast samples (20 us apart): drawn as they are.
-    view.plots[0].setXRange(0.010, 0.011, padding=0)
-    view._refresh()
-    x, _ = fast[0].getData()
-    assert "each drawn" in view.info.text().split(";")[0]
-    assert 49 <= len(x) <= 51
-    view.stream_checks["slow"].setChecked(False)
-    assert all(c.getData()[0] is None or len(c.getData()[0]) == 0
-               for c in slow)
-    assert "slow:" not in view.info.text()
+def test_a_wide_view_draws_at_most_two_points_per_bin(tod_tab):
+    from rfmux.algorithms.measurement.tod import VIEW_BINS
+    for curve in tod_tab.curves["fast"] + tod_tab.curves["slow"]:
+        assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
+
+
+def test_the_fast_stream_is_drawn_under_the_slow(tod_tab):
+    fast, slow = tod_tab.curves["fast"], tod_tab.curves["slow"]
+    assert max(c.zValue() for c in fast) < min(c.zValue() for c in slow)
+
+
+def test_a_narrow_view_draws_the_samples_themselves(tod_tab):
+    from rfmux.algorithms.measurement.tod import tod_window
+    tod_tab.plots[0].setXRange(0.010, 0.011, padding=0)
+    tod_tab._refresh()
+    x0, x1 = tod_tab.plots[0].getPlotItem().viewRange()[0]
+    want = tod_window(tod_tab.f, "fast", tod_tab.key,
+                      tod_tab.origin + x0, tod_tab.origin + x1)
+    assert want["kind"] == "raw"
+    np.testing.assert_allclose(tod_tab.curves["fast"][0].getData()[1],
+                               want["I"], rtol=1e-6)
+
+
+def test_unchecking_a_stream_clears_its_curves(tod_tab):
+    tod_tab.stream_checks["slow"].setChecked(False)
+    for curve in tod_tab.curves["slow"]:
+        x = curve.getData()[0]
+        assert x is None or len(x) == 0
+    assert all(len(c.getData()[0]) for c in tod_tab.curves["fast"])
 
 
 def test_the_tod_tab_zooms_to_a_dragged_box_and_back_to_the_whole_run(

@@ -201,6 +201,22 @@ def test_a_both_mode_event_is_made_of_pairs_and_draws_either_stream(
                                    "Ch3 slow (no trigger)"]
 
 
+def test_a_both_mode_event_draws_the_fast_lines_under_the_slow_points(
+        qt_app, tmp_path):
+    """As a pair draws them: the slow samples, sparse, stay visible over
+    the dense fast trace, for every channel of the event."""
+    from test.pulse_capture.test_events_dual import _capture
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0,
+                       dump_all_channels=True)
+    panel = _review(path, GROUP_EVENTS)
+    panel._show_event(1)
+    for plot in (panel.pulse_plot_i, panel.pulse_plot_q):
+        curves = plot.getPlotItem().listDataItems()
+        slow = [c.zValue() for c in curves if " slow" in c.name()]
+        fast = [c.zValue() for c in curves if " fast" in c.name()]
+        assert slow and fast and min(slow) > max(fast)
+
+
 def _double_click(panel, role):
     for k in range(panel.pulse_tree.topLevelItemCount()):
         top = panel.pulse_tree.topLevelItem(k)

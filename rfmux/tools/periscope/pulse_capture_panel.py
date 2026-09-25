@@ -2364,10 +2364,13 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                     + ("" if triggered else " (no trigger)"))
             for plot, data in zip((self.pulse_plot_i, self.pulse_plot_q),
                                   quads):
-                plot.plot(t, data, name=name, pen=pg.mkPen(
+                curve = plot.plot(t, data, name=name, pen=pg.mkPen(
                     colour, style=style,
                     width=LINE_WIDTH if triggered and stream != "slow" else 1),
                     **points)
+                # The dense fast lines under the slow points, as a pair
+                # draws them, whichever order the traces come in.
+                curve.setZValue(1 if stream == "slow" else 0)
         first, second = self._axis_names(
             traces[0][0] if traces else self._label_channel())
         for plot, name in ((self.pulse_plot_i, first),

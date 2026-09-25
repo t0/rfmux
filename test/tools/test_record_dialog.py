@@ -16,7 +16,10 @@ from test.record_helpers import bias_export  # noqa: E402
 def _dialog(tmp_path, monkeypatch, running=()):
     monkeypatch.setattr(rd, "interface_speeds",
                         lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
-                                 "wlan0": None})
+                                 "wlan0": None, "enp1s0f0": None})
+    monkeypatch.setattr(rd, "interface_operstate",
+                        {"wlan0": "up", "enp1s0f0": "down"}.get)
+    monkeypatch.setattr(rd, "running_mock", lambda: None)
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
                            start_command=lambda i: f"sudo fastrxd -i {i}",
                            record_stride=lambda c: (86 + 4 * c + 7) & ~7)
@@ -85,6 +88,120 @@ def test_the_channel_streamer_is_off_unless_asked_and_remembered(
     assert not dlg.streamer_check.isEnabled()
 
 
+def test_the_units_choice_is_the_captures_trigger_basis(
+        qt_app, tmp_path, monkeypatch):
+    """One setting seen twice: the pulse file and the TOD are written
+    in the same units whichever view changed it."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    assert dlg.units_combo.currentIndex() == dlg.capture_form.basis_combo.currentIndex()
+    dlg.units_combo.setCurrentIndex(0)
+    assert dlg.get_options()["config"].trigger_basis == "iq"
+    dlg.capture_form.basis_combo.setCurrentIndex(1)
+    assert dlg.units_combo.currentData() == "df"
+    assert dlg.get_options()["config"].trigger_basis == "df"
+    dlg._save()
+    again = rd.RecordDialog(settings=settings)
+    assert again.units_combo.currentData() == "df"
+
+
+def _products_dialog(tmp_path, monkeypatch, fastrx=False):
+    """A dialog ready to record channels 1-4 with the parser, the TOD
+    and its merge chosen."""
+    dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.fastrx_iface_combo.setEditText("enp2s0f0np0")
+    dlg.serial_edit.setText("0156")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-4")
+    dlg.fastrx_check.setChecked(fastrx)
+    dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(True)
+    dlg.tod_check.setChecked(True)
+    dlg.merge_tod_check.setChecked(True)
+    return dlg
+
+
+def test_the_tod_needs_a_stream_to_repack(qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.tod_check.isEnabled()
+    dlg.parser_check.setChecked(False)
+    assert not dlg.tod_check.isEnabled()
+
+
+def test_the_merge_needs_a_pulse_capture_the_tod_does_not(
+        qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.merge_tod_check.isEnabled()
+    dlg.capture_check.setChecked(False)
+    assert not dlg.merge_tod_check.isEnabled()
+    assert dlg.tod_check.isEnabled()
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    assert dlg.get_options()["tod"]
+
+
+def test_each_data_product_shows_its_cost_while_chosen(
+        qt_app, tmp_path, monkeypatch):
+    """The conversion note while the TOD is chosen; the merge note while
+    the merge is, with the size of this run's TOD, which follows the
+    duration."""
+    dlg = _products_dialog(tmp_path, monkeypatch, fastrx=True)
+    assert not dlg.tod_note.isHidden() and not dlg.merge_tod_note.isHidden()
+    dlg.duration_spin.setValue(10.0)
+    short = dlg.merge_tod_note.text()
+    dlg.duration_spin.setValue(100.0)
+    assert dlg.merge_tod_note.text() != short
+    dlg.merge_tod_check.setChecked(False)
+    assert dlg.merge_tod_note.isHidden() and not dlg.tod_note.isHidden()
+    dlg.tod_check.setChecked(False)
+    assert dlg.tod_note.isHidden()
+
+
+def test_a_tod_without_a_bias_export_warns_but_records(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.serial_edit.setText("0156")
+    dlg.fastrx_check.setChecked(False)
+    dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(False)
+    dlg.tod_check.setChecked(True)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("2:1-4")
+    assert "warning: the TOD metadata" in dlg.status_label.text()
+    assert dlg.record_btn.isEnabled()
+    # A session whose bias export covers the module supplies the tuning.
+    folder = _session_with_bias(tmp_path)
+    dlg.rb_existing.setChecked(True)
+    dlg.session_path_edit.setText(str(folder))
+    assert "warning" not in dlg.status_label.text(), dlg.status_label.text()
+    dlg.tod_check.setChecked(False)
+    dlg.rb_new.setChecked(True)
+    assert "warning" not in dlg.status_label.text()
+
+
+def test_the_running_mock_fills_the_hostname_for_its_serial(
+        qt_app, tmp_path, monkeypatch):
+    """Serial 0000 with a mock server up fills the hostname in; another
+    serial takes the autofill away again, while an address the user
+    typed stays."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    monkeypatch.setattr(rd, "running_mock", lambda: "127.0.0.1:9878")
+    dlg.serial_edit.setText("MOCK")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
+    dlg.hostname_edit.setText("rfmux0156.lan")
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "rfmux0156.lan"
+    dlg._save()
+    assert rd.RecordDialog(settings=settings).get_options()["hostname"] == \
+        "rfmux0156.lan"
+
+
 def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     dlg.serial_edit.setText("0042")
@@ -109,8 +226,11 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     dlg, _ = _dialog(tmp_path, monkeypatch)
     parser = [dlg.parser_iface_combo.itemText(i)
               for i in range(dlg.parser_iface_combo.count())]
+    # A wifi driver reports no rate; a port without a link is down; the
+    # loopback is where a mock on this host streams.
     assert parser == ["eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
-                      "wlan0 (no link)"]
+                      "wlan0 (no rate reported)", "enp1s0f0 (down)",
+                      "lo (loopback: a mock on this host)"]
     fast = [dlg.fastrx_iface_combo.itemText(i)
             for i in range(dlg.fastrx_iface_combo.count())]
     assert fast == ["enp2s0f0np0 (100 Gb/s)"]
@@ -300,3 +420,18 @@ def test_a_failed_load_is_shown_and_printed(qt_app, tmp_path, monkeypatch,
     dlg._load_config_file(str(tmp_path / "missing.h5"))
     assert len(shown) == 1 and "Could not load" in shown[0]
     assert "Could not load" in capsys.readouterr().out
+
+
+def test_a_loaded_config_sets_the_units_and_stays_bound_to_them(
+        qt_app, tmp_path, monkeypatch):
+    """The Units choice and the trigger basis are one setting, before a
+    load and after it."""
+    from rfmux.pulse_capture import write_trigger_config
+    path = write_trigger_config(tmp_path / "tc.h5",
+                                rd.PulseCaptureConfig(trigger_basis="iq"))
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.capture_form.basis_combo.setCurrentIndex(1)          # df
+    dlg.load_trigger_config(path)
+    assert dlg.units_combo.currentIndex() == 0               # iq
+    dlg.units_combo.setCurrentIndex(1)
+    assert dlg.get_options()["config"].trigger_basis == "df"

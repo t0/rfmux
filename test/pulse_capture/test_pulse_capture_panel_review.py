@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label, pulse_rows  # noqa: E402
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
@@ -185,8 +186,8 @@ def test_amplitude_bins_follow_the_view_in_counts_too(qt_app,
     panel.units_combo.setCurrentText(m.UNITS_COUNTS)
     curve = panel.hist_plots["amplitude"].getPlotItem().listDataItems()[0]
     assert np.max(curve.xData) == pytest.approx(2e-5 / VOLTS_PER_ROC)
-    label = panel.hist_plots["amplitude"].getPlotItem().getAxis("bottom")
-    assert label.labelText == "amplitude (counts)"
+    assert axis_label(panel.hist_plots["amplitude"], "bottom") == \
+        "amplitude (counts)"
 
 
 def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
@@ -253,13 +254,285 @@ def test_the_quadrature_view_of_a_hertz_channel_draws_the_raw_pair(qt_app):
     panel.close()
 
 
+@pytest.fixture
+def tod_only(qt_app, tmp_path, panel):
+    """A file of time-ordered data alone, in df with a calibration,
+    open in review; (panel, channel, calibration)."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _dirfile, _recording_file)
+    cal = complex(3.0e6, -4.0e6)
+    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path),
+                     dirfile=_dirfile(tmp_path),
+                     tuning={CHANNEL: {"bias_channel": CHANNEL,
+                                       "df_calibration": cal}})
+    panel.load_from_hdf5(path)
+    return panel, CHANNEL, cal
+
+
+def test_a_tod_file_names_its_streams_and_lists_no_pulses(tod_only):
+    panel, channel, _ = tod_only
+    status = panel.status_label.text()
+    assert "slow:" in status and "fast:" in status
+    assert all(row.childCount() == 0 for row in pulse_rows(panel))
+
+
+def test_the_metadata_item_lists_the_metadata_and_each_calibration(
+        tod_only):
+    """Every attribute of the metadata group, and under it the channel's
+    calibration, its df calibration first."""
+    panel, channel, _ = tod_only
+    tree = panel.pulse_tree
+    meta = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                if "Metadata" in tree.topLevelItem(i).text(0))
+    lines = [meta.child(i).text(0) for i in range(meta.childCount())]
+    assert "trigger_basis = df" in lines and "stored_units = Hz" in lines
+    cal_item = next(meta.child(i) for i in range(meta.childCount())
+                    if meta.child(i).text(0) == f"calibration, channel {channel}")
+    assert cal_item.child(0).text(0).startswith("df_calibration = ")
+
+
+def _tod_file(tmp_path):
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _dirfile, _recording_file)
+    return write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path),
+                     dirfile=_dirfile(tmp_path), trigger_basis="iq"), CHANNEL
+
+
+def _tod_item(panel):
+    tree = panel.pulse_tree
+    return next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+                if "Time-ordered data" in tree.topLevelItem(i).text(0))
+
+
+def test_the_tree_holds_the_pulses_beside_the_time_ordered_data(
+        qt_app, tmp_path, panel):
+    """Top level: Pulses, holding the channels (or events) as the
+    grouping says, and beside it the time-ordered data and metadata."""
+    from rfmux.algorithms.measurement.tod import merge_tod, write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _capture, _recording_file)
+    pulse = _capture(tmp_path, channels=(CHANNEL,), trigger_basis="iq")
+    merge_tod(pulse, write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                               fastrx=_recording_file(tmp_path),
+                               trigger_basis="iq"))
+    panel.load_from_hdf5(pulse)
+    tree = panel.pulse_tree
+    tops = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+    assert tops[0] == "◆ Pulses"
+    assert any(t.startswith("≋ Time-ordered data") for t in tops[1:])
+    assert tops[-1] == "▦ Metadata"
+    assert [r.text(0) for r in pulse_rows(panel)] == \
+        [f"▤ Channel {CHANNEL} (1)"]
+    panel.group_combo.setCurrentText(m.GROUP_EVENTS)
+    assert [r.data(0, QtCore.Qt.ItemDataRole.UserRole)[0]
+            for r in pulse_rows(panel)] == ["event"]
+    tops = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+    assert tops[0] == "◆ Pulses"
+
+
+@pytest.fixture
+def tod_tab(qt_app, tmp_path, panel):
+    """A TOD file in review, its channel open in the Channel TOD View."""
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    return panel.tod_view
+
+
+def test_double_clicking_a_tod_channel_brings_its_tab_forward(
+        qt_app, tmp_path, panel):
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    assert tabs.isTabVisible(tabs.indexOf(view))
+    assert tabs.currentWidget() is not view
+    panel._on_tree_double_click(_tod_item(panel).child(0), 0)
+    assert tabs.currentWidget() is view
+    assert view.channel_combo.currentData() == channel
+
+
+def test_a_wide_view_draws_at_most_two_points_per_bin(tod_tab):
+    from rfmux.algorithms.measurement.tod import VIEW_BINS
+    for curve in tod_tab.curves["fast"] + tod_tab.curves["slow"]:
+        assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
+
+
+def test_the_fast_stream_is_drawn_under_the_slow(tod_tab):
+    fast, slow = tod_tab.curves["fast"], tod_tab.curves["slow"]
+    assert max(c.zValue() for c in fast) < min(c.zValue() for c in slow)
+
+
+def test_a_narrow_view_draws_the_samples_themselves(tod_tab):
+    from rfmux.algorithms.measurement.tod import tod_window
+    tod_tab.plots[0].setXRange(0.010, 0.011, padding=0)
+    tod_tab._refresh()
+    x0, x1 = tod_tab.plots[0].getPlotItem().viewRange()[0]
+    want = tod_window(tod_tab.f, "fast", tod_tab.key,
+                      tod_tab.origin + x0, tod_tab.origin + x1)
+    assert want["kind"] == "raw"
+    np.testing.assert_allclose(tod_tab.curves["fast"][0].getData()[1],
+                               want["I"], rtol=1e-6)
+
+
+def test_unchecking_a_stream_clears_its_curves(tod_tab):
+    tod_tab.stream_checks["slow"].setChecked(False)
+    for curve in tod_tab.curves["slow"]:
+        x = curve.getData()[0]
+        assert x is None or len(x) == 0
+    assert all(len(c.getData()[0]) for c in tod_tab.curves["fast"])
+
+
+def test_the_tod_tab_zooms_to_a_dragged_box_and_back_to_the_whole_run(
+        qt_app, tmp_path, panel):
+    """Dragging draws a zoom box (the pulse view's viewbox), which sets
+    both axes; the wheel is time only; Whole run returns with the
+    vertical axis following the data again."""
+    import pyqtgraph as pg
+    from PyQt6 import QtCore as QC
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    view = panel.tod_view
+    vb = view.plots[0].getPlotItem().getViewBox()
+    assert vb.state["mouseMode"] == pg.ViewBox.RectMode
+    assert vb.state["mouseEnabled"] == [True, False]
+    vb.showAxRect(QC.QRectF(0.010, -50.0, 0.001, 100.0), padding=0)
+    view._refresh()
+    (x0, x1), (y0, y1) = vb.viewRange()
+    assert (x0, x1) == pytest.approx((0.010, 0.011))
+    assert (y0, y1) == pytest.approx((-50.0, 50.0))
+    assert "each drawn" in view.info.text()
+    view.reset_btn.click()
+    (x0, x1), _ = vb.viewRange()
+    assert x1 - x0 == pytest.approx(view.span * 1.02, rel=1e-3)
+    assert vb.state["autoRange"][1]
+
+
+def test_entering_the_tod_tab_draws_the_selected_pulses_channel(
+        qt_app, tmp_path, panel):
+    """No trip to the Channel box: the tab opens on the channel of the
+    pulse selected in Pulse View, and on the first channel with the
+    time-ordered data when the selection is on a channel it lacks."""
+    from rfmux.algorithms.measurement.tod import merge_tod, write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _capture, _recording_file)
+    pulse = _capture(tmp_path, channels=(CHANNEL, 5))
+    tod = write_tod(tmp_path / "tod.h5", [CHANNEL, 7], 1,
+                    fastrx=_recording_file(tmp_path), trigger_basis="iq")
+    import h5py
+    with h5py.File(pulse, "a") as f:            # the capture stored volts
+        for c in (CHANNEL, 5):
+            f[f"channel_{c}"].attrs["stored_units"] = "V"
+        f["metadata"].attrs["trigger_basis"] = "iq"
+    merge_tod(pulse, tod)
+    panel.load_from_hdf5(pulse)
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    panel._show_pulse(CHANNEL, 1)
+    tabs.setCurrentWidget(view)
+    assert view.key == CHANNEL and view.curves
+    assert view.info.text().startswith("Channel 200:")
+    # A selection on a channel the TOD lacks leaves what is drawn.
+    tabs.setCurrentIndex(0)
+    panel._current_view = (5, 1)
+    tabs.setCurrentWidget(view)
+    assert view.key == CHANNEL
+
+
+def test_prev_and_next_step_through_the_channels_over_the_same_window(
+        qt_app, tmp_path, panel):
+    """Like the pulse tab's: one channel along at a time, stopping at
+    either end; the time window zoomed to stays, to compare channels at
+    one moment."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import CHANNEL, _recording_file
+    path = write_tod(tmp_path / "tod.h5", [7, CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path), trigger_basis="iq")
+    panel.load_from_hdf5(path)
+    view = panel.tod_view
+    panel._open_tod_viewer(7)
+    assert not view.btn_prev.isEnabled() and view.btn_next.isEnabled()
+    from PyQt6 import QtCore as QC
+    vb = view.plots[0].getPlotItem().getViewBox()
+    vb.showAxRect(QC.QRectF(0.010, -50.0, 0.001, 100.0), padding=0)
+    view.btn_next.click()
+    assert view.key == CHANNEL
+    assert view.channel_combo.currentData() == CHANNEL
+    assert vb.viewRange()[0] == pytest.approx([0.010, 0.011])
+    # The box's levels were channel 7's; channel 200's are its own.
+    assert vb.state["autoRange"][1]
+    assert view.btn_prev.isEnabled() and not view.btn_next.isEnabled()
+    view.btn_next.click()                    # at the end: stays
+    assert view.key == CHANNEL
+    view.btn_prev.click()
+    assert view.key == 7
+
+
+def test_the_units_choice_redraws_the_tod_tab_as_it_does_the_pulse_view(
+        qt_app, tmp_path, panel):
+    """The TOD tab takes the same conversion as the pulse and IQ views:
+    a channel stored in volts and switched to df is drawn in hertz under
+    df and dissipation labels, over the same window."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import CHANNEL, _recording_file
+    cal = complex(3e6, -4e6)
+    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path), trigger_basis="iq",
+                     tuning={CHANNEL: {"df_calibration": cal}})
+    panel.load_from_hdf5(path)
+    view = panel.tod_view
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel._open_tod_viewer(CHANNEL)
+    assert axis_label(view.plots[0], "left") == "I (V)"
+    view.plots[0].setXRange(0.010, 0.011, padding=0)
+    view._refresh()
+    i_volts = view.curves["fast"][0].getData()[1]
+    q_volts = view.curves["fast"][1].getData()[1]
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    assert axis_label(view.plots[0], "left") == "df (Hz)"
+    assert axis_label(view.plots[1], "left") == \
+        "dissipation (Hz)"
+    assert view.plots[0].getPlotItem().viewRange()[0] == \
+        pytest.approx([0.010, 0.011])
+    factor = panel._view_coeffs(CHANNEL)[0]
+    expected = (i_volts + 1j * q_volts) * factor
+    np.testing.assert_allclose(view.curves["fast"][0].getData()[1],
+                               expected.real, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(view.curves["fast"][1].getData()[1],
+                               expected.imag, rtol=1e-4, atol=1e-6)
+
+
+def test_the_tod_tab_opens_on_its_first_channel_with_nothing_selected(
+        qt_app, tmp_path, panel):
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel.viewer_tabs.setCurrentWidget(panel.tod_view)
+    assert panel.tod_view.key == channel and panel.tod_view.curves
+
+
+def test_the_tod_tab_is_hidden_for_a_file_without_time_ordered_data(
+        qt_app, tmp_path, panel):
+    from test.pulse_capture.test_overlay import _capture
+    path, channel = _tod_file(tmp_path)
+    panel.load_from_hdf5(path)
+    panel._open_tod_viewer(channel)
+    (tmp_path / "plain").mkdir()
+    panel.load_from_hdf5(_capture(tmp_path / "plain"))
+    tabs, view = panel.viewer_tabs, panel.tod_view
+    assert not tabs.isTabVisible(tabs.indexOf(view))
+    assert view.f is None and view.channel_combo.count() == 0
+
+
 def test_idle_axes_name_the_default_view(qt_app, panel):
     """Before any data, every tab names the units the selector shows."""
     assert panel.units_combo.currentText() == m.UNITS_VOLTS
     for plot in (panel.pulse_plot_i, panel.template_plot_i):
-        assert plot.getPlotItem().getAxis("left").labelText == "I (V)"
-    amp = panel.hist_plots["amplitude"].getPlotItem().getAxis("bottom")
-    assert amp.labelText == "amplitude (V)"
+        assert axis_label(plot, "left") == "I (V)"
+    assert axis_label(panel.hist_plots["amplitude"], "bottom") == \
+        "amplitude (V)"
 
 
 def test_the_noise_segment_prints_the_stored_unit(qt_app, panel):
@@ -272,7 +545,7 @@ def test_the_noise_segment_prints_the_stored_unit(qt_app, panel):
     panel._show_noise_segment()
     text = panel.pulse_info.text()
     assert "I = 2e-06 ± 1.1e-05 V" in text
-    assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
+    assert axis_label(panel.pulse_plot_i, "left") \
         == "I (V)"
     panel.task = None
 

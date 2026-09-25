@@ -17,6 +17,7 @@ crash on the user's next launch.
 """
 
 import os
+import re
 import threading
 import queue
 import sys, warnings, ctypes.util, ctypes, platform
@@ -642,6 +643,29 @@ def apply_issue_banner(label, ok_button, issues) -> bool:
     if ok_button is not None:
         ok_button.setEnabled(not errors)
     return not errors
+
+
+#: Units an axis label may SI-prefix: "I (mV)", "df (kHz)".
+SI_UNITS = frozenset({"V", "Hz", "s"})
+_LABEL_UNIT = re.compile(r"^(.*?)\s*\(([^()]+)\)(.*)$")
+
+
+def set_axis_label(plot, side: str, text: str) -> None:
+    """Label an axis, its unit in SI notation.  A unit in *text*'s
+    brackets that is an SI unit (``I (V)``, ``I (V) − baseline``) is
+    handed to pyqtgraph as the axis unit, which prefixes it to the tick
+    scale (``I (mV)``); any other text is kept as it is, with the tick
+    scale left alone, so no ``(x0.001)`` factor and no ``kcounts``."""
+    item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
+    axis = item.getAxis(side)
+    match = _LABEL_UNIT.match(text)
+    if match and match.group(2) in SI_UNITS:
+        axis.enableAutoSIPrefix(True)
+        item.setLabel(side, (match.group(1) + match.group(3)).strip(),
+                      units=match.group(2))
+    else:
+        axis.enableAutoSIPrefix(False)
+        item.setLabel(side, text)
 
 
 # ───────────────────────── Custom Plot Controls ─────────────────────────

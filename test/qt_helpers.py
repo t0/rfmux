@@ -81,3 +81,20 @@ class Board:
 
     async def get_nco_frequency(self, module=None):
         return self.nco_frequency_hz
+
+
+def pulse_rows(panel):
+    """The channel or event items under the review tree's Pulses item."""
+    root = next(panel.pulse_tree.topLevelItem(i)
+                for i in range(panel.pulse_tree.topLevelItemCount())
+                if panel.pulse_tree.topLevelItem(i).text(0).endswith("Pulses"))
+    return [root.child(i) for i in range(root.childCount())]
+
+
+def axis_label(plot, side="left"):
+    """An axis label as a reader sees it, the SI prefix aside: its text
+    and, when the unit is the axis's own, the unit in brackets."""
+    item = plot.getPlotItem() if hasattr(plot, "getPlotItem") else plot
+    axis = item.getAxis(side)
+    return (f"{axis.labelText} ({axis.labelUnits})" if axis.labelUnits
+            else axis.labelText)

@@ -2,6 +2,7 @@
 channel, and only there; a one-module file reads as it always has."""
 
 import pytest
+from test.qt_helpers import pulse_rows  # noqa: E402
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
@@ -34,8 +35,7 @@ def test_a_capture_across_modules_reviews_with_the_module_named(
     panel.load_from_hdf5(_file(tmp_path, KEYS, None))
     assert panel.channels_edit.text() == "2:5,3:1"
     assert panel.module_spin.value() == 2
-    tops = [panel.pulse_tree.topLevelItem(i).text(0)
-            for i in range(panel.pulse_tree.topLevelItemCount())]
+    tops = [item.text(0) for item in pulse_rows(panel)]
     assert tops[0] == "▤ Module 2 channel 5 (2)"
     assert tops[1] == "▤ Module 3 channel 1 (1)"
     panel._show_pulse((2, 5), 1)
@@ -48,8 +48,7 @@ def test_a_one_module_file_reads_as_before(qt_app, tmp_path, panel):
     panel.load_from_hdf5(_file(tmp_path, [1, 5], 2))
     assert panel.channels_edit.text() == "1,5"
     assert panel.module_spin.value() == 2
-    tops = [panel.pulse_tree.topLevelItem(i).text(0)
-            for i in range(panel.pulse_tree.topLevelItemCount())]
+    tops = [item.text(0) for item in pulse_rows(panel)]
     assert tops[:2] == ["▤ Channel 1 (2)", "▤ Channel 5 (1)"]
     panel._show_pulse(1, 1)
     assert "Pulse #000001 — Channel 1" in panel.pulse_info.text()

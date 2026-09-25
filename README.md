@@ -53,6 +53,25 @@ To launch the Periscope GUI, run:
 $ uv run periscope # or periscope
 ```
 
+To open a pulse capture or time-ordered data file in review mode, offline:
+
+```bash
+$ periscope --review pulse_module2_171224.h5
+```
+
+To add Periscope to your application menu, with its icon, and to the
+right-click **Open With** menu of `.h5` and `.hdf5` files (Linux and
+Windows, for your user only, no administrator rights):
+
+```bash
+$ rfmux periscope --install-desktop
+```
+
+`--default-for-hdf5` also makes double-clicking an HDF5 file open it in
+Periscope, and `--desktop-icon` puts a shortcut on the desktop. The entries
+start Periscope from the environment you ran this in, so run it again after
+moving to another one. `rfmux periscope --uninstall-desktop` removes them.
+
 https://github.com/user-attachments/assets/581d4ff8-5ea2-493a-9c9c-c93d6ca847e2
 
 ### Scripting with Mock Mode

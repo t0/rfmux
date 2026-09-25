@@ -12,6 +12,7 @@ import time
 from types import SimpleNamespace
 
 import click
+import numpy as np
 import pytest
 
 from rfmux.algorithms.measurement import record_streams as rs
@@ -80,6 +81,13 @@ def fake_recorders(monkeypatch):
     monkeypatch.setattr(rs, "_stop_parser", stop)
     # The parser is faked, so its pygetdata requirement is too.
     monkeypatch.setattr(rs.importlib.util, "find_spec", lambda name: object())
+
+    def write_tod(path, channels, module, **kw):
+        log["tod"] = kw
+        path.touch()
+        return path
+    # The products are fakes, so their repacking is too: an empty file.
+    monkeypatch.setattr(rs, "write_tod", write_tod)
     return log
 
 
@@ -180,7 +188,8 @@ def test_the_parser_subprocess_is_started_stopped_and_logged(
     board = _Board()
     result = asyncio.run(rs.record_streams(
         board, module=2, channels=[1, 2], duration_s=DURATION_S,
-        session=core_session.open_session(base=tmp_path), fastrx=False, verbose=False))
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tod=False, verbose=False))       # the fake child writes no dirfile
     assert result.dirfile_path.name == "serial_0042"
     log = result.parser_log.read_text()
     assert log.startswith("parser up") and "Drop Statistics" in log
@@ -351,6 +360,141 @@ def test_nothing_is_merged_without_both_products(tmp_path, monkeypatch):
     pulse.touch()
     rs._merge_recording(_result(tmp_path, pulse_path=pulse))
     assert calls == []
+
+
+def test_the_time_ordered_data_is_written_from_the_run_and_its_tuning(
+        tmp_path, fake_recorders):
+    tuning = {1: {"bias_channel": 1, "df_calibration": 1e6 + 0j}}
+    result = asyncio.run(rs.record_streams(
+        _Board(), module=2, channels=[1], duration_s=DURATION_S,
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tuning=tuning, trigger_basis="iq", verbose=False))
+    assert result.tod_path.name.startswith("tod_module2_")
+    assert result.tod_path.suffix == ".h5" and result.tod_path.exists()
+    assert fake_recorders["tod"]["tuning"] == tuning
+    assert fake_recorders["tod"]["trigger_basis"] == "iq"
+    assert result.warnings == [] and not result.merged_tod
+
+
+def test_no_time_ordered_data_when_not_asked(tmp_path, fake_recorders):
+    result = asyncio.run(rs.record_streams(
+        _Board(), module=2, channels=[1], duration_s=DURATION_S,
+        session=core_session.open_session(base=tmp_path), fastrx=False,
+        tod=False, verbose=False))
+    assert result.tod_path is None and "tod" not in fake_recorders
+
+
+def test_the_disk_estimate_includes_the_time_ordered_data(
+        tmp_path, fake_recorders, monkeypatch):
+    """The repacked fast stream costs more than the recording it comes
+    from (float32 I and Q against int16), so the check before the run
+    counts both."""
+    fx = fake_fastrx(monkeypatch, tmp_path, packets=1)
+    recording = DURATION_S * rs.fastrx_bytes_per_s(fx, 1)
+    monkeypatch.setattr(rs.shutil, "disk_usage",
+                        lambda p: SimpleNamespace(free=recording * 1.05))
+    for tod, warned in ((False, False), (True, True)):
+        result = asyncio.run(rs.record_streams(
+            _Board(), module=1, channels=[1], duration_s=DURATION_S,
+            session=core_session.open_session(base=tmp_path / str(tod)),
+            capture=False, merge_fastrx=False, tod=tod, verbose=False))
+        assert any("GB free" in w for w in result.warnings) is warned
+
+
+def _tod_result(tmp_path, recording=True, day=None):
+    """A run's products: a pulse file (with the clock's day when given),
+    a dirfile and, with *recording*, a fastrx recording."""
+    from rfmux.pulse_capture.hdf5 import PulseHDF5Writer
+    pulse = tmp_path / "pulse.h5"
+    w = PulseHDF5Writer(pulse, [1], {}, {})
+    if day is not None:
+        w.set_time_origin(day)
+    w.finalize()
+    dirfile = tmp_path / "run.dirfile" / "serial_0042"
+    dirfile.mkdir(parents=True, exist_ok=True)
+    paths = {"pulse_path": pulse, "dirfile_path": dirfile}
+    if recording:
+        (tmp_path / "run.fastrx").touch()
+        paths["fastrx_path"] = tmp_path / "run.fastrx"
+    return _result(tmp_path, **paths)
+
+
+@pytest.fixture
+def repack(monkeypatch):
+    """write_tod and merge_tod replaced; their calls, by name."""
+    calls = {}
+
+    def write_tod(path, channels, module, **kw):
+        calls["write"] = kw
+        return path
+    monkeypatch.setattr(rs, "write_tod", write_tod)
+    monkeypatch.setattr(rs, "merge_tod",
+                        lambda pulse, tod: calls.setdefault("merge", (pulse, tod)))
+    return calls
+
+
+def test_the_tod_is_repacked_from_the_products_the_run_left(tmp_path, repack):
+    result = _tod_result(tmp_path, recording=False)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert repack["write"]["dirfile"] == result.dirfile_path
+    assert repack["write"]["fastrx"] is None
+    assert result.tod_path == tmp_path / "tod.h5"
+
+
+def test_the_tod_takes_the_clock_day_from_the_pulse_file(tmp_path, repack):
+    result = _tod_result(tmp_path, day=1.7e9)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert repack["write"]["time_origin_epoch"] == 1.7e9
+
+
+def test_the_tod_is_merged_into_the_pulse_file_only_when_asked(tmp_path,
+                                                              repack):
+    result = _tod_result(tmp_path)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=False,
+                  say=lambda *a: None)
+    assert "merge" not in repack and not result.merged_tod
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
+    assert repack["merge"] == (result.pulse_path, tmp_path / "tod.h5")
+    assert result.merged_tod
+
+
+def _boom(*a, **k):
+    raise ValueError("no disciplined timestamp")
+
+
+def test_a_failed_repack_is_a_warning(tmp_path, repack, monkeypatch):
+    monkeypatch.setattr(rs, "write_tod", _boom)
+    result = _tod_result(tmp_path)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
+    assert result.tod_path is None and not result.merged_tod
+    assert result.warnings == [
+        "time-ordered data not written: no disciplined timestamp"]
+
+
+def test_a_failed_merge_is_a_warning_and_keeps_the_tod(tmp_path, repack,
+                                                       monkeypatch):
+    monkeypatch.setattr(rs, "merge_tod", _boom)
+    result = _tod_result(tmp_path)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
+    assert result.tod_path == tmp_path / "tod.h5" and not result.merged_tod
+    assert result.warnings == [
+        "time-ordered data not merged into pulse.h5: no disciplined timestamp"]
+
+
+def test_nothing_is_repacked_without_a_dirfile_or_recording(tmp_path,
+                                                            repack):
+    pulse = tmp_path / "pulse.h5"
+    pulse.touch()
+    result = _result(tmp_path, pulse_path=pulse)
+    rs._write_tod(result, tmp_path / "tod.h5", None, "df", merge=True,
+                  say=lambda *a: None)
+    assert result.tod_path is None and result.warnings == []
+    assert repack == {}
 
 
 def test_pulse_summary_lines_name_the_busiest_channel_first():
@@ -564,7 +708,7 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
     assert capsys.readouterr().out == ""
     record._show(result, "periscope")
     assert capsys.readouterr().out == (
-        "[record] no display; to review: -m rfmux.tools.periscope "
+        "[record] no display; to review: periscope "
         f"--review {tmp_path / 'pulse.h5'}\n")
     record._show(result, "overlay")
     assert capsys.readouterr().out == (
@@ -581,11 +725,131 @@ def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
 
 
 def test_periscope_is_launched_on_the_pulse_file_in_review_mode(tmp_path):
-    import sys
+    from rfmux.tools.cli import periscope_command
     from rfmux.tools.record import periscope_review_command
-    assert periscope_review_command(tmp_path / "pulse.h5") == [
-        sys.executable, "-m", "rfmux.tools.periscope", "--review",
-        str(tmp_path / "pulse.h5")]
+    cmd = periscope_review_command(tmp_path / "pulse.h5")
+    assert cmd == [*periscope_command(), "--review", str(tmp_path / "pulse.h5")]
+
+
+@pytest.mark.parametrize("installed", [True, False])
+def test_periscope_starts_from_this_environment(tmp_path, monkeypatch,
+                                                installed):
+    """Its script by full path, which works with the environment
+    inactive; else rfmux's command.  Never -m on the periscope package,
+    which imports its own __main__ and so runs it twice."""
+    import os
+    import sys
+    from rfmux.tools import cli
+    script = tmp_path / ("periscope.exe" if os.name == "nt" else "periscope")
+    if installed:
+        script.touch()
+    monkeypatch.setattr(cli.sysconfig, "get_path", lambda name: str(tmp_path))
+    assert cli.periscope_command() == ([str(script)] if installed else
+                                       [sys.executable, "-m",
+                                        "rfmux.tools.cli", "periscope"])
+
+
+def test_mock_and_its_serial_resolve_to_the_running_mock_server(monkeypatch):
+    from rfmux.mock import server
+    from rfmux.tools.record import resolve_hostname
+    monkeypatch.setattr(server, "running_mock", lambda: "127.0.0.1:9878")
+    assert resolve_hostname("MOCK", None) == "127.0.0.1:9878"
+    assert resolve_hostname("0000", None) == "127.0.0.1:9878"
+    assert resolve_hostname("mock", "127.0.0.1:57013") == "127.0.0.1:57013"
+    assert resolve_hostname("0156", None) is None                # a board
+    monkeypatch.setattr(server, "running_mock", lambda: None)
+    assert resolve_hostname("0000", None) is None                # none runs
+
+
+def test_mock_attaches_to_the_running_mock_and_simulates_only_without_one(
+        monkeypatch):
+    """MOCK is the mock already running, reached as serial 0000 at its
+    address; a new simulated board is started only when none runs."""
+    from rfmux.mock import server
+    from rfmux.tools import record
+    import rfmux
+    seen = {}
+
+    class Session:
+        def __init__(self, hwm):
+            seen["hwm"] = hwm
+
+        def query(self, cls):
+            return SimpleNamespace(one=lambda: SimpleNamespace(
+                resolve=_ok, kind="attached"))
+
+    async def _ok():
+        pass
+
+    async def created(**kw):
+        seen["created"] = kw
+        return SimpleNamespace(kind="simulated", stop_udp_streaming=_ok)
+
+    async def recorded(crs, **kw):
+        return crs.kind
+    monkeypatch.setattr(rfmux, "load_session", Session)
+    monkeypatch.setattr(record, "record_streams", recorded)
+    monkeypatch.setattr("rfmux.mock.helpers.create_mock_crs", created)
+    monkeypatch.setattr(record.asyncio, "sleep", lambda s: _ok())
+
+    monkeypatch.setattr(server, "running_mock", lambda: "127.0.0.1:9878")
+    assert asyncio.run(record._main("MOCK", None, module=1, channels=[1])) \
+        == "attached"
+    assert seen["hwm"] == \
+        '!HardwareMap [ !CRS { serial: "0000", hostname: "127.0.0.1:9878" } ]'
+    assert "created" not in seen
+
+    monkeypatch.setattr(server, "running_mock", lambda: None)
+    assert asyncio.run(record._main("MOCK", None, module=1, channels=[1])) \
+        == "simulated"
+    assert seen["created"]["module"] == 1
+
+
+def test_a_tod_without_a_bias_export_is_said_before_the_run(
+        tmp_path, monkeypatch):
+    from click.testing import CliRunner
+    from rfmux.tools import record
+
+    async def ran(*a, **kw):
+        return rs.RecordResult(session=tmp_path, module=1, channels=[1, 2],
+                               duration_s=1.0, training_s=0.0)
+    monkeypatch.setattr(record, "_main", ran)
+    args = ["--serial", "0156", "--duration", "1", "--channels", "1-2",
+            "--session-dir", str(tmp_path), "--no-fastrx", "--show", "none"]
+    r = CliRunner().invoke(record.cli, args)
+    assert r.exit_code == 0, r.output
+    assert "no bias export for these modules" in r.output
+    r = CliRunner().invoke(record.cli, args + ["--no-tod"])
+    assert "no bias export" not in r.output
+
+
+def _unreachable(tmp_path, monkeypatch, serial):
+    import aiohttp
+    from click.testing import CliRunner
+    from rfmux.tools import record
+
+    async def unreachable(*a, **kw):
+        raise aiohttp.ClientConnectionError("Cannot connect to host")
+    monkeypatch.setattr(record, "_main", unreachable)
+    return CliRunner().invoke(record.cli, [
+        "--serial", serial, "--duration", "1", "--channels", "1-2",
+        "--session-dir", str(tmp_path), "--no-parser", "--no-fastrx"])
+
+
+def test_an_unreachable_board_is_an_error_not_a_traceback(tmp_path,
+                                                          monkeypatch):
+    r = _unreachable(tmp_path, monkeypatch, "0156")
+    assert r.exit_code == 1 and "Traceback" not in r.output
+    assert "Cannot connect to host" in r.output
+
+
+def test_only_a_mock_serial_says_no_mock_is_running(tmp_path, monkeypatch):
+    """The mock server is looked for only for MOCK or 0000, so only then
+    does the error say none was found."""
+    assert "no mock server is running" in \
+        _unreachable(tmp_path, monkeypatch, "0000").output
+    assert "no mock server is running" not in \
+        _unreachable(tmp_path, monkeypatch, "0156").output
 
 
 def test_a_bare_record_command_asks_the_dialog(monkeypatch):
@@ -711,7 +975,8 @@ def test_a_run_across_modules_with_channel_settings_keeps_the_metadata(
         session=session, pulse_path=None, dirfile_path=None,
         fastrx_path=None, module=None, modules=[2, 3],
         channels=[(2, 1), (3, 5)], duration_s=1.0, training_s=0.1,
-        started_at=0.0, fastrx_stats=None, merged_fastrx=False, warnings=[])
+        started_at=0.0, fastrx_stats=None, merged_fastrx=False, tod_path=None,
+        merged_tod=False, warnings=[])
     config = PulseCaptureConfig(per_channel={(3, 5): {"trigger": False}})
     rs._record(result, config)
     after = load_metadata(session)
@@ -728,9 +993,10 @@ def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
         session=session, fastrx=False, verbose=False))
     meta = load_metadata(session)
     assert [(e["data_type"], e["identifier"]) for e in meta["exports"]] == [
-        ("parser", "module2")]          # the fake capture wrote no file
+        ("parser", "module2"), ("tod", "module2")]   # the fake capture wrote no file
     run = meta["recordings"][0]
     assert run["dirfile"] == str(result.dirfile_path.relative_to(session))
+    assert run["tod"] == result.tod_path.name and run["merged_tod"] is False
     assert run["duration_s"] == DURATION_S
     assert run["training_s"] == pytest.approx(
         PulseCaptureConfig().noise_train_ms / 1e3, rel=0.05)
@@ -826,6 +1092,7 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     with PulseHDF5Reader(result.pulse_path) as reader:
         assert reader.channels == [1, 2]
         rate = float(reader.metadata["sample_rate_slow"])
+        reader_origin = reader.metadata["time_origin_epoch"]
     assert result.dirfile_path.name == "serial_0000"
     df = gd.dirfile(str(result.dirfile_path), gd.RDONLY)
     # The parser drops the batch in flight when it is stopped, up to
@@ -835,6 +1102,21 @@ def test_mock_capture_and_parser_cover_the_same_stretch(tmp_path):
     assert "Drop Statistics" in result.parser_log.read_text()
 
     meta = load_metadata(result.session)
-    assert sorted(e["data_type"] for e in meta["exports"]) == ["parser", "pulse"]
+    assert sorted(e["data_type"] for e in meta["exports"]) == ["parser", "pulse", "tod"]
     run_meta = meta["recordings"][0]
     assert run_meta["started_at"] - result.capture.start_time >= 0.9 * result.training_s
+
+    # The dirfile repacked: every frame, in volts (no tuning was given),
+    # at the capture's rate, on the capture's clock and day.
+    import h5py
+    with h5py.File(result.tod_path, "r") as f:
+        assert "tod/fast" not in f
+        t = f["tod/slow/time"][()]
+        assert t.shape == f["tod/slow/channel_1/I"].shape
+        assert df.nframes - 1 <= len(t) <= df.nframes
+        assert np.all(np.diff(t) > 0)       # one seconds-of-day axis
+        assert np.median(np.diff(t)) == pytest.approx(1.0 / rate, rel=1e-3)
+        assert f["tod/slow/channel_1"].attrs["stored_units"] == "V"
+        m = f["metadata"].attrs
+        assert m["sample_rate_slow"] == pytest.approx(rate)
+        assert m["time_origin_epoch"] == reader_origin

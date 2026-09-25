@@ -33,11 +33,26 @@ commands or on "rfmux --help".
 """
 
 import importlib
+import os
 import pkgutil
+import sys
+import sysconfig
+from pathlib import Path
 
 import click
 
 import rfmux.tools as _tools_pkg
+
+
+def periscope_command() -> list:
+    """The command that starts Periscope from this environment: its
+    ``periscope`` script by full path, or the interpreter running
+    ``rfmux periscope``."""
+    scripts = Path(sysconfig.get_path("scripts"))
+    exe = scripts / ("periscope.exe" if os.name == "nt" else "periscope")
+    if exe.exists():
+        return [str(exe)]
+    return [sys.executable, "-m", "rfmux.tools.cli", "periscope"]
 
 
 def _discover_command_names():

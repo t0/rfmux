@@ -152,6 +152,40 @@ def test_a_run_across_modules_views_each_modules_records(tmp_path):
     assert view["i_max"].max() == pytest.approx(odd_spikes, rel=1e-6)
 
 
+def test_a_view_factor_converts_samples_exactly_and_bounds_the_overview(tod):
+    """(I + jQ) * factor, as Periscope's units choice converts: the
+    samples converted before they are reduced; the overview, which holds
+    each stored axis's extremes, scaled exactly and, under a rotation,
+    bounded so that every converted sample lies inside its bin."""
+    path, iq, seconds = tod
+    z = (iq[:, 1, 0] + 1j * iq[:, 1, 1]) * VOLTS_PER_ROC
+    rot = 3e6 * np.exp(1j * 0.9)
+    with h5py.File(path, "r") as f:
+        raw = tod_window(f, "fast", 2, seconds[100], seconds[140], factor=rot)
+        mid = tod_window(f, "fast", 2, seconds[10000], seconds[12999],
+                         bins=100, factor=rot)
+        t0, t1 = tod_extent(f, "fast", 2)
+        scaled = tod_window(f, "fast", 2, t0, t1, bins=100, factor=2.0)
+        plain = tod_window(f, "fast", 2, t0, t1, bins=100)
+        wide = tod_window(f, "fast", 2, t0, t1, bins=100, factor=rot)
+    np.testing.assert_allclose(raw["I"] + 1j * raw["Q"], z[100:141] * rot,
+                               rtol=1e-5)
+    conv = z[10000:13000] * rot
+    assert mid["i_max"].max() == pytest.approx(conv.real.max(), rel=1e-5)
+    assert mid["q_min"].min() == pytest.approx(conv.imag.min(), rel=1e-5)
+    assert not scaled["bounds"]
+    np.testing.assert_allclose(scaled["i_max"], 2 * plain["i_max"])
+    assert wide["bounds"] and wide["source"] == "overview"
+    conv = z * rot
+    t = np.where(np.isnan(seconds), -np.inf, seconds)
+    for k in range(len(wide["t_first"])):
+        inside = (t >= wide["t_first"][k]) & (t <= wide["t_last"][k])
+        assert conv.real[inside].max() <= wide["i_max"][k] * (1 + 1e-6) + 1e-9
+        assert conv.real[inside].min() >= wide["i_min"][k] * (1 + 1e-6) - 1e-9
+        assert conv.imag[inside].max() <= wide["q_max"][k] * (1 + 1e-6) + 1e-9
+        assert conv.imag[inside].min() >= wide["q_min"][k] * (1 + 1e-6) - 1e-9
+
+
 def test_a_file_without_an_overview_still_views(tod, tmp_path):
     """A TOD written before overviews existed reads the samples
     instead: slower for a wide window, the same answer."""

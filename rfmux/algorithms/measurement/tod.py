@@ -462,8 +462,23 @@ def _reduce(t_first, t_last, i_min, i_max, q_min, q_max, bins: int):
             "q_max": np.maximum.reduceat(q_max, starts)}
 
 
+def _convert(i, q, factor: complex):
+    """(I, Q) as (I + jQ) * *factor*, the conversion a view applies."""
+    if factor == 1:
+        return i, q
+    z = (np.asarray(i, np.float64) + 1j * np.asarray(q, np.float64)) * factor
+    return z.real, z.imag
+
+
+def _bounds(lo, hi, coef: float):
+    """Extremes of *coef* times a value lying in [lo, hi]."""
+    a, b = coef * lo, coef * hi
+    return np.minimum(a, b), np.maximum(a, b)
+
+
 def tod_window(f: h5py.File, stream: str, key: ChannelKey, t0: float,
-               t1: float, bins: int = VIEW_BINS) -> dict:
+               t1: float, bins: int = VIEW_BINS,
+               factor: complex = 1) -> dict:
     """*key*'s samples of *stream* stamped in ``[t0, t1]``, fit to draw:
 
     * ``kind="raw"``: ``time``, ``I``, ``Q``, the samples themselves,
@@ -476,24 +491,46 @@ def tod_window(f: h5py.File, stream: str, key: ChannelKey, t0: float,
 
     ``samples`` is how many samples the window holds.  Only the
     window's slice of the file is read, and an overview read covers
-    the whole run in kilobytes."""
+    the whole run in kilobytes.
+
+    *factor* converts the stored (I, Q) to a view, (I + jQ) * factor,
+    as Periscope's units choice does.  Samples are converted before
+    they are reduced, exactly.  The overview holds each stored axis's
+    extremes, so a factor that turns I into Q gives each bin bounds
+    that hold its converted samples (``bounds=True``): never narrower
+    than the samples, possibly wider."""
     sgrp, tgrp, cgrp = _groups(f, stream, key)
     t_ds = tgrp["time"]
     a = index_at(f, stream, key, t0)
     b = index_at(f, stream, key, t1, side="right")
     n = b - a
     if n <= 2 * bins:
+        i, q = _convert(cgrp["I"][a:b], cgrp["Q"][a:b], factor)
         return {"kind": "raw", "samples": n, "time": t_ds[a:b],
-                "I": cgrp["I"][a:b], "Q": cgrp["Q"][a:b]}
+                "I": i, "Q": q}
     size = int(sgrp.attrs.get("overview_samples", 0))
     if size and "overview" in cgrp and n >= size * bins:
         ka, kb = a // size, -(-b // size)
-        ov = cgrp["overview"][ka:kb]
+        ov = cgrp["overview"][ka:kb].astype(np.float64)
         tov = tgrp["time_overview"][ka:kb]
         view = _reduce(tov[:, 0], tov[:, 1], *ov.T, bins)
+        c, s = complex(factor).real, complex(factor).imag
+        if s == 0:
+            view["i_min"], view["i_max"] = _bounds(view["i_min"],
+                                                   view["i_max"], c)
+            view["q_min"], view["q_max"] = _bounds(view["q_min"],
+                                                   view["q_max"], c)
+        else:
+            # I' = c I - s Q and Q' = s I + c Q, each term bounded.
+            ci = _bounds(view["i_min"], view["i_max"], c)
+            si = _bounds(view["i_min"], view["i_max"], s)
+            cq = _bounds(view["q_min"], view["q_max"], c)
+            sq = _bounds(view["q_min"], view["q_max"], -s)
+            view["i_min"], view["i_max"] = ci[0] + sq[0], ci[1] + sq[1]
+            view["q_min"], view["q_max"] = si[0] + cq[0], si[1] + cq[1]
         return {"kind": "envelope", "source": "overview", "samples": n,
-                **view}
+                "bounds": s != 0, **view}
     t = t_ds[a:b]
-    i, q = cgrp["I"][a:b], cgrp["Q"][a:b]
+    i, q = _convert(cgrp["I"][a:b], cgrp["Q"][a:b], factor)
     view = _reduce(t, t, i, i, q, q, bins)
     return {"kind": "envelope", "source": "samples", "samples": n, **view}

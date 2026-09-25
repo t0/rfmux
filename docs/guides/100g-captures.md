@@ -244,7 +244,13 @@ hold. Double-click one to draw it over the run in the **Channel TOD View**
 tab, shown beside Pulse View while the file holds time-ordered data.
 Switching to the tab draws the channel of the pulse selected in Pulse
 View; its Channel box switches channels, and Prev and Next step to the
-neighbouring channel over the same time window, each at its own levels. It draws I and Q (df and
+neighbouring channel over the same time window, each at its own levels.
+The Units choice converts it as it does the pulse and IQ views. A wide
+view drawn from the overview, which holds each stored axis's extremes,
+shows bounds under a units change that turns I into Q (the status line
+says so): every converted sample lies inside them, though the band can
+draw wider than the samples. Zooming until the samples are read makes
+it exact. It draws I and Q (df and
 dissipation for a channel stored in hertz) on one time axis, the fast and
 slow streams either or both, the fast drawn under the slow. The plot is
 never more than 500 bins, each drawn as its minimum and maximum, so a

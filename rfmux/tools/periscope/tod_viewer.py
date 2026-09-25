@@ -43,6 +43,11 @@ class TodViewer(QtWidgets.QWidget):
         self.streams: List[str] = []
         self.curves = {}
         self.origin, self.span = 0.0, 1.0
+        #: key -> (factor, (first axis name, second)) taking the stored
+        #: samples to the view Periscope's units choice asks for, or None
+        #: to draw them as stored; the panel sets it.
+        self.view_for = None
+        self._stored_names = ("I", "Q")
         self._setup_ui()
         self.apply_theme(dark_mode)
 
@@ -184,8 +189,8 @@ class TodViewer(QtWidgets.QWidget):
 
         names = ("df", "dissipation") if units == "Hz" else ("I", "Q")
         suffix = f" ({units})" if units else ""
-        for plot, name in zip(self.plots, names):
-            plot.setLabel("left", name + suffix)
+        self._stored_names = tuple(n + suffix for n in names)
+        self._set_labels()
         epoch = self.f["metadata"].attrs.get("time_origin_epoch") \
             if "metadata" in self.f else None
         start = (epoch_to_utc(float(epoch) + self.origin) if epoch is not None
@@ -216,6 +221,27 @@ class TodViewer(QtWidgets.QWidget):
 
     # ── Drawing ───────────────────────────────────────────────────
 
+    def _view(self):
+        """(factor, axis names) for the channel drawn: the panel's view
+        when it can be produced, else the stored samples as they are."""
+        view = self.view_for(self.key) if self.view_for else None
+        return view if view is not None else (1, self._stored_names)
+
+    def _set_labels(self) -> None:
+        for plot, name in zip(self.plots, self._view()[1]):
+            plot.setLabel("left", name)
+
+    def view_changed(self) -> None:
+        """Periscope's units changed: the same window, redrawn in them,
+        the vertical axis following the new levels."""
+        if self.key is None:
+            return
+        self._set_labels()
+        for plot in self.plots:
+            plot.getPlotItem().enableAutoRange(axis="y")
+            plot.getPlotItem().setAutoVisible(y=True)
+        self._refresh()
+
     def reset_view(self) -> None:
         if self.key is None:
             return
@@ -230,6 +256,7 @@ class TodViewer(QtWidgets.QWidget):
             return
         x0, x1 = self.plots[0].getPlotItem().viewRange()[0]
         t0, t1 = self.origin + x0, self.origin + x1
+        factor = self._view()[0]
         parts = []
         for s in self.streams:
             curves = self.curves[s]
@@ -237,7 +264,7 @@ class TodViewer(QtWidgets.QWidget):
                 for curve in curves:
                     curve.setData([], [])
                 continue
-            view = tod_window(self.f, s, self.key, t0, t1)
+            view = tod_window(self.f, s, self.key, t0, t1, factor=factor)
             x, ys = _xy(view)
             # Each sample marked once the view is the samples themselves.
             symbol = "o" if view["kind"] == "raw" else None
@@ -246,7 +273,8 @@ class TodViewer(QtWidgets.QWidget):
                               symbol=symbol, symbolSize=4)
             parts.append(f"{s}: {view['samples']:,} samples, " + (
                 "each drawn" if view["kind"] == "raw" else
-                f"{len(view['t_first'])} bins from the {view['source']}"))
+                f"{len(view['t_first'])} bins from the {view['source']}"
+                + (", bounds in this view" if view.get("bounds") else "")))
         self.info.setText(f"{title_label(self.key)}: " + "; ".join(parts))
 
 

@@ -582,6 +582,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # Shown while the file under review holds time-ordered data.
         from .tod_viewer import TodViewer
         self.tod_view = TodViewer(dark_mode=self.dark_mode)
+        self.tod_view.view_for = self._tod_view_for
         self.viewer_tabs.addTab(self.tod_view, "Channel TOD View")
         self.viewer_tabs.setTabVisible(
             self.viewer_tabs.indexOf(self.tod_view), False)
@@ -2943,6 +2944,14 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         self._render_templates()
         self._refresh_pulse_plot()
         self._refresh_noise_label()
+        self.tod_view.view_changed()
+
+    def _tod_view_for(self, channel):
+        """The Channel TOD View's conversion for *channel*: the factor
+        and axis names the pulse view draws it with, or None to draw
+        the stored samples."""
+        view = self._view_coeffs(channel)
+        return None if view is None else (view[0], self._axis_names(channel))
 
     def _any_channel_calibrated(self) -> bool:
         """Whether any displayed channel has a df calibration.

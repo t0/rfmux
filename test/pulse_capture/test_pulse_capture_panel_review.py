@@ -427,6 +427,40 @@ def test_prev_and_next_step_through_the_channels_over_the_same_window(
     assert view.key == 7
 
 
+def test_the_units_choice_redraws_the_tod_tab_as_it_does_the_pulse_view(
+        qt_app, tmp_path, panel):
+    """The TOD tab takes the same conversion as the pulse and IQ views:
+    a channel stored in volts and switched to df is drawn in hertz under
+    df and dissipation labels, over the same window."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import CHANNEL, _recording_file
+    cal = complex(3e6, -4e6)
+    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path), trigger_basis="iq",
+                     tuning={CHANNEL: {"df_calibration": cal}})
+    panel.load_from_hdf5(path)
+    view = panel.tod_view
+    panel.units_combo.setCurrentText(m.UNITS_VOLTS)
+    panel._open_tod_viewer(CHANNEL)
+    assert view.plots[0].getPlotItem().getAxis("left").labelText == "I (V)"
+    view.plots[0].setXRange(0.010, 0.011, padding=0)
+    view._refresh()
+    i_volts = view.curves["fast"][0].getData()[1]
+    q_volts = view.curves["fast"][1].getData()[1]
+    panel.units_combo.setCurrentText(m.UNITS_DF)
+    assert view.plots[0].getPlotItem().getAxis("left").labelText == "df (Hz)"
+    assert view.plots[1].getPlotItem().getAxis("left").labelText == \
+        "dissipation (Hz)"
+    assert view.plots[0].getPlotItem().viewRange()[0] == \
+        pytest.approx([0.010, 0.011])
+    factor = panel._view_coeffs(CHANNEL)[0]
+    expected = (i_volts + 1j * q_volts) * factor
+    np.testing.assert_allclose(view.curves["fast"][0].getData()[1],
+                               expected.real, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(view.curves["fast"][1].getData()[1],
+                               expected.imag, rtol=1e-4, atol=1e-6)
+
+
 def test_the_tod_tab_opens_on_its_first_channel_with_nothing_selected(
         qt_app, tmp_path, panel):
     path, channel = _tod_file(tmp_path)

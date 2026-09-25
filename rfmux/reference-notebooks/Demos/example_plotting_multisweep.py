@@ -9,10 +9,10 @@
 
 Each resonator gets a panel, with amplitude steps coloured by drive and sweep
 directions distinguished by line style. Select traces with ``names``,
-``iterations`` and ``directions``. Magnitude panels mark the starting catalog's
-bias frequency and thicken a trace swept at its bias amplitude. Magnitude
-defaults to drive-referenced dB; IQ defaults to readout counts divided by the
-drive's DAC fraction.
+``iterations`` and ``directions``. Once the multisweep has a bias report,
+magnitude panels mark its new bias frequency and thicken a trace swept at its
+new bias amplitude. Magnitude defaults to drive-referenced dB; IQ defaults to
+readout counts divided by the drive's DAC fraction.
 
 Style is applied per figure. Batches share a colour scale; ``batchlen=None``
 puts all resonators in one figure.
@@ -272,7 +272,8 @@ def _plot_panels(
     title=None,
     batchlen=BATCH_SIZE,
     equal_aspect=False,
-    overlay_bias=False,
+    show_bias_frequency=False,
+    highlight_bias_amplitude=False,
 ):
     """Draw panels with the supplied trace callback.
 
@@ -282,9 +283,8 @@ def _plot_panels(
     traces_by_name = _collect_traces(
         ms_module_output, names, iterations, directions
     )
-    bias_points = (
-        _catalog_bias_points(ms_module_output) if overlay_bias else {}
-    )
+    bias_points = (_reported_bias_points(ms_module_output)
+                   if show_bias_frequency or highlight_bias_amplitude else {})
     every_trace = [
         sweep for traces in traces_by_name.values() for _, _, sweep in traces
     ]
@@ -308,16 +308,20 @@ def _plot_panels(
     for batch_number, batch in enumerate(batches, start=1):
         _draw_figure(
             batch, draw, mappable, xlabel, ylabel, normalize, columns, panel_size,
-            equal_aspect, bias_points,
+            equal_aspect, bias_points, show_bias_frequency,
+            highlight_bias_amplitude,
             title=_figure_title(
                 title, what, len(traces_by_name), steps, batch_number, len(batches)
             ),
         )
 
 
-def _catalog_bias_points(ms_module_output):
-    """Bias points in the catalog snapshot this multisweep was called with."""
-    catalog = ms_module_output.get("call_params", {}).get("catalog")
+def _reported_bias_points(ms_module_output):
+    """Bias points selected by the multisweep's saved bias report, if any."""
+    report = ms_module_output.get("bias_report")
+    if report is None:
+        return {}
+    catalog = report.get("catalog")
     if catalog is None:
         return {}
     return {
@@ -341,7 +345,8 @@ def _figure_title(title, what, section_count, steps, batch_number, batch_count):
 
 def _draw_figure(
     batch, draw, mappable, xlabel, ylabel, normalize, columns, panel_size,
-    equal_aspect, bias_points, title,
+    equal_aspect, bias_points, show_bias_frequency, highlight_bias_amplitude,
+    title,
 ):
     """One figure, holding one batch of sweep sections."""
     # Every artist below takes its size from the rcParams in force when it is
@@ -355,9 +360,11 @@ def _draw_figure(
         for panel, (name, traces) in zip(panels, batch):
             bias = bias_points.get(name)
             for iteration, direction, sweep in traces:
-                at_bias_amplitude = bias is not None and np.isclose(
-                    sweep["sweep_amplitude"], bias.amplitude,
-                    rtol=BIAS_AMPLITUDE_RTOL, atol=0.0,
+                at_bias_amplitude = (
+                    highlight_bias_amplitude and bias is not None and np.isclose(
+                        sweep["sweep_amplitude"], bias.amplitude,
+                        rtol=BIAS_AMPLITUDE_RTOL, atol=0.0,
+                    )
                 )
                 draw(
                     panel,
@@ -372,7 +379,7 @@ def _draw_figure(
                     directions_drawn.append(direction)
 
             centre_mhz = traces[0][2]["original_center_frequency"] / 1e6
-            if bias is not None:
+            if show_bias_frequency and bias is not None:
                 panel.axvline(
                     (bias.frequency_hz - traces[0][2]["original_center_frequency"])
                     / 1e3,
@@ -413,10 +420,10 @@ def _draw_figure(
             labels.extend(directions_drawn)
         if bias_frequency_drawn:
             handles.append(Line2D([], [], color=BIAS_COLOUR, lw=2.0, ls="--"))
-            labels.append("catalog bias frequency")
+            labels.append("new bias frequency")
         if bias_trace_drawn:
             handles.append(Line2D([], [], color="0.3", lw=BIAS_TRACE_LINEWIDTH))
-            labels.append("trace at catalog bias amplitude")
+            labels.append("trace at new bias amplitude")
         if handles:
             fig.legend(
                 handles, labels,
@@ -439,7 +446,8 @@ def plot_magnitude_panels(
     panel_size=(7.0, 5.0),
     title=None,
     batchlen=BATCH_SIZE,
-    overlay_bias=True,
+    show_bias_frequency=True,
+    highlight_bias_amplitude=True,
 ):
     """|S21| against frequency offset, a panel per resonator.
 
@@ -465,10 +473,12 @@ def plot_magnitude_panels(
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
         batchlen: resonators per figure; None uses one figure.
-        overlay_bias: mark each resonator's bias frequency from the catalog
-            snapshot in ``call_params``. A sweep whose amplitude matches the
-            catalog bias amplitude within a relative tolerance of 1e-6 is
-            drawn thicker. Results without a catalog are drawn unchanged.
+        show_bias_frequency: mark each resonator's frequency from the catalog
+            in ``bias_report``. It has no effect until bias finding saved a
+            report on the multisweep.
+        highlight_bias_amplitude: draw thicker traces whose amplitude matches
+            the catalog in ``bias_report`` within a relative tolerance of
+            1e-6. It has no effect until bias finding saved a report.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -513,7 +523,8 @@ def plot_magnitude_panels(
         panel_size=panel_size,
         title=title,
         batchlen=batchlen,
-        overlay_bias=overlay_bias,
+        show_bias_frequency=show_bias_frequency,
+        highlight_bias_amplitude=highlight_bias_amplitude,
     )
 
 

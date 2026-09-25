@@ -53,6 +53,14 @@ class TodViewer(QtWidgets.QWidget):
         outer.setContentsMargins(4, 4, 4, 4)
         bar = QtWidgets.QWidget()
         flow = FlowLayout(bar)
+        self.btn_prev = QtWidgets.QPushButton("◀ Prev")
+        self.btn_prev.clicked.connect(lambda: self.step(-1))
+        self.btn_next = QtWidgets.QPushButton("Next ▶")
+        self.btn_next.clicked.connect(lambda: self.step(+1))
+        for btn in (self.btn_prev, self.btn_next):
+            btn.setToolTip("The previous or next channel, over the same "
+                           "time window")
+            flow.addWidget(btn)
         self.channel_combo = QtWidgets.QComboBox()
         self.channel_combo.activated.connect(
             lambda i: self.show_channel(self.channel_combo.itemData(i)))
@@ -132,10 +140,27 @@ class TodViewer(QtWidgets.QWidget):
                 plot.removeItem(curve)
         self.curves = {}
 
-    def show_channel(self, key) -> None:
-        """Draw *key* over the whole run."""
+    def step(self, step: int) -> None:
+        """The channel *step* places along the Channel box, stopping at
+        either end, over the time window in view."""
+        n = self.channel_combo.count()
+        if self.f is None or not n:
+            return
+        i = self.channel_combo.currentIndex() + step if self.key is not None \
+            else 0
+        i = max(0, min(n - 1, i))
+        if self.channel_combo.itemData(i) != self.key:
+            self.show_channel(self.channel_combo.itemData(i), keep_window=True)
+
+    def show_channel(self, key, keep_window: bool = False) -> None:
+        """Draw *key* over the whole run, or with *keep_window* over the
+        time window in view."""
         if self.f is None:
             return
+        window = None
+        if keep_window and self.key is not None:
+            x0, x1 = self.plots[0].getPlotItem().viewRange()[0]
+            window = (self.origin + x0, self.origin + x1)
         self._clear_curves()
         self.key = key
         idx = self.channel_combo.findData(key)
@@ -175,7 +200,19 @@ class TodViewer(QtWidgets.QWidget):
                                   symbolPen=None, symbolBrush=c, name=s)
                 curve.setZValue(0 if s == "fast" else 1)
                 self.curves.setdefault(s, []).append(curve)
-        self.reset_view()
+        i = self.channel_combo.currentIndex()
+        self.btn_prev.setEnabled(i > 0)
+        self.btn_next.setEnabled(0 <= i < self.channel_combo.count() - 1)
+        if window is None:
+            self.reset_view()
+            return
+        # The time window stays; the levels are the new channel's.
+        for plot in self.plots:
+            plot.getPlotItem().enableAutoRange(axis="y")
+            plot.getPlotItem().setAutoVisible(y=True)
+        self.plots[0].setXRange(window[0] - self.origin,
+                                window[1] - self.origin, padding=0)
+        self._refresh()
 
     # ── Drawing ───────────────────────────────────────────────────
 

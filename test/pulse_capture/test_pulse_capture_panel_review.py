@@ -398,6 +398,35 @@ def test_entering_the_tod_tab_draws_the_selected_pulses_channel(
     assert view.key == CHANNEL
 
 
+def test_prev_and_next_step_through_the_channels_over_the_same_window(
+        qt_app, tmp_path, panel):
+    """Like the pulse tab's: one channel along at a time, stopping at
+    either end; the time window zoomed to stays, to compare channels at
+    one moment."""
+    from rfmux.algorithms.measurement.tod import write_tod
+    from test.pulse_capture.test_overlay import CHANNEL, _recording_file
+    path = write_tod(tmp_path / "tod.h5", [7, CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path), trigger_basis="iq")
+    panel.load_from_hdf5(path)
+    view = panel.tod_view
+    panel._open_tod_viewer(7)
+    assert not view.btn_prev.isEnabled() and view.btn_next.isEnabled()
+    from PyQt6 import QtCore as QC
+    vb = view.plots[0].getPlotItem().getViewBox()
+    vb.showAxRect(QC.QRectF(0.010, -50.0, 0.001, 100.0), padding=0)
+    view.btn_next.click()
+    assert view.key == CHANNEL
+    assert view.channel_combo.currentData() == CHANNEL
+    assert vb.viewRange()[0] == pytest.approx([0.010, 0.011])
+    # The box's levels were channel 7's; channel 200's are its own.
+    assert vb.state["autoRange"][1]
+    assert view.btn_prev.isEnabled() and not view.btn_next.isEnabled()
+    view.btn_next.click()                    # at the end: stays
+    assert view.key == CHANNEL
+    view.btn_prev.click()
+    assert view.key == 7
+
+
 def test_the_tod_tab_opens_on_its_first_channel_with_nothing_selected(
         qt_app, tmp_path, panel):
     path, channel = _tod_file(tmp_path)

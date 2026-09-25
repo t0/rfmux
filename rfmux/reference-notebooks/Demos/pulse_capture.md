@@ -1,5 +1,12 @@
 ---
 jupyter:
+  jupytext:
+    formats: ipynb,md
+    text_representation:
+      extension: .md
+      format_name: markdown
+      format_version: '1.3'
+      jupytext_version: 1.19.5
   kernelspec:
     display_name: Python 3 (ipykernel)
     language: python
@@ -16,8 +23,9 @@ builds a `PulseCaptureSession`, feeds it from its own packet receiver and from
 `run_pfb_source`, and draws the callbacks. This notebook builds the same
 session, feeds it with the source functions, and prints or plots.
 
-`rfmux.pulse_capture` re-exports every class and function of its submodules,
-so one import line covers them. The table gives the module each lives in.
+`rfmux.pulse_capture` re-exports the main session, configuration, source and
+reader APIs. Additional analysis helpers live in `rfmux.pulse_capture.analysis`.
+The table gives the module each lives in.
 
 | Piece | Module |
 |---|---|
@@ -38,21 +46,20 @@ that fits.
 This format saves no outputs, so every number you see comes from your own run.
 The shipped copy is read-only: *File → Save Notebook As…* to keep changes.
 
-Captures are written to `OUTPUT_DIR`, printed by the next cell. Section 7 reads
-them back, and Periscope can open them in review mode.
+Captures are written to the store session folder, `OUTPUT_DIR`, printed below.
+Section 7 reads them back, and Periscope can open them in review mode.
 
 ```python
 %matplotlib inline
 
 import asyncio
 import os
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
 
 import rfmux
+from rfmux.tuning import store
 from rfmux.pulse_capture import (
     DualPulseCaptureSession, PulseCaptureConfig, PulseCaptureSession,
     PulseHDF5Reader,
@@ -65,11 +72,7 @@ from rfmux.algorithms.measurement.streamer_config import (
     StreamerConfig, describe, validate,
 )
 
-# Reference notebooks are provisioned read-only, so captures go to a
-# scratch directory; override it with RFMUX_DEMO_OUTPUT.
-OUTPUT_DIR = Path(os.environ.get(
-    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_pulse_capture"))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR = store.session_directory()
 
 MODULE = 1
 CHANNELS = [1, 2]
@@ -250,8 +253,8 @@ Two streams carry data off the board:
 - the **fast** PFB stream: 2.44 MHz, up to 4 channels of one module, port 9877.
 
 Choose the stream and decimation from the pulse: aim for **10 or more samples
-across one decay constant**. Fewer and the decay cannot be fitted; many more
-and you are oversampling.
+across one decay constant** for this example. The required rate depends on
+the pulse shape and the precision you need from its decay estimate.
 
 `validate()` reports the hardware rules (long packets need stage ≥ 3, the 1 GbE
 budget, OS receive-buffer advice) as `(severity, message)` pairs. `describe()`
@@ -324,9 +327,11 @@ or by hand.
 
 ## 4. Choose the detection parameters
 
-`PulseCaptureConfig` holds every user-facing parameter in **physical units**
-(σ and milliseconds). It converts them to samples for the stream rate you hand
-it, so one configuration works unchanged from 596 Hz to 2.44 MHz.
+`PulseCaptureConfig` holds detection settings in **physical units**
+(σ, milliseconds and seconds), alongside sample-count overrides. It converts
+time settings to samples for the stream rate, so the same configuration can
+be used from 596 Hz to 2.44 MHz. Inspect `describe()` at each rate to see the
+effective sample counts and bounded training duration.
 
 How pulse detection works:
 
@@ -334,9 +339,11 @@ How pulse detection works:
   axes are df and dissipation for a channel with a calibration (section 7),
   I and Q otherwise. It opens when either leaves ±`threshold_sigma`. It
   closes when both are back inside ±`end_sigma` of the baseline, or of the
-  level the pulse rose from. They must stay there for the longest of
-  `min_end_samples`, a tenth of the time above threshold, and
-  `post_pulse_ms`. `end_sigma` must sit below `threshold_sigma`.
+  level the pulse rose from. The end-confirmation counter
+  increases while both are inside and decreases while either is outside.
+  It must exceed the largest of `min_end_samples`, a tenth of the time
+  above threshold, and `post_pulse_ms` converted to samples. `end_sigma` must
+  sit below `threshold_sigma`.
 - **Triggers are confirmed.** `trigger_samples` consecutive samples must clear
   the threshold. Left at 0 it is derived from the stream rate to hold
   accidental triggers under `max_accidental_per_min`: 1 sample at 596 Hz, 2 on
@@ -349,13 +356,16 @@ How pulse detection works:
   ignores pulses as long as they are a minority of the window. The noise σ is
   the samples' scatter about a block-median baseline, three hard-stop lengths
   per block, so a slow drift is not counted as noise.
-- **`max_pulse_ms` sizes the pulse scale.** The ring buffer is 1.5× it, the
-  hard stop 1.2×, the edge lookback a tenth. Estimate it generously: a pulse
-  that outlasts the buffer loses its rising edge.
+- **`max_pulse_ms` sizes the pulse scale.** The ring buffer starts at 1.5× it
+  plus pre/post margins, with extra space for event dumps and noise windows.
+  The hard stop is 1.2× it plus the post-pulse margin, and the edge lookback
+  is a tenth; sample-count floors apply at low rates. Estimate it generously:
+  a pulse that outlasts the buffer loses its rising edge.
 - **`noise_train_ms` is the 1/f window** (5 s): the record the noise σ is
   fitted from and the span of the rolling baseline, long compared with any
-  pulse and with the 1/f knee. Below 2 s the baseline refresh costs real time
-  at many channels.
+  pulse and with the 1/f knee. `describe()` reports the actual training length
+  after sample-count bounds, and the baseline window may be longer to cover
+  several ring buffers.
 - **A capture that never ends is cut off** at the hard stop and flagged
   `truncated`.
 - **The saved record has set margins.** `pre_pulse_ms` is kept before the
@@ -385,7 +395,8 @@ How pulse detection works:
 ![Anatomy of one capture window](pulse_capture_anatomy.png)
 
 The figure is the engine's own output on a synthetic pulse and a piled-up
-pair, at the defaults with `max_pulse_ms=50`. The shaded region is what gets
+pair, with `max_pulse_ms=50`, `noise_train_ms=1000` and the other
+configuration defaults. The shaded region is what gets
 saved: from `pre_pulse_ms` before the trigger (5 ms by default), so the
 record keeps pre-trigger baseline, to `post_pulse_ms` (5 ms) after the sample
 the pulse settled on inside the end band. The end confirmation runs at least
@@ -500,15 +511,15 @@ $$\tau = \frac{t_{\rm thr} - t_{\rm peak}}{\ln(\mathrm{SNR}_{\rm peak} / \sigma_
 
 The ratio of amplitudes cancels the unknown event energy, so a detector with
 one decay time gives one τ at every energy. It is a live cross-check, not a
-precision measurement: the discrete crossing sample lands slightly below the
-true crossing, so it runs a few percent low.
+precision measurement: sampling, noise and pileup can shift the threshold
+crossing and bias the estimate.
 
 ## 6. Live capture with streaming persistence
 
 `PulseCaptureSession` is what the panel runs. It trains on noise, then
 detects, and as each pulse closes it appends to HDF5, updates the histograms
-and stacks a trigger-aligned template. Memory stays flat however long you
-capture.
+and stacks a trigger-aligned template. Waveforms are written as they close
+instead of retaining the complete capture in memory.
 
 Feed it from `run_slow_source` / `run_pfb_source`, or from any sample source
 of your own through `feed_sample(channel, I, Q, t)`.
@@ -578,7 +589,7 @@ hist = reader.get_histograms()
 fig, axes = plt.subplots(1, 4, figsize=(17, 3))
 for ax, metric, xlabel in zip(
         axes, ["snr", "amplitude_i", "amplitude_q", "tau_ms"],
-        ["peak deviation (σ)", "peak along df (V)", "peak along dissipation (V)",
+        ["peak deviation (σ)", "peak along I (V)", "peak along Q (V)",
          "derived τ (ms)"]):
     edges = hist.get(f"{metric}_edges")
     for ch in reader.channels:
@@ -624,53 +635,74 @@ plt.title("Trigger-aligned template"); plt.legend(); plt.show()
 Samples are stored in physical units, not ADC counts: volts, or hertz for a
 channel rotated into the frequency basis.
 
-The calibration comes from `bias_kids`, whose entry per detector carries a
-complex `df_calibration`. Its magnitude is hertz per volt; its phase is minus
-the angle of the frequency direction in the (I, Q) plane, so multiplying by
-it turns that direction onto the real axis. The capture takes the whole
-entry, the tuning record: `tuning_rows` keys the entries by readout channel,
-and the session stores each channel's row (bias frequency, amplitude, sweep,
-fit parameters, calibration) in the file with its pulses:
+For a catalog produced by `find_bias_points()`, use
+`rfmux.tuning.tuning_rows(report.catalog)` to build the channel-keyed tuning
+records accepted by a capture. Each record carries the bias frequency,
+amplitude, IQ derivatives expressed as `df_calibration`, and the calibration
+sweep retained by the bias point. The session saves these records with its pulses.
 
-    from rfmux.algorithms.measurement.df_calibration import tuning_rows
+The complex calibration is `1 / (dI_df + 1j*dQ_df)` in Hz/V. Multiplying IQ
+in volts by it maps the frequency direction onto the real axis. Calibrated
+channels trigger in that basis by default (`trigger_basis="df"`); uncalibrated
+channels stay in I/Q volts. Use `trigger_basis="iq"` to trigger on I/Q even
+when a calibration is available.
 
-    bias_results = await bias_kids(crs=crs, multisweep_results=...,
-                                   module=MODULE)
-    tuning = tuning_rows(bias_results, await crs.get_nco_frequency(module=MODULE))
-
-    capture_session = PulseCaptureSession(..., tuning=tuning)
-
-A calibrated channel is rotated before thresholding by default
-(`trigger_basis="df"`), so a pulse lands on one axis instead of being split
-between two by an angle nothing controls. A channel without a calibration
-stays on the quadratures, and in volts. Pass `trigger_basis="iq"` to threshold
-the raw quadratures even where a calibration exists.
-
-`auto_bias_kids` biases the resonators but does not produce a calibration, so
-a simulated array has none yet. `measure_df_calibrations` is that measurement
-on its own: a narrow sweep around each bias point, every channel stepping
-together, with a resonance fitted to the sweep and differentiated at the bias
-point. This is the estimate `bias_kids` keeps as `df_calibration_fit`; its
-`df_calibration` is measured by stepping each tone. It uses only ordinary CRS
-calls (`get_frequency`, `set_frequency`, `get_samples`), so it runs against a
-board too. On hardware take the calibration from `bias_kids` instead of
-sweeping a tuned array again. With no channel list it measures every channel
-the module reports as biased, which is what Periscope does at startup in mock
-mode. It returns rows of the same shape: the calibration, the sweep it was
-read from and the resonance fitted to that sweep.
+The simulator's automatic biasing does not populate a catalog calibration.
+Here we read the existing tones into a catalog, which rounds their frequencies
+to the tone grid, sweep around them, and use `iq_derivatives_at()` to calibrate
+those catalog frequencies. We keep their amplitudes and do not run a new bias
+search. For an already calibrated array, reuse its catalog instead of repeating
+this measurement. The same measurement calls work on hardware. For the simulation
+created here, pause injected pulses during the sweep and restore them afterwards
+so transient events do not distort the calibration trace.
 
 ```python
-tuning = await crs.measure_df_calibrations(module=MODULE)
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.tuning import iq_derivatives_at, tuning_rows
+
+nco = await crs.get_nco_frequency(module=MODULE)
+resonators = []
+for ch in CHANNELS:
+    frequency = nco + await crs.get_frequency(channel=ch, module=MODULE)
+    amplitude = await crs.get_amplitude(channel=ch, module=MODULE)
+    resonators.append(Resonator(
+        name=f"channel {ch}", channel=ch,
+        bias=BiasPoint(frequency, amplitude=amplitude)))
+calibration_catalog = ResonatorCatalog(resonators, module=MODULE)
+if IS_MOCK:
+    await crs.set_pulse_mode("none")
+try:
+    calibration_sweeps = await crs.multisweep(
+        calibration_catalog, span_hz=20e3, npoints_per_sweep=41,
+        nsamps=10)
+    calibration_block = calibration_sweeps[crs.module[MODULE].index()]
+    for resonator in calibration_catalog:
+        sweep = calibration_block["results"][0]["upward"][resonator.name]
+        dI_df, dQ_df = iq_derivatives_at(sweep, resonator.bias.frequency_hz)
+        resonator.update_bias_point(
+            dI_df=dI_df, dQ_df=dQ_df,
+            bias_sweep={key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS})
+finally:
+    try:
+        await crs.apply_bias(calibration_catalog)
+    finally:
+        if IS_MOCK:
+            await crs.set_pulse_mode(MOCK_CONFIG["pulse_mode"])
+
+tuning = tuning_rows(calibration_catalog,
+                     dac_scale_dbm=calibration_block["dac_scale_dbm"], nsamps=10)
+assert set(tuning) == set(CHANNELS)
 for ch, row in sorted(tuning.items()):
     cal = row["df_calibration"]
+    assert cal is not None and np.isfinite(cal)
     print(f"  ch{ch}: {abs(cal):.3g} Hz per volt, "
           f"{np.degrees(np.angle(cal)):+.1f} deg")
 ```
 
 A capture with this tuning triggers in the frequency basis and stores each
 calibrated channel in hertz. This one also records events and noise samples,
-and captures a third channel that has no detector on it. That channel never
-triggers, so `dump_all_channels` saves it with every event:
+and captures a third channel that has no detector or calibration.
+`dump_all_channels` saves that channel with events where it did not trigger:
 
 ```python
 from dataclasses import replace
@@ -818,7 +850,7 @@ plt.tight_layout(); plt.show()
 ```
 
 The IQ Plane draws the pulse over the sweep the channel was tuned with.
-`tuning_sweep` returns that sweep in counts, turned to sit under the samples,
+`tuning_sweep` returns that sweep in counts in the samples’ IQ frame,
 with the bias point. `display_transform` gives the factor that takes stored
 samples, or counts, into the view. Here the view is volts on the I and Q
 axes:
@@ -994,34 +1026,28 @@ for c in reader.channels:
         print(f"  ch{c}: trained sigma {trained:.4g} {reader.stored_units(c)}")
 ```
 
-### A channel's sweep and fit
+### A channel's calibration sweep
 
-The `tuning` row is shaped like the `bias_kids` entry for the channel, so it
-holds the sweep, the fitted resonance and the bias point as well as the
-calibration. Scalars and fit parameters come back as values, the sweep as
-arrays:
+A catalog tuning row stores the measured voltage sweep and bias point.
+Resonator fits are separate analysis products; calibration here uses derivatives
+of the measured sweep rather than a fitted model.
 
 ```python
 row = reader.tuning(ch)
-fit = row.get("nonlinear_fit_params") or {}
 print(f"bias frequency {row['bias_frequency'] / 1e6:.6f} MHz, "
-      f"df calibration {abs(row['df_calibration']):.4g} Hz/V "
-      f"({row['df_calibration_source']})")
-for key in ("fr", "Qr", "amp", "phi", "a"):
-    if key in fit:
-        print(f"  {key:<4} {fit[key]:.6g}")
+      f"df calibration {abs(row['df_calibration']):.4g} Hz/V")
+assert "iq_volts" in row
 
 f_mhz = np.asarray(row["frequencies"]) / 1e6
+iq_volts = np.asarray(row["iq_volts"])
 fig, axes = plt.subplots(1, 2, figsize=(11, 3.4))
-axes[0].plot(f_mhz, np.abs(row["iq_complex"]), ".", ms=4, label="sweep")
-if "nonlinear_model_iq" in row:
-    axes[0].plot(f_mhz, np.abs(row["nonlinear_model_iq"]), lw=1, label="fit")
+axes[0].plot(f_mhz, np.abs(iq_volts), ".", ms=4, label="sweep")
 axes[0].axvline(row["bias_frequency"] / 1e6, color="k", lw=0.8, ls=":",
                 label="bias")
-axes[0].set_xlabel("frequency (MHz)"); axes[0].set_ylabel("|S21| (counts)")
+axes[0].set_xlabel("frequency (MHz)"); axes[0].set_ylabel("magnitude (V)")
 axes[0].legend()
-axes[1].plot(np.real(row["iq_complex"]), np.imag(row["iq_complex"]), ".", ms=4)
-axes[1].set_xlabel("I (counts)"); axes[1].set_ylabel("Q (counts)")
+axes[1].plot(iq_volts.real, iq_volts.imag, ".", ms=4)
+axes[1].set_xlabel("I (V)"); axes[1].set_ylabel("Q (V)")
 axes[1].axis("equal")
 fig.suptitle(f"channel {ch}: the sweep its calibration was read from")
 plt.tight_layout(); plt.show()
@@ -1074,9 +1100,10 @@ is held until the longest capture could have closed, plus 50 ms, then released
 as a one-sided pair. `run_dual_source` drives both sockets; whichever side
 finishes first stops the other.
 
-Every pair stores both streams over one common interval, the union of the two
-saved records, recorded as `window_t0`/`window_t1`: the same event at both
-rates over the same interval. A one-sided pair gets the other stream's window
+Each pair requests both streams over the union of their saved records, padded
+on each side by 10% of that span or 0.1 ms, whichever is larger. A span shorter
+than one slow sample is first widened to two slow samples. The requested
+interval is `pair["window"]`, saved as `window_t0`/`window_t1` in HDF5. A one-sided pair gets the other stream's window
 when that buffer still covers it; after `pair_window_wait_s` (3 s) the pair is
 written without it. Metrics are computed from each stream's own triggered
 samples.
@@ -1131,10 +1158,12 @@ if two_sided:
         if tod is None:
             continue
         t = np.asarray(tod["Time"], dtype=float)
-        plt.plot((t - np.nanmin(t)) * 1e3, tod["Amp_I"],
+        plt.plot((t - p["window"][0]) * 1e3, tod["Amp_I"],
                  marker="." if key == "slow_tod" else None,
-                 ms=4, lw=1, label=label)
-    plt.xlabel("time (ms)"); plt.ylabel("I (V)")
+                 ms=4, lw=1, label=label,
+                 zorder=3 if key == "slow_tod" else 2,
+                 alpha=1.0 if key == "slow_tod" else 0.5)
+    plt.xlabel("time from pair window start (ms)"); plt.ylabel("I (V)")
     plt.title(f"ch{p['channel']} pair #{p['pair_idx']}: "
               f"trigger offset {(p.get('time_offset') or 0.0)*1e6:+.0f} µs")
     plt.legend(); plt.show()

@@ -615,7 +615,11 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording
   under every pulse. `periscope --review <pulse.h5>` opens any capture
-  file that way, offline, without the startup dialog. With no options
+  file that way, offline, without the startup dialog;
+  `rfmux periscope --install-desktop` adds Periscope with its icon to
+  the application menu and to HDF5 files' Open With, on Linux and
+  Windows (`--default-for-hdf5`, `--desktop-icon`,
+  `--uninstall-desktop`). With no options
   the command opens a dialog with every choice, remembered between
   runs, the pulse capture settings on their own tab and the newest
   session under the default path filled in; it checks for fastrxd and

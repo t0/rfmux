@@ -231,7 +231,9 @@ The merged file is a both-mode file: the Pulse Capture panel shows the
 recording's samples under every pulse, and names the module beside each
 channel for a run across modules. Any capture file opens that way with
 `periscope --review <pulse.h5>`, offline, or by double-clicking it in the
-session browser. The status line says what time-ordered data the file
+session browser. After `rfmux periscope --install-desktop` (Linux and
+Windows) a file manager offers Periscope in an HDF5 file's right-click
+Open With menu too. The status line says what time-ordered data the file
 holds beside its pulses, per stream. The tree's Metadata item lists every
 attribute of the file and, per channel, the scalars of its tuning row, the
 df calibration first; the Tuning item browses the sweeps. A time-ordered

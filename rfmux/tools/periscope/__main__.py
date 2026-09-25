@@ -20,6 +20,7 @@ and background tasks in `tasks.py`.
 """
 
 import argparse
+import subprocess
 import textwrap
 from pathlib import Path
 import sys
@@ -169,6 +170,27 @@ def review_session(review) -> dict:
     }
 
 
+def _desktop(args) -> int:
+    """--install-desktop or --uninstall-desktop: say what was written or
+    removed, and return the exit status."""
+    from . import desktop
+    try:
+        if args.uninstall_desktop:
+            done = desktop.uninstall()
+            print("Removed:" if done else "Nothing to remove.")
+        else:
+            done = desktop.install(default=args.default_for_hdf5,
+                                   desktop_icon=args.desktop_icon)
+            print("Periscope added to the application menu and to Open With "
+                  "for .h5 and .hdf5 files:")
+    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+        print(f"periscope: {e}", file=sys.stderr)
+        return 1
+    for line in done:
+        print(f"  {line}")
+    return 0
+
+
 def main():
     """
     Command-line entry point for the Periscope application.
@@ -243,11 +265,29 @@ def main():
     ap.add_argument("-n", "--num-samples", type=int, default=DEFAULT_BUFFER_SIZE)
     ap.add_argument("-f", "--fps", type=float, default=30.0)
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
-    ap.add_argument("--review", metavar="PULSE_H5", default=None,
+    ap.add_argument("--review", metavar="PULSE_H5", nargs="?", const="",
+                    default=None,
                     help="Open this pulse capture file in a review panel: offline, "
-                         "in the file's session folder, without the startup dialog.")
+                         "in the file's session folder, without the startup "
+                         "dialog.  Given no file, the startup dialog opens.")
+    desk = ap.add_argument_group(
+        "desktop", "Periscope in the application menu and on HDF5 files' "
+        "Open With, for this user (Linux and Windows)")
+    desk.add_argument("--install-desktop", action="store_true",
+                      help="Add Periscope, with its icon, to the application "
+                           "menu and to Open With for .h5 and .hdf5 files")
+    desk.add_argument("--default-for-hdf5", action="store_true",
+                      help="With --install-desktop: also open HDF5 files with "
+                           "Periscope on double-click")
+    desk.add_argument("--desktop-icon", action="store_true",
+                      help="With --install-desktop: also put a Periscope "
+                           "shortcut on the desktop")
+    desk.add_argument("--uninstall-desktop", action="store_true",
+                      help="Remove what --install-desktop added")
     args = ap.parse_args()
-    
+    if args.install_desktop or args.uninstall_desktop:
+        return _desktop(args)
+
     # Initialize Qt application first for the dialog
     app = QtWidgets.QApplication(sys.argv[:1])
     echo_popups_to_console(app)
@@ -285,7 +325,7 @@ def main():
         prefill['module'] = args.module
     
     # Show the startup dialog with pre-filled values
-    if args.review is not None:
+    if args.review:
         review = Path(args.review).resolve()
         args.crs_board = "OFFLINE"
         session_config = review_session(review)
@@ -566,7 +606,7 @@ def main():
     # sys.exit(app.exec()) ensures that the application's exit code is propagated.
     viewer.setWindowIcon(app_icon)
     viewer.show()
-    if args.review is not None:
+    if args.review:
         viewer._load_pulse_capture_from_session(str(review))
     # Held in a local so it outlives this call: a QTimer that goes out
     # of scope is destroyed and stops firing.

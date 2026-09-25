@@ -361,11 +361,37 @@ BACKPLANES = {
             "manufacturer": "t0.technology",
             "product_name": "4-slot backplane",
             "part_number": "4SBP",
+            "custom_fields": ["revision=2"],
+        },
+    },
+}
+
+# Known crate models, selected with "--crate-model".
+CRATES = {
+    "crc4": {
+        "chassis": {"part_number": "CRC4"},
+        "product": {
+            "manufacturer": "t0.technology",
+            "product_name": "CRS Crate",
+            "part_number": "CRC4",
+            "product_version": "1\0",
         },
     },
 }
 
 SLOT_FIELD = re.compile(r"slot=(\d+)$")
+REVISION_FIELD = re.compile(r"revision=(.+)$")
+
+def fru_text(ctx, param, value):
+    """Append a nul byte to 1-character FRU strings.
+
+    A 1-byte ASCII field encodes as type/length 0xc1, which is also the
+    end-of-fields marker. U-boot will handle the trailing nul byte(s)
+    in the field data.
+    """
+    if len(value) == 1:
+        value = value + "\0"
+    return value
 
 # One line of "i2c md" output: a 16-bit offset, then hex byte pairs (the
 # trailing ASCII column can't false-match: it is set off by two or more
@@ -657,8 +683,8 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
         rfmux firmware --serial 0110 reflash-spi boot.bin --md5sum $(md5sum boot.bin | cut -d' ' -f1)
         rfmux firmware --serial 0110 reflash-spi boot.bin reflash-mmc t0-crs-image.wic.gz
         rfmux firmware --serial any  --crate 0123 reflash-spi boot.bin
-        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 3
-        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --chassis-serial-number C0021 --slot 0110=1 --slot 0111=2
+        rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 3
+        rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
     # Optional dependencies, checked here (the single gateway to every
@@ -886,19 +912,24 @@ backplane_option = click.option(
                    "its position, so this is how boards learn their slot. "
                    "Give a bare N with a single --serial, or repeat "
                    "SERIAL=N to program a whole crate in one run.")
-@click.option("--chassis-serial-number", required=True,
-              help="Serial number of the crate being commissioned.")
-@click.option("--board-serial-number", default="",
-              help="Serial number of the backplane PCB, if tracked.")
+@click.option("--crate-model", type=click.Choice(sorted(CRATES)), required=True,
+              help="Crate model. Pins the crate model, product name and "
+                   "revision FRU fields.")
+@click.option("--chassis-serial-number", required=True, callback=fru_text,
+              help="Serial number of the crate being commissioned "
+                   "(3 digits, e.g. 011).")
+@click.option("--board-serial-number", required=True, callback=fru_text,
+              help="Serial number of the backplane PCB (3 digits, e.g. 027).")
 @click.pass_context
-def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
-                               board_serial_number):
+def write_backplane_eeprom_cmd(ctx, backplane, crate_model, slots,
+                               chassis_serial_number, board_serial_number):
     """Commission crate backplane EEPROM(s) with IPMI FRU descriptors.
 
     The design-dependent FRU content (manufacturer, part numbers, EEPROM
-    geometry) comes from the named --backplane; only per-crate data (slot
-    mapping and serial numbers) is given here. Each written image is read
-    back and verified before the board reports success.
+    geometry) comes from the named --backplane, and the crate (manufacturer,
+    model, product name, revision) from --crate-model. Only per-crate data
+    (slot mapping and serial numbers) is given here. Each written image is
+    read back and verified before the board reports success.
 
     With a repeated "--slot SERIAL=N" mapping, every mapped board is
     programmed in a single run (one crate power-cycle), each receiving the
@@ -908,6 +939,7 @@ def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
     reconcile_slot_serials(ctx.obj, mapping)
 
     design = BACKPLANES[backplane]
+    crate_model = CRATES[crate_model]
     eeprom_size = design["eeprom"]["size"]
     mfg_date_time = int(
         (datetime.datetime.now(datetime.timezone.utc) - FRU_EPOCH)
@@ -916,12 +948,14 @@ def write_backplane_eeprom_cmd(ctx, backplane, slots, chassis_serial_number,
     def build_image(slot):
         data = {
             "common": {"format_version": 1, "size": eeprom_size},
-            "chassis": dict(design["chassis"],
+            "chassis": dict(design["chassis"], **crate_model["chassis"],
                             serial_number=chassis_serial_number,
                             custom_fields=[f"slot={slot}"]),
             "board": dict(design["board"],
                           serial_number=board_serial_number,
                           mfg_date_time=mfg_date_time),
+            "product": dict(crate_model["product"],
+                            serial_number=chassis_serial_number),
         }
         try:
             return fru.dump(data)

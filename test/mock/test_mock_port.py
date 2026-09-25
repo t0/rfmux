@@ -1,48 +1,59 @@
 """The first mock server on a host serves at MOCK_PORT, so a client
-finds it untold; a second takes an ephemeral port and still serves."""
+finds it untold; a second takes an ephemeral port and still serves.
+The port tests use a port of their own: a process's hardware map keeps
+every board loaded into it, and a new mock map binds them all again."""
 
 import socket
 
-import rfmux
+import pytest
+
 from rfmux.mock import server
 
 
-def _mock(serial: str):
-    session = rfmux.load_session(f"""
-!HardwareMap
-- !flavour "rfmux.mock"
-- !CRS {{ serial: "{serial}" }}
-""")
-    return session.query(rfmux.CRS).one()
+@pytest.fixture
+def port(monkeypatch):
+    """A port free for this test stands in for MOCK_PORT, so a mock
+    already running on the machine (Periscope's, another test's) leaves
+    the contract to be checked every time.  Taken below every system's
+    ephemeral range, where no outgoing connection can take it before
+    the mock binds it."""
+    import random
+    for free in random.Random().sample(range(20000, 30000), 50):
+        probe = socket.socket()
+        try:
+            probe.bind(("localhost", free))
+            probe.listen(1)
+        except OSError:
+            continue
+        finally:
+            probe.close()
+        monkeypatch.setattr(server, "MOCK_PORT", free)
+        return free
+    pytest.skip("no free port in 20000-30000")
 
 
-def test_the_first_mock_takes_the_port_and_is_found_there():
-    if server.running_mock() is not None:
-        # Another test's server holds the port for this session: then
-        # this one is the second, on a port of its own.
-        crs = _mock("0771")
-        assert crs.hostname != f"127.0.0.1:{server.MOCK_PORT}"
-        return
-    crs = _mock("0770")
-    assert crs.hostname == f"127.0.0.1:{server.MOCK_PORT}"
-    assert server.running_mock() == crs.hostname
-
-
-def test_a_held_port_leaves_the_mock_on_another(tmp_path):
-    holder = socket.socket()
-    holder.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def test_a_free_mock_port_is_taken_and_found(port):
+    s = server._listening_socket()
     try:
-        holder.bind(("localhost", server.MOCK_PORT))
-        holder.listen(1)
-    except OSError:
-        holder = None                      # a mock already has it
-    try:
-        crs = _mock("0772")
-        assert crs.hostname != f"127.0.0.1:{server.MOCK_PORT}"
-        assert crs.hostname.startswith("127.0.0.1:")
+        assert s.getsockname()[1] == port
+        assert server.running_mock() == f"127.0.0.1:{port}"
     finally:
-        if holder is not None:
-            holder.close()
+        s.close()
+    assert server.running_mock() is None
+
+
+def test_a_held_mock_port_leaves_the_next_socket_on_another(port):
+    """Held by another mock server: the next listens elsewhere rather
+    than share it."""
+    first = server._listening_socket()
+    try:
+        second = server._listening_socket()
+        try:
+            assert second.getsockname()[1] != port
+        finally:
+            second.close()
+    finally:
+        first.close()
 
 
 #: Loads a map of two mock boards, checks each answers at its address,

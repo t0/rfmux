@@ -215,11 +215,12 @@ class RecordDialog(QtWidgets.QDialog):
         self.tod_check.setToolTip(
             "After the run, the dirfile and the recording repacked as one "
             "HDF5 file of time-ordered data: every channel in the units "
-            "chosen below, with the pulse file's metadata and each channel's "
-            "tuning row from the bias export, readable with h5py alone")
+            "chosen below, with a metadata group laid out as the pulse "
+            "file's and each channel's tuning row from the bias export, "
+            "readable with h5py alone")
         self.tod_note = QtWidgets.QLabel(
-            "Converts at about a fifth of real time after the run: a 20 s "
-            "recording takes about 110 s.")
+            "Converts after the run at less than real-time speed, typically "
+            "about 20% of it.")
         self.tod_note.setWordWrap(True)
         self.merge_tod_check = QtWidgets.QCheckBox("Merge pulse and TOD HDF5s")
         self.merge_tod_check.setToolTip(

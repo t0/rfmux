@@ -442,9 +442,11 @@ templates/slow/,  templates/fast/
 ```
 
 **A time-ordered data file**, `rfmux record`'s `tod_module<M>_HHMMSS.h5`,
-has the same `metadata` (with `sample_rate_slow`, `sample_rate_fast`,
-`slow_time_offset_s` and `fast_channels` as the streams it holds give
-them) and the parser dirfile and fastrx recording of the run under `tod/`,
+has a `metadata` group laid out as a capture file's, without the capture
+settings: `module`, `channels`, `trigger_basis`, `stored_units`,
+`volts_per_count`, the clock origin, and `sample_rate_slow`,
+`sample_rate_fast`, `slow_time_offset_s` and `fast_channels` as the
+streams it holds give them, and the parser dirfile and fastrx recording of the run under `tod/`,
 each channel in its stored units, on the PFB clock, as float32.
 `--merge-tod` copies the `tod/` group into the pulse file.
 

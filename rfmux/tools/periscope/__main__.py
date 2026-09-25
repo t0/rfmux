@@ -170,6 +170,25 @@ def review_session(review) -> dict:
     }
 
 
+def _resolve_board(board: str):
+    """The CRS a board argument names, resolved: ``rfmux<NNNN>.local``
+    or a serial, else a hostname or address.  None for ``OFFLINE``, a
+    file under review, which has no board to reach."""
+    if board.upper() == "OFFLINE":
+        return None
+    if "rfmux" in board and ".local" in board:
+        spec = f'serial: "{board.replace("rfmux", "").replace(".local", "")}"'
+    elif board.isdigit():
+        spec = f'serial: "{board}"'
+    else:
+        spec = f'hostname: "{board}"'
+    crs = load_session(f"!HardwareMap [ !CRS {{ {spec} }} ]").query(CRS).one()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(crs.resolve())
+    return crs
+
+
 def _desktop(args) -> int:
     """--install-desktop or --uninstall-desktop: say what was written or
     removed, and return the exit status."""
@@ -267,9 +286,10 @@ def main():
     ap.add_argument("-d", "--density-dot", type=int, default=DENSITY_DOT_SIZE)
     ap.add_argument("--review", metavar="PULSE_H5", nargs="?", const="",
                     default=None,
-                    help="Open this pulse capture file in a review panel: offline, "
-                         "in the file's session folder, without the startup "
-                         "dialog.  Given no file, the startup dialog opens.")
+                    help="Open this pulse capture or time-ordered data file in "
+                         "a review panel: offline, in the file's session "
+                         "folder, without the startup dialog.  Given no file, "
+                         "the startup dialog opens.")
     desk = ap.add_argument_group(
         "desktop", "Periscope in the application menu and on HDF5 files' "
         "Open With, for this user (Linux and Windows)")
@@ -392,18 +412,12 @@ def main():
     is_mock = False  # Track if we're using MockCRS
     
     try:
-        # Parse the CRS board identifier - can be in four formats:
-        # 1. "MOCK" - special case for demo mode
-        # 2. rfmux####.local (hostname with serial number)
-        # 3. #### (just the serial number)
-        # 4. Any other string (treated as direct hostname or IP address)
+        # "MOCK" starts the demo board here; OFFLINE, a serial, an
+        # rfmux<NNNN>.local name or an address go to _resolve_board.
         crs_board = args.crs_board
 
-        if crs_board.upper() == "OFFLINE":
-            # Review of a file: no board to reach, nothing to resolve.
-            crs_obj = None
         # Special case for MOCK demo mode
-        elif crs_board.upper() == "MOCK":
+        if crs_board.upper() == "MOCK":
             is_mock = True
             # Use the mock flavour to create a MockCRS instance
             s = load_session("""
@@ -483,30 +497,9 @@ def main():
                                                  f"Failed to apply mock configuration:\n{str(e)}\n\n"
                                                  f"Details:\n{traceback.format_exc()}")
             
-        # Check if it's a hostname in the format rfmux####.local
-        elif "rfmux" in crs_board and ".local" in crs_board:
-            serial = crs_board.replace("rfmux", "").replace(".local", "")
-            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
-            crs_obj = s.query(CRS).one()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(crs_obj.resolve())
-        # Check if it's just a serial number (all digits, possibly with leading zeros)
-        elif crs_board.isdigit() or (crs_board.startswith("0") and crs_board[1:].isdigit()):
-            serial = crs_board
-            s = load_session(f'!HardwareMap [ !CRS {{ serial: "{serial}" }} ]')
-            crs_obj = s.query(CRS).one()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(crs_obj.resolve())
         else:
-            # Treat as direct hostname or IP address
-            s = load_session(f'!HardwareMap [ !CRS {{ hostname: "{crs_board}" }} ]')
-            crs_obj = s.query(CRS).one()
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(crs_obj.resolve())
-        
+            crs_obj = _resolve_board(crs_board)
+
     except Exception as e:
         # If CRS object creation or resolution fails, issue a warning
         # and proceed without network analysis capabilities.

@@ -138,8 +138,9 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--tod/--no-tod", default=True, show_default=True,
               help="After the run, repack the dirfile and the fastrx recording "
                    "into one HDF5 file of time-ordered data, every channel in "
-                   "the units the pulse file stores it in, with the same "
-                   "metadata and tuning")
+                   "the units the pulse file stores it in, with a metadata "
+                   "group laid out as the pulse file's and each channel's "
+                   "tuning")
 @click.option("--merge-tod/--no-merge-tod", default=False, show_default=True,
               help="Copy the time-ordered data into the pulse file as its tod/ "
                    "group, so one file holds the pulses and the streams")
@@ -268,11 +269,13 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
     except aiohttp.ClientConnectionError as e:
+        mock = ("; no mock server is running on this host"
+                if is_mock(serial) else "")
         raise click.ClickException(
-            f"cannot reach the board: {e}. A serial names a board at "
+            f"cannot reach the board: {e}{mock}. A serial names a board at "
             "rfmux<NNNN>.local; MOCK or 0000 the mock server running on this "
-            "host (none was found); --hostname gives another address; "
-            "--serial MOCK with no mock running starts a simulated board")
+            "host; --hostname gives another address; --serial MOCK with no "
+            "mock running starts a simulated board")
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")

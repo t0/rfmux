@@ -596,11 +596,13 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `rfmux fastrx merge` for an older run), repacks the dirfile and the
   recording into `tod_module<M>_HHMMSS.h5`, one HDF5 file of
   time-ordered data with every channel in the units the pulse file
-  stores it in and the same metadata and tuning (`--no-tod`;
+  stores it in, a metadata group laid out as the pulse file's, and each
+  channel's tuning (`--no-tod`;
   `--merge-tod` copies it into the pulse file as its `tod/` group, and
   refuses a TOD whose basis or channel units differ from the pulses';
   review names the file's time-ordered data in its status line, its
-  Metadata item lists every attribute of the file and each channel's
+  Metadata item lists every attribute of the file's metadata and each
+  channel's
   calibration scalars, and a TOD file of its own opens with those; the
   Time-ordered data item draws a channel over the run in the Channel TOD
   View tab from at most 500 min/max bins, filling in as you zoom (a

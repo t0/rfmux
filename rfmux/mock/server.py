@@ -146,9 +146,8 @@ def yaml_hook(hwm):
 PARENT_POLL_S = 1.0
 
 
-# Start up a web server. This is a distinct process, so COW semantics.
 #: The localhost TCP port the first mock server on a host serves at, so
-#: a client finds it untold (``rfmux record --serial 0000``).  A second
+#: a client finds it untold (``rfmux record --serial MOCK``).  A second
 #: mock takes an ephemeral port and must be named by it.
 MOCK_PORT = 9878
 #: Seconds a probe of that port waits.
@@ -192,6 +191,7 @@ def running_mock():
         return None
 
 
+# Start up a web server. This is a distinct process, so COW semantics.
 class ServerProcess(mp_ctx.Process):
     daemon = True
 

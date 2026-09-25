@@ -773,24 +773,33 @@ def test_a_tod_without_a_bias_export_is_said_before_the_run(
     assert "no bias export" not in r.output
 
 
-def test_an_unreachable_board_is_one_line_naming_the_mock_options(
-        tmp_path, monkeypatch):
-    """A serial that resolves nowhere (0000 given for a running mock,
-    say) is an error that says how to reach a mock, not a traceback."""
+def _unreachable(tmp_path, monkeypatch, serial):
     import aiohttp
     from click.testing import CliRunner
     from rfmux.tools import record
 
     async def unreachable(*a, **kw):
-        raise aiohttp.ClientConnectionError("Cannot connect to host rfmux0000.local:80")
+        raise aiohttp.ClientConnectionError("Cannot connect to host")
     monkeypatch.setattr(record, "_main", unreachable)
-    r = CliRunner().invoke(record.cli, [
-        "--serial", "0000", "--duration", "1", "--channels", "1-2",
+    return CliRunner().invoke(record.cli, [
+        "--serial", serial, "--duration", "1", "--channels", "1-2",
         "--session-dir", str(tmp_path), "--no-parser", "--no-fastrx"])
-    assert r.exit_code == 1
-    assert "Traceback" not in r.output
-    assert "Cannot connect to host rfmux0000.local:80" in r.output
-    assert "--hostname" in r.output and "--serial MOCK" in r.output
+
+
+def test_an_unreachable_board_is_an_error_not_a_traceback(tmp_path,
+                                                          monkeypatch):
+    r = _unreachable(tmp_path, monkeypatch, "0156")
+    assert r.exit_code == 1 and "Traceback" not in r.output
+    assert "Cannot connect to host" in r.output
+
+
+def test_only_a_mock_serial_says_no_mock_is_running(tmp_path, monkeypatch):
+    """The mock server is looked for only for MOCK or 0000, so only then
+    does the error say none was found."""
+    assert "no mock server is running" in \
+        _unreachable(tmp_path, monkeypatch, "0000").output
+    assert "no mock server is running" not in \
+        _unreachable(tmp_path, monkeypatch, "0156").output
 
 
 def test_a_bare_record_command_asks_the_dialog(monkeypatch):

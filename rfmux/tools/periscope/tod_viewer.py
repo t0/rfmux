@@ -1,7 +1,7 @@
 """The Channel TOD View tab: one channel of a file's time-ordered data
-over time, drawn from at most a few hundred bins.  The whole run comes
-from the overview; zooming reads the window's slice of the file until
-the samples themselves show.  The reading is ``tod_window`` in
+over time, drawn from at most a few hundred bins.  A wide window of the
+fast stream comes from the overview; zooming reads the window's slice
+of the file until the samples themselves show.  The reading is ``tod_window`` in
 ``rfmux.algorithms.measurement.tod``; this widget only draws it."""
 
 from __future__ import annotations

@@ -104,27 +104,56 @@ def test_the_units_choice_is_the_captures_trigger_basis(
     assert again.units_combo.currentData() == "df"
 
 
-def test_the_tod_needs_a_stream_and_the_merge_a_pulse_file(
-        qt_app, tmp_path, monkeypatch):
-    dlg, _ = _dialog(tmp_path, monkeypatch)
+def _products_dialog(tmp_path, monkeypatch, fastrx=False):
+    """A dialog ready to record channels 1-4 with the parser, the TOD
+    and its merge chosen."""
+    dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
     dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.fastrx_iface_combo.setEditText("enp2s0f0np0")
     dlg.serial_edit.setText("0156")
     dlg.rb_ranges.setChecked(True)
     dlg.channels_edit.setText("1-4")
-    dlg.fastrx_check.setChecked(False)
+    dlg.fastrx_check.setChecked(fastrx)
     dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(True)
     dlg.tod_check.setChecked(True)
     dlg.merge_tod_check.setChecked(True)
-    assert dlg.tod_check.isEnabled() and dlg.merge_tod_check.isEnabled()
-    assert "fifth of real time" in dlg.tod_note.text()
-    assert "grows by the whole TOD" in dlg.merge_tod_note.text()
-    # Without a pulse capture the TOD is still written; there is
-    # nothing to merge it into.
-    dlg.capture_check.setChecked(False)
-    assert dlg.tod_check.isEnabled() and not dlg.merge_tod_check.isEnabled()
-    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    return dlg
+
+
+def test_the_tod_needs_a_stream_to_repack(qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.tod_check.isEnabled()
     dlg.parser_check.setChecked(False)
     assert not dlg.tod_check.isEnabled()
+
+
+def test_the_merge_needs_a_pulse_capture_the_tod_does_not(
+        qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.merge_tod_check.isEnabled()
+    dlg.capture_check.setChecked(False)
+    assert not dlg.merge_tod_check.isEnabled()
+    assert dlg.tod_check.isEnabled()
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    assert dlg.get_options()["tod"]
+
+
+def test_each_data_product_shows_its_cost_while_chosen(
+        qt_app, tmp_path, monkeypatch):
+    """The conversion note while the TOD is chosen; the merge note while
+    the merge is, with the size of this run's TOD, which follows the
+    duration."""
+    dlg = _products_dialog(tmp_path, monkeypatch, fastrx=True)
+    assert not dlg.tod_note.isHidden() and not dlg.merge_tod_note.isHidden()
+    dlg.duration_spin.setValue(10.0)
+    short = dlg.merge_tod_note.text()
+    dlg.duration_spin.setValue(100.0)
+    assert dlg.merge_tod_note.text() != short
+    dlg.merge_tod_check.setChecked(False)
+    assert dlg.merge_tod_note.isHidden() and not dlg.tod_note.isHidden()
+    dlg.tod_check.setChecked(False)
+    assert dlg.tod_note.isHidden()
 
 
 def test_a_tod_without_a_bias_export_warns_but_records(

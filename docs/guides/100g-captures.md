@@ -99,14 +99,14 @@ The **Run** tab:
   flow for a second before checking it.
 - **Merge the recording into the pulse file after the run.**
 - **Data products**: **TODs as HDF5 with metadata** repacks the dirfile
-  and the recording after the run (section 4); it converts at about a
-  fifth of real time, so a 20 s recording takes about 110 s. **Merge
-  pulse and TOD HDF5s** copies that file into the pulse file, which then
-  grows by the whole TOD (the size for this run is shown) where the pulse
-  record alone is a few MB; it needs the pulse capture. Either works
-  without the pulse capture, but the file's tuning and df calibrations
-  come from the session's bias export, and the status line warns when
-  none was found for the modules. **Units** chooses what both files store,
+  and the recording after the run (section 4); it converts at less than
+  real-time speed, typically about 20% of it, depending on the machine
+  and the channel count. **Merge pulse and TOD HDF5s** copies that file
+  into the pulse file, which then grows by the whole TOD (the size for
+  this run is shown) where the pulse record alone is a few MB; it needs
+  the pulse capture. The TOD file works without the pulse capture, but
+  its tuning and df calibrations come from the session's bias export,
+  and the status line warns when none was found for the modules. **Units** chooses what both files store,
   I,Q voltages or df/diss units (hertz along the frequency direction, for
   calibrated channels); it is the same setting as the trigger basis on
   the Pulse capture tab.
@@ -188,8 +188,9 @@ The products, sharing one time stamp, named `module2` for one module and
   one HDF5 file of time-ordered data: the recorded channels of each
   stream, every one in the units the pulse file stores it in (volts, or
   hertz for a calibrated channel in the frequency basis), on the PFB
-  clock, with the pulse file's `metadata` and each channel's `tuning`
-  beside them. It reads with h5py alone. Its layout is in the pulse
+  clock, with a `metadata` group laid out as the pulse file's (the
+  streams' rates, units, calibration constant and clock origin) and each
+  channel's `tuning` beside them. It reads with h5py alone. Its layout is in the pulse
   capture guide's file layout section.
 
 All four are listed in the session's metadata, so Periscope's session
@@ -237,7 +238,8 @@ Metadata items. After `rfmux periscope --install-desktop` (Linux and
 Windows) a file manager offers Periscope in an HDF5 file's right-click
 Open With menu too. The status line says what time-ordered data the file
 holds beside its pulses, per stream. The tree's Metadata item lists every
-attribute of the file and, per channel, the scalars of its tuning row, the
+attribute of the file's `metadata` group and, per channel, the scalars of
+its tuning row, the
 df calibration first; the Tuning item browses the sweeps. A time-ordered
 data file of its own opens the same way, with those and no pulses.
 
@@ -249,15 +251,17 @@ View; its Channel box switches channels, and Prev and Next step to the
 neighbouring channel over the same time window, each at its own levels.
 The Units choice converts it as it does the pulse and IQ views. A wide
 view drawn from the overview, which holds each stored axis's extremes,
-shows bounds under a units change that turns I into Q (the status line
-says so): every converted sample lies inside them, though the band can
+shows bounds under a units change that turns I into Q (the line above
+the plot says so): every converted sample lies inside them, though the band can
 draw wider than the samples. Zooming until the samples are read makes
 it exact. It draws I and Q (df and
 dissipation for a channel stored in hertz) on one time axis, the fast and
 slow streams either or both, the fast drawn under the slow. The plot is
 never more than 500 bins, each drawn as its minimum and maximum, so a
-spike of one sample in the whole run still shows. The whole run comes
-from the file's overview; zooming in reads only the window's slice, until
+spike of one sample in the whole run still shows. A window of the fast
+stream longer than about 0.8 s comes from the file's overview (a slow
+stream shorter than about a minute is reduced from its samples, which
+are few); zooming in reads only the window's slice, until
 at most 1000 samples are in view and each is drawn. On a 5 s, 8-channel
 file any view read in under 45 ms with the file's pages evicted. Drag a
 box to zoom to it; the wheel zooms time, the vertical axis following what

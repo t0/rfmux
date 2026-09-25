@@ -115,7 +115,17 @@ def test_the_windows_icon_holds_the_svg_at_each_size(qt_app):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the registry is Windows'")
 def test_windows_install_and_uninstall(tmp_path, monkeypatch):
+    """Against the current user's real registry, so only where Periscope
+    is not registered already: uninstalling would take away a
+    developer's own installation.  CI runners start without one."""
     import winreg
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                       rf"Software\Classes\{desktop.PROG_ID}").Close()
+        pytest.skip("Periscope is installed for this user; the test would "
+                    "remove it")
+    except FileNotFoundError:
+        pass
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setattr(desktop, "_windows_desktop",

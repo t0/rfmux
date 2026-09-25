@@ -63,7 +63,7 @@ BLOCK = 1 << 16
 #: Samples per overview bin: each channel's min and max of I and Q per
 #: this many samples, so a view of the whole run reads kilobytes.
 OVERVIEW = 4096
-#: Bins a view is reduced to; below twice this many samples a view is
+#: Bins a view is reduced to; at most twice this many samples, a view is
 #: the samples themselves.
 VIEW_BINS = 500
 #: Chunk of a slow-stream dataset: a run's slow stream is short next to

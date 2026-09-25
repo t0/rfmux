@@ -245,7 +245,10 @@ def counts_to_stored(reader: PulseHDF5Reader, channel: int,
     from the file's own record of how they were stored: its
     ``volts_per_count``, and the df calibration's rotation and
     magnitude for a channel stored in hertz.  1 for a file that holds
-    counts."""
+    counts.  A channel stored in hertz whose file carries no df
+    calibration (one written before the tuning record) cannot be
+    converted to its units, and is refused rather than left in volts
+    under a hertz label."""
     units = reader.stored_units(channel, stream)
     if units == "counts":
         return 1.0 + 0j
@@ -254,7 +257,12 @@ def counts_to_stored(reader: PulseHDF5Reader, channel: int,
     if units == "V":
         return complex(scale)
     cal = reader.df_calibration(channel, stream)
-    if units == "Hz" and cal is not None and cal != 0:
+    if units == "Hz":
+        if cal is None or cal == 0:
+            raise ValueError(
+                f"{reader.path.name}: channel {channel} is stored in hertz "
+                "but the file carries no df calibration to put the "
+                "recording in hertz with")
         return complex(cal) * scale       # rotation and hertz per volt in one
     return complex(scale)
 

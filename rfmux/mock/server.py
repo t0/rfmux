@@ -107,26 +107,15 @@ def yaml_hook(hwm):
     sockets = []
     for crs in hwm.query(BaseCRS):  # Query for BaseCRS, as MockCRS might not be in DB yet
 
-        # Create a socket to be shared with the server process.
-        s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-        # A restarted mock takes the port back while old connections
-        # drain, but never while another server listens on it.  POSIX
-        # SO_REUSEADDR is exactly that; Windows' lets a second socket
-        # share a port in use, and SO_EXCLUSIVEADDRUSE is its refusal.
-        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
-        else:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("localhost", MOCK_PORT))
-        except OSError:                     # another mock has it
-            s.bind(("localhost", 0))
+        # A socket to be shared with the server process, listening.
+        s = _listening_socket()
         (hostname, port) = s.getsockname()
 
         sockets.append(s)
         crs.hostname = f"{hostname}:{port}"
-        # The address another client gives as its hostname to share
-        # this board: rfmux record --serial 0000 --hostname <address>.
+        # The address another client names as its hostname to share this
+        # board; the one at MOCK_PORT is found untold (rfmux record
+        # --serial MOCK).
         print(f"[MockCRS] serial {crs.serial or '%05d' % port} served at "
               f"{crs.hostname}")
         # Store configuration for MockCRS instantiation in subprocess
@@ -164,6 +153,33 @@ PARENT_POLL_S = 1.0
 MOCK_PORT = 9878
 #: Seconds a probe of that port waits.
 PROBE_S = 0.2
+
+
+def _listening_socket() -> socket.socket:
+    """A socket listening at MOCK_PORT, or at a free port when another
+    server has it.  It listens as soon as it is bound: POSIX
+    SO_REUSEADDR lets a second socket bind a port that is bound but not
+    yet listening, so two boards of one map, or two mocks started at
+    once, would otherwise both take MOCK_PORT and the second server
+    fail to listen.  A restarted mock takes the port back while old
+    connections drain, never while a server listens on it; Windows'
+    SO_REUSEADDR would share a port in use, and SO_EXCLUSIVEADDRUSE is
+    its refusal."""
+    s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+    else:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("localhost", MOCK_PORT))
+        s.listen()
+        return s
+    except OSError:                         # another server has it
+        s.close()
+    s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
+    s.bind(("localhost", 0))
+    s.listen()
+    return s
 
 
 def running_mock():

@@ -43,3 +43,40 @@ def test_a_held_port_leaves_the_mock_on_another(tmp_path):
     finally:
         if holder is not None:
             holder.close()
+
+
+#: Loads a map of two mock boards, checks each answers at its address,
+#: and prints the addresses.
+TWO_BOARDS = '''
+import socket
+import rfmux
+session = rfmux.load_session("""
+!HardwareMap
+- !flavour "rfmux.mock"
+- !CRS { serial: "0781" }
+- !CRS { serial: "0782" }
+""")
+hosts = sorted(c.hostname for c in session.query(rfmux.CRS))
+for host in hosts:
+    h, _, p = host.rpartition(":")
+    socket.create_connection((h, int(p)), timeout=2).close()
+print("HOSTS", *hosts)
+'''
+
+
+def test_two_boards_of_one_map_are_served_at_two_ports():
+    """Both sockets are bound before the server listens on either: each
+    must still get a port of its own, and the map must load rather than
+    wait on a server that failed to listen.  In a process of its own,
+    with a deadline: the hardware map's database belongs to the thread
+    and process that open it, and a hung load must fail, not hang."""
+    import subprocess
+    import sys
+    try:
+        out = subprocess.run([sys.executable, "-c", TWO_BOARDS],
+                             capture_output=True, text=True, timeout=90).stdout
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the map never loaded: a server failed to listen")
+    hosts = next(line.split()[1:] for line in out.splitlines()
+                 if line.startswith("HOSTS"))
+    assert len(hosts) == 2 and len(set(hosts)) == 2

@@ -122,6 +122,51 @@ def _store_tuning(grp, tuning, channel) -> None:
         tgrp.attrs[TUNING_JSON_FIELDS] = json_fields
 
 
+#: capture_params written to ``metadata``, grouped by attribute type.
+#: Must cover everything in
+#: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
+#: missing here is dropped without complaint.
+#: test_every_detection_param_reaches_the_file pins it.
+META_ATTRS = (
+    (str, ("streamer_mode", "trigger_basis", "stored_units")),
+    (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
+             "post_pulse_ms", "coincidence_window_s",
+             "noise_capture_interval_s", "noise_capture_window_s",
+             "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
+             "sample_rate_slow", "sample_rate_fast",
+             "volts_per_count", "slow_time_offset_s")),
+    (int, ("module", "min_end_samples",
+           *(name + suffix for name in RATE_PARAMS
+             for suffix in ("", "_slow", "_fast")))),
+    (bool, ("enable_pileup", "dump_all_channels")),
+)
+
+
+def write_metadata(f: h5py.File, channels: List[ChannelKey],
+                   params: Dict[str, Any]) -> None:
+    """The ``metadata`` group of a capture file, or of a time-ordered
+    data file of the same channels: the attributes of
+    :data:`META_ATTRS` that *params* gives, ``channels`` and
+    ``fast_channels``."""
+    meta = f.create_group("metadata")
+    meta.attrs["format_version"] = 1
+    for cast, keys in META_ATTRS:
+        for k in keys:
+            if params.get(k) is not None:
+                meta.attrs[k] = cast(params[k])
+    meta.attrs["channels"] = np.asarray(check_keys(channels), dtype=np.int64)
+    if "fast_channels" in params:
+        meta.attrs["fast_channels"] = np.asarray(
+            check_keys(params["fast_channels"]), dtype=np.int64)
+
+
+def write_time_origin(meta, day_epoch: float) -> None:
+    """The calendar day a file's seconds-of-day count from, on its
+    ``metadata`` group: seconds since 1970 and the UTC time."""
+    meta.attrs["time_origin_epoch"] = float(day_epoch)
+    meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+
+
 # ───────────────────────── Shared writer plumbing ───────────────────
 
 class _PulseFileWriter:
@@ -138,43 +183,13 @@ class _PulseFileWriter:
     #: Where an event's member lives: a pulse under its channel.
     _MEMBER_PATH = "/{group}/pulse_{idx:06d}"
 
-    #: capture_params written to ``metadata``, grouped by attribute type.
-    #: Must cover everything in
-    #: :data:`~.capture_session.DETECTION_PARAMS` — a parameter
-    #: missing here is dropped without complaint.
-    #: test_every_detection_param_reaches_the_file pins it.
-    _META = (
-        (str, ("streamer_mode", "trigger_basis", "stored_units")),
-        (float, ("threshold_sigma", "end_sigma", "pre_pulse_ms",
-                 "post_pulse_ms", "coincidence_window_s",
-                 "noise_capture_interval_s", "noise_capture_window_s",
-                 "min_pulse_ms", "max_pulse_ms", "noise_train_ms",
-                 "sample_rate_slow", "sample_rate_fast",
-                 "volts_per_count", "slow_time_offset_s")),
-        (int, ("module", "min_end_samples",
-               *(name + suffix for name in RATE_PARAMS
-                 for suffix in ("", "_slow", "_fast")))),
-        (bool, ("enable_pileup", "dump_all_channels")),
-    )
-
     def __init__(self, path: str | Path, channels: List[ChannelKey],
                  capture_params: Dict[str, Any]):
         self.path = Path(path)
-        channels = check_keys(channels)
         self._threshold_sigma = capture_params.get("threshold_sigma")
         self.f: Optional[h5py.File] = h5py.File(self.path, "w")
-
-        meta = self.f.create_group("metadata")
-        meta.attrs["capture_start"] = time.time()
-        meta.attrs["format_version"] = 1
-        for cast, keys in self._META:
-            for k in keys:
-                if capture_params.get(k) is not None:
-                    meta.attrs[k] = cast(capture_params[k])
-        meta.attrs["channels"] = np.asarray(channels, dtype=np.int64)
-        if "fast_channels" in capture_params:
-            meta.attrs["fast_channels"] = np.asarray(
-                check_keys(capture_params["fast_channels"]), dtype=np.int64)
+        write_metadata(self.f, channels, capture_params)
+        self.f["metadata"].attrs["capture_start"] = time.time()
 
     # ── Shared helpers ────────────────────────────────────────────
 
@@ -340,8 +355,7 @@ class _PulseFileWriter:
         meta = self.f["metadata"]
         if "time_origin_epoch" in meta.attrs:
             return
-        meta.attrs["time_origin_epoch"] = float(day_epoch)
-        meta.attrs["time_origin_utc"] = epoch_to_utc(day_epoch)
+        write_time_origin(meta, day_epoch)
         self.f.flush()
 
     @property
@@ -613,6 +627,15 @@ class DualPulseHDF5Writer(_PulseFileWriter):
 
 # ───────────────────────── Reader ───────────────────────────────────
 
+def _time_datasets(stream_grp) -> List[str]:
+    """The ``time`` datasets of a time-ordered data stream: one, or one
+    per ``module_<m>/`` for a run across modules."""
+    if "time" in stream_grp:
+        return ["time"]
+    return [f"{name}/time" for name in stream_grp
+            if name.startswith("module_") and "time" in stream_grp[name]]
+
+
 class PulseHDF5Reader:
     """Lazy reader for pulse capture HDF5 files.
 
@@ -642,6 +665,13 @@ class PulseHDF5Reader:
         #: True for dual-layout ("both" mode) files
         self.dual: bool = "slow" in self.f and "fast" in self.f
         self.streams: List[str] = ["slow", "fast"] if self.dual else []
+        #: The streams a ``tod/`` group holds: the run's time-ordered
+        #: data, in a merged pulse file or a file of its own.
+        self.tod_streams: List[str] = [s for s in ("slow", "fast")
+                                       if f"tod/{s}" in self.f]
+        #: False for a file of time-ordered data alone.
+        self.has_pulses: bool = any(self._ch_key(c, None) in self.f
+                                    for c in self.channels)
 
     @property
     def modules(self) -> List[int]:
@@ -715,9 +745,7 @@ class PulseHDF5Reader:
         ``"counts"`` for files written before samples were stored in
         physical units, which is what those actually hold.
         """
-        if self.f is None:
-            return "counts"
-        grp = self.f.get(self._ch_key(channel, stream))
+        grp = self._channel_group(channel, stream)
         if grp is None:
             return "counts"
         return str(grp.attrs.get("stored_units", "counts"))
@@ -735,11 +763,43 @@ class PulseHDF5Reader:
             return "iq"
         return str(meta.attrs.get("trigger_basis", "iq"))
 
-    def _tuning_group(self, channel, stream):
+    def _channel_group(self, channel, stream):
+        """*channel*'s group: its pulse group, or, in a file without one,
+        its group under the time-ordered data (which carries the same
+        tuning and units)."""
         if self.f is None:
             return None
         grp = self.f.get(self._ch_key(channel, stream))
+        for s in self.tod_streams if grp is None else ():
+            grp = self.f.get(f"tod/{s}/{channel_group(channel)}")
+            if grp is not None:
+                break
+        return grp
+
+    def _tuning_group(self, channel, stream):
+        grp = self._channel_group(channel, stream)
         return None if grp is None else grp.get("tuning")
+
+    def tod_info(self) -> Dict[str, Dict[str, Any]]:
+        """Per stream of the time-ordered data: its channels, and its
+        records (summed over modules for a run across them)."""
+        info = {}
+        for s in self.tod_streams:
+            sgrp = self.f[f"tod/{s}"]
+            channels = [c for c in self.channels
+                        if channel_group(c) in sgrp]
+            info[s] = {"channels": channels,
+                       "samples": sum(int(sgrp[g].shape[0]) for g in
+                                      _time_datasets(sgrp))}
+        return info
+
+    @property
+    def tod_channels(self) -> List[ChannelKey]:
+        """The channels any stream of the time-ordered data holds, in
+        the file's channel order."""
+        groups = [self.f[f"tod/{s}"] for s in self.tod_streams]
+        return [c for c in self.channels
+                if any(channel_group(c) in g for g in groups)]
 
     def tuning(self, channel: int, stream: Optional[str] = None) -> dict:
         """The tuning row *channel* was captured with, as the writer was

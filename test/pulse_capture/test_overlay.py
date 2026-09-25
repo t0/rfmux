@@ -10,8 +10,10 @@ arbitrary because the index reads stamps, not a rate.
 
 import pathlib
 
+import h5py
 import numpy as np
 import pytest
+from test.qt_helpers import pulse_rows  # noqa: E402
 
 from rfmux.core.transferfunctions import (
     VOLTS_PER_ROC, decimated_stream_delay_s, decimation_to_sampling,
@@ -166,6 +168,28 @@ def test_counts_to_stored_follows_the_file(tmp_path):
     with PulseHDF5Reader(path) as r:
         assert r.stored_units(1) == "counts"
         assert counts_to_stored(r, 1) == 1.0
+
+
+def test_a_hertz_channel_without_its_calibration_is_refused(tmp_path,
+                                                             merge_recording):
+    """A capture stored in hertz from before the tuning record has no
+    calibration to put the recording in hertz with: the merge stops
+    rather than writing volts under the hertz label, where they draw as
+    a flat line beside the slow samples."""
+    path = str(tmp_path / "old.h5")
+    PulseHDF5Writer(path, [1], {}, {"volts_per_count": 2e-6,
+                                    "trigger_basis": "df"},
+                    stored_units={1: "Hz"}).finalize()
+    with PulseHDF5Reader(path) as r:
+        with pytest.raises(ValueError, match="no df calibration"):
+            counts_to_stored(r, 1)
+    capture = _capture(tmp_path, trigger_basis="df",
+                       tuning={CHANNEL: {"df_calibration": 3e6 + 0j}})
+    with h5py.File(capture, "a") as f:
+        del f[f"channel_{CHANNEL}/tuning"]
+    with pytest.raises(ValueError, match="no df calibration"):
+        merge_fastrx(capture, merge_recording)
+    assert not list(tmp_path.glob("*.merging"))
 
 
 def test_correlation_lag_reads_a_known_offset():
@@ -514,7 +538,7 @@ def test_a_merged_file_can_be_reviewed_by_event(
     panel.group_combo.setCurrentText(GROUP_EVENTS)
     panel.load_from_hdf5(path)
     role = QtCore.Qt.ItemDataRole.UserRole
-    top = panel.pulse_tree.topLevelItem(0)
+    top = pulse_rows(panel)[0]
     assert top.data(0, role) == ("event", 1)
     assert [top.child(k).data(0, role) for k in range(top.childCount())] \
         == [("pair", CHANNEL, 1)]

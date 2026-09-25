@@ -12,13 +12,16 @@ from typing import List, Optional
 
 from PyQt6 import QtCore, QtWidgets
 
-from .record import TRUNC_HELP
 from ..algorithms.measurement.record_streams import (
-    fastrx_bytes_per_s, interface_speeds, resolve_channels)
+    fastrx_bytes_per_s, interface_operstate, interface_speeds,
+    resolve_channels)
+from ..algorithms.measurement.tod import tod_bytes_per_s
 from ..core.transferfunctions import decimation_to_sampling
 from ..pulse_capture.capture_session import PulseCaptureConfig
 from ..core.channels import MAX_MODULE, parse_channel_spec
 from ..core.session_folder import newest_session
+from ..mock.server import running_mock
+from .record import TRUNC_HELP, is_mock
 from .periscope.pulse_capture_settings_dialog import PulseCaptureSettingsForm
 from .periscope.settings import APPLICATION, ORGANIZATION
 
@@ -30,9 +33,19 @@ _SHOW = ("periscope", "overlay", "none")
 _FAST_MBPS = 100_000
 
 
+#: The parser's entry for a mock on this host, which streams on the
+#: loopback.
+_LOOPBACK = "lo"
+
+
 def _label(name: str, speed) -> str:
+    if name == _LOOPBACK:
+        return f"{name} (loopback: a mock on this host)"
     if speed is None:
-        return f"{name} (no link)"
+        # No negotiated rate: the link is down, or the driver (wifi,
+        # for one) does not report a rate.
+        return (f"{name} (down)" if interface_operstate(name) == "down"
+                else f"{name} (no rate reported)")
     return (f"{name} ({speed / 1000:g} Gb/s)" if speed >= 1000
             else f"{name} ({speed} Mb/s)")
 
@@ -82,9 +95,21 @@ class RecordDialog(QtWidgets.QDialog):
 
         # ── Board ────────────────────────────────────────────────
         self.serial_edit = QtWidgets.QLineEdit()
-        self.serial_edit.setPlaceholderText("0156")
+        self.serial_edit.setPlaceholderText("0156, or MOCK")
+        self.serial_edit.setToolTip(
+            "A serial names a board at rfmux<NNNN>.local.  MOCK or 0000 is "
+            "the mock server running on this host, Periscope's for one, "
+            "whose address is filled in below; MOCK with none running "
+            "starts a simulated board of the run's own.")
         self.hostname_edit = QtWidgets.QLineEdit()
         self.hostname_edit.setPlaceholderText("only when not <serial>.local")
+        self.hostname_edit.setToolTip(
+            "For MOCK or 0000, the mock server running on this host is "
+            "filled in when the field is empty (a second mock, on another "
+            "port, is typed here: Periscope prints its address at startup)")
+        #: The address filled in for the running mock, cleared again when
+        #: the serial no longer names one; a typed address is kept.
+        self._autofilled = None
         self.modules_edit = QtWidgets.QLineEdit()
         self.modules_edit.setPlaceholderText(
             "1, or 2,3 for one RF line over several modules")
@@ -177,6 +202,40 @@ class RecordDialog(QtWidgets.QDialog):
         add("", self._row(self.streamer_check, QtWidgets.QLabel("sample bits"),
                           self.trunc_combo))
         add("", self.merge_check)
+
+        # ── Data products ────────────────────────────────────────
+        self.tod_check = QtWidgets.QCheckBox("TODs as HDF5 with metadata")
+        self.tod_check.setToolTip(
+            "After the run, the dirfile and the recording repacked as one "
+            "HDF5 file of time-ordered data: every channel in the units "
+            "chosen below, with a metadata group laid out as the pulse "
+            "file's and each channel's tuning row from the bias export, "
+            "readable with h5py alone")
+        self.tod_note = QtWidgets.QLabel(
+            "Converts after the run at less than real-time speed, typically "
+            "about 20% of it.")
+        self.tod_note.setWordWrap(True)
+        self.merge_tod_check = QtWidgets.QCheckBox("Merge pulse and TOD HDF5s")
+        self.merge_tod_check.setToolTip(
+            "Copy the time-ordered data into the pulse file as its tod/ "
+            "group, so one file carries the pulses and the streams they "
+            "were cut from; the standalone TOD file stays")
+        self.merge_tod_note = QtWidgets.QLabel()
+        self.merge_tod_note.setWordWrap(True)
+        self.units_combo = QtWidgets.QComboBox()
+        self.units_combo.addItem("I,Q voltages", "iq")
+        self.units_combo.addItem("df/diss units", "df")
+        self.units_combo.setToolTip(
+            "What both files store: the quadratures in volts, or the "
+            "samples rotated onto the frequency direction and scaled by the "
+            "df calibration, in hertz (a channel without a calibration stays "
+            "in volts).  The same setting as the trigger basis on the Pulse "
+            "capture tab, so the pulse file and the TOD always agree.")
+        add("Data products:", self.tod_check)
+        add("", self.tod_note)
+        add("", self.merge_tod_check)
+        add("", self.merge_tod_note)
+        add("Units:", self.units_combo)
         add("After the run:", self.show_combo)
 
         # ── Pulse capture settings, on their own tab ─────────────
@@ -206,11 +265,18 @@ class RecordDialog(QtWidgets.QDialog):
         outer.addWidget(self.buttons)
 
         self._load()
+        # One setting, two views: the units choice and the capture
+        # form's trigger basis, so the pulse file and the TOD agree.
+        basis = self.capture_form.basis_combo
+        self.units_combo.setCurrentIndex(basis.currentIndex())
+        self.units_combo.currentIndexChanged.connect(basis.setCurrentIndex)
+        basis.currentIndexChanged.connect(self.units_combo.setCurrentIndex)
         for w in (self.serial_edit, self.session_path_edit,
                   self.session_dir_edit, self.channels_edit):
             w.textChanged.connect(self._refresh)
         for w in (self.rb_existing, self.rb_new, self.rb_bias, self.rb_ranges,
-                  self.fastrx_check, self.parser_check, self.capture_check):
+                  self.fastrx_check, self.parser_check, self.capture_check,
+                  self.tod_check, self.merge_tod_check):
             w.toggled.connect(self._refresh)
         self.modules_edit.textChanged.connect(self._refresh)
         self.duration_spin.valueChanged.connect(self._refresh)
@@ -263,9 +329,10 @@ class RecordDialog(QtWidgets.QDialog):
             return None
 
     def _channels(self):
-        """(channels, note): the ``{module: channels}`` the options
-        resolve to, or None with the reason.  Reading the bias exports
-        costs a tenth of a second, so the answer is kept until an input
+        """(channels, note, tuned): the ``{module: channels}`` the
+        options resolve to, or None with the reason, and whether a bias
+        export gave them tuning rows.  Reading the bias exports costs a
+        tenth of a second, so the answer is kept until an input
         changes."""
         key = (self.rb_ranges.isChecked(), self.channels_edit.text(),
                self._session_folder(), self.modules_edit.text())
@@ -281,20 +348,20 @@ class RecordDialog(QtWidgets.QDialog):
         ranges = self.rb_ranges.isChecked()
         text = self.channels_edit.text()
         if modules is None and not (ranges and ":" in text):
-            return None, "name the modules, like 1 or 2,3"
+            return None, "name the modules, like 1 or 2,3", False
         folder = self._session_folder()
         if not ranges and folder is None:
-            return None, "an existing session folder is needed"
+            return None, "an existing session folder is needed", False
         try:
-            wanted, _, notes = resolve_channels(modules or [], text if ranges
-                                                else None, folder)
+            wanted, tuning, notes = resolve_channels(
+                modules or [], text if ranges else None, folder)
         except ValueError as e:
-            return None, str(e)
+            return None, str(e), False
         if ranges:
             n = sum(len(c) for c in wanted.values())
             return wanted, (f"{n} channels on module(s) "
-                            f"{', '.join(str(m) for m in wanted)}")
-        return wanted, "\n".join(notes)
+                            f"{', '.join(str(m) for m in wanted)}"), bool(tuning)
+        return wanted, "\n".join(notes), bool(tuning)
 
     def _fill_interfaces(self, running) -> None:
         """The parser's list: every interface, since the board's 1G
@@ -305,7 +372,8 @@ class RecordDialog(QtWidgets.QDialog):
         fast = running + [n for n, v in speeds.items()
                           if v is not None and v >= _FAST_MBPS
                           and n not in running]
-        for combo, names in ((self.parser_iface_combo, list(speeds)),
+        for combo, names in ((self.parser_iface_combo,
+                              list(speeds) + [_LOOPBACK]),
                              (self.fastrx_iface_combo, fast)):
             current = _combo_value(combo)
             combo.blockSignals(True)
@@ -325,14 +393,56 @@ class RecordDialog(QtWidgets.QDialog):
         iface = _combo_value(self.fastrx_iface_combo)
         return fx.start_command(iface) if fx and iface else ""
 
+    def _offer_running_mock(self) -> None:
+        """For the mock serial, the mock server running on this host
+        fills an empty hostname field; a typed address is kept, and the
+        autofill goes when the serial no longer names a mock."""
+        host = running_mock() if is_mock(self.serial_edit.text()) else None
+        edit = self.hostname_edit
+        if host and not edit.text().strip():
+            edit.setText(host)
+            self._autofilled = host
+        elif not host and edit.text().strip() == self._autofilled:
+            edit.clear()
+            self._autofilled = None
+
     def _refresh(self, *_) -> None:
-        chans, note = self._channels()
+        self._offer_running_mock()
+        chans, note, tuned = self._channels()
         self.bias_label.setText(note if self.rb_bias.isChecked() else "")
         problems = []
+        warnings = []
         if not self.serial_edit.text().strip():
             problems.append("a CRS serial is needed")
         if chans is None:
             problems.append(note)
+
+        # Data products: the TOD needs a stream to repack, the merge a
+        # pulse file to land in, and the metadata a bias export.
+        source = self.parser_check.isChecked() or self.fastrx_check.isChecked()
+        self.tod_check.setEnabled(source)
+        tod = source and self.tod_check.isChecked()
+        self.tod_note.setVisible(tod)
+        self.merge_tod_check.setEnabled(tod and self.capture_check.isChecked())
+        merge = self.merge_tod_check.isEnabled() and \
+            self.merge_tod_check.isChecked()
+        # Bytes the fast stream's TOD takes for this run.
+        tod_size = self.duration_spin.value() * tod_bytes_per_s(
+            sum(len(c) for c in chans.values())) if chans else 0.0
+        if merge and chans:
+            if self.fastrx_check.isChecked():
+                grows = f"about {tod_size / 1e9:.1f} GB for this run"
+            else:
+                grows = "the slow stream alone, a few MB"
+            self.merge_tod_note.setText(
+                f"The pulse file grows by the whole TOD, {grows}, where "
+                "the pulse record alone is a few MB.")
+        self.merge_tod_note.setVisible(merge and bool(chans))
+        if tod and chans and not tuned:
+            warnings.append(
+                "the TOD metadata (tuning, df calibration) comes from a "
+                "bias_kids export, and none was found for these modules in "
+                "the session: channels will be stored in volts without tuning")
 
         fx = _fastrx()
         running = fx.running_interfaces() if fx else []
@@ -366,6 +476,8 @@ class RecordDialog(QtWidgets.QDialog):
             if chans and folder.is_dir() and fx is not None:
                 need = self.duration_spin.value() * fastrx_bytes_per_s(
                     fx, max(c for chs in chans.values() for c in chs))
+                if tod:
+                    need += tod_size
                 if self._disk[0] != folder or self.sender() is self.recheck_btn:
                     self._disk = (folder, shutil.disk_usage(folder).free)
                 free = self._disk[1]
@@ -381,7 +493,8 @@ class RecordDialog(QtWidgets.QDialog):
             self.disk_label.setText("")
         if not self.capture_form.valid:
             problems.append("the pulse capture settings do not validate")
-        self.status_label.setText("\n".join(problems))
+        self.status_label.setText("\n".join(
+            problems + [f"warning: {w}" for w in warnings]))
         self.record_btn.setEnabled(not problems)
 
     # ── Options ──────────────────────────────────────────────────
@@ -407,6 +520,8 @@ class RecordDialog(QtWidgets.QDialog):
             "fastrx_interface": _combo_value(self.fastrx_iface_combo) or None,
             "fastrx_socket": None,
             "merge_fastrx": self.merge_check.isChecked(),
+            "tod": self.tod_check.isChecked(),
+            "merge_tod": self.merge_tod_check.isChecked(),
             "channel_streamer": self.streamer_check.isChecked(),
             "sample_trunc": self.trunc_combo.currentData(),
             "show": _SHOW[self.show_combo.currentIndex()],
@@ -463,6 +578,8 @@ class RecordDialog(QtWidgets.QDialog):
                 "" if saved_iface == "auto" else saved_iface)
         _select(self.fastrx_iface_combo, str(v("fastrx_interface", "")))
         self.merge_check.setChecked(v("merge_fastrx", "true") in (True, "true"))
+        self.tod_check.setChecked(v("tod", "true") in (True, "true"))
+        self.merge_tod_check.setChecked(v("merge_tod", "false") in (True, "true"))
         self.streamer_check.setChecked(
             v("channel_streamer", "false") in (True, "true"))
         _select(self.trunc_combo, str(v("sample_trunc", "LOW")))
@@ -490,6 +607,8 @@ class RecordDialog(QtWidgets.QDialog):
                 ("parser_interface", o["parser_interface"] or ""),
                 ("fastrx_interface", o["fastrx_interface"] or ""),
                 ("merge_fastrx", "true" if o["merge_fastrx"] else "false"),
+                ("tod", "true" if o["tod"] else "false"),
+                ("merge_tod", "true" if o["merge_tod"] else "false"),
                 ("channel_streamer", "true" if o["channel_streamer"] else "false"),
                 ("sample_trunc", o["sample_trunc"]),
                 ("show", o["show"]),

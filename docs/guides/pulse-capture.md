@@ -441,6 +441,33 @@ histograms/slow/, histograms/fast/
 templates/slow/,  templates/fast/
 ```
 
+**A time-ordered data file**, `rfmux record`'s `tod_module<M>_HHMMSS.h5`,
+has a `metadata` group laid out as a capture file's, without the capture
+settings: `module`, `channels`, `trigger_basis`, `stored_units`,
+`volts_per_count`, the clock origin, and `sample_rate_slow`,
+`sample_rate_fast`, `slow_time_offset_s` and `fast_channels` as the
+streams it holds give them, and the parser dirfile and fastrx recording of the run under `tod/`,
+each channel in its stored units, on the PFB clock, as float32.
+`--merge-tod` copies the `tod/` group into the pulse file.
+
+```
+tod/slow/time                  seconds of day, the dirfile's timebase
+tod/slow/channel_<n>/          I, Q, tuning/, stored_units
+tod/fast/time                  seconds of day, NaN for an undisciplined stamp
+tod/fast/seq, pipe_snapshot    the record's sequence number and sent pipes
+tod/fast/channel_<n>/          I, Q, tuning/, stored_units
+tod/<stream>/channel_<n>/overview  I min, I max, Q min, Q max per bin
+tod/<stream>/time_overview     each bin's first and last finite stamp
+```
+
+A bin is `overview_samples` samples (4096, an attribute of the stream
+group), so the overview of a 20 s fast stream is about 12 000 rows.
+Across modules each stream nests `module_<m>/` with that module's `time`
+(and `seq`, `pipe_snapshot`, `time_overview`) and channel groups.
+`tod_window` in `rfmux.algorithms.measurement.tod` reads one channel over
+a time window as the viewer draws it: the samples, or at most 500 bins of
+their extremes, from the overview for a wide window.
+
 ## From a script
 
 One call captures and writes the file:

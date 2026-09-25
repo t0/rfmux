@@ -593,12 +593,35 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `on_noise=` for that. After the run it lists the channels that
   triggered, merges the recording into the pulse file as its fast
   stream and renames it to end in `_100G` (`--no-merge-fastrx`;
-  `rfmux fastrx merge` for an older run)
+  `rfmux fastrx merge` for an older run), repacks the dirfile and the
+  recording into `tod_module<M>_HHMMSS.h5`, one HDF5 file of
+  time-ordered data with every channel in the units the pulse file
+  stores it in, a metadata group laid out as the pulse file's, and each
+  channel's tuning (`--no-tod`;
+  `--merge-tod` copies it into the pulse file as its `tod/` group, and
+  refuses a TOD whose basis or channel units differ from the pulses';
+  review names the file's time-ordered data in its status line, its
+  Metadata item lists every attribute of the file's metadata and each
+  channel's
+  calibration scalars, and a TOD file of its own opens with those; the
+  Time-ordered data item draws a channel over the run in the Channel TOD
+  View tab from at most 500 min/max bins, filling in as you zoom (a
+  dragged box or the wheel) until the samples show, fast and slow either
+  or both (`tod_window` reads the same headlessly); the
+  command says before the run when no bias export supplies the tuning;
+  `--trigger-basis` sets the units of both files; the dialog's Data
+  products group holds the two choices with their costs and a Units
+  choice tied to the trigger basis; `write_tod` and `merge_tod` in
+  `rfmux.algorithms.measurement.tod` do the same by hand),
   and opens Periscope in review mode on the file (`--show overlay` for
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording
   under every pulse. `periscope --review <pulse.h5>` opens any capture
-  file that way, offline, without the startup dialog. With no options
+  file that way, offline, without the startup dialog;
+  `rfmux periscope --install-desktop` adds Periscope with its icon to
+  the application menu and to HDF5 files' Open With, on Linux and
+  Windows (`--default-for-hdf5`, `--desktop-icon`,
+  `--uninstall-desktop`). With no options
   the command opens a dialog with every choice, remembered between
   runs, the pulse capture settings on their own tab and the newest
   session under the default path filled in; it checks for fastrxd and
@@ -610,8 +633,11 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `trigger_capture` takes the same `{module: [channels]}` for a slow
   capture across modules. Periscope reviews such a file with the module
   named beside each channel, its histogram Plot field taking `2:1-8` for
-  module 2's channels; a one-module file reads as before. See the 100G
-  captures guide.
+  module 2's channels; a one-module file reads as before. The first mock
+  server on a host serves at a fixed port, so `--serial MOCK` (or `0000`)
+  records from Periscope's mock with its tuned detectors, the parser on
+  `lo`, and starts a simulated board only when no mock runs; the dialog
+  fills the address in for either serial. See the 100G captures guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

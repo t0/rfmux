@@ -2,7 +2,8 @@
 """
 rfmux record - a pulse capture, a parser dirfile and a fastrx recording
 of a module, or of several feeding one RF line, for the same stretch,
-into one session folder.
+into one session folder, and the dirfile and recording repacked as one
+HDF5 file of time-ordered data in the capture's units.
 
     rfmux record --serial 0156 --module 2 --duration 20 \\
         --session ~/data/session_20260909_153654
@@ -21,6 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import aiohttp
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
@@ -37,17 +39,22 @@ _DEFAULTS = PulseCaptureConfig()
 
 
 async def _main(serial: str, hostname: str | None, **kw):
-    """Connect, record, and for a simulated board stop its stream."""
+    """Connect and record.  MOCK or 0000 is the mock server running on
+    this host; MOCK with none running starts a simulated board for the
+    run and stops its stream after."""
     import rfmux
-    if serial.upper() == "MOCK":
-        from rfmux.mock.helpers import create_mock_crs
-        crs = await create_mock_crs(
-            module=kw["module"] or min(kw["channels"]), verbose=False)
-        await asyncio.sleep(2.0)             # stream warm-up
-        try:
-            return await record_streams(crs, **kw)
-        finally:
-            await crs.stop_udp_streaming()
+    hostname = resolve_hostname(serial, hostname)
+    if serial.upper() == MOCK_NAME:
+        if hostname is None:
+            from rfmux.mock.helpers import create_mock_crs
+            crs = await create_mock_crs(
+                module=kw["module"] or min(kw["channels"]), verbose=False)
+            await asyncio.sleep(2.0)             # stream warm-up
+            try:
+                return await record_streams(crs, **kw)
+            finally:
+                await crs.stop_udp_streaming()
+        serial = MOCK_SERIAL
     host = f', hostname: "{hostname}"' if hostname else ""
     session = rfmux.load_session(
         f'!HardwareMap [ !CRS {{ serial: "{serial}"{host} }} ]')
@@ -56,15 +63,42 @@ async def _main(serial: str, hostname: str | None, **kw):
     return await record_streams(crs, **kw)
 
 
+def resolve_hostname(serial: str, hostname: str | None) -> str | None:
+    """*hostname* as given; for MOCK or the mock serial 0000, the mock
+    server running on this host at its port (``running_mock`` in
+    ``rfmux.mock.server``); else None, for ``<serial>.local``."""
+    if hostname:
+        return hostname
+    if is_mock(serial):
+        from rfmux.mock.server import running_mock
+        return running_mock()
+    return None
+
+
+#: The serial a mock board reports, and the name that means the mock.
+MOCK_SERIAL = "0000"
+MOCK_NAME = "MOCK"
+
+
+def is_mock(serial: str) -> bool:
+    return serial.strip().upper() in (MOCK_NAME, MOCK_SERIAL)
+
+
 #: What the sample truncation choices mean, for the option and the dialog.
 TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts.")
 
 
 @click.command()
 @click.option("--serial", default=None,
-              help="CRS serial (rfmux<NNNN>.local), or MOCK for a simulated board; "
+              help="CRS serial (rfmux<NNNN>.local); MOCK or 0000 for the mock "
+                   "server running on this host (Periscope's, say), MOCK with "
+                   "none running for a simulated board of the command's own; "
                    "with no options at all, a dialog asks for everything")
-@click.option("--hostname", default=None, help="Board address when it is not <serial>.local")
+@click.option("--hostname", default=None,
+              help="Board address when it is not <serial>.local. A mock server "
+                   "already running on this host, Periscope's for one, is found "
+                   "by its serial (0000) without this; 127.0.0.1:<port> names "
+                   "one explicitly")
 @click.option("--module", "modules", type=int, multiple=True, default=(1,),
               show_default=True,
               help="Module to record; repeat it for one RF line over several")
@@ -101,6 +135,15 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="After the run, add the fastrx recording to the pulse file as its "
                    "fast stream (a both-mode file, as Periscope reviews it), "
                    f"renamed to end in {MERGED_SUFFIX}")
+@click.option("--tod/--no-tod", default=True, show_default=True,
+              help="After the run, repack the dirfile and the fastrx recording "
+                   "into one HDF5 file of time-ordered data, every channel in "
+                   "the units the pulse file stores it in, with a metadata "
+                   "group laid out as the pulse file's and each channel's "
+                   "tuning")
+@click.option("--merge-tod/--no-merge-tod", default=False, show_default=True,
+              help="Copy the time-ordered data into the pulse file as its tod/ "
+                   "group, so one file holds the pulses and the streams")
 @click.option("--show", type=click.Choice(["periscope", "overlay", "none"]),
               default="periscope", show_default=True,
               help="After the run: Periscope in review mode on the pulse file, the "
@@ -131,11 +174,16 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--noise-train-ms", type=float, default=_DEFAULTS.noise_train_ms, show_default=True,
               help="Noise-training span; the other recorders start when it ends")
 @click.option("--trigger-basis", type=click.Choice(["df", "iq"]), default=_DEFAULTS.trigger_basis,
-              show_default=True)
+              show_default=True,
+              help="The units both the pulse file and the time-ordered data "
+                   "store, and what the capture triggers on: df rotates each "
+                   "calibrated channel onto its frequency direction and stores "
+                   "hertz (df, dissipation), iq stores the quadratures in volts")
 @click.option("-q", "--quiet", is_flag=True)
 def cli(serial, hostname, modules, channels, duration, session, session_dir,
         capture, parser, fastrx, parser_interface, fastrx_interface,
-        fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, show,
+        fastrx_socket, channel_streamer, sample_trunc, merge_fastrx, tod,
+        merge_tod, show,
         bias, threshold_sigma, end_sigma, min_pulse_ms, max_pulse_ms,
         pre_pulse_ms, post_pulse_ms, coincidence_window_ms,
         noise_capture_interval_s, dump_all_channels, noise_train_ms,
@@ -170,7 +218,8 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
          duration=duration, session=session, session_dir=session_dir,
          capture=capture, parser=parser, fastrx=fastrx,
          parser_interface=parser_interface, fastrx_interface=fastrx_interface,
-         fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, show=show,
+         fastrx_socket=fastrx_socket, merge_fastrx=merge_fastrx, tod=tod,
+         merge_tod=merge_tod, show=show,
          bias=bias, config=config, channel_streamer=channel_streamer,
          sample_trunc=sample_trunc, quiet=quiet)
 
@@ -178,7 +227,8 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
 def _run(*, serial, hostname, modules, channels, duration, session,
          session_dir, capture, parser, fastrx, parser_interface,
          fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
-         quiet, channel_streamer=False, sample_trunc="LOW"):
+         quiet, channel_streamer=False, sample_trunc="LOW", tod=True,
+         merge_tod=False):
     """One recording, from the command line's options or the dialog's.
     *channels* is a range spec for every module of *modules*, a
     per-module spec (which names the modules itself), or None for each
@@ -195,6 +245,10 @@ def _run(*, serial, hostname, modules, channels, duration, session,
         click.echo(f"[record] session {folder}")
         for note in notes:
             click.echo(f"[record] bias export {note}")
+        if tod and not tuning:
+            click.echo("[record] no bias export for these modules: the "
+                       "time-ordered data carries no tuning, its channels "
+                       "stored in volts (--session or --bias names one)")
         for module, chosen in wanted.items():
             click.echo(f"[record] module {module}, channels "
                        f"{chosen[0]}-{chosen[-1]} ({len(chosen)}), "
@@ -209,20 +263,32 @@ def _run(*, serial, hostname, modules, channels, duration, session,
             tuning=tuning or None,
             parser_interface=parser_interface,
             fastrx_interface=fastrx_interface, fastrx_socket=fastrx_socket,
-            merge_fastrx=merge_fastrx, channel_streamer=channel_streamer,
+            merge_fastrx=merge_fastrx, tod=tod, merge_tod=merge_tod,
+            channel_streamer=channel_streamer,
             sample_trunc=sample_trunc, verbose=not quiet))
     except (RuntimeError, ValueError) as e:
         raise click.ClickException(str(e))
+    except aiohttp.ClientConnectionError as e:
+        mock = ("; no mock server is running on this host"
+                if is_mock(serial) else "")
+        raise click.ClickException(
+            f"cannot reach the board: {e}{mock}. A serial names a board at "
+            "rfmux<NNNN>.local; MOCK or 0000 the mock server running on this "
+            "host; --hostname gives another address; --serial MOCK with no "
+            "mock running starts a simulated board")
     if not quiet and result.capture is not None:
         for line in pulse_summary_lines(result.capture):
             click.echo(f"[record] {line}")
-    for name in ("pulse_path", "dirfile_path", "fastrx_path"):
+    for name in ("pulse_path", "dirfile_path", "fastrx_path", "tod_path"):
         path = getattr(result, name)
         if path is not None:
             click.echo(f"[record] {name.split('_')[0]:7s} {path}")
     if result.merged_fastrx:
         click.echo("[record] fastrx merged into the pulse file as its fast "
                    f"stream: {result.pulse_path.name}")
+    if result.merged_tod:
+        click.echo("[record] time-ordered data copied into the pulse file's "
+                   f"tod/ group: {result.pulse_path.name}")
     for w in result.warnings:
         click.echo(f"[record] warning: {w}", err=True)
     _show(result, show)
@@ -232,8 +298,8 @@ def _run(*, serial, hostname, modules, channels, duration, session,
 
 def periscope_review_command(pulse_path) -> list:
     """Periscope in review mode on *pulse_path*, offline, in its session."""
-    return [sys.executable, "-m", "rfmux.tools.periscope", "--review",
-            str(pulse_path)]
+    from rfmux.tools.cli import periscope_command
+    return [*periscope_command(), "--review", str(pulse_path)]
 
 
 def _show(result, how: str) -> None:
@@ -247,7 +313,8 @@ def _show(result, how: str) -> None:
     if how == "periscope":
         cmd = periscope_review_command(result.pulse_path)
         if headless:
-            click.echo("[record] no display; to review: " + " ".join(cmd[1:]))
+            click.echo("[record] no display; to review: periscope "
+                       f"--review {result.pulse_path}")
             return
         subprocess.Popen(cmd, start_new_session=True)
         return

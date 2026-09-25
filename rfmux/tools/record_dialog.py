@@ -182,7 +182,7 @@ class RecordDialog(QtWidgets.QDialog):
             "(fastrxd drops a partial pipeline); otherwise the board is only "
             "read, and a module whose channel stream is off is refused")
         self.trunc_combo = QtWidgets.QComboBox()
-        for choice in ("LOW", "MID", "HIGH"):
+        for choice in ("AUTO", "LOW", "MID", "HIGH"):
             self.trunc_combo.addItem(choice, choice)
         self.trunc_combo.setToolTip(TRUNC_HELP)
         self.merge_check = QtWidgets.QCheckBox(
@@ -582,7 +582,7 @@ class RecordDialog(QtWidgets.QDialog):
         self.merge_tod_check.setChecked(v("merge_tod", "false") in (True, "true"))
         self.streamer_check.setChecked(
             v("channel_streamer", "false") in (True, "true"))
-        _select(self.trunc_combo, str(v("sample_trunc", "LOW")))
+        _select(self.trunc_combo, str(v("sample_trunc", "AUTO")))
         show = str(v("show", "periscope"))
         self.show_combo.setCurrentIndex(
             _SHOW.index(show) if show in _SHOW else 0)

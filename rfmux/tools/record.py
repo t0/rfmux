@@ -85,7 +85,7 @@ def is_mock(serial: str) -> bool:
 
 
 #: What the sample truncation choices mean, for the option and the dialog.
-TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts.")
+TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts. AUTO measures each module's slow stream first and takes the finest window that holds its DC level plus 5 sigma of noise scaled to the channel stream's rate, with 2x headroom; name the window yourself when pulses reach past that.")
 
 
 @click.command()
@@ -128,8 +128,8 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="Turn the channel streamer on for the recorded modules, "
                    "channels 1 to the highest in whole pipelines of 128, "
                    "before the run")
-@click.option("--sample-trunc", type=click.Choice(["LOW", "MID", "HIGH"]),
-              default="LOW", show_default=True,
+@click.option("--sample-trunc", type=click.Choice(["AUTO", "LOW", "MID", "HIGH"]),
+              default="AUTO", show_default=True,
               help="With --channel-streamer: " + TRUNC_HELP)
 @click.option("--merge-fastrx/--no-merge-fastrx", default=True, show_default=True,
               help="After the run, add the fastrx recording to the pulse file as its "
@@ -227,7 +227,7 @@ def cli(serial, hostname, modules, channels, duration, session, session_dir,
 def _run(*, serial, hostname, modules, channels, duration, session,
          session_dir, capture, parser, fastrx, parser_interface,
          fastrx_interface, fastrx_socket, merge_fastrx, show, bias, config,
-         quiet, channel_streamer=False, sample_trunc="LOW", tod=True,
+         quiet, channel_streamer=False, sample_trunc="AUTO", tod=True,
          merge_tod=False):
     """One recording, from the command line's options or the dialog's.
     *channels* is a range spec for every module of *modules*, a

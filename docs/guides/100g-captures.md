@@ -133,8 +133,15 @@ first, into a new session folder under `~/data`:
 
 ```bash
 rfmux record --serial <NNNN> --module 2 --module 3 --duration 20 \
-    --session-dir ~/data --channel-streamer --sample-trunc LOW
+    --session-dir ~/data --channel-streamer
 ```
+
+`--sample-trunc` defaults to AUTO: before turning each module's streamer
+on, record averages a moment of its slow stream and takes the finest
+truncation whose window holds every channel's DC level plus 5 sigma of
+noise, the noise scaled from the slow stream's rate to the channel
+stream's, with 2x headroom. The 100G path is not needed for this. Name
+LOW, MID or HIGH yourself when pulses reach past that headroom.
 
 Channel ranges instead of the bias export: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules

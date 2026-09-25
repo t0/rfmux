@@ -44,6 +44,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
+import numpy as np
+
 from ... import streamer
 from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
@@ -259,7 +261,7 @@ async def record_streams(
     tod: bool = True,
     merge_tod: bool = False,
     channel_streamer: bool = False,
-    sample_trunc: str = "LOW",
+    sample_trunc: str = "AUTO",
     verbose: bool = True,
 ) -> RecordResult:
     """Record the selected products of *channels* on *module*, or of
@@ -275,7 +277,9 @@ async def record_streams(
     board's address); ``fastrx`` records channels 1 to the highest of
     *channels*
     through the running fastrxd (*fastrx_interface* or *fastrx_socket*
-    name it when several run).  Each requirement is checked before
+    name it when several run).  With ``channel_streamer`` the streamer is
+turned on at *sample_trunc*, AUTO choosing it per module from the
+slow stream (:func:`choose_sample_trunc`).  Each requirement is checked before
     anything starts.
 
     After the run, ``merge_fastrx`` adds the recording to the pulse
@@ -543,6 +547,37 @@ CHANNEL_STREAMER_SETTLE_S = 1.0
 MAX_CHANNEL = 1024
 #: Seconds a fastrx probe waits for the channel stream before a run.
 FASTRX_PROBE_S = 1.0
+#: The largest ADC count each truncation carries: the int16 on the wire
+#: times its counts per LSB (pulse_capture.overlay.COUNTS_PER_LSB).
+TRUNC_FULL_SCALE = {"LOW": 32767.0, "MID": 32767.0 * 16, "HIGH": 32767.0 * 256}
+#: Slow-stream samples AUTO averages per module to choose a truncation.
+AUTO_TRUNC_SAMPLES = 256
+#: Sigmas of channel-stream noise AUTO keeps inside the window, and the
+#: factor of headroom over that for pulses the probe cannot see.  A
+#: sample past the window wraps (its high bits are dropped); one too
+#: coarse only loses its low bits, so both lean wide.
+AUTO_TRUNC_SIGMA = 5.0
+AUTO_TRUNC_MARGIN = 2.0
+
+
+def choose_sample_trunc(mean_i, mean_q, std_i, std_q,
+                        slow_rate_hz: float) -> Tuple[str, float]:
+    """The finest truncation whose window holds the channel stream, and
+    the peak in ADC counts it was chosen for, from the slow stream's
+    per-channel means and standard deviations (py_get_samples with
+    ``average=True``).  The DC level is the same on both streams; the
+    noise is not, the slow stream being decimated, so its sigma is
+    scaled by sqrt(PFB rate / slow rate) as white noise would be."""
+    # ponytail: white-noise scaling; 1/f noise makes it overestimate
+    # (safe), and a pulse bigger than MARGIN x the DC is not foreseen.
+    widen = AUTO_TRUNC_SIGMA * (PFB_SAMPLING_FREQ / slow_rate_hz) ** 0.5
+    peak = float(max(
+        (np.abs(mean_i) + widen * np.asarray(std_i)).max(initial=0.0),
+        (np.abs(mean_q) + widen * np.asarray(std_q)).max(initial=0.0)))
+    for name, full_scale in TRUNC_FULL_SCALE.items():
+        if peak * AUTO_TRUNC_MARGIN <= full_scale:
+            return name, peak
+    return "HIGH", peak
 
 
 async def _enable_channel_streamer(crs, modules: List[int], channels: int,
@@ -556,11 +591,24 @@ async def _enable_channel_streamer(crs, modules: List[int], channels: int,
     if not hasattr(crs, "set_channel_streamer"):
         raise RuntimeError("this board has no channel streamer to turn on")
     channels = -(-channels // pipeline) * pipeline
+    if sample_trunc == "AUTO":
+        dec = await crs.get_decimation()
+        slow_rate = decimation_to_sampling(6 if dec is None else dec)
     for m in modules:
+        trunc = sample_trunc
+        if trunc == "AUTO":
+            s = await crs.py_get_samples(AUTO_TRUNC_SAMPLES, average=True,
+                                         module=m)
+            n = min(channels, len(s.mean.i))
+            trunc, peak = choose_sample_trunc(
+                s.mean.i[:n], s.mean.q[:n], s.std.i[:n], s.std.q[:n],
+                slow_rate)
+            say(f"[record] module {m}: channel-stream peak about "
+                f"{peak:.0f} counts, so {trunc}")
         say(f"[record] channel streamer on for module {m}: channels "
-            f"1-{channels}, {sample_trunc} bits")
+            f"1-{channels}, {trunc} bits")
         await crs.set_channel_streamer(channels=channels, module=m,
-                                       sample_trunc=sample_trunc)
+                                       sample_trunc=trunc)
     await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
 
 

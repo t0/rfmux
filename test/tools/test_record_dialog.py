@@ -75,10 +75,10 @@ def test_the_channel_streamer_is_off_unless_asked_and_remembered(
         qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     o = dlg.get_options()
-    assert (o["channel_streamer"], o["sample_trunc"]) == (False, "LOW")
+    assert (o["channel_streamer"], o["sample_trunc"]) == (False, "AUTO")
     assert "±32767" in dlg.trunc_combo.toolTip()
     dlg.streamer_check.setChecked(True)
-    dlg.trunc_combo.setCurrentIndex(2)
+    dlg.trunc_combo.setCurrentIndex(3)
     dlg._save()
     o = rd.RecordDialog(settings=settings).get_options()
     assert (o["channel_streamer"], o["sample_trunc"]) == (True, "HIGH")

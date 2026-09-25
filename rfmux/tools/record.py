@@ -26,6 +26,7 @@ import aiohttp
 import click
 
 from rfmux.algorithms.measurement.record_streams import (
+    AUTO_TRUNC_MARGIN, AUTO_TRUNC_SIGMA,
     MERGED_SUFFIX,
     resolve_channels,
     pulse_summary_lines,
@@ -85,7 +86,7 @@ def is_mock(serial: str) -> bool:
 
 
 #: What the sample truncation choices mean, for the option and the dialog.
-TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts. AUTO measures each module's slow stream first and takes the finest window that holds its DC level plus 5 sigma of noise scaled to the channel stream's rate, with 2x headroom; name the window yourself when pulses reach past that.")
+TRUNC_HELP = (f"Which 16 of each sample's 24 bits the channel stream carries, in ADC counts: LOW keeps bits 15:0 and is exact while the signal stays within ±32767 counts; MID keeps bits 19:4 (counts/16); HIGH bits 23:8 (counts/256), each dropping the finer bits. With DC levels of a few thousand counts and noise of a few hundred, HIGH leaves about one bit of noise; LOW or MID keeps it. The viewer scales every truncation back to counts. AUTO measures each module's slow stream first and takes the finest window that holds its DC level plus {AUTO_TRUNC_SIGMA:g} sigma of noise scaled to the channel stream's rate, with {AUTO_TRUNC_MARGIN:g}x headroom; name the window yourself when pulses reach past that.")
 
 
 @click.command()

@@ -597,8 +597,14 @@ async def _enable_channel_streamer(crs, modules: List[int], channels: int,
     for m in modules:
         trunc = sample_trunc
         if trunc == "AUTO":
-            s = await crs.py_get_samples(AUTO_TRUNC_SAMPLES, average=True,
-                                         module=m)
+            try:
+                s = await crs.py_get_samples(AUTO_TRUNC_SAMPLES,
+                                             average=True, module=m)
+            except TimeoutError as e:
+                raise RuntimeError(
+                    f"AUTO sample truncation reads module {m}'s slow "
+                    "stream, which is silent: configure the streamer, or "
+                    "name LOW, MID or HIGH") from e
             n = min(channels, len(s.mean.i))
             trunc, peak = choose_sample_trunc(
                 s.mean.i[:n], s.mean.q[:n], s.std.i[:n], s.std.q[:n],

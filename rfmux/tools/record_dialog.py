@@ -528,6 +528,7 @@ class RecordDialog(QtWidgets.QDialog):
         # fastrxd take; a worker thread if that ever runs long.
         QtWidgets.QApplication.setOverrideCursor(
             QtCore.Qt.CursorShape.WaitCursor)
+        QtWidgets.QApplication.processEvents()     # show "measuring…"
         try:
             measured = measure_bit_depth(o["serial"], o["hostname"], chans,
                                          o["fastrx_interface"])

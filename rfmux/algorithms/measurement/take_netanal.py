@@ -70,8 +70,7 @@ async def take_netanal(
         ``block["results"]`` holds ``frequencies`` (Hz), complex ``iq_counts``
         and ``iq_volts``, ``sweep_amplitude``, ``sweep_amplitude_dbm``, and
         ``sweep_direction``.
-        Use :func:`rfmux.tuning.netanal_trace` to read it or
-        :func:`rfmux.tuning.find_resonances_in_netanal` to search for dips.
+        Use :func:`rfmux.tuning.find_resonances_in_netanal` to search for dips.
     """
     sweep_direction = resolve_direction(sweep_direction)
 

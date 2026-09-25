@@ -21,12 +21,10 @@ from .transferfunctions import BASE_FREQUENCY, convert_dacunits_to_dbm
 
 
 def on_grid(frequency_hz: float) -> float:
-    """Round onto the hardware tone grid, ``transferfunctions.BASE_FREQUENCY``.
+    """Round a frequency in Hz to the nearest hardware tone-grid point.
 
-    The single definition every quantizing path in the tree uses. Public
-    because the grid binds more than bias points: the NCO an operation parks
-    its tones against has to land on it too, or every offset computed from
-    that NCO is off-grid however carefully the tone was quantized.
+    Use this for both tones and NCOs so their frequency offsets also lie on
+    multiples of ``transferfunctions.BASE_FREQUENCY``.
     """
     return round(frequency_hz / BASE_FREQUENCY) * BASE_FREQUENCY
 
@@ -59,8 +57,7 @@ class BiasPoint:
     bifurcated_at: float | None = None
     bias_sweep: dict | None = None  # the trace dI_df/dQ_df were read off
 
-    # Fields that describe *this* tone and are therefore invalidated by moving
-    # it. Consumed by Resonator.update_bias_point.
+    # Fields cleared by update_bias_point when frequency or amplitude is supplied.
     _CAL_FIELDS = (
         "dI_df",
         "dQ_df",
@@ -69,8 +66,7 @@ class BiasPoint:
         "bias_sweep",
     )
 
-    # Keep the calibration trace and its measurement context. Counts can be
-    # recovered from volts only while VOLTS_PER_ROC is a shared constant.
+    # Fields retained from the sweep used to compute calibration.
     BIAS_SWEEP_KEYS = (
         "frequencies",
         "iq_volts",
@@ -79,9 +75,7 @@ class BiasPoint:
         "sweep_direction",
     )
 
-    # The head of that tuple: the two arrays a calibration is computed from,
-    # and the only part a stored sweep has to have. The scalars after them are
-    # provenance — a missing one costs a reader context rather than an answer.
+    # Frequency and IQ arrays are required; the remaining sweep fields are optional.
     _SWEEP_TRACES = BIAS_SWEEP_KEYS[:2]
 
     def __post_init__(self):
@@ -111,12 +105,9 @@ class BiasPoint:
 
     @classmethod
     def _check_sweep(cls, sweep):
-        """Reject a ``bias_sweep`` that cannot be read as a trace.
+        """Check that a stored sweep has frequency and IQ arrays of equal length.
 
-        Shallow on purpose. It is checked at all because a bias point
-        validated at construction is meant to stay valid, and a sweep that
-        arrives with mismatched arrays would otherwise surface much later, in
-        whichever reader interpolated it.
+        This checks the mapping and array lengths, not the values in the arrays.
         """
         if not isinstance(sweep, Mapping):
             raise ValueError(
@@ -141,38 +132,32 @@ class BiasPoint:
 
     @property
     def df_calibration(self) -> complex | None:
-        """1/(dI_df + j·dQ_df) in Hz/V. Derived — can never go stale."""
+        """Return ``1 / (dI_df + j*dQ_df)`` in Hz/V, or None for missing or zero slope."""
         if self.dI_df is None or self.dQ_df is None:
             return None
         d = complex(self.dI_df, self.dQ_df)
         return 1.0 / d if abs(d) > 0 else None
 
     def power_dbm(self, dac_scale_dbm: float) -> float:
-        """What this tone is driven at, against the module's DAC full scale."""
+        """Return this tone's drive power in dBm using the module's DAC full scale."""
         return float(convert_dacunits_to_dbm(self.amplitude, dac_scale_dbm))
 
     def quantize(self) -> BiasPoint:
-        """Round the frequency onto the hardware tone grid.
+        """Return a copy with its frequency rounded to the hardware tone grid.
 
-        Rarely needed by hand — a bias point quantizes itself at construction
-        unless it was built with ``bias_frequency_quantized=False``. This is the
-        one-shot for those, and a no-op for everything else. Calibration is
-        kept: the shift is under half a grid step, which is small compared to a
-        resonator's width. ``bias_frequency_quantized`` is policy and is left
-        alone, so an opted-out point stays opted out for its next move.
+        Bias points normally quantize at construction. Use this for a point built
+        with ``bias_frequency_quantized=False``. Calibration and the quantization
+        setting are preserved; future updates still follow that setting.
         """
         return replace(self, frequency_hz=on_grid(self.frequency_hz))
 
 
 def _bias_dict(bias: BiasPoint) -> dict:
-    """One bias point as a dict, for :meth:`ResonatorCatalog.to_dict`.
+    """Return a bias point's fields as a dictionary.
 
-    Field by field rather than ``dataclasses.asdict``, which deep-copies as it
-    recurses. Over floats that cost nothing and nobody noticed; over a
-    ``bias_sweep`` it would duplicate both arrays on every call, including the
-    ``to_dict`` every multisweep does to snapshot its catalog. The sweep is
-    copied one level, so the record is its own dict but shares the traces —
-    they are measurement data and nothing mutates them.
+    Copy the ``bias_sweep`` dictionary but share its arrays. This avoids
+    copying the measured traces each time a catalog is saved. Callers must
+    treat the shared arrays as read-only.
     """
     d = {f.name: getattr(bias, f.name) for f in fields(bias)}
     if d.get("bias_sweep") is not None:
@@ -194,7 +179,7 @@ class Resonator:
     name: str
     channel: int  # 1-based hardware channel; permanent binding
     bias: BiasPoint
-    notes: dict = field(default_factory=dict)  # explicitly the junk drawer
+    notes: dict = field(default_factory=dict)  # user-supplied metadata
 
     def update_bias_point(self, **changes) -> BiasPoint:
         """Replace the bias point with the supplied changes and return it.
@@ -228,26 +213,11 @@ class ResonatorCatalog:
     groups; ``crs.apply_bias`` requires all tones to fit within one band.
     """
 
-    # Stamped into to_dict output and checked by from_dict, so a file written by
-    # a version of this module that shaped things differently fails loudly
-    # instead of being half-understood. Bump it whenever the dict shape changes.
+    # Version the saved catalog format; reject unsupported versions on load.
     SCHEMA_VERSION = 4
 
-    # Older shapes from_dict can still read. Version 1 stored `resonators` as a
-    # list of entries each carrying its own `name`; 2 keys them by name, so a
-    # reader can look one up instead of scanning. That is a shape change and so
-    # a version bump, but the old shape is unambiguous — no reason to strand
-    # files already on disk over it.
-    #
-    # 3 added `bias_sweep` to a bias point: the trace its calibration was read
-    # off. Reading an older file back needs nothing — the field defaults to
-    # None, which is what a bias point that never had one says. The bump is for
-    # the other direction, so that a file written now fails on an older reader
-    # rather than arriving there as an unexpected keyword.
-    #
-    # 4 added `name`, the catalog's own. A file without one reads back under the
-    # default, so again the bump is for the other direction: a reader that would
-    # drop the name on the floor should refuse the file instead.
+    # Version 1 uses a list of named entries; later versions key entries by name.
+    # Missing bias_sweep and catalog name fields use their constructor defaults.
     READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4)
 
     def __init__(
@@ -285,8 +255,7 @@ class ResonatorCatalog:
         self.name = name
         self.module = module
         self.min_separation_hz = min_separation_hz
-        # The one store. Channel is read off the resonators themselves rather
-        # than mirrored into a second index that could fall out of step.
+        # Store members by name; channel lookups read each resonator directly.
         self._by_name: dict[str, Resonator] = {}
         for r in resonators:
             self._add(r)
@@ -294,25 +263,12 @@ class ResonatorCatalog:
     # -- invariants -----------------------------------------------------------
 
     def _check_frequency(self, r: Resonator):
-        """Reject a bias frequency that collides with one already present.
+        """Reject a new member within ``min_separation_hz`` of an existing member.
 
-        The default, ``min_separation_hz=None``, skips this altogether. Nothing
-        downstream depends on frequencies being distinct — the cost of two tones
-        on one frequency is that the two channels read the same thing, which is
-        fine when you meant it, and a caller who has already made their
-        separation cut in ``find_resonances`` should not have to argue with a
-        second one here.
-
-        ``min_separation_hz=0.0`` rejects exactly equal floats. Because bias
-        frequencies arrive quantized, that also catches the realistic symptom of
-        ``find_resonances`` splitting one resonator: two peaks a hair apart land
-        on one grid point, which is exactly what the hardware would have done
-        with them. It stays a weak check past one grid step — set something
-        physically motivated for anything wider.
-
-        Comparison is inclusive — a pair exactly ``min_separation_hz`` apart
-        collides — which is what makes 0.0 mean "no two tones share a
-        frequency", and matches ``find_resonances``' separation pass.
+        The comparison includes the threshold itself. None skips the check;
+        0.0 rejects only equal bias frequencies. Bias points normally quantize
+        at construction, so nearby input frequencies can become equal.
+        This check runs when adding members, not when retuning them.
         """
         threshold = self.min_separation_hz
         if threshold is None:
@@ -360,45 +316,28 @@ class ResonatorCatalog:
         names: list[str] | Callable[[Sequence[float]], list[str]] | None = None,
         **kwargs,
     ) -> ResonatorCatalog:
-        """Seed a catalog from found resonances. Channels 1..N in frequency order.
+        """Build a catalog with channels 1..N assigned in frequency order.
 
-        Each resonator gets a ``BiasPoint`` at its found frequency, carrying no
-        calibration — the operating point as first guessed. Multisweep and bias
-        finding move it from there. Found frequencies come off a sweep grid,
-        not the tone grid, so expect them to shift by up to half a tone-grid
-        step on the way in.
+        Each resonator starts with an uncalibrated ``BiasPoint`` at the supplied
+        amplitude, in fractions of DAC full scale. Frequencies are rounded to the
+        hardware tone grid, which can shift them by up to half a grid step.
 
-        ``amplitude`` is required rather than defaulted: the probe amplitude is
-        a real measurement choice, and there is no value that is right for an
-        arbitrary array.
+        ``names`` may be a list or a naming function. A list is paired with the
+        input frequencies before sorting. A function receives sorted frequencies
+        and must return one name per frequency. The default, ``syllabic_names``,
+        generates fresh names such as ``BOTA``. For example::
 
-        This is where a resonator's name is minted, and it is minted once: from
-        here on the name is the catalog's key, it keys every result dict the
-        measurement algorithms return, and it round-trips through ``to_dict``
-        and ``to_csv``.
+            from functools import partial
+            from rfmux.resonator_names import numbered_names
 
-        ``names`` is either a list or a namer. A **list** is paired with
-        ``frequencies_hz`` positionally *before* sorting, so parallel lists stay
-        associated no matter what order they arrive in. A **namer** is a
-        function of the sorted frequencies returning one name each, and the
-        default is
-        :func:`~rfmux.resonator_names.syllabic_names` — short made-up words like
-        ``BOTA``, drawn fresh each time::
+            catalog = ResonatorCatalog.from_frequencies(
+                found, module=2, amplitude=0.01,
+                names=partial(numbered_names, prefix="kid"))
 
-            from rfmux.resonator_names import (
-                numbered_names, syllabic_names_from_frequency)
-
-            ResonatorCatalog.from_frequencies(found, module=2, amplitude=0.01)
-            ...(names=numbered_names)                   # R0001…
-            ...(names=syllabic_names_from_frequency)    # stable per resonator
-            ...(names=partial(numbered_names, prefix="kid"))
-
-        A drawn name is deliberately not an index. ``R0007`` asserts a position
-        in frequency order, and that assertion goes stale the first time a
-        resonator is removed or retuned while still looking authoritative. The
-        ordering is not lost — ``channel`` records it, and ``resonators()``
-        recomputes it live from the bias frequencies, which is the version that
-        stays true.
+        Names identify resonators in the catalog, sweep results, and exports.
+        They stay unchanged when a resonator is retuned or another is removed.
+        Numbered names therefore need not match current frequency order.
+        Additional keywords are passed to the catalog constructor.
         """
         freqs = [float(f) for f in frequencies_hz]
         if names is None:
@@ -407,8 +346,7 @@ class ResonatorCatalog:
             ordered = sorted(freqs)
             drawn = names(ordered)
             if len(drawn) != len(ordered):
-                # getattr, not .__name__: a partial() has no name, and partial
-                # is what the docstring above recommends for a custom prefix.
+                # Callable objects such as functools.partial may have no __name__.
                 who = getattr(names, "__name__", repr(names))
                 raise ValueError(
                     f"{who} returned {len(drawn)} names for "
@@ -499,12 +437,10 @@ class ResonatorCatalog:
             resonator.update_bias_point(bifurcated_at=None)
 
     def copy(self) -> ResonatorCatalog:
-        """Deep copy. THE threading rule: workers operate on ``catalog.copy()``;
-        the GUI swaps its reference when the worker's completed signal fires.
+        """Return a deep copy, including stored calibration traces and notes.
 
-        A resonator is scalars plus, once it has been biased, the one trace its
-        calibration came off, so the copy costs a few kB per resonator rather
-        than the sweeps it was measured in.
+        Give workers a copy so they can update bias points independently of the
+        catalog displayed by the GUI.
         """
         return _copy.deepcopy(self)
 
@@ -526,23 +462,14 @@ class ResonatorCatalog:
     # -- persistence ----------------------------------------------------------
 
     def to_dict(self) -> dict:
-        """Builtins and arrays only — files never contain these classes.
+        """Return catalog fields as dictionaries, keeping sweep arrays as arrays.
 
-        Everything here is a builtin except the two arrays inside a
-        ``bias_sweep``, which stay arrays: ``store`` writes pickles of builtins
-        and ndarrays, and a trace turned into a list of Python floats on the
-        way out would be slower to read and no more portable.
+        Resonators are keyed by name, for example ``d["resonators"]["BOTA"]``.
+        Entries are inserted in current bias-frequency order. The catalog name,
+        module, separation rule, bias points, and notes are included.
 
-        ``resonators`` is keyed by name, the same way the catalog itself is, so
-        a reader that wants one resonator says ``d["resonators"]["BOTA"]``
-        rather than scanning for it. The name is the key and so is not repeated
-        inside the entry. Insertion is in frequency order, which dicts keep,
-        but nothing needs to lean on that — ``from_dict`` takes the order back
-        off the frequencies, the same as everywhere else.
-
-        ``name`` and ``min_separation_hz`` are part of the record like every
-        other field, and :meth:`from_dict` reads them back — the separation rule
-        applied, the name carried.
+        Stored sweep arrays are shared with the catalog; use :meth:`copy` first
+        if they must be independent.
         """
         return {
             "schema_version": self.SCHEMA_VERSION,
@@ -563,26 +490,12 @@ class ResonatorCatalog:
     def from_dict(cls, d: dict, **kwargs) -> ResonatorCatalog:
         """Rebuild a catalog from ``to_dict`` output.
 
-        The dict carries everything the object does, the separation rule
-        included, so reading one back restores the catalog that was written
-        instead of deciding what to make of it. The rule arrives the way it
-        does in every other constructor, which means it is checked against the
-        frequencies in the file — and that is a check worth having here, since
-        retuning through ``Resonator.update_bias_point`` is not policed: a
-        catalog whose tones were walked together after it was built fails on
-        the way back in rather than coming back claiming a spacing it does
-        not have.
+        Restore the saved name and separation rule unless overridden by keyword
+        arguments. Missing values use the constructor defaults.
 
-        The name comes back the same way, and ``from_dict(d, name=...)``
-        renames the catalog on the way in — a file written before catalogs had
-        names carries none, and comes back under the default like any other
-        unnamed catalog.
-
-        ``from_dict(d, min_separation_hz=...)`` reads the file under a rule of
-        your own instead — a tighter one to audit it with, or ``None`` to open a
-        file whose rule you no longer want to be held to. A file written before
-        the rule was persisted has no key at all and comes back under ``None``,
-        the same as any other catalog with no rule.
+        Construction checks frequency spacing again. Loading can therefore fail
+        if members were retuned closer together after the catalog was built.
+        Pass ``min_separation_hz=None`` to load without that check.
         """
         version = d.get("schema_version")
         if version not in cls.READABLE_SCHEMA_VERSIONS:
@@ -607,26 +520,17 @@ class ResonatorCatalog:
             )
             for name, rd in entries
         ]
-        # The file's rule unless the caller named one of their own, so that a
-        # round trip is a round trip. Anything else the file carries and
-        # __init__ does not take is ignored — including a file written while the
-        # catalog still carried an NCO frequency, which is why removing that
-        # field did not need a schema bump: neither direction of the round trip
-        # loses a resonator over it.
+        # Explicit arguments override saved values; missing fields use defaults.
         kwargs.setdefault("min_separation_hz", d.get("min_separation_hz"))
         kwargs.setdefault("name", d.get("name"))
         return cls(resonators, module=d["module"], **kwargs)
 
     # -- CSV ------------------------------------------------------------------
     #
-    # A spreadsheet-editable bias table. Deliberately lossy: it carries the
-    # operating point and nothing else. `notes`, `bias_frequency_quantized` and
-    # every calibration field — `df_calibration` and `bias_sweep` with them —
-    # are dropped; a trace does not go in a cell anyway. So is the catalog's own
-    # `name`, which is not a per-row fact: pass it, and the separation rule, to
-    # `from_csv` alongside `module`, and note that a row read back comes in
-    # quantized whether or not it was written that way. Use to_dict for a
-    # faithful round-trip.
+    # CSV stores only resonator names, channels, frequencies, and amplitudes.
+    # Loading quantizes frequencies and leaves calibration and notes unset.
+    # Pass module, catalog name, and separation rule separately to from_csv.
+    # Use to_dict to retain all catalog fields.
 
     CSV_COLUMNS = (
         "name",

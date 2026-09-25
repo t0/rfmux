@@ -29,12 +29,10 @@ def tuning_rows(
     dac_scale_dbm: Optional[float] = None,
     nsamps: Optional[int] = None,
 ) -> Dict[int, dict]:
-    """``{channel: row}`` for every resonator in *catalog*.
+    """Return ``{channel: row}`` with each resonator's bias and calibration.
 
-    The keyword arguments are facts about the measurement rather than about
-    the array -- a catalog holds no NCO on purpose -- so they are passed in
-    and stamped onto every row. One left out is left out of the rows: a
-    reader finds the field absent rather than a number nothing measured.
+    Optional measurement settings are added to every row. A setting passed
+    as None is omitted.
     """
     provenance = {k: v for k, v in
                   (("nco_frequency_hz", nco_frequency_hz),
@@ -49,8 +47,7 @@ def tuning_rows(
             "amplitude": bias.amplitude,
             # Hz/V at the bias point, from the IQ derivatives measured there.
             "df_calibration": bias.df_calibration,
-            # A separate quantity: the angle the IQ loop is rotated by, which
-            # is not derivable from df_calibration and is not measured yet.
+            # Loop rotation is stored separately from the df calibration.
             "iq_rotation_deg": bias.iq_rotation_deg,
             "bifurcated_at": bias.bifurcated_at,
         }
@@ -67,8 +64,7 @@ def _bias_point(row: Mapping) -> BiasPoint:
     cal = row.get("df_calibration")
     d = None if cal in (None, 0) else 1.0 / complex(cal)
     sweep = {k: row[k] for k in _SWEEP_FIELDS if row.get(k) is not None}
-    # The scalars without the traces do not describe a sweep anything can be
-    # read off, and BiasPoint refuses the pair. A row like that has no sweep.
+    # A stored sweep requires both frequency and IQ arrays.
     if any(k not in sweep for k in BiasPoint._SWEEP_TRACES):
         sweep = {}
     return BiasPoint(
@@ -84,13 +80,10 @@ def _bias_point(row: Mapping) -> BiasPoint:
 
 def catalog_from_tuning(rows: Mapping[int, dict], module: int,
                         **kwargs) -> ResonatorCatalog:
-    """The catalog a capture's tuning rows describe.
+    """Build a catalog from a capture's tuning rows.
 
-    The inverse of :func:`tuning_rows`. A row with no tone -- no bias
-    frequency or no amplitude -- is not a resonator we can say anything
-    about, so it is left out rather than given a placeholder. A row with no
-    name is named after its channel, which is what it is known by in the
-    file it came from.
+    Skip rows without a bias frequency or amplitude. Use ``"channel <n>"``
+    when a row has no name. Pass remaining keywords to ResonatorCatalog.
     """
     resonators = []
     for channel, row in sorted(rows.items()):
@@ -108,22 +101,14 @@ def catalog_from_tuning(rows: Mapping[int, dict], module: int,
 
 def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
                            module_id: str) -> dict:
-    """A capture's tuning rows as one multisweep, for reading and plotting.
+    """Pack stored calibration sweeps as ``{module_id: block}`` for plotting.
 
-    One iteration: the sweep each resonator is biased at is the one sweep
-    it has, so the schedule is ``AmplitudeSchedule()`` -- one pass, each
-    resonator at its own amplitude -- and that is what the rows record
-    rather than a step everything shares. Resonators biased on traces taken
-    in different directions land in the direction they were measured in.
+    The result has one amplitude step. Each resonator keeps its own amplitude
+    and recorded sweep direction; a missing direction defaults to upward.
+    ``nsamps`` and ``dac_scale_dbm`` are read from the rows when available,
+    and otherwise remain None.
 
-    Goes through the same packer a measurement does, so what comes back is
-    a container and not a shape that resembles one. ``nsamps`` and
-    ``dac_scale_dbm`` are provenance the file may not carry; they reach the
-    container as whatever the rows say, or None.
-
-    Raises:
-        ValueError: if no row carries a sweep. There is nothing to draw,
-            and an empty container would read as a measurement of nothing.
+    Raise ValueError if no row contains a calibration sweep.
     """
     catalog = catalog_from_tuning(rows, module)
     by_direction: Dict[str, Dict[str, dict]] = {}
@@ -137,9 +122,7 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
         entry = {
             "channel": r.channel,
             "frequencies": frequencies,
-            # The counts the volts were converted from, by the one constant
-            # that conversion uses. Kept out of a stored sweep for exactly
-            # that reason; rebuilt here because a sweep entry has it.
+            # Reconstruct counts from the stored voltage trace using VOLTS_PER_ROC.
             "iq_counts": iq_volts / VOLTS_PER_ROC,
             "iq_volts": iq_volts,
             "original_center_frequency": float(
@@ -174,7 +157,7 @@ def multisweep_from_tuning(rows: Mapping[int, dict], module: int, *,
 
 
 def _span(by_direction: Mapping[str, Mapping[str, dict]]) -> float:
-    """The widest sweep in the set, which is the span they were taken at."""
+    """Return the largest frequency span among the stored sweeps, in Hz."""
     return max(
         (float(e["frequencies"].max() - e["frequencies"].min())
          for entries in by_direction.values() for e in entries.values()

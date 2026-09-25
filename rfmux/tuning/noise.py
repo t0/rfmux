@@ -22,50 +22,19 @@ _SPECTRUM_KEYS = ("psd_i", "psd_q", "psd_dual_sideband")
 
 
 def separate_iq_fft_to_i_and_q_linear(freqs, iqfft, fs, U):
-    """
-    Reconstruct I- and Q-only FFTs from a complex (IQ) FFT, returning *linear*
-    PSD values (Watts/Hz) for each bin. This function is part of a larger
-    pipeline that matches the Hann-window normalization used in SciPy's Welch.
+    """Reconstruct single-sideband I and Q power spectra from an IQ FFT.
 
-    How the normalization works:
-      - We define U = sum(window^2), NOT sum(window^2)/N.
-      - The factor of 2 below accounts for real-signal reconstruction:
-         * I and Q each get a factor of 2 in power for single-sideband.
-      - We then divide by (50 * U * fs) at the last stage of the pipeline
-        (though part of that division happens externally in apply_pfb_correction
-        for the dual-sideband portion).
+    ``iqfft`` is an unshifted FFT of windowed complex voltage samples.
+    ``fs`` is the sample rate in Hz, and ``U`` is ``sum(window**2)``.
+    Return ``(psdfreq, psd_i, psd_q)`` with PSDs in W/Hz.
 
-    Parameters
-    ----------
-    freqs : ndarray
-        Frequency array (unshifted 0..fs layout) used only to determine
-        the maximum frequency for psdfreq.
-    iqfft : ndarray
-        Complex FFT array (length N) of I+jQ data, presumably after windowing
-        and optional gain factors. Typically shape (N,).
-    fs : float
-        Sampling frequency in Hz for the final PSD (e.g., ~2.44 MHz in CRS).
-    U : float
-        Window power normalization factor = sum(window^2). *Not* divided
-        by len(window), so it aligns with Welch's approach.
+    Reconstruct each real signal from paired positive and negative bins.
+    Double non-DC powers for a single-sideband spectrum; use the peak-voltage
+    power convention ``V**2 / (2 * TERMINATION)`` and divide by ``U * fs``.
 
-    Returns
-    -------
-    psdfreq : ndarray
-        Single-sideband frequency axis from 0..(max(freqs)) for N/2 bins.
-    re_ps_lin : ndarray
-        I-channel PSD (Watts/Hz).
-    im_ps_lin : ndarray
-        Q-channel PSD (Watts/Hz).
-
-    Notes
-    -----
-    - We use a factor of 2 for each real channel (I or Q). For real-signal
-      single-sideband PSD, this is typical.
-    - The DC bin is halved again (re_ps[0] /= 2, im_ps[0] /= 2), to avoid
-      double-counting at 0 Hz.
-    - The final scaling to dBm/Hz or dBc/Hz (and any referencing) happens
-      outside, in apply_pfb_correction.
+    The output has ``N // 2`` bins. Its frequency axis runs from zero toward
+    ``max(freqs)``, excluding that endpoint. Decibel conversion and carrier
+    referencing are handled by :func:`apply_pfb_correction`.
     """
 
     N = len(iqfft)
@@ -87,9 +56,7 @@ def separate_iq_fft_to_i_and_q_linear(freqs, iqfft, fs, U):
     # For I: real parts add, imaginary parts subtract
     ibatch = 0.5 * (z_pos + np.conj(z_neg))
 
-    # For Q: we need to be careful with the formula
-    # Q[k] = 0.5 * ((z_pos - conj(z_neg)) / j)
-    # which is: 0.5 * j * (conj(z_neg) - z_pos)
+    # Reconstruct Q using the conjugate of the negative-frequency component.
     qbatch = 0.5j * (np.conj(z_neg) - z_pos)
 
     # Prepend DC values
@@ -106,7 +73,7 @@ def separate_iq_fft_to_i_and_q_linear(freqs, iqfft, fs, U):
     re_ps[0] /= 2.0
     im_ps[0] /= 2.0
 
-    # Here we define rbw = fs, so re_ps / rbw => power spectral density in W/Hz
+    # Divide by the sample rate to obtain power density in W/Hz.
     rbw = fs
     re_ps_lin = re_ps / rbw
     im_ps_lin = im_ps / rbw
@@ -124,62 +91,30 @@ def apply_pfb_correction(
     nsegments=1,
     reference="relative",
 ):
-    """
-    Apply droop correction for a polyphase filter bank (PFB), returning both
-    single-sideband (I,Q) and dual-sideband PSDs in either dBm/Hz or dBc/Hz.
+    """Correct PFB frequency response and calculate I, Q, and complex IQ spectra.
 
-    We accumulate in *linear* units (Watts/Hz) across 'nsegments', then
-    convert to the final dB scale. This approach aligns with Hann-window
-    normalization in Welch:
+    Split the samples into equal segments, apply a Hann window, and correct
+    each FFT for the PFB gain and droop. Average powers before converting to
+    decibels. Samples left over after splitting are not used.
 
-      U = sum(window^2), no dividing by len(window).
-      We do not divide the FFT amplitude by len(segment).
-      The final PSD is effectively power / (U * fs).
+    Args:
+        pfb_samples: complex PFB samples in ADC counts.
+        nco_freq: NCO frequency in Hz.
+        channel_freq: absolute tone frequency in Hz.
+        binlim: correction limit on either side of the PFB bin centre, in Hz.
+            Defaults to 1.1e6.
+        trim: trim the corrected dual-sideband spectrum symmetrically around
+            zero. Defaults to True.
+        nsegments: number of segments to average. Defaults to one.
+        reference: ``"absolute"`` for dBm/Hz or ``"relative"`` for dBc/Hz,
+            referenced to the dual-sideband DC-bin power. Defaults to relative.
 
-    If reference='relative', we treat the DC bin in the dual-sideband data
-    as the "carrier" and subtract it in dB, producing dBc/Hz. If 'absolute',
-    we keep dBm/Hz.
-
-    Parameters
-    ----------
-    pfb_samples : ndarray
-        Complex time-domain samples from the PFB (ADC counts).
-    nco_freq : float
-        NCO frequency in Hz, used to locate the bin center offset.
-    channel_freq : float
-        Channel frequency in Hz (NCO freq + channel offset).
-    binlim : float, optional
-        ± frequency range for droop correction / trimming. Default 1.1e6.
-    trim : bool, optional
-        If True, narrows the dual-sideband data around zero. Default True.
-    nsegments : int, optional
-        Number of segments to average in linear space. Default 1 => use all
-        samples in one segment.
-    reference : str, optional
-        'relative' => produce dBc/Hz, referencing the DC bin in dual sideband.
-        'absolute' => produce dBm/Hz.
-
-    Returns
-    -------
-    psdfreq_ssb : ndarray
-        Single-sideband frequency axis (0..binlim), possibly trimmed.
-    re_psd : ndarray
-        I-channel PSD in dBm/Hz or dBc/Hz.
-    im_psd : ndarray
-        Q-channel PSD in dBm/Hz or dBc/Hz.
-    ds_freq : ndarray
-        Dual-sideband frequency axis, possibly trimmed around zero if trim=True.
-    ds_psd : ndarray
-        Dual-sideband PSD in dBm/Hz or dBc/Hz.
-
-    Notes
-    -----
-    - We build a Hann window per segment, compute an FFT, and apply the
-      built-in PFB gain at bin center + droop correction from the PFB filter.
-    - The factor-of-2 for single-sideband real signals is handled inside
-      `separate_iq_fft_to_i_and_q_linear`, with an extra 1/2 for the DC bin.
-    - For 'relative', we sum the DC bin in the dual-sideband data across
-      segments to find the "carrier" in linear, then do final referencing.
+    Returns:
+        tuple: ``(ssb_frequency, psd_i, psd_q, dsb_frequency, psd_iq)``.
+        Frequencies are in Hz relative to the tone. I and Q spectra are
+        single-sideband; the complex IQ spectrum includes both sidebands.
+        In relative mode, DC entries represent bin power relative to the
+        carrier, in dBc, rather than power density in dBc/Hz.
     """
 
     comb_sampling_freq = 625e6
@@ -207,15 +142,12 @@ def apply_pfb_correction(
     ds_ps_lin_accum = None
     ds_freq_final = None
 
-    # For dBc mode: accumulate the DC bin amplitude in linear units
+    # Accumulate DC-bin power for carrier referencing.
     carrier_lin_accum = 0.0
     carrier_count = 0
 
     def _trim_around_zero(freq, data):
-        """
-        Helper to trim data around zero frequency. We find zero_idx and keep
-        symmetric +/- range. Used if trim=True for the dual-sideband.
-        """
+        """Keep equal numbers of bins on either side of the bin nearest zero."""
         zero_idx = np.argmin(np.abs(freq))
         half_len = min(zero_idx, len(freq) - zero_idx)
         return (
@@ -224,10 +156,9 @@ def apply_pfb_correction(
         )
 
     def _accumulate_linear(accum, freq_accum, new_lin, new_freq):
-        """
-        Accumulates new_lin into accum in-place, ensuring consistent length min.
-        freq_accum is not strictly updated here except to keep shape alignment
-        if needed. We do a simple accumulation for multi-segment averaging.
+        """Add overlapping bins to the accumulator in place.
+
+        Keep the first segment's frequency axis and array length.
         """
         if accum is None:
             return new_lin, new_freq
@@ -235,7 +166,7 @@ def apply_pfb_correction(
         accum[:m_len] += new_lin[:m_len]
         return accum, freq_accum
 
-    # Figure out bin centers. The channel offset inside that bin is channel_freq_in_nco_bw
+    # Locate the tone relative to the NCO, then within its nearest PFB bin.
     bin_centers = (comb_sampling_freq / 512.0) * np.arange(-256, 256)
     channel_freq_in_nco_bw = channel_freq - nco_freq
 
@@ -282,7 +213,7 @@ def apply_pfb_correction(
         if reference.lower()=='relative' and len(ds_freq_local) > 0:
             # Record the DC bin amplitude for later normalization in linear
             zero_idx = np.argmin(np.abs(ds_freq_local))
-            # The DC bin is infinitely narrow => multiply by bin_width to get total power
+            # Multiply the DC-bin density by its width to estimate carrier power.
             bin_width = fs / len(segment)
             carrier_lin_accum += ds_ps_lin_local[zero_idx] * bin_width
             carrier_count += 1

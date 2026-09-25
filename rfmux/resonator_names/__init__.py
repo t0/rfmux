@@ -32,10 +32,8 @@ A namer is a function of the resonators' frequencies::
     syllabic_names_from_frequency(frequencies_hz) # stable per resonator
 
 :meth:`~rfmux.core.resonators.ResonatorCatalog.from_frequencies` takes one of
-these, so a catalog can be named any of those ways without the constructor
-growing a flag per scheme. Taking the frequencies rather than just a count is
-what lets a namer derive a name from the resonator it is naming — see
-:func:`syllabic_names_from_frequency` — and lets you write your own.
+these functions through its ``names`` argument. You can also supply a custom
+function that receives sorted frequencies and returns one name per frequency.
 """
 
 from __future__ import annotations
@@ -68,15 +66,7 @@ __all__ = [
     "syllabic_names_from_frequency",
 ]
 
-#: How long a generated name is. Four characters is short enough to sit in a
-#: legend or a table column without wrapping, and there are ~89,000 reachable
-#: strings at this length, so a full module of 1024 draws without trouble.
-#:
-#: The cost is that four characters is not much room to be distinctive: among
-#: 1000 names of this length, expect on the order of a thousand pairs that
-#: differ in a single character (``BITA`` and ``BOTA``). Raise this if an array
-#: is large and the names are being read aloud or typed; 6 removes essentially
-#: all of that.
+# Default character count. Increase it to make similar names easier to distinguish.
 DEFAULT_LENGTH = 4
 
 
@@ -85,30 +75,17 @@ def syllabic_name(
     *,
     rng: random.Random | int | None = None,
 ) -> str:
-    """One made-up, pronounceable name of exactly ``length`` characters.
+    """Generate one uppercase, pronounceable name of exactly ``length`` characters.
 
-    Upper case, which is where rfmux differs from the vendored generator: it
-    hands back ``Bota`` and this hands back ``BOTA``. Case is decided here, in
-    one place, so ``syllables.py`` stays byte-identical to upstream.
+    Use :func:`syllabic_names` to generate several distinct names.
 
-    All caps reads as a label rather than as a word, which is what these are —
-    nobody is meant to wonder whether ``BOTA`` is an English word they should
-    recognise. It also keeps a name visually distinct from the surrounding prose
-    in a plot legend or a log line.
-
-    This is the single-name primitive. For a catalog's worth, all distinct, use
-    :func:`syllabic_names`.
-
-    :param length: the exact character count, at least :data:`MIN_LENGTH`.
-    :param rng: a :class:`random.Random`, or an int seed, for a reproducible draw.
+    :param length: character count, at least :data:`MIN_LENGTH`.
+    :param rng: a :class:`random.Random` instance or integer seed for reproducibility.
     """
     return _random_syllabic_string(length, rng=rng).upper()
 
 
-#: Consecutive draws that all turn out to be duplicates before the space is
-#: treated as used up. There is no pool to watch empty, so this stands in for
-#: one: a run this long means the strings of that length really are exhausted
-#: rather than merely unlucky.
+# Maximum consecutive duplicate draws before raising ValueError.
 _MISSES = 5000
 
 
@@ -138,27 +115,17 @@ def syllabic_names(
     rng: random.Random | int | None = None,
     avoid: Iterable[str] = (),
 ) -> list[str]:
-    """One distinct made-up name per frequency, in the order given.
+    """Generate one distinct name per input frequency, in the supplied order.
 
-    The default namer. Names are drawn rather than derived, so the frequencies
-    are used only for their count — two runs over the same array give different
-    names. That is the point: a name that carries no ordering cannot imply one
-    that later goes stale, the way ``R0007`` does the moment a resonator is
-    removed or retuned.
+    Only the number of frequencies is used. Names are random unless ``rng``
+    is seeded. A fixed seed repeats the sequence, but inserting a frequency
+    changes which names are assigned to later resonators.
 
-    When you need the same array to come back with the same names — a demo
-    notebook whose prose names a resonator out loud — use
-    :func:`syllabic_names_from_frequency`, or pass ``rng`` a seed to fix the
-    sequence.
-
-    :param frequencies_hz: the resonators being named; only the count is read.
-    :param length: characters per name. See :data:`DEFAULT_LENGTH`.
-    :param rng: a :class:`random.Random`, or an int seed, for a reproducible
-        draw. Note this fixes the *sequence* of names, not which resonator gets
-        which: names are handed out positionally, so one extra resonance shifts
-        every name after it onto a different resonator.
-    :param avoid: names already in use, e.g. those of resonators already named.
-    :raises ValueError: if there are not enough distinct strings of that length.
+    :param frequencies_hz: frequencies to name; only their count is used.
+    :param length: characters per name.
+    :param rng: a :class:`random.Random` instance or integer seed.
+    :param avoid: names already in use, which must not be generated.
+    :raises ValueError: if length is too short or distinct-name retries are exhausted.
     """
     if length < MIN_LENGTH:
         raise ValueError(f"length must be at least {MIN_LENGTH}, got {length}")
@@ -166,11 +133,7 @@ def syllabic_names(
     return _distinct(len(frequencies_hz), length, resolved, set(avoid))
 
 
-#: How coarsely a frequency is bucketed before it seeds a name. Ten kilohertz
-#: sits in the gap between the two things this has to survive: re-measuring one
-#: resonator moves it by a sweep step or so, which must *not* change its name,
-#: while two distinct resonators are a hundred kilohertz apart or more (the
-#: usual ``min_resonance_separation_hz``), which must.
+# Frequency bucket width in Hz for repeatable name generation.
 DEFAULT_QUANTUM_HZ = 10e3
 
 
@@ -181,34 +144,23 @@ def syllabic_names_from_frequency(
     quantum_hz: float = DEFAULT_QUANTUM_HZ,
     avoid: Iterable[str] = (),
 ) -> list[str]:
-    """One made-up name per frequency, derived from that frequency.
+    """Generate distinct names using rounded frequency buckets as random seeds.
 
-    Each name is a function of the resonator it names, so the resonator at
-    4.512300 GHz gets the same name in every run, on every machine, against mock
-    or real hardware — no seed to pass and nothing to keep in step. Unlike a
-    seeded draw, this binds a name to a *resonator* rather than to a position,
-    so finding one extra resonance does not rename everything after it.
+    For each frequency, seed a separate generator with
+    ``round(frequency / quantum_hz)``. The same bucket gives the same first
+    name. If that name is already used or in ``avoid``, draw again from that
+    generator until a distinct name is found.
 
-    That is what makes it worth having for documentation: a notebook can say
-    "``BOTA`` is the one that goes nonlinear first" and still be right next
-    week. It is off by default because outside that setting the stability buys
-    nothing, and a name that is secretly a hash of a frequency invites being
-    read as one.
+    Names usually survive small frequency changes and additions to an array.
+    They can change when a frequency crosses a bucket boundary or when a
+    name collision changes which draw is available. Collisions can occur
+    within a bucket or between different buckets.
 
-    Two caveats, both from the bucketing:
-
-    - A frequency landing near a bucket edge can fall either side of it between
-      runs and take a different name. ``quantum_hz`` trades that risk against
-      the next one.
-    - Two resonators inside one bucket derive the same name. The later one in
-      frequency order redraws, which makes *its* name depend on the array again.
-      At the default separations this is rare enough not to matter.
-
-    :param frequencies_hz: the resonators being named, in the order to name them.
-    :param length: characters per name. See :data:`DEFAULT_LENGTH`.
-    :param quantum_hz: bucket width. See :data:`DEFAULT_QUANTUM_HZ`.
+    :param frequencies_hz: frequencies in Hz, processed in the supplied order.
+    :param length: characters per name.
+    :param quantum_hz: positive bucket width in Hz; defaults to 10 kHz.
     :param avoid: names already in use.
-    :raises ValueError: if there are not enough distinct strings of that length.
+    :raises ValueError: if length or bucket width is invalid, or retries are exhausted.
     """
     if length < MIN_LENGTH:
         raise ValueError(f"length must be at least {MIN_LENGTH}, got {length}")
@@ -219,9 +171,7 @@ def syllabic_names_from_frequency(
     names: list[str] = []
     for frequency in frequencies_hz:
         bucket = round(float(frequency) / quantum_hz)
-        # Seeded per resonator, so this draw depends on nothing but the
-        # frequency -- until it collides, when _distinct carries on from the
-        # same stream rather than starting a shared one.
+        # Retry collisions using this bucket's generator.
         names.extend(_distinct(1, length, random.Random(bucket), seen))
     return names
 
@@ -236,11 +186,8 @@ def numbered_names(
 ) -> list[str]:
     """``R0001…``, one per frequency, in the order given.
 
-    The namer for when a number is the right answer — a wafer being screened, a
-    figure that has to sort correctly, a reader who wants to know which
-    resonator is which without learning a vocabulary. Note what it asserts: the
-    catalog's order at the moment it was built, which stops being true as soon
-    as a resonator is removed or retuned.
+    Numbers follow input order. Catalogs retain these names after retuning or
+    removal, so the numbers may no longer match current frequency order.
 
     :param frequencies_hz: the resonators being named; only the count is read.
     :param prefix: what to put in front of the number, verbatim. Must not

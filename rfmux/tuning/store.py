@@ -39,9 +39,7 @@ __all__ = [
 ]
 
 
-# Bumped when the file_metadata block changes shape in a way a reader cannot
-# absorb. It versions the wrapper, not the measurement: what a sweep looks like
-# inside is RESULTS_SCHEMA_VERSION's business, and a catalog's is its own.
+# Version of file_metadata. Measurements and catalogs have their own versions.
 FILE_VERSION = 1
 
 METADATA_KEY = "file_metadata"
@@ -63,12 +61,12 @@ _created_by: str | None = None
 
 
 def output_directory() -> Path:
-    """The explicit destination, or the root for default dated folders.
+    """Return the output root without creating it.
 
-    Resolved highest-first: :func:`set_output_directory`, then
-    ``$RFMUX_DATA_DIR``, then ``store.directory`` in your config file, then
-    ``~/rfmux_data``. Not created here — :func:`session_directory` does that,
-    so merely asking where output *would* go never leaves a folder behind.
+    Use the first available setting: :func:`set_output_directory`,
+    ``$RFMUX_DATA_DIR``, ``store.directory`` in the config, or ``~/rfmux_data``.
+    :func:`session_directory` adds a dated subfolder unless the path was set
+    with :func:`set_output_directory`.
     """
     if _output_directory is not None:
         return _output_directory
@@ -85,11 +83,9 @@ def output_directory() -> Path:
 
 
 def set_output_directory(directory: Path | str | None) -> None:
-    """Send new output directly to this folder for this Python session.
+    """Set the output folder for this Python session, without a dated subfolder.
 
-    The notebook knob — one line at the top of a cooldown's notebook, no file to
-    edit. No dated subfolder is added. ``None`` restores dated folders under
-    the root selected by the environment and config.
+    Pass None to restore dated folders under the environment or config root.
     """
     global _output_directory
     _output_directory = None if directory is None else Path(directory).expanduser()
@@ -158,22 +154,17 @@ def _save(
     module=None,
     new: bool = False,
 ) -> Path:
-    """Write ``data`` to a pickle and return where it went.
+    """Write data to a pickle and return its path.
 
-    ``measurement_type`` leads the filename and is how you recognize the file
-    later; it can be omitted only when ``data`` has been saved before and can
-    say what it is itself.
+    If ``file_metadata`` contains a path, update that file. Pass ``new=True``
+    to create a separate timestamped file in ``directory`` or the session
+    folder. Updating one module preserves the other modules in a readable
+    source container.
 
-    If ``data`` already knows its path — it was saved earlier, or loaded from
-    disk — this overwrites that file, which is what makes
-    ``fit_sweeps(sweeps, save=True)`` update the sweep it fitted rather than
-    leaving a near-copy beside it. Pass ``new=True`` for a fresh timestamped
-    file when you want to keep what is already on disk.
-
-    ``label`` is your name for this measurement and goes on the end of the
-    filename. ``module`` supplies the module number for payloads that do not
-    record it themselves — a class's ``to_dict()``, say. Every driver's result
-    carries its own, so measurements do not need it.
+    ``measurement_type`` starts the filename and may be omitted when saved
+    metadata provides it. ``label`` is appended to new filenames; an existing
+    filename is kept. ``module`` supplies the metadata module number when
+    needed for a standalone dictionary.
     """
     existing = _metadata_of(data)
 
@@ -220,18 +211,10 @@ def _save(
 
 
 def _spliced(data, target: Path):
-    """What actually goes in the file when ``data`` is only part of it.
+    """Replace one module in its saved container, preserving the other modules.
 
-    :func:`~rfmux.tuning.fits.fit_sweeps` works on **one module's output**,
-    ``sweeps[module_id]``, and that output carries the path of the file it was
-    written to — a file holding the whole container, every module of it. Writing
-    one module over that path would silently throw the other modules away, and
-    would leave even a one-module file no longer shaped like a sweep result.
-
-    So a re-save of one module's output reads the container back, puts it in
-    the place it came from — matched on module number, which
-    :func:`~rfmux.tuning.sweep_results.merge_modules` guarantees is unique
-    within a container — and writes the whole thing.
+    Match by module number. Return ``data`` unchanged if the source file is
+    missing, unreadable, not a container, or has no matching module.
     """
     if _is_container(data) or not isinstance(data, dict):
         return data
@@ -262,12 +245,9 @@ save = _save
 
 
 def load(path: Path | str):
-    """Read a pickle back, and tell it where it actually is now.
+    """Load a pickle and update its metadata to the path it was loaded from.
 
-    Files get copied off the acquisition machine and renamed. The
-    ``file_metadata`` path recorded at write time is corrected to where the file
-    was really found, so saving it again after a fit writes back to the file you
-    opened rather than to a path on a machine you may not even be on.
+    This lets later saves update the opened file even if it was moved or renamed.
     """
     path = Path(path).expanduser()
     with path.open("rb") as f:
@@ -288,14 +268,10 @@ def maybe_save(
     label: str | None = None,
     module=None,
 ) -> Path | None:
-    """The drivers' entry point: honour ``save=``, and never lose data over it.
+    """Save when requested, using the autosave setting when ``save`` is None.
 
-    ``save=None`` means "whatever :func:`autosave_enabled` says", which is how a
-    config file turns autosave off without any call site changing.
-
-    A failed write warns rather than raises. A twenty-minute sweep that made it
-    back into memory should not be thrown away because the output directory is
-    read-only — you still have the data, and you can save it somewhere else.
+    On a write failure, warn and return None. The caller still has the data
+    in memory and can retry with :func:`save`.
     """
     if save is False:
         return None
@@ -322,16 +298,11 @@ def saved_path(data) -> Path | None:
 
 
 def plain(value):
-    """Builtins all the way down: numpy scalars and arrays become floats and lists.
+    """Recursively convert NumPy values in settings to Python scalars and lists.
 
-    What the ``to_dict`` methods run their loosely-typed corners through — the
-    ``settings`` dicts on the reports hold whatever a caller passed, which is
-    routinely a ``np.float64`` picked out of an array. Left as it is that
-    pickles as numpy, and a file you need numpy to read is not the
-    plain-builtins file this module promises.
-
-    Measured data is exempt and stays as ndarrays: a sweep's IQ has no business
-    being a list of a hundred thousand Python floats.
+    Dictionary keys become strings, arrays and tuples become lists, and NumPy
+    scalars become Python scalars. Other values are returned unchanged.
+    Call this on settings, not measured traces that should remain arrays.
     """
     if isinstance(value, dict):
         return {str(k): plain(v) for k, v in value.items()}
@@ -365,11 +336,9 @@ def _filename(measurement_type: str, label: str | None, when) -> str:
 
 
 def _unused(target: Path) -> Path:
-    """A path nothing is at yet, suffixing ``_1``, ``_2`` … if need be.
+    """Return an unused path, adding a numeric suffix if the target exists.
 
-    Two measurements can finish in the same second — the amplitude steps of a
-    schedule, saved individually, routinely do — and the loser should not silently
-    land on top of the winner.
+    Try suffixes ``_1`` through ``_999``, then raise FileExistsError.
     """
     if not target.exists():
         return target
@@ -384,12 +353,10 @@ def _unused(target: Path) -> Path:
 
 
 def _stamp(data, *, measurement_type, path, label, module, created) -> None:
-    """Write a ``file_metadata`` block into every part of ``data`` that takes one.
+    """Add file metadata to each module block or standalone dictionary.
 
-    ``created`` carries the original timestamp through a re-save: the file
-    records when the measurement was *taken*, and gains an ``updated`` field to
-    say when an analysis last wrote to it. A fit run three days later should not
-    make the sweep look three days younger than it is.
+    Preserve ``created`` when updating a saved file and record the current
+    time in ``updated``. A new file gets the current time as ``created``.
     """
     stamped_at = _now().isoformat(timespec="seconds")
     for block, block_module in _blocks(data, module):
@@ -424,26 +391,12 @@ def _metadata_of(data) -> dict:
 
 
 def _blocks(data, module):
-    """Yield ``(mapping_to_stamp, module_number_or_None)`` for one payload.
+    """Yield dictionaries to stamp, paired with their module numbers.
 
-    The three shapes a saveable thing arrives in:
-
-    * a packed measurement container, ``{module_id: output}`` — one block per
-      module, each of which already records its own module. Stamping inside
-      each module's output rather than at the top is what keeps
-      :func:`~rfmux.tuning.sweep_results._is_container` true of the result,
-      which is how every reader tells the container from one module's output.
-    * any other dict — one block, at the top. This is the shape a class's
-      ``to_dict()`` arrives in, and it takes its module from the ``module``
-      argument or from a ``module`` key of its own.
-    * anything else — refused, because a payload that cannot be stamped cannot
-      be found again, and silently writing one is worse than not writing it.
-
-    There used to be a fourth: a bare list of results, one block each, numbered
-    from a ``module`` argument that had to be passed alongside because the
-    entries could not say which module they were. That was ``take_netanal(
-    module=[1, 2])``'s return, and since schema 4 it returns a container like
-    everything else, so nothing produced the shape any more.
+    For a measurement container, yield each module block and its recorded
+    module number. For a standalone dictionary, use an integer ``module``
+    argument if supplied, otherwise its own ``module`` field.
+    Raise TypeError for other input types.
     """
     if _is_container(data):
         for module_output in data.values():

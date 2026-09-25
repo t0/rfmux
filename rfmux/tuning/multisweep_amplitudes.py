@@ -51,21 +51,14 @@ def resolve_amplitudes(
     what: str,
     of: str = "sections",
 ) -> dict[str, float]:
-    """An amplitude for every name, from the one vocabulary two arguments share.
+    """Return one amplitude per name from a scalar, mapping, sequence, or None.
 
-    ``multisweep``'s ``amp`` and a schedule's ``base`` are the same question
-    asked at different moments — *what amplitude does each sweep start from?* —
-    so they are one function, and *what* is the name of the argument the caller
-    actually typed, so each says so when it complains. *of* is what the names
-    are, for the one message that has to count them.
+    None uses ``defaults`` and raises if no defaults are available. A scalar
+    applies to every name. A mapping must contain exactly the supplied names.
+    Sequences must match the number of names and require ``allow_sequence``;
+    catalog callers disable them to avoid depending on catalog order.
 
-    ``None`` falls back to *defaults* (a catalog's own bias amplitudes) and is
-    an error where there are none. A number applies to everything. A mapping
-    sets them individually and must name every sweep, because a half-applied
-    amplitude override is the kind of thing that is only noticed after the data
-    is taken. A positional sequence is only accepted where the caller supplied
-    the ordering — i.e. alongside ``center_frequencies``, never alongside a
-    catalog.
+    ``what`` names the argument in error messages; ``of`` describes the items.
     """
     names = list(names)
 
@@ -118,11 +111,7 @@ def resolve_amplitudes(
 
 @dataclass(frozen=True, slots=True)
 class AmplitudeStep:
-    """One amplitude step: what every sweep section is probed at, for one pass.
-
-    ``amplitudes`` is what one pass of ``multisweep`` probes at — keyed by the
-    same names the sweep sections come back under.
-    """
+    """Amplitudes for one multisweep step, keyed by sweep-section name."""
 
     step: int  # execution order, 0-based
     amplitudes: dict[str, float]  # normalized DAC units, by section name
@@ -167,11 +156,9 @@ def _build_steps(
     *,
     what: str,
 ) -> tuple[float, ...]:
-    """*nsteps* steps from *start* to *stop*, log- or linear-spaced.
+    """Generate logarithmic or linear steps, including both endpoints.
 
-    ``nsteps=1`` is only accepted when the endpoints agree.  Silently keeping
-    the start and discarding the stop is how the dialog this replaces ended up
-    shipping a one-step "uniform sweep" that had quietly become something else.
+    A single step is allowed only when the endpoints are equal.
     """
     if spacing not in STEP_SPACINGS:
         raise ValueError(
@@ -201,19 +188,19 @@ def _build_steps(
 
 @dataclass(frozen=True, slots=True)
 class AmplitudeSchedule:
-    """What amplitude each resonator is probed at, on each pass.
+    """Set the probe amplitude for each resonator at each sweep step.
 
-    Two fields carry the whole answer: a **base** amplitude per resonator, and
-    the **steps** applied to it. The iterating forms are built through
-    :meth:`multiplicative`, :meth:`ramp` and :meth:`explicit`; the two that do
-    not iterate are just the constructor::
+    Relative schedules multiply each resonator's ``base`` by each value in
+    ``steps``. Absolute schedules use the step values directly as amplitudes.
+    All amplitudes are fractions of DAC full scale.
 
-        AmplitudeSchedule()         # one pass, at each resonator's own amplitude
-        AmplitudeSchedule(0.005)    # one pass, at 0.005 for everything
-        AmplitudeSchedule({"BOTA": 0.004, ...})   # one pass, per resonator
+    Use the constructor for one step::
 
-    which is why *base* is the first argument: that is the only field a caller
-    sets by hand with any regularity.
+        AmplitudeSchedule()       # use each resonator's bias amplitude
+        AmplitudeSchedule(0.005)  # use 0.005 for every resonator
+        AmplitudeSchedule({"BOTA": 0.004, "KOZR": 0.006})
+
+    Use :meth:`multiplicative`, :meth:`ramp`, or :meth:`explicit` for a sequence.
     """
 
     # Version 2 writes steps; version 1 remains readable for saved sweeps.
@@ -222,10 +209,8 @@ class AmplitudeSchedule:
     base: float | Mapping[str, float] | Sequence[float] | None = None
     steps: tuple[float, ...] = (1.0,)
     relative: bool = True
-    # Provenance only: how the steps were generated, for describe() and
-    # to_dict() to report. Nothing computes with it — the step values are the
-    # truth — so it is excluded from equality, and two schedules that measure
-    # the same thing compare equal however they were spelled.
+    # Record how steps were generated for display and saving.
+    # Spacing does not affect calculations or schedule equality.
     spacing: str = field(default="none", compare=False)
 
     def __post_init__(self):
@@ -257,9 +242,7 @@ class AmplitudeSchedule:
                     "Use multiplicative(..., base=...) for a schedule that "
                     "multiplies a base you chose."
                 )
-            # Absolute steps are amplitudes, so they answer to the same domain
-            # BiasPoint enforces. Relative ones cannot be checked until a base
-            # is known — that happens in _amplitudes_per_step.
+            # Check absolute amplitudes now; relative amplitudes need a resolved base.
             bad = [v for v in steps if not 0 < v <= 1]
             if bad:
                 raise ValueError(
@@ -273,10 +256,7 @@ class AmplitudeSchedule:
 
     # ─── constructors ────────────────────────────────────────────────────────
     #
-    # Only the iterating forms need one. A schedule that does not iterate is
-    # the plain constructor — AmplitudeSchedule(), AmplitudeSchedule(0.005),
-    # AmplitudeSchedule({...}) — which is what `base` being the first field
-    # buys.
+    # Use the plain constructor for one step and these methods for sequences.
 
     @classmethod
     def multiplicative(
@@ -290,12 +270,12 @@ class AmplitudeSchedule:
     ) -> AmplitudeSchedule:
         """A sequence of factors, each multiplying the base amplitude.
 
-        Every resonator keeps its own scale, so an array biased across a spread
-        of amplitudes walks that spread up and down together::
+        Apply the same factors to each resonator's base amplitude::
 
-            AmplitudeSchedule.multiplicative(0.5, 2.0, 5)                 # of the catalog's
-            AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base=0.004)     # of one number
-            AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base={...})     # of your own, per name
+            # Scale each resonator's catalog amplitude from 0.5x to 2x.
+            AmplitudeSchedule.multiplicative(0.5, 2.0, 5)
+            # Use the same base amplitude for every resonator.
+            AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base=0.004)
 
         Args:
             start: factor of the first step.
@@ -338,19 +318,17 @@ class AmplitudeSchedule:
 
     @classmethod
     def explicit(cls, levels: Sequence[float]) -> AmplitudeSchedule:
-        """Absolute amplitudes, exactly as given, in the order given.
-
-        The escape hatch for a sequence no spacing rule produces.
-        """
+        """Use the supplied absolute amplitudes in the supplied order."""
         return cls(steps=tuple(levels), relative=False, spacing="explicit")
 
     # ─── the steps, without needing a catalog ───────────────────────────────
 
     @property
     def nsteps(self) -> int:
-        """How many amplitude steps. Not how many sweeps — one sweep is a
-        whole multisweep measurement, and the driver's ``directions``
-        multiplies this to get that count."""
+        """Return the number of amplitude steps.
+
+        Each step can run in one or both frequency directions.
+        """
         return len(self.steps)
 
     def __len__(self) -> int:
@@ -382,14 +360,10 @@ class AmplitudeSchedule:
     def _resolve_targets(
         self, target: ResonatorCatalog | Sequence[str]
     ) -> tuple[list[str], dict[str, float] | None, bool]:
-        """*target* → its sweep names, the base amplitudes it can supply, and
-        whether a positional base is meaningful for it.
+        """Return sweep names, default amplitudes, and whether sequences are allowed.
 
-        A catalog brings its own amplitudes, and a positional base is refused
-        there for exactly the reason ``multisweep`` refuses a positional
-        ``amp``: a catalog is an unordered collection, so pairing to it by
-        position means knowing which order it was pulled out in. A bare list of
-        names is the caller's own ordering, so there it is fine.
+        Catalogs supply bias amplitudes and require overrides by name or scalar.
+        A sequence of names defines its own order and allows positional overrides.
         """
         if isinstance(target, ResonatorCatalog):
             resonators = target.resonators(order="frequency")
@@ -434,13 +408,7 @@ class AmplitudeSchedule:
         defaults: dict[str, float] | None,
         allow_sequence: bool,
     ) -> dict[str, float]:
-        """The base amplitude of every sweep, keyed by name.
-
-        The same vocabulary ``multisweep``'s ``amp`` speaks, because it is the
-        same function — see :func:`resolve_amplitudes`. The one case a base has
-        that ``amp`` does not is having no catalog to fall back on *and* an
-        absolute alternative to suggest, which is why that message is here.
-        """
+        """Resolve a base amplitude for each name using :func:`resolve_amplitudes`."""
         if self.base is None and defaults is None:
             raise ValueError(
                 "A base amplitude is required when scheduling by name: "
@@ -498,11 +466,8 @@ class AmplitudeSchedule:
 
         Raises:
             ValueError: if any resolved amplitude falls outside (0, 1], or if a
-                base mapping does not name every sweep. Both are caught here,
-                before the first sweep runs, rather than after some of the data
-                has been taken — ``multisweep`` itself only rejects
-                non-positive amplitudes, so a schedule that overshoots full scale
-                would otherwise reach the hardware unchallenged.
+                base mapping does not name every sweep. All steps are checked
+                before measurement starts.
         """
         names, per_step, factors = self._amplitudes_per_step(target)
 
@@ -518,11 +483,7 @@ class AmplitudeSchedule:
     def _range_issues(
         self, per_step: list[dict[str, float]]
     ) -> list[tuple[str, str]]:
-        """Amplitudes that fall outside the (0, 1] BiasPoint enforces.
-
-        Reported per step and per name, so the answer is "BOTA overshoots at
-        step 5" rather than a failure twenty minutes into the run.
-        """
+        """Report non-finite amplitudes and values outside (0, 1], by step and name."""
         issues: list[tuple[str, str]] = []
         for i, amplitudes in enumerate(per_step):
             over = sorted(n for n, a in amplitudes.items() if a > 1)
@@ -557,11 +518,11 @@ class AmplitudeSchedule:
         n_directions: int = 1,
         dac_scale_dbm: float | None = None,
     ) -> dict:
-        """Derived quantities for display, resolved against *target*.
+        """Return step counts and amplitude ranges for display.
 
-        What a dialog or a notebook renders instead of deriving its own. Raises
-        the same things :meth:`resolve_steps` does — call :meth:`validate` first if the
-        input might not be sound.
+        Include power ranges when ``dac_scale_dbm`` is supplied. This resolves
+        amplitudes but does not check their range; use :meth:`validate` to check
+        settings before displaying a preview.
         """
         names, per_step, factors = self._amplitudes_per_step(target)
         flat = [a for amplitudes in per_step for a in amplitudes.values()]
@@ -597,11 +558,10 @@ class AmplitudeSchedule:
         target: ResonatorCatalog | Sequence[str],
         n_directions: int = 1,
     ) -> list[tuple[str, str]]:
-        """``[(severity, message), ...]`` — severities error/warning/info.
+        """Return ``(severity, message)`` pairs for errors, warnings, and step counts.
 
-        Never raises: a caller that is rendering a live preview of a
-        half-entered form wants the complaint as text, not as a traceback. The
-        errors here are the ones :meth:`resolve_steps` raises on.
+        Convert ValueError and TypeError from amplitude resolution into error
+        messages. Also report invalid amplitudes and repeated steps.
         """
         try:
             names, per_step, factors = self._amplitudes_per_step(target)

@@ -16,7 +16,7 @@ from ...core.transferfunctions import (
 
 
 def _unreachable(nco_hz: float, resonators: list) -> list:
-    """The resonators whose tones fall outside the band this NCO carries."""
+    """Return resonators outside the allowed bandwidth around this NCO."""
     reach = ALLOWED_NCO_BANDWIDTH_HZ / 2
     return [r for r in resonators if abs(r.bias.frequency_hz - nco_hz) > reach]
 
@@ -27,7 +27,7 @@ def _aligned(nco_hz: float) -> bool:
 
 
 def _describe_problem(nco_hz: float, unreachable: list) -> str:
-    """Why this NCO will not do, as a phrase that follows the NCO frequency."""
+    """Describe tones outside the NCO bandwidth or an NCO off the tone grid."""
     if unreachable:
         worst = max(unreachable, key=lambda r: abs(r.bias.frequency_hz - nco_hz))
         return (
@@ -71,9 +71,7 @@ async def apply_bias(
             a reset. The NCO has moved, but no tones have been applied.
     """
     if not isinstance(catalog, ResonatorCatalog):
-        # Overwhelmingly this is a BiasReport passed whole. Say so, rather than
-        # letting it fail several lines later on an iteration it does not
-        # support.
+        # Explain how to extract a catalog if the caller passed a bias report.
         raise TypeError(
             f"apply_bias takes a ResonatorCatalog, not a "
             f"{type(catalog).__name__}. Bias finding hands back a report; the "
@@ -123,9 +121,7 @@ async def apply_bias(
             )
 
         await crs.set_nco_frequency(wanted_hz, module=module)
-        # Read back rather than trusting the number we sent: the offsets below
-        # are only right if they are computed from the NCO the board actually
-        # settled on.
+        # Use the measured NCO frequency to calculate tone offsets.
         nco_hz = float(await crs.get_nco_frequency(module=module))
 
         unreachable = _unreachable(nco_hz, resonators)

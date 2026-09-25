@@ -599,51 +599,63 @@ def test_the_channel_streamer_is_turned_on_first_when_asked(
             fastrx_socket=fx.socket, verbose=False))
 
 
-def test_auto_truncation_is_the_finest_window_holding_dc_and_fast_noise():
-    # Noise-free, the window must hold the DC level with its headroom.
-    full = rs.TRUNC_FULL_SCALE
-    edge = full["LOW"] / rs.AUTO_TRUNC_MARGIN
-    zero = np.zeros(2)
-    choose = lambda i, q=zero, si=zero, sq=zero: rs.choose_sample_trunc(
-        np.asarray(i, float), q, si, sq, 1000.0)[0]
-    assert choose([edge, 0.0]) == "LOW"
-    assert choose([0.0, -edge * 1.01]) == "MID"
-    assert choose(zero, q=[full["MID"] / rs.AUTO_TRUNC_MARGIN * 1.01, 0]) \
-        == "HIGH"
-    assert choose([1e9, 0.0]) == "HIGH"
-    # Slow-stream noise counts at the fast stream's rate: sigma 10 at
-    # 1 kHz is sigma 10 * sqrt(2.44 MHz / 1 kHz), about 494, at 5 sigma.
-    trunc, peak = rs.choose_sample_trunc(
-        np.array([1000.0]), zero[:1], np.array([10.0]), zero[:1], 1000.0)
-    assert peak == pytest.approx(
-        1000 + 5 * 10 * (rs.PFB_SAMPLING_FREQ / 1000) ** 0.5)
-    assert trunc == ("LOW" if peak * rs.AUTO_TRUNC_MARGIN <= full["LOW"]
-                     else "MID")
+def test_auto_truncation_is_the_finest_window_holding_the_peak():
+    edge = {k: v / rs.AUTO_TRUNC_MARGIN for k, v in rs.TRUNC_FULL_SCALE.items()}
+    assert rs.choose_sample_trunc(0.0) == "LOW"
+    assert rs.choose_sample_trunc(edge["LOW"]) == "LOW"
+    assert rs.choose_sample_trunc(edge["LOW"] + 1) == "MID"
+    assert rs.choose_sample_trunc(edge["MID"] + 1) == "HIGH"
+    assert rs.choose_sample_trunc(1e9) == "HIGH"
 
 
-def test_auto_truncation_measures_each_module_on_the_slow_stream(
-        monkeypatch):
+def test_auto_truncation_reads_each_module_at_high_then_sets_it(
+        tmp_path, monkeypatch):
+    fx = fake_fastrx(monkeypatch, tmp_path)
     monkeypatch.setattr(rs, "CHANNEL_STREAMER_SETTLE_S", 0.0)
     board = _Board()
     board.streamer = []
-    # Module 1 sits at a few hundred counts, module 2 past LOW's window;
-    # channels past the streamed 128 do not count.
-    dc = {1: 300.0, 2: 40000.0}
+    # Peaks at HIGH (counts/256): module 1 about 5000 counts, module 2
+    # about 100000, module 3 at the int16 floor, which must not wrap.
+    wire = {1: 20, 2: 400, 3: -32768}
+    asked = []
 
-    async def py_get_samples(n, average, module):
-        i = np.full(1024, dc[module])
-        i[500] = 1e7
-        z = np.zeros(1024)
-        return SimpleNamespace(mean=SimpleNamespace(i=i, q=z),
-                               std=SimpleNamespace(i=z, q=z))
+    class Capture(fx.PacketCapture):
+        def capture(self, n, channels, module, timeout):
+            asked.append((n, channels, module))
+            i = np.zeros((4, channels), np.int16)
+            i[2, 5] = wire[module]
+            return {"i": i, "q": np.zeros_like(i)}
+    fx.PacketCapture = Capture
 
     async def set_channel_streamer(**kw):
-        board.streamer.append(kw)
-    board.py_get_samples = py_get_samples
+        board.streamer.append((kw["module"], kw["sample_trunc"]))
     board.set_channel_streamer = set_channel_streamer
     asyncio.run(rs._enable_channel_streamer(
-        board, [1, 2], 9, 128, "AUTO", lambda *a: None))
-    assert [c["sample_trunc"] for c in board.streamer] == ["LOW", "MID"]
+        board, [1, 2, 3], 9, 128, "AUTO", lambda *a: None, fx, fx.socket))
+    assert asked == [(rs.AUTO_TRUNC_PACKETS, 128, m) for m in (1, 2, 3)]
+    # All on at HIGH first; then each module that fits finer is reset.
+    assert board.streamer == [(1, "HIGH"), (2, "HIGH"), (3, "HIGH"),
+                              (1, "LOW"), (2, "MID")]
+
+
+def test_auto_truncation_without_packets_says_so(tmp_path, monkeypatch):
+    fx = fake_fastrx(monkeypatch, tmp_path)
+    monkeypatch.setattr(rs, "CHANNEL_STREAMER_SETTLE_S", 0.0)
+
+    class Capture(fx.PacketCapture):
+        def capture(self, n, channels, module, timeout):
+            return {"i": np.zeros((0, channels), np.int16),
+                    "q": np.zeros((0, channels), np.int16)}
+    fx.PacketCapture = Capture
+    board = _Board()
+
+    async def set_channel_streamer(**kw):
+        pass
+    board.set_channel_streamer = set_channel_streamer
+    with pytest.raises(RuntimeError, match="no channel-stream packets from "
+                                           "module 1"):
+        asyncio.run(rs._enable_channel_streamer(
+            board, [1], 9, 128, "AUTO", lambda *a: None, fx, fx.socket))
 
 
 def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(

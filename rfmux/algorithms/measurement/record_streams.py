@@ -278,8 +278,8 @@ async def record_streams(
     *channels*
     through the running fastrxd (*fastrx_interface* or *fastrx_socket*
     name it when several run).  With ``channel_streamer`` the streamer is
-turned on at *sample_trunc*, AUTO choosing it per module from the
-slow stream (:func:`choose_sample_trunc`).  Each requirement is checked before
+turned on at *sample_trunc*, AUTO choosing it per module from a
+burst of the channel stream read at HIGH (:func:`choose_sample_trunc`).  Each requirement is checked before
     anything starts.
 
     After the run, ``merge_fastrx`` adds the recording to the pulse
@@ -329,7 +329,8 @@ slow stream (:func:`choose_sample_trunc`).  Each requirement is checked before
         if channel_streamer:
             await _enable_channel_streamer(crs, modules, fastrx_channels,
                                            fx.MAX_SAMPLES,
-                                           sample_trunc, say)
+                                           sample_trunc, say, fx,
+                                           fastrx_socket)
         silent = await asyncio.to_thread(
             _fastrx_silent_modules, fx, fastrx_socket, modules)
         if silent:
@@ -550,71 +551,75 @@ FASTRX_PROBE_S = 1.0
 #: The largest ADC count each truncation carries: the int16 on the wire
 #: times its counts per LSB (pulse_capture.overlay.COUNTS_PER_LSB).
 TRUNC_FULL_SCALE = {"LOW": 32767.0, "MID": 32767.0 * 16, "HIGH": 32767.0 * 256}
-#: Slow-stream samples AUTO averages per module to choose a truncation.
-AUTO_TRUNC_SAMPLES = 256
-#: Sigmas of channel-stream noise AUTO keeps inside the window, and the
-#: factor of headroom over that for pulses the probe cannot see.  A
-#: sample past the window wraps (its high bits are dropped); one too
-#: coarse only loses its low bits, so both lean wide.
-AUTO_TRUNC_SIGMA = 5.0
+#: Channel-stream packets AUTO reads per module at HIGH to choose a
+#: truncation: 65536 at the PFB rate is about 27 ms.
+AUTO_TRUNC_PACKETS = 65536
+#: Headroom AUTO keeps over the peak it measured, for pulses the probe
+#: did not see.  A sample past the window wraps (its high bits are
+#: dropped); one too coarse only loses its low bits, so it leans wide.
 AUTO_TRUNC_MARGIN = 2.0
 
 
-def choose_sample_trunc(mean_i, mean_q, std_i, std_q,
-                        slow_rate_hz: float) -> Tuple[str, float]:
-    """The finest truncation whose window holds the channel stream, and
-    the peak in ADC counts it was chosen for, from the slow stream's
-    per-channel means and standard deviations (py_get_samples with
-    ``average=True``).  The DC level is the same on both streams; the
-    noise is not, the slow stream being decimated, so its sigma is
-    scaled by sqrt(PFB rate / slow rate) as white noise would be."""
-    # ponytail: white-noise scaling; 1/f noise makes it overestimate
-    # (safe), and a pulse bigger than MARGIN x the DC is not foreseen.
-    widen = AUTO_TRUNC_SIGMA * (PFB_SAMPLING_FREQ / slow_rate_hz) ** 0.5
-    peak = float(max(
-        (np.abs(mean_i) + widen * np.asarray(std_i)).max(initial=0.0),
-        (np.abs(mean_q) + widen * np.asarray(std_q)).max(initial=0.0)))
+def choose_sample_trunc(peak: float) -> str:
+    """The finest truncation whose window holds *peak* ADC counts with
+    AUTO_TRUNC_MARGIN of headroom."""
     for name, full_scale in TRUNC_FULL_SCALE.items():
         if peak * AUTO_TRUNC_MARGIN <= full_scale:
-            return name, peak
-    return "HIGH", peak
+            return name
+    return "HIGH"
+
+
+def _fastrx_peak(fx, socket: str, module: int, channels: int) -> float:
+    """The largest |I| or |Q| of *module*'s channels 1 to *channels*
+    over AUTO_TRUNC_PACKETS of the channel stream, in ADC counts, the
+    streamer being at HIGH (which cannot wrap)."""
+    # ponytail: one 27 ms burst; a pulse outside it is covered only by
+    # AUTO_TRUNC_MARGIN.  Loop captures for a longer running max.
+    with fx.PacketCapture(socket=socket) as c:
+        d = c.capture(AUTO_TRUNC_PACKETS, channels=channels, module=module,
+                      timeout=FASTRX_PROBE_S)
+    if not len(d["i"]):
+        raise RuntimeError(
+            f"no channel-stream packets from module {module} to choose "
+            "its sample truncation from: name LOW, MID or HIGH")
+    # int32 first: |int16(-32768)| does not fit an int16.
+    peak = max(np.abs(d["i"].astype(np.int32)).max(),
+               np.abs(d["q"].astype(np.int32)).max())
+    return float(peak) * 256.0          # HIGH's counts per LSB
 
 
 async def _enable_channel_streamer(crs, modules: List[int], channels: int,
                                    pipeline: int, sample_trunc: str,
-                                   say) -> None:
+                                   say, fx=None, socket: str = "") -> None:
     """Turn the channel streamer on for *modules*, channels 1 to
     *channels* as the recording keeps them, rounded up to whole
     pipelines of *pipeline* channels: fastrxd drops a packet whose
     pipelines are not all full.  Then let it flow before the stream is
-    probed."""
+    probed.  AUTO turns it on at HIGH, reads each module's peak through
+    fastrx (*fx* on *socket*) and sets the finest window that holds it."""
     if not hasattr(crs, "set_channel_streamer"):
         raise RuntimeError("this board has no channel streamer to turn on")
     channels = -(-channels // pipeline) * pipeline
-    if sample_trunc == "AUTO":
-        dec = await crs.get_decimation()
-        slow_rate = decimation_to_sampling(6 if dec is None else dec)
-    for m in modules:
-        trunc = sample_trunc
-        if trunc == "AUTO":
-            try:
-                s = await crs.py_get_samples(AUTO_TRUNC_SAMPLES,
-                                             average=True, module=m)
-            except TimeoutError as e:
-                raise RuntimeError(
-                    f"AUTO sample truncation reads module {m}'s slow "
-                    "stream, which is silent: configure the streamer, or "
-                    "name LOW, MID or HIGH") from e
-            n = min(channels, len(s.mean.i))
-            trunc, peak = choose_sample_trunc(
-                s.mean.i[:n], s.mean.q[:n], s.std.i[:n], s.std.q[:n],
-                slow_rate)
-            say(f"[record] module {m}: channel-stream peak about "
-                f"{peak:.0f} counts, so {trunc}")
+
+    async def turn_on(m, trunc):
         say(f"[record] channel streamer on for module {m}: channels "
             f"1-{channels}, {trunc} bits")
         await crs.set_channel_streamer(channels=channels, module=m,
                                        sample_trunc=trunc)
+
+    auto = sample_trunc == "AUTO"
+    for m in modules:
+        await turn_on(m, "HIGH" if auto else sample_trunc)
+    await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
+    if not auto:
+        return
+    for m in modules:
+        peak = await asyncio.to_thread(_fastrx_peak, fx, socket, m, channels)
+        trunc = choose_sample_trunc(peak)
+        say(f"[record] module {m}: channel-stream peak {peak:.0f} counts, "
+            f"so {trunc}")
+        if trunc != "HIGH":
+            await turn_on(m, trunc)
     await asyncio.sleep(CHANNEL_STREAMER_SETTLE_S)
 
 

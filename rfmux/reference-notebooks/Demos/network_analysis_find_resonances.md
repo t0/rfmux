@@ -66,9 +66,12 @@ print(rfmux.__file__)
 import numpy as np
 import matplotlib.pyplot as plt
 
-from rfmux.tuning import netanal_trace, store
+from rfmux.tuning import store
 
 MODULE = 1
+
+OUTPUT_DIR = store.session_directory()
+print(f"results: {OUTPUT_DIR}")
 ```
 
 ## 1. Simulate a board
@@ -124,12 +127,11 @@ netanal = await crs.take_netanal(
 # Select one module, then access its trace (the results dictionary).
 module_id = crs.module[MODULE].index()
 module_netanal_outputs = netanal[module_id]
-netanal_measured = netanal_trace(module_netanal_outputs)
-netanal_frequencies = netanal_measured["frequencies"]
-netanal_iq_counts = netanal_measured["iq_counts"]
+netanal_results = module_netanal_outputs["results"]
 
-print(f"{len(netanal_frequencies):,} points, "
-      f"{np.mean(np.diff(netanal_frequencies))/1e3:.2f} kHz spacing")
+
+print(f"{len(netanal_results["frequencies"]):,} points, "
+      f"{np.mean(np.diff(netanal_results["frequencies"]))/1e3:.2f} kHz spacing")
 ```
 
 The returned dictionary and saved `.pkl` use the same structure, even when
@@ -153,10 +155,10 @@ netanal[module_id]                  # e.g. "crs0042_rmod1"
     file_metadata                  # added when saved
 ```
 
-`netanal_trace(module_netanal_outputs)` returns that module's `results`
-dictionary. There are no iteration, direction, or resonator keys between
-`results` and the arrays. Derive phase from `np.angle(iq_counts)`; it is not
-stored separately. Select a module before calling the accessor or finder.
+`module_netanal_outputs["results"]` is the trace dictionary. There are no
+iteration, direction, or resonator keys between `results` and the arrays.
+Derive phase from `np.angle(iq_counts)`; it is not stored separately. Select a module before accessing the trace or calling the
+finder.
 
 `sweep_direction` decides which end of the band the measurement starts at, and
 defaults to `"upward"`. A downward netanal visits the same points and comes back
@@ -167,10 +169,8 @@ The search stores frequencies in ascending order; candidate indices refer to
 `resonance_search.frequencies_hz` and `magnitude_db`, including for a downward
 sweep.
 
-Plot magnitude and phase across the band. Magnitude is received power minus
-drive power in dBm, using the saved DAC scale and amplitude, as in multisweep.
-This includes the intervening gain and loss. The resonance-search diagnostics
-below retain the finder's median reference. These cells show the plotting steps
+Below we plot the measured magnitude and phase across the band.
+These cells show the plotting steps
 directly; reusable versions are in `example_plotting_netanal.py`.
 
 ```python
@@ -180,14 +180,12 @@ fig, (magnitude_panel, phase_panel) = plt.subplots(
     2, 1, figsize=(11, 6), sharex=True
 )
 
-magnitude_db = convert_roc_to_dbm(np.abs(netanal_iq_counts)) - convert_dacunits_to_dbm(
-    netanal_measured["sweep_amplitude"], module_netanal_outputs["dac_scale_dbm"]
-)
-magnitude_panel.plot(netanal_frequencies / 1e6, magnitude_db, lw=0.6)
+magnitude_db = convert_roc_to_dbm(np.abs(netanal_results['iq_counts'])) - netanal_results['sweep_amplitude_dbm']
+magnitude_panel.plot(netanal_results['frequencies'] / 1e6, magnitude_db, lw=0.6)
 magnitude_panel.set_ylabel("|S21| [dB, drive-referenced]")
 
-phase_panel.plot(netanal_frequencies / 1e6,
-                 np.degrees(np.angle(netanal_iq_counts)), lw=0.6)
+phase_panel.plot(netanal_results['frequencies'] / 1e6,
+                 np.degrees(np.angle(netanal_results['iq_counts'])), lw=0.6)
 phase_panel.set_ylabel("phase [deg]")
 phase_panel.set_xlabel("frequency [MHz]")
 
@@ -221,33 +219,16 @@ resonance_search = find_resonances_in_netanal(
 
 ```
 
-The call stores a plain search dictionary at
+The call also stores a plain search dictionary at
 `module_netanal_outputs["results"]["resonance_search"]`.
 With autosave enabled, it also updates the measurement file.
 
-Use `ResonanceSearch.from_dict()` to rebuild the search object. To load a saved
-measurement without a board, select its module identifier from the file:
 
-```python
-from rfmux.tuning import ResonanceSearch
 
-# For a saved file, run these lines with your path and module identifier:
-# netanal = store.load("path/to/netanal.pkl")
-# print(list(netanal))
-# module_netanal_outputs = netanal["crs0042_rmod1"]
-# netanal_measured = netanal_trace(module_netanal_outputs)
-# Run the finder first if the file has no resonance_search yet.
-stored_search = ResonanceSearch.from_dict(netanal_measured["resonance_search"])
-```
 
 The search contains accepted candidates, rejected candidates and their reasons,
 the processed trace, and the settings used. Mark the results on that trace:
 
-
-
-`q_estimate` is frequency divided by dip width. It is a screening estimate,
-not a fitted resonator Q. Use detailed multisweeps and fits to measure Q;
-see `fitting_resonators.md`.
 
 ```python
 # the trace the finder actually saw, and just the frequencies it accepted
@@ -282,6 +263,8 @@ Zoom in to see which samples define each dip. The vertical red bar shows depth
 This is a useful first check when the number of resonances is unexpected.
 
 ```python
+from rfmux.tuning.find_resonances import ResonanceSearch
+
 def plot_candidate_details(search: ResonanceSearch, ncols: int = 5,
                            span_widths: float = 4.0) -> None:
     """One panel per candidate, with the measured depth and width drawn on."""
@@ -364,7 +347,7 @@ coarse_netanal = await crs.take_netanal(
     max_chans=1023,
     module=MODULE,
 )
-coarse_trace = netanal_trace(coarse_netanal[crs.module[MODULE].index()])
+coarse_trace = coarse_netanal[crs.module[MODULE].index()]["results"]
 coarse_search = find_resonances(
     coarse_trace["frequencies"], coarse_trace["iq_counts"],
     min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,
@@ -459,7 +442,7 @@ bias finding refine these initial operating points.
 ```python
 catalog = resonance_search.to_catalog(
     module=module_netanal_outputs["module"],
-    amplitude=netanal_measured["sweep_amplitude"],
+    amplitude=netanal_results["sweep_amplitude"],
 )
 print(catalog)
 

@@ -35,9 +35,7 @@ The simulator supplies demonstration biases; this is not a bias optimizer.
 ```python
 %matplotlib inline
 
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -55,9 +53,8 @@ import example_plotting_multisweep as msplots
 import example_plotting_noise as noiseplots
 
 MODULE = 1
-OUTPUT_DIR = Path(os.environ.get(
-    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_noise_demo"))
-store.set_output_directory(OUTPUT_DIR)
+OUTPUT_DIR = store.session_directory()
+print(f"results: {OUTPUT_DIR}")
 
 session = rfmux.load_session('''
 !HardwareMap
@@ -91,7 +88,10 @@ print(catalog)
 Take one sweep at each current bias amplitude. The dashed frequency marker
 in the magnitude plots lets us inspect where the bias sits relative to the
 resonance. This inspection does not automatically accept or change a bias.
-Multisweep silences the channels it used, so reapply the catalog afterwards.
+Read IQ derivatives from each voltage sweep at the existing bias frequency
+and retain that trace in the catalog. This calibrates the current operating
+points without choosing new ones. Multisweep silences the channels it used,
+so reapply the calibrated catalog afterwards.
 
 ```python
 verification = await crs.multisweep(
@@ -99,6 +99,16 @@ verification = await crs.multisweep(
     sweep_direction="upward", save=True, label="noise_bias_check")
 sweep_path = store.saved_path(verification)
 msplots.plot_magnitude_panels(verification[module_id], directions="upward")
+from rfmux.tuning import iq_derivatives_at
+
+for resonator in catalog:
+    sweep = verification[module_id]["results"][0]["upward"][resonator.name]
+    dI_df, dQ_df = iq_derivatives_at(sweep, resonator.bias.frequency_hz)
+    resonator.update_bias_point(
+        dI_df=dI_df, dQ_df=dQ_df,
+        bias_sweep={key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS},
+    )
+assert all(r.bias.df_calibration is not None for r in catalog)
 await crs.apply_bias(catalog)
 print(f"bias-check file: {sweep_path}")
 ```
@@ -217,6 +227,8 @@ from rfmux.tuning import noise_to_df
 
 converted = noise_to_df(block)  # use save=False to leave its file unchanged
 df_slow = converted["results"]["resonators"]["KID01"]["slow_data"]
+assert df_slow["df_hz"].shape == df_slow["iq_volts"].shape
+assert df_slow["psd_df"].shape == converted["results"]["shared_slow"]["freq_iq"].shape
 print(df_slow["df_hz"], df_slow["psd_df"])
 ```
 

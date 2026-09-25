@@ -62,8 +62,6 @@ print(rfmux.__file__)
 ```
 
 ```python
-from pathlib import Path
-
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.mock.standard_array import standard_array
@@ -88,6 +86,7 @@ crs, catalog = await standard_array()
 print(catalog)
 ```
 
+<!-- #region -->
 ## 2. Explore the catalog
 
 The catalog has three nested types:
@@ -97,7 +96,8 @@ The catalog has three nested types:
         └── BiasPoint   tone frequency, amplitude, and calibration
 
 The catalog stores identity and bias settings per detector. After bias finding,
-`bias.bias_sweep` also holds the selected voltage trace used for calibration.
+the BiasPoint's
+`bias_sweep` also holds the selected voltage trace used for calibration.
 The full amplitude schedule and other measured traces stay in the measurement results.
 
 A resonator’s name identifies it across tuning steps and measurement files.
@@ -109,12 +109,12 @@ this replacement and clears old calibration when you supply a frequency or ampli
 Bias frequencies snap to the hardware tone grid by default.
 
 The catalog checks for unique names and channel numbers when members are added.
-Frequency separation is optional; see the validation examples below.
+
 
 ### Build a catalog by hand
 
-Let’s build three resonators to see where each field belongs. The third also
-has calibration values and a note.
+You'd probably never do this in real life, but let’s build three resonators to explore how this works.
+<!-- #endregion -->
 
 ```python
 by_hand_catalog = ResonatorCatalog(
@@ -134,8 +134,6 @@ by_hand_catalog = ResonatorCatalog(
 print(by_hand_catalog)
 print(f"\nred's df calibration: "
       f"{by_hand_catalog['red'].bias.df_calibration:.4g} Hz/V")
-print(f"red at a -30 dBm DAC scale: "
-      f"{by_hand_catalog['red'].bias.power_dbm(-30):.2f} dBm")
 ```
 
 `df_calibration` is calculated from `dI_df` and `dQ_df`; it is not stored separately.
@@ -161,78 +159,10 @@ or `KOZR`. New calls generate new names.
 
 Names identify detectors; they do not track frequency rank. Use `catalog.names()` to
 get a list of the names in the catalog, which by default come back in bias frequency order. You can check each resonator's `channel` for its hardware channel assignment. Numbered
-names are also available, but their numbers stay unchanged after retuning or removal, so this is generally not recommended. Plus, using numbered names substantially reduces the opportunities for whimsy.
+names are also available, but their numbers stay unchanged after retuning or removal, so they can become out-of-order, and this is generally not recommended. Plus, using numbered names substantially reduces the opportunities for whimsy.
 
-You can pass a naming function instead of a list. It receives sorted frequencies
-and returns one name per frequency. Here are the three built-in options:
 
-```python
-from rfmux.resonator_names import (
-    numbered_names,
-    syllabic_names,
-    syllabic_names_from_frequency,
-)
 
-frequencies = [1.01e9, 1.03e9, 1.05e9]
-
-# The default. Drawn, so a second call gives different names.
-print(f"syllabic_names          : {syllabic_names(frequencies)}")
-print(f"    ... and again       : {syllabic_names(frequencies)}")
-
-# Derived from frequency buckets, so the same inputs give the same names.
-print(f"from_frequency          : {syllabic_names_from_frequency(frequencies)}")
-print(f"    ... and again       : {syllabic_names_from_frequency(frequencies)}")
-
-# When a number really is what you want.
-print(f"numbered_names          : {numbered_names(frequencies)}")
-```
-
-`syllabic_names_from_frequency` derives names from frequency buckets. This is
-useful for repeatable figures and examples. Small frequency changes usually keep
-the same name, but crossing a bucket boundary can change it.
-
-Here, adding a resonance and shifting the others by 300 Hz preserves the
-original three names:
-
-```python
-stable = ResonatorCatalog.from_frequencies(
-    frequencies, module=2, amplitude=0.01, names=syllabic_names_from_frequency
-)
-# One extra resonance, and a few hundred Hz of jitter on the others.
-remeasured = ResonatorCatalog.from_frequencies(
-    [f + 300 for f in frequencies] + [1.04e9],
-    module=2,
-    amplitude=0.01,
-    names=syllabic_names_from_frequency,
-)
-print(f"first pass  : {stable.names()}")
-print(f"re-measured : {remeasured.names()}  ← the original three kept theirs")
-```
-
-Pass the naming function as `names`. Use `functools.partial` to set its options:
-
-```python
-from functools import partial
-
-numbered = ResonatorCatalog.from_frequencies(
-    frequencies, module=2, amplitude=0.01, names=numbered_names
-)
-prefixed = ResonatorCatalog.from_frequencies(
-    frequencies,
-    module=2,
-    amplitude=0.01,
-    names=partial(numbered_names, prefix="kid"),
-)
-longer = ResonatorCatalog.from_frequencies(
-    frequencies,
-    module=2,
-    amplitude=0.01,
-    names=partial(syllabic_names, length=7),
-)
-print(f"numbered : {numbered.names()}")
-print(f"prefixed : {prefixed.names()}")
-print(f"longer   : {longer.names()}")
-```
 
 Names are assigned when the catalog is built. They key the catalog and sweep
 sections, and are included in dictionary and CSV exports. Loading a saved catalog
@@ -480,22 +410,15 @@ file does not depend on the catalog class’s import path. Rebuild it with
 file and its path. Measurement routines use it to save their outputs automatically.
 Here, we’ll use it to save a catalog ourselves.
 
-Choose a writable output folder below. The default is a temporary demo folder;
-set `RFMUX_DEMO_OUTPUT` to use another location.
+Use the same session folder as the measurement routines. Files remain there
+after the notebook finishes.
 
 ```python
-import os
-import tempfile
-
-# Keep demo files outside the read-only notebook directory.
-output_dir = Path(os.environ.get(
-    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_catalog_demo"
-))
-output_dir.mkdir(parents=True, exist_ok=True)
+output_dir = store.session_directory()
 print(f"saving files to: {output_dir}")
 
 catalog_pkl_path = store.save(by_hand_catalog.to_dict(), "catalog",
-                              label="by_hand", directory=output_dir)
+                              label="by_hand")
 print(f"wrote {catalog_pkl_path.name} "
       f"({catalog_pkl_path.stat().st_size} bytes)")
 
@@ -503,9 +426,10 @@ catalog_from_disk = ResonatorCatalog.from_dict(store.load(catalog_pkl_path))
 print(catalog_from_disk)
 ```
 
-Omit `directory=` to use the normal measurement folder,
-`~/rfmux_data/ipy_session_<today>/`. `store.session_directory()` reports that path;
-see `rfmux.tuning.store` for ways to change it.
+The default measurement folder is `~/rfmux_data/ipy_session_YYYYMMDD/`.
+`store.session_directory()` creates and returns the active folder, respecting
+`RFMUX_DATA_DIR`, `store.directory` in the config, or a session override from
+`store.set_output_directory(path)`.
 
 The filename includes a timestamp. The saved dictionary also gains `file_metadata`,
 which `ResonatorCatalog.from_dict()` ignores when rebuilding the catalog.
@@ -564,7 +488,7 @@ Finally, save the mock array’s catalog in both formats:
 
 ```python
 (output_dir / "mock_array.csv").write_text(catalog.to_csv())
-store.save(catalog.to_dict(), "catalog", label="mock_array", directory=output_dir)
+store.save(catalog.to_dict(), "catalog", label="mock_array")
 print(f"wrote {len(catalog)} resonators to {output_dir}")
 for output_path in sorted(output_dir.iterdir()):
     print(f"  {output_path.name:<16} {output_path.stat().st_size:>7} bytes")
@@ -573,4 +497,3 @@ for output_path in sorted(output_dir.iterdir()):
 You now have a catalog ready for tuning. Next, sweep around its bias frequencies,
 fit the resonances, and choose bias points. See `multisweep.md` for the next step
 and `simplified_tuning_flow.py` for the full workflow.
-

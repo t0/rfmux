@@ -1165,7 +1165,7 @@ Small, and each belongs in the library rather than in Periscope.
    fields `nan` (§6, judgement call 20). In the library because a notebook
    edits a search for the same reasons a GUI does. **Nothing else was needed:**
    writing the edit back is
-   `netanal_trace(block)["resonance_search"] = search.to_dict()` and then
+   `block["results"]["resonance_search"] = search.to_dict()` and then
    `store.save`, which overwrites the file the block already knows it came
    from. A `record_search` helper wrapping those two lines was written and
    removed again — `store`'s save-in-place is the whole mechanism, and a

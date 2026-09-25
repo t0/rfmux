@@ -115,7 +115,7 @@ def test_jupytext_notebook(request, notebook_file):
 
 @pytest.mark.slow_acquisition
 @pytest.mark.parametrize("notebook_file", DEMO_NOTEBOOKS)
-def test_reference_demo_notebook(request, tmp_path, notebook_file):
+def test_reference_demo_notebook(request, tmp_path, monkeypatch, notebook_file):
     """Execute a shipped reference notebook end to end.
 
     Acquisition-tier: these spawn a MockCRS server and stream real UDP over
@@ -135,6 +135,9 @@ def test_reference_demo_notebook(request, tmp_path, notebook_file):
     client = nbclient.NotebookClient(
         notebook, timeout=1800, kernel_name="python3", resources={
             "metadata": {"path": str(tmp_path)}})
+
+    # Exercise the normal workbook autosave workflow in the isolated test store.
+    monkeypatch.setenv("RFMUX_AUTOSAVE", "1")
 
     result = tmp_path / f"{request.node.name}.ipynb"
     try:

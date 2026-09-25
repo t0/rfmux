@@ -87,6 +87,9 @@ from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, store
 
 MODULE = 1
+
+OUTPUT_DIR = store.session_directory()
+print(f"results: {OUTPUT_DIR}")
 ```
 
 ## 1. Start with a tuned array
@@ -474,7 +477,7 @@ Section 6 also shows selection by each resonator’s bias amplitude.
 | `approx_Qr` | `10000.0` | skewed | Initial Qr estimate |
 | `normalize` | `True` | skewed | Divide the trace by its last point; models use these normalized units |
 | `fr_limit_hz` | `None` | skewed | Maximum fr offset from sweep centre; default is 37.5% of the span |
-| `fit_nonlinearity` | `True` | nonlinear | Fit `a`; otherwise hold it at zero |
+| `fit_nonlinearity` | `True` | nonlinear | Fit `a`; otherwise constrain it near zero |
 | `n_extrema_points` | `5` | nonlinear | Points averaged at each end to estimate gain |
 | `max_residual` | `0.1` | nonlinear | Reject fits above this residual |
 

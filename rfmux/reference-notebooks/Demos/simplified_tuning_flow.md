@@ -16,15 +16,20 @@ jupyter:
 # From network analysis to a biased array
 
 Run this notebook from top to bottom to generate an unbiased mock array, find
-its resonances, measure narrow sweeps, step the drive amplitude through
+its resonances, measure narrow sweeps around each resonance, step the drive amplitude through
 bifurcation, select operating points, program the tones, and acquire slow-stream
 and PFB noise. The measurements
 use the CRS API; analysis uses `rfmux.tuning`, and a `ResonatorCatalog` carries
 the named resonators, channels, amplitudes, and frequencies between steps.
 
+This is a streamlined example workflow, which will skim over many details of the
+tuning process. More details about each step can be found in the other example
+.md workbooks in this folder, which treat each aspect of the tuning flow in more
+detail.
+
 The default is a fresh ten-resonator simulation. To use a real board and array,
 change the connection and measurement settings in section 1. The remaining
-cells are shared. This flow changes the selected module's NCO and tones.
+cells are shared.
 
 This is a runnable Jupytext notebook: open it as a notebook in JupyterLab and
 use **Shift+Enter**, or **Restart Kernel and Run All Cells**. Use the Python
@@ -52,16 +57,12 @@ For a real array:
 - Configure the board's clock/timestamp source and RF path for your setup.
   The hardware connection below leaves those settings as configured.
 
-To attach to a CRS advertised by Periscope, use `MODE = "attached"`. This uses
-`RFMUX_CRS_HOSTNAME` and `RFMUX_CRS_SERIAL` and does not generate another array.
-Set the measurement band for that session's array too. Coordinate measurements
-with Periscope because both clients control the same tones.
+
 
 ```python
 %matplotlib inline
 
 import os
-import tempfile
 import time
 from pathlib import Path
 
@@ -72,8 +73,17 @@ import rfmux
 from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for,
     find_bias_amplitude, find_bias_frequency, find_bias_points,
-    find_resonances_in_netanal, magnitude_db, netanal_trace, store,
+    find_resonances_in_netanal, magnitude_db, store,
 )
+
+from rfmux.core.resonators import ResonatorCatalog
+
+# import example plotting helpers
+import sys
+DEMO_DIR = Path(rfmux.__file__).resolve().parent / "reference-notebooks" / "Demos"
+if str(DEMO_DIR) not in sys.path:
+    sys.path.insert(0, str(DEMO_DIR))
+import example_plotting_multisweep as msplots
 
 MODE = "mock"                 # "mock", "hardware", or "attached"
 SERIAL = "0042"                # replace for hardware
@@ -88,9 +98,7 @@ SWEEP_POINTS = 201             # 500 Hz spacing across 100 kHz
 NSAMPS = 10
 SCHEDULE = AmplitudeSchedule.ramp(0.002, 0.032, 5)
 
-OUTPUT_DIR = Path(os.environ.get(
-    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_tuning_flow"))
-store.set_output_directory(OUTPUT_DIR)
+OUTPUT_DIR = store.session_directory()
 print(f"rfmux: {rfmux.__file__}")
 print(f"results: {OUTPUT_DIR}")
 started = time.perf_counter()
@@ -147,7 +155,7 @@ print(f"connected: {module_id}; channels cleared")
 The wide sweep locates dips. The mock band has about 5 kHz point spacing;
 a narrower multisweep will resolve each dip in the next step. Measurement
 results are keyed by module even when only one module was measured.
-`netanal_trace()` accesses that module's arrays, including raw `iq_counts`.
+`module_netanal["results"]` accesses that module's arrays, including raw `iq_counts`.
 
 ```python
 netanal = await crs.take_netanal(
@@ -156,7 +164,7 @@ netanal = await crs.take_netanal(
     nsamps=NSAMPS, max_chans=1023, save=True, label="tuning_netanal",
 )
 module_netanal = netanal[module_id]
-trace = netanal_trace(module_netanal)
+trace = module_netanal["results"]
 
 search = find_resonances_in_netanal(
     module_netanal, min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,
@@ -183,6 +191,8 @@ bounds limit accepted widths. `min_separation_hz` rejects both members of a
 close pair. See `network_analysis_find_resonances.md` for rejected candidates
 and tuning those cuts. Catalog names identify resonators; channels refer to the
 hardware channel that will synthesize and digitize the resonator's bias tone.
+For more info on the Catalog and Resonator objects, see the `resonator_catalogs.md`
+workbook.
 
 
 
@@ -206,33 +216,22 @@ The structure is `results[step][direction][resonator_name]`. A section contains
 `frequencies`, `iq_counts`, `iq_volts`, `sweep_amplitude`, and
 `sweep_amplitude_dbm`.
 
+You can write your own plotters for the data, but here we use some canned example
+plotting helpers for brevity.
 The standard `plot_magnitude_panels()` from `example_plotting_multisweep.py`
-plots one panel per resonator. Its dashed vertical line is the bias frequency
-in the catalog snapshot supplied to that multisweep, and a trace at the
-snapshot's bias amplitude is thicker. Pass `overlay_bias=False` to omit those
-starting-state annotations. Import the examples shipped with this rfmux
-installation so the cell also works when you save the notebook elsewhere.
-If the plotter file is already beside your notebook, a plain
-`import example_plotting_multisweep as msplots` is sufficient.
+plots one panel per resonator. Once bias finding has saved a report, its dashed
+vertical line is the new bias frequency, and the trace at the new bias
+amplitude is thicker. Pass `show_bias_frequency=False` or
+`highlight_bias_amplitude=False` to omit either decoration.
 
 ```python
-import sys
 
-DEMO_DIR = Path(rfmux.__file__).resolve().parent / "reference-notebooks" / "Demos"
-if str(DEMO_DIR) not in sys.path:
-    sys.path.insert(0, str(DEMO_DIR))
-import example_plotting_multisweep as msplots
 
 msplots.plot_magnitude_panels(
     module_initial, directions="upward", normalize=True, ncols=4,
     title="Initial multisweep at the probe amplitude",
 )
 ```
-
-Here `normalize=True` divides raw IQ counts by each trace's drive amplitude
-before converting magnitude to dB. It removes the drive scaling so sweep
-shapes can be compared; it does not set the off-resonance baseline to 0 dB.
-The custom bias-point panels in section 5 use median normalization instead.
 
 The same plotter handles multiple amplitudes and directions, with a shared
 amplitude colour scale and batches of 50 resonators per figure by default.
@@ -248,7 +247,12 @@ See `multisweep.md` for a runnable example.
 
 ## 4. Iterate multisweeps over various amplitudes
 
-`AmplitudeSchedule.ramp()` specifies five absolute amplitudes, logarithmically
+To efficiently handle iteratively calling multisweeps at multiple amplitudes,
+we use the `AmplitudeSchedule` class. This provides a number of options, which
+are explored in more detail in `multisweep.md`.
+
+The `AmplitudeSchedule.ramp()` that we declared in the first cell
+specifies five absolute amplitudes, logarithmically
 spaced from 0.002 to 0.032. Each step measures the whole catalog in both
 frequency directions. This is ten multisweep passes; the driver handles the
 iteration and preserves the steps together in one result.
@@ -258,10 +262,10 @@ For per-resonator starting amplitudes, use
 that resonator's catalog amplitude. Edit `SCHEDULE` and rerun this section to
 extend or refine the range based on the bias report below.
 
-The mock evaluates frequency points independently and does not reproduce
-physical hysteresis.
-However, it still demonstrates drive-dependent traces and the analysis
-flags; its detected threshold is not a validation of a real array's limit.
+The mock retains tone state between frequency points and can follow different
+branches in upward and downward sweeps through bifurcation.
+Use its traces to explore the analysis flags; a simulated threshold does not
+establish a real array’s operating limit.
 
 ```python
 print(SCHEDULE.describe(catalog, n_directions=2))
@@ -271,9 +275,8 @@ amplitude_sweeps = await crs.multisweep(
     sweep_direction=("upward", "downward"),
     save=True, label="tuning_amplitudes",
 )
-module_amplitudes = amplitude_sweeps[module_id]
 msplots.plot_magnitude_panels(
-    module_amplitudes, normalize=True, ncols=4,
+    amplitude_sweeps[module_id], normalize=True, ncols=4,
     title="Amplitude scan: both sweep directions",
 )
 ```
@@ -285,8 +288,8 @@ Solid lines are upward sweeps; dashed lines are downward sweeps.
 The bias amplitude finder examines measured levels from low to high and chooses
 the step below the first detected bifurcation. The bifurcation detection method `"derivative"` looks for jumps
 in normalized IQ arc speed; `"hysteresis"` compares the two directions;
-`"both"` flags either test. Use the derivative test for this mock, and both
-for the hardware example. The thresholds below are explicit so they can be
+`"both"` flags either test. This example uses the derivative test for the mock
+and both tests for the hardware example. The thresholds below are explicit so they can be
 adjusted after inspecting the traces (see `bias_finding.md`).
 
 This first cell exposes the two decisions for one resonator: first choosing the amplitude, then the frequency.
@@ -303,7 +306,7 @@ BIAS_SETTINGS = dict(
     max_discrepancy=0.1, compare="magnitude",
 )
 name = catalog.names()[0]
-iterations = collect_amplitude_iterations_for(module_amplitudes, name)
+iterations = collect_amplitude_iterations_for(amplitude_sweeps[module_id], name)
 choice = find_bias_amplitude(
     iterations, method=AMPLITUDE_METHOD,
     spike_prominence_factor=BIAS_SETTINGS["spike_prominence_factor"],
@@ -329,7 +332,7 @@ for ax, (step, entries) in zip(axes.flat, iterations.items()):
     chosen = step == choice.iteration
     for direction, entry in entries.items():
         offset = (entry["frequencies"] - selected["original_center_frequency"]) / 1e3
-        ax.plot(offset, magnitude_db(entry["iq_volts"]),
+        ax.plot(offset, magnitude_db(entry["iq_volts"] / entry["sweep_amplitude"]),
                 ls="-" if direction == "upward" else "--", label=direction)
     ax.set_title(f"step {step}: amplitude {amplitude:g}"
                  f"{' — CHOSEN' if chosen else ''}\n{verdict}", fontsize=10)
@@ -344,7 +347,7 @@ for ax, (step, entries) in zip(axes.flat, iterations.items()):
 for ax in list(axes.flat)[len(iterations):]:
     ax.set_visible(False)
 fig.supxlabel("offset from sweep centre [kHz]")
-fig.supylabel("median-normalized magnitude [dB]")
+fig.supylabel("magnitude [dB, sweep-amplitude-normalized]")
 fig.suptitle(f"{name}: selecting amplitude and frequency")
 plt.show()
 ```
@@ -352,44 +355,36 @@ plt.show()
 Each panel is one measured amplitude, with both sweep directions. The green
 panel is the selected step; its dotted line marks the selected frequency.
 The search stops at the first detected bifurcation, so higher measured levels
-can be labelled **not checked**. Each trace is normalized by its own median
-magnitude before conversion to dB; shared axes make dip depths comparable.
-The median is an estimate of the off-resonance baseline, so the span should
-include enough of that baseline.
+can be labelled **not checked**. Each trace is divided by its recorded sweep
+amplitude before conversion to dB, removing the commanded drive scaling while
+preserving changes in its measured baseline.
 
 `find_bias_points()` performs those steps for every resonator and returns a
-`BiasReport` with a new catalog. It rounds bias frequencies onto the tone grid
+`BiasReport` with a new catalog. This `BiasReport` is also saved into the
+existing multisweep file. It rounds bias frequencies onto the tone grid
 and measures IQ derivatives there from the selected sweep. Those derivatives
 supply the catalog's `df_calibration`; no separate calibration measurement or
-phase rotation is performed by this call. The input catalog is preserved.
+phase rotation is performed by this call. The input catalog is preserved under
+`'call_params'`.
 
 ```python
-bias_report = find_bias_points(module_amplitudes, **BIAS_SETTINGS, save=True)
+bias_report = find_bias_points(amplitude_sweeps[module_id], **BIAS_SETTINGS, save=True)
 print(bias_report)
+print(bias_report.catalog)
 
 ```
 
-Review the flags and selected traces before applying to a real array:
-
-- With this fresh catalog, if nothing bifurcated, the highest measured amplitude
-  is selected and flagged. On later measurements, a clean selection strictly
-  below a retained `bias.bifurcated_at` is not flagged for missing bifurcation.
-  Pass `bias_report.catalog` into the next multisweep to retain that observation;
-  call `clear_bifurcations()` on it before measuring to reset it.
-- If the lowest amplitude bifurcated, that amplitude is selected and flagged.
-  Measure lower levels to find a point below the detected transition.
-- A coarse amplitude schedule only brackets the transition. Rerun section 4
-  with more levels around it if a finer choice matters.
-
+Review the flags and selected traces before applying to a real array.
 The API returns a point even for flagged resonators; it does not silently
-remove them. This demonstration applies the entire report catalog below.
-Changing the analysis settings only requires rerunning section 5, not acquiring
-new data. The report is also saved inside the amplitude measurement.
+remove them.
+
+Note that you can run `find_bias_points` on multisweep data multiple times, using
+different analysis parameters, to refine your results. You do not need to retake
+the measurement.
 
 The following panels show each resonator's selected sweep, normalized by its
-own median magnitude in dB, with shared axes. Zero frequency offset marks its
-bias frequency. Panel titles identify the selected amplitude and any flags;
-the report above explains the flags.
+recorded sweep amplitude in dB, with shared axes. Zero frequency offset marks
+its bias frequency.
 
 ```python
 columns = min(4, len(bias_report.findings))
@@ -401,15 +396,14 @@ fig, axes = plt.subplots(
 for ax, finding in zip(axes.flat, bias_report.findings):
     entry = bias_report.catalog[finding.name].bias.bias_sweep
     offset = (entry["frequencies"] - finding.frequency_hz) / 1e3
-    ax.plot(offset, magnitude_db(entry["iq_volts"]), lw=1.2)
+    ax.plot(offset, magnitude_db(entry["iq_volts"] / entry["sweep_amplitude"]), lw=1.2)
     ax.axvline(0, color="black", ls=":", lw=1)
-    ax.axhline(0, color="0.7", lw=0.6)
     ax.set_title(f"{finding.name}: amplitude {finding.amplitude:g}"
                  f"{' (flagged)' if finding.flagged_because else ''}", fontsize=10)
 for ax in list(axes.flat)[len(bias_report.findings):]:
     ax.set_visible(False)
 fig.supxlabel("offset from bias frequency [kHz]")
-fig.supylabel("median-normalized magnitude [dB]")
+fig.supylabel("magnitude [dB, sweep-amplitude-normalized]")
 fig.suptitle("Each resonator at its selected amplitude; dotted line = bias frequency")
 plt.show()
 ```
@@ -444,9 +438,6 @@ The **mock RPC PFB capture is uniform synthetic noise**, not detector noise.
 The slow stream uses the resonator model. This example disables pulses and TLS
 noise and retains a small quasiparticle-noise term.
 
-The notebook owns only the mock sender it starts. Hardware and attached
-sessions need an existing slow stream and valid timestamps; their senders are
-left running. The `finally` block also stops our sender on failure/cancellation.
 
 ```python
 from rfmux.streamer import find_streamer_conflict
@@ -473,7 +464,8 @@ noise_path = store.saved_path(noise_results)
 print(f"saved noise: {noise_path}")
 ```
 
-Reload the file before plotting. The plotters require no board: IQ overlays use
+Use the example noise plotters to take a quick look at the data.
+IQ overlays use
 the calibration sweep in the saved catalog; timestreams use nominal sample
 spacing; PSD plots omit carrier bins and their immediate neighbors only in
 the display. Saved arrays remain unchanged. See `noise_measurement.md` for
@@ -494,17 +486,22 @@ noiseplots.plot_psds(
 ## 8. Keep and reload the results
 
 Measurements were saved through `rfmux.tuning.store`; the resonance search
-and bias report were saved back alongside their source measurements.
-Reload the amplitude file and reconstruct the catalog without a board or a
-new sweep.
+and bias report were saved back alongside their source measurements. The saved
+files are pickle files, and CAN be loaded using pickle.load() but this is not advised -
+when loaded with `store.load(...)`, the code reads and updates the path to where it read
+from, and then will be reliably able to save updates to that file, even if it is not
+in the place where it was originally generated (e.g., you sent your favourite multisweep
+to your friend)
+
+This makes it easy to reload a previous multisweep, extract its resonator
+catalog, and re-tune the array from this saved starting point.
 
 ```python
-for measurement in (module_netanal, module_initial, module_amplitudes):
+for measurement in (module_netanal, module_initial, amplitude_sweeps[module_id]):
     print(store.saved_path(measurement))
 
-saved_sweeps = store.load(store.saved_path(module_amplitudes))
-restored_report = BiasReport.from_dict(saved_sweeps[module_id]["bias_report"])
-restored_catalog = restored_report.catalog
+saved_sweeps = store.load(store.saved_path(amplitude_sweeps[module_id]))
+restored_catalog = ResonatorCatalog.from_dict(saved_sweeps[module_id]["bias_report"]['catalog'])
 print(restored_catalog)
 restored_noise = store.load(noise_path)
 print(f"reloaded noise for {len(restored_noise[module_id]['results']['resonators'])} resonators")

@@ -78,9 +78,12 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 from rfmux.core.resonators import BiasPoint, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
-from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for
+from rfmux.tuning import AmplitudeSchedule, collect_amplitude_iterations_for, store
 
 MODULE = 1
+
+OUTPUT_DIR = store.session_directory()
+print(f"results: {OUTPUT_DIR}")
 ```
 
 ## 1. Generate a mock multisweep
@@ -89,9 +92,10 @@ Let’s create four pre-biased simulated resonators and read their tone frequenc
 into a catalog. Give two resonators different bias amplitudes, then sweep 0.5,
 1, 2, 4, and 8 times each bias amplitude in both frequency directions.
 
-The mock evaluates frequency points independently. It can show changes with drive,
-but does not reproduce physical hysteresis. These examples demonstrate the
-analysis and its flags; they do not establish safe operating amplitudes for a real array.
+The mock retains each tone’s converged currents as it moves through a sweep,
+so upward and downward traces can follow different branches through bifurcation.
+These examples demonstrate the analysis and its flags; they do not establish
+safe operating amplitudes for a real array.
 
 The sweep below saves a fresh measurement file in the configured data directory.
 For real data, replace this setup with your own session, catalog, and multisweep.
@@ -598,7 +602,7 @@ threshold, and the positive spike must be followed within two samples by a
 qualifying negative spike.
 
 Use the plots to inspect sensitivity. A detector response alone is not proof of
-physical bifurcation, especially with independently evaluated mock traces.
+physical bifurcation; inspect the measured traces and their noise as well.
 
 ### Hysteresis detection
 
@@ -672,10 +676,10 @@ plot_magnitude_hysteresis(multi_amplitude_module_results, resonator_names,
                           max_discrepancy=0.1)
 ```
 
-The lower panels compare separation with the threshold. Mock sweeps do not have
-physical sweep-history dependence; any detected difference needs that context.
-On a real array, a jump at the same frequency in both directions can also escape
-this test while still triggering derivative detection.
+The lower panels compare separation with the threshold. The mock retains sweep
+history, but the separation also depends on drive, sampling and noise.
+On either a simulated or real array, a jump at the same frequency in both
+directions can escape this test while still triggering derivative detection.
 
 ### Combine both tests
 
@@ -903,7 +907,7 @@ for every resonator in the sweep’s catalog snapshot.
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `sweeps` | required | One module’s multisweep output |
+| `ms_module_output` | required | One module’s multisweep output |
 | `amplitude_method` | `"derivative"` | Bifurcation test; `"both"` and `"hysteresis"` require both directions |
 | `frequency_method` | `"iq_derivative"` | Frequency-selection method |
 | `direction` | `None` | Direction for frequency and calibration; prefers upward |
@@ -916,14 +920,14 @@ for every resonator in the sweep’s catalog snapshot.
 | `save` | `None` | Follow autosave settings; save the sweeps with their new report |
 | `label` | `None` | Label when creating a new measurement file |
 
-We use `save=False` while comparing settings. The report still enters the result
-in memory. Omit that option to follow autosave settings and update the fresh
-measurement file from section 1.
+The main bias report follows autosave settings and updates the measurement
+file from section 1. Later comparisons use `save=False` to leave that saved
+report unchanged.
 
 ```python
 from rfmux.tuning import find_bias_points
 
-bias_report = find_bias_points(multi_amplitude_module_results, save=False)
+bias_report = find_bias_points(multi_amplitude_module_results)
 
 print(bias_report)
 print(bias_report.catalog)
@@ -1040,8 +1044,8 @@ print(f"good:    {len(bias_report.good)}")
 print(f"flagged: {len(bias_report.flagged)}")
 ```
 
-Now compare the hysteresis-only result. With this simulator, a lack of detected
-hysteresis is expected and may leave the highest amplitude selected as a fallback:
+Now compare the hysteresis-only result. If this amplitude schedule does not
+produce a detectable separation, the highest amplitude is selected as a fallback:
 
 ```python
 # Keep the selected report in the original multisweep.

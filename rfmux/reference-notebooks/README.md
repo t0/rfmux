@@ -39,12 +39,12 @@ Then:
 - **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
   find resonators, select bias points, park the carriers, and measure noise.
 - **`Demos/noise_measurement.md`** — start with a biased mock array, verify it
-  with a multisweep, call `measure_noise`, and reopen the files for IQ
-  overlays, timestreams and PSDs. `example_plotting_noise.py` supplies reusable
+  and calibrate it with a multisweep, call `measure_noise`, and reopen the files
+  for IQ overlays, timestreams and PSDs. `example_plotting_noise.py` supplies reusable
   plotters for saved noise module blocks, including optional PFB captures.
 - **`Demos/pulse_capture.md`** — detect and record detector pulses, with
   streaming HDF5, histograms, matched slow+fast capture, coincidence events,
-  noise samples and IQ-plane review.
+  noise samples and IQ-plane review using catalog-based calibration records.
 
 `simplified_tuning_flow` and `pulse_capture` have an unattended `.py`
 counterpart beside them for cron jobs and smoke tests; the notebook is the
@@ -67,3 +67,18 @@ await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)  # the fast stream needs a
 
 No hardware? Every demo above stands up a simulated CRS instead — see their
 mock-mode sections.
+
+## Data products
+
+The demo workbooks use `rfmux.tuning.store` just like an in-lab workflow.
+`store.session_directory()` creates and returns the active output folder,
+which defaults to `~/rfmux_data/ipy_session_YYYYMMDD/`. Measurements and
+catalogs use `store.save()` / `store.load()`; CSV exports and pulse HDF5
+captures use the same folder with their format-specific readers and writers.
+Data products remain on disk after the workbook finishes.
+
+To choose a different root, set `RFMUX_DATA_DIR` or `store.directory` in your
+config; the store adds the dated session folder. To use an exact folder in
+a notebook session, call `store.set_output_directory(path)` before running
+the workbook's setup cell. Measurements autosave by default, subject to
+your store settings and any explicit `save=` argument in the workbook.

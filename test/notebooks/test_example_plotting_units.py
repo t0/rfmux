@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
-from rfmux.core.transferfunctions import VOLTS_PER_ROC
+from rfmux.core.transferfunctions import VOLTS_PER_ROC, convert_dacunits_to_dbm
 from rfmux.tuning import (
     BiasReport, bifurcated_by_derivative, collect_amplitude_iterations_for,
     normalized_arc_speed, hysteresis_separation,
@@ -328,6 +328,9 @@ def netanal_measurement(scale: float = 0.0, step: int = 0) -> dict:
     block = measurement(scale)
     block["measurement"] = "netanal"
     block["results"] = block["results"][step]["upward"]["R1"]
+    block["results"]["sweep_amplitude_dbm"] = convert_dacunits_to_dbm(
+        block["results"]["sweep_amplitude"], scale
+    )
     return block
 
 
@@ -393,7 +396,7 @@ def test_netanal_notebook_transmission_matches_module(plotters):
     trace = block["results"]
     namespace = {
         "np": np, "plt": plt, "module_netanal_outputs": block,
-        "netanal_measured": trace, "netanal_iq_counts": trace["iq_counts"],
+        "netanal_results": trace, "netanal_iq_counts": trace["iq_counts"],
         "netanal_frequencies": trace["frequencies"],
     }
     path = DEMOS / "network_analysis_find_resonances.md"

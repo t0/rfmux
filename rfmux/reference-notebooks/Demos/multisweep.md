@@ -80,8 +80,12 @@ import matplotlib.pyplot as plt
 
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import store
 
 MODULE = 1
+
+OUTPUT_DIR = store.session_directory()
+print(f"results: {OUTPUT_DIR}")
 
 # The band the simulated array lives in.
 FMIN, FMAX = 0.6e9, 1.0e9
@@ -834,9 +838,9 @@ for step, by_direction in both_ways_module_results["results"].items():
               f"{sections[first_resonator]['sweep_amplitude']:.5f}")
 ```
 
-Plot amplitude as colour and direction as line style. The simulated traces
-overlap. Real detectors can show different traces in the two directions when
-driven into bifurcation.
+Plot amplitude as colour and direction as line style. Both the mock and real
+detectors can follow different branches in the two directions when driven into
+bifurcation; low-drive traces should largely overlap apart from noise.
 
 ```python
 # The same plotters include both directions automatically.
@@ -910,8 +914,9 @@ except ValueError as e:
 - **Measure noise:** reapply the desired bias catalog, then use
   `crs.measure_noise`. See [noise_measurement.md](noise_measurement.md)
   for saved noise products and plots against the verification sweeps.
-- **Save data:** multisweep saves results to `~/rfmux_data/ipy_session_<today>/`
-  by default. The result records the path under `file_metadata`. Pass
+- **Save data:** measurements follow the store autosave settings and use the
+  session folder printed above (default `~/rfmux_data/ipy_session_YYYYMMDD/`).
+  The result records the path under `file_metadata`. Pass
   `save=False` to skip saving, or `label="cooldown3"` to label the file.
   See `rfmux.tuning.store` for output directory settings.
 

@@ -18,7 +18,7 @@ from ...algorithms.measurement.tod import tod_extent, tod_window
 from ...pulse_capture.channel_keys import channel_group, title_label
 from ...streamer import epoch_to_utc
 from .layouts import FlowLayout, labelled
-from .utils import IQ_COLORS, ClickableViewBox
+from .utils import IQ_COLORS, ClickableViewBox, set_axis_label
 
 #: Milliseconds after the last range change before the window is read.
 SETTLE_MS = 60
@@ -229,7 +229,7 @@ class TodViewer(QtWidgets.QWidget):
 
     def _set_labels(self) -> None:
         for plot, name in zip(self.plots, self._view()[1]):
-            plot.setLabel("left", name)
+            set_axis_label(plot, "left", name)
 
     def view_changed(self) -> None:
         """Periscope's units changed: the same window, redrawn in them,

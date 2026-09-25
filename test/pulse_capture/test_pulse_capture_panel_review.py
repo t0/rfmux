@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label, pulse_rows  # noqa: E402
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
@@ -185,8 +186,8 @@ def test_amplitude_bins_follow_the_view_in_counts_too(qt_app,
     panel.units_combo.setCurrentText(m.UNITS_COUNTS)
     curve = panel.hist_plots["amplitude"].getPlotItem().listDataItems()[0]
     assert np.max(curve.xData) == pytest.approx(2e-5 / VOLTS_PER_ROC)
-    label = panel.hist_plots["amplitude"].getPlotItem().getAxis("bottom")
-    assert label.labelText == "amplitude (counts)"
+    assert axis_label(panel.hist_plots["amplitude"], "bottom") == \
+        "amplitude (counts)"
 
 
 def test_amplitude_histogram_overlays_the_two_stored_axes(qt_app,
@@ -302,6 +303,32 @@ def _tod_item(panel):
     tree = panel.pulse_tree
     return next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
                 if "Time-ordered data" in tree.topLevelItem(i).text(0))
+
+
+def test_the_tree_holds_the_pulses_beside_the_time_ordered_data(
+        qt_app, tmp_path, panel):
+    """Top level: Pulses, holding the channels (or events) as the
+    grouping says, and beside it the time-ordered data and metadata."""
+    from rfmux.algorithms.measurement.tod import merge_tod, write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _capture, _recording_file)
+    pulse = _capture(tmp_path, channels=(CHANNEL,), trigger_basis="iq")
+    merge_tod(pulse, write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                               fastrx=_recording_file(tmp_path),
+                               trigger_basis="iq"))
+    panel.load_from_hdf5(pulse)
+    tree = panel.pulse_tree
+    tops = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+    assert tops[0] == "◆ Pulses"
+    assert any(t.startswith("≋ Time-ordered data") for t in tops[1:])
+    assert tops[-1] == "▦ Metadata"
+    assert [r.text(0) for r in pulse_rows(panel)] == \
+        [f"▤ Channel {CHANNEL} (1)"]
+    panel.group_combo.setCurrentText(m.GROUP_EVENTS)
+    assert [r.data(0, QtCore.Qt.ItemDataRole.UserRole)[0]
+            for r in pulse_rows(panel)] == ["event"]
+    tops = [tree.topLevelItem(i).text(0) for i in range(tree.topLevelItemCount())]
+    assert tops[0] == "◆ Pulses"
 
 
 def test_a_tod_channel_is_drawn_in_its_tab_from_a_few_hundred_points(
@@ -442,14 +469,14 @@ def test_the_units_choice_redraws_the_tod_tab_as_it_does_the_pulse_view(
     view = panel.tod_view
     panel.units_combo.setCurrentText(m.UNITS_VOLTS)
     panel._open_tod_viewer(CHANNEL)
-    assert view.plots[0].getPlotItem().getAxis("left").labelText == "I (V)"
+    assert axis_label(view.plots[0], "left") == "I (V)"
     view.plots[0].setXRange(0.010, 0.011, padding=0)
     view._refresh()
     i_volts = view.curves["fast"][0].getData()[1]
     q_volts = view.curves["fast"][1].getData()[1]
     panel.units_combo.setCurrentText(m.UNITS_DF)
-    assert view.plots[0].getPlotItem().getAxis("left").labelText == "df (Hz)"
-    assert view.plots[1].getPlotItem().getAxis("left").labelText == \
+    assert axis_label(view.plots[0], "left") == "df (Hz)"
+    assert axis_label(view.plots[1], "left") == \
         "dissipation (Hz)"
     assert view.plots[0].getPlotItem().viewRange()[0] == \
         pytest.approx([0.010, 0.011])
@@ -486,9 +513,9 @@ def test_idle_axes_name_the_default_view(qt_app, panel):
     """Before any data, every tab names the units the selector shows."""
     assert panel.units_combo.currentText() == m.UNITS_VOLTS
     for plot in (panel.pulse_plot_i, panel.template_plot_i):
-        assert plot.getPlotItem().getAxis("left").labelText == "I (V)"
-    amp = panel.hist_plots["amplitude"].getPlotItem().getAxis("bottom")
-    assert amp.labelText == "amplitude (V)"
+        assert axis_label(plot, "left") == "I (V)"
+    assert axis_label(panel.hist_plots["amplitude"], "bottom") == \
+        "amplitude (V)"
 
 
 def test_the_noise_segment_prints_the_stored_unit(qt_app, panel):
@@ -501,7 +528,7 @@ def test_the_noise_segment_prints_the_stored_unit(qt_app, panel):
     panel._show_noise_segment()
     text = panel.pulse_info.text()
     assert "I = 2e-06 ± 1.1e-05 V" in text
-    assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
+    assert axis_label(panel.pulse_plot_i, "left") \
         == "I (V)"
     panel.task = None
 

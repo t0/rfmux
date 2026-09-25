@@ -13,6 +13,7 @@ import pathlib
 import h5py
 import numpy as np
 import pytest
+from test.qt_helpers import pulse_rows  # noqa: E402
 
 from rfmux.core.transferfunctions import (
     VOLTS_PER_ROC, decimated_stream_delay_s, decimation_to_sampling,
@@ -537,7 +538,7 @@ def test_a_merged_file_can_be_reviewed_by_event(
     panel.group_combo.setCurrentText(GROUP_EVENTS)
     panel.load_from_hdf5(path)
     role = QtCore.Qt.ItemDataRole.UserRole
-    top = panel.pulse_tree.topLevelItem(0)
+    top = pulse_rows(panel)[0]
     assert top.data(0, role) == ("event", 1)
     assert [top.child(k).data(0, role) for k in range(top.childCount())] \
         == [("pair", CHANNEL, 1)]

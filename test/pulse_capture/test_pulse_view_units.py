@@ -6,6 +6,7 @@ calibration far from either axis so a missing rotation cannot hide."""
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label  # noqa: E402
 
 pytest.importorskip("PyQt6")
 
@@ -89,7 +90,7 @@ def _traces(panel):
 
 
 def _labels(panel):
-    return tuple(p.getPlotItem().getAxis("left").labelText
+    return tuple(axis_label(p, "left")
                  for p in (panel.pulse_plot_i, panel.pulse_plot_q))
 
 

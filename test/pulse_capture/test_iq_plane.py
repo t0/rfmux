@@ -3,6 +3,7 @@ one frame, in every view."""
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label  # noqa: E402
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
@@ -89,7 +90,7 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
     bias_item = [i for i in panel.iq_plot.getPlotItem().listDataItems()
                  if i.name() == "bias point"][0]
     assert bias_item.zValue() > markers.zValue()
-    assert panel.iq_plot.getPlotItem().getAxis("bottom").labelText == "I (V)"
+    assert axis_label(panel.iq_plot, "bottom") == "I (V)"
 
     panel.units_combo.setCurrentText(UNITS_DF)
     items = _named(panel)
@@ -99,7 +100,7 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
     # bias point's dissipation.
     np.testing.assert_allclose(markers.data["y"], by[0], atol=1e-6)
     assert markers.data["x"].max() > bx[0]
-    assert panel.iq_plot.getPlotItem().getAxis("left").labelText == \
+    assert axis_label(panel.iq_plot, "left") == \
         "dissipation (Hz)"
     assert "bias 1000.001250 MHz" in panel.iq_info.toolTip() + panel.iq_info.text()
     panel.close()

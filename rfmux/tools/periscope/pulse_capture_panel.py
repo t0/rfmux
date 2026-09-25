@@ -40,6 +40,7 @@ from .utils import (
     LINE_WIDTH,
     find_parent_with_attr,
     flag_tint,
+    set_axis_label,
     theme_colors,
 )
 from .pulse_capture_task import PulseCaptureSignals, PulseCaptureTask
@@ -639,7 +640,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for plot, ylabel in ((self.pulse_plot_i, "I (V)"),
                              (self.pulse_plot_q, "Q (V)")):
             item = plot.getPlotItem()
-            item.setLabel("left", ylabel)
+            set_axis_label(item, "left", ylabel)
             item.showGrid(x=True, y=True, alpha=0.3)
             item.addLegend(offset=(-10, 10))
         self._set_pulse_x_axis("time", "s")
@@ -742,8 +743,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         if channel is None:
             channel = self._label_channel()
         first, second = self._axis_names(channel)
-        plot.setLabel("bottom", first)
-        plot.setLabel("left", second)
+        set_axis_label(plot, "bottom", first)
+        set_axis_label(plot, "left", second)
         view = self._view_coeffs(channel)
         basis, units = (self._view_state() if view is not None
                         else self._stored_state(channel))
@@ -1016,7 +1017,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for i, (metric, title, xlabel) in enumerate(_HIST_METRICS):
             plot = pg.PlotWidget(viewBox=ClickableViewBox())
             item = plot.getPlotItem()
-            item.setLabel("bottom", xlabel)
+            set_axis_label(item, "bottom", xlabel)
             item.setLabel("left", "count")
             item.showGrid(x=True, y=True, alpha=0.3)
             item.addLegend(offset=(-10, 10))
@@ -1126,8 +1127,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         # Same names the pulse view uses, set even with nothing stacked
         # so an empty tab does not advertise units the view is not in.
         first, second = self._axis_names(self._label_channel())
-        self.template_plot_i.getPlotItem().setLabel("left", first)
-        self.template_plot_q.getPlotItem().setLabel("left", second)
+        set_axis_label(self.template_plot_i, "left", first)
+        set_axis_label(self.template_plot_q, "left", second)
         data = self._template_data
         if not data:
             self.template_info.setText("No pulses stacked yet")
@@ -2090,13 +2091,27 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
     def _on_group_changed(self, _text: str = "") -> None:
         self._rebuild_tree()
 
+    def _pulses_item(self) -> QtWidgets.QTreeWidgetItem:
+        """The tree's Pulses item, holding the channels or events under
+        the chosen grouping; the time-ordered data, the tuning and the
+        metadata are its siblings."""
+        root = getattr(self, "_pulses_root", None)
+        if root is None or root.treeWidget() is None:
+            root = QtWidgets.QTreeWidgetItem(["◆ Pulses", "", "", ""])
+            self.pulse_tree.insertTopLevelItem(0, root)
+            root.setExpanded(True)
+            self._pulses_root = root
+        return root
+
     def _rebuild_tree(self) -> None:
         """The tree under the chosen grouping, from what the panel
         holds: channels with their pulses (or pairs), or events with
         theirs."""
         self.pulse_tree.clear()
+        self._pulses_root = None
         self._channel_items: Dict[int, QtWidgets.QTreeWidgetItem] = {}
         role = QtCore.Qt.ItemDataRole.UserRole
+        root = self._pulses_item()
         if self._events_grouping():
             for event in self._event_list():
                 self._add_event_item(event)
@@ -2105,7 +2120,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                 item = QtWidgets.QTreeWidgetItem(
                     [f"▤ {title_label(c)} (0)", "", "", ""])
                 item.setData(0, role, ("channel", c))
-                self.pulse_tree.addTopLevelItem(item)
+                root.addChild(item)
                 item.setExpanded(True)
                 self._channel_items[c] = item
             for key in self._pulse_order:
@@ -2240,7 +2255,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
                              "Saved over the event's window without "
                              "having triggered")
             item.addChild(child)
-        self.pulse_tree.insertTopLevelItem(0, item)
+        self._pulses_item().insertChild(0, item)
 
     def _regroup_if_due(self, force: bool = False) -> None:
         now = time.monotonic()
@@ -2376,7 +2391,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             traces[0][0] if traces else self._label_channel())
         for plot, name in ((self.pulse_plot_i, first),
                            (self.pulse_plot_q, second)):
-            plot.getPlotItem().setLabel("left", f"{name} − baseline")
+            set_axis_label(plot, "left", f"{name} − baseline")
 
         members = event["members"]
         dumped = event.get("dumped") or []
@@ -2782,8 +2797,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         does not advertise units the next capture will not be in.
         """
         first, second = self._axis_names(self._label_channel())
-        self.pulse_plot_i.getPlotItem().setLabel("left", first)
-        self.pulse_plot_q.getPlotItem().setLabel("left", second)
+        set_axis_label(self.pulse_plot_i, "left", first)
+        set_axis_label(self.pulse_plot_q, "left", second)
         cur = self._current_view
         if self._current_noise is not None:
             # Drawn as stored, and labeled so, in every view.
@@ -3054,7 +3069,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         for quad, name, plot, data in (
                 ("I", names[0], self.pulse_plot_i, arr.real),
                 ("Q", names[1], self.pulse_plot_q, arr.imag)):
-            plot.getPlotItem().setLabel("left", f"{name} ({unit})")
+            set_axis_label(plot, "left", f"{name} ({unit})")
             plot.plot(x, data, pen=pg.mkPen(IQ_COLORS[quad], width=1.0),
                       name=f"{name} (training)")
             self._annotate_noise_bands(plot, quad, ns, 0.0, x1, "#888888")
@@ -3412,7 +3427,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         first, second = self._axis_names(channel)
         for plot, name in ((self.pulse_plot_i, first),
                            (self.pulse_plot_q, second)):
-            plot.getPlotItem().setLabel("left", name)
+            set_axis_label(plot, "left", name)
         x0 = float(t_rel[0]) if len(t_rel) else 0.0
         x1 = float(t_rel[-1]) if len(t_rel) else 1.0
         # Series names follow the axes: "I (pulse)" over a plot labelled
@@ -3561,7 +3576,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         slow_wf, fast_wf = in_view(slow_wf), in_view(fast_wf)
         for plot, name in zip((self.pulse_plot_i, self.pulse_plot_q),
                               self._axis_names(channel)):
-            plot.getPlotItem().setLabel("left", name)
+            set_axis_label(plot, "left", name)
 
         # Shared clock → common time origin across both streams
         t0 = None
@@ -3658,8 +3673,8 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             # in the label: units= would add a second bracket.
             scalable = metric == "amplitude"
             if scalable:
-                item.setLabel(
-                    "bottom",
+                set_axis_label(
+                    item, "bottom",
                     f"amplitude ({self._units_label(self._label_channel())})")
             # The amplitude plot overlays two axes: the first (frequency,
             # or I) filled, the second (dissipation, or Q) hatched in the

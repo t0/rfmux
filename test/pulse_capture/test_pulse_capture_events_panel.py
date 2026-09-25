@@ -4,6 +4,7 @@ that did not trigger shown with it except while following."""
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label, pulse_rows  # noqa: E402
 
 pytest.importorskip("PyQt6")
 
@@ -56,8 +57,7 @@ def _review(path, grouping=GROUP_CHANNELS):
 def _tree(panel):
     """{top-level role: [child roles]} for the pulse and event rows."""
     out = {}
-    for k in range(panel.pulse_tree.topLevelItemCount()):
-        top = panel.pulse_tree.topLevelItem(k)
+    for top in pulse_rows(panel):
         role = top.data(0, ROLE)
         if role and role[0] in ("channel", "event"):
             out[tuple(role)] = [tuple(top.child(j).data(0, ROLE))
@@ -218,8 +218,7 @@ def test_a_both_mode_event_draws_the_fast_lines_under_the_slow_points(
 
 
 def _double_click(panel, role):
-    for k in range(panel.pulse_tree.topLevelItemCount()):
-        top = panel.pulse_tree.topLevelItem(k)
+    for top in pulse_rows(panel):
         for j in range(top.childCount()):
             if tuple(top.child(j).data(0, ROLE) or ()) == role:
                 panel._on_tree_double_click(top.child(j), 0)
@@ -331,13 +330,13 @@ def test_a_units_change_redraws_the_event_and_the_no_trigger_views(
     panel.units_combo.setCurrentText(UNITS_COUNTS)
     assert panel._current_event == 1
     assert peak() == pytest.approx(volts / VOLTS_PER_ROC, rel=1e-6)
-    label = panel.pulse_plot_i.getPlotItem().getAxis("left").labelText
+    label = axis_label(panel.pulse_plot_i, "left")
     assert label == "I (counts) − baseline"
 
     _double_click(panel, ("dump", 1, 3))
     panel.units_combo.setCurrentText(UNITS_VOLTS)
     assert panel._current_dump == (1, 3)
-    assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
+    assert axis_label(panel.pulse_plot_i, "left") \
         == "I (V)"
 
 
@@ -357,8 +356,7 @@ def noise_file(tmp_path_factory):
 def test_noise_samples_are_tagged_in_the_event_list(qt_app, noise_file):
     events, path = noise_file
     panel = _review(path, GROUP_EVENTS)
-    labels = [panel.pulse_tree.topLevelItem(k).text(0)
-              for k in range(len(events))]
+    labels = [row.text(0) for row in pulse_rows(panel)[:len(events)]]
     assert all(text.startswith("◇ Noise sample #") for text in labels)
     # Every channel under each, and the pulse that fell inside one.
     tree = _tree(panel)
@@ -374,8 +372,7 @@ def test_a_noise_sample_shows_the_time_it_was_taken_at(qt_app, noise_file):
     panel = _review(path, GROUP_EVENTS)
     panel._events[0]["trigger_utc"] = "2026-09-02T16:00:01.250000Z"
     panel._rebuild_tree()
-    rows = [panel.pulse_tree.topLevelItem(k)
-            for k in range(panel.pulse_tree.topLevelItemCount())]
+    rows = pulse_rows(panel)
     row = next(r for r in rows if r.data(0, ROLE) == ("event", 1))
     assert row.text(1) == "16:00:01.250000"
     panel._show_event(1)

@@ -109,7 +109,14 @@ def yaml_hook(hwm):
 
         # Create a socket to be shared with the server process.
         s = socket.socket(family=socket.AF_INET, type=socket.SOCK_STREAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # A restarted mock takes the port back while old connections
+        # drain, but never while another server listens on it.  POSIX
+        # SO_REUSEADDR is exactly that; Windows' lets a second socket
+        # share a port in use, and SO_EXCLUSIVEADDRUSE is its refusal.
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        else:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("localhost", MOCK_PORT))
         except OSError:                     # another mock has it

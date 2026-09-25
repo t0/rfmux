@@ -289,6 +289,51 @@ def test_a_tod_file_reviews_with_its_tuning_and_no_pulses(qt_app, tmp_path,
                       f"bias_channel = {CHANNEL}"]
 
 
+def test_a_tod_channel_opens_a_viewer_that_draws_a_few_hundred_points(
+        qt_app, tmp_path, panel):
+    """The review tree lists the file's time-ordered data per channel;
+    double-clicking one opens a viewer whose curves never hold more
+    than two points per bin, the fast stream drawn under the slow, and
+    whose narrow views are the samples themselves."""
+    from rfmux.algorithms.measurement.tod import VIEW_BINS, write_tod
+    from test.pulse_capture.test_overlay import (
+        CHANNEL, _dirfile, _recording_file)
+    path = write_tod(tmp_path / "tod.h5", [CHANNEL], 1,
+                     fastrx=_recording_file(tmp_path),
+                     dirfile=_dirfile(tmp_path), trigger_basis="iq")
+    panel.load_from_hdf5(path)
+    tree = panel.pulse_tree
+    tod = next(tree.topLevelItem(i) for i in range(tree.topLevelItemCount())
+               if "Time-ordered data" in tree.topLevelItem(i).text(0))
+    assert tod.text(0) == "≋ Time-ordered data (slow, fast)"
+    assert tod.childCount() == 1
+    from rfmux.tools.periscope.tod_viewer import TodViewer
+    panel._on_tree_double_click(tod.child(0), 0)
+    viewer = panel.findChildren(TodViewer)[-1]
+    try:
+        fast, slow = viewer.curves["fast"], viewer.curves["slow"]
+        items = viewer.plots[0].getPlotItem().listDataItems()
+        assert items.index(fast[0]) < items.index(slow[0])
+        assert fast[0].zValue() < slow[0].zValue()
+        for curve in fast + slow:
+            assert 0 < len(curve.getData()[0]) <= 2 * VIEW_BINS
+        assert "fast: 2,500 samples, 500 bins from the samples" in viewer.info.text()
+
+        # A millisecond is 50 fast samples (20 us apart): drawn as they are.
+        viewer.plots[0].setXRange(0.010, 0.011, padding=0)
+        viewer._refresh()
+        x, _ = fast[0].getData()
+        assert "each drawn" in viewer.info.text().split(";")[0]
+        assert 49 <= len(x) <= 51
+        viewer.stream_checks["slow"].setChecked(False)
+        assert all(c.getData()[0] is None or len(c.getData()[0]) == 0
+                   for c in slow)
+        assert "slow" not in viewer.info.text()
+    finally:
+        viewer.close()
+    assert viewer.f is None
+
+
 def test_idle_axes_name_the_default_view(qt_app, panel):
     """Before any data, every tab names the units the selector shows."""
     assert panel.units_combo.currentText() == m.UNITS_VOLTS

@@ -602,6 +602,9 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   review names the file's time-ordered data in its status line, its
   Metadata item lists every attribute of the file and each channel's
   calibration scalars, and a TOD file of its own opens with those; the
+  Time-ordered data item draws a channel over the run from at most 500
+  min/max bins, filling in as you zoom until the samples show, fast and
+  slow either or both (`tod_window` reads the same headlessly); the
   command says before the run when no bias export supplies the tuning;
   `--trigger-basis` sets the units of both files; the dialog's Data
   products group holds the two choices with their costs and a Units

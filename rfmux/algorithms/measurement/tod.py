@@ -22,13 +22,19 @@ groups as :mod:`.hdf5` writes them)::
     tod/fast/pipe_snapshot     bit p set when channels p*128+1 to
                                (p+1)*128 were sent (else zero-filled)
     tod/fast/channel_<n>/I, Q, tuning/, stored_units
+    tod/<stream>/channel_<n>/overview    (bins, 4): I min, I max, Q min,
+                               Q max per overview_samples samples
+    tod/<stream>/time_overview (bins, 2): each bin's first and last
+                               finite stamp
+    tod/<stream>               attribute overview_samples (4096)
 
 A run across modules nests ``module_<m>/`` under each stream, each
-module with its own ``time`` (and ``seq``, ``pipe_snapshot``), since
-the recording interleaves the modules' records.  Samples are float32:
-the wire carries at most 24 bits.  :func:`merge_tod` copies ``tod/``
-into the run's pulse file so one file holds the pulses and the streams
-they were cut from.
+module with its own ``time`` (and ``seq``, ``pipe_snapshot``,
+``time_overview``), since the recording interleaves the modules'
+records.  Samples are float32: the wire carries at most 24 bits.
+:func:`merge_tod` copies ``tod/`` into the run's pulse file so one file
+holds the pulses and the streams they were cut from; :func:`tod_window`
+reads a time window of one channel fit to draw.
 """
 
 from __future__ import annotations
@@ -54,6 +60,12 @@ from ...pulse_capture.overlay import _PROBE, Recording, dirfile_stage
 
 #: Records converted and written at a time.
 BLOCK = 1 << 16
+#: Samples per overview bin: each channel's min and max of I and Q per
+#: this many samples, so a view of the whole run reads kilobytes.
+OVERVIEW = 4096
+#: Bins a view is reduced to; below twice this many samples a view is
+#: the samples themselves.
+VIEW_BINS = 500
 #: Chunk of a slow-stream dataset: a run's slow stream is short next to
 #: its channel stream, and a chunk is allocated whole.
 SLOW_CHUNK = 4096
@@ -75,7 +87,7 @@ def tod_bytes_per_s(fast_channels: int) -> float:
 def write_tod(out, channels: Iterable[ChannelKey], module: Optional[int] = None,
               *, fastrx=None, dirfile=None, tuning: Optional[Dict] = None,
               trigger_basis: str = "df", time_origin_epoch: Optional[float] = None,
-              block: int = BLOCK) -> Path:
+              block: int = BLOCK, overview: int = OVERVIEW) -> Path:
     """Write *out*: the time-ordered data of *channels* (numbers on
     *module*, or (module, channel) pairs) from a fastrx recording
     and/or a parser dirfile (one board's subdirfile).  Each channel is
@@ -127,11 +139,15 @@ def write_tod(out, channels: Iterable[ChannelKey], module: Optional[int] = None,
                 f["metadata"].attrs["time_origin_epoch"] = float(time_origin_epoch)
                 f["metadata"].attrs["time_origin_utc"] = epoch_to_utc(time_origin_epoch)
             if df is not None:
-                _write_slow(f.create_group("tod/slow"), df, keys, module,
-                            factors, units, tuning, block)
+                sgrp = f.create_group("tod/slow")
+                sgrp.attrs["overview_samples"] = overview
+                _write_slow(sgrp, df, keys, module, factors, units, tuning,
+                            block, overview)
             if rec is not None:
-                _write_fast(f.create_group("tod/fast"), rec, keys, module,
-                            factors, units, tuning, block)
+                sgrp = f.create_group("tod/fast")
+                sgrp.attrs["overview_samples"] = overview
+                _write_fast(sgrp, rec, keys, module, factors, units, tuning,
+                            block, overview)
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -180,7 +196,59 @@ def _append(ds, values: np.ndarray) -> None:
     ds[n:] = values
 
 
-def _write_slow(sgrp, df, keys, module, factors, units, tuning, block) -> None:
+class _Overview:
+    """Each channel's min and max of I and Q per *size* samples
+    (``overview``, rows of I min, I max, Q min, Q max), and the first
+    and last finite stamp of each bin (``time_overview`` beside the
+    ``time`` they summarise), appended as blocks arrive.  A bin that a
+    block leaves partial is completed by the next; the last bin of the
+    stream may be short."""
+
+    def __init__(self, time_grp, channel_grps, size: int):
+        self.size = size
+        self.t_ds = time_grp.create_dataset(
+            "time_overview", (0, 2), maxshape=(None, 2), dtype=np.float64,
+            chunks=(1024, 2))
+        self.ds = [g.create_dataset("overview", (0, 4), maxshape=(None, 4),
+                                    dtype=np.float32, chunks=(1024, 4))
+                   for g in channel_grps]
+        self.t_tail = np.empty(0)
+        self.z_tail = np.empty((0, len(channel_grps)), np.complex64)
+
+    def feed(self, t: np.ndarray, z: np.ndarray) -> None:
+        """*t* (records,) and *z* (records, channels) complex."""
+        if len(self.t_tail):
+            head = self.size - len(self.t_tail)
+            self.t_tail = np.concatenate([self.t_tail, t[:head]])
+            self.z_tail = np.concatenate([self.z_tail, z[:head]])
+            t, z = t[head:], z[head:]
+            if len(self.t_tail) < self.size:
+                return
+            self._emit(self.t_tail, self.z_tail, self.size)
+            self.t_tail, self.z_tail = self.t_tail[:0], self.z_tail[:0]
+        m = len(t) // self.size * self.size
+        if m:
+            self._emit(t[:m], z[:m], self.size)
+        self.t_tail, self.z_tail = t[m:].copy(), z[m:].copy()
+
+    def finish(self) -> None:
+        if len(self.t_tail):
+            self._emit(self.t_tail, self.z_tail, len(self.t_tail))
+
+    def _emit(self, t, z, size: int) -> None:
+        k = len(t) // size
+        r = z.reshape(k, size, z.shape[1])
+        rows = np.stack([r.real.min(1), r.real.max(1),
+                         r.imag.min(1), r.imag.max(1)], axis=2)
+        for j, ds in enumerate(self.ds):
+            _append(ds, rows[:, j, :])
+        tt = t.reshape(k, size)
+        _append(self.t_ds, np.stack([np.fmin.reduce(tt, axis=1),
+                                     np.fmax.reduce(tt, axis=1)], axis=1))
+
+
+def _write_slow(sgrp, df, keys, module, factors, units, tuning, block,
+                overview) -> None:
     import pygetdata as gd
 
     for m, members in keys_by_module(keys, module).items():
@@ -193,6 +261,7 @@ def _write_slow(sgrp, df, keys, module, factors, units, tuning, block) -> None:
         iq_ds = {k: (_appendable(groups[k], "I", np.float32, chunk),
                      _appendable(groups[k], "Q", np.float32, chunk))
                  for _, k in members}
+        ov = _Overview(mgrp, [groups[k] for _, k in members], overview)
         nframes = df.nframes
         for a in range(0, nframes, block):
             n = min(block, nframes - a)
@@ -212,10 +281,12 @@ def _write_slow(sgrp, df, keys, module, factors, units, tuning, block) -> None:
             for k, z in zs.items():
                 _append(iq_ds[k][0], z.real[:n])
                 _append(iq_ds[k][1], z.imag[:n])
+            ov.feed(tb[:n], np.stack([z[:n] for z in zs.values()], axis=1))
+        ov.finish()
 
 
 def _write_fast(sgrp, rec: Recording, keys, module, factors, units, tuning,
-                block) -> None:
+                block, overview) -> None:
     headers = rec.file.headers()
     iq_all = rec.file.iq()
     lsb = np.complex64(rec.counts_per_lsb)
@@ -234,13 +305,15 @@ def _write_fast(sgrp, rec: Recording, keys, module, factors, units, tuning,
         columns = np.array([n - 1 for n, _ in members])
         scale = np.array([lsb * np.complex64(factors[k]) for _, k in members],
                          dtype=np.complex64)
+        ov = _Overview(mgrp, [groups[k] for _, k in members], overview)
         for a in range(0, rec.num_packets, block):
             b = min(a + block, rec.num_packets)
             hdr = headers[a:b]
             keep = np.flatnonzero(hdr["module"] == m - 1)
             if not keep.size:
                 continue
-            _append(time_ds, rec.seconds(a, b)[keep])
+            t = rec.seconds(a, b)[keep]
+            _append(time_ds, t)
             _append(seq_ds, hdr["seq"][keep])
             _append(snap_ds, hdr["pipe_snapshot"][keep])
             # The block's wanted channels converted in one pass:
@@ -250,6 +323,8 @@ def _write_fast(sgrp, rec: Recording, keys, module, factors, units, tuning,
             for j, (i_ds, q_ds) in enumerate(iq_ds):
                 _append(i_ds, np.ascontiguousarray(z.real[:, j]))
                 _append(q_ds, np.ascontiguousarray(z.imag[:, j]))
+            ov.feed(t, z)
+        ov.finish()
 
 
 def _check_same_units(pulse: h5py.File, tod: h5py.File, pulse_path,
@@ -306,3 +381,119 @@ def merge_tod(pulse_path, tod_path, out=None) -> Path:
         tmp.unlink(missing_ok=True)
         raise
     return out
+
+
+# ── Viewing ────────────────────────────────────────────────────────
+
+def _groups(f: h5py.File, stream: str, key: ChannelKey):
+    """(stream group, the group holding *key*'s ``time``, *key*'s
+    channel group) in the time-ordered data of an open file."""
+    sgrp = f[f"tod/{stream}"]
+    tgrp = sgrp[f"module_{key[0]}"] if isinstance(key, tuple) else sgrp
+    return sgrp, tgrp, sgrp[channel_group(key)]
+
+
+def _backfill(t: np.ndarray, after: float = np.inf) -> np.ndarray:
+    """*t* with each NaN replaced by the next finite value, *after* past
+    the last one: a stamp axis with undisciplined stretches, searchable
+    as a sorted one."""
+    bad = ~np.isfinite(t)
+    if not bad.any():
+        return t
+    n = len(t)
+    nxt = np.where(bad, n, np.arange(n))
+    nxt = np.minimum.accumulate(nxt[::-1])[::-1]
+    return np.append(t, after)[nxt]
+
+
+def index_at(f: h5py.File, stream: str, key: ChannelKey, t: float,
+             side: str = "left") -> int:
+    """Index of the first sample of *key*'s stream stamped at or after
+    *t* (``"left"``) or after it (``"right"``).  The bin comes from the
+    time overview, then the sample from that bin's stamps: two small
+    reads however long the run, and a stretch of undisciplined (NaN)
+    stamps of any length is placed with the next finite stamp."""
+    sgrp, tgrp, _ = _groups(f, stream, key)
+    t_ds = tgrp["time"]
+    n = t_ds.shape[0]
+    size = int(sgrp.attrs.get("overview_samples", 0))
+    if "time_overview" in tgrp and size:
+        # Each bin's first stamp, a NaN bin taking the next bin's: the
+        # stamp its first sample is placed with.  The sample sought
+        # then lies in the bin before the first at or after t.
+        # ponytail: the column is read whole per lookup, 8 bytes per
+        # 4096 samples (100 kB for 20 s); bisect it on disk if hour-long
+        # runs make refreshes slow.
+        first = _backfill(tgrp["time_overview"][:, 0])
+    else:
+        size, first = max(n, 1), np.empty(0)
+    k = int(np.searchsorted(first, t, side=side))
+    if k == 0 and len(first):
+        return 0
+    a = max(k - 1, 0) * size
+    seg = _backfill(t_ds[a:min(a + size, n)],
+                    first[k] if k < len(first) else np.inf)
+    return a + int(np.searchsorted(seg, t, side=side))
+
+
+def tod_extent(f: h5py.File, stream: str, key: ChannelKey):
+    """(first, last) finite stamp of *key*'s stream, from its time
+    overview; (NaN, NaN) for an empty stream."""
+    _, tgrp, _ = _groups(f, stream, key)
+    if "time_overview" in tgrp:
+        ov = tgrp["time_overview"][()]
+        first, last = ov[:, 0], ov[:, 1]
+    else:                                  # a file written without one
+        first = last = tgrp["time"][()]
+    first, last = first[np.isfinite(first)], last[np.isfinite(last)]
+    return ((float(first[0]), float(last[-1])) if first.size
+            else (np.nan, np.nan))
+
+
+def _reduce(t_first, t_last, i_min, i_max, q_min, q_max, bins: int):
+    """Groups of consecutive bins merged into at most *bins*."""
+    n = len(t_first)
+    starts = np.arange(0, n, max(1, -(-n // bins)))
+    return {"t_first": np.fmin.reduceat(t_first, starts),
+            "t_last": np.fmax.reduceat(t_last, starts),
+            "i_min": np.minimum.reduceat(i_min, starts),
+            "i_max": np.maximum.reduceat(i_max, starts),
+            "q_min": np.minimum.reduceat(q_min, starts),
+            "q_max": np.maximum.reduceat(q_max, starts)}
+
+
+def tod_window(f: h5py.File, stream: str, key: ChannelKey, t0: float,
+               t1: float, bins: int = VIEW_BINS) -> dict:
+    """*key*'s samples of *stream* stamped in ``[t0, t1]``, fit to draw:
+
+    * ``kind="raw"``: ``time``, ``I``, ``Q``, the samples themselves,
+      when there are at most twice *bins* of them;
+    * ``kind="envelope"``: at most *bins* bins, each with ``t_first``
+      and ``t_last`` and the min and max of I and Q (``i_min`` ...), from
+      the overview when the window spans at least *bins* of its bins
+      (``source="overview"``), else from the samples
+      (``source="samples"``).
+
+    ``samples`` is how many samples the window holds.  Only the
+    window's slice of the file is read, and an overview read covers
+    the whole run in kilobytes."""
+    sgrp, tgrp, cgrp = _groups(f, stream, key)
+    t_ds = tgrp["time"]
+    a = index_at(f, stream, key, t0)
+    b = index_at(f, stream, key, t1, side="right")
+    n = b - a
+    if n <= 2 * bins:
+        return {"kind": "raw", "samples": n, "time": t_ds[a:b],
+                "I": cgrp["I"][a:b], "Q": cgrp["Q"][a:b]}
+    size = int(sgrp.attrs.get("overview_samples", 0))
+    if size and "overview" in cgrp and n >= size * bins:
+        ka, kb = a // size, -(-b // size)
+        ov = cgrp["overview"][ka:kb]
+        tov = tgrp["time_overview"][ka:kb]
+        view = _reduce(tov[:, 0], tov[:, 1], *ov.T, bins)
+        return {"kind": "envelope", "source": "overview", "samples": n,
+                **view}
+    t = t_ds[a:b]
+    i, q = cgrp["I"][a:b], cgrp["Q"][a:b]
+    view = _reduce(t, t, i, i, q, q, bins)
+    return {"kind": "envelope", "source": "samples", "samples": n, **view}

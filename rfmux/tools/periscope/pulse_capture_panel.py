@@ -2105,6 +2105,7 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
             for stream in (("slow", "fast") if self._both_mode else (None,)):
                 self._add_noise_rows(stream)
         self._add_tuning_items()
+        self._add_tod_items()
         meta = QtWidgets.QTreeWidgetItem(["▦ Metadata", "", ""])
         for text in self._metadata_lines():
             meta.addChild(QtWidgets.QTreeWidgetItem([text, "", ""]))
@@ -3072,6 +3073,31 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         return {m: {c: rows[key] for c, key in pairs}
                 for m, pairs in keys_by_module(rows, module).items()}
 
+    def _add_tod_items(self) -> None:
+        """The file's time-ordered data, one child per channel it holds:
+        double-click draws that channel over the run."""
+        if self.reader is None or not self.reader.tod_streams:
+            return
+        info = self.reader.tod_info()
+        item = QtWidgets.QTreeWidgetItem(
+            [f"≋ Time-ordered data ({', '.join(info)})", "", ""])
+        held = {c for s in info.values() for c in s["channels"]}
+        for c in self.reader.channels:
+            if c not in held:
+                continue
+            child = QtWidgets.QTreeWidgetItem([title_label(c), "", ""])
+            child.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("tod", c))
+            child.setToolTip(0, "Double-click: this channel over the run")
+            item.addChild(child)
+        self.pulse_tree.addTopLevelItem(item)
+
+    def _open_tod_viewer(self, key) -> "TodViewer":
+        from .tod_viewer import TodViewer
+        viewer = TodViewer(self.reader.path, key, self,
+                           dark_mode=self.dark_mode)
+        viewer.show()
+        return viewer
+
     def _add_tuning_items(self) -> None:
         """One tree item per module whose channels carry their tuning:
         double-click browses the sweeps as a multisweep window."""
@@ -3134,6 +3160,9 @@ class PulseCapturePanel(QtWidgets.QWidget, ScreenshotMixin):
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if data and data[0] == "tuning":
             self._open_tuning_window(data[1])
+            return
+        if data and data[0] == "tod":
+            self._open_tod_viewer(data[1])
             return
         if data and data[0] == "noise":
             self.follow_check.setChecked(False)

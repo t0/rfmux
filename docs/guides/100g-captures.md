@@ -100,7 +100,7 @@ The **Run** tab:
 - **Merge the recording into the pulse file after the run.**
 - **Data products**: **TODs as HDF5 with metadata** repacks the dirfile
   and the recording after the run (section 4); it converts at about a
-  fifth of real time, so a 20 s recording takes about 100 s. **Merge
+  fifth of real time, so a 20 s recording takes about 110 s. **Merge
   pulse and TOD HDF5s** copies that file into the pulse file, which then
   grows by the whole TOD (the size for this run is shown) where the pulse
   record alone is a few MB; it needs the pulse capture. Either works
@@ -236,6 +236,17 @@ holds beside its pulses, per stream. The tree's Metadata item lists every
 attribute of the file and, per channel, the scalars of its tuning row, the
 df calibration first; the Tuning item browses the sweeps. A time-ordered
 data file of its own opens the same way, with those and no pulses.
+
+The **Time-ordered data** item lists each channel the file's streams
+hold. Double-click one to draw it over the run: I and Q (df and
+dissipation for a channel stored in hertz) on one time axis, the fast and
+slow streams either or both, the fast drawn under the slow. The plot is
+never more than 500 bins, each drawn as its minimum and maximum, so a
+spike of one sample in the whole run still shows. The whole run comes
+from the file's overview; zooming in reads only the window's slice, until
+at most 1000 samples are in view and each is drawn. On a 5 s, 8-channel
+file any view read in under 45 ms with the file's pages evicted. The wheel
+zooms time; the vertical axis follows what is in view; Whole run returns.
 
 The pulse list carries a **Tuning** item, one per module, for a capture
 taken after Bias KIDs. Double-click it to browse the sweeps the channels

@@ -454,10 +454,17 @@ tod/slow/channel_<n>/          I, Q, tuning/, stored_units
 tod/fast/time                  seconds of day, NaN for an undisciplined stamp
 tod/fast/seq, pipe_snapshot    the record's sequence number and sent pipes
 tod/fast/channel_<n>/          I, Q, tuning/, stored_units
+tod/<stream>/channel_<n>/overview  I min, I max, Q min, Q max per bin
+tod/<stream>/time_overview     each bin's first and last finite stamp
 ```
 
+A bin is `overview_samples` samples (4096, an attribute of the stream
+group), so the overview of a 20 s fast stream is about 12 000 rows.
 Across modules each stream nests `module_<m>/` with that module's `time`
-(and `seq`, `pipe_snapshot`) and channel groups.
+(and `seq`, `pipe_snapshot`, `time_overview`) and channel groups.
+`tod_window` in `rfmux.algorithms.measurement.tod` reads one channel over
+a time window as the viewer draws it: the samples, or at most 500 bins of
+their extremes, from the overview for a wide window.
 
 ## From a script
 

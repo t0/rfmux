@@ -219,7 +219,7 @@ class RecordDialog(QtWidgets.QDialog):
             "tuning row from the bias export, readable with h5py alone")
         self.tod_note = QtWidgets.QLabel(
             "Converts at about a fifth of real time after the run: a 20 s "
-            "recording takes about 100 s.")
+            "recording takes about 110 s.")
         self.tod_note.setWordWrap(True)
         self.merge_tod_check = QtWidgets.QCheckBox("Merge pulse and TOD HDF5s")
         self.merge_tod_check.setToolTip(

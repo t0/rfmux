@@ -1,11 +1,19 @@
 /* fastrxd: AF_XDP setup, packet ingest, and multi-client dispatch.
  *
- * Usage: sudo fastrxd [--frame-headroom=N] [--uid=UID] [--gid=GID] <ifname>
+ * Usage: sudo fastrxd -i <ifname> [--frame-headroom=N] [--uid=UID] [--gid=GID]
  *
- * Starts as root to perform privileged setup once: attaches the embedded XDP
- * filter, creates UMEM and an AF_XDP socket on queue 0, inserts the socket
- * into xsks_map[0], joins the channel-stream multicast group, and pre-fills
- * the FILL ring.  Then drops privileges irreversibly.
+ * Starts as root to perform privileged setup once: asks the kernel what the
+ * driver offers AF_XDP, attaches the embedded XDP filter, creates UMEM and a
+ * zero-copy AF_XDP socket on queue 0, inserts the socket into xsks_map[0],
+ * joins the channel-stream multicast group, and pre-fills the FILL ring.
+ * Then drops privileges irreversibly.
+ *
+ * Zero-copy is required, never assumed: without XDP_ZEROCOPY the kernel
+ * answers a driver that cannot do it by silently copying every packet into
+ * the UMEM from softirq context, which at stream rates pins a CPU in
+ * ksoftirqd and drops packets.  Drivers differ in whether a zero-copy packet
+ * may span several UMEM chunks (ice: 8, mlx5: 1); that is read from the
+ * kernel, and the MTU is checked against it, rather than special-cased.
  *
  * Clients receive the UMEM memfd (read-only) and a control memfd holding
  * per-client descriptor rings plus a shared frame refcount table (see
@@ -56,6 +64,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <format>
@@ -236,6 +245,70 @@ static void deepen_rx_ring(const std::string& ifname) {
 static_assert(FASTRXD_FRAME_SIZE == XSK_UMEM__DEFAULT_FRAME_SIZE,
 	"FASTRXD_FRAME_SIZE disagrees with XSK_UMEM__DEFAULT_FRAME_SIZE");
 
+/* UMEM frames one zero-copy packet may span on this NIC (ice: 8, mlx5: 1),
+ * as the kernel reports it.  Zero where it does not: a packet is then
+ * assumed able to span frames, which is what fastrxd has always asked for,
+ * and a driver that cannot refuses the bind rather than degrading quietly. */
+static uint32_t query_zc_max_segs(const std::string& ifname, int ifindex) {
+	LIBBPF_OPTS(bpf_xdp_query_opts, q);
+	int err = bpf_xdp_query(ifindex, 0, &q);
+	if (err)
+		warn("cannot ask the kernel what %s offers AF_XDP (%s); assuming a "
+			"packet may span UMEM frames", ifname.c_str(), std::strerror(-err));
+	else if (!q.xdp_zc_max_segs)
+		warn("this kernel does not report how many UMEM frames a zero-copy "
+			"packet may span; assuming more than one");
+	return err ? 0 : q.xdp_zc_max_segs;
+}
+
+/* Ethernet frame headers XDP hands us verbatim (validity checks belong at the
+ * BPF, not here). */
+constexpr size_t kNetHdrLen = sizeof(struct ethhdr)
+		+ sizeof(struct iphdr)
+		+ sizeof(struct udphdr);
+
+/* Space XDP reserves ahead of every packet in its chunk. */
+constexpr uint32_t kXdpHeadroom = 256; /* XDP_PACKET_HEADROOM */
+
+/* IP MTU the largest channel-stream packet needs: every pipeline present. */
+constexpr uint32_t kStreamMtu = (uint32_t)(kNetHdrLen - sizeof(struct ethhdr)
+		+ sizeof(fastrx_packet_header)
+		+ MAX_SAMPLES_PER_PACKET * 2 * sizeof(int16_t));
+
+/* Pipelines a packet may carry and still pass an interface with this MTU. */
+static uint32_t pipelines_within_mtu(uint32_t mtu) {
+	constexpr uint32_t fixed = (uint32_t)(kNetHdrLen - sizeof(struct ethhdr)
+			+ sizeof(fastrx_packet_header));
+	constexpr uint32_t block = SAMPLES_PER_PIPELINE * 2 * sizeof(int16_t);
+	return mtu < fixed ? 0 : (mtu - fixed) / block;
+}
+
+/* The largest MTU at which the kernel lets a driver that receives one chunk
+ * per packet bind zero-copy.  Mirrors xp_assign_dev(): a chunk offers its
+ * size less XDP_PACKET_HEADROOM and our headroom, rounded down to 128, and
+ * the MTU plus Ethernet, two VLAN tags and FCS (26 bytes) must fit.
+ *
+ * The chunk cannot be enlarged past this: xdp_umem_reg() refuses one bigger
+ * than a page, so on x86-64 no zero-copy buffer exceeds 4096 bytes and any
+ * driver without multi-buffer support is capped here. */
+static uint32_t single_chunk_mtu_limit(uint32_t frame_headroom) {
+	uint32_t frame = (FASTRXD_FRAME_SIZE - kXdpHeadroom - frame_headroom) & ~127u;
+	return frame - 26;
+}
+
+static int if_mtu(const std::string& ifname) {
+	int s = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (s < 0)
+		return -1;
+	struct ifreq ifr = {};
+	std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+	int r = ioctl(s, SIOCGIFMTU, &ifr);
+	int saved = errno;
+	close(s);
+	errno = saved;
+	return r < 0 ? -1 : ifr.ifr_mtu;
+}
+
 constexpr uint32_t kQueueId = 0;
 
 /* RX descriptors taken per ingest pass.  Client heads and the FILL ring are
@@ -247,13 +320,6 @@ constexpr uint32_t kRxBatch = 256;
  * header this many descriptors ahead hides that miss behind the packets in
  * between. */
 constexpr uint32_t kPrefetchAhead = 8;
-
-/* XDP passes Ethernet frames verbatim, so we need to know about their headers
- * (or at least the space they take up! Validity checks belong at the BPF, not
- * here.) */
-constexpr size_t kNetHdrLen = sizeof(struct ethhdr)
-		+ sizeof(struct iphdr)
-		+ sizeof(struct udphdr);
 
 class Session {
 public:
@@ -267,19 +333,23 @@ public:
 	int igmp_fd = -1; /* holds multicast membership, programs NIC MAC filter */
 	int ifindex = 0;
 
-	xsk_ring_prod fill;
-	xsk_ring_cons comp;
-	xsk_ring_cons rx;
-	xsk_ring_prod tx;
+	/* Zeroed: libxdp fills in the mapping and cached_cons of the FILL ring
+	 * but leaves cached_prod alone, and a stale value there makes the first
+	 * reserve fail and the pre-fill silently hand the NIC nothing. */
+	xsk_ring_prod fill{};
+	xsk_ring_cons comp{};
+	xsk_ring_cons rx{};
+	xsk_ring_prod tx{};
 
 	/* Shared control region. */
  	fastrxd_ctl* ctl = nullptr;
 
 	/* Acquires everything: attaches XDP, creates the UMEM and AF_XDP socket,
 	 * maps the control region, joins the multicast group, pre-fills the FILL
-	 * ring.  Throws std::runtime_error on any failure, so a partly-built Session
-	 * is destroyed rather than leaked. */
-	Session(const std::string& ifname, uint32_t frame_headroom);
+	 * ring.  multi_buffer says whether a packet may span UMEM chunks on this
+	 * NIC.  Throws std::runtime_error on any failure, so a partly-built
+	 * Session is destroyed rather than leaked. */
+	Session(const std::string& ifname, uint32_t frame_headroom, bool multi_buffer);
 
 	/* Releases the XDP program, which is attached to the netdev.
 	 * Everything else (memfds, mappings, sockets, UMEM) is reclaimed by
@@ -379,7 +449,7 @@ public:
 };
 
 /* Create and map the shared control region. */
-Session::Session(const std::string& ifname, uint32_t frame_headroom) {
+Session::Session(const std::string& ifname, uint32_t frame_headroom, bool multi_buffer) {
 	int err;
 
 	/* signedness for ifindex is oddly inconsistent */
@@ -425,24 +495,25 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom) {
 			PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0)))
 		fail("mmap umem: {}", std::strerror(errno));
 
-	/* frame_headroom positions the sample payload within the UMEM frame.
+	/* frame_headroom positions the sample payload within the UMEM frame:
 	 * d->addr in the rx path points to frame_base + XDP_PACKET_HEADROOM(256) +
-	 * frame_headroom, so for the sample fragment to be 512-byte aligned:
-	 * (256 + frame_headroom + net_hdr + pkt_hdr) % 512 == 0
-	 * (256 + frame_headroom + 128) % 512 == 0
-	 * frame_headroom = 128
-	 * The value is overridable via --frame-headroom */
-	if (frame_headroom >= FASTRXD_FRAME_SIZE - 256u)
+	 * frame_headroom. */
+	if (frame_headroom >= FASTRXD_FRAME_SIZE - kXdpHeadroom)
 		fail("frame_headroom={} exceeds kernel limit ({})",
-			frame_headroom, FASTRXD_FRAME_SIZE - 256u - 1);
+			frame_headroom, FASTRXD_FRAME_SIZE - kXdpHeadroom - 1);
 
-	/* Refuse a headroom that would split a pipeline block across frames.
-	 * Clients index each pipeline's samples at a single offset, so a block must
-	 * lie wholly within one frame. */
+	/* Where a packet may span frames, refuse a headroom that would split a
+	 * pipeline block across two of them: clients index each pipeline's
+	 * samples at a single offset, so a block must lie wholly within one
+	 * frame.  512-byte alignment of the payload guarantees that:
+	 * (256 + frame_headroom + net_hdr(42) + pkt_hdr(86)) % 512 == 0, i.e.
+	 * frame_headroom = 128.  A NIC that delivers one frame per packet
+	 * cannot split anything, and every byte of headroom there is a byte
+	 * less of packet. */
 	constexpr size_t kBlockBytes = SAMPLES_PER_PIPELINE * 2 * sizeof(int16_t);
-	size_t payload_at = 256u + frame_headroom + kNetHdrLen +
+	size_t payload_at = kXdpHeadroom + frame_headroom + kNetHdrLen +
 			sizeof(fastrx_packet_header);
-	if (payload_at % kBlockBytes)
+	if (multi_buffer && payload_at % kBlockBytes)
 		fail("frame_headroom={} puts the payload at frame offset {}, which is not "
 			"a multiple of the {}-byte pipeline block: a block would straddle "
 			"a frame boundary and be unreadable.  Try {}.",
@@ -471,26 +542,56 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom) {
 		*xsk_ring_prod__fill_addr(&fill, idx + i) = (uint64_t)i * FASTRXD_FRAME_SIZE;
 	xsk_ring_prod__submit(&fill, reserved);
 
+	/* Fatal, not a warning: whatever the ring did not take, the NIC never
+	 * gets, and with nothing at all it receives nothing while its poller
+	 * spins on an empty ring. */
 	if (reserved < FASTRXD_NUM_FRAMES)
-		warn("FILL ring took only %u of %u frames.\n",
-				reserved, FASTRXD_NUM_FRAMES);
+		fail("FILL ring took only {} of {} frames", reserved, FASTRXD_NUM_FRAMES);
 	else if (verbose)
 		std::fprintf(stderr, "fastrxd: pre-filled all %u FILL ring entries "
 			"(%.0f MiB reachable)\n", reserved,
 			(double)FASTRXD_UMEM_SIZE / (1 << 20));
 
-	/* XDP_USE_SG is required, since packets may span multiple UMEM frames. */
+	/* XDP_ZEROCOPY: refuse rather than let the kernel fall back to copying
+	 * (see the file comment).  XDP_USE_SG lets a packet span UMEM frames,
+	 * and is only accepted zero-copy by a driver that can do that. */
 	xsk_socket_config xsk_cfg = {
 		.rx_size = FASTRXD_NUM_FRAMES,
 		.tx_size = 0,
 		.libxdp_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD,
 		.xdp_flags = 0,
-		.bind_flags = XDP_USE_SG,
+		.bind_flags = (uint16_t)(XDP_ZEROCOPY | (multi_buffer ? XDP_USE_SG : 0)),
 	};
-	if ((err = xsk_socket__create(&xsk, ifname.c_str(), kQueueId, umem, &rx, &tx, &xsk_cfg)))
+	if ((err = xsk_socket__create(&xsk, ifname.c_str(), kQueueId, umem, &rx, &tx, &xsk_cfg))) {
+		if (-err == EOPNOTSUPP)
+			fail("xsk_socket__create({}): {}\n"
+				"the driver refused a zero-copy AF_XDP socket{}.  fastrxd does "
+				"not run in copy mode: copying every packet out of softirq "
+				"context drops them at stream rates.",
+				ifname.c_str(), std::strerror(-err),
+				multi_buffer ? " for packets spanning several UMEM frames" : "");
+		if (-err == EINVAL)
+			fail("xsk_socket__create({}): {}\n"
+				"the interface MTU ({}) may be larger than a zero-copy frame on "
+				"this NIC can hold (at most {} with frame_headroom={})",
+				ifname.c_str(), std::strerror(-err), if_mtu(ifname),
+				single_chunk_mtu_limit(frame_headroom), frame_headroom);
 		fail("xsk_socket__create({}): {}", ifname.c_str(), std::strerror(-err));
+	}
 
 	xsk_fd = xsk_socket__fd(xsk);
+
+	/* Belt and braces: the flag above makes copy mode a bind error, so this
+	 * can only fire on a kernel that ignores it. */
+	struct xdp_options xo = {};
+	socklen_t xo_len = sizeof(xo);
+	if (getsockopt(xsk_fd, SOL_XDP, XDP_OPTIONS, &xo, &xo_len) == 0 &&
+			!(xo.flags & XDP_OPTIONS_ZEROCOPY))
+		fail("kernel bound the AF_XDP socket in copy mode despite XDP_ZEROCOPY");
+	if (verbose)
+		std::fprintf(stderr, "fastrxd: zero-copy AF_XDP socket on %s queue %u, "
+			"%s\n", ifname.c_str(), kQueueId,
+			multi_buffer ? "packets may span frames" : "one frame per packet");
 
 	bpf_object* obj = xdp_program__bpf_obj(prog);
 	bpf_map* xsks_map = bpf_object__find_map_by_name(obj, "xsks_map");
@@ -1110,7 +1211,8 @@ static int listen_socket(const char* path, uid_t uid, gid_t gid) {
 static void usage(FILE* out, const char* argv0) {
 	std::fprintf(out, "usage: sudo %s -i <ifname> [options]\n", argv0);
 	std::fprintf(out, " -i, --interface=IFNAME interface to capture from (required)\n");
-	std::fprintf(out, " -r, --frame-headroom=N UMEM headroom bytes\n");
+	std::fprintf(out, " -r, --frame-headroom=N UMEM headroom bytes (default: 128 where a\n"
+	                  "                        packet may span frames, else 0)\n");
 	std::fprintf(out, " -u, --uid=UID drop privileges to UID (default: $SUDO_UID)\n");
 	std::fprintf(out, " -g, --gid=GID drop privileges to GID (default: $SUDO_GID)\n");
 	std::fprintf(out, " -s, --socket-path=PATH listen path (default: "
@@ -1120,11 +1222,10 @@ static void usage(FILE* out, const char* argv0) {
 }
 
 int main(int argc, char** argv) {
-	/* Default frame_headroom:
-	 * (XDP_PACKET_HEADROOM=256) + frame_headroom + net_hdr(42) +
-	 * pkt_hdr(86) = 128 bytes total. For 512-byte alignment of each
-	 * pipeline block: (256 + 128 + 128) % 512 = 0 */
-	uint32_t frame_headroom = 128;
+	/* Chosen from the NIC's capabilities below unless -r says otherwise (see
+	 * the Session constructor for the arithmetic). */
+	uint32_t frame_headroom = 0;
+	bool frame_headroom_set = false;
 
 	uint32_t uid = 0;
 	uint32_t gid = 0;
@@ -1157,6 +1258,7 @@ int main(int argc, char** argv) {
 				return 1;
 			}
 			frame_headroom = (uint32_t)v;
+			frame_headroom_set = true;
 			break;
 		}
 		case 'u':
@@ -1238,12 +1340,60 @@ int main(int argc, char** argv) {
 		return 1;
 	deepen_rx_ring(ifname);
 
+	int ifindex = (int)if_nametoindex(ifname);
+	if (!ifindex)
+		die("unknown interface %s", ifname);
+
+	uint32_t zc_max_segs = query_zc_max_segs(ifname, ifindex);
+	bool multi_buffer = zc_max_segs != 1;
+	if (!frame_headroom_set)
+		frame_headroom = multi_buffer ? 128 : 0;
+	if (verbose)
+		std::fprintf(stderr, "fastrxd: %s: a zero-copy packet may span %s UMEM "
+			"frames; frame_headroom=%u\n", ifname,
+			zc_max_segs ? std::format("{}", zc_max_segs).c_str() : "unreported",
+			frame_headroom);
+
+	/* The MTU decides which packets the NIC admits at all, and on a NIC that
+	 * receives one frame per packet, whether zero-copy can bind. */
+	int mtu = if_mtu(ifname);
+	if (mtu < 0)
+		warn("cannot read the MTU of %s: %s", ifname, std::strerror(errno));
+	else {
+		if (!multi_buffer) {
+			uint32_t limit = single_chunk_mtu_limit(frame_headroom);
+			if ((uint32_t)mtu > limit)
+				die("%s: MTU %d needs more than one zero-copy buffer, and this "
+					"driver cannot spread a packet across several.  A buffer "
+					"cannot exceed a page (%u bytes), so the MTU here can be at "
+					"most %u (frame_headroom=%u); the NIC's own maximum does not "
+					"enter into it.\n"
+					"fastrxd: run:  sudo ip link set dev %s mtu %u",
+					ifname, mtu, FASTRXD_FRAME_SIZE, limit, frame_headroom,
+					ifname, limit);
+		}
+		if ((uint32_t)mtu < kStreamMtu) {
+			uint32_t want = kStreamMtu;
+			if (!multi_buffer)
+				want = std::min(want, single_chunk_mtu_limit(frame_headroom));
+			warn("%s: MTU %d admits packets of at most %u of %d pipelines; the "
+				"NIC discards larger ones", ifname, mtu,
+				pipelines_within_mtu((uint32_t)mtu), NUM_PIPELINES);
+			if (want > (uint32_t)mtu)
+				warn("run:  sudo ip link set dev %s mtu %u%s", ifname, want,
+					want < kStreamMtu
+						? std::format(" ({} pipelines: the most this NIC receives "
+							"zero-copy)", pipelines_within_mtu(want)).c_str()
+						: "");
+		}
+	}
+
 	/* Ownership splits at the fork below: the parent destroys the Session (which
 	 * detaches the XDP program), the child releases it without destroying, since
 	 * it lacks the privilege to detach and must not try. */
 	std::unique_ptr<Session> sess;
 	try {
-		sess = std::make_unique<Session>(ifname, frame_headroom);
+		sess = std::make_unique<Session>(ifname, frame_headroom, multi_buffer);
 	} catch (const std::exception& e) {
 		std::fprintf(stderr, "fastrxd: %s\n", e.what());
 		return 1;

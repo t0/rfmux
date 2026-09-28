@@ -407,22 +407,20 @@ file does not depend on the catalog class’s import path. Rebuild it with
 `from_dict()` after loading.
 
 `crs.apply_bias()` saves the successfully applied catalog as a dictionary through
-the same store used by measurement routines. Its `save=None` default follows the
-autosave setting; `save=True` forces a write and `save=False` applies the tones
-without writing. `label` is appended to the generated filename.
+the same store used by measurement routines, and returns the file's path as a
+string. Its `save=None` default follows the autosave setting; `save=True` forces
+a write and `save=False` applies the tones without writing, returning None.
+`label` is appended to the generated filename.
 
-Use the same session folder as the measurement routines. Files remain there
-after the notebook finishes.
+The file goes in the same session folder as the measurement routines, and
+remains there after the notebook finishes.
 
 ```python
 output_dir = store.session_directory()
 print(f"saving files to: {output_dir}")
 
-catalog_files_before = set(output_dir.glob("catalog_*.pkl"))
-await crs.apply_bias(by_hand_catalog, save=True, label="by_hand")
-catalog_pkl_path, = set(output_dir.glob("catalog_*.pkl")) - catalog_files_before
-print(f"wrote {catalog_pkl_path.name} "
-      f"({catalog_pkl_path.stat().st_size} bytes)")
+catalog_pkl_path = await crs.apply_bias(by_hand_catalog, save=True, label="by_hand")
+print(f"wrote {catalog_pkl_path}")
 
 catalog_from_disk = ResonatorCatalog.from_dict(store.load(catalog_pkl_path))
 print(catalog_from_disk)

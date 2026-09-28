@@ -53,12 +53,12 @@ async def apply_bias(
     allow_nco_reset: bool = True,
     save: bool | None = None,
     label: str | None = None,
-):
+) -> str | None:
     """Program each catalog member's bias frequency and amplitude.
 
     Other channels are not cleared, and IQ rotation is not applied. To start
     with a quiet module, call ``crs.clear_channels(module=...)`` first.
-    The catalog is read without modification. Returns None.
+    The catalog is read without modification.
 
     Args:
         catalog: resonators to program, with their module and channel bindings.
@@ -68,6 +68,10 @@ async def apply_bias(
         save: save the applied catalog as a dictionary. None uses
             ``store.autosave_enabled()``.
         label: label appended to the catalog filename when saving.
+
+    Returns:
+        The saved catalog's path, for ``ResonatorCatalog.from_dict(
+        store.load(path))``; None when nothing was saved.
 
     Raises:
         ValueError: the catalog is empty, spans more than
@@ -147,6 +151,7 @@ async def apply_bias(
             ctx.set_amplitude(r.bias.amplitude, channel=r.channel, module=module)
         await ctx()
 
-    store.maybe_save(
+    path = store.maybe_save(
         catalog.to_dict(), "catalog", save=save, label=label, module=module
     )
+    return None if path is None else str(path)

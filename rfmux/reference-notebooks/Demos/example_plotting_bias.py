@@ -12,8 +12,8 @@ Run ``find_bias_points`` to store ``bias_report`` in the module dict::
     biasplots.plot_bifurcation_checks(ms_module_output)
     biasplots.plot_hysteresis_checks(ms_module_output)
 
-``plot_arc_speed_panels`` and ``plot_bifurcation_verdict_map`` evaluate the
-sweeps directly and do not require a saved report. Flagged bias points are
+``plot_arc_speed_panels`` evaluates the sweeps directly and does not require
+a saved report. Flagged bias points are
 orange, with the reason shown in the bias-point panel.
 ``plot_bifurcation_checks`` shows threshold-normalized arc-speed changes,
 matching Periscope; ``plot_arc_speed_panels(..., quantity="spikes")`` shows
@@ -30,7 +30,6 @@ from matplotlib.colors import LinearSegmentedColormap, LogNorm, Normalize
 from matplotlib.colorbar import Colorbar
 from matplotlib.lines import Line2D
 from matplotlib.ticker import FuncFormatter, LogFormatter
-from matplotlib.patches import Patch
 
 from rfmux.core.transferfunctions import convert_roc_to_dbm
 
@@ -59,7 +58,6 @@ __all__ = [
     "plot_bias_points",
     "plot_bifurcation_checks",
     "plot_hysteresis_checks",
-    "plot_bifurcation_verdict_map",
     "square_axes",
 ]
 
@@ -333,6 +331,7 @@ def plot_bias_points(
     panel_size=None,
     title=None,
     batchlen=BATCH_SIZE,
+    xlim_khz=None,
 ):
     """Plot the selected sweep and bias point, one panel per resonator.
 
@@ -352,15 +351,25 @@ def plot_bias_points(
             square for the IQ projection.
         title: overrides the figure title. The batch marker is still appended.
         batchlen: resonators per figure; None uses one figure.
+        xlim_khz: ``(low, high)`` frequency-offset range to show in every
+            magnitude panel, in kHz from the sweep centre; ``None`` shows
+            each whole sweep.
 
     Raises:
         KeyError: if a requested name has no finding.
         TypeError: if handed the whole per-module output container.
-        ValueError: for a missing report, unknown projection or missing bias sweep.
+        ValueError: for a missing report, unknown projection or missing bias
+            sweep, or ``xlim_khz`` with the IQ projection, which has no
+            frequency axis.
     """
     if projection not in ("magnitude", "iq"):
         raise ValueError(
             f"Unknown projection {projection!r}. This draws 'magnitude' or 'iq'."
+        )
+    if xlim_khz is not None and projection == "iq":
+        raise ValueError(
+            "xlim_khz sets a frequency axis, and the IQ projection has none. "
+            "Use projection='magnitude', or leave xlim_khz out."
         )
     if panel_size is None:
         panel_size = (6.0, 6.0) if projection == "iq" else (7.0, 5.0)
@@ -392,6 +401,8 @@ def plot_bias_points(
                         / 1e3,
                         color=colour, lw=2.5,
                     )
+                    if xlim_khz is not None:
+                        panel.set_xlim(xlim_khz)
                 else:
                     panel.plot(iq.real, iq.imag, lw=1.5, color="0.35")
                     # Where the tone sits on the loop: the measured sample
@@ -432,7 +443,7 @@ def plot_bias_points(
             labels = ["bias point"]
             if flagged:
                 handles.append(Line2D([], [], color=FLAGGED_COLOUR, lw=2.5))
-                labels.append("flagged — a default, not a measurement")
+                labels.append("flagged")
             fig.legend(handles, labels, loc="outside lower center",
                        ncols=len(handles))
 
@@ -454,6 +465,7 @@ def plot_bifurcation_checks(
     panel_size: tuple[float, float] = (7.0, 5.0),
     title: str | None = None,
     batchlen: int | None = BATCH_SIZE,
+    xlim_khz: tuple[float, float] | None = None,
 ) -> None:
     """Plot normalized arc-speed changes in derivative-threshold units.
 
@@ -476,6 +488,9 @@ def plot_bifurcation_checks(
         panel_size: panel width and height in inches.
         title: figure title; batch numbers are appended.
         batchlen: resonators per figure; None uses one figure.
+        xlim_khz: ``(low, high)`` frequency-offset range to show in every
+            panel, in kHz from the sweep centre; ``None`` shows each whole
+            sweep.
 
     All amplitude steps are drawn, including those beyond the recorded checks.
     The selected amplitude is thicker, with its lower threshold shown faintly.
@@ -565,6 +580,8 @@ def plot_bifurcation_checks(
                     panel.text(0.5, 0.5, "no usable derivative traces",
                                ha="center", transform=panel.transAxes)
                 panel.margins(y=0.12)
+                if xlim_khz is not None:
+                    panel.set_xlim(xlim_khz)
                 panel.set_title(finding.name)
                 panel.legend(fontsize=10)
 
@@ -582,6 +599,7 @@ def plot_hysteresis_checks(
     ms_module_output: dict, *, names: str | list[str] | None = None,
     ncols: int | None = None, panel_size: tuple[float, float] = (7.0, 5.0),
     title: str | None = None, batchlen: int | None = BATCH_SIZE,
+    xlim_khz: tuple[float, float] | None = None,
 ) -> None:
     """Plot up/down separation versus frequency, one curve per amplitude.
 
@@ -590,6 +608,8 @@ def plot_hysteresis_checks(
     compares dip-depth fractions; IQ compares loop-radius fractions. For a
     zero limit, show those fractions directly with the threshold at zero.
     Missing or unusable sweep pairs are skipped. The selected amplitude is bold.
+    ``xlim_khz`` is a ``(low, high)`` frequency-offset range in kHz from the
+    sweep centre, applied to every panel; ``None`` shows each whole sweep.
     """
     report = _bias_report(ms_module_output)
     findings = _findings(report, names)
@@ -632,6 +652,8 @@ def plot_hysteresis_checks(
                     panel.text(0.5, 0.5, "no usable up/down pairs", ha="center",
                                transform=panel.transAxes)
                 panel.set_ylim(bottom=0)
+                if xlim_khz is not None:
+                    panel.set_xlim(xlim_khz)
                 panel.set_title(finding.name)
                 panel.legend(fontsize=10)
             _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", ylabel)
@@ -639,179 +661,6 @@ def plot_hysteresis_checks(
             _titled(fig, _batch_title(
                 title, f"Hysteresis ({compare}) — selected amplitude bold",
                 len(findings), batch_number, len(batches),
-            ))
-            plt.show()
-
-
-def _verdict_row(entries, factors, noise_gate_factor):
-    """Return verdicts and the factor below which the noise gate dominates.
-
-    The crossover is the noise-only threshold divided by the span-only
-    threshold. Unusable sweeps return ``(None, None)``.
-    """
-    try:
-        noise_bar = bifurcated_by_derivative(
-            entries, spike_prominence_factor=0.0, noise_gate_factor=noise_gate_factor
-        ).threshold
-        span_bar = bifurcated_by_derivative(
-            entries, spike_prominence_factor=1.0, noise_gate_factor=0.0
-        ).threshold
-        verdicts = [
-            bifurcated_by_derivative(
-                entries,
-                spike_prominence_factor=float(factor),
-                noise_gate_factor=noise_gate_factor,
-            ).bifurcated
-            for factor in factors
-        ]
-    except ValueError:
-        return None, None
-    return verdicts, (noise_bar / span_bar if span_bar else None)
-
-
-def plot_bifurcation_verdict_map(
-    ms_module_output,
-    names=None,
-    factors=None,
-    noise_gate_factor=50.0,
-    mark_factor=0.5,
-    ncols=1,
-    panel_size=(11.0, 0.55),
-    title=None,
-    batchlen=8,
-):
-    """Re-evaluate derivative bifurcation checks across a grid of factors.
-
-    Rows are amplitude steps; black pixels indicate bifurcation. Tinted bands
-    mark factors where the noise gate dominates, separately for each direction.
-
-    Args:
-        ms_module_output: one module's output from ``multisweep``. No bias
-            report is required; the detector is evaluated directly on the
-            sweeps.
-        names: which resonators to draw. ``None`` for every one swept.
-        factors: the ``spike_prominence_factor`` values to test, or ``None`` for
-            80 points from 0.02 to 1.0.
-        noise_gate_factor: fixed noise threshold multiplier; 0 disables the gate.
-        mark_factor: draw a line at this factor — the setting you mean to use.
-            ``None`` for no line.
-        ncols: panels per row of the figure. One is usually right: these panels
-            are wide and short, and stacking them shares the factor axis.
-        panel_size: ``(width, height)`` of one panel, in inches. The height is
-            per resonator, and gets multiplied by the number of steps.
-        title: overrides the figure title. The batch marker is still appended.
-        batchlen: resonators per figure; None uses one figure.
-
-    Raises:
-        KeyError: if a requested name was not swept.
-        TypeError: if handed the whole per-module output container.
-    """
-    swept = _section_names(ms_module_output)
-    wanted = _as_list(names)
-    if wanted is None:
-        wanted = swept
-    missing = [name for name in wanted if name not in swept]
-    if missing:
-        raise KeyError(f"These resonators were not swept: {missing}")
-    if factors is None:
-        factors = np.linspace(0.02, 1.0, 80)
-    factors = np.asarray(factors, dtype=float)
-
-    batches = _batches(list(wanted), batchlen)
-    columns = _columns_for(batches, ncols)
-
-    for batch_number, batch in enumerate(batches, start=1):
-        with plt.rc_context({**PLOT_STYLE, "axes.grid": False}):
-            # A panel is as tall as it has steps, so a five-step schedule is five
-            # readable rows rather than five slivers.
-            iterations = {
-                name: collect_amplitude_iterations_for(ms_module_output, name)
-                for name in batch
-            }
-            tallest = max(len(steps) for steps in iterations.values())
-            fig, axes, panels = _panel_grid(
-                len(batch), columns,
-                (panel_size[0], panel_size[1] * tallest),
-            )
-
-            drew_a_crossing = False
-            for panel, name in zip(panels, batch):
-                steps = sorted(iterations[name], key=lambda s: _amplitude(
-                    iterations[name][s]))
-                grid, crossings, unusable = [], [], []
-                for row, step in enumerate(steps):
-                    verdicts, crossover = _verdict_row(
-                        iterations[name][step], factors, noise_gate_factor
-                    )
-                    if verdicts is None:
-                        grid.append([False] * len(factors))
-                        unusable.append(row)
-                        continue
-                    grid.append(verdicts)
-                    if crossover is not None:
-                        crossings.append((row, crossover))
-
-                panel.imshow(
-                    np.array(grid),
-                    aspect="auto", origin="lower", cmap="binary",
-                    vmin=0, vmax=1, interpolation="nearest",
-                    extent=(factors[0], factors[-1], -0.5, len(steps) - 0.5),
-                )
-                # How far across the row the noise gate is the binding bar,
-                # tinted rather than marked with a line: a row tinted end to end
-                # is one the gate is holding down everywhere, and an untinted
-                # one is a row the factor alone decided. A tick at the crossover
-                # cannot say either of those when it falls off the axis.
-                for row, crossover in crossings:
-                    if crossover <= factors[0]:
-                        continue
-                    panel.fill_betweenx(
-                        [row - 0.5, row + 0.5], factors[0],
-                        min(crossover, factors[-1]),
-                        color=BIAS_COLOUR, alpha=0.3, lw=0, zorder=3,
-                    )
-                    drew_a_crossing = True
-                # A step whose sweep the detector refused is a gap in the
-                # evidence, not a white "no" — say so rather than drawing blank.
-                for row in unusable:
-                    panel.text(
-                        (factors[0] + factors[-1]) / 2, row, "no usable sweep",
-                        ha="center", va="center", fontsize=11,
-                        color=FLAGGED_COLOUR,
-                    )
-
-                if mark_factor is not None:
-                    panel.axvline(mark_factor, color=FLAGGED_COLOUR, lw=2.0)
-
-                panel.set_yticks(range(len(steps)))
-                panel.set_yticklabels(
-                    [f"{_amplitude(iterations[name][step]):.4f}" for step in steps],
-                    fontsize=11,
-                )
-                panel.set_xlim(factors[0], factors[-1])
-
-            # After _outer_labels, which writes the shared y label into the
-            # first column and would otherwise overwrite the resonator names.
-            _outer_labels(axes, "spike_prominence_factor", "")
-            for panel, name in zip(panels, batch):
-                panel.set_ylabel(name, fontsize=13)
-
-            handles = [Line2D([], [], color="black", lw=8)]
-            labels = ["bifurcated"]
-            if mark_factor is not None:
-                handles.append(Line2D([], [], color=FLAGGED_COLOUR, lw=2.0))
-                labels.append(f"factor = {mark_factor:g}")
-            if drew_a_crossing:
-                handles.append(Patch(color=BIAS_COLOUR, alpha=0.3))
-                labels.append("noise gate is the binding bar")
-            fig.legend(handles, labels, loc="outside lower center",
-                       ncols=len(labels))
-
-            _titled(fig, _batch_title(
-                title,
-                f"derivative verdict vs threshold (rows are drive amplitude), "
-                f"noise_gate_factor={noise_gate_factor:g}",
-                len(wanted), batch_number, len(batches),
             ))
             plt.show()
 
@@ -847,6 +696,7 @@ def plot_arc_speed_panels(
     panel_size=(7.0, 5.0),
     title=None,
     batchlen=BATCH_SIZE,
+    xlim_khz=None,
 ):
     """Plot arc speed, normalized speed or its difference per resonator.
 
@@ -877,6 +727,9 @@ def plot_arc_speed_panels(
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
         batchlen: resonators per figure; None uses one figure.
+        xlim_khz: ``(low, high)`` frequency-offset range to show in every
+            panel, in kHz from the sweep centre; ``None`` shows each whole
+            sweep.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -967,6 +820,8 @@ def plot_arc_speed_panels(
                                 ls="-" if check.bifurcated else "--", alpha=0.9,
                             )
 
+                if xlim_khz is not None:
+                    panel.set_xlim(xlim_khz)
                 centre_mhz = entries[0][1]["original_center_frequency"] / 1e6
                 panel.set_title(f"{name}  {centre_mhz:.3f} MHz")
 

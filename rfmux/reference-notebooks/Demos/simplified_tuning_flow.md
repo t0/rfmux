@@ -22,6 +22,10 @@ and PFB noise. The measurements
 use the CRS API; analysis uses `rfmux.tuning`, and a `ResonatorCatalog` carries
 the named resonators, channels, amplitudes, and frequencies between steps.
 
+Measurements use `rfmux.tuning.store` and are saved by default. The processing
+steps add their results to those measurement dictionaries in place and update
+the same files.
+
 This is a streamlined example workflow, which will skim over many details of the
 tuning process. More details about each step can be found in the other example
 .md workbooks in this folder, which treat each aspect of the tuning flow in more
@@ -161,7 +165,7 @@ results are keyed by module even when only one module was measured.
 netanal = await crs.take_netanal(
     module=MODULE, fmin=FMIN_HZ, fmax=FMAX_HZ,
     npoints=NETANAL_POINTS, amp=PROBE_AMPLITUDE,
-    nsamps=NSAMPS, max_chans=1023, save=True, label="tuning_netanal",
+    nsamps=NSAMPS, max_chans=1023, save=True, label="netanal",
 )
 module_netanal = netanal[module_id]
 trace = module_netanal["results"]
@@ -206,7 +210,7 @@ First take a single upward sweep at the probe amplitude and plot it, for a quick
 initial_sweeps = await crs.multisweep(
     catalog, span_hz=SPAN_HZ, npoints_per_sweep=SWEEP_POINTS,
     nsamps=NSAMPS, sweep_direction="upward",
-    save=True, label="tuning_probe",
+    save=True, label="initial_sweeps",
 )
 module_initial = initial_sweeps[module_id]
 ```
@@ -273,7 +277,7 @@ amplitude_sweeps = await crs.multisweep(
     catalog, amp=SCHEDULE, span_hz=SPAN_HZ,
     npoints_per_sweep=SWEEP_POINTS, nsamps=NSAMPS,
     sweep_direction=("upward", "downward"),
-    save=True, label="tuning_amplitudes",
+    save=True, label="amplitude_sweeps",
 )
 msplots.plot_magnitude_panels(
     amplitude_sweeps[module_id], normalize=True, ncols=4,
@@ -454,7 +458,7 @@ try:
             raise RuntimeError(f"Cannot start a second mock stream: {conflict}")
         started_mock_stream = await crs.start_udp_streaming()
     noise_results = await crs.measure_noise(
-        bias_report.catalog, **NOISE_PARAMS, save=True, label="tuning_noise")
+        bias_report.catalog, **NOISE_PARAMS, save=True, label="noise_results")
 finally:
     if started_mock_stream:
         await crs.stop_udp_streaming()

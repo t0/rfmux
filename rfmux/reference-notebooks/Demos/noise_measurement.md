@@ -20,6 +20,9 @@ multisweep, and measure slow-stream and optional PFB noise. Then reopen the
 saved files and plot IQ clouds on their bias sweeps, timestreams, and spectra.
 The analysis cells need only those files, not a running board.
 
+Measurements use `rfmux.tuning.store` and are saved by default; their short
+`label=` values match the result variables used below.
+
 Run top to bottom in the environment where this checkout is installed.
 This is a Jupytext workbook; the Markdown is the source and the paired
 `.ipynb` is a local copy. See `multisweep.md` and `bias_finding.md` for the
@@ -96,7 +99,7 @@ so reapply the calibrated catalog afterwards.
 ```python
 verification = await crs.multisweep(
     catalog, span_hz=80e3, npoints_per_sweep=201, nsamps=10,
-    sweep_direction="upward", save=True, label="noise_bias_check")
+    sweep_direction="upward", save=True, label="verification")
 sweep_path = store.saved_path(verification)
 msplots.plot_magnitude_panels(verification[module_id], directions="upward")
 from rfmux.tuning import iq_derivatives_at
@@ -150,7 +153,7 @@ try:
     started_sender = await crs.start_udp_streaming()
     noise = await crs.measure_noise(
         catalog, **NOISE_PARAMS, progress_callback=report_progress,
-        save=True, label="biased_array_noise")
+        save=True, label="noise")
 finally:
     if started_sender:
         await crs.stop_udp_streaming()

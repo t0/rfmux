@@ -30,6 +30,11 @@ analysis, or “netanal”) and a search for resonance dips. It ends with a
 beside its trace. This keeps the measurement and search in the same file.
 Call it separately for each module so you can choose suitable depth and Q limits.
 
+Measurements are saved by default through `rfmux.tuning.store`; the `label=`
+in each example identifies its file. Processing functions such as
+`find_resonances_in_netanal()` modify the measurement dictionary in place and,
+while autosave is enabled, update that same file.
+
 See `resonator_catalogs.md` for working with the catalog after this step.
 
 ## How to use this document
@@ -122,6 +127,7 @@ netanal = await crs.take_netanal(
     nsamps=10,          # averages per point
     max_chans=1023,     # frequencies measured simultaneously
     module=MODULE,
+    label="netanal",
 )
 
 # Select one module, then access its trace (the results dictionary).
@@ -346,6 +352,7 @@ coarse_netanal = await crs.take_netanal(
     nsamps=10,
     max_chans=1023,
     module=MODULE,
+    label="coarse_netanal",
 )
 coarse_trace = coarse_netanal[crs.module[MODULE].index()]["results"]
 coarse_search = find_resonances(

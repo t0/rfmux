@@ -1,6 +1,5 @@
 """Demo axes must state the units of the displayed measurement."""
 
-import ast
 import importlib.util
 import inspect
 from pathlib import Path
@@ -10,14 +9,13 @@ from types import SimpleNamespace
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap, LogNorm
 import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import VOLTS_PER_ROC, convert_dacunits_to_dbm
 from rfmux.tuning import (
-    BiasReport, bifurcated_by_derivative, collect_amplitude_iterations_for,
+    BiasReport, bifurcated_by_derivative,
     normalized_arc_speed, hysteresis_separation,
 )
 from rfmux.tuning.bias import BiasFinding, BifurcationCheck
@@ -50,7 +48,6 @@ def test_multisweep_plotters_name_the_module_output_consistently(plotters):
         plotters.bias.plot_bias_points,
         plotters.bias.plot_bifurcation_checks,
         plotters.bias.plot_hysteresis_checks,
-        plotters.bias.plot_bifurcation_verdict_map,
         plotters.bias.plot_arc_speed_panels,
         plotters.fits.plot_fit_panels,
         plotters.fits.plot_fitted_parameters,
@@ -298,23 +295,52 @@ def test_bias_plot_rejects_separate_report(plotters, function):
 
 
 def test_notebook_bias_plot_reads_embedded_report(plotters):
-    namespace = {"np": np, "plt": plt, "BiasReport": BiasReport, "LogNorm": LogNorm,
-                 "AMPLITUDE_CMAP": plotters.bias.AMPLITUDE_CMAP,
-                 "collect_amplitude_iterations_for": collect_amplitude_iterations_for}
     source = (DEMOS / "bias_finding.md").read_text()
-    for cell in re.findall(r"```python\n(.*?)```", source, re.S):
-        if not any(f"def {name}(" in cell for name in (
-            "amplitude_colours", "plot_bias_points_on_sweeps",
-        )):
-            continue
-        tree = ast.parse(cell)
-        tree.body = [node for node in tree.body if isinstance(
-            node, (ast.FunctionDef, ast.Import, ast.ImportFrom),
-        )]
-        exec(compile(tree, str(DEMOS / "bias_finding.md"), "exec"), namespace)
-    namespace["plot_bias_points_on_sweeps"](biased_measurement())
+    cell = next(cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
+                if cell.startswith("biasplots.plot_bias_points("))
+    module_output = re.match(r"biasplots\.plot_bias_points\((\w+)", cell).group(1)
+    namespace = {"biasplots": plotters.bias, module_output: biased_measurement()}
+    exec(compile(cell, str(DEMOS / "bias_finding.md"), "exec"), namespace)
     panel = plt.gcf().axes[0]
-    np.testing.assert_allclose(panel.lines[2].get_ydata(), [-52.0412], atol=1e-4)
+    np.testing.assert_allclose(
+        panel.lines[0].get_ydata(), [-46.0206, -52.0412, -46.0206], atol=1e-4,
+    )
+    np.testing.assert_allclose(panel.lines[1].get_xdata(), [0, 0])
+
+
+def smooth_biased_measurement() -> dict:
+    """biased_measurement with eight-point sweeps, enough to differentiate."""
+    block = biased_measurement()
+    frequencies = 600e6 + np.arange(-4, 4) * 1000
+    iq = np.array([0, 1, 3, 4, 4.4, 4.7, 8, 9]) + 1j * np.array(
+        [0, 0.4, 1, 2, 2.4, 2.6, 3, 4],
+    )
+    for step in block["results"]:
+        block["results"][step]["upward"]["R1"].update(
+            frequencies=frequencies, iq_counts=iq * (step + 1),
+        )
+    return block
+
+
+@pytest.mark.parametrize("module, function, block", [
+    ("multisweep", "plot_magnitude_panels", measurement),
+    ("bias", "plot_bias_points", biased_measurement),
+    ("bias", "plot_bifurcation_checks", smooth_biased_measurement),
+    ("bias", "plot_hysteresis_checks", biased_measurement),
+    ("bias", "plot_arc_speed_panels", smooth_biased_measurement),
+])
+def test_panel_plotters_show_the_requested_frequency_range(
+    plotters, module, function, block,
+):
+    getattr(getattr(plotters, module), function)(block(), xlim_khz=(-2.0, 1.5))
+    assert plt.gcf().axes[0].get_xlim() == (-2.0, 1.5)
+
+
+def test_iq_bias_points_have_no_frequency_range_to_set(plotters):
+    with pytest.raises(ValueError, match="no frequency axis|has none"):
+        plotters.bias.plot_bias_points(
+            biased_measurement(), projection="iq", xlim_khz=(-2.0, 1.5),
+        )
 
 
 def test_normalized_iq_retains_count_units(plotters):
@@ -410,34 +436,33 @@ def test_netanal_notebook_transmission_matches_module(plotters):
     assert panel.get_ylabel() == "|S21| [dB, drive-referenced]"
 
 
-@pytest.mark.parametrize("notebook,function,argument", [
-    ("fitting_resonators", "plot_amplitude_iterations", "R1"),
-    ("fitting_resonators", "plot_sections_at_iteration", 0),
-    ("bias_finding", "plot_amplitude_steps", ["R1"]),
-])
-def test_notebook_transmission_matches_module(plotters, notebook, function, argument):
-    # Run the shipped plotting definitions without acquiring a new measurement.
-    namespace = {
-        "np": np, "plt": plt, "LinearSegmentedColormap": LinearSegmentedColormap,
-        "LogNorm": LogNorm,
-        "collect_amplitude_iterations_for": collect_amplitude_iterations_for,
-    }
-    source = (DEMOS / f"{notebook}.md").read_text()
-    for match in re.finditer(r"```python\n(.*?)```", source, re.S):
-        cell = match[1]
-        if not any(f"def {name}(" in cell for name in (function, "amplitude_colours")):
-            continue
-        tree = ast.parse(cell)
-        ast.increment_lineno(tree, source[:match.start(1)].count("\n"))
-        tree.body = [node for node in tree.body if (
-            isinstance(node, (ast.FunctionDef, ast.Import, ast.ImportFrom))
-            or isinstance(node, ast.Assign) and any(
-                isinstance(target, ast.Name) and target.id == "AMPLITUDE_CMAP"
-                for target in node.targets
-            )
-        )]
-        exec(compile(tree, str(DEMOS / f"{notebook}.md"), "exec"), namespace)
-    namespace[function](measurement(), argument)
+@pytest.mark.parametrize("cell_index", [0, 1])
+def test_fitting_notebook_uses_drive_referenced_plotter(plotters, cell_index):
+    source = (DEMOS / "fitting_resonators.md").read_text()
+    cells = [
+        cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
+        if cell.startswith("msplots.plot_magnitude_panels(\n    multi_amplitude_results,")
+    ]
+    assert len(cells) == 2
+    first_call = cells[cell_index].split("\nmsplots.plot_iq_panels(")[0]
+    exec(compile(first_call, str(DEMOS / "fitting_resonators.md"), "exec"), {
+        "msplots": plotters.multisweep,
+        "multi_amplitude_results": measurement(),
+        "first_resonator": "R1",
+    })
+    panel = plt.gcf().axes[0]
+    np.testing.assert_allclose(
+        panel.lines[0].get_ydata(), [-6.0206, -12.0412, -6.0206], atol=1e-4,
+    )
+    assert panel.get_ylabel() == "|S21| [dB, drive-referenced]"
+
+
+def test_bias_notebook_transmission_matches_module(plotters):
+    source = (DEMOS / "bias_finding.md").read_text()
+    cell = next(cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
+                if cell.startswith("msplots.plot_magnitude_panels(coarse_multisweep_module_outputs,"))
+    exec(compile(cell, str(DEMOS / "bias_finding.md"), "exec"),
+         {"msplots": plotters.multisweep, "coarse_multisweep_module_outputs": measurement()})
     panel = plt.gcf().axes[0]
     for line in panel.lines:
         if len(line.get_ydata()):

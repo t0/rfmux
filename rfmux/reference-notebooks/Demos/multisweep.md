@@ -44,6 +44,11 @@ Pass an `AmplitudeSchedule` to `amp` to sweep several amplitudes. Pass both
 frequency directions to `sweep_direction` to measure each step twice.
 Sections 4–7 cover these options.
 
+Measurement results are saved by default through `rfmux.tuning.store`; the
+`label=` in each example identifies its file. Processing functions such as
+fitting and bias finding add their results to the measurement dictionary in
+place and, while autosave is enabled, update the same file.
+
 ## How to use this document
 
 This is a runnable Jupytext notebook. Select a code cell and press **Shift+Enter**.
@@ -166,6 +171,7 @@ ms = await crs.multisweep(
     span_hz=75e3,
     npoints_per_sweep=101,
     nsamps=10,
+    label="ms",
 )
 
 print(f"keyed by module: {list(ms)}")
@@ -255,6 +261,7 @@ original_biases = {r.name: r.bias for r in catalog}
 recentered = await crs.multisweep(
     catalog, center_frequencies=sweep_centers,
     span_hz=100e3, npoints_per_sweep=101, nsamps=10,
+    label="recentered",
 )
 recentered_module = recentered[crs.module[MODULE].index()]
 for name, section in recentered_module["results"][0]["upward"].items():
@@ -289,6 +296,7 @@ ms_louder = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     amp=0.001 * 2,
+    label="ms_louder",
 )
 
 print(f"catalog bias amplitude   {catalog[first_resonator].bias.amplitude}")
@@ -317,6 +325,7 @@ mixed_amplitude_ms = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     amp=per_resonator_amplitude_mapping,
+    label="mixed_amplitude_ms",
 )
 
 mixed_amplitude_sections = mixed_amplitude_ms[crs.module[MODULE].index()]["results"][0]["upward"]
@@ -359,6 +368,7 @@ no_catalog_ms = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     module=MODULE,
+    label="no_catalog_ms",
 )
 
 no_catalog_sections = no_catalog_ms[crs.module[MODULE].index()]["results"][0]["upward"]
@@ -389,6 +399,7 @@ per_section_amplitude_ms = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     module=MODULE,
+    label="per_section_amplitude_ms",
 )
 
 for section_name, s in per_section_amplitude_ms[crs.module[MODULE].index()]["results"][0]["upward"].items():
@@ -412,6 +423,7 @@ named_section_ms = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     module=MODULE,
+    label="named_section_ms",
 )
 
 for section_name, s in named_section_ms[crs.module[MODULE].index()]["results"][0]["upward"].items():
@@ -535,6 +547,7 @@ multi_amplitude_ms = await crs.multisweep(
     nsamps=10,
     amp=amplitude_schedule,
     sweep_callback=report,
+    label="multi_amplitude_ms",
 )
 
 print(f"\nkeyed by module index: {list(multi_amplitude_ms)}")
@@ -637,6 +650,7 @@ both_ways = await crs.multisweep(
     nsamps=10,
     amp=AmplitudeSchedule.multiplicative(1.0, 2.0, 2),
     sweep_direction=("upward", "downward"),
+    label="both_ways",
 )
 
 both_ways_module_results = both_ways[crs.module[MODULE].index()]
@@ -671,6 +685,7 @@ one_way = await crs.multisweep(
     nsamps=10,
     amp=AmplitudeSchedule.explicit([0.001]),
     sweep_direction="downward",
+    label="one_way",
 )
 
 print(f"directions present: "
@@ -691,6 +706,7 @@ untuned_results = await crs.multisweep(
     npoints_per_sweep=101,
     nsamps=10,
     amp=AmplitudeSchedule.ramp(0.001, 0.001 * 4, 3),
+    label="untuned_results",
 )
 
 untuned_module_results = untuned_results[crs.module[MODULE].index()]

@@ -44,6 +44,8 @@ rfmux provides three independent models:
 
 We’ll start with a simulated array whose bias points are already set. See
 `network_analysis_find_resonances.md` and `multisweep.md` for the preceding steps.
+Measurements use `rfmux.tuning.store` and are saved by default. Fit functions
+add their results to the measurement in place and update its saved file.
 
 ## How to use this document
 
@@ -80,11 +82,12 @@ import copy
 
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap, LogNorm
 
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import AmplitudeSchedule, store
+import example_plotting_multisweep as msplots
+import example_plotting_fits as fitplots
 
 MODULE = 1
 
@@ -201,6 +204,7 @@ multi_amplitude_ms = await crs.multisweep(
     nsamps=10,
     amp=amplitude_schedule,
     sweep_direction=("upward", "downward"),
+    label="multi_amplitude_ms",
 )
 
 # A sweep comes back keyed by module
@@ -216,165 +220,27 @@ print(f"resonators:      {list(multi_amplitude_results['results'][0]['upward'])}
 
 ### Inspect the traces
 
-A quick plot helps catch measurement problems before fitting. Each panel below
-shows one resonator at step 1, its bias amplitude.
-
-Colour shows amplitude; solid and dashed lines show sweep direction. Divide IQ
-by each section’s drive amplitude to compare shapes. The plotters read the
-`results[step][direction][name]` dictionaries directly.
+A quick plot helps catch measurement problems before fitting. Start with the
+bias-amplitude step: each resonator has its own amplitude at step 1. Colour
+shows amplitude and line style shows sweep direction. The magnitude plot
+subtracts each trace's drive power; the IQ plot divides counts by its drive
+amplitude so traces can be compared across steps.
 
 ```python
-from example_plotting_multisweep import amplitude_colorbar
-
-from rfmux.core.transferfunctions import (
-    convert_roc_to_dbm, convert_dacunits_to_dbm,
+msplots.plot_magnitude_panels(
+    multi_amplitude_results, iterations=1, ncols=4, batchlen=None,
 )
-
-# Omit the pale end of gnuplot so traces remain visible on white.
-AMPLITUDE_CMAP = LinearSegmentedColormap.from_list(
-    "gnuplot_truncated", plt.cm.gnuplot(np.linspace(0.0, 0.9, 256))
-)
-
-
-def amplitude_colours(amplitudes):
-    """Map amplitudes to log-scaled colours and a colourbar."""
-    lo, hi = min(amplitudes), max(amplitudes)
-    if hi > lo:
-        norm = LogNorm(vmin=lo, vmax=hi)
-        colours = [AMPLITUDE_CMAP(norm(a)) for a in amplitudes]
-    else:
-        # One amplitude, or several identical ones: nothing to grade.
-        norm = LogNorm(vmin=lo * 0.9, vmax=lo * 1.1)
-        colours = [AMPLITUDE_CMAP(0.5)] * len(amplitudes)
-    return colours, plt.cm.ScalarMappable(norm=norm, cmap=AMPLITUDE_CMAP)
-
-
-def plot_sections_at_iteration(ms_module_output, iteration, ncols=4):
-    """Plot every direction at one step, with one panel per resonator."""
-    by_direction = ms_module_output["results"][iteration]
-    # The same resonators occur in each direction. Use the first direction
-    # to get panel names; this also works for downward-only measurements.
-    first_direction = next(iter(by_direction))
-    sections = by_direction[first_direction]
-    amplitudes = [
-        section["sweep_amplitude"]
-        for direction_sections in by_direction.values()
-        for section in direction_sections.values()
-    ]
-    _, mappable = amplitude_colours(amplitudes)
-    styles = {"upward": "-", "downward": "--"}
-
-    nrows = -(-len(sections) // ncols)   # ceiling division, no import needed
-    fig, axes = plt.subplots(
-        nrows, ncols, figsize=(2.4 * ncols, 2.5 * nrows),
-        constrained_layout=True, squeeze=False,
-    )
-    panels = axes.ravel()
-
-    for panel, name in zip(panels, sections):
-        # Read this resonator's section separately for each direction.
-        for direction, direction_sections in by_direction.items():
-            section = direction_sections[name]
-            amplitude = section["sweep_amplitude"]
-            colour = mappable.to_rgba(amplitude)
-            offset_khz = (
-                section["frequencies"] - section["original_center_frequency"]
-            ) / 1e3
-            magnitude = (
-                convert_roc_to_dbm(np.abs(section["iq_counts"]))
-                - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
-                )
-            )
-            panel.plot(offset_khz, magnitude, lw=1.0,
-                       color=colour, ls=styles[direction], label=direction)
-        panel.set_title(f"{name}\n{sections[name]['sweep_amplitude']:.5f}", fontsize=8)
-        panel.tick_params(labelsize=7)
-
-    panels[0].legend(fontsize=7)
-
-    # Axis labels only on the outer edge, and hide any panel left over when the
-    # section count does not fill the grid.
-    for panel in panels[len(sections):]:
-        panel.set_visible(False)
-    for panel in axes[-1, :]:
-        if panel.get_visible():
-            panel.set_xlabel("offset [kHz]", fontsize=8)
-    for panel in axes[:, 0]:
-        panel.set_ylabel("|S21| [dB, drive-referenced]", fontsize=8)
-
-    amplitude_colorbar(fig, mappable, ax=axes, label="sweep amplitude")
-    fig.suptitle(f"all {len(sections)} sweep sections at amplitude step {iteration}")
-    plt.show()
-
-
-# Step 1 uses each resonator’s bias amplitude; colours show those amplitudes.
-plot_sections_at_iteration(multi_amplitude_results, 1)
 ```
 
-Now follow one resonator across all five amplitudes. Section 7 will use fitted
-parameters to describe these changes in resonance frequency and shape.
+Follow one resonator across all five amplitudes in magnitude and IQ.
 
 ```python
-from example_plotting_multisweep import amplitude_colorbar
-
-from rfmux.core.transferfunctions import (
-    convert_roc_to_dbm, convert_dacunits_to_dbm,
+msplots.plot_magnitude_panels(
+    multi_amplitude_results, names=first_resonator, batchlen=None,
 )
-
-def plot_amplitude_iterations(ms_module_output, name):
-    """Plot every amplitude step and available direction for one resonator."""
-    # Keep the step → direction → resonator structure visible as we read it.
-    steps = ms_module_output["results"]
-    amplitudes = [
-        sections[name]["sweep_amplitude"]
-        for by_direction in steps.values()
-        for sections in by_direction.values()
-    ]
-    colours, mappable = amplitude_colours(amplitudes)
-    colours = iter(colours)  # One colour per trace, in the same order as above.
-    styles = {"upward": "-", "downward": "--"}
-    shown_directions = set()
-
-    fig, (ax_mag, ax_iq) = plt.subplots(
-        1, 2, figsize=(11, 4), constrained_layout=True
-    )
-    for step, by_direction in steps.items():
-        for direction, sections in by_direction.items():
-            section = sections[name]
-            colour = next(colours)
-            offset_khz = (
-                section["frequencies"] - section["original_center_frequency"]
-            ) / 1e3
-            # Normalize by drive amplitude to compare shapes.
-            iq = section["iq_counts"] / section["sweep_amplitude"]
-            magnitude = (
-                convert_roc_to_dbm(np.abs(section["iq_counts"]))
-                - convert_dacunits_to_dbm(
-                    section["sweep_amplitude"], ms_module_output["dac_scale_dbm"]
-                )
-            )
-
-            # Label each direction once, even when it appears at several steps.
-            label = direction if direction not in shown_directions else None
-            ax_mag.plot(offset_khz, magnitude, lw=1.0,
-                        color=colour, ls=styles[direction], label=label)
-            ax_iq.plot(iq.real, iq.imag, lw=1.0,
-                       color=colour, ls=styles[direction])
-            shown_directions.add(direction)
-
-    ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("|S21| [dB, drive-referenced]")
-    ax_mag.legend(title="frequency direction", fontsize=8)
-    ax_iq.set_xlabel("I [counts / DAC amplitude]")
-    ax_iq.set_ylabel("Q [counts / DAC amplitude]")
-    ax_iq.set_aspect("equal", "datalim")
-    amplitude_colorbar(fig, mappable, ax=(ax_mag, ax_iq), label="sweep amplitude")
-    fig.suptitle(f"{name}, {len(steps)} amplitude steps")
-    plt.show()
-
-
-plot_amplitude_iterations(multi_amplitude_results, first_resonator)
+msplots.plot_iq_panels(
+    multi_amplitude_results, names=first_resonator, batchlen=None,
+)
 ```
 
 Take a second sweep at the bias amplitudes, using 40 kHz and 201 points.
@@ -387,44 +253,24 @@ fine_multisweep = (await crs.multisweep(
     span_hz=40e3,
     npoints_per_sweep=201,
     nsamps=10,
+    label="fine_multisweep",
 ))[crs.module[MODULE].index()]
-
 
 print(f"{len(fine_multisweep['results'][0]['upward'])} sweeps, "
       f"{40e3 / (201 - 1):.0f} Hz between points")
 ```
 
-Plot the fine sweep in IQ and magnitude. Compare its IQ loops with the wider
-sweep above: the closer frequency spacing traces each loop in more detail.
+Compare the fine sweep's IQ loops and magnitude with the wider sweep above.
+The closer frequency spacing traces each loop in more detail. With one step,
+there is no amplitude ladder to compare, so show received power and raw IQ.
 
 ```python
-from rfmux.core.transferfunctions import convert_roc_to_dbm
-
-def plot_ms(sections, keys, title):
-    """A set of sweep sections: the IQ loop above, the magnitude below."""
-    fig, axes = plt.subplots(2, len(keys), figsize=(3.0 * len(keys), 5.5))
-    for column, key in enumerate(keys):
-        s = sections[key]
-        centre = s["original_center_frequency"]
-        offset_khz = (s["frequencies"] - centre) / 1e3
-
-        axes[0, column].plot(s["iq_counts"].real, s["iq_counts"].imag, lw=0.9)
-        axes[0, column].set_aspect("equal", "datalim")
-        axes[0, column].set_title(f"{key}\n{centre/1e6:.3f} MHz", fontsize=9)
-
-        axes[1, column].plot(offset_khz, convert_roc_to_dbm(np.abs(s["iq_counts"])), lw=0.9)
-        axes[1, column].set_xlabel("offset [kHz]", fontsize=8)
-
-    axes[0, 0].set_ylabel("Q")
-    axes[1, 0].set_ylabel("received power [dBm]")
-    fig.suptitle(title)
-    plt.tight_layout()
-    plt.show()
-
-
-fine_sections = fine_multisweep['results'][0]['upward']
-plot_ms(fine_sections, list(fine_sections),
-        f"fine multisweep, {40e3/1e3:.0f} kHz span at the bias amplitudes")
+msplots.plot_iq_panels(
+    fine_multisweep, normalize=False, ncols=4, batchlen=None,
+)
+msplots.plot_magnitude_panels(
+    fine_multisweep, normalize=False, ncols=4, batchlen=None,
+)
 ```
 
 Before fitting, inspect one section’s keys and array shapes:
@@ -579,176 +425,52 @@ Model curves are computed from stored parameters when needed:
 
 ## 5. Compare fits with measurements
 
-Use points for measured samples and lines for model curves. To draw a smooth
-model, copy the section dictionary and replace its frequency array with a finer
-grid. The stored fit parameters stay the same.
-
-With `normalize=True`, compare the skewed model with
-`np.abs(iq_counts / iq_counts[-1])`. The plots zoom around fitted `fr`, although
-the fit uses the full sweep span. Both measured directions are shown.
+The fit plotter uses points for measured samples and lines for model curves.
+It evaluates the stored model on a finer frequency grid. The magnitude panels
+normalize both models and data to the last measured point. Plot each sweep
+direction separately; a failed fit still shows its data and failure reason.
 
 ```python
-from rfmux.tuning import (
-    nonlinear_model_iq,
-    skewed_model_magnitude,
-)
-
-
-def plot_skewed_fits(ms_module_output, iteration=0, linewidths=6):
-    """Every resonator at one amplitude step, with its skewed fit over it."""
-    by_direction = ms_module_output["results"][iteration]
-    first_direction = next(iter(by_direction))
-    sections = by_direction[first_direction]
-    styles = {"upward": "-", "downward": "--"}
-    markers = {"upward": ".", "downward": "x"}
-
-    fig, axes = plt.subplots(
-        1, len(sections), figsize=(3.1 * len(sections), 3.2),
-        constrained_layout=True, squeeze=False,
+for direction in ("upward", "downward"):
+    fitplots.plot_fit_panels(
+        multi_amplitude_results, model="skewed", iterations=0,
+        direction=direction, ncols=4, batchlen=None,
     )
-    for panel, name in zip(axes[0], sections):
-        limits = []
-        for direction, direction_sections in by_direction.items():
-            sweep_section = direction_sections[name]
-            offset_khz = (
-                sweep_section["frequencies"] - sweep_section["original_center_frequency"]
-            ) / 1e3
-            normalized = np.abs(
-                sweep_section["iq_counts"] / sweep_section["iq_counts"][-1]
-            )
-
-            panel.plot(offset_khz, 20 * np.log10(normalized), lw=0, marker=markers[direction],
-                       ms=2.5, color="0.45", label=f"{direction} measured")
-
-            skewed_fit = sweep_section["fits"]["skewed"]
-            if skewed_fit["failed_because"] is None:
-                params = skewed_fit["params"]
-                # Copy the section with a denser frequency axis for model evaluation.
-                model_frequencies = np.linspace(
-                    sweep_section["frequencies"][0], sweep_section["frequencies"][-1],
-                    25 * len(sweep_section["frequencies"]),
-                )
-                model_section = {**sweep_section, "frequencies": model_frequencies}
-                model = skewed_model_magnitude(model_section)
-                model_offset_khz = (
-                    model_frequencies - sweep_section["original_center_frequency"]
-                ) / 1e3
-                panel.plot(model_offset_khz, 20 * np.log10(model), lw=1.4,
-                           color="crimson", ls=styles[direction], label=f"{direction} fit")
-                panel.set_title(
-                    f"{name}\nQr {params['Qr']:.3g}   Qi {params['Qi']:.3g}",
-                    fontsize=9,
-                )
-                # Zoom to a few linewidths around the fitted resonance. fr / Qr is
-                # the linewidth, and fr itself is not the middle of the sweep.
-                centre_khz = (
-                    params["fr"] - sweep_section["original_center_frequency"]
-                ) / 1e3
-                half_width_khz = linewidths * params["fr"] / params["Qr"] / 1e3
-                limits.extend([centre_khz - half_width_khz, centre_khz + half_width_khz])
-            else:
-                panel.set_title(f"{name}\nno fit", fontsize=9)
-
-        if limits:
-            panel.set_xlim(min(limits), max(limits))
-        panel.set_xlabel("offset [kHz]", fontsize=8)
-        panel.tick_params(labelsize=7)
-
-    axes[0, 0].set_ylabel("|S21| / off-resonance [dB]", fontsize=8)
-    axes[0, 0].legend(fontsize=7)
-    fig.suptitle(f"skewed Lorentzian fits, amplitude step {iteration}")
-    plt.show()
-
-
-plot_skewed_fits(multi_amplitude_results)
 ```
 
-For this simulated array, compare fitted `Qi` with the internal Q values
-printed during setup. This is a useful check on the fit.
-
-Next, fit the finer sweep. The nonlinear model uses complex IQ data, so we’ll
-inspect it in the IQ plane as well as in magnitude.
+Next, fit the finer sweep. The nonlinear model uses complex IQ data; its fit
+panel compares the model with the measured magnitude. The circle panel draws
+the fitted circle around the measured IQ loop.
 
 ```python
 fit_sweeps(fine_multisweep)
 
 print(f"{first_resonator} fits: "
       f"{list(fine_multisweep['results'][0]['upward'][first_resonator]['fits'])}")
+fitplots.plot_fit_panels(
+    fine_multisweep, model="nonlinear", names=first_resonator,
+)
+fitplots.plot_fit_panels(
+    fine_multisweep, model="circle", names=first_resonator,
+)
 ```
 
-The middle panel shows the data used by the nonlinear fitter. Divide
-`iq_counts` by the complex gain stored in `fits["nonlinear"]["gain"]`.
+The nonlinear fit stores a complex readout gain. Divide the measured IQ by
+that gain to inspect the data in the coordinates used by the fitter.
 
 ```python
-from rfmux.core.transferfunctions import convert_roc_to_dbm
-
-def plot_nonlinear_fit(sections, name=None):
-    """One resonator's nonlinear fit: measured and model, in IQ and in magnitude."""
-    name = next(iter(sections)) if name is None else name
-    sweep_section = sections[name]
-    nonlinear_fit = sweep_section["fits"]["nonlinear"]
-
-    if nonlinear_fit["failed_because"] is not None:
-        print(f"{name}: {nonlinear_fit['failed_because']}")
-        return
-
-    measured = sweep_section["iq_counts"]
-    corrected = measured / nonlinear_fit["gain"]  # Remove the fitted readout gain.
-    offset_khz = (
-        sweep_section["frequencies"] - sweep_section["original_center_frequency"]
-    ) / 1e3
-
-    # The model on a finer axis than the measurement: in the IQ plane a coarse
-    # one would cut the loop into chords, and it is the loop we are looking at.
-    # Copy the section with a denser frequency axis for model evaluation.
-    model_frequencies = np.linspace(
-        sweep_section["frequencies"][0], sweep_section["frequencies"][-1],
-        25 * len(sweep_section["frequencies"]),
-    )
-    model_section = {**sweep_section, "frequencies": model_frequencies}
-    model = nonlinear_model_iq(model_section)
-    model_offset_khz = (
-        model_frequencies - sweep_section["original_center_frequency"]
-    ) / 1e3
-
-    fig, (ax_iq, ax_corrected, ax_mag) = plt.subplots(
-        1, 3, figsize=(12, 3.8), constrained_layout=True
-    )
-
-    ax_iq.plot(measured.real, measured.imag, lw=0, marker=".", ms=3,
-               color="0.45", label="measured")
-    ax_iq.plot(model.real, model.imag, lw=1.4, color="teal", label="model")
-    ax_iq.set_xlabel("I [counts]")
-    ax_iq.set_ylabel("Q [counts]")
-    ax_iq.set_aspect("equal", "datalim")
-    ax_iq.legend(fontsize=8)
-    ax_iq.set_title("IQ plane", fontsize=9)
-
-    ax_corrected.plot(corrected.real, corrected.imag, lw=0, marker=".", ms=3,
-                      color="0.45")
-    ax_corrected.set_xlabel("I / gain")
-    ax_corrected.set_ylabel("Q / gain")
-    ax_corrected.set_aspect("equal", "datalim")
-    ax_corrected.set_title("what the fitter saw\n(gain divided out)", fontsize=9)
-
-    ax_mag.plot(offset_khz, convert_roc_to_dbm(np.abs(measured)), lw=0, marker=".",
-                ms=2.5, color="0.45")
-    ax_mag.plot(model_offset_khz, convert_roc_to_dbm(np.abs(model)), lw=1.4,
-                color="teal")
-    ax_mag.set_xlabel("offset [kHz]")
-    ax_mag.set_ylabel("received power [dBm]")
-    ax_mag.set_title("magnitude", fontsize=9)
-
-    params = nonlinear_fit["params"]
-    fig.suptitle(
-        f"{name} nonlinear fit — fr {params['fr']/1e6:.4f} MHz, "
-        f"Qr {params['Qr']:.3g}, a {params['a']:.3f}, "
-        f"residual {nonlinear_fit['residual']:.2e}"
-    )
+section = fine_multisweep["results"][0]["upward"][first_resonator]
+fit = section["fits"]["nonlinear"]
+if fit["failed_because"] is None:
+    corrected = section["iq_counts"] / fit["gain"]
+    plt.plot(corrected.real, corrected.imag, ".")
+    plt.gca().set_aspect("equal", "datalim")
+    plt.xlabel("I / gain")
+    plt.ylabel("Q / gain")
+    plt.title(f"{first_resonator}: gain-corrected IQ")
     plt.show()
-
-
-plot_nonlinear_fit(fine_multisweep['results'][0]['upward'])
+else:
+    print(fit["failed_because"])
 ```
 
 The nonlinearity parameter `a` is zero for a linear resonator; bifurcation is
@@ -758,52 +480,17 @@ The circle fit stores a centre and radius. Subtract the centre from `iq_counts`
 to place the loop around the origin before interpreting phase around the loop.
 
 ```python
-def plot_circle_fit(sections, name=None):
-    """The fitted circle, and the loop it recentres."""
-    name = next(iter(sections)) if name is None else name
-    sweep_section = sections[name]
-    circle_fit = sweep_section["fits"]["circle"]
-
-    if circle_fit["failed_because"] is not None:
-        print(f"{name}: {circle_fit['failed_because']}")
-        return
-
-    measured = sweep_section["iq_counts"]
-    centre, radius = circle_fit["center"], circle_fit["radius"]
-    angles = np.linspace(0, 2 * np.pi, 361)
-
-    fig, (ax_measured, ax_centred) = plt.subplots(
-        1, 2, figsize=(9, 4.2), constrained_layout=True
-    )
-
-    ax_measured.plot(measured.real, measured.imag, lw=0, marker=".", ms=3,
-                     color="0.45", label="measured")
-    ax_measured.plot(centre.real + radius * np.cos(angles),
-                     centre.imag + radius * np.sin(angles),
-                     lw=1.2, color="darkorange", label="fitted circle")
-    ax_measured.plot(centre.real, centre.imag, marker="+", ms=12,
-                     color="darkorange", label="centre")
-    ax_measured.set_xlabel("I [counts]")
-    ax_measured.set_ylabel("Q [counts]")
-    ax_measured.set_aspect("equal", "datalim")
-    ax_measured.legend(fontsize=8)
-    ax_measured.set_title("as measured", fontsize=9)
-
-    recentred = measured - centre  # Shift the fitted centre to the origin.
-    ax_centred.plot(recentred.real, recentred.imag, lw=0, marker=".", ms=3,
-                    color="0.45")
-    ax_centred.axhline(0, lw=0.6, color="0.8")
-    ax_centred.axvline(0, lw=0.6, color="0.8")
-    ax_centred.set_xlabel("I − centre")
-    ax_centred.set_ylabel("Q − centre")
-    ax_centred.set_aspect("equal", "datalim")
-    ax_centred.set_title("IQ minus fitted centre", fontsize=9)
-
-    fig.suptitle(f"{name} circle fit — radius {radius:.4g} counts")
+fit = section["fits"]["circle"]
+if fit["failed_because"] is None:
+    centred = section["iq_counts"] - fit["center"]
+    plt.plot(centred.real, centred.imag, ".")
+    plt.gca().set_aspect("equal", "datalim")
+    plt.xlabel("I − centre [counts]")
+    plt.ylabel("Q − centre [counts]")
+    plt.title(f"{first_resonator}: centred IQ")
     plt.show()
-
-
-plot_circle_fit(fine_multisweep['results'][0]['upward'])
+else:
+    print(fit["failed_because"])
 ```
 
 ## 6. Select sweeps to fit
@@ -932,144 +619,32 @@ Check the selected section’s `sweep_amplitude` when closeness matters.
 
 ## 7. Follow fitted parameters across amplitudes
 
-Fits let us compare how frequency and Q change with drive. First, overlay the
-skewed model on each trace for one resonator. Colours show amplitude, markers
-show measured data, and line styles distinguish sweep directions.
+Fits let us compare how frequency and Q change with drive. Overlay the
+skewed model on each amplitude for one resonator. Colour shows amplitude,
+points show measured data, and lines show the fitted model. Plot the two sweep
+directions separately.
 
 The measured points are about 2 kHz apart and may miss the dip minimum.
-A fitted curve can extend below them; inspect the fit quality before treating
+A fitted curve can extend below them; inspect fit quality before treating
 that depth as a reliable estimate.
 
 ```python
-from example_plotting_multisweep import amplitude_colorbar
-
-def plot_fitted_traces(ms_module_output, name, linewidths=8):
-    """One resonator at every amplitude, each trace with its skewed fit over it."""
-    # Keep direction with each section so both sweeps can be drawn.
-    traces = [
-        (direction, sections[name])
-        for by_direction in ms_module_output["results"].values()
-        for direction, sections in by_direction.items()
-    ]
-    amplitudes = [section["sweep_amplitude"] for direction, section in traces]
-    colours, mappable = amplitude_colours(amplitudes)
-    styles = {"upward": "-", "downward": "--"}
-    markers = {"upward": ".", "downward": "x"}
-
-    fig, ax = plt.subplots(figsize=(8, 4.4), constrained_layout=True)
-    fitted_centres_khz, widest_khz = [], 0.0
-
-    for (direction, sweep_section), colour in zip(traces, colours):
-        offset_khz = (
-            sweep_section["frequencies"] - sweep_section["original_center_frequency"]
-        ) / 1e3
-        normalized = np.abs(
-            sweep_section["iq_counts"] / sweep_section["iq_counts"][-1]
-        )
-        ax.plot(offset_khz, 20 * np.log10(normalized), lw=0, marker=markers[direction], ms=2,
-                color=colour, alpha=0.6)
-
-        skewed_fit = sweep_section["fits"]["skewed"]
-        if skewed_fit["failed_because"] is None:
-            params = skewed_fit["params"]
-            # Copy the section with a denser frequency axis for model evaluation.
-            model_frequencies = np.linspace(
-                sweep_section["frequencies"][0], sweep_section["frequencies"][-1],
-                25 * len(sweep_section["frequencies"]),
-            )
-            model_section = {**sweep_section, "frequencies": model_frequencies}
-            model = skewed_model_magnitude(model_section)
-            ax.plot((model_frequencies
-                     - sweep_section["original_center_frequency"]) / 1e3,
-                    20 * np.log10(model), lw=1.3, color=colour, ls=styles[direction])
-            fitted_centres_khz.append(
-                (params["fr"] - sweep_section["original_center_frequency"]) / 1e3
-            )
-            widest_khz = max(widest_khz, params["fr"] / params["Qr"] / 1e3)
-
-    # Wide enough to hold every step's resonance, plus a few linewidths of the
-    # broadest one. Since the drive pulls fr down as the amplitude increases,
-    # this window is not centred on the sweep centre.
-    if fitted_centres_khz:
-        pad = linewidths * widest_khz
-        ax.set_xlim(min(fitted_centres_khz) - pad, max(fitted_centres_khz) + pad)
-
-    ax.set_xlabel("offset [kHz]")
-    ax.set_ylabel("|S21| / off-resonance [dB]")
-    amplitude_colorbar(fig, mappable, ax=ax, label="sweep amplitude")
-    for direction in dict.fromkeys(direction for direction, section in traces):
-        ax.plot([], [], color="0.3", ls=styles[direction],
-                marker=markers[direction], label=direction)
-    ax.legend(fontsize=8)
-    fig.suptitle(f"{name}: points measured, lines fitted")
-    plt.show()
-
-
-plot_fitted_traces(multi_amplitude_results, first_resonator)
+for direction in ("upward", "downward"):
+    fitplots.plot_fit_panels(
+        multi_amplitude_results, model="skewed", names=first_resonator,
+        direction=direction,
+    )
 ```
 
-Read each parameter from the section’s `fits` dictionary. The plot below uses
-`np.nan` for failed fits, leaving a gap in the curve. Each resonator has one colour,
-with a separate line style for each direction.
+Plot the fitted parameter curves against drive amplitude. Failed fits leave
+gaps. Frequency shifts are relative to the lowest drive with a usable fit.
 
 ```python
-def plot_fitted_parameters_vs_amplitude(ms_module_output, model="skewed"):
-    """Plot parameter curves for every resonator and available direction."""
-    steps = ms_module_output["results"]
-    # Use all measured directions, preserving their measurement order.
-    directions = list(dict.fromkeys(
-        direction for by_direction in steps.values() for direction in by_direction
-    ))
-    names = list(dict.fromkeys(
-        name for by_direction in steps.values()
-        for sections in by_direction.values() for name in sections
-    ))
-    styles = {"upward": "-", "downward": "--"}
-    panels = [
-        ("fr", "fr − fr(lowest drive) [kHz]", 1e-3),
-        ("Qr", "Qr", 1.0),
-        ("Qc", "Qc", 1.0),
-        ("Qi", "Qi", 1.0),
-    ]
-
-    fig, axes = plt.subplots(1, len(panels), figsize=(3.2 * len(panels), 3.4),
-                             constrained_layout=True)
-    for panel, (parameter, label, scale) in zip(axes, panels):
-        for index, name in enumerate(names):
-            for direction in directions:
-                amplitudes, values = [], []
-                for by_direction in steps.values():
-                    # A step may contain just one direction.
-                    if direction not in by_direction:
-                        continue
-                    section = by_direction[direction][name]
-                    fit = section["fits"][model]
-                    amplitudes.append(section["sweep_amplitude"])
-                    # Failed fits leave gaps rather than usable-looking values.
-                    values.append(fit["params"][parameter]
-                                  if fit["failed_because"] is None else np.nan)
-                amplitudes = np.array(amplitudes)
-                values = np.array(values, dtype=float)
-                if parameter == "fr":
-                    # Compare shifts from the lowest measured drive.
-                    values = values - values[np.argmin(amplitudes)]
-                panel.plot(amplitudes, values * scale, marker="o", ms=4,
-                           lw=1.2, color=f"C{index % 10}", ls=styles[direction],
-                           label=f"{name} {direction}")
-        panel.set_xscale("log")
-        panel.set_xlabel("sweep amplitude")
-        panel.set_ylabel(label, fontsize=9)
-        panel.tick_params(labelsize=8)
-
-    axes[1].set_yscale("log")
-    axes[2].set_yscale("log")
-    axes[3].set_yscale("log")
-    axes[0].legend(fontsize=7)
-    fig.suptitle(f"{model} fit parameters against drive amplitude")
-    plt.show()
-
-
-plot_fitted_parameters_vs_amplitude(multi_amplitude_results)
+for direction in ("upward", "downward"):
+    fitplots.plot_fitted_parameters(
+        multi_amplitude_results, model="skewed", direction=direction,
+        batchlen=None,
+    )
 ```
 
 Compare the skewed and nonlinear estimates as a cross-check. Agreement on `Qr`

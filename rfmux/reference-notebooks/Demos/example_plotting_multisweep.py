@@ -448,6 +448,7 @@ def plot_magnitude_panels(
     batchlen=BATCH_SIZE,
     show_bias_frequency=True,
     highlight_bias_amplitude=True,
+    xlim_khz=None,
 ):
     """|S21| against frequency offset, a panel per resonator.
 
@@ -479,6 +480,9 @@ def plot_magnitude_panels(
         highlight_bias_amplitude: draw thicker traces whose amplitude matches
             the catalog in ``bias_report`` within a relative tolerance of
             1e-6. It has no effect until bias finding saved a report.
+        xlim_khz: ``(low, high)`` frequency-offset range to show in every
+            panel, in kHz from the sweep centre; ``None`` shows each whole
+            sweep.
 
     Raises:
         KeyError: if a requested name was never swept.
@@ -508,6 +512,8 @@ def plot_magnitude_panels(
             ls=linestyle,
             zorder=2 if highlight else 1,
         )
+        if xlim_khz is not None:
+            panel.set_xlim(xlim_khz)
 
     _plot_panels(
         ms_module_output,

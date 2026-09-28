@@ -900,7 +900,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # its colour whichever of them are drawn.
         drawn = {amplitude for traces in traces_by_name.values()
                  for _step, _direction, amplitude, _sweep in traces}
-        if len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
+        if plot_type != "bias" and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
             colorbar.update_range(amplitudes[0], amplitudes[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)

@@ -26,8 +26,7 @@ from rfmux.tuning.bias import (
     # down — the noise floor's robustness and the pairing rule's monotonicity
     # are properties of these two rather than of any one verdict.
     _noise_floor,
-    _paired,
-    _spikes,
+    _strongest_pair,
 )
 from rfmux.tuning.fits import nonlinear_iq
 from rfmux.tuning.multisweep_amplitudes import AmplitudeSchedule
@@ -269,27 +268,19 @@ def test_a_jumped_trace_is_bifurcated():
     check = bifurcated_by_derivative(a_step(a=JUMPED))
 
     assert check.bifurcated
-    assert check.metric["positive_spike_prominence"] > check.threshold
-    assert check.metric["negative_spike_prominence"] > check.threshold
-    assert check.metric["adjacency"]
+    assert check.metric["pair_strength"] > check.threshold
+    assert check.metric["pair_found"]
 
 
-def test_the_reported_numbers_are_the_three_conditions_the_verdict_is_made_of():
-    """The verdict is the conjunction of exactly what ``metric`` reports, so a
-    caller can see which condition decided it rather than guessing from one
-    number that stood in for all three."""
+def test_pair_strength_and_thresholds_explain_the_verdict():
     check = bifurcated_by_derivative(a_step(a=JUMPED))
-
-    assert set(check.metric) == {
-        "positive_spike_prominence",
-        "negative_spike_prominence",
-        "adjacency",
-    }
-    assert check.bifurcated == (
-        check.metric["positive_spike_prominence"] >= check.threshold
-        and check.metric["negative_spike_prominence"] >= check.threshold
-        and check.metric["adjacency"]
-    )
+    pair = check.diagnostics["pair"]
+    assert check.metric["pair_strength"] == min(
+        pair["positive_spike_prominence"], pair["negative_spike_prominence"])
+    assert check.threshold == max(check.diagnostics["shape_threshold"],
+                                  check.diagnostics["noise_threshold"])
+    assert check.bifurcated == (check.metric["pair_found"]
+                              and check.metric["pair_strength"] >= check.threshold)
 
 
 def test_a_spike_that_missed_the_bar_still_reports_its_prominence():
@@ -303,8 +294,8 @@ def test_a_spike_that_missed_the_bar_still_reports_its_prominence():
     demanding = bifurcated_by_derivative(step, spike_prominence_factor=3.0)
 
     assert not demanding.bifurcated
-    assert demanding.metric["positive_spike_prominence"] > 0.0
-    assert demanding.metric["negative_spike_prominence"] > 0.0
+    assert demanding.metric["pair_strength"] > 0.0
+    assert demanding.diagnostics["pair"] is not None
 
 
 def test_a_trace_with_no_spike_at_all_reports_zero_rather_than_failing():
@@ -315,8 +306,9 @@ def test_a_trace_with_no_spike_at_all_reports_zero_rather_than_failing():
     check = bifurcated_by_derivative({"upward": a_sweep(npoints=4)})
 
     assert not check.bifurcated
-    assert check.metric["positive_spike_prominence"] == 0.0
-    assert check.metric["negative_spike_prominence"] == 0.0
+    assert check.metric["pair_strength"] == 0.0
+    assert not check.metric["pair_found"]
+    assert check.diagnostics["pair"] is None
 
 
 def test_the_direction_reported_is_one_that_fired():
@@ -331,7 +323,7 @@ def test_the_direction_reported_is_one_that_fired():
     check = bifurcated_by_derivative(mixed)
 
     assert check.bifurcated
-    assert check.metric["adjacency"]
+    assert check.metric["pair_found"]
 
 
 def test_the_noise_gate_throws_out_a_sweep_that_is_only_noise():
@@ -385,17 +377,14 @@ def test_a_jump_that_straddles_two_samples_is_still_a_jump():
 
     for trace in (speed, straddled):
         jumps = np.diff(trace)
-        up, up_prominence = _spikes(jumps)
-        down, down_prominence = _spikes(-jumps)
-        bar = 0.4
-        assert _paired(up[up_prominence >= bar], down[down_prominence >= bar])
+        pair = _strongest_pair(jumps)
+        assert pair is not None
+        assert min(pair["positive_spike_prominence"],
+                   pair["negative_spike_prominence"]) >= 0.4
 
 
 def test_lowering_the_bar_cannot_take_a_detection_away():
-    """Matching any cleared pair rather than the first of each list is what
-    makes the verdict monotone in the bar. Without it, admitting one more spike
-    at a lower index displaces ``cleared_up[0]`` and a matching pair stops
-    matching, so turning the knob down could turn a detection off."""
+    """Raising the threshold cannot admit a weaker pair."""
     step = a_step(a=JUMPED)
     factors = np.linspace(0.02, 2.0, 60)
     verdicts = [
@@ -634,17 +623,11 @@ def test_a_combined_check_reports_each_test_in_multiples_of_its_own_bar():
     assert check.threshold == 1.0
     assert set(check.parts) == {"derivative", "hysteresis"}
     assert check.metric == pytest.approx({
-        "derivative_positive_spike_prominence": (
-            check.parts["derivative"].metric["positive_spike_prominence"]
+        "derivative_pair_strength": (
+            check.parts["derivative"].metric["pair_strength"]
             / check.parts["derivative"].threshold
         ),
-        "derivative_negative_spike_prominence": (
-            check.parts["derivative"].metric["negative_spike_prominence"]
-            / check.parts["derivative"].threshold
-        ),
-        # A condition rather than a measurement, so it is carried across as it
-        # stands — there is no bar to be a multiple of.
-        "derivative_adjacency": True,
+        "derivative_pair_found": True,
         "hysteresis_max_separation": (
             check.parts["hysteresis"].metric["max_separation"] / 0.2
         ),
@@ -668,7 +651,7 @@ def test_a_bar_of_zero_has_no_multiples():
         step, spike_prominence_factor=0.0, noise_gate_factor=0.0
     )
 
-    assert check.metric["derivative_positive_spike_prominence"] == float("inf")
+    assert check.metric["derivative_pair_strength"] == float("inf")
     assert check.bifurcated
 
 
@@ -813,15 +796,11 @@ def test_the_normalized_speed_reader_is_what_the_detector_differentiates():
     assert len(speed) == len(entry["frequencies"]) - 1
     assert len(frequencies) == len(speed)
 
-    # The detector differences this and reads the prominence of the tallest
-    # spike, so reproducing that from the exported reader has to land on the
-    # number it reported — otherwise this is not what it looked at.
-    _, prominences = find_peaks(np.diff(speed), prominence=0)
-    assert prominences["prominences"].max() == pytest.approx(
-        bifurcated_by_derivative({"upward": entry}).metric[
-            "positive_spike_prominence"
-        ]
-    )
+    pair = bifurcated_by_derivative({"upward": entry}).diagnostics["pair"]
+    peaks, properties = find_peaks(np.diff(speed), prominence=0)
+    selected = np.flatnonzero(peaks == pair["positive_index"])[0]
+    assert properties["prominences"][selected] == pytest.approx(
+        pair["positive_spike_prominence"])
 
 
 def test_both_readers_come_back_in_ascending_frequency_order():
@@ -1515,3 +1494,39 @@ def test_hysteresis_curve_locates_the_reported_difference(compare, expected):
                                     max_discrepancy=separation.max())
     assert check.metric["max_separation"] == separation.max()
     assert not check.bifurcated  # equality is allowed
+
+
+def test_strongest_pair_uses_the_weaker_member_not_unrelated_extrema():
+    pair = _strongest_pair(np.array([3., -5., -4., -3., -4., 3., 4., 1., -5., -4., -2., -1.]))
+    assert (pair["positive_index"], pair["negative_index"]) == (6, 8)
+    assert min(pair["positive_spike_prominence"],
+               pair["negative_spike_prominence"]) == 4.0
+
+
+def test_missing_pair_cannot_trigger_at_zero_threshold():
+    check = bifurcated_by_derivative({"upward": a_sweep(npoints=4)},
+                                     spike_prominence_factor=0., noise_gate_factor=0.)
+    assert not check.bifurcated
+    assert not check.metric["pair_found"]
+
+
+def test_pair_diagnostics_survive_report_serialization():
+    report = find_bias_points(a_schedule(), save=False)
+    restored = BiasReport.from_dict(report.to_dict())
+    for before, after in zip(report.findings, restored.findings):
+        assert after.checks == before.checks
+        assert all(c.diagnostics for c in after.checks.values())
+
+
+def test_version_two_reports_load_without_inventing_pair_diagnostics():
+    saved = find_bias_points(a_schedule(), save=False).to_dict()
+    saved["schema_version"] = 2
+    for finding in saved["findings"]:
+        for check in finding["checks"].values():
+            check.pop("diagnostics")
+            check["metric"] = {"positive_spike_prominence": 1.0,
+                               "negative_spike_prominence": 2.0,
+                               "adjacency": check["bifurcated"]}
+    restored = BiasReport.from_dict(saved)
+    assert all(check.diagnostics == {} for finding in restored.findings
+               for check in finding.checks.values())

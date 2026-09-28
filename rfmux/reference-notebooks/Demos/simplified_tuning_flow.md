@@ -516,5 +516,5 @@ print(f"workflow completed in {time.perf_counter() - started:.1f} s")
 
 The board is left biased. Section 7 stops only the mock streamer owned by this
 notebook; it leaves hardware and attached-session streams running.
-For further characterization, see `fitting_resonators.md` and `bias_finding.md`;
+For further characterization, see `multisweep.md` and `bias_finding.md`;
 for timestreams and pulse capture, see `pulse_capture.md`.

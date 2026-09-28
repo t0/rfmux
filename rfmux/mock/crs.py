@@ -784,19 +784,16 @@ class ServerMockCRS:
 
         if channel is not None:
             if channel in module_responses:
-                # Get the S21 response with QP noise for this channel
                 response = module_responses[channel]
-                if isinstance(response, np.ndarray):
-                    i_list = (response.real * scale_factor).tolist()
-                    q_list = (response.imag * scale_factor).tolist()
-                else:
-                    i_base = response.real * scale_factor
-                    q_base = response.imag * scale_factor
-                    i_list = [i_base] * num_samples
-                    q_list = [q_base] * num_samples
+                i_signal = response.real * scale_factor
+                q_signal = response.imag * scale_factor
             else:
-                i_list = np.random.normal(0, noise_level, num_samples).tolist()
-                q_list = np.random.normal(0, noise_level, num_samples).tolist()
+                i_signal = q_signal = 0.0
+
+            i_list = (i_signal + np.random.normal(
+                0, noise_level, num_samples)).tolist()
+            q_list = (q_signal + np.random.normal(
+                0, noise_level, num_samples)).tolist()
 
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
@@ -809,17 +806,14 @@ class ServerMockCRS:
             for ch_idx in range(1, channels_per_module + 1):
                 if ch_idx in module_responses:
                     response = module_responses[ch_idx]
-                    if isinstance(response, np.ndarray):
-                        i_ch_samples = (response.real * scale_factor).tolist()
-                        q_ch_samples = (response.imag * scale_factor).tolist()
-                    else:
-                        i_base = response.real * scale_factor
-                        q_base = response.imag * scale_factor
-                        i_ch_samples = [i_base] * num_samples
-                        q_ch_samples = [q_base] * num_samples
+                    i_signal = response.real * scale_factor
+                    q_signal = response.imag * scale_factor
                 else:
-                    i_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
-                    q_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
+                    i_signal = q_signal = 0.0
+                i_ch_samples = (i_signal + np.random.normal(
+                    0, noise_level, num_samples)).tolist()
+                q_ch_samples = (q_signal + np.random.normal(
+                    0, noise_level, num_samples)).tolist()
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)
 

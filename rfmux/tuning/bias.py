@@ -93,7 +93,7 @@ class BifurcationCheck(NamedTuple):
     ``metric`` maps quantity names to values; ``threshold`` is their comparison
     threshold. See each detector for units and conditions. For ``"both"``,
     metrics are normalized by each detector's threshold and ``parts`` retains
-    the original checks.
+    the original checks. ``diagnostics`` retains unscaled detector details.
     """
 
     method: str
@@ -101,6 +101,7 @@ class BifurcationCheck(NamedTuple):
     metric: dict
     threshold: float
     parts: dict = {}  # by method name, for a combined check; else empty
+    diagnostics: dict = {}  # unscaled detector details, including pair positions
 
     def to_dict(self) -> dict:
         """Plain builtins only — files never contain these classes."""
@@ -110,6 +111,7 @@ class BifurcationCheck(NamedTuple):
             "metric": dict(self.metric),
             "threshold": float(self.threshold),
             "parts": {k: v.to_dict() for k, v in self.parts.items()},
+            "diagnostics": dict(self.diagnostics),
         }
 
     @classmethod
@@ -124,6 +126,7 @@ class BifurcationCheck(NamedTuple):
             parts={
                 k: cls.from_dict(v) for k, v in (d.get("parts") or {}).items()
             },
+            diagnostics=dict(d.get("diagnostics") or {}),
         )
 
 
@@ -251,8 +254,8 @@ class BiasReport:
     Findings follow the input catalog's bias-frequency order.
     """
 
-    # Saved report format. Version 2 requires named metrics in each check.
-    SCHEMA_VERSION = 2
+    # Version 3 reports derivative pair strength and unscaled diagnostics.
+    SCHEMA_VERSION = 3
 
     catalog: ResonatorCatalog
     findings: list[BiasFinding]
@@ -293,9 +296,9 @@ class BiasReport:
     @classmethod
     def from_dict(cls, d) -> "BiasReport":
         version = d.get("schema_version")
-        if version != cls.SCHEMA_VERSION:
+        if version not in (2, cls.SCHEMA_VERSION):
             raise ValueError(
-                f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
+                f"schema_version={version!r}, expected 2 or {cls.SCHEMA_VERSION}: "
                 f"this dict was written by a different version of BiasReport."
             )
         return cls(
@@ -720,82 +723,67 @@ def bifurcated_by_derivative(
     spike_prominence_factor: float = 0.5,
     noise_gate_factor: float = 50.0,
 ) -> BifurcationCheck:
-    """Detect a jump from adjacent positive and negative IQ-speed spikes.
+    """Detect a jump using the strongest adjacent peak–trough pair.
 
-    I and Q are normalized by their ranges. Point-to-point distance divided
-    by frequency spacing gives the arc speed; its differences reveal jumps.
-    A positive spike must be followed by a negative one within
-    ``MAX_SPIKE_SEPARATION`` samples, with both prominences meeting the
-    threshold. Any usable direction can trigger the verdict.
+    I and Q are scaled by their ranges. Point-to-point IQ distance per Hz
+    gives speed; its differences reveal peaks and troughs. A pair is a peak
+    followed by a trough one or two indices later. Its strength is the smaller
+    of their prominences. The strongest pair must reach both thresholds.
+    Any usable sweep direction can trigger detection.
 
     Args:
         entries: one amplitude step, ``{direction: sweep_entry}``.
-        spike_prominence_factor: threshold as a fraction of the arc-speed
-            range. Larger values are less sensitive.
-        noise_gate_factor: threshold as a multiple of the robust noise floor
-            of the speed differences. Larger values are less sensitive;
-            zero disables this gate. See :func:`_noise_floor`.
+        spike_prominence_factor: shape threshold as a fraction of the speed
+            range (default 0.5). Larger values are less sensitive.
+        noise_gate_factor: noise threshold as a multiple of the robust
+            scatter of speed differences (default 50). Larger values are less
+            sensitive; zero disables this requirement. See :func:`_noise_floor`.
 
     Returns:
-        BifurcationCheck: ``threshold`` is the larger of the range and noise
-        thresholds. Metrics are ``positive_spike_prominence``,
-        ``negative_spike_prominence`` (both in inverse Hz), and ``adjacency``
-        (whether a qualifying pair exists). Missing spikes have prominence
-        zero. Metrics describe a triggering direction if any, otherwise the
-        direction with the largest spike prominence.
+        BifurcationCheck: ``metric`` holds ``pair_strength`` (inverse Hz,
+        zero if absent) and ``pair_found``. Detection requires a pair and
+        strength >= ``threshold``, the larger of the shape and noise thresholds.
+        ``diagnostics`` holds both thresholds, the direction, and ``pair``:
+        either None or its peak/trough indices into the speed-difference array
+        and their prominences. Details describe a triggering direction if any,
+        otherwise the direction with greatest pair strength.
 
     Raises:
         ValueError: no direction contains a usable sweep.
     """
-    verdict = False
-    reported = None  # (rank, metric, threshold) of the closest direction so far
-    for entry in _directions(entries):
-        frequencies, iq = _sorted_trace(entry, "iq_counts")
+    reported = None
+    for direction in sorted(entries, key=lambda d: (d != PREFERRED_DIRECTION, d)):
+        frequencies, iq = _sorted_trace(entries[direction], "iq_counts")
         speed = _point_to_point_speed(frequencies, iq)
         if speed is None or len(speed) < 3:
             continue
 
         jumps = np.diff(speed)
-        # Both thresholds are prominences in inverse Hz; require the larger.
-        prominence_threshold = max(
-            float(spike_prominence_factor * (speed.max() - speed.min())),
-            float(noise_gate_factor * _noise_floor(jumps)),
+        shape_threshold = float(spike_prominence_factor * np.ptp(speed))
+        noise_threshold = float(noise_gate_factor * _noise_floor(jumps))
+        threshold = max(shape_threshold, noise_threshold)
+        pair = _strongest_pair(jumps)
+        strength = (min(pair["positive_spike_prominence"],
+                        pair["negative_spike_prominence"]) if pair else 0.0)
+        detected = pair is not None and strength >= threshold
+        check = BifurcationCheck(
+            method="derivative", bifurcated=detected,
+            metric={"pair_strength": strength, "pair_found": pair is not None},
+            threshold=threshold,
+            diagnostics={"direction": direction, "pair": pair,
+                         "shape_threshold": shape_threshold,
+                         "noise_threshold": noise_threshold},
         )
-
-        # Retain below-threshold spikes too, so a missed detection is inspectable.
-        up, up_prominence = _spikes(jumps)
-        down, down_prominence = _spikes(-jumps)
-        cleared_up = up[up_prominence >= prominence_threshold]
-        cleared_down = down[down_prominence >= prominence_threshold]
-
-        adjacency = _paired(cleared_up, cleared_down)
-        verdict = verdict or adjacency
-
-        metric = {
-            "positive_spike_prominence": _tallest(up_prominence),
-            "negative_spike_prominence": _tallest(down_prominence),
-            "adjacency": adjacency,
-        }
-        # Report a triggering direction if available. Break ties by spike prominence.
-        rank = (
-            adjacency,
-            max(
-                metric["positive_spike_prominence"],
-                metric["negative_spike_prominence"],
-            ),
-        )
+        rank = (detected, strength)
         if reported is None or rank > reported[0]:
-            reported = (rank, metric, prominence_threshold)
+            reported = (rank, check)
 
     if reported is None:
         raise ValueError(
             "No usable sweep at this amplitude: every direction is too short "
-            "have a shape, or has a degenerate frequency or IQ axis."
+            "to have a shape, or has a degenerate frequency or IQ axis."
         )
-    _, metric, threshold = reported
-    return BifurcationCheck(
-        method="derivative", bifurcated=verdict, metric=metric, threshold=threshold
-    )
+    return reported[1]
 
 
 def bifurcated_by_hysteresis(
@@ -891,7 +879,7 @@ def bifurcated_by_either(
     Returns:
         BifurcationCheck: ``parts`` contains both original checks.
         ``metric`` prefixes each quantity with its method and divides numeric
-        values by that method's threshold; boolean adjacency is unchanged.
+        values by that method's threshold; boolean pair availability is unchanged.
         The combined threshold is 1.0. For a zero source threshold, positive
         values become infinity and other values become zero.
 
@@ -981,11 +969,6 @@ def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return peaks, properties["prominences"]
 
 
-def _tallest(prominences: np.ndarray) -> float:
-    """Return the largest prominence, or zero if there are no spikes."""
-    return float(prominences.max()) if len(prominences) else 0.0
-
-
 def _noise_floor(values: np.ndarray) -> float:
     """Estimate Gaussian-equivalent noise with median absolute deviation × 1.4826.
 
@@ -995,17 +978,19 @@ def _noise_floor(values: np.ndarray) -> float:
     return float(np.median(np.abs(values - np.median(values))) * 1.4826)
 
 
-def _paired(up: np.ndarray, down: np.ndarray) -> bool:
-    """Find any positive spike followed within ``MAX_SPIKE_SEPARATION`` samples
-    by a negative spike.
-
-    Checking all pairs ensures that lowering the prominence threshold cannot
-    remove a detection by admitting an earlier, unrelated spike.
-    """
-    if not (len(up) and len(down)):
-        return False
+def _strongest_pair(jumps: np.ndarray) -> dict | None:
+    """Return the eligible peak–trough pair with greatest minimum prominence."""
+    up, up_prominence = _spikes(jumps)
+    down, down_prominence = _spikes(-jumps)
     separation = down[np.newaxis, :] - up[:, np.newaxis]
-    return bool(((separation >= 1) & (separation <= MAX_SPIKE_SEPARATION)).any())
+    i, j = np.nonzero((separation >= 1) & (separation <= MAX_SPIKE_SEPARATION))
+    if not len(i):
+        return None
+    best = int(np.argmax(np.minimum(up_prominence[i], down_prominence[j])))
+    u, d = i[best], j[best]
+    return {"positive_index": int(up[u]), "negative_index": int(down[d]),
+            "positive_spike_prominence": float(up_prominence[u]),
+            "negative_spike_prominence": float(down_prominence[d])}
 
 
 # ─── Which frequency ──────────────────────────────────────────────────────────

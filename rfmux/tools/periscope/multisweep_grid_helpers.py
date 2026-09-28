@@ -9,7 +9,7 @@ from PyQt6 import QtCore, QtWidgets
 from rfmux.core.transferfunctions import (convert_roc_to_volts,
                                           convert_dacunits_to_volts)
 from rfmux.tuning.bias import (
-    BiasFinding, bifurcated_by_derivative, iq_arc_speed, iq_derivatives, normalized_arc_speed,
+    BiasFinding, bifurcated_by_derivative, iq_arc_speed, iq_derivatives,
     hysteresis_separation)
 from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
@@ -163,10 +163,9 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                                dac_scale)
                 magnitude_axis_labels(plot_item, unit_mode, normalize)
             elif plot_type == 'bias':
-                _plot_bifurcation(plot_item, traces, amplitude_to_color,
-                                  pen_color, bias, bias_settings or {}, labels)
-                plot_item.setLabel('left', 'IQ-speed change (× threshold)')
-                plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+                _plot_bifurcation(plot_item, traces, pen_color, bias, bias_settings or {})
+                plot_item.setLabel('left', 'Prominence', units='1/Hz')
+                plot_item.setLabel('bottom', 'Drive amplitude (DAC fraction)')
             elif plot_type == 'hysteresis':
                 _plot_hysteresis(plot_item, traces, amplitude_to_color, pen_color,
                                  bias, bias_settings or {}, labels)
@@ -596,134 +595,43 @@ def _fr_line(plot_item, sweep, fit_model, amplitude, amplitude_to_color, pen_col
         pen=pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE))
 
 
-#: How faint the bar that did not bind is drawn, against the one that did.
-UNBINDING_BAR_ALPHA = 160
-
-#: How solid the band inside a bar is filled. A bar is a region -- everything
-#: inside it is "not a spike" -- and a filled region says that at a glance
-#: where two horizontal lines leave the eye to do the work.
-BAR_FILL_ALPHA = 26
-UNBINDING_FILL_ALPHA = 30
-
-#: Fraction of the range left clear around the bifurcation plot's contents.
-#: The bar is the outermost thing on a subplot where nothing crossed it, and
-#: pyqtgraph's own padding is too small to tell it from the frame.
-BAR_PADDING = 0.12
-
-
-def _derivative_bars(entry, settings) -> tuple[float, float]:
-    """``(prominence bar, noise bar)`` for one trace, from the library itself.
-
-    The two are prominences in the same units and the detector applies the
-    higher, so it reports only that one. Switching each off in turn is how the
-    detector is asked for them separately -- the same trick the docstring
-    recommends for finding out which bar was binding, and the reason nothing is
-    recomputed here.
-    """
-    prominence = bifurcated_by_derivative(
-        {"one": entry},
-        spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
-        noise_gate_factor=0.0).threshold
-    noise = bifurcated_by_derivative(
-        {"one": entry}, spike_prominence_factor=0.0,
-        noise_gate_factor=settings.get("noise_gate_factor", 50.0)).threshold
-    return prominence, noise
-
-
-def _plot_bifurcation(plot_item, traces, amplitude_to_color, pen_color,
-                      bias, settings, legend_labels=None):
-    """Plot changes in normalized IQ speed divided by each trace's cutoff.
-
-    The cutoff is the larger of the noise and span thresholds, drawn at ±1.
-    Show the unused threshold faintly for the bias step. The detector tests
-    prominence and adjacency; a crossing alone does not establish bifurcation.
-    """
-    if traces:
-        _add_legend(plot_item, pen_color)
-
-    # Room above the bar, so that when nothing reaches it the line reads as a
-    # threshold rather than as the top of the frame.
-    plot_item.getViewBox().setDefaultPadding(BAR_PADDING)
-    _bar_band(plot_item, 1.0, pen_color, BAR_FILL_ALPHA)
-    plot_item.addLine(y=1.0, pen=pg.mkPen(color=pen_color, width=1))
-    plot_item.addLine(y=-1.0, pen=pg.mkPen(color=pen_color, width=1))
-
-    # The bar that did not bind, over the chosen step's traces. Collected
-    # rather than drawn inside the loop: that step is swept in both directions,
-    # each with a bar of its own, and two translucent bands one on top of the
-    # other read as one darker band that means nothing.
-    unbinding = []
-    # Which of the two was in force, over every trace drawn. A set, because
-    # different steps of a schedule can be held by different bars, and a legend
-    # that named one of them would be wrong on the others.
-    binding_kinds = set()
-    lower_kinds = set()
-
+def _plot_bifurcation(
+    plot_item: pg.PlotItem, traces: list[tuple], pen_color: str,
+    bias: BiasFinding | None, settings: dict,
+) -> None:
+    """Plot pair strength and both thresholds against drive amplitude."""
+    _add_legend(plot_item, pen_color)
+    plot_item.legend.setOffset((10, 10))
+    by_direction = {}
     for step, direction, amplitude, sweep in traces:
         try:
-            frequencies, speed = normalized_arc_speed(sweep)
-            prominence_bar, noise_bar = _derivative_bars(sweep, settings)
+            check = bifurcated_by_derivative(
+                {direction: sweep},
+                spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
+                noise_gate_factor=settings.get("noise_gate_factor", 50.0),
+            )
         except (ValueError, KeyError):
-            continue        # too short or too flat to difference
-        bar = max(prominence_bar, noise_bar)
-        if bar <= 0:
             continue
-
-        # A difference belongs between the two samples it was taken from.
-        midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
-        offsets = (midpoints - sweep['original_center_frequency']) / 1e3
-        chosen = _biased_at(bias, step)
-        name = legend_labels.get((step, direction, amplitude)) if legend_labels else None
-        _plot_trace(
-            plot_item, offsets, np.diff(speed) / bar, amplitude, direction,
-            amplitude_to_color, pen_color, chosen=chosen, name=name)
-
-        binding_kinds.add(_bar_kind(prominence_bar, noise_bar))
-        if chosen:
-            unbinding.append(min(prominence_bar, noise_bar) / bar)
-            lower_kinds.add("Spike" if noise_bar >= prominence_bar else "Noise")
-
-    if traces:
-        _bar_legend(plot_item, pen_color, binding_kinds, lower_kinds)
-
-    if unbinding:
-        colour = pg.mkColor(pen_color)
-        colour.setAlpha(UNBINDING_BAR_ALPHA)
-        faint = pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE)
-        # Shade once at the smallest unused cutoff to avoid overlapping bands.
-        _bar_band(plot_item, min(unbinding), pen_color, UNBINDING_FILL_ALPHA)
-        for other in unbinding:
-            for sign in (1.0, -1.0):
-                plot_item.addLine(y=sign * other, pen=faint)
-
-
-#: Sources of the derivative cutoff: arc-speed span and noise estimate.
-BAR_NAMES = ("Spike", "Noise")
-
-
-def _bar_kind(prominence_bar: float, noise_bar: float) -> str:
-    """Which of the two was in force on one trace, by name.
-
-    The detector applies the higher, and reports only that one, so this is the
-    same comparison it made.
-    """
-    return BAR_NAMES[1] if noise_bar >= prominence_bar else BAR_NAMES[0]
-
-
-def _bar_legend(plot_item, pen_color, binding_kinds: set, lower_kinds: set) -> None:
-    """Label the prominence reference and the smaller selected-drive gate."""
-    named = (next(iter(binding_kinds)) if len(binding_kinds) == 1
-             else "Larger")
-    legend_key(plot_item, f"±1 × {named.lower()} prominence threshold",
-               pg.mkPen(color=pen_color, width=1), pen_color, BAR_FILL_ALPHA)
-    if lower_kinds:
-        lower = next(iter(lower_kinds)) if len(lower_kinds) == 1 else "Lower"
-        colour = pg.mkColor(pen_color)
-        colour.setAlpha(UNBINDING_BAR_ALPHA)
-        legend_key(
-            plot_item, f"{lower} threshold (selected amp.)",
-            pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE),
-            pen_color, UNBINDING_FILL_ALPHA)
+        by_direction.setdefault(direction, []).append((
+            amplitude, check.metric["pair_strength"],
+            check.diagnostics["shape_threshold"], check.diagnostics["noise_threshold"],
+        ))
+    for direction, rows in by_direction.items():
+        values = np.asarray(sorted(rows)).T
+        for y, label, colour, symbol in zip(
+            values[1:], ("Pair strength", "Shape threshold", "Noise threshold"),
+            ("#3366CC", "#CC6633", "#339966"), ("o", "t", "s"),
+        ):
+            plot_item.plot(values[0], y, symbol=symbol, symbolSize=6,
+                           symbolBrush=colour, symbolPen=colour,
+                           pen=pg.mkPen(colour, width=1.5, style=(
+                               DOWNWARD_SWEEP_STYLE if direction == "downward"
+                               else QtCore.Qt.PenStyle.SolidLine)),
+                           name=f"{label} ({direction})")
+    if bias is not None and by_direction:
+        pen = pg.mkPen(pen_color, style=QtCore.Qt.PenStyle.DotLine)
+        plot_item.addLine(x=bias.amplitude, pen=pen)
+        legend_key(plot_item, "Selected amplitude", pen)
 
 
 def legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) -> None:
@@ -740,22 +648,6 @@ def legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) 
         colour.setAlpha(fill_alpha)
         fill = {"fillLevel": 0, "fillBrush": pg.mkBrush(colour)}
     plot_item.legend.addItem(pg.PlotDataItem(pen=pen, **fill), name)
-
-
-def _bar_band(plot_item, bar: float, pen_color, alpha: int) -> None:
-    """Fill the band a bar encloses, behind everything drawn on top of it.
-
-    Nested where both bars are shown: the inner band is the gate that did not
-    bind, so the two shades together say how much of the bar in force is the
-    noise gate and how much the prominence.
-    """
-    colour = pg.mkColor(pen_color)
-    colour.setAlpha(alpha)
-    band = pg.LinearRegionItem(
-        values=(-bar, bar), orientation='horizontal', movable=False,
-        brush=pg.mkBrush(colour), pen=pg.mkPen(None))
-    band.setZValue(-10)
-    plot_item.addItem(band)
 
 
 def _plot_hysteresis(

@@ -281,25 +281,24 @@ def test_bifurcation_plot_matches_periscope_quantity(plotters, noise_gate_factor
             }}
     plotters.bias.plot_bifurcation_checks(block)
     panel = plt.gcf().axes[0]
-    traces = [line for line in panel.lines if len(line.get_xdata()) == 6]
-    assert len(traces) == 6
-    for line, (step, direction) in zip(traces, (
-        (step, direction) for step in range(3) for direction in ("upward", "downward")
-    )):
-        entry = block["results"][step][direction]["R1"]
-        midpoints, speed = normalized_arc_speed(entry)
-        threshold = bifurcated_by_derivative(
-            {direction: entry}, spike_prominence_factor=0.3,
-            noise_gate_factor=noise_gate_factor,
-        ).threshold
-        np.testing.assert_allclose(line.get_xdata(),
-                                   (0.5 * (midpoints[:-1] + midpoints[1:]) - 600e6) / 1e3)
-        np.testing.assert_allclose(line.get_ydata(), np.diff(speed) / threshold)
-        assert line.get_linestyle() == ("-" if direction == "upward" else "--")
-    assert traces[0].get_linewidth() > traces[2].get_linewidth()
-    bars = [line.get_ydata()[0] for line in panel.lines if len(line.get_xdata()) == 2]
-    assert 1 in bars and -1 in bars
-    assert panel.get_ylabel() == "IQ-speed change / threshold"
+    for direction in ("upward", "downward"):
+        checks = [bifurcated_by_derivative(
+            {direction: block["results"][step][direction]["R1"]},
+            spike_prominence_factor=0.3, noise_gate_factor=noise_gate_factor,
+        ) for step in range(3)]
+        for label, expected in (
+            ("Pair strength", [c.metric["pair_strength"] for c in checks]),
+            ("Shape threshold", [c.diagnostics["shape_threshold"] for c in checks]),
+            ("Noise threshold", [c.diagnostics["noise_threshold"] for c in checks]),
+        ):
+            line = next(line for line in panel.lines
+                        if line.get_label() == f"{label} ({direction})")
+            np.testing.assert_allclose(line.get_xdata(), [0.01, 0.02, 0.03])
+            np.testing.assert_allclose(line.get_ydata(), expected)
+            assert line.get_linestyle() == ("-" if direction == "upward" else "--")
+    assert len(panel.lines) == 7  # six curves and the selected amplitude
+    assert panel.get_xlabel() == "Drive amplitude [DAC fraction]"
+    assert panel.get_ylabel() == "Prominence [1/Hz]"
 
 
 def test_bifurcation_plot_skips_unusable_traces(plotters):
@@ -307,7 +306,7 @@ def test_bifurcation_plot_skips_unusable_traces(plotters):
     plotters.bias.plot_bifurcation_checks(biased_measurement())
     panel = plt.gcf().axes[0]
     assert any(text.get_text() == "no usable derivative traces" for text in panel.texts)
-    np.testing.assert_allclose([line.get_ydata()[0] for line in panel.lines], [1, -1])
+    assert not panel.lines
 
 
 @pytest.mark.parametrize("function", ["plot_bias_points", "plot_bifurcation_checks", "plot_hysteresis_checks"])
@@ -355,7 +354,6 @@ def smooth_biased_measurement() -> dict:
 @pytest.mark.parametrize("module, function, block", [
     ("multisweep", "plot_magnitude_panels", measurement),
     ("bias", "plot_bias_points", biased_measurement),
-    ("bias", "plot_bifurcation_checks", smooth_biased_measurement),
     ("bias", "plot_hysteresis_checks", biased_measurement),
     ("bias", "plot_arc_speed_panels", smooth_biased_measurement),
 ])
@@ -466,27 +464,6 @@ def test_netanal_notebook_transmission_matches_module(plotters):
     assert panel.get_ylabel() == "|S21| [dB, drive-referenced]"
 
 
-@pytest.mark.parametrize("cell_index", [0, 1])
-def test_fitting_notebook_uses_drive_referenced_plotter(plotters, cell_index):
-    source = (DEMOS / "fitting_resonators.md").read_text()
-    cells = [
-        cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
-        if cell.startswith("msplots.plot_magnitude_panels(\n    multi_amplitude_results,")
-    ]
-    assert len(cells) == 2
-    first_call = cells[cell_index].split("\nmsplots.plot_iq_panels(")[0]
-    exec(compile(first_call, str(DEMOS / "fitting_resonators.md"), "exec"), {
-        "msplots": plotters.multisweep,
-        "multi_amplitude_results": measurement(),
-        "first_resonator": "R1",
-    })
-    panel = plt.gcf().axes[0]
-    np.testing.assert_allclose(
-        panel.lines[0].get_ydata(), [-6.0206, -12.0412, -6.0206], atol=1e-4,
-    )
-    assert panel.get_ylabel() == "|S21| [dB, drive-referenced]"
-
-
 def test_bias_notebook_transmission_matches_module(plotters):
     source = (DEMOS / "bias_finding.md").read_text()
     cell = next(cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
@@ -520,6 +497,7 @@ def test_hysteresis_plot_uses_saved_settings(plotters, compare, limit):
         np.testing.assert_allclose(line.get_ydata(), separation / (limit or 1))
     np.testing.assert_allclose(panel.lines[-1].get_ydata(), [1, 1] if limit else [0, 0])
     assert panel.lines[0].get_linewidth() > panel.lines[1].get_linewidth()
+    assert panel.get_yscale() == ("log" if limit else "linear")
 
 
 def test_hysteresis_plot_explains_missing_pairs(plotters):
@@ -648,3 +626,32 @@ def test_noise_psd_explains_capture_with_only_carrier_bin(plotters):
         ["psd_dual_sideband"] = np.array([0.])
     figures = plotters.noise.plot_psds(block, dual_sideband=True)
     assert "no bins beyond" in figures[0].axes[0].texts[0].get_text()
+
+
+def test_speed_change_plot_marks_pairs_without_threshold_lines(plotters):
+    block = smooth_biased_measurement()
+    plotters.bias.plot_arc_speed_panels(block, quantity="spikes")
+    panel = plt.gcf().axes[0]
+    for step in block["results"]:
+        entry = block["results"][step]["upward"]["R1"]
+        pair = bifurcated_by_derivative({"upward": entry}).diagnostics["pair"]
+        if pair is not None:
+            frequencies, speed = normalized_arc_speed(entry)
+            indices = [pair["positive_index"], pair["negative_index"]]
+            expected = np.diff(speed)[indices]
+            assert any(np.allclose(line.get_ydata(), expected)
+                       for line in panel.lines if line.get_marker() == "o")
+    assert all(line.get_transform() == panel.transData for line in panel.lines)
+
+
+def test_workbook_fit_crosscheck_draws_measurements_and_a_title(plotters):
+    source = (DEMOS / "bias_finding.md").read_text()
+    cell = next(cell for cell in re.findall(r"```python\n(.*?)```", source, re.S)
+                if cell.startswith("import matplotlib.pyplot as plt"))
+    block = biased_measurement()
+    namespace = {"refined_multisweep_module_outputs": block,
+                 "refined_bias_report": BiasReport.from_dict(block["bias_report"])}
+    exec(compile(cell, str(DEMOS / "bias_finding.md"), "exec"), namespace)
+    panel = plt.gcf().axes[0]
+    assert panel.get_title().startswith("R1: step 0, ")
+    assert any(len(line.get_xdata()) == 3 for line in panel.lines)

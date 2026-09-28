@@ -731,14 +731,32 @@ except ValueError as e:
     print(f"\nValueError: {e}")
 ```
 
-## 8. Next steps and saving
+## 8. Fit and plot a few sweeps
+
+`fit_sweeps()` takes one module's result and adds model results under each
+selected section's `fits` key. The example fit plotter overlays those results
+on the measured data; a failed fit shows its reason in the panel.
+
+```python
+from rfmux.tuning import fit_sweeps
+import example_plotting_fits as fitplots
+
+shown_names = list(sweep_sections)[:4]
+fit_sweeps(ms_module_output, models=("skewed",), names=shown_names)
+fitplots.plot_fit_panels(
+    ms_module_output, model="skewed", names=shown_names, batchlen=None,
+)
+```
+
+See `ms_module_output["results"][0]["upward"][first_resonator]["fits"]`
+for the fitted parameters and `failed_because` status. Other models and
+selection options are available in `rfmux.tuning.fits`.
+
+## 9. Next steps and saving
 
 - **Choose bias points (amplitude and frequency):** `rfmux.tuning.find_bias_points` finds
   bifurcation in an amplitude sequence and returns a new catalog biased one
   step below it. See `bias_finding.md`.
-- **Fit resonators:** `rfmux.tuning.fit_sweeps` stores model results under `fits`
-  in each fitted sweep section, leaving the catalog unchanged. See
-  `fitting_resonators.md`.
 - **Saving data:** measurements follow the store autosave settings and use the
   session folder printed above (default `~/rfmux_data/ipy_session_YYYYMMDD/`).
   The result records the path under `file_metadata`. Pass

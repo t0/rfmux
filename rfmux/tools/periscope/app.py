@@ -955,28 +955,21 @@ followed by a negative spike within two samples in the change in IQ speed.
 Both spikes must have enough prominence (height above their surrounding base).
 Either sweep direction can supply the pair.
 
-**Vertical scale:** each curve is the point-to-point change in normalized IQ
-speed divided by that curve's prominence threshold. I and Q are first scaled
-by their own ranges before calculating speed (distance per hertz).
-The plotted ratio has no units. A value of +1 means an increase equal to one
-threshold; −1 means a decrease of the same size. +2 means twice the threshold.
+**Pair strength:** the smaller prominence in a peak–trough pair. The strongest
+eligible pair is retained, even below threshold. No pair means no detection.
 
-**Solid lines and shading:** ±1 mark one threshold on either side of zero.
-The threshold is the larger of the spike setting times the speed range and
-the noise gate setting times the estimated noise in the speed changes.
-The legend names which sets the threshold, or says “larger” if it varies
-between curves. Each curve uses its own threshold, so different drives
-can be compared on this scale.
+**Axes:** drive amplitude (DAC fraction) horizontally, prominence in inverse Hz
+vertically. Blue circles show pair strength (zero when no pair exists), orange
+triangles show the shape threshold, and green squares show the noise threshold.
+A pair triggers when its strength reaches both curves. The shape threshold is
+the spike factor times the speed range; the noise threshold is the noise factor
+times the robust scatter of speed changes. Raise either factor to demand
+stronger evidence. Lowering the smaller threshold does not change the verdict.
 
-These are reference lines, not a pass/fail band: crossing a line alone does
-not establish bifurcation, and staying inside the shading does not guarantee
-a pass. The detector checks spike prominence relative to the surrounding
-base, not height from zero, and requires the positive/negative pair.
-
-**Faint lines:** the smaller threshold at the selected drive, expressed on
-the same scale. The selected drive is drawn with thicker curves; the drive
-colors are identified by the colorbar or legend. Apply changes in Find Bias
-Settings to redraw the derivative plot with those thresholds.
+Solid curves are upward sweeps, dashed curves downward sweeps. A dotted vertical
+line marks the selected drive. All measured amplitudes are evaluated for the
+plot, including those beyond the amplitude search's stopping point. Apply Find
+Bias Settings to redraw these curves.
 
 ## Bias: hysteresis — compare the sweep directions
 

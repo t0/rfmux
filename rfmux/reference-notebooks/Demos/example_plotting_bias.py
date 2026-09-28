@@ -15,9 +15,9 @@ Run ``find_bias_points`` to store ``bias_report`` in the module dict::
 ``plot_arc_speed_panels`` evaluates the sweeps directly and does not require
 a saved report. Flagged bias points are
 orange, with the reason shown in the bias-point panel.
-``plot_bifurcation_checks`` shows threshold-normalized arc-speed changes,
+``plot_bifurcation_checks`` shows pair strength and both thresholds versus drive,
 matching Periscope; ``plot_arc_speed_panels(..., quantity="spikes")`` shows
-the changes before threshold normalization.
+the raw speed changes and the strongest eligible pair.
 
 Style is applied per figure. Use ``batchlen=None`` for a single figure.
 """
@@ -103,16 +103,15 @@ ARC_QUANTITIES = {
         "reader": normalized_arc_speed,
         "label": "normalized speed [1/Hz]",
         "what": "what the derivative bifurcation test differentiates",
-        # Nothing here is compared against a threshold — the test's bars apply
-        # to the *difference* of this, which is the "spikes" quantity below.
+        # Prominence is measured on differences of this speed.
         "annotation": None,
     },
     "spikes": {
         "reader": None,  # np.diff of normalized_arc_speed — see _arc_quantity
-        "label": "$\\Delta$ normalized speed",
+        "label": "$\\Delta$ normalized speed [1/Hz]",
         "what": "what the derivative test looks for spikes in",
-        # The bar a spike has to clear, per amplitude step.
-        "annotation": "threshold",
+        # Mark the strongest eligible pair, even below threshold.
+        "annotation": "pair",
     },
 }
 
@@ -472,131 +471,70 @@ def plot_bifurcation_checks(
     panel_size: tuple[float, float] = (7.0, 5.0),
     title: str | None = None,
     batchlen: int | None = BATCH_SIZE,
-    xlim_khz: tuple[float, float] | None = None,
 ) -> None:
-    """Plot normalized arc-speed changes in derivative-threshold units.
+    """Plot strongest pair strength and both thresholds against drive amplitude.
 
-    Matches Periscope's "Bias: derivative" view: each trace is the
-    point-to-point change in normalized arc speed divided by the larger of
-    its spike-prominence and noise thresholds. The larger threshold is ±1;
-    the legend names its source.
-    The detector tests spike prominence and adjacency; crossing a line alone
-    does not establish bifurcation. This view does not show the up/down
-    separation test, which can also trigger a combined verdict.
+    Uses the embedded bias report's settings. A pair must reach both curves
+    to trigger the derivative detector. Zero strength represents no eligible
+    pair when none exists; missing pairs cannot trigger even at zero thresholds.
+    Upward sweeps are solid, downward dashed. The vertical line marks the
+    selected amplitude. All measured steps are evaluated, including those
+    beyond the amplitude search's stopping point. This does not show the
+    hysteresis test, which can independently trigger a combined verdict.
 
-    Args:
-        ms_module_output: one module's output from ``multisweep`` with an
-            embedded ``bias_report``. Its saved spike_prominence_factor and
-            noise_gate_factor are used, defaulting to 0.5 and 50.0 when absent.
-        names: resonator name(s), or None for every finding.
-        direction: one sweep direction, or None for all measured directions.
-            Upward traces are solid and downward traces dashed.
-        ncols: panels per row, or None to choose automatically.
-        panel_size: panel width and height in inches.
-        title: figure title; batch numbers are appended.
-        batchlen: resonators per figure; None uses one figure.
-        xlim_khz: ``(low, high)`` frequency-offset range to show in every
-            panel, in kHz from the sweep centre; ``None`` shows each whole
-            sweep.
-
-    All amplitude steps are drawn, including those beyond the recorded checks.
-    The selected amplitude is thicker, with its lower threshold shown faintly.
-    "Spike threshold" is the configured fraction of the arc-speed range;
-    "Noise threshold" is the configured multiple of the noise estimate.
-    Unusable or zero-threshold traces are skipped, as in Periscope.
+    ``names``, ``ncols``, ``panel_size``, ``title`` and ``batchlen`` select and
+    arrange resonator panels; ``direction=None`` shows every sweep direction.
     """
     report = _bias_report(ms_module_output)
     findings = _findings(report, names)
-    traces = {
-        finding.name: [
-            (step, swept_direction, entry)
-            for step, entries in collect_amplitude_iterations_for(
-                ms_module_output, finding.name
-            ).items()
-            for swept_direction, entry in entries.items()
-            if direction is None or swept_direction == direction
-        ]
-        for finding in findings
-    }
-    amplitudes = [
-        entry["sweep_amplitude"]
-        for entries in traces.values() for _, _, entry in entries
-    ]
-    if not amplitudes:
-        raise ValueError("No sweeps match the selected names and direction.")
-    mappable = amplitude_mappable(amplitudes)
     settings = report.settings
     batches = _batches(findings, batchlen)
     columns = _columns_for(batches, ncols)
-
     for batch_number, batch in enumerate(batches, start=1):
         with plt.rc_context(PLOT_STYLE):
             fig, axes, panels = _panel_grid(len(batch), columns, panel_size)
             for panel, finding in zip(panels, batch):
-                unbinding = []
-                binding_kinds = set()
-                lower_kinds = set()
-                for step, swept_direction, entry in traces[finding.name]:
-                    try:
-                        frequencies, changes = _arc_quantity("spikes", entry)
-                        prominence = bifurcated_by_derivative(
-                            {swept_direction: entry},
-                            spike_prominence_factor=settings.get(
-                                "spike_prominence_factor", 0.5),
-                            noise_gate_factor=0.0,
-                        ).threshold
-                        noise = bifurcated_by_derivative(
-                            {swept_direction: entry}, spike_prominence_factor=0.0,
-                            noise_gate_factor=settings.get("noise_gate_factor", 50.0),
-                        ).threshold
-                    except (ValueError, KeyError):
-                        continue
-                    threshold = max(prominence, noise)
-                    if threshold <= 0:
-                        continue
-                    chosen = step == finding.iteration
-                    panel.plot(
-                        offset_khz(entry, frequencies), changes / threshold,
-                        color=mappable.to_rgba(entry["sweep_amplitude"]),
-                        ls={"upward": "-", "downward": "--"}.get(swept_direction, ":"),
-                        lw=2.5 if chosen else 1.0,
-                    )
-                    binding_kinds.add("Noise" if noise >= prominence else "Spike")
-                    if chosen:
-                        unbinding.append(min(prominence, noise) / threshold)
-                        lower_kinds.add("Spike" if noise >= prominence else "Noise")
-
-                binding = (next(iter(binding_kinds)) if len(binding_kinds) == 1
-                           else "Larger")
-                panel.axhspan(-1, 1, color="0.35", alpha=0.08)
-                for sign in (1, -1):
-                    panel.axhline(sign, color="0.35", lw=1,
-                                  label=f"{binding} threshold (±1)" if sign == 1 else None)
-                if unbinding:
-                    lower = next(iter(lower_kinds)) if len(lower_kinds) == 1 else "Lower"
-                    panel.axhspan(-min(unbinding), min(unbinding),
-                                  color="0.35", alpha=0.04)
-                    for index, other in enumerate(unbinding):
-                        for sign in (1, -1):
-                            panel.axhline(
-                                sign * other, color="0.35", lw=1, ls="--", alpha=0.4,
-                                label=f"{lower} threshold (selected amp.)"
-                                if index == 0 and sign == 1 else None,
+                by_direction = {}
+                for entries in collect_amplitude_iterations_for(
+                    ms_module_output, finding.name
+                ).values():
+                    for swept_direction, entry in entries.items():
+                        if direction is not None and swept_direction != direction:
+                            continue
+                        try:
+                            check = bifurcated_by_derivative(
+                                {swept_direction: entry},
+                                spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
+                                noise_gate_factor=settings.get("noise_gate_factor", 50.0),
                             )
-                if not binding_kinds:
+                        except (ValueError, KeyError):
+                            continue
+                        by_direction.setdefault(swept_direction, []).append((
+                            entry["sweep_amplitude"], check.metric["pair_strength"],
+                            check.diagnostics["shape_threshold"],
+                            check.diagnostics["noise_threshold"],
+                        ))
+                for swept_direction, rows in by_direction.items():
+                    values = np.asarray(sorted(rows)).T
+                    for y, label, colour, marker in zip(
+                        values[1:], ("Pair strength", "Shape threshold", "Noise threshold"),
+                        ("#3366CC", "#CC6633", "#339966"), ("o", "^", "s"),
+                    ):
+                        panel.plot(values[0], y, color=colour, marker=marker,
+                                   ls="--" if swept_direction == "downward" else "-",
+                                   label=f"{label} ({swept_direction})")
+                if by_direction:
+                    panel.axvline(finding.amplitude, color="0.4", ls=":",
+                                  label="Selected amplitude")
+                    panel.legend(fontsize=10)
+                else:
                     panel.text(0.5, 0.5, "no usable derivative traces",
                                ha="center", transform=panel.transAxes)
-                panel.margins(y=0.12)
-                if xlim_khz is not None:
-                    panel.set_xlim(xlim_khz)
+                panel.set_ylim(bottom=0)
                 panel.set_title(finding.name)
-                panel.legend(fontsize=10)
-
-            _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]",
-                          "IQ-speed change / threshold")
-            amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
+            _outer_labels(axes, "Drive amplitude [DAC fraction]", "Prominence [1/Hz]")
             _titled(fig, _batch_title(
-                title, "Derivative test — selected amplitude bold",
+                title, "Derivative test — pair strength must reach both thresholds",
                 len(findings), batch_number, len(batches),
             ))
             plt.show()
@@ -613,7 +551,8 @@ def plot_hysteresis_checks(
     Reads compare and max_discrepancy from the embedded bias_report. Values
     above 1 exceed the allowed separation; equality does not trigger. Magnitude
     compares dip-depth fractions; IQ compares loop-radius fractions. For a
-    zero limit, show those fractions directly with the threshold at zero.
+    zero limit, show those fractions directly with the threshold at zero on a
+    linear axis. Positive limits use a log axis to show small differences.
     Missing or unusable sweep pairs are skipped. The selected amplitude is bold.
     ``xlim_khz`` is a ``(low, high)`` frequency-offset range in kHz from the
     sweep centre, applied to every panel; ``None`` shows each whole sweep.
@@ -658,7 +597,10 @@ def plot_hysteresis_checks(
                 if not drawn:
                     panel.text(0.5, 0.5, "no usable up/down pairs", ha="center",
                                transform=panel.transAxes)
-                panel.set_ylim(bottom=0)
+                if limit > 0:
+                    panel.set_yscale("log")
+                else:
+                    panel.set_ylim(bottom=0)
                 if xlim_khz is not None:
                     panel.set_xlim(xlim_khz)
                 panel.set_title(finding.name)
@@ -699,6 +641,7 @@ def plot_arc_speed_panels(
     direction=PREFERRED_DIRECTION,
     annotate=True,
     spike_prominence_factor=0.5,
+    noise_gate_factor=50.0,
     ncols=None,
     panel_size=(7.0, 5.0),
     title=None,
@@ -708,10 +651,9 @@ def plot_arc_speed_panels(
     """Plot arc speed, normalized speed or its difference per resonator.
 
     With ``annotate=True``, arc speed gets a maximum marker and spikes get
-    per-step thresholds from the derivative detector. Solid thresholds indicate
-    bifurcation; dashed thresholds indicate no bifurcation. Normalized speed
-    has no annotation. The detector tests prominence and adjacency, so crossing
-    a threshold line alone does not establish bifurcation.
+    markers on the strongest eligible peak–trough pair. Filled markers indicate
+    detection; open markers indicate a pair below threshold. Normalized speed
+    has no annotation.
 
     All selected steps are evaluated, including those beyond the first
     bifurcation recorded by the amplitude search.
@@ -728,8 +670,8 @@ def plot_arc_speed_panels(
         direction: the sweep direction to draw.
         annotate: draw the per-quantity marks described above.
         spike_prominence_factor: as :func:`~rfmux.tuning.find_bias_points`
-            takes it. Only used to place the ``spikes`` thresholds — pass the
-            factor to evaluate.
+            takes it. Used to classify the marked ``spikes`` pair.
+        noise_gate_factor: noise requirement for the marked ``spikes`` pair.
         ncols: panels per row, or ``None`` to let :func:`panels_per_row` pick.
         panel_size: ``(width, height)`` of one panel, in inches.
         title: overrides the figure title. The batch marker is still appended.
@@ -795,7 +737,6 @@ def plot_arc_speed_panels(
         with plt.rc_context(PLOT_STYLE):
             fig, axes, panels = _panel_grid(len(batch), columns, panel_size)
 
-            bifurcated_any = False
             for panel, (name, entries) in zip(panels, batch):
                 for iteration, entry in entries:
                     colour = mappable.to_rgba(entry["sweep_amplitude"])
@@ -813,19 +754,18 @@ def plot_arc_speed_panels(
                             offset_khz(entry, frequencies)[peak], values[peak],
                             marker="o", ms=13, mfc="none", mew=2.5, color=colour,
                         )
-                    elif spec["annotation"] == "threshold":
-                        # Straight off the detector, on this one step, so the
-                        # line is the bar the code actually applied.
+                    elif spec["annotation"] == "pair":
                         check = bifurcated_by_derivative(
                             {direction: entry},
                             spike_prominence_factor=spike_prominence_factor,
+                            noise_gate_factor=noise_gate_factor,
                         )
-                        bifurcated_any |= check.bifurcated
-                        for sign in (1, -1):
-                            panel.axhline(
-                                sign * check.threshold, color=colour, lw=1.5,
-                                ls="-" if check.bifurcated else "--", alpha=0.9,
-                            )
+                        pair = check.diagnostics["pair"]
+                        if pair is not None:
+                            indices = [pair["positive_index"], pair["negative_index"]]
+                            panel.plot(offset_khz(entry, frequencies)[indices], values[indices],
+                                       ls="none", marker="o", color=colour,
+                                       mfc=colour if check.bifurcated else "none", ms=9)
 
                 if xlim_khz is not None:
                     panel.set_xlim(xlim_khz)
@@ -835,14 +775,13 @@ def plot_arc_speed_panels(
             _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", spec["label"])
             amplitude_colorbar(fig, mappable, ax=axes, label="drive amp. [norm.]")
 
-            if annotate and spec["annotation"] == "threshold":
-                handles = [Line2D([], [], color="0.35", lw=1.5, ls="--")]
-                labels = ["threshold, per step"]
-                if bifurcated_any:
-                    handles.append(Line2D([], [], color="0.35", lw=1.5))
-                    labels.append("threshold, step called bifurcated")
-                fig.legend(handles, labels, loc="outside lower center",
-                           ncols=len(handles))
+            if annotate and spec["annotation"] == "pair":
+                fig.legend(
+                    [Line2D([], [], ls="none", marker="o", color="0.35", mfc=fill)
+                     for fill in ("0.35", "none")],
+                    ["strongest pair: detected", "strongest pair: below threshold"],
+                    loc="outside lower center", ncols=2,
+                )
             elif annotate and spec["annotation"] == "maximum":
                 fig.legend(
                     [Line2D([], [], ls="none", marker="o", ms=13, mfc="none",

@@ -17,7 +17,7 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 
 ## Where to start
 
-The first five take the tuning flow a step at a time, in this order:
+The first four take the tuning flow a step at a time, in this order:
 
 - **`Demos/network_analysis_find_resonances.md`** — sweep a band, find the dips,
   and seed the resonator catalog everything downstream passes around.
@@ -28,9 +28,7 @@ The first five take the tuning flow a step at a time, in this order:
 - **`Demos/multisweep.md`** — look at each resonance closely: one narrow sweep
   per resonator, all of them in parallel, and then the same array over a schedule
   of probe amplitudes, with sweep centers independent of catalog bias points.
-- **`Demos/fitting_resonators.md`** — turn those sweeps into numbers. The three
-  resonator models, where their results land in the results dictionary, and what
-  the fitted parameters do as you drive a detector harder.
+  Includes a short example of fitting and plotting measured sweeps.
 - **`Demos/bias_finding.md`** — select amplitudes and frequencies, inspect flags,
   and carry calibration and bifurcation observations into the next measurement.
 

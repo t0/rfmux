@@ -85,3 +85,26 @@ def test_a_measurement_that_was_never_biased_has_no_report(qt_app, tmp_path):
         assert panel.bias_report is None
     finally:
         panel.close()
+
+
+def test_derivative_plot_compares_pair_strength_to_both_thresholds(qt_app):
+    import pyqtgraph as pg
+    from rfmux.tuning import bifurcated_by_derivative
+    from rfmux.tools.periscope.multisweep_grid_helpers import _plot_bifurcation
+
+    entry = {"frequencies": np.arange(8.),
+             "iq_counts": np.array([0, 1, 3, 4, 4.4, 4.7, 8, 9]) * (1 + 1j)}
+    check = bifurcated_by_derivative({"upward": entry})
+    widget = pg.PlotWidget()
+    try:
+        _plot_bifurcation(widget.getPlotItem(), [(0, "upward", 0.01, entry)],
+                         "black", None, {})
+        curves = widget.listDataItems()
+        assert len(curves) == 3
+        np.testing.assert_allclose([curve.yData[0] for curve in curves],
+                                   [check.metric["pair_strength"],
+                                    check.diagnostics["shape_threshold"],
+                                    check.diagnostics["noise_threshold"]])
+        assert all(curve.xData.tolist() == [0.01] for curve in curves)
+    finally:
+        widget.close()

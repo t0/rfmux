@@ -194,7 +194,8 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.prominence_spin.setDecimals(3)
         self.prominence_spin.setSingleStep(0.05)
         self.prominence_spin.setToolTip(
-            "Spike prominence as a fraction of the arc-speed range."
+            "Required pair strength as a fraction of the arc-speed range. "
+            "Larger values demand stronger evidence; the noise threshold must also be met."
         )
         derivative_form.addRow("Spike prominence factor:", self.prominence_spin)
 
@@ -204,7 +205,8 @@ class BiasSettingsPanel(AnalysisSettingsPanel):
         self.noise_gate_spin.setSingleStep(5.0)
         self.noise_gate_spin.setSpecialValueText("Off")
         self.noise_gate_spin.setToolTip(
-            "Spike prominence as a multiple of the estimated noise floor."
+            "Required pair strength as a multiple of the background scatter in speed changes. "
+            "Larger values demand stronger evidence; zero disables this requirement."
         )
         derivative_form.addRow("Noise gate factor:", self.noise_gate_spin)
         layout.addWidget(self.derivative_group)

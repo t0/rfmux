@@ -229,6 +229,36 @@ def test_bias_magnitude_is_received_power(plotters):
     assert panel.get_ylabel() == "received power [dBm]"
 
 
+@pytest.mark.parametrize("projection", ["magnitude", "iq"])
+def test_bias_plot_shows_fitted_nonlinearity_with_readable_text(plotters, projection):
+    block = biased_measurement()
+    block["results"][0]["upward"]["R1"]["fits"] = {
+        "nonlinear": {"params": {"a": 0.731}, "failed_because": None},
+    }
+    plotters.bias.plot_bias_points(block, projection=projection)
+    note = plt.gcf().axes[0].texts[0]
+    assert "a = 0.731" in note.get_text()
+    assert note.get_fontsize() == 16
+
+
+def test_bias_plot_omits_nonlinearity_without_a_parameter(plotters):
+    block = biased_measurement()
+    block["results"][0]["upward"]["R1"]["fits"] = {
+        "nonlinear": {"params": None, "failed_because": "fit did not converge"},
+    }
+    plotters.bias.plot_bias_points(block)
+    assert "a =" not in plt.gcf().axes[0].texts[0].get_text()
+
+
+def test_bias_plot_labels_rejected_nonlinear_fit(plotters):
+    block = biased_measurement()
+    block["results"][0]["upward"]["R1"]["fits"] = {
+        "nonlinear": {"params": {"a": 0.84}, "failed_because": "high residual"},
+    }
+    plotters.bias.plot_bias_points(block)
+    assert "a = 0.840 (fit rejected)" in plt.gcf().axes[0].texts[0].get_text()
+
+
 @pytest.mark.parametrize("noise_gate_factor", [0.0, 50.0])
 def test_bifurcation_plot_matches_periscope_quantity(plotters, noise_gate_factor):
     block = biased_measurement()

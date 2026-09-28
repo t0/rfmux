@@ -240,11 +240,11 @@ async def test_a_failed_fit_counts_as_no_fit_not_a_crash():
     # The batch fitter leaves nonlinear_fit_params = None behind when a
     # fit fails; the amplitude choice then falls back to the jump
     # detector for that entry.
-    loud = _entry(a=0.2, amplitude=0.03)
-    loud["nonlinear_fit_params"] = None
-    loud["nonlinear_fit_success"] = False
-    loud["is_bifurcated"] = True
-    results = {"results_by_detector": {1: {0: _entry(a=0.2, amplitude=0.01), 1: loud}}}
+    large = _entry(a=0.2, amplitude=0.03)
+    large["nonlinear_fit_params"] = None
+    large["nonlinear_fit_success"] = False
+    large["is_bifurcated"] = True
+    results = {"results_by_detector": {1: {0: _entry(a=0.2, amplitude=0.01), 1: large}}}
     out = await bk.bias_kids(_Board(), results, module=1)
     assert out[1]["selected_amplitude"] == 0.01
 
@@ -252,7 +252,7 @@ async def test_a_failed_fit_counts_as_no_fit_not_a_crash():
 @pytest.mark.asyncio
 async def test_amplitude_choice_comes_from_the_fitted_nonlinearity():
     # Two amplitudes, neither sweep jumping: only the fitted nonlinearity
-    # can rule the louder one out, and it has to be fitted first.
+    # can rule the larger one out, and it has to be fitted first.
     results = {"results_by_detector": {1: {0: _entry(a=0.2, amplitude=0.01),
                                            1: _entry(a=0.9, amplitude=0.03)}}}
     out = await bk.bias_kids(_Board(), results, module=1)
@@ -280,7 +280,7 @@ async def test_a_fit_past_bifurcation_leaves_the_raw_bias_point(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_skewed_choice_ignores_the_fitted_nonlinearity():
-    # Both sweeps carry a nonlinear fit, the louder one above the
+    # Both sweeps carry a nonlinear fit, the larger one above the
     # threshold; the skewed choice reads only the jump detector.
     entries = {}
     for k, (amp, a) in enumerate([(0.01, 0.2), (0.03, 0.9)]):

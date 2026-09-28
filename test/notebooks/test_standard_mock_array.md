@@ -181,8 +181,8 @@ assert all(sections[n]["fits"]["nonlinear"]["params"]["a"] < BIFURCATION_A for n
 
 ## 5. An amplitude schedule, and bias finding
 
-The bias finder needs a schedule that brackets bifurcation: quiet enough at the
-bottom that every resonator is linear, loud enough at the top that most of
+The bias finder needs a schedule that brackets bifurcation: small enough at the
+bottom that every resonator is linear, large enough at the top that most of
 them have jumped. This is the schedule the tests use. What the check pins is
 that the schedule does its job on this array — at least one resonator bifurcates
 inside it — and that bias finding gives every resonator an operating point.
@@ -238,7 +238,7 @@ for f in bias.findings:
 
 The fits put bifurcation between the top two steps for every resonator, so the
 step below the top is the amplitude a physics reading would choose. The
-detectors can choose lower, including firing on the quietest measured step.
+detectors can choose lower, including firing on the smallest measured step.
 The counts vary with the simulated noise. The table below runs each detector
 on the same sweeps and shows the step each would pick, beside the step the fit would. Nothing here is
 asserted: this is the comparison the post-merge plan wants to build into bias

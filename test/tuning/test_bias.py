@@ -7,7 +7,7 @@ from scipy.signal import find_peaks
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.tuning.bias import (
-    FLAG_BIFURCATED_AT_QUIETEST,
+    FLAG_BIFURCATED_AT_SMALLEST,
     FLAG_NEVER_BIFURCATED,
     FLAG_OFF_CENTRE,
     BiasReport,
@@ -179,7 +179,7 @@ def test_the_amplitude_below_the_first_bifurcated_one_is_chosen():
     assert not choice.is_bifurcated_at_bias
 
 
-def test_a_sweep_that_never_bifurcates_is_biased_at_its_loudest_step():
+def test_a_sweep_that_never_bifurcates_is_biased_at_its_largest_step():
     """The schedule did not reach the limit, so the most drive measured is the
     most drive known to be safe."""
     iterations = amplitude_iterations((0.0, 0.0, 0.0))
@@ -192,7 +192,7 @@ def test_a_sweep_that_never_bifurcates_is_biased_at_its_loudest_step():
     assert not choice.is_bifurcated_at_bias
 
 
-def test_bifurcation_at_the_quietest_step_says_so_rather_than_going_below():
+def test_bifurcation_at_the_smallest_step_says_so_rather_than_going_below():
     iterations = amplitude_iterations((JUMPED, JUMPED))
 
     choice = find_bias_amplitude(iterations)
@@ -422,10 +422,10 @@ def test_the_derivative_test_reads_the_shape_and_not_the_scale():
     """I and Q are normalized by their own range, so a resonator ten times
     deeper is not ten times more suspicious."""
     step = a_step(a=JUMPED)
-    louder = {"upward": dict(step["upward"])}
-    louder["upward"]["iq_counts"] = step["upward"]["iq_counts"] * 10
+    scaled = {"upward": dict(step["upward"])}
+    scaled["upward"]["iq_counts"] = step["upward"]["iq_counts"] * 10
 
-    assert bifurcated_by_derivative(louder).metric == pytest.approx(
+    assert bifurcated_by_derivative(scaled).metric == pytest.approx(
         bifurcated_by_derivative(step).metric
     )
 
@@ -492,11 +492,11 @@ def test_the_discrepancy_does_not_care_how_large_the_trace_is(compare):
     scale of that plane — so turning up the readout gain does not move it."""
     step = a_step(a=0.0, directions=("upward", "downward"))
     step["downward"]["iq_counts"] = a_trace(a=0.5, direction="downward")[1]
-    louder = {
+    scaled = {
         d: {**e, "iq_counts": e["iq_counts"] * 10} for d, e in step.items()
     }
 
-    assert bifurcated_by_hysteresis(louder, compare=compare).metric == pytest.approx(
+    assert bifurcated_by_hysteresis(scaled, compare=compare).metric == pytest.approx(
         bifurcated_by_hysteresis(step, compare=compare).metric
     )
 
@@ -697,8 +697,8 @@ def test_a_combined_search_stops_wherever_the_first_test_fires(
     assert combined.bifurcated_at == pytest.approx(
         find_bias_amplitude(iterations, method=fires_first).bifurcated_at
     )
-    # The other test, on its own, would have let this resonator go a step
-    # louder — which is the step the combination just refused.
+    # The other test, on its own, would have allowed a higher amplitude step,
+    # which is the step the combination just refused.
     assert find_bias_amplitude(iterations, method=later).iteration == 1
 
 
@@ -1125,14 +1125,17 @@ def test_every_resonator_comes_back_with_a_freshly_measured_bias_point():
         assert resonator.bias.df_calibration is not None
 
 
-def test_bifurcation_at_the_quietest_amplitude_is_biased_anyway_and_flagged():
+def test_bifurcation_at_the_smallest_amplitude_is_biased_anyway_and_flagged():
     report = find_bias_points(a_schedule((JUMPED, JUMPED, JUMPED)))
     finding = report["R0001"]
 
     assert report.catalog["R0001"].bias.amplitude == pytest.approx(finding.amplitude)
     assert not finding.good
-    assert "quietest amplitude" in finding.flagged_because
-    assert finding.flagged_kind == FLAG_BIFURCATED_AT_QUIETEST
+    assert finding.flagged_because == (
+        f"the smallest amplitude measured ({finding.amplitude:g}) was already "
+        "bifurcated"
+    )
+    assert finding.flagged_kind == FLAG_BIFURCATED_AT_SMALLEST
     assert [f.name for f in report.flagged] == ["R0001", "R0002"]
 
 
@@ -1142,7 +1145,10 @@ def test_never_reaching_bifurcation_is_biased_anyway_and_flagged():
 
     assert finding.bifurcated_at is None
     assert not finding.good
-    assert "loudest amplitude measured" in finding.flagged_because
+    assert finding.flagged_because == (
+        f"No bifurcation observed up to {finding.amplitude:g} "
+        "(largest amplitude measured)"
+    )
     assert finding.flagged_kind == FLAG_NEVER_BIFURCATED
 
 
@@ -1183,7 +1189,9 @@ def test_a_resonance_further_out_than_asked_for_leaves_the_tone_where_it_was():
     assert finding.frequency_hz == pytest.approx(FR - 20e3, abs=BASE_FREQUENCY / 2)
     assert finding.frequency_hz == report.catalog["R0001"].bias.frequency_hz
     assert not finding.good
-    assert "left where the sweep was centred" in finding.flagged_because
+    assert finding.flagged_because == (
+        "the resonance was +20.0 kHz from the sweep centre (limit 5.0 kHz)"
+    )
     assert finding.flagged_kind == FLAG_OFF_CENTRE
 
     # Its neighbour was not moved, so it is measured and not flagged.
@@ -1251,7 +1259,7 @@ def test_only_the_first_concern_is_reported():
 
     report = find_bias_points(sweeps, max_distance_hz=5e3)
 
-    assert "loudest amplitude measured" in report["R0001"].flagged_because
+    assert "largest amplitude measured" in report["R0001"].flagged_because
 
 
 @pytest.mark.parametrize("amplitude_method", ["hysteresis", "both"])
@@ -1302,7 +1310,7 @@ def test_the_report_reads_like_what_happened():
 
     assert len(report) == 2
     assert "2 biased, 2 flagged" in repr(report)
-    assert "loudest amplitude measured" in repr(report)
+    assert "largest amplitude measured" in repr(report)
     with pytest.raises(KeyError):
         report["R9999"]
 
@@ -1476,7 +1484,7 @@ def test_retained_bifurcation_does_not_hide_a_new_detection():
     report = find_bias_points(a_schedule(
         (JUMPED,), catalog=catalog, schedule=AmplitudeSchedule(),
     ), save=False)
-    assert all(f.flagged_kind == FLAG_BIFURCATED_AT_QUIETEST
+    assert all(f.flagged_kind == FLAG_BIFURCATED_AT_SMALLEST
                for f in report.findings)
 
 

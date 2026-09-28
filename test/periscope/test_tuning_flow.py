@@ -1838,7 +1838,7 @@ def test_the_fit_tab_marks_where_the_model_put_the_resonance(board, qt_app):
 
 
 def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
-    """``a`` is the number that says the drive was too loud, so it is on the
+    """``a`` is the number that says the drive was too large, so it is on the
     line it came from rather than only in the file."""
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)

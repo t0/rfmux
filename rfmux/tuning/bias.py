@@ -37,7 +37,7 @@ __all__ = [
     "HYSTERESIS_COMPARISONS",
     "NEEDS_BOTH_DIRECTIONS",
     "FLAG_KINDS",
-    "FLAG_BIFURCATED_AT_QUIETEST",
+    "FLAG_BIFURCATED_AT_SMALLEST",
     "FLAG_NEVER_BIFURCATED",
     "FLAG_OFF_CENTRE",
     "BifurcationCheck",
@@ -75,10 +75,10 @@ FREQUENCY_METHODS = ("iq_derivative", "minimum")
 PREFERRED_DIRECTION = "upward"
 
 #: Short flag labels for plots and tables; _concern supplies explanations.
-FLAG_BIFURCATED_AT_QUIETEST = "already bifurcated"
+FLAG_BIFURCATED_AT_SMALLEST = "already bifurcated"
 FLAG_NEVER_BIFURCATED = "No bifurcation observed in this run"
 FLAG_OFF_CENTRE = "freq out of bounds"
-FLAG_KINDS = (FLAG_BIFURCATED_AT_QUIETEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
+FLAG_KINDS = (FLAG_BIFURCATED_AT_SMALLEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
 
 #: Allow a jump to cross one or two bins when a sample falls partway across it.
 MAX_SPIKE_SEPARATION = 2
@@ -553,23 +553,21 @@ def _concern(
     bifurcation amplitude passes the amplitude check.
     """
     if choice.is_bifurcated_at_bias:
-        return FLAG_BIFURCATED_AT_QUIETEST, (
-            f"the quietest amplitude measured ({choice.amplitude:g}) was already "
-            f"bifurcated, so there was nothing below it to fall back to"
+        return FLAG_BIFURCATED_AT_SMALLEST, (
+            f"the smallest amplitude measured ({choice.amplitude:g}) was already "
+            "bifurcated"
         )
     if choice.bifurcated_at is None and (
         known_bifurcation is None or choice.amplitude >= known_bifurcation
     ):
         return FLAG_NEVER_BIFURCATED, (
-            f"No bifurcation observed in this run up to {choice.amplitude:g}, "
-            f"the loudest amplitude measured"
+            f"No bifurcation observed up to {choice.amplitude:g} "
+            "(largest amplitude measured)"
         )
     if _too_far(measured_hz, centre_hz, max_distance_hz):
         return FLAG_OFF_CENTRE, (
-            f"the resonance came out {(measured_hz - centre_hz) / 1e3:+.1f} kHz "
-            f"from the sweep centre, past the {max_distance_hz / 1e3:.1f} kHz "
-            f"asked for — usually a neighbour in the span, or a resonance pulled "
-            f"out of it — so the tone was left where the sweep was centred"
+            f"the resonance was {(measured_hz - centre_hz) / 1e3:+.1f} kHz "
+            f"from the sweep centre (limit {max_distance_hz / 1e3:.1f} kHz)"
         )
     return None, None
 
@@ -686,17 +684,17 @@ def find_bias_amplitude(
         i: float(_directions(entries)[0]["sweep_amplitude"])
         for i, entries in iterations.items()
     }
-    quietest_first = sorted(iterations, key=amplitude.get)
+    smallest_first = sorted(iterations, key=amplitude.get)
 
     # Keep the preceding amplitude step to select if the current one bifurcates.
     checks: dict[int, BifurcationCheck] = {}
-    for previous, iteration in zip([None, *quietest_first], quietest_first):
+    for previous, iteration in zip([None, *smallest_first], smallest_first):
         checks[iteration] = detector(iterations[iteration], **settings)
         if not checks[iteration].bifurcated:
             continue
 
         # Found the limit. Bias one step below it — or here, if this is the
-        # quietest amplitude we have and there is nothing below to fall back to.
+        # smallest amplitude we have and there is nothing below to fall back to.
         chosen = iteration if previous is None else previous
         return AmplitudeChoice(
             iteration=chosen,
@@ -707,10 +705,10 @@ def find_bias_amplitude(
 
     # No bifurcation detected: select the highest measured amplitude.
     # The bifurcation limit remains unknown.
-    loudest = quietest_first[-1]
+    largest = smallest_first[-1]
     return AmplitudeChoice(
-        iteration=loudest,
-        amplitude=amplitude[loudest],
+        iteration=largest,
+        amplitude=amplitude[largest],
         bifurcated_at=None,
         checks=checks,
     )

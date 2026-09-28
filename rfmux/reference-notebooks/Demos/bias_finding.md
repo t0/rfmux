@@ -199,14 +199,46 @@ refined_bias_report = find_bias_points(refined_multisweep_module_outputs)
 msplots.plot_magnitude_panels(refined_multisweep_module_outputs, ncols=2, xlim_khz=(-10, 10))
 ```
 
-Looks good. Let's inspect the sweep at the chosen bias amplitude:
+These look pretty good, but we can get a cross check by fitting each one.
+
+```python
+import matplotlib.pyplot as plt
+import example_plotting_fits as fitplots
+from rfmux.tuning import fit_section
+
+fig, axes = plt.subplots(1, len(refined_bias_report.findings),
+                         figsize=(5 * len(refined_bias_report.findings), 4),
+                         constrained_layout=True, squeeze=False)
+for panel, finding in zip(axes.flat, refined_bias_report.findings):
+    entry = refined_multisweep_module_outputs["results"][finding.iteration]["upward"][finding.name]
+    fit_section(entry, models=("nonlinear",))
+    failure = fitplots.draw_measured_and_model(
+        panel, entry, "nonlinear", "magnitude", "0.45", "crimson", oversample=25,
+    )
+    panel.axvline((finding.frequency_hz - entry["original_center_frequency"]) / 1e3,
+                  color="royalblue", label="bias frequency")
+    fit = entry["fits"]["nonlinear"]
+    detail = failure or f"a = {fit['params']['a']:.3f}"
+    panel.set_title(f"{finding.name}: step {finding.iteration}, {detail}")
+    panel.set_xlabel("frequency from sweep centre [kHz]")
+    panel.set_ylabel("magnitude [dB, normalized]")
+    panel.set_xlim(-10, 10)
+axes.flat[0].legend()
+plt.show()
+```
+
+The grey points are the measured sweep, the red curve is the nonlinear fit,
+and the blue line is the selected bias frequency. The fitted nonlinearity
+parameter `a` gives another check on how strongly driven the selected sweep is;
+the panel shows a failure reason if the fit does not pass. Let's inspect the
+chosen bias points on the measured sweeps:
 
 ```python
 biasplots.plot_bias_points(refined_multisweep_module_outputs, ncols=2)
 
 ```
 
-You could now fit these sweeps to extract the nonlinearity parameter `a` for each resonance at its chosen bias point; the diagnostics at the end of this workbook do that for every refined sweep. See `fitting_resonators.md` for more info on the built-in fitting options.
+See `fitting_resonators.md` for more on the built-in fitting options.
 
 If you want, feed the catalog into another round of multisweeps to refine the bias point further. If you are happy with the bias points that have been found, we're ready to apply these biases to the array.
 
@@ -274,7 +306,10 @@ msplots.plot_magnitude_panels(confirmation_multisweep_module_outputs, ncols=4)
 biasplots.plot_bias_points(confirmation_multisweep_module_outputs, ncols=2)
 ```
 
-Looks good!
+TODO: the above is still finding that most of these resonators are bifurcated at the bias points, even though on the previous multisweep they werent! Why?
+
+
+
 
 ```python
 
@@ -286,21 +321,15 @@ Looks good!
 # More info on how the bias finder operates 
 
 
-
-
-These comparisons reuse the refined measurement without collecting new data.
-Pick one resonator to keep the diagnostic plots readable. The example selects
-one flagged resonator if available. To choose another, use a name from
+Here we are picking one resonator to keep the diagnostic plots readable. To choose another, use a name from
 `refined_bias_report.catalog.names()`.
 <!-- #endregion -->
 
 ```python
 
 
-resonator_name = (
-    refined_bias_report.flagged[0].name
-    if refined_bias_report.flagged else refined_bias_report.catalog.names()[0]
-)
+resonator_name = refined_bias_report.catalog.names()[0]
+
 biasplots.plot_bias_points(
     refined_multisweep_module_outputs,
     names=resonator_name, projection="iq",
@@ -312,34 +341,24 @@ loop. For several resonators, pass a list to `names`.
 
 ### Bifurcation detection: derivative method
 
-The default method looks for a jump in the IQ trace. I and Q are each divided by
-their range over the sweep, and the distance between neighbouring points divided
-by the frequency step gives the arc speed: how fast the sweep moves around the
-IQ loop. A bifurcated sweep snaps from one branch to the other between two
-frequency points, so its arc speed shoots up and straight back down. In the
-point-to-point change of arc speed, that shows as a positive spike followed
-within one or two points by a negative one. A resonance that has not bifurcated
-also speeds up and slows down, but gradually, so its rise and fall are spread
-over many points.
+The default test looks for a sudden jump in the IQ trace. It scales I and Q by
+their range over the sweep, then measures how far the trace moves between each
+pair of frequency points. A jump produces a sharp increase in that movement,
+followed within two points by a sharp decrease. Smooth changes in a resonance
+are more spread out. Either sweep direction can reveal a jump.
 
-Both spikes must clear a threshold, which is the larger of two bars:
+The increase and decrease must both stand out from the rest of the sweep. The
+test uses the stricter of two limits:
 
-* **the prominence bar**, `spike_prominence_factor` times the full range of the
-  arc speed over the sweep. A jump has to be a large share of everything the
-  sweep does, however strongly it is driven.
-* **the noise bar**, `noise_gate_factor` times the noise in the arc-speed
-  changes, estimated from their median absolute deviation so the jump itself
-  hardly moves it. On a sweep with little signal, the range is set by noise too,
-  and a fraction of it is easy for a noise spike to clear; this bar rules that
-  out.
-
-The sweep is called bifurcated if any direction has a qualifying pair.
+* `spike_prominence_factor` sets the required jump relative to the range of
+  movement across the sweep.
+* `noise_gate_factor` sets the required jump relative to the background
+  variation. This keeps noise in a weak sweep from looking like bifurcation.
 
 Both factors are parameters of `find_bias_points`: `spike_prominence_factor`
 (default 0.5) and `noise_gate_factor` (default 50; 0 disables the noise bar).
 
-For example, we can examine the effects of changing the noise threshold on one of our previously measured
-multisweeps. First, the default:
+First, inspect the default threshold on the refined measurement:
 
 
 ```python
@@ -347,6 +366,7 @@ multisweeps. First, the default:
 biasplots.plot_bifurcation_checks(
     refined_multisweep_module_outputs,
     names=resonator_name,
+    xlim_khz=(-5,5)
 )
 ```
 
@@ -355,111 +375,83 @@ threshold; its legend identifies whether prominence or noise sets that threshold
 The detector also checks spike prominence and adjacency, so a line crossing
 alone is not a bifurcation verdict.
 
-### Cross-check: the fitted nonlinearity `a`
 
-The nonlinear resonator model measures how far the drive has bent a resonance
-with one parameter, `a`: zero for a linear resonator, rising in proportion to
-drive power, and bifurcating at `a = 4√3/9 ≈ 0.77` (`BIFURCATION_A`). Fitting
-every sweep of the refined multisweep gives a measure of how close each step
-came to bifurcation that does not depend on the derivative test, so the two
-can be compared step by step.
 
-```python
-import matplotlib.pyplot as plt
-from rfmux.tuning import collect_fit_params, fit_sweeps
-from rfmux.tuning.fits import BIFURCATION_A
 
-fit_sweeps(refined_multisweep_module_outputs, models=("nonlinear",))
-nonlinear_fits = [
-    row for row in collect_fit_params(refined_multisweep_module_outputs, "nonlinear")
-    if row["failed_because"] is None
-]
 
-for finding in refined_bias_report.findings:
-    print(finding.name)
-    for row in nonlinear_fits:
-        if row["name"] != finding.name or row["direction"] != "upward":
-            continue
-        step, a = row["iteration"], row["params"]["a"]
-        check = finding.checks.get(step)
-        verdict = ("not examined" if check is None
-                   else "bifurcated" if check.bifurcated else "not bifurcated")
-        chosen = "  <- bias" if step == finding.iteration else ""
-        print(f"  step {step}  amp {row['amplitude']:.5f}  a = {a:.3f} "
-              f"({a / BIFURCATION_A:.0%} of bifurcation)  derivative: {verdict}{chosen}")
-```
-
-The table reads the upward fits; the downward ones agree closely until the
-sweep is bistable. The plot shows both, against drive amplitude. An open circle
-marks the step chosen for the bias point, a cross the first step the derivative
-test called bifurcated.
+To make the noise gate easier to see, regenerate the mock array with 50 times
+the earlier quasiparticle noise and average two samples per frequency instead
+of ten. The random seed and resonance range stay the same, so we can use the
+earlier coarse catalog for a similar amplitude ladder. This is a separate
+measurement after the applied-bias example above.
 
 ```python
-fig, ax = plt.subplots(figsize=(8, 5.5), constrained_layout=True)
-for colour, finding in zip(plt.cm.tab10.colors, refined_bias_report.findings):
-    for direction, linestyle in (("upward", "-"), ("downward", "--")):
-        rows = [row for row in nonlinear_fits
-                if row["name"] == finding.name and row["direction"] == direction]
-        ax.plot([row["amplitude"] for row in rows],
-                [row["params"]["a"] for row in rows],
-                marker=".", ls=linestyle, color=colour,
-                label=finding.name if direction == "upward" else None)
-        for row in rows:
-            if direction != "upward":
-                continue
-            check = finding.checks.get(row["iteration"])
-            if row["iteration"] == finding.iteration:
-                ax.plot(row["amplitude"], row["params"]["a"], "o", ms=14,
-                        mfc="none", mew=2, color=colour)
-            if check is not None and check.bifurcated:
-                ax.plot(row["amplitude"], row["params"]["a"], "x", ms=12,
-                        mew=2.5, color=colour)
-ax.axhline(BIFURCATION_A, color="0.3", lw=1.5, ls=":",
-           label=f"BIFURCATION_A = {BIFURCATION_A:.3f}")
-ax.set_xlabel("drive amp. [norm.]")
-ax.set_ylabel("fitted nonlinearity a")
-ax.set_title("Refined multisweep: fitted a, upward solid, downward dashed")
-ax.legend()
-plt.show()
-```
+noisy_mock_config = {**mock_config, "nqp_noise_enabled": True,
+                     "nqp_noise_std_factor": 0.08}
+await crs.generate_resonators(noisy_mock_config)
 
-If the derivative test is well tuned, its first bifurcated step lands as `a`
-reaches `BIFURCATION_A`, and the chosen bias step sits just below it. A first
-verdict at `a` well below 0.77 means the test calls the jump early and gives up
-drive; one well above means it misses the jump. The fitter bounds `a` at 0.9,
-so a fit pinned there is above bifurcation and says no more than that.
-
-To explore sensitivity, change one setting and rerun on the same sweeps.
-Larger `spike_prominence_factor` or `noise_gate_factor` values make detection
-less sensitive. Here we lower the noise gate from its default of 50 to 20:
-
-```python
-# optionally duplicate the existing multisweep to avoid overwriting its bias info, just in case
-import copy
-noise_gate_demo_ms_output = copy.deepcopy(refined_multisweep_module_outputs)
-
-# run the bias finder again, with a different noise threshold factor
-noise_gate_bias_report = find_bias_points(
-    noise_gate_demo_ms_output,
-    noise_gate_factor=20.0, save=True,
+noisy_multisweep = await crs.multisweep(
+    coarse_bias_catalog,
+    span_hz=70e3,
+    npoints_per_sweep=101,
+    nsamps=10,
+    amp=AmplitudeSchedule.multiplicative(1.0, 4.0, 5),
+    sweep_direction=("upward", "downward"),
+    label="bias_noise_gate_demo",
 )
-biasplots.plot_bifurcation_checks(
-    noise_gate_demo_ms_output,
-    names=resonator_name,
-)
-biasplots.plot_bias_points(noise_gate_demo_ms_output, names=resonator_name)
+noisy_multisweep_module_outputs = noisy_multisweep[module_id]
+msplots.plot_magnitude_panels(noisy_multisweep_module_outputs, ncols=2)
 ```
 
-Copying the module dictionary lets this comparison store a separate report
-while sharing the unchanged sweep arrays. `save=False` leaves the saved
-measurement unchanged. Compare the chosen point and diagnostic with the
-originals above. Changing the threshold need not change the selected point.
-
-With **both sweep directions**, you can instead compare up/down separation:
+Run the bias finder with the noise gate disabled, with its default factor
+of 50, and with a stronger factor of 150. Larger factors make detection less
+sensitive. Analyze copies of the same measured sweeps so a change in the result
+comes from the gate setting, not from a new noise realization.
 
 ```python
-if {"upward", "downward"} <= set(refined_multisweep_module_outputs["results"][0]):
-    hysteresis_multisweep_module_outputs = dict(refined_multisweep_module_outputs)
+noise_gate_results = {}
+noise_gate_reports = {}
+for factor in (0.0, 50.0, 150.0):
+    measured = dict(noisy_multisweep_module_outputs)
+    report = find_bias_points(measured, noise_gate_factor=factor, save=False)
+    noise_gate_results[factor] = measured
+    noise_gate_reports[factor] = report
+    print(f"noise gate factor {factor:g}:")
+    for finding in report.findings:
+        print(f"  {finding.name}: step {finding.iteration}, "
+              f"amplitude {finding.amplitude:.5f}")
+
+# Focus the plots on a resonator whose chosen step changed, if there is one.
+noise_gate_name = next(
+    (finding.name for finding in noise_gate_reports[0.0].findings
+     if finding.iteration != noise_gate_reports[150.0][finding.name].iteration),
+    noise_gate_reports[0.0].findings[0].name,
+)
+for factor in (0.0, 150.0):
+    measured = noise_gate_results[factor]
+    biasplots.plot_bifurcation_checks(measured, names=noise_gate_name,
+                                     xlim_khz=(-5, 5),
+                                     title=f"Noise gate factor {factor:g}")
+    biasplots.plot_bias_points(measured, names=noise_gate_name,
+                              xlim_khz=(-10, 10),
+                              title=f"Noise gate factor {factor:g}")
+```
+
+<!-- #region -->
+Compare the printed amplitude steps and the threshold lines. On a noisy sweep,
+the gate can reject noise-induced spike pairs that pass the prominence
+threshold alone; the selected step can then move to a higher amplitude. The
+exact result varies with each noise realization.
+
+
+### Hysteresis method for bifurcation detection
+
+If your multisweep contains **both sweep directions**, you can instead compare the up/down sweeps and look for when they start to become notably different due to the readout current hysteresis:
+<!-- #endregion -->
+
+```python
+if {"upward", "downward"} <= set(bifurcation_multisweep_module_outputs["results"][0]):
+    hysteresis_multisweep_module_outputs = dict(bifurcation_multisweep_module_outputs)
     find_bias_points(
         hysteresis_multisweep_module_outputs,
         amplitude_method="hysteresis", save=False,
@@ -468,54 +460,20 @@ if {"upward", "downward"} <= set(refined_multisweep_module_outputs["results"][0]
         hysteresis_multisweep_module_outputs,
         names=resonator_name,
     )
-    biasplots.plot_bias_points(
-        hysteresis_multisweep_module_outputs,
-        names=resonator_name,
-    )
+    msplots.plot_magnitude_panels(bifurcation_multisweep_module_outputs, names=resonator_name,
+                                   xlim_khz=(-10, 10))
 ```
 
-Values above 1 exceed the allowed separation; the selected amplitude is bold.
-The two methods can disagree: a jump can be visible in each sweep even when
-the upward and downward traces nearly coincide. Hysteresis alone may then
-select the highest tested amplitude and flag it. This comparison leaves the
-refined catalog unchanged.
+Values above 1 are classified as bifurcation.
 
 `amplitude_method="both"` detects bifurcation when **either** the derivative
 or hysteresis test fires. Both `"hysteresis"` and `"both"` need upward and
 downward sweeps; `"derivative"` also works with just one direction.
 
-### Compare maximum IQ sensitivity with the magnitude minimum
 
-`frequency_method="iq_derivative"` selects the largest IQ change per hertz;
-`"minimum"` selects the magnitude dip's minimum. Plot the IQ sensitivity of the
-selected sweep, then compare the two operating points:
 
-```python
-selected_iteration = refined_bias_report[resonator_name].iteration
-measured_directions = refined_multisweep_module_outputs["results"][selected_iteration]
-sweep_direction = "upward" if "upward" in measured_directions else "downward"
-biasplots.plot_arc_speed_panels(
-    refined_multisweep_module_outputs, names=resonator_name,
-    iterations=selected_iteration, direction=sweep_direction,
-)
 
-minimum_multisweep_module_outputs = dict(refined_multisweep_module_outputs)
-find_bias_points(
-    minimum_multisweep_module_outputs,
-    frequency_method="minimum", save=False,
-)
-biasplots.plot_bias_points(
-    refined_multisweep_module_outputs,
-    names=resonator_name, title="Maximum IQ sensitivity",
-)
-biasplots.plot_bias_points(
-    minimum_multisweep_module_outputs,
-    names=resonator_name, title="Magnitude minimum",
-)
-```
-
-The sensitivity maximum can be away from the dip minimum. Look at its width as
-well as its height: a narrow feature leaves less room for frequency drift.
+## For more info...
 
 These are the main controls to explore; use `help(find_bias_points)` for the
 full argument reference.

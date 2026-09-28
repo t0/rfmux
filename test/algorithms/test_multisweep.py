@@ -225,7 +225,7 @@ def test_targets_come_from_the_catalog_in_channel_order():
     assert [t.channel for t in targets] == [1, 2, 3]
 
 
-def test_a_target_says_what_is_swept_and_not_how_loud():
+def test_a_target_says_what_is_swept_and_not_how_large():
     """A target is resolved once and swept at every step of the schedule, so an
     amplitude on it could only be one step's."""
     (target,) = _resolve_sweep_targets(a_catalog(amplitudes=(0.001,)), None, None)

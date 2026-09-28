@@ -61,17 +61,17 @@ def test_two_drives_land_on_one_axis():
     """The point of the feature. The same transmission measured at two
     amplitudes is two curves stacked by drive until they are normalized, and
     one curve afterwards."""
-    quiet, loud = 0.002, 0.02
+    small, large = 0.002, 0.02
     # A linear device: what comes back scales with what went in.
-    at_quiet, at_loud = COUNTS * quiet, COUNTS * loud
+    at_small, at_large = COUNTS * small, COUNTS * large
 
-    raw = [UnitConverter.convert_amplitude(c, "dbm") for c in (at_quiet, at_loud)]
+    raw = [UnitConverter.convert_amplitude(c, "dbm") for c in (at_small, at_large)]
     assert not np.allclose(*raw)
 
     normalized = [
         UnitConverter.convert_amplitude(c, "dbm", normalize=True, drive=d,
                                         dac_scale=DAC_SCALE)
-        for c, d in ((at_quiet, quiet), (at_loud, loud))]
+        for c, d in ((at_small, small), (at_large, large))]
     assert np.allclose(*normalized)
 
 

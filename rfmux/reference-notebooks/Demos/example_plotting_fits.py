@@ -385,7 +385,7 @@ def plot_fit_panels(
         )
 
 
-def _draw_measured_and_model(
+def draw_measured_and_model(
     panel, entry, model, projection, colour, fit_colour, oversample
 ):
     """Draw measured data and a converged model; return the failure reason or None."""
@@ -458,7 +458,7 @@ def _draw_fit_batch(
                     else mappable.to_rgba(entry["sweep_amplitude"])
                 )
                 fit_colour = FIT_COLOUR if one_step else colour
-                why = _draw_measured_and_model(
+                why = draw_measured_and_model(
                     panel, entry, model, projection, colour, fit_colour, oversample
                 )
                 if why is not None:
@@ -575,7 +575,7 @@ def plot_fitted_parameters(
                     )
                     if spec.get("shift") and np.isfinite(values).any():
                         # Absolute fr differs by hundreds of MHz between
-                        # resonators; the shift from the quietest step is what
+                        # resonators; the shift from the smallest step is what
                         # puts every curve on one axis.
                         first = values[np.isfinite(values)][0]
                         values = values - first

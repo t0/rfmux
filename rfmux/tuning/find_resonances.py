@@ -657,8 +657,8 @@ def find_sweeps_with_nearby_resonances(
             Keep below ``min_separation_hz``; unresolved pairs cannot be flagged.
         iq_key: ``"iq_counts"`` or ``"iq_volts"``.
         iteration: amplitude step to inspect, or None for all. A bifurcated
-            high-amplitude sweep may produce extra minima; select a quieter
-            step if needed.
+            high-amplitude sweep may produce extra minima; select a step with
+            a smaller amplitude if needed.
         direction: sweep direction to inspect, or None for all.
 
     Returns:

@@ -36,7 +36,7 @@ class _SweepTarget:
     of the macro, so the measurement body below has exactly one thing to walk.
 
     No amplitude: a target is *what* is swept, and it is swept once per step of
-    the amplitude schedule. How loud each pass is arrives beside the targets,
+    the amplitude schedule. Each pass's amplitude arrives beside the targets,
     as the step's own ``{name: amplitude}``.
     """
 
@@ -599,7 +599,7 @@ async def multisweep(
     # --- Resolve what to sweep ----------------------------------------------
     targets = _resolve_sweep_targets(catalog, center_frequencies, names)
 
-    # --- Resolve how loud, on each pass -------------------------------------
+    # --- Resolve each pass's amplitude --------------------------------------
     #
     # A catalog can supply the amplitudes itself; a bare frequency list has
     # nothing to fall back on, which is the difference the defaults carry.

@@ -290,18 +290,18 @@ amplitude used in `sweep_amplitude` and its converted drive power in
 <!-- #endregion -->
 
 ```python
-ms_louder = await crs.multisweep(
+ms_larger = await crs.multisweep(
     catalog,
     span_hz=75e3,
     npoints_per_sweep=101,
     nsamps=10,
     amp=0.001 * 2,
-    label="ms_louder",
+    label="ms_larger",
 )
 
 print(f"catalog bias amplitude   {catalog[first_resonator].bias.amplitude}")
 print(f"swept at (default)       {sweep_sections[first_resonator]['sweep_amplitude']}")
-print(f"swept at (override)      {ms_louder[crs.module[MODULE].index()]['results'][0]['upward'][first_resonator]['sweep_amplitude']}")
+print(f"swept at (override)      {ms_larger[crs.module[MODULE].index()]['results'][0]['upward'][first_resonator]['sweep_amplitude']}")
 print(f"catalog after the sweep  {catalog[first_resonator].bias.amplitude}  ← unchanged")
 
 # call_params stores the requested amplitude as the schedule base.
@@ -309,7 +309,7 @@ print(f"catalog after the sweep  {catalog[first_resonator].bias.amplitude}  ← 
 print(f"\ncall_params amp (default)   "
       f"{ms[crs.module[MODULE].index()]['call_params']['amp_schedule']['base']}")
 print(f"call_params amp (override)  "
-      f"{ms_louder[crs.module[MODULE].index()]['call_params']['amp_schedule']['base']}")
+      f"{ms_larger[crs.module[MODULE].index()]['call_params']['amp_schedule']['base']}")
 ```
 
 Or, using a per-resonator amplitude mapping:
@@ -523,8 +523,8 @@ for severity, message in amplitude_schedule.validate(catalog, n_directions=2):
     print(f"{severity:>7}: {message}")
 
 print()
-too_loud = AmplitudeSchedule.multiplicative(1.0, 500.0, 3)
-for severity, message in too_loud.validate(catalog):
+too_large = AmplitudeSchedule.multiplicative(1.0, 500.0, 3)
+for severity, message in too_large.validate(catalog):
     print(f"{severity:>7}: {message}")
 ```
 

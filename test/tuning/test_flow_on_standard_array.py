@@ -129,7 +129,7 @@ def test_bias_finding_on_a_bifurcating_schedule_raises_no_warning(bias_report):
 
 def test_every_resonator_bifurcates_inside_the_schedule(bias_report):
     """The array and schedule are chosen so the finder always has something to
-    find. A resonator that never bifurcated would make the loudest step the
+    find. A resonator that never bifurcated would make the largest step the
     answer by default, which is a flagged outcome, not a measured one."""
     for f in bias_report.findings:
         assert f.bifurcated_at is not None, f.name
@@ -155,7 +155,9 @@ def test_apply_bias_puts_every_tone_where_the_catalog_says(bias_report, standard
 
 def test_the_nonlinearity_rises_with_drive(nonlinear_fits, schedule_sweeps, standard_array_board):
     _, _, catalog = standard_array_board
-    assert not nonlinear_fits.failed, nonlinear_fits.failed
+    failures = [fit for fit in nonlinear_fits["fits"]
+                if fit["failed_because"] is not None]
+    assert not failures, failures
     for name in catalog.names():
         assert _fitted_a(schedule_sweeps, name, 0) < _fitted_a(schedule_sweeps, name, TOP - 1), name
 
@@ -171,9 +173,9 @@ def test_the_schedule_brackets_bifurcation_for_every_resonator(nonlinear_fits, s
 def test_the_pull_is_downward(nonlinear_fits, schedule_sweeps, standard_array_board):
     """Stored energy lowers the resonance (Swenson et al. 2013 eq. 13): driven
     hard, the transmission minimum sits below the fitted low-power fr, and
-    further below it than when driven gently. At the quiet step the pull is a
-    few hertz and the 1 kHz sweep grid decides which side the minimum lands
-    on, so only the ordering is asserted there."""
+    further below it than when driven gently. At the small amplitude step,
+    the pull is a few hertz and the 1 kHz sweep grid decides which side the
+    minimum lands on, so only the ordering is asserted there."""
     _, _, catalog = standard_array_board
 
     def pull_hz(name, step):

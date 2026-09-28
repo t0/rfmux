@@ -23,8 +23,9 @@ from .utils import (
 
 #: The model curve's colour on the bias plot. Not the foreground, as the Fit
 #: Results grid draws it: there the model lies over traces of every drive,
-#: here it lies over one, and the quiet end of a schedule is drawn in the
-#: near-black bottom of the inferno colormap that a black line vanishes into.
+#: here it lies over one, and the small amplitude end of a schedule is drawn
+#: in the near-black bottom of the inferno colormap, where a black line
+#: vanishes.
 #: Cyan is in neither that colormap nor the first three ``TABLEAU10_COLORS``,
 #: which is what a drive is drawn in when there are few enough of them.
 MODEL_COLOR = "#00B0F0"

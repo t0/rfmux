@@ -335,7 +335,8 @@ def plot_bias_points(
 ):
     """Plot the selected sweep and bias point, one panel per resonator.
 
-    Flagged findings use FLAGGED_COLOUR and include the reason.
+    Flagged findings use FLAGGED_COLOUR and include the reason. A nonlinear
+    fit's ``a`` is shown when its selected sweep has that parameter.
 
     Args:
         ms_module_output: one module's output from ``multisweep``, including
@@ -424,6 +425,12 @@ def plot_bias_points(
                     f"step {finding.iteration}\n"
                     f"{finding.frequency_hz / 1e6:.6f} MHz"
                 )
+                fit = (entry.get("fits") or {}).get("nonlinear") or {}
+                a = (fit.get("params") or {}).get("a")
+                if a is not None:
+                    note += f"\na = {a:.3f}"
+                    if fit.get("failed_because") is not None:
+                        note += " (fit rejected)"
                 if finding.bifurcated_at is not None:
                     note += f"\nbifurcated at {finding.bifurcated_at:.4g}"
                 if not finding.good:
@@ -431,7 +438,7 @@ def plot_bias_points(
                         textwrap.wrap(finding.flagged_because, 32)
                     )
                 panel.text(0.03, 0.03, note, transform=panel.transAxes,
-                           fontsize=11, va="bottom", color=colour)
+                           fontsize=16, va="bottom", color=colour)
 
             if projection == "magnitude":
                 _outer_labels(axes, "$f - f_\\mathrm{centre}$ [kHz]", "received power [dBm]")

@@ -112,22 +112,9 @@ def test_a_module_still_silent_when_the_duration_is_covered_is_an_error(
     with loopback_pair() as (recv, send, port):
         patched_socket(monkeypatch, {streamer.STREAMER_PORT: recv})
         sink = _Sink([(1, 1), (3, 1)])
-        stop = threading.Event()
-
-        def pump():
-            k = 0
-            while not stop.is_set():
-                send.sendto(_packet(k, 1, 10.0), ("127.0.0.1", port))
-                k += 1
-                time.sleep(0.005)
-
-        th = threading.Thread(target=pump)
-        th.start()
-        try:
-            with pytest.raises(ValueError, match=r"module\(s\) \[3\] sent no"):
-                asyncio.run(src.run_slow_source(sink, "127.0.0.1",
-                                                duration_s=0.1))
-        finally:
-            stop.set()
-            th.join()
+        for k in range(70):
+            send.sendto(_packet(k, 1, 10.0), ("127.0.0.1", port))
+        with pytest.raises(ValueError, match=r"module\(s\) \[3\] sent no"):
+            asyncio.run(src.run_slow_source(sink, "127.0.0.1",
+                                            duration_s=0.1))
     assert len(sink.fed[(1, 1)]) >= 0.1 * FS

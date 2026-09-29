@@ -1555,7 +1555,7 @@ def _show_fit_amplitude(panel, choice):
 
 def _measured_curves(panel, tab_idx=FIT_TAB):
     """Per subplot, the curves that are measurement rather than model: the
-    model is the foreground colour, the measurement its drive's."""
+    model is the foreground colour, the measurement blue."""
     foreground = "#ffffff" if panel.dark_mode else "#000000"
     return [[curve for curve in subplot
              if curve.opts["pen"].color().name() != foreground]
@@ -1576,6 +1576,7 @@ def test_only_the_chosen_model_is_drawn(board, qt_app):
     for model in ("skewed", "nonlinear"):
         _show_fit_model(panel, model)
         assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=FIT_TAB))
+        assert panel.fit_model_label.text() == f"━ {model.capitalize()} fit"
 
 
 def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
@@ -1590,19 +1591,20 @@ def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
 
 
 def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app, swept_container):
-    """The data keeps the line it has on the other tabs -- coloured by its
-    drive -- and the model is a thinner black or white line over it, so the
-    measurement is still visible where the two agree."""
+    """Measured data has one blue on every drive; fits use the foreground."""
+    from rfmux.tools.periscope.multisweep_grid_helpers import FIT_MEASURED_COLOR
+
     panel = _panel_showing(swept_container, board)
     _run_fits(panel, qt_app, choice=0, models=("skewed",))
 
     measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
     assert fit.opts["pen"].color().name() == "#000000"      # light mode
-    assert measured.opts["pen"].color().name() == TABLEAU10_COLORS[0]
+    assert measured.opts["pen"].color().name() == FIT_MEASURED_COLOR.lower()
     assert fit.opts["pen"].width() < measured.opts["pen"].width()
 
     panel.dark_mode = True
     _measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
+    assert _measured.opts["pen"].color().name() == FIT_MEASURED_COLOR.lower()
     assert fit.opts["pen"].color().name() == "#ffffff"
 
 
@@ -1638,10 +1640,7 @@ def test_the_fit_tab_draws_the_amplitude_step_it_is_asked_for(board, qt_app,
     assert all(len(subplot) == 2 for subplot in _measured_curves(panel))
 
 
-def test_the_colorbar_follows_what_is_on_screen_not_what_was_measured(board, qt_app):
-    """The bar is the scale for a schedule with more amplitudes than can be
-    labelled; it is no way to read the one step the Fit Results tab is showing,
-    so what is drawn decides whether it is up."""
+def test_the_fit_tab_uses_shared_line_labels_instead_of_a_drive_colorbar(board, qt_app):
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(
         crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
@@ -1649,7 +1648,7 @@ def test_the_colorbar_follows_what_is_on_screen_not_what_was_measured(board, qt_
     _run_fits(panel, qt_app, models=("skewed",))
 
     _grid_widgets(panel, tab_idx=FIT_TAB)
-    assert not panel.fit_colorbar.isHidden()
+    assert panel.fit_colorbar.isHidden()
 
     _show_fit_amplitude(panel, 2)
     _grid_widgets(panel, tab_idx=FIT_TAB)
@@ -1664,24 +1663,27 @@ def _legend_texts(panel, tab_idx=FIT_TAB):
             for w in _grid_widgets(panel, tab_idx)]
 
 
-def test_the_fit_legend_says_which_line_is_the_model_even_under_the_colorbar(
+def test_the_fit_labels_say_which_line_is_the_model_outside_the_plots(
         board, qt_app):
-    """Which line is the measurement and which the model is what this tab is
-    for, and the colorbar cannot say it. With a schedule too long to label, the
-    legend says it once for the pair."""
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(
         crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
     assert errors == []
     _run_fits(panel, qt_app, models=("skewed",))
 
-    assert all(texts == ["Measured", "Skewed fit"]
-               for texts in _legend_texts(panel))
+    assert all(texts == [] for texts in _legend_texts(panel))
+    labels = [label.text() for label in
+              panel.fit_plot_labels.findChildren(QtWidgets.QLabel)]
+    assert any("Measured" in label for label in labels)
+    assert any("Skewed fit" in label for label in labels)
+    assert any("f_r" in label for label in labels)
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert "<br>" not in axis.labelText
+    assert axis.labelText.startswith("med ")
+    assert "U:" in axis.toolTip()
 
 
-def test_the_fit_legend_carries_what_the_model_fitted(board, qt_app):
-    """With one step on screen the legend is the label of record: the drive on
-    the measurement, and the headline numbers on the model."""
+def test_the_fit_axis_carries_what_the_model_fitted(board, qt_app):
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(
         crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
@@ -1692,13 +1694,13 @@ def test_the_fit_legend_carries_what_the_model_fitted(board, qt_app):
     name = panel._selected_names()[0]
     fit = collect_amplitude_iterations_for(
         panel.module_sweeps, name)[2]["upward"]["fits"]["skewed"]["params"]
-    measured, model = _legend_texts(panel)[0]
-
-    assert "dBm" in measured, "the measurement is labelled by its drive"
-    assert model.startswith("Skewed: ")
-    assert f"fr {fit['fr'] / 1e6:.4f} MHz" in model
-    assert f"Qr {fit['Qr'] / 1e3:.3g}k" in model
-    assert f"Qi {fit['Qi'] / 1e3:.3g}k" in model
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert axis.isVisible()
+    for param in ("fr", "Qi", "Qc"):
+        assert f"{param}=" in axis.labelText
+        assert f"{param}={fit[param]:.1e}" in axis.toolTip()
+    assert "Qr=" not in axis.labelText
+    assert "a=" not in axis.labelText
 
 
 def test_the_fit_tab_can_draw_each_resonator_at_the_step_it_is_biased_at(
@@ -1837,9 +1839,7 @@ def test_the_fit_tab_marks_where_the_model_put_the_resonance(board, qt_app):
          - sweep["original_center_frequency"]) / 1e3 for sweep in fitted))
 
 
-def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
-    """``a`` is the number that says the drive was too large, so it is on the
-    line it came from rather than only in the file."""
+def test_the_fit_axis_carries_the_nonlinearity_it_fitted(board, qt_app):
     _, crs, catalog = board
     panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
     assert errors == []
@@ -1848,11 +1848,9 @@ def test_the_fit_legend_carries_the_nonlinearity_it_fitted(board, qt_app):
 
     name = panel._selected_names()[0]
     sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
-    labels = [entry[1].text for entry in
-              _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().legend.items]
-
-    assert any(f"a {sweep['fits']['nonlinear']['params']['a']:.2f}" in label
-               for label in labels)
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert "a=" in axis.labelText
+    assert f"a={sweep['fits']['nonlinear']['params']['a']:.1e}" in axis.toolTip()
 
 
 def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):
@@ -2428,7 +2426,7 @@ def test_the_bias_line_is_named_with_the_drive_it_was_chosen_at(board, qt_app,
 
     rows = _legend_names(panel, MAGNITUDE_TAB)
 
-    assert [row for row in rows if row.endswith(f"bias amp. = {amplitude:.4g}")]
+    assert f"f_bias<br>amp={amplitude:.2g}" in rows
 
 
 def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
@@ -3526,6 +3524,9 @@ def test_hysteresis_tab_uses_detector_curve(board, qt_app, swept_container, comp
     np.testing.assert_allclose(highlight.getData()[0], curves[chosen].getData()[0])
     np.testing.assert_allclose(highlight.getData()[1], curves[chosen].getData()[1])
     assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [1]
+    units = "dip depth" if compare == "magnitude" else "loop radius"
+    assert panel.hysteresis_limit_label.text() == f"· · Limit: 0.2 × {units}"
+    assert not any("Limit:" in row for row in _legend_names(panel, HYSTERESIS_TAB))
 
 
 def test_hysteresis_tab_updates_the_allowed_difference(board, qt_app, swept_container):
@@ -3538,6 +3539,7 @@ def test_hysteresis_tab_updates_the_allowed_difference(board, qt_app, swept_cont
     panel.bias_settings.discrepancy_spin.setValue(0.0)
     panel.bias_settings.apply_button.click()
     assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [0]
+    assert panel.hysteresis_limit_label.text().startswith("· · Limit: 0 ×")
     assert np.isfinite(_grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1]).all()
 
 

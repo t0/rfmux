@@ -122,15 +122,15 @@ For high-resolution analysis around identified resonance frequencies:
    it. Its own toolbar says which: "Fit" offers the models the sweeps carry
    fits for, and "Amplitude" which sweeps are drawn -- all of them, one
    amplitude step, or, once Find Bias has chosen one, each resonator at the
-   step it is biased at. Both are remembered between sessions. The measurement
-   keeps the line it has on the other tabs -- coloured by its drive, styled by
-   its direction -- and the model is a thinner black or white line over it.
-   Its legend always names the two lines; with few enough drives on screen to
-   label -- one step of a schedule, say -- it names each by its drive and puts
-   the model's headline numbers (fr, Qr, Qi, and the nonlinear fit's a) on the
-   line they came from. With more, the colorbar carries the drives and the
-   legend says "Measured" and "<model> fit" once. The axis is normalized to
-   each trace's last point, which is the fits' own convention, so the
+   step it is biased at. Both are remembered between sessions. Measured data
+   is blue, the model is a thinner black or white line, and its fitted resonance
+   is marked in orange. A shared label strip identifies the lines. Each fitted
+   sweep's `fr`, `Qi`, `Qc`, and nonlinear `a` appear on its subplot's top axis
+   in scientific notation. When several fits are shown, that axis gives the
+   median of each parameter; hover it for each curve's exact values or select
+   one amplitude to narrow the summary. The plotted magnitude is normalized to
+   each trace's last point,
+   which is the fits' own convention, so the
    toolbar's "Normalize Traces" does not apply here
 5. The Fit Histograms tab answers the same fits over the whole array rather
    than one resonator at a time: a scatter of fitted `fr` sorted in ascending
@@ -188,9 +188,10 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
 
   1. **Find Bias** chooses an operating amplitude and frequency for every resonator in the sweeps on screen, in one `find_bias_points` call. **Find Bias Settings** opens a settings window grouped by the test each setting belongs to: which bifurcation test decides the amplitude, the thresholds that test reads, where in the chosen sweep the tone goes, and how far from the sweep centre an answer is believed. Settings persist between sessions, **Apply** saves edits, and **Close** discards unapplied edits. **Reset to Defaults** restores the default values; press **Apply** to save them.
      The resulting catalog keeps the last observed bifurcation amplitude when the new run detects none; a new observation replaces it. Findings record this run's bifurcation checks. A clean sweep below the retained bifurcation amplitude is not flagged for missing a new detection; a drive at or above that amplitude remains flagged, and the frequency-distance check still applies. To reset stored amplitudes in Python, call `catalog.clear_bifurcations()` before taking the next multisweep with that catalog. This preserves bias frequencies, amplitudes and calibrations. Find Bias reads the catalog snapshot recorded in its sweeps, so clearing a separate catalog does not change an existing sweep's snapshot.
-  2. The report becomes the panel's catalog, and the sweeps come back carrying it as `bias_report`. On the magnitude and IQ grids the amplitude step each resonator is biased at keeps its normal line and gains a translucent wide overlay, with a dashed line at its bias frequency on the magnitude grid. That line is named `f_bias` over the drive it was chosen at in normalized DAC units. Flags are absent from plot labels; hover a subplot for the reason its point is flagged. The status line says `Bias found (2 of 9 flagged)`, then fades like any other outcome — nothing is on the board until Apply Bias.
-  3. The **Bias: derivative** tab shows strongest pair strength and the shape and noise thresholds versus drive amplitude. Pair strength is the smaller prominence of an eligible peak–trough pair, in inverse Hz; it must reach both thresholds to trigger detection. Zero denotes no pair when none exists. A compact label strip above the grid identifies the three curves, upward and downward line styles, and the dotted selected-amplitude line. The plot is available before Find Bias and redraws when you apply Find Bias Settings. Open **Help → Bias plot guide** for the scales.
+  2. The report becomes the panel's catalog, and the sweeps come back carrying it as `bias_report`. On the magnitude and IQ grids the amplitude step each resonator is biased at keeps its normal line and gains a translucent wide overlay, with a dashed line at its bias frequency on the magnitude grid. Its compact legend label reads `f_bias` and `amp=` with at most two significant figures in normalized DAC units. Flags are absent from plot labels; hover a subplot for the reason its point is flagged. The status line says `Bias found (2 of 9 flagged)`, then fades like any other outcome — nothing is on the board until Apply Bias.
+  3. The **Bias: derivative** tab shows strongest pair strength and the shape and noise thresholds versus drive amplitude. Pair strength is the smaller prominence of an eligible peak–trough pair, in inverse Hz; it must reach both thresholds to trigger detection. Zero denotes no pair when none exists. A compact label strip above the grid identifies the three curves, upward and downward line styles, and the dotted selected-amplitude line. Hover those labels for the path to the `bias_finding.md` example workbook's derivative-method explanation. The plot is available before Find Bias and redraws when you apply Find Bias Settings. Open **Help → Bias plot guide** for the scales.
   4. The **Bias: frequency** tab draws what chose the frequency: each resonator's IQ arc speed — how far its trace moves per hertz — at the drive it is biased at, which is the quantity the default `iq_derivative` method maximizes. The speed is black or white with no thick overlay; `dI/df` and `dQ/df` are thin green and red lines. A shared label strip above the grid identifies them and the dashed `f_bias` line. That line marks the hardware-grid frequency, so the gap between it and the speed peak shows quantization. Only the step the resonator is biased at is drawn, and the tab is empty until Find Bias has chosen one. With the `minimum` frequency method the line sits at the dip instead and need not be at this curve's peak.
+  5. The **Bias: hysteresis** tab labels its limit once above the grid. Its value updates when you apply Find Bias Settings; individual drive labels remain with their own curves or in the amplitude colorbar.
 
 - **Apply Bias**
   1. **Apply Bias** parks a tone on every resonator in the panel's catalog, at the frequency and amplitude it carries. Which NCO carries them, and putting the frequencies on the tone grid, are `apply_bias`'s doing.

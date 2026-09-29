@@ -980,6 +980,7 @@ separation divided by the allowed separation: values above 1 trigger this
 test. If the allowed separation is zero, the plot shows separation directly
 and any value above zero triggers the test. Each curve is one drive; the
 selected drive is thicker.
+The limit and its units are labelled once above the panels.
 
 The magnitude comparison measures separation in units of the upward sweep's
 dip depth. The IQ comparison measures complex separation in loop radii and

@@ -132,6 +132,22 @@ def test_bias_plot_labels_are_shared_above_the_grids(qt_app):
         panel.close()
 
 
+def test_derivative_shared_labels_point_to_the_bias_workbook(qt_app):
+    from PyQt6 import QtWidgets
+
+    panel = _panel(_container())
+    try:
+        strip = panel.bias_sweeps_tab.findChild(
+            QtWidgets.QWidget, "shared_plot_labels")
+        path = "rfmux/reference-notebooks/Demos/bias_finding.md"
+        assert path in strip.toolTip()
+        assert "Bifurcation detection: derivative method" in strip.toolTip()
+        assert all(path in label.toolTip()
+                   for label in strip.findChildren(QtWidgets.QLabel))
+    finally:
+        panel.close()
+
+
 @pytest.mark.parametrize("foreground", ["k", "w"])
 def test_frequency_speed_uses_foreground_without_highlight(qt_app, foreground):
     import pyqtgraph as pg
@@ -151,3 +167,20 @@ def test_frequency_speed_uses_foreground_without_highlight(qt_app, foreground):
         assert widget.getPlotItem().legend is None
     finally:
         widget.close()
+
+
+def test_bias_legend_uses_two_significant_figures_without_flags():
+    from types import SimpleNamespace
+    from rfmux.tools.periscope.multisweep_grid_helpers import bias_legend_label
+
+    bias = SimpleNamespace(amplitude=0.0123456, flagged_kind="freq out of bounds")
+    assert bias_legend_label(bias) == "f_bias<br>amp=0.012"
+
+
+def test_fit_axis_summarizes_multiple_drawn_fits():
+    from rfmux.tools.periscope.multisweep_grid_helpers import fit_axis_medians
+
+    rows = [("upward", 0.01, {"fr": 1e9, "Qi": 1e5, "Qc": 2e5}),
+            ("downward", 0.02, {"fr": 1.2e9, "Qi": 3e5, "Qc": 4e5})]
+    assert fit_axis_medians(rows, "skewed") == (
+        "med fr=1.1e+09 Qi=2.0e+05 Qc=3.0e+05")

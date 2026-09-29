@@ -174,8 +174,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                 plot_item.setLabel('left', 'IQ arc speed', units='Counts/Hz')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
-                _plot_fit(plot_item, traces, amplitude_to_color, pen_color,
-                          fit_model, labels)
+                _plot_fit(plot_item, traces, pen_color, fit_model)
                 # The fitters' normalization, not the drive's: a fit works on
                 # the trace divided by its own off-resonance level, and this
                 # tab draws measurement and model together in those units.
@@ -327,7 +326,7 @@ BIAS_LINE_STYLE = QtCore.Qt.PenStyle.DashLine
 
 def bias_legend_label(bias) -> str:
     """Name the bias line and its drive, in normalized DAC units."""
-    return f"f_bias<br>bias amp. = {bias.amplitude:.4g}"
+    return f"f_bias<br>amp={bias.amplitude:.2g}"
 
 
 def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
@@ -460,10 +459,7 @@ FR_LINE_ALPHA = 120
 
 
 def si(value: float, digits: int = 3) -> str:
-    """A Q, short enough for a legend: ``29.6k``, ``1.24M``.
-
-    *digits* is significant figures; two is what an uncertainty gets.
-    """
+    """A quality factor with a short SI suffix."""
     if abs(value) >= 1e6:
         return f"{value / 1e6:.{digits}g}M"
     if abs(value) >= 1e3:
@@ -471,106 +467,95 @@ def si(value: float, digits: int = 3) -> str:
     return f"{value:.{digits}g}"
 
 
-#: What a model's legend entry says it fitted, in the order it says it. The
-#: headline numbers only: everything a fit learned is in the entry, and a
-#: legend that listed it all would cover the plot it labels.
-FIT_LEGEND_PARAMS = (
-    ("fr", lambda value: f"fr {value / 1e6:.4f} MHz"),
-    ("Qr", lambda value: f"Qr {si(value)}"),
-    ("Qi", lambda value: f"Qi {si(value)}"),
-    ("a", lambda value: f"a {value:.2f}"),
-)
+FIT_MEASURED_COLOR = "#3366CC"
+FIT_RESONANCE_COLOR = "#CC6633"
 
 
-def fit_legend_label(sweep, fit_model) -> str:
-    """What one model's line is labelled: its name, and what it fitted.
-
-    A fit that has no parameters -- it did not converge -- is named and left
-    at that; there is no curve of it on the plot to label anyway.
-    """
-    params = ((sweep.get('fits') or {}).get(fit_model) or {}).get('params') or {}
-    said = [say(params[name]) for name, say in FIT_LEGEND_PARAMS
-            if params.get(name) is not None]
-    name = fit_model.capitalize()
-    return f"{name}: {', '.join(said)}" if said else name
+def fit_axis_label(params: dict, fit_model: str) -> str:
+    """Compact values for one fit."""
+    names = ("fr", "Qi", "Qc") + (("a",) if fit_model == "nonlinear" else ())
+    return "  ".join(f"{name}={params[name]:.1e}" for name in names
+                     if params.get(name) is not None)
 
 
-def _once(label: str, said: set):
-    """*label* the first time it is asked for, and None after that."""
-    if label in said:
-        return None
-    said.add(label)
-    return label
+def fit_axis_medians(rows: list[tuple], fit_model: str) -> str:
+    """One axis line summarizing multiple drawn fits."""
+    names = ("fr", "Qi", "Qc") + (("a",) if fit_model == "nonlinear" else ())
+    summary = []
+    for name in names:
+        reported = [params[name] for _direction, _amplitude, params in rows
+                    if params.get(name) is not None]
+        values = [value for value in reported if np.isfinite(value)]
+        if values:
+            summary.append(f"{name}={np.median(values):.1e}")
+        elif reported:
+            summary.append(f"{name}=nan")
+    return "med " + " ".join(summary)
 
 
-def _plot_fit(plot_item, traces, amplitude_to_color, pen_color, fit_model,
-              legend_labels=None):
+def _plot_fit(plot_item: pg.PlotItem, traces: list[tuple], pen_color: str,
+              fit_model: str) -> None:
     """One resonator's measured magnitude with one model fitted to it.
 
     Normalized to each trace's last point, because that is the skewed fit's own
     convention: the model comes back in those units, so the measurement is put
     into them rather than the model taken out of them.
 
-    The measurement keeps the line it has on the other tabs -- coloured by its
-    drive, styled by its direction -- and the fit is a thinner line in the
-    foreground colour over it, so that at a glance the black or white line is
-    the model and the coloured one is the data. One model at a time, which
-    leaves line style free to mean direction here as it does everywhere else.
+    Measured data is blue, the model is a thinner foreground line, and the
+    resonance marker is orange. Line style still distinguishes direction.
 
     A sweep with no fit of this model draws its measurement alone, and one that
     did not converge is simply absent: the count of what failed is on the
     toolbar.
 
-    The legend is always drawn here, because on this tab it says which line is
-    the measurement and which the model -- a distinction the colorbar cannot
-    make. With *legend_labels* it says that per trace, with the drive on the
-    measurement and the fitted numbers on the model; without them, which is
-    when the colorbar is carrying the drives and there are more traces than
-    rows to spare, it says it once for the pair.
+    The top axis gives exact values for one fit or medians for several. Its
+    tooltip lists every drawn fit's values.
     """
-    if traces:
-        _add_legend(plot_item, pen_color)
-
     reader, scale_of = FIT_READERS[fit_model]
-    # Which of the pair the one-entry-each legend has already named. The first
-    # *drawn* line of each kind takes the entry, not the first trace: a fit
-    # that did not converge draws nothing to hang it on.
-    said = set()
-    for step, direction, amplitude, sweep in traces:
+    fit_rows = []
+    for _step, direction, amplitude, sweep in traces:
         counts = np.asarray(sweep['iq_counts'])
         if len(counts) == 0 or counts[-1] == 0:
             continue
+        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
         plot_item.plot(
             offset_khz(sweep), np.abs(counts / counts[-1]),
-            pen=_trace_pen(amplitude, direction, amplitude_to_color, pen_color),
-            name=(legend_labels.get((step, direction, amplitude)) if legend_labels
-                  else _once("Measured", said)))
+            pen=pg.mkPen(color=FIT_MEASURED_COLOR, width=LINE_WIDTH, style=style))
 
         try:
             offsets, model = _model_on_a_finer_grid(reader, sweep)
         except (ValueError, KeyError):
             continue    # no fit of this model, or one that did not converge
-        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
         plot_item.plot(
             offsets, np.abs(model) * scale_of(counts),
-            pen=pg.mkPen(color=pen_color, width=MODEL_LINE_WIDTH, style=style),
-            name=(fit_legend_label(sweep, fit_model) if legend_labels
-                  else _once(f"{fit_model.capitalize()} fit", said)))
-        _fr_line(plot_item, sweep, fit_model, amplitude, amplitude_to_color,
-                 pen_color)
+            pen=pg.mkPen(color=pen_color, width=MODEL_LINE_WIDTH, style=style))
+        _fr_line(plot_item, sweep, fit_model)
+        params = ((sweep.get('fits') or {}).get(fit_model) or {}).get('params') or {}
+        if fit_axis_label(params, fit_model):
+            fit_rows.append((direction, amplitude, params))
+
+    axis = plot_item.getAxis('top')
+    axis.setStyle(showValues=False, tickLength=0)
+    details = [f"{amplitude:.2g} {direction[0].upper()}: " +
+               fit_axis_label(params, fit_model)
+               for direction, amplitude, params in fit_rows]
+    if len(fit_rows) > 1:
+        axis_text = fit_axis_medians(fit_rows, fit_model)
+    elif fit_rows:
+        axis_text = fit_axis_label(fit_rows[0][2], fit_model)
+    else:
+        axis_text = ""
+    axis.setLabel(text=axis_text)
+    axis.setToolTip("\n".join(details))
+    plot_item.showAxis('top', bool(fit_rows))
 
 
-def _fr_line(plot_item, sweep, fit_model, amplitude, amplitude_to_color, pen_color):
-    """A line where this model put the resonance, in its sweep's drive colour.
-
-    The colour rather than the model's own, because the reading is how far
-    ``fr`` moved between one drive and the next, and that is only legible if
-    each line is paired with the trace it came off.
-    """
+def _fr_line(plot_item, sweep, fit_model):
+    """Mark the resonance frequency from this model."""
     params = ((sweep.get('fits') or {}).get(fit_model) or {}).get('params') or {}
     if params.get('fr') is None:
         return
-    colour = pg.mkColor(amplitude_to_color.get(amplitude, pen_color))
+    colour = pg.mkColor(FIT_RESONANCE_COLOR)
     colour.setAlpha(FR_LINE_ALPHA)
     plot_item.addLine(
         x=(params['fr'] - sweep['original_center_frequency']) / 1e3,
@@ -612,20 +597,17 @@ def _plot_bifurcation(
         plot_item.addLine(x=bias.amplitude, pen=pen)
 
 
-def legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) -> None:
-    """A legend row for something that is not a plotted curve.
+def legend_key(plot_item, name: str, pen) -> None:
+    """Add a labelled line sample without drawing another curve."""
+    plot_item.legend.addItem(pg.PlotDataItem(pen=pen), name)
 
-    ``ItemSample`` paints from an item's ``opts``, so a detached
-    ``PlotDataItem`` carrying a pen -- and, for a band, the fill under it --
-    draws that thing's own swatch without a second copy of it going onto the
-    plot.
-    """
-    fill = {}
-    if fill_color is not None:
-        colour = pg.mkColor(fill_color)
-        colour.setAlpha(fill_alpha)
-        fill = {"fillLevel": 0, "fillBrush": pg.mkBrush(colour)}
-    plot_item.legend.addItem(pg.PlotDataItem(pen=pen, **fill), name)
+
+def hysteresis_limit_label(settings: dict) -> str:
+    """Text for the limit line shared by all hysteresis subplots."""
+    limit = settings.get("max_discrepancy", 0.1)
+    units = ("dip depth" if settings.get("compare", "magnitude") == "magnitude"
+             else "loop radius")
+    return f"Limit: {limit:g} × {units}"
 
 
 def _plot_hysteresis(
@@ -640,7 +622,8 @@ def _plot_hysteresis(
     units = "dip depth" if compare == "magnitude" else "loop radius"
     ylabel = "Up/down difference / limit" if limit > 0 else f"Up/down difference / {units}"
     plot_item.setLabel('left', ylabel)
-    _add_legend(plot_item, pen_color)
+    if legend_labels:
+        _add_legend(plot_item, pen_color)
     pairs = {}
     for step, direction, amplitude, sweep in traces:
         pairs.setdefault(step, {})[direction] = sweep
@@ -661,7 +644,6 @@ def _plot_hysteresis(
         drawn = True
     pen = pg.mkPen(color=pen_color, width=1, style=DOWNWARD_SWEEP_STYLE)
     plot_item.addLine(y=limit / divisor, pen=pen)
-    legend_key(plot_item, f"Limit: {limit:g} × {units}", pen)
     if not drawn:
         note = pg.TextItem("No usable up/down pairs", color=pen_color)
         plot_item.addItem(note)

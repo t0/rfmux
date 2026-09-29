@@ -18,7 +18,9 @@ from .utils import (
 from .noise_spectrum_dialog import NoiseSpectrumDialog
 from .amplitude_colorbar import AmplitudeColorBar
 from .detector_digest_tab import DetectorDigestTab
-from .multisweep_grid_helpers import create_amplitude_color_map
+from .multisweep_grid_helpers import (
+    FIT_MEASURED_COLOR, FIT_RESONANCE_COLOR, create_amplitude_color_map,
+    hysteresis_limit_label)
 from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
@@ -401,6 +403,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # Fit Results (per-detector grid, models over the measurement)
         self.fit_sweeps_tab, self.fit_sweeps_grid, self.fit_colorbar = \
             self._create_sweep_tab(toolbar=self.fit_display)
+        self.fit_plot_labels = self._add_shared_plot_labels(self.fit_sweeps_tab, (
+            ("━ Measured", FIT_MEASURED_COLOR),
+            ("┆ f_r", FIT_RESONANCE_COLOR),
+            ("solid: upward · dotted: downward", None),
+        ))
+        self.fit_model_label = QtWidgets.QLabel(self.fit_plot_labels)
+        self.fit_plot_labels.layout().addWidget(self.fit_model_label)
         self.plot_tabs.addTab(self.fit_sweeps_tab, "Fit Results")
 
         # The same fits, over the whole array rather than one at a time
@@ -417,7 +426,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             ("■ Noise threshold", "#339966"),
             ("solid: upward · dotted: downward", None),
             ("⋮ Selected amplitude", None),
-        ))
+        ), tooltip=(
+            "For the pair strength and threshold definitions, see "
+            "'Bifurcation detection: derivative method' in\n"
+            "rfmux/reference-notebooks/Demos/bias_finding.md"))
         self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: derivative")
         self._tab_tooltip(
             self.bias_sweeps_tab,
@@ -440,6 +452,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         self.hysteresis_sweeps_tab, self.hysteresis_sweeps_grid, self.hysteresis_colorbar = (
             self._create_sweep_tab())
+        self.hysteresis_plot_labels = self._add_shared_plot_labels(
+            self.hysteresis_sweeps_tab, ())
+        self.hysteresis_limit_label = QtWidgets.QLabel(self.hysteresis_plot_labels)
+        self.hysteresis_plot_labels.layout().addWidget(self.hysteresis_limit_label)
         self.plot_tabs.addTab(self.hysteresis_sweeps_tab, "Bias: hysteresis")
         self._tab_tooltip(
             self.hysteresis_sweeps_tab,
@@ -506,15 +522,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         return tab, grid, colorbar
 
-    def _add_shared_plot_labels(self, tab, entries):
+    def _add_shared_plot_labels(self, tab, entries, tooltip=None):
         """Put the grid's line labels in a compact row above its scroll area."""
         strip = QtWidgets.QWidget(tab)
         strip.setObjectName("shared_plot_labels")
+        if tooltip:
+            strip.setToolTip(tooltip)
         labels = FlowLayout(strip, margin=0, h_spacing=14, v_spacing=2)
         for caption, colour in entries:
             label = QtWidgets.QLabel(caption, strip)
             if colour:
                 label.setStyleSheet(f"color: {colour}")
+            if tooltip:
+                label.setToolTip(tooltip)
             labels.addWidget(label)
         tab.layout().insertWidget(tab.layout().count() - 1, strip)
         return strip
@@ -899,10 +919,16 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         if plot_type == 'fit':
             traces_by_name = {name: self._fit_traces(name, traces_by_name.get(name, []))
                               for name in names}
+            self.fit_plot_labels.setVisible(any(traces_by_name.values()))
+            self.fit_model_label.setText(
+                f"━ {(self.fit_display.get_model() or 'skewed').capitalize()} fit")
         elif plot_type == 'frequency':
             traces_by_name = {name: self._bias_step_traces(name, traces_by_name.get(name, []))
                               for name in names}
             self.freq_plot_labels.setVisible(any(traces_by_name.values()))
+        elif plot_type == 'hysteresis':
+            self.hysteresis_limit_label.setText(
+                "· · " + hysteresis_limit_label(self.bias_settings.get_parameters()))
         if not traces_by_name:
             if tab is self.collision_tab:
                 colorbar.hide()
@@ -921,15 +947,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                            for traces in traces_by_name.values()
                            for _step, direction, _amp, _sweep in traces)
 
-        # A legend or a colorbar, on how many amplitudes are on screen rather
-        # than how many the measurement holds: the Fit Results tab draws one
-        # step of a schedule too many to label, and a bar is no way to read one
-        # line. The scale itself stays the whole measurement's, so a step keeps
-        # its colour whichever of them are drawn. The bias views do not use
-        # drive colours for their plotted quantities.
+        # Drive colours need a per-plot legend or a colorbar. Fit and bias
+        # diagnostics use fixed colours for their plotted quantities.
         drawn = {amplitude for traces in traces_by_name.values()
                  for _step, _direction, amplitude, _sweep in traces}
-        if plot_type not in ("bias", "frequency") and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
+        if plot_type not in ("bias", "frequency", "fit") and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
             colorbar.update_range(amplitudes[0], amplitudes[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)

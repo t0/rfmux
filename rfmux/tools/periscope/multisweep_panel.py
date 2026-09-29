@@ -411,6 +411,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
 
         # What the derivative bifurcation test looks at
         self.bias_sweeps_tab, self.bias_sweeps_grid, self.bias_colorbar = self._create_sweep_tab()
+        self._add_shared_plot_labels(self.bias_sweeps_tab, (
+            ("● Pair strength", "#3366CC"),
+            ("▲ Shape threshold", "#CC6633"),
+            ("■ Noise threshold", "#339966"),
+            ("solid: upward · dotted: downward", None),
+            ("⋮ Selected amplitude", None),
+        ))
         self.plot_tabs.addTab(self.bias_sweeps_tab, "Bias: derivative")
         self._tab_tooltip(
             self.bias_sweeps_tab,
@@ -419,6 +426,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # What choosing the bias frequency looked at
         self.freq_sweeps_tab, self.freq_sweeps_grid, self.freq_colorbar = \
             self._create_sweep_tab()
+        self.freq_plot_labels = self._add_shared_plot_labels(self.freq_sweeps_tab, (
+            ("━ IQ arc speed", None),
+            ("━ dI/df", "#00B050"),
+            ("━ dQ/df", "#FF2D2D"),
+            ("solid: upward · dotted: downward", None),
+            ("- - f_bias", None),
+        ))
         self.plot_tabs.addTab(self.freq_sweeps_tab, "Bias: frequency")
         self._tab_tooltip(
             self.freq_sweeps_tab,
@@ -491,6 +505,19 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         tab_layout.addWidget(scroll)
         
         return tab, grid, colorbar
+
+    def _add_shared_plot_labels(self, tab, entries):
+        """Put the grid's line labels in a compact row above its scroll area."""
+        strip = QtWidgets.QWidget(tab)
+        strip.setObjectName("shared_plot_labels")
+        labels = FlowLayout(strip, margin=0, h_spacing=14, v_spacing=2)
+        for caption, colour in entries:
+            label = QtWidgets.QLabel(caption, strip)
+            if colour:
+                label.setStyleSheet(f"color: {colour}")
+            labels.addWidget(label)
+        tab.layout().insertWidget(tab.layout().count() - 1, strip)
+        return strip
         
     def _on_plot_tab_changed(self, index):
         """Handle plot tab changes."""
@@ -875,6 +902,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         elif plot_type == 'frequency':
             traces_by_name = {name: self._bias_step_traces(name, traces_by_name.get(name, []))
                               for name in names}
+            self.freq_plot_labels.setVisible(any(traces_by_name.values()))
         if not traces_by_name:
             if tab is self.collision_tab:
                 colorbar.hide()
@@ -897,10 +925,11 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # than how many the measurement holds: the Fit Results tab draws one
         # step of a schedule too many to label, and a bar is no way to read one
         # line. The scale itself stays the whole measurement's, so a step keeps
-        # its colour whichever of them are drawn.
+        # its colour whichever of them are drawn. The bias views do not use
+        # drive colours for their plotted quantities.
         drawn = {amplitude for traces in traces_by_name.values()
                  for _step, _direction, amplitude, _sweep in traces}
-        if plot_type != "bias" and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
+        if plot_type not in ("bias", "frequency") and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
             colorbar.update_range(amplitudes[0], amplitudes[-1],
                                   dac_scale, self.unit_mode,
                                   self.dark_mode, has_downward)

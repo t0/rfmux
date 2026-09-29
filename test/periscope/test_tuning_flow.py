@@ -31,7 +31,7 @@ from rfmux.tuning import (  # noqa: E402
 from rfmux.tuning.fits import (  # noqa: E402
     BIFURCATION_A, collect_fit_params)
 from rfmux.tuning.bias import (  # noqa: E402
-    FLAG_KINDS, BiasReport, bifurcated_by_derivative, iq_arc_speed,
+    BiasReport, bifurcated_by_derivative, iq_arc_speed,
     iq_derivatives, normalized_arc_speed, hysteresis_separation)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
@@ -2448,33 +2448,14 @@ def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
         "the bias line lost its label when the drives went to the colorbar"
 
 
-def test_the_flag_is_on_the_subplot_of_the_resonator_it_is_about(board, qt_app,
-                                                                swept_container):
-    """The mark a flag is about is the bias line, so the flag is on that line's
-    legend row -- beside the resonator, rather than in a list of names on a
-    status line that fades. It says which flag, in the library's own words,
-    so the plot and a notebook call it the same thing; and a sound point does
-    not carry one, or the flag would mean nothing."""
-
+def test_flag_text_stays_out_of_plot_legends(board, qt_app, swept_container):
     panel = _with_flagged_points(_panel_showing(swept_container, board), qt_app)
-    findings = panel._bias_by_name()
 
-    named_on_plot = {
-        name: next((row.split("\u2014")[1].split("<br>")[0].strip()
-                    for row in _legend_names(panel, MAGNITUDE_TAB, index)
-                    if row.startswith("f_bias \u2014")), None)
-        for index, name in enumerate(panel._selected_names())
-        if index < len(_grid_widgets(panel, MAGNITUDE_TAB))}
-
-    assert named_on_plot == {name: findings[name].flagged_kind
-                             for name in named_on_plot}
-    assert set(named_on_plot.values()) - {None} <= set(FLAG_KINDS)
-    assert any(named_on_plot.values()), "nothing on screen carried a flag"
-
-    # And nowhere else: the same findings with nothing to report carry no flag.
-    panel._bias_found(_with_the_flags_cleared(panel))
-    assert not [row for row in _legend_names(panel, MAGNITUDE_TAB)
-                if row.startswith("f_bias \u2014")]
+    for index, _widget in enumerate(_grid_widgets(panel, MAGNITUDE_TAB)):
+        rows = _legend_names(panel, MAGNITUDE_TAB, index)
+        assert all(finding.flagged_kind not in row
+                   for finding in panel.bias_report.flagged for row in rows)
+        assert any(row.startswith("f_bias<br>") for row in rows)
 
 
 def test_the_reason_a_point_is_flagged_stays_off_the_canvas(board, qt_app,
@@ -2800,14 +2781,15 @@ def test_the_bias_frequency_tab_draws_what_chose_the_frequency(board, qt_app,
     finding = panel._bias_by_name()[name]
     sweep = collect_amplitude_iterations_for(
         panel.module_sweeps, name)[finding.iteration]["upward"]
-    drive = create_amplitude_color_map(
-        panel._amplitudes_drawn(), panel.dark_mode)[finding.amplitude]
+    foreground = "w" if panel.dark_mode else "k"
 
     frequencies, speed = iq_arc_speed(sweep)
-    x, y = _upward_curve(panel, drive).getData()
+    x, y = _upward_curve(panel, foreground).getData()
     assert np.allclose(
         x, (frequencies - sweep["original_center_frequency"]) / 1e3)
     assert np.allclose(y, speed)
+    assert not _bias_highlights(panel, BIAS_FREQ_TAB)[0]
+    assert panel.freq_colorbar.isHidden()
 
 
 def test_the_line_on_it_is_where_the_tone_will_go(board, qt_app, swept_container):
@@ -2877,10 +2859,13 @@ def test_the_frequency_tab_shows_which_component_carries_the_response(
             x, (frequencies - sweep["original_center_frequency"]) / 1e3)
         assert np.allclose(y, values)
 
-    # Named once each, however many traces carry them -- the colour means the
-    # component, and the speed line keeps its drive label beside them.
-    names = _legend_names(panel, BIAS_FREQ_TAB)
-    assert [row for row in names if row in ("dI/df", "dQ/df")] == ["dI/df", "dQ/df"]
+    # The same labels serve every subplot without covering its curves.
+    assert all(widget.getPlotItem().legend is None
+               for widget in _grid_widgets(panel, BIAS_FREQ_TAB))
+    labels = [label.text() for label in
+              panel.freq_plot_labels.findChildren(QtWidgets.QLabel)]
+    assert any("dI/df" in label for label in labels)
+    assert any("dQ/df" in label for label in labels)
 
 
 def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_container):

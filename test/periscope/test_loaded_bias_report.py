@@ -106,5 +106,48 @@ def test_derivative_plot_compares_pair_strength_to_both_thresholds(qt_app):
                                     check.diagnostics["shape_threshold"],
                                     check.diagnostics["noise_threshold"]])
         assert all(curve.xData.tolist() == [0.01] for curve in curves)
+        assert widget.getPlotItem().legend is None
+    finally:
+        widget.close()
+
+
+def test_bias_plot_labels_are_shared_above_the_grids(qt_app):
+    from PyQt6 import QtWidgets
+
+    panel = _panel(_container())
+    try:
+        for tab, expected in (
+                (panel.bias_sweeps_tab, ("Pair strength", "Shape threshold",
+                                         "Noise threshold", "Selected amplitude")),
+                (panel.freq_sweeps_tab, ("IQ arc speed", "dI/df", "dQ/df",
+                                         "f_bias"))):
+            strip = tab.findChild(QtWidgets.QWidget, "shared_plot_labels")
+            assert strip is not None
+            labels = " ".join(label.text() for label in
+                              strip.findChildren(QtWidgets.QLabel))
+            assert all(name in labels for name in expected)
+            assert tab.layout().indexOf(strip) < tab.layout().indexOf(
+                next(widget for widget in tab.findChildren(QtWidgets.QScrollArea)))
+    finally:
+        panel.close()
+
+
+@pytest.mark.parametrize("foreground", ["k", "w"])
+def test_frequency_speed_uses_foreground_without_highlight(qt_app, foreground):
+    import pyqtgraph as pg
+    from rfmux.tools.periscope.multisweep_grid_helpers import _plot_bias_frequency
+
+    sweep = next(iter(_container()[MODULE_ID]["results"][0]["upward"].values()))
+    sweep = {**sweep, "iq_counts": np.linspace(0, 1, 21) +
+             1j * np.linspace(1, 0, 21)}
+    widget = pg.PlotWidget()
+    try:
+        _plot_bias_frequency(widget.getPlotItem(),
+                             [(0, "upward", 0.01, sweep)], foreground, None)
+        curves = widget.listDataItems()
+        assert len(curves) == 3
+        assert curves[-1].opts["pen"].color() == pg.mkColor(foreground)
+        assert all(not curve.property("bias_highlight") for curve in curves)
+        assert widget.getPlotItem().legend is None
     finally:
         widget.close()

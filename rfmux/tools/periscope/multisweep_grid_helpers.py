@@ -151,8 +151,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
             labels = legend_labels if (show_legend and legend_labels) else None
 
             bias = (bias_by_name or {}).get(name)
-            # Why a point is flagged is a sentence; the legend says *that* it
-            # is, and the sentence lives here rather than across a subplot.
+            # Keep the reason in the tooltip, outside the plot and its labels.
             plot_widget.setToolTip(
                 "" if bias is None or bias.good
                 else f"{name} is flagged: {bias.flagged_because}")
@@ -171,8 +170,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                                  bias, bias_settings or {}, labels)
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'frequency':
-                _plot_bias_frequency(plot_item, traces, amplitude_to_color,
-                                     pen_color, bias, labels)
+                _plot_bias_frequency(plot_item, traces, pen_color, bias)
                 plot_item.setLabel('left', 'IQ arc speed', units='Counts/Hz')
                 plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
             elif plot_type == 'fit':
@@ -328,28 +326,12 @@ BIAS_LINE_STYLE = QtCore.Qt.PenStyle.DashLine
 
 
 def bias_legend_label(bias) -> str:
-    """What the bias frequency line is called, over two lines.
-
-    The drive in normalized DAC units, which is what a bias amplitude *is* and
-    what goes back into a re-run -- the colorbar carries the same number in
-    whatever the panel is displaying.
-
-    A flagged point names its flag here, because this is the mark on the plot
-    that a flag is about. The words are the library's
-    (:data:`~rfmux.tuning.bias.FLAG_KINDS`), so the plot and a notebook call a
-    flag the same thing; the sentence behind it goes in the subplot's tooltip.
-    """
-    flag = "" if bias.good else f" \u2014 {bias.flagged_kind}"
-    return f"f_bias{flag}<br>bias amp. = {bias.amplitude:.4g}"
+    """Name the bias line and its drive, in normalized DAC units."""
+    return f"f_bias<br>bias amp. = {bias.amplitude:.4g}"
 
 
 def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
-    """A vertical line where the tone goes, in the chosen drive's own colour.
-
-    Named in the legend, because a bare vertical line on a magnitude plot says
-    nothing about which of the drives on screen it belongs to or whether the
-    point is one to trust.
-    """
+    """A vertical line where the tone goes, using the mapped or foreground colour."""
     offset = (bias.frequency_hz - sweep['original_center_frequency']) / 1e3
     color = amplitude_to_color.get(bias.amplitude, pen_color)
     pen = pg.mkPen(color=color, width=LINE_WIDTH, style=BIAS_LINE_STYLE)
@@ -600,10 +582,8 @@ def _plot_bifurcation(
     bias: BiasFinding | None, settings: dict,
 ) -> None:
     """Plot pair strength and both thresholds against drive amplitude."""
-    _add_legend(plot_item, pen_color)
-    plot_item.legend.setOffset((10, 10))
     by_direction = {}
-    for step, direction, amplitude, sweep in traces:
+    for _step, direction, amplitude, sweep in traces:
         try:
             check = bifurcated_by_derivative(
                 {direction: sweep},
@@ -618,20 +598,18 @@ def _plot_bifurcation(
         ))
     for direction, rows in by_direction.items():
         values = np.asarray(sorted(rows)).T
-        for y, label, colour, symbol in zip(
-            values[1:], ("Pair strength", "Shape threshold", "Noise threshold"),
+        for y, colour, symbol in zip(
+            values[1:],
             ("#3366CC", "#CC6633", "#339966"), ("o", "t", "s"),
         ):
             plot_item.plot(values[0], y, symbol=symbol, symbolSize=6,
                            symbolBrush=colour, symbolPen=colour,
                            pen=pg.mkPen(colour, width=1.5, style=(
                                DOWNWARD_SWEEP_STYLE if direction == "downward"
-                               else QtCore.Qt.PenStyle.SolidLine)),
-                           name=f"{label} ({direction})")
+                               else QtCore.Qt.PenStyle.SolidLine)))
     if bias is not None and by_direction:
         pen = pg.mkPen(pen_color, style=QtCore.Qt.PenStyle.DotLine)
         plot_item.addLine(x=bias.amplitude, pen=pen)
-        legend_key(plot_item, "Selected amplitude", pen)
 
 
 def legend_key(plot_item, name: str, pen, fill_color=None, fill_alpha: int = 0) -> None:
@@ -705,8 +683,7 @@ DERIVATIVE_COLORS = {"dI/df": "#00B050", "dQ/df": "#FF2D2D"}
 DERIVATIVE_LINE_WIDTH = 1
 
 
-def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
-                         bias, legend_labels=None):
+def _plot_bias_frequency(plot_item, traces, pen_color, bias):
     """What choosing the bias frequency looked at, at the drive it was chosen at.
 
     :func:`~rfmux.tuning.bias.iq_arc_speed` is the quantity the default
@@ -723,14 +700,7 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
     Only the step the resonator is biased at is drawn. The other steps chose
     nothing, and a grid of them would bury the one that did.
     """
-    if traces:
-        _add_legend(plot_item, pen_color)
-
-    # Which of the components the legend has already named. One entry each,
-    # not one per direction: the colour means the component, and the pair of
-    # them is the same pair on every trace of the subplot.
-    said = set()
-    for step, direction, amplitude, sweep in traces:
+    for _step, direction, _amplitude, sweep in traces:
         try:
             frequencies, dI_df, dQ_df = iq_derivatives(sweep)
             _same, speed = iq_arc_speed(sweep)
@@ -742,17 +712,13 @@ def _plot_bias_frequency(plot_item, traces, amplitude_to_color, pen_color,
             plot_item.plot(
                 offsets, values,
                 pen=pg.mkPen(color=DERIVATIVE_COLORS[label],
-                             width=DERIVATIVE_LINE_WIDTH, style=style),
-                name=_once(label, said))
-        _plot_trace(
-            plot_item, offsets, speed, amplitude, direction,
-            amplitude_to_color, pen_color, chosen=True,
-            name=(legend_labels.get((step, direction, amplitude)) if legend_labels
-                  else _once("IQ arc speed", said)))
+                             width=DERIVATIVE_LINE_WIDTH, style=style))
+        plot_item.plot(offsets, speed,
+                       pen=pg.mkPen(color=pen_color, width=LINE_WIDTH,
+                                    style=style))
 
     if bias is not None and traces:
-        _bias_frequency_line(plot_item, bias, traces[0][3], amplitude_to_color,
-                             pen_color)
+        _bias_frequency_line(plot_item, bias, traces[0][3], {}, pen_color)
 
 
 def plot_iq(plot_item, traces, amplitude_to_color, pen_color,

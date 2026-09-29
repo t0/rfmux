@@ -966,8 +966,9 @@ the spike factor times the speed range; the noise threshold is the noise factor
 times the robust scatter of speed changes. Raise either factor to demand
 stronger evidence. Lowering the smaller threshold does not change the verdict.
 
-Solid curves are upward sweeps, dashed curves downward sweeps. A dotted vertical
-line marks the selected drive. All measured amplitudes are evaluated for the
+The labels above the panels identify each curve. Solid curves are upward sweeps,
+dotted curves downward sweeps. A dotted vertical line marks the selected drive.
+All measured amplitudes are evaluated for the
 plot, including those beyond the amplitude search's stopping point. Apply Find
 Bias Settings to redraw these curves.
 
@@ -988,7 +989,8 @@ allowed separation in Find Bias Settings.
 ## Bias: frequency — inspect where the tone goes
 
 At the selected drive, the plot shows IQ arc speed (response change per
-hertz), with dI/df and dQ/df as thin green and red curves. The IQ derivative
+hertz) in black or white, with dI/df and dQ/df as thin green and red curves.
+The labels above the panels identify these lines and f_bias. The IQ derivative
 frequency method chooses the largest arc speed; the minimum method chooses
 the magnitude dip instead, which need not coincide with the speed peak.
 The vertical line marks the selected frequency on the hardware frequency

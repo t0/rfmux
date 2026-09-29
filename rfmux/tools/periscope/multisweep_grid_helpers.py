@@ -190,9 +190,9 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
             plot_item.showGrid(x=True, y=True, alpha=0.3)
 
-        plot_widget.show()
-
     arrange_plot_widgets(grid_layout, widget_cache[:num_plots], columns)
+    for plot_widget in widget_cache[:num_plots]:
+        plot_widget.show()
 
     # Update batch navigation
     total_batches = max(1, (len(names) + batch_size - 1) // batch_size)

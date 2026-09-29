@@ -255,9 +255,9 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 2356 tests
+pytest --tier=quick                 # Edit loop: 2360 tests
 pytest --tier=portable              # No CRS, no GUI: 861 tests
-pytest --tier=full                  # All 2395 that run without a board, including demos
+pytest --tier=full                  # All 2399 that run without a board, including demos
 pytest --tier=acquisition           # MockCRS server + real UDP: 39 tests, including demos (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem

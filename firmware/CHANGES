@@ -1,6 +1,6 @@
 # Changelog
 
-# r1.7.0rc7 - 2026-09-11
+# r1.7.0 - 2026-09-29
 
 This is a major update, and REQUIRES an accompanying bootloader upgrade as well.
 You will need one of the following:
@@ -29,8 +29,6 @@ New features:
   high-channel-count streaming modes. We anticipate the software side of this
   work (Linux-only) will also land in rfmux in the near future.
 
-New since -rc5:
-
 - Fixed an accidental complex inversion (sign negation) in
 
   >>> set_phase(x, DEMOD, ...)
@@ -44,8 +42,6 @@ New since -rc5:
 
 - Fixed a Nyquist 3/4 error in DAC settings resulting in incorrect pulse shaping
   and a corresponding loss of synthesizer power.
-
-New since -rc4:
 
 - Yocto churn - rebased onto Xilinx 2026.1 trees. This was necessary to get
   the build working again after recent GNU tar CVE fixes (CVE-2025-45582).

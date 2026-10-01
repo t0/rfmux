@@ -18,8 +18,9 @@ fi
 
 program_flash -f boot.bin -fsbl fsbl.elf -flash_type qspi-x8-dual_parallel
 
-echo "If you see \"Flash Operation Successful\", power off and power on the CRS.\
-The screen on the front panel should turn on after a few seconds with the\
-t0.technology logo. You may now proceed"
+echo "If you see \"Flash Operation Successful\", power off and power on the CRS. \
+The screen on the front panel should turn on after a few seconds and display the \
+t0.technology logo momentarily. You have successfully upgraded the bootloader \
+and may now proceed to upgrade the SD card image."
 
 

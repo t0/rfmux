@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.core.transferfunctions import BALUN_LOSS_DB
 from rfmux.tuning import AmplitudeSchedule
 from rfmux.algorithms.measurement import multisweep as multisweep_module
 from rfmux.algorithms.measurement.multisweep import multisweep
@@ -264,7 +265,7 @@ async def test_the_sweep_parameters_reach_the_measurement_unchanged(sweeps):
     assert call["span_hz"] == 123e3
     assert call["npoints_per_sweep"] == 57
     assert call["nsamps"] == 42
-    assert call["dac_scale"] == pytest.approx(1.0)
+    assert call["dac_scale"] == pytest.approx(1.0 - BALUN_LOSS_DB)
 
 
 @pytest.mark.asyncio

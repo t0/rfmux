@@ -1,12 +1,14 @@
-"""The DAC scale a module's amplitudes are labelled against."""
+"""The DAC scale a module's amplitudes are measured against: the
+programmed scale less the balun loss."""
 
 import math
 
 import pytest
 
-from rfmux.core.dac_scale import DAC_SCALE_LABEL_OFFSET_DB, dac_scale_dbm
+from rfmux.core.dac_scale import dac_scale_dbm
 from rfmux.core.resonators import BiasPoint
 from rfmux.core.transferfunctions import (
+    BALUN_LOSS_DB,
     convert_dacunits_to_dbm,
     convert_dacunits_to_volts,
     convert_volts_to_dbm,
@@ -21,16 +23,16 @@ class _Board:
         return self.scale
 
 
-def test_the_label_offset_is_zero():
-    """A label is the board's own number. This pins the offset because
-    changing it moves every power this package reports, in files as well
-    as on screen -- see the warning on rfmux.core.dac_scale."""
-    assert DAC_SCALE_LABEL_OFFSET_DB == 0.0
+def test_the_balun_loss_is_pinned():
+    """The balun between the DAC and the output loses 1.75 dB. Pinned
+    because it moves every power this package reports, in files as well
+    as on screen."""
+    assert BALUN_LOSS_DB == 1.75
 
 
 @pytest.mark.asyncio
-async def test_the_scale_is_the_board_s_less_the_offset():
-    assert await dac_scale_dbm(_Board(-0.5), 1) == -0.5 - DAC_SCALE_LABEL_OFFSET_DB
+async def test_the_scale_is_the_board_s_less_the_balun_loss():
+    assert await dac_scale_dbm(_Board(-0.5), 1) == -0.5 - BALUN_LOSS_DB
 
 
 @pytest.mark.asyncio
@@ -59,10 +61,10 @@ async def test_any_other_failure_is_raised():
 @pytest.mark.asyncio
 async def test_the_scale_labels_an_amplitude_as_a_power():
     """What the scale is for: BiasPoint.power_dbm adds it to
-    20*log10(amplitude), so the offset is applied once, on the way in."""
+    20*log10(amplitude), so the balun loss is applied once, on the way in."""
     scale = await dac_scale_dbm(_Board(0.0), 1)
     assert BiasPoint(frequency_hz=1e9, amplitude=0.1).power_dbm(scale) == \
-        pytest.approx(-20.0)
+        pytest.approx(-20.0 - BALUN_LOSS_DB)
 
 
 # ─── the conversions every label is built from ───────────────────────────────

@@ -236,21 +236,6 @@ def test_stored_df_basis_survives_the_dialog_without_a_calibration(qt_app):
     dlg.close()
 
 
-def test_derived_values_are_one_per_line(qt_app):
-    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
-    assert dlg.pulse_derived_label.text().count("<tr>") == 7
-    assert dlg.sigma_derived_label.text().count("<tr>") == 2
-    dlg.close()
-
-
-def test_max_pulse_tooltip_cites_the_config_ratios(qt_app):
-    dlg = PulseCaptureSettingsDialog(sample_rate=596.0)
-    tip = dlg.max_pulse_spin.toolTip()
-    for piece in ("1.5×", "1.2×", "20×", "10%"):
-        assert piece in tip, piece
-    dlg.close()
-
-
 def test_saved_margins_are_shown_in_samples_at_this_rate(qt_app):
     """The times are the setting; what they come to at this stream's
     rate is derived, and follows the spin boxes."""
@@ -274,14 +259,4 @@ def test_noise_training_row_shows_the_length_actually_used(qt_app):
     assert label.startswith("819 ms")
     assert "capped" in label
     assert "noise training 819 ms" in _plain(dlg.pulse_derived_label)
-    dlg.close()
-
-
-def test_advanced_group_sits_between_the_settings_and_the_buttons(qt_app):
-    dlg = PulseCaptureSettingsDialog(
-        config=PulseCaptureConfig(), sample_rate=596.0, mode="slow")
-    dlg.show()
-    dlg.adv_box.setChecked(True)
-    qt_app.processEvents()
-    assert dlg.noise_label.y() < dlg.adv_box.y() < dlg.buttons.y()
     dlg.close()

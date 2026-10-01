@@ -49,13 +49,13 @@ def mock_crs():
             "num_resonances": 2,
             "resonator_random_seed": 11,
             "auto_bias_kids": True,
-            # At the default -55 dBm bias and the board's readout floor
+            # At the default -56.75 dBm bias and the board's readout floor
             # the fast stream cannot trigger on single samples: a pulse
             # swings the tone no further than its off-resonance level,
             # about 7 sigma over a 605-count PFB floor.  A quarter of the
             # board's floor gives these tests 21 sigma without driving the
             # resonator into bifurcation, which more bias would.
-            "bias_amplitude": bias_amplitude_from_dbm(-55.0),
+            "bias_amplitude": bias_amplitude_from_dbm(-56.75),
             "udp_noise_level": 4.0,
             "pulse_mode": "periodic",
             "pulse_period": 0.02,
@@ -71,6 +71,16 @@ def mock_crs():
     except Exception:
         pass
     loop.close()
+
+
+@pytest.fixture(autouse=True)
+def _pfb_streamer_off(mock_crs):
+    """The fast and both mode tests turn the mock's PFB streamer on;
+    left on, its 2.44 MHz packets keep the server busy and a slow
+    capture after them takes four times as long."""
+    yield
+    loop, crs = mock_crs
+    loop.run_until_complete(crs.set_pfb_streamer(channel=None, module=1))
 
 
 @pytest.fixture

@@ -880,7 +880,10 @@ def kerr_output_couplings(omega_g, L, R, C, Cc, input_atten_dB, ZLNA, GLNA,
                           input_atten_dB, system_termination)[0]
         S_dn = s21_of_one(f, L[r] - dL, R[r], C[r], Cc[r], ZLNA, GLNA,
                           input_atten_dB, system_termination)[0]
-        out[r] = (S_up - S_dn) / (I_up - I_dn)
+        dI = I_up - I_dn
+        # Far from every resonator the two currents are bit-identical:
+        # no tangent, so the transient couples nothing to the output.
+        out[r] = (S_up - S_dn) / dI if dI != 0 else 0j
     return out
 
 

@@ -7,13 +7,9 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+from rfmux.core.transferfunctions import BALUN_LOSS_DB  # noqa: E402
 from rfmux.tools.periscope import app_runtime, tasks  # noqa: E402
-from test.qt_helpers import bare_periscope  # noqa: E402
-
-
-class _Board:
-    async def get_dac_scale(self, units="DBM", module=None):
-        return -0.5
+from test.qt_helpers import Board, bare_periscope  # noqa: E402
 
 
 def test_the_blocking_fetch_outlives_its_thread(qt_app, monkeypatch):
@@ -32,9 +28,8 @@ def test_the_blocking_fetch_outlives_its_thread(qt_app, monkeypatch):
             self.ended = True
 
     monkeypatch.setattr(app_runtime, "DACScaleFetcher", SlowTail)
-    p = bare_periscope(monkeypatch, crs=_Board())
+    p = bare_periscope(monkeypatch, crs=Board())
     scales = p.fetch_dac_scales_blocking()
     [fetcher] = made
     assert fetcher.ended and not fetcher.isRunning()
-    # The board's scale less DAC_SCALE_LABEL_OFFSET_DB, which is zero.
-    assert scales[1] == -0.5
+    assert scales[1] == -0.5 - BALUN_LOSS_DB   # the board's scale less the balun loss

@@ -434,7 +434,7 @@ print(f"added {by_hand.frequency_hz / 1e6:.6f} MHz, depth {by_hand.depth_db}")
 # before the rest of this notebook uses it.
 resonance_search.reject(by_hand.frequency_hz, reason="added for the example")
 
-netanal_measured["resonance_search"] = resonance_search.to_dict()
+netanal_results["resonance_search"] = resonance_search.to_dict()
 store.save(module_netanal_outputs, "netanal")
 ```
 

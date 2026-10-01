@@ -6,13 +6,9 @@ the helpers in test/test_fastrx_file.py."""
 import numpy as np
 import pytest
 
-pytest.importorskip(
-    "rfmux.fastrx", reason="this rfmux build does not include fastrx"
-)
-
 from rfmux.core.transferfunctions import PFB_SAMPLING_FREQ
 from rfmux.pulse_capture.overlay import Recording
-from test.test_fastrx_file import file_header, record, seconds_ts, write
+from test.fastrx_bytes import file_header, record, seconds_ts, write
 
 T0 = 43000.0
 DT = 1.0 / PFB_SAMPLING_FREQ

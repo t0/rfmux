@@ -12,6 +12,11 @@ import warnings
 from scipy import interpolate
 
 
+#: Loss in the board's balun, in dB. The power at the output is the DAC scale
+#: programmed with ``set_dac_scale`` less this; the readout counts are scaled
+#: by it too.
+BALUN_LOSS_DB = 1.75
+
 # TODO: Empirical value (should probably be a hybrid)
 #
 # Being one constant is load-bearing for more than arithmetic.
@@ -21,7 +26,8 @@ from scipy import interpolate
 # frequency, or anything fitted — that stops being true for a catalog already
 # written, and what a bias sweep stores has to be reconsidered.
 VOLTS_PER_ROC = (
-    (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
+    (np.sqrt(2)) * np.sqrt(50 * (10 ** (-BALUN_LOSS_DB / 10)) / 1000)
+    / 1880796.4604246316
 )
 
 CREST_FACTOR = 3.5
@@ -71,7 +77,6 @@ VELOCITY_FACTOR_COAX = 0.66
 EFFECTIVE_PROPAGATION_SPEED = SPEED_OF_LIGHT_VACUUM * VELOCITY_FACTOR_COAX
 
 # TODO: These should be functions that take the current and attenuation as inputs
-# CAN assume -1.75 dBm loss in the balun
 # ADC_FS = -1 # dbm
 # DAC_FS = -1 # dbm
 

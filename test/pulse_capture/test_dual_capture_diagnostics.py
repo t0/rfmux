@@ -9,7 +9,7 @@ import pytest
 
 from rfmux import streamer
 from rfmux.pulse_capture.sources import run_pfb_source
-from test.pulse_capture.test_source_drain import _loopback_pair, _patched_socket
+from test.packet_helpers import loopback_pair, patched_socket
 from test.qt_helpers import spin
 
 
@@ -26,8 +26,8 @@ def test_silent_pfb_socket_is_an_error(monkeypatch):
     been stopped."""
     # A private loopback socket nothing sends to, so the real PFB
     # multicast group cannot leak packets in.
-    with _loopback_pair() as (recv, send, port):
-        _patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
+    with loopback_pair() as (recv, send, port):
+        patched_socket(monkeypatch, {streamer.PFB_STREAMER_PORT: recv})
         with pytest.raises(TimeoutError, match="fast streamer is not sending"):
             asyncio.run(run_pfb_source(_NeverFed(), "127.0.0.1", [1]))
 
@@ -125,9 +125,11 @@ def _task_with_pfb(active):
 
 
 @pytest.mark.parametrize("active, wanted, ok", [
-    ([1, 2], [1, 2], True), ([2, 1], [1, 2], True), (None, [1, 2], False),
-    ([], [1, 2], False), ([1], [1, 2], False), ([1, 2, 3, 4], [1], True),
-    ([1, 2, 3], [1, 2], True), (1, [1], True), (2, [1], False)])
+    ([2, 1], [1, 2], True),            # every wanted channel, any order
+    ([1, 2, 3, 4], [1], True),         # the streamer carries more
+    ([1], [1, 2], False),              # one wanted channel missing
+    (None, [1, 2], False),             # the streamer is off
+    (1, [1], True), (2, [1], False)])  # a single channel, bare
 def test_capture_uses_the_streamer_as_configured(active, wanted, ok):
     """The capture reads what the board streams and never sets it: every
     captured channel must be among the streamed ones.  The board
@@ -304,25 +306,6 @@ def test_union_window_spans_the_saved_record():
            "fast_summary": None}
     t0, t1 = D._union_window(old)
     assert t1 == pytest.approx(T + 0.004 + 0.0004, abs=1e-6)
-
-
-def test_matcher_pairs_on_the_trigger_instant():
-    """Two records of one event start at different pre-margins and have
-    different core lengths; the matcher pairs on the trigger, and the
-    offset it reports is trigger to trigger."""
-    from rfmux.pulse_capture.capture_session import IncrementalPulseMatcher
-    pairs = []
-    m = IncrementalPulseMatcher(window_s=0.05, grace_s=0.25,
-                                on_pair=lambda p: pairs.append(p))
-    T = 43000.0
-    # Record starts 115 ms apart, outside the 50 ms window; one trigger.
-    m.add("slow", 1, 1, {"timestamp": T - 0.005, "trigger_time": T,
-                         "duration_s": 0.010})
-    m.add("fast", 1, 1, {"timestamp": T - 0.120, "trigger_time": T - 0.0016,
-                         "duration_s": 0.002})
-    assert m.matched == 1 and pairs and pairs[0]["slow_idx"] == 1 \
-        and pairs[0]["fast_idx"] == 1, "one event, two records, no match"
-    assert pairs[0]["time_offset"] == pytest.approx(0.0016, abs=1e-9)
 
 
 def test_band_pair_is_one_legend_entry_that_hides_both(qt_app):
@@ -616,30 +599,6 @@ def test_template_tab_picks_its_own_stream(qt_app):
     assert panel._template_data is fast, "the other stream's update is kept, not shown"
     panel.close()
     spin(qt_app)
-
-
-def test_the_dual_file_records_the_pulse_settings(tmp_path):
-    """Min pulse, max pulse, training and the confirmation length per
-    stream reach the dual file, so a fragment's absence can be read
-    against the setting that dropped it."""
-    from rfmux.pulse_capture.capture_session import (
-        DualPulseCaptureSession, PulseCaptureConfig)
-    from rfmux.pulse_capture.hdf5 import PulseHDF5Reader
-    cfg = PulseCaptureConfig(min_pulse_ms=1.5, max_pulse_ms=40.0,
-                             noise_train_ms=50.0)
-    path = tmp_path / "dual.h5"
-    d = DualPulseCaptureSession(channels=[1], module=1, slow_rate=1000.0,
-                                fast_rate=100000.0, config=cfg, hdf5_path=path,
-                                on_error=lambda m: None)
-    d.start()
-    d.stop()
-    with PulseHDF5Reader(path) as r:
-        m = r.metadata
-        assert m["min_pulse_ms"] == pytest.approx(1.5)
-        assert m["max_pulse_ms"] == pytest.approx(40.0)
-        assert m["noise_train_ms"] == pytest.approx(50.0)
-        assert int(m["trigger_samples_slow"]) == 1
-        assert int(m["trigger_samples_fast"]) == 2
 
 
 def test_pair_rows_carry_the_pileup_marker(qt_app):

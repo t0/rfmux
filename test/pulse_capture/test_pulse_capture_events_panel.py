@@ -4,6 +4,7 @@ that did not trigger shown with it except while following."""
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label, pulse_rows  # noqa: E402
 
 pytest.importorskip("PyQt6")
 
@@ -56,8 +57,7 @@ def _review(path, grouping=GROUP_CHANNELS):
 def _tree(panel):
     """{top-level role: [child roles]} for the pulse and event rows."""
     out = {}
-    for k in range(panel.pulse_tree.topLevelItemCount()):
-        top = panel.pulse_tree.topLevelItem(k)
+    for top in pulse_rows(panel):
         role = top.data(0, ROLE)
         if role and role[0] in ("channel", "event"):
             out[tuple(role)] = [tuple(top.child(j).data(0, ROLE))
@@ -178,15 +178,6 @@ def test_a_live_event_joins_the_tree(qt_app, tmp_path):
     assert _tree(panel) == {("event", 1): [("pulse", 1, 1), ("pulse", 2, 1)]}
 
 
-def test_the_grouping_sits_above_the_pulse_list(qt_app):
-    """It groups the list, so it is with the list and not inside one of
-    the view tabs."""
-    panel = PulseCapturePanel(dark_mode=False)
-    assert panel.group_combo.parent().parent() is \
-        panel.pulse_tree.parent()
-    assert not panel.viewer_tabs.isAncestorOf(panel.group_combo)
-
-
 def test_a_both_mode_event_is_made_of_pairs_and_draws_either_stream(
         qt_app, tmp_path):
     from test.pulse_capture.test_events_dual import _capture
@@ -210,9 +201,24 @@ def test_a_both_mode_event_is_made_of_pairs_and_draws_either_stream(
                                    "Ch3 slow (no trigger)"]
 
 
+def test_a_both_mode_event_draws_the_fast_lines_under_the_slow_points(
+        qt_app, tmp_path):
+    """As a pair draws them: the slow samples, sparse, stay visible over
+    the dense fast trace, for every channel of the event."""
+    from test.pulse_capture.test_events_dual import _capture
+    _, path = _capture(tmp_path, coincidence_window_ms=5.0,
+                       dump_all_channels=True)
+    panel = _review(path, GROUP_EVENTS)
+    panel._show_event(1)
+    for plot in (panel.pulse_plot_i, panel.pulse_plot_q):
+        curves = plot.getPlotItem().listDataItems()
+        slow = [c.zValue() for c in curves if " slow" in c.name()]
+        fast = [c.zValue() for c in curves if " fast" in c.name()]
+        assert slow and fast and min(slow) > max(fast)
+
+
 def _double_click(panel, role):
-    for k in range(panel.pulse_tree.topLevelItemCount()):
-        top = panel.pulse_tree.topLevelItem(k)
+    for top in pulse_rows(panel):
         for j in range(top.childCount()):
             if tuple(top.child(j).data(0, ROLE) or ()) == role:
                 panel._on_tree_double_click(top.child(j), 0)
@@ -324,30 +330,33 @@ def test_a_units_change_redraws_the_event_and_the_no_trigger_views(
     panel.units_combo.setCurrentText(UNITS_COUNTS)
     assert panel._current_event == 1
     assert peak() == pytest.approx(volts / VOLTS_PER_ROC, rel=1e-6)
-    label = panel.pulse_plot_i.getPlotItem().getAxis("left").labelText
+    label = axis_label(panel.pulse_plot_i, "left")
     assert label == "I (counts) − baseline"
 
     _double_click(panel, ("dump", 1, 3))
     panel.units_combo.setCurrentText(UNITS_VOLTS)
     assert panel._current_dump == (1, 3)
-    assert panel.pulse_plot_i.getPlotItem().getAxis("left").labelText \
+    assert axis_label(panel.pulse_plot_i, "left") \
         == "I (V)"
 
 
-def _noise_file(tmp_path):
+@pytest.fixture(scope="module")
+def noise_file(tmp_path_factory):
+    """A capture with noise samples, one of them holding a pulse; the
+    tests that read it do not change it."""
     from test.pulse_capture.test_noise_samples import _capture
     dry, _, _, _ = _capture(noise_capture_interval_s=1.0)
     start = int(round(dry[1]["window"][0] * FS)) + 20
-    events, path, _, _ = _capture(tmp_path, pulses=[(2, start)],
+    events, path, _, _ = _capture(tmp_path_factory.mktemp("noise"),
+                                  pulses=[(2, start)],
                                   noise_capture_interval_s=1.0)
     return events, path
 
 
-def test_noise_samples_are_tagged_in_the_event_list(qt_app, tmp_path):
-    events, path = _noise_file(tmp_path)
+def test_noise_samples_are_tagged_in_the_event_list(qt_app, noise_file):
+    events, path = noise_file
     panel = _review(path, GROUP_EVENTS)
-    labels = [panel.pulse_tree.topLevelItem(k).text(0)
-              for k in range(len(events))]
+    labels = [row.text(0) for row in pulse_rows(panel)[:len(events)]]
     assert all(text.startswith("◇ Noise sample #") for text in labels)
     # Every channel under each, and the pulse that fell inside one.
     tree = _tree(panel)
@@ -358,21 +367,20 @@ def test_noise_samples_are_tagged_in_the_event_list(qt_app, tmp_path):
     assert f"noise samples:  {len(events)}" in panel.noise_label.text()
 
 
-def test_a_noise_sample_shows_the_time_it_was_taken_at(qt_app, tmp_path):
-    _, path = _noise_file(tmp_path)
+def test_a_noise_sample_shows_the_time_it_was_taken_at(qt_app, noise_file):
+    _, path = noise_file
     panel = _review(path, GROUP_EVENTS)
     panel._events[0]["trigger_utc"] = "2026-09-02T16:00:01.250000Z"
     panel._rebuild_tree()
-    rows = [panel.pulse_tree.topLevelItem(k)
-            for k in range(panel.pulse_tree.topLevelItemCount())]
+    rows = pulse_rows(panel)
     row = next(r for r in rows if r.data(0, ROLE) == ("event", 1))
     assert row.text(1) == "16:00:01.250000"
     panel._show_event(1)
     assert "taken at 2026-09-02T16:00:01.250000Z" in panel.pulse_info.text()
 
 
-def test_a_noise_sample_draws_every_channel(qt_app, tmp_path):
-    _, path = _noise_file(tmp_path)
+def test_a_noise_sample_draws_every_channel(qt_app, noise_file):
+    _, path = noise_file
     panel = _review(path, GROUP_EVENTS)
     panel._show_event(2)
     assert _curve_names(panel) == ["Ch1", "Ch2", "Ch3"]
@@ -384,10 +392,10 @@ def test_a_noise_sample_draws_every_channel(qt_app, tmp_path):
     assert "[noise sample]" in panel.pulse_info.text()
 
 
-def test_following_passes_over_noise_samples(qt_app, tmp_path):
+def test_following_passes_over_noise_samples(qt_app, noise_file):
     """A noise sample is for the statistics, not for keeping up with
     the capture: with nothing else to follow, nothing is drawn."""
-    _, path = _noise_file(tmp_path)
+    _, path = noise_file
     panel = _review(path, GROUP_EVENTS)
     panel.follow_check.setChecked(True)
     panel._show_latest()

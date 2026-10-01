@@ -32,7 +32,7 @@ from rfmux.tuning.fits import (  # noqa: E402
     BIFURCATION_A, collect_fit_params)
 from rfmux.tuning.bias import (  # noqa: E402
     BiasReport, bifurcated_by_derivative, iq_arc_speed,
-    iq_derivatives, normalized_arc_speed, hysteresis_separation)
+    iq_derivatives, hysteresis_separation)
 from rfmux.tuning.find_resonances import (  # noqa: E402
     ResonanceSearch,
     find_resonances_in_netanal,
@@ -1714,13 +1714,11 @@ def test_the_fit_tab_can_draw_each_resonator_at_the_step_it_is_biased_at(
     _find_bias(panel, qt_app)
     _show_fit_amplitude(panel, BIAS_AMPLITUDE)
 
-    colours = create_amplitude_color_map(panel._amplitudes_drawn(), panel.dark_mode)
-    for name, subplot in zip(panel._selected_names(), _measured_curves(panel)):
-        finding = panel._bias_by_name()[name]
+    from rfmux.tools.periscope.multisweep_grid_helpers import FIT_MEASURED_COLOR
+    for subplot in _measured_curves(panel):
         assert len(subplot) == 2, "that resonator's bias step, both directions"
-        assert all(curve.opts["pen"].color().name()
-                   == pg.mkColor(colours[finding.amplitude]).name()
-                   for curve in subplot)
+        assert {curve.opts["pen"].color().name() for curve in subplot} == \
+            {FIT_MEASURED_COLOR.lower()}
 
 
 def test_a_new_measurement_takes_the_bias_amplitude_off_the_fit_tab(
@@ -2282,13 +2280,6 @@ def _infinite_lines(panel, tab_idx=MAGNITUDE_TAB):
             for w in _grid_widgets(panel, tab_idx)]
 
 
-def _bands(panel, tab_idx=MAGNITUDE_TAB):
-    """The filled bands on each subplot, innermost last."""
-    return [[item for item in w.getPlotItem().items
-             if isinstance(item, pg.LinearRegionItem)]
-            for w in _grid_widgets(panel, tab_idx)]
-
-
 def _trace_widths(panel, name, tab_idx=MAGNITUDE_TAB):
     """``{(step, direction): pen width}`` for one resonator's subplot."""
     index = panel._selected_names().index(name)
@@ -2504,73 +2495,62 @@ def _on_bias_tab(swept_container, board):
     return panel
 
 
+def _diagnostic_rows(sweeps, settings=None):
+    """``[(amplitude, pair strength, shape threshold, noise threshold)]`` in
+    amplitude order, from the library the tab reads."""
+    settings = settings or {}
+    rows = []
+    for amplitude, direction, sweep in sweeps:
+        check = bifurcated_by_derivative(
+            {direction: sweep},
+            spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
+            noise_gate_factor=settings.get("noise_gate_factor", 50.0))
+        rows.append((amplitude, check.metric["pair_strength"],
+                     check.diagnostics["shape_threshold"],
+                     check.diagnostics["noise_threshold"]))
+    return sorted(rows)
+
+
 def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_app, swept_container):
-    """The change in normalized arc speed, divided by the bar that trace
-    faced -- so every step is on one scale and the bar is one line."""
-    _, crs, catalog = board
+    """Per direction, the pair strength and both thresholds the derivative
+    test compares it with, against drive amplitude."""
     panel = _on_bias_tab(swept_container, board)
 
     name = panel._selected_names()[0]
     traces = panel._collect_traces([name])[name]
+    directions = sorted({direction for _s, direction, _a, _sw in traces})
     curves = _grid_curves(panel, BIAS_TAB)[0]
-    assert len(curves) == len(traces)
+    assert len(curves) == 3 * len(directions)
 
-    (step, direction, _amp, sweep) = traces[0]
-    frequencies, speed = normalized_arc_speed(sweep)
-    prominence = bifurcated_by_derivative(
-        {"one": sweep}, noise_gate_factor=0.0).threshold
-    noise = bifurcated_by_derivative(
-        {"one": sweep}, spike_prominence_factor=0.0).threshold
-
-    x, y = curves[0].getData()
-    midpoints = 0.5 * (frequencies[:-1] + frequencies[1:])
-    assert np.allclose(
-        x, (midpoints - sweep["original_center_frequency"]) / 1e3)
-    assert np.allclose(y, np.diff(speed) / max(prominence, noise))
+    upward = _diagnostic_rows([(amplitude, direction, sweep)
+                               for _s, direction, amplitude, sweep in traces
+                               if direction == "upward"])
+    expected = np.asarray(upward).T
+    drawn = [curve.getData() for curve in curves
+             if curve.opts["pen"].style() == UPWARD_SWEEP_STYLE]
+    assert len(drawn) == 3
+    for (x, y), values in zip(drawn, expected[1:]):
+        assert np.allclose(x, expected[0])
+        assert np.allclose(y, values)
 
 
-def test_the_bar_is_one_pair_of_lines_for_every_step(board, qt_app, swept_container):
-    """Dividing each trace by its own bar is what puts them all on it."""
-    _, crs, catalog = board
+def test_the_diagnostics_tab_marks_the_amplitude_biased_at(board, qt_app, swept_container):
+    """One vertical line at the chosen drive, once something has chosen one."""
     panel = _on_bias_tab(swept_container, board)
-
-    heights = sorted(line.value() for line in _infinite_lines(panel, BIAS_TAB)[0])
-    assert heights == pytest.approx([-1.0, 1.0])
-
-
-def test_the_step_biased_at_shows_the_bar_that_did_not_bind(board, qt_app, swept_container):
-    """Below the solid bar it was the noise gate that decided; at it the two
-    coincide. That is the question the detector otherwise answers by being run
-    again with one of the two switched off."""
-    _, crs, catalog = board
-    panel = _on_bias_tab(swept_container, board)
-    assert len(_infinite_lines(panel, BIAS_TAB)[0]) == 2
+    assert _infinite_lines(panel, BIAS_TAB)[0] == []
 
     _find_bias(panel, qt_app)
 
     name = panel._selected_names()[0]
-    finding = panel.bias_report[name]
-    directions = collect_amplitude_iterations_for(
-        panel.module_sweeps, name)[finding.iteration]
     lines = _infinite_lines(panel, BIAS_TAB)[0]
-    # The bar, plus the one that did not bind for each direction of that step.
-    assert len(lines) == 2 + 2 * len(directions)
-    assert all(abs(line.value()) <= 1.0 + 1e-9 for line in lines)
+    assert [line.value() for line in lines] == pytest.approx(
+        [panel._bias_by_name()[name].amplitude])
 
 
-def test_the_diagnostics_tab_highlights_the_step_biased_at(
-        board, qt_app, swept_container):
-    """The same statement the sweep grids make, on the plot the choice was
-    read off."""
-    _, crs, catalog = board
-    panel = _on_bias_tab(swept_container, board)
-    name = panel._selected_names()[0]
-    assert len(set(_trace_widths(panel, name, BIAS_TAB).values())) == 1
 
-    _find_bias(panel, qt_app)
 
-    assert set(_trace_widths(panel, name, BIAS_TAB).values()) == {LINE_WIDTH}
-    assert len(_bias_highlights(panel, BIAS_TAB)[0]) == 2
+
+
 
 
 def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app, swept_container):
@@ -2584,17 +2564,17 @@ def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app,
 
 
 def test_the_bars_follow_the_settings(board, qt_app, swept_container):
-    """The bar a trace is divided by is the one the current settings would
-    apply, so turning the gate off moves every trace."""
+    """The thresholds drawn are the ones the current settings apply, so
+    turning the noise gate off moves them."""
     _, crs, catalog = board
     panel = _on_bias_tab(swept_container, board)
-    before = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
+    before = [c.getData()[1] for c in _grid_curves(panel, BIAS_TAB)[0]]
 
     panel.bias_settings.noise_gate_spin.setValue(0.0)
     panel.bias_settings.apply_button.click()
 
-    after = _grid_curves(panel, BIAS_TAB)[0][0].getData()[1]
-    assert not np.allclose(before, after)
+    after = [c.getData()[1] for c in _grid_curves(panel, BIAS_TAB)[0]]
+    assert not all(np.allclose(b, a) for b, a in zip(before, after))
 
 
 # ── applying it ──────────────────────────────────────────────────────────────
@@ -2734,20 +2714,6 @@ def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app, swe
     assert panel.apply_bias_btn.isEnabled()
 
 
-def test_the_bar_is_a_shaded_band_and_not_only_a_pair_of_lines(board, qt_app,
-                                                              swept_container):
-    """A bar encloses a region -- everything inside it is not a spike -- and
-    the step that was chosen shows the gate that did not bind nested in it."""
-    panel = _panel_showing(swept_container, board)
-    _find_bias(panel, qt_app)
-
-    bands = _bands(panel, BIAS_TAB)[0]
-
-    assert len(bands) == 2, "the bar in force, and the gate that did not bind"
-    applied, unbinding = (band.getRegion() for band in bands)
-    assert applied == pytest.approx((-1.0, 1.0))
-    assert -1.0 <= unbinding[0] and unbinding[1] <= 1.0
-    assert all(band.zValue() < 0 for band in bands), "behind the traces"
 
 
 # ── the bias frequency tab ───────────────────────────────────────────────────

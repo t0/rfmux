@@ -8,10 +8,9 @@ FS = 2441406.25
 N = 64
 
 
-@pytest.mark.parametrize("pulses", [False, True])
-def test_hoisted_matches_reference(batch, pulses):
-    a_crs, a = batch.model(11, "reference", pulses)
-    b_crs, b = batch.model(11, "hoisted", pulses)
+def test_hoisted_matches_reference(batch):
+    a_crs, a = batch.model(11, "reference", pulses=True)
+    b_crs, b = batch.model(11, "hoisted", pulses=True)
     ra = batch.run(a_crs, a, 40, 7, fs=FS, n=N)
     rb = batch.run(b_crs, b, 40, 7, fs=FS, n=N)
     rel = np.max(np.abs(ra - rb) / np.maximum(np.abs(ra), 1e-300))

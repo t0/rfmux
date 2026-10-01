@@ -235,7 +235,7 @@ def test_events_need_a_sample_rate():
         PulseCaptureSession(channels=[1], coincidence_window_s=0.005)
 
 
-def test_config_validation():
+def test_the_coincidence_window_is_validated():
     assert any(sev == "error" and "coincidence" in msg.lower() for sev, msg in
                PulseCaptureConfig(coincidence_window_ms=-1).validate())
     assert any(sev == "warning" and "unrelated" in msg for sev, msg in

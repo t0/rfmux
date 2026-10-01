@@ -131,8 +131,8 @@ def test_the_flow_detector_tells_a_jump_from_a_steep_resonance():
 
 
 @pytest.mark.parametrize("span, n, skew, off_fr", [
-    (20e3, 41, 0.0, 0.0), (20e3, 41, 0.02, 0.0), (20e3, 41, 0.0, 1e3),
-    (200e3, 101, 0.0, 0.0)])
+    (200e3, 101, 0.0, 0.0),             # clean, at multisweep's sampling
+    (20e3, 41, 0.02, 1e3)])             # skewed baseline, biased off the dip
 def test_fitted_slope_is_exact_on_a_resonance(span, n, skew, off_fr):
     """The nonlinear resonator model's slope at the bias, with a sloped
     baseline, off the dip, and at multisweep's coarse sampling."""

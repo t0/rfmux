@@ -1,8 +1,10 @@
 """
 Record the slow stream (a pulse capture and a parser dirfile) and the
 channel stream (a fastrx recording) of a module, or of several feeding
-one RF line, together into one session folder.  ``rfmux record`` is the
-command-line front.
+one RF line, together into one session folder, then repack the dirfile
+and the recording as one HDF5 file of time-ordered data in the
+capture's units (:mod:`rfmux.algorithms.measurement.tod`).  ``rfmux record`` is
+the command-line front.
 
 The board is read, and its channel streamer turned on for the modules
 only when asked (``channel_streamer=True``); configure the slow
@@ -29,7 +31,6 @@ calibrations come from by default::
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import datetime
 import importlib.util
 import os
@@ -50,10 +51,12 @@ from ...core.session_folder import (is_session, latest_export, load_metadata,
                              register_export, save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
-from ...pulse_capture.channel_keys import (describe, keys_by_module,
-                                           pair_keys)
+from ...pulse_capture.channel_keys import (capture_keys, describe,
+                                           keys_by_module, pair_keys)
+from ...pulse_capture.hdf5 import PulseHDF5Reader
 from ...core.resonators import ResonatorCatalog
 from ...tuning import store, tuning_rows
+from .tod import merge_tod, tod_bytes_per_s, write_tod
 
 PARSER_EXIT_S = 10.0
 
@@ -80,6 +83,15 @@ def interface_speeds() -> dict:
             speed = None
         speeds[name] = speed if speed and speed > 0 else None
     return speeds
+
+
+def interface_operstate(name: str) -> Optional[str]:
+    """``up``, ``down`` or ``unknown`` for an interface, as the kernel
+    reports it; None where there is no such report (off Linux)."""
+    try:
+        return Path("/sys/class/net", name, "operstate").read_text().strip()
+    except OSError:
+        return None
 
 
 #: The parser as a child: it says so on stderr once imported, which is
@@ -248,12 +260,18 @@ class RecordResult:
     fastrx_stats: Dict[str, int] = field(default_factory=dict)
     #: The recording was merged into the pulse file as its fast stream.
     merged_fastrx: bool = False
+    #: The dirfile and recording repacked as one HDF5 file of
+    #: time-ordered data, in the capture's units.
+    tod_path: Optional[Path] = None
+    #: The time-ordered data was copied into the pulse file's ``tod/``.
+    merged_tod: bool = False
     capture: object = None
     warnings: List[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         parts = [p.name for p in (self.pulse_path, self.dirfile_path,
-                                  self.fastrx_path) if p is not None]
+                                  self.fastrx_path, self.tod_path)
+                 if p is not None]
         return (f"RecordResult({self.session.name}: {', '.join(parts)}; "
                 f"{len(self.warnings)} warnings)")
 
@@ -275,6 +293,8 @@ async def record_streams(
     fastrx_interface: Optional[str] = None,
     fastrx_socket: Optional[str] = None,
     merge_fastrx: bool = True,
+    tod: bool = True,
+    merge_tod: bool = False,
     channel_streamer: bool = False,
     sample_trunc: str = "LOW",
     verbose: bool = True,
@@ -294,17 +314,18 @@ async def record_streams(
     through the running fastrxd (*fastrx_interface* or *fastrx_socket*
     name it when several run).  Each requirement is checked before
     anything starts.
+
+    After the run, ``merge_fastrx`` adds the recording to the pulse
+    file as its fast stream; ``tod`` repacks the dirfile and the
+    recording into one HDF5 file of time-ordered data in the capture's
+    units (:func:`~rfmux.algorithms.measurement.tod.write_tod`), which
+    ``merge_tod`` then copies into the pulse file.
     """
     wanted = by_module(module, channels)
     if not wanted:
         raise ValueError("no channels to record")
     modules = list(wanted)
-    if len(modules) == 1:
-        module = modules[0]
-        channels = list(wanted[module])
-    else:
-        module = None
-        channels = pair_keys(wanted)
+    module, channels = capture_keys(wanted)
     if duration_s <= 0:
         raise ValueError(f"duration must be positive, got {duration_s}")
     if not (capture or parser or fastrx):
@@ -353,6 +374,9 @@ async def record_streams(
         result.training_s = config.noise_samples(rate) / rate
     if fastrx:
         need = duration_s * fastrx_bytes_per_s(fx, fastrx_channels)
+        if tod:
+            need += duration_s * tod_bytes_per_s(
+                sum(len(chs) for chs in wanted.values()))
         free = shutil.disk_usage(session).free
         if free < need:
             result.warnings.append(
@@ -457,10 +481,14 @@ async def record_streams(
         if handle is not None:
             await _stop_parser(handle, result, name("parser", ".dirfile"),
                                result.parser_log)
-        if merge_fastrx and tasks and all(
-                t.done() and not t.cancelled() and t.exception() is None
-                for t in tasks):
-            await asyncio.to_thread(_merge_recording, result)
+        if tasks and all(t.done() and not t.cancelled()
+                         and t.exception() is None for t in tasks):
+            if merge_fastrx:
+                await asyncio.to_thread(_merge_recording, result)
+            if tod:
+                await asyncio.to_thread(
+                    _write_tod, result, name("tod", ".h5"), tuning,
+                    trigger_basis or config.trigger_basis, merge_tod, say)
         _record(result, config)
     # The one that failed first raised; the other was cancelled to end
     # the run, and its cancellation is not the error.
@@ -609,6 +637,43 @@ def _merge_recording(result: RecordResult) -> None:
             f"fastrx not merged into {result.pulse_path.name}: {e}")
 
 
+def _existing(path: Optional[Path]) -> Optional[Path]:
+    return path if path is not None and path.exists() else None
+
+
+def _write_tod(result: RecordResult, path: Path, tuning, trigger_basis: str,
+               merge: bool, say=print) -> None:
+    """The dirfile and the recording into one time-ordered data file at
+    *path*, its clock's day taken from the pulse file when there is one,
+    and that file into the pulse file when *merge*; a failure is a
+    warning, the run itself having succeeded."""
+    fastrx, dirfile = _existing(result.fastrx_path), _existing(result.dirfile_path)
+    if fastrx is None and dirfile is None:
+        return
+    pulse = _existing(result.pulse_path)
+    origin = None
+    if pulse is not None:
+        with PulseHDF5Reader(pulse) as reader:
+            origin = reader.metadata.get("time_origin_epoch")
+    say("[record] repacking the time-ordered data")
+    try:
+        result.tod_path = write_tod(
+            path, result.channels, result.module, fastrx=fastrx,
+            dirfile=dirfile, tuning=tuning, trigger_basis=trigger_basis,
+            time_origin_epoch=origin)
+    except Exception as e:
+        result.warnings.append(f"time-ordered data not written: {e}")
+        return
+    if not (merge and pulse is not None):
+        return
+    try:
+        merge_tod(pulse, result.tod_path)
+        result.merged_tod = True
+    except Exception as e:
+        result.warnings.append(
+            f"time-ordered data not merged into {pulse.name}: {e}")
+
+
 def pulse_summary_lines(capture) -> List[str]:
     """One line per channel that triggered, most pulses first, then the
     total; from a trigger_capture result."""
@@ -640,7 +705,8 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
     recordings."""
     for kind, path in (("pulse", result.pulse_path),
                        ("parser", result.dirfile_path),
-                       ("fastrx", result.fastrx_path)):
+                       ("fastrx", result.fastrx_path),
+                       ("tod", result.tod_path)):
         if path is not None and path.exists():
             register_export(result.session, str(path.relative_to(result.session)),
                             kind, modules_tag(result.modules))
@@ -660,7 +726,9 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         "fastrx": result.fastrx_path.name if result.fastrx_path else None,
         "fastrx_stats": result.fastrx_stats,
         "merged_fastrx": result.merged_fastrx,
-        "capture_config": dataclasses.asdict(config),
+        "tod": result.tod_path.name if result.tod_path else None,
+        "merged_tod": result.merged_tod,
+        "capture_config": config.to_dict(),
         "warnings": result.warnings,
     })
     save_metadata(result.session, metadata)

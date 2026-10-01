@@ -33,7 +33,10 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
         
         # Add configuration panel
         self._add_config_panel(layout)
-        
+
+        # NCO banner, shown in Control mode
+        layout.addWidget(self.periscope.nco_banner)
+
         # Create the plot grid container
         self.container = QtWidgets.QWidget()
         self.grid = QtWidgets.QGridLayout(self.container)
@@ -60,8 +63,9 @@ class MainPlotPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.periscope.rb_real_units, self.periscope.rb_df_units))
 
         # Add plot type checkboxes
-        for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft, 
-                   self.periscope.cb_ssb, self.periscope.cb_dsb, self.periscope.cb_hist):
+        for cb in (self.periscope.cb_time, self.periscope.cb_iq, self.periscope.cb_fft,
+                   self.periscope.cb_ssb, self.periscope.cb_dsb, self.periscope.cb_hist,
+                   self.periscope.cb_control):
             toolbar_layout.addWidget(cb)
         
         layout.addWidget(toolbar_widget)

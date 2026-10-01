@@ -10,8 +10,9 @@ the capture session and the parser take out where they write
 dirfile's corrected timebase).  Files written before that carry raw
 stamps, and :func:`slow_shift_s` supplies the shift for them.
 
-The fastrx extension is imported only when a :class:`Recording` is
-opened from a path, so this module loads where it does not build.
+A :class:`Recording` opened from a path reads it through the fastrx
+extension where that is built, and through
+:class:`~.recording_file.RecordingFile`, numpy alone, elsewhere.
 """
 
 from __future__ import annotations
@@ -80,8 +81,9 @@ class Window:
 class Recording:
     """A fastrx recording with a time index over its IRIG stamps.
 
-    Wraps a ``rfmux.fastrx.PacketFile`` (or opens one from a path).  The
-    extension maps the file and hands back strided views; nothing here
+    Wraps a ``rfmux.fastrx.PacketFile`` or a
+    :class:`~.recording_file.RecordingFile` (or opens one from a path).
+    Either maps the file and hands back strided views; nothing here
     reads more of it than the records asked for.  Every record is one
     sample of channels 1 to :attr:`channels`, stamped by the board, so
     a stamp is a sample time with no first-or-last-in-packet ambiguity.
@@ -99,7 +101,10 @@ class Recording:
 
     def __init__(self, source):
         if isinstance(source, (str, bytes)) or hasattr(source, "__fspath__"):
-            from ..fastrx import PacketFile
+            try:
+                from ..fastrx import PacketFile
+            except ImportError:      # the extension builds on Linux only
+                from .recording_file import RecordingFile as PacketFile
             source = PacketFile(str(source))
         self.file = source
         self._ts = source.ts()
@@ -115,8 +120,10 @@ class Recording:
         #: recording has none near its start, in which case there is no
         #: time axis to index by.
         self.t_first = None
-        t, _ = self._second_from(0)
+        t, j = self._second_from(0)
         self.t_first = None if t != t else float(t)
+        #: Record index of that stamp; None without one.
+        self.first_index = None if t != t else j
 
     @property
     def num_packets(self) -> int:
@@ -240,7 +247,10 @@ def counts_to_stored(reader: PulseHDF5Reader, channel: int,
     from the file's own record of how they were stored: its
     ``volts_per_count``, and the df calibration's rotation and
     magnitude for a channel stored in hertz.  1 for a file that holds
-    counts."""
+    counts.  A channel stored in hertz whose file carries no df
+    calibration (one written before the tuning record) cannot be
+    converted to its units, and is refused rather than left in volts
+    under a hertz label."""
     units = reader.stored_units(channel, stream)
     if units == "counts":
         return 1.0 + 0j
@@ -249,7 +259,12 @@ def counts_to_stored(reader: PulseHDF5Reader, channel: int,
     if units == "V":
         return complex(scale)
     cal = reader.df_calibration(channel, stream)
-    if units == "Hz" and cal is not None and cal != 0:
+    if units == "Hz":
+        if cal is None or cal == 0:
+            raise ValueError(
+                f"{reader.path.name}: channel {channel} is stored in hertz "
+                "but the file carries no df calibration to put the "
+                "recording in hertz with")
         return complex(cal) * scale       # rotation and hertz per volt in one
     return complex(scale)
 
@@ -369,6 +384,34 @@ def pulse_overlay(reader: PulseHDF5Reader, recording: Recording,
                    dropouts=w.dropouts)
 
 
+#: Frames of a dirfile's timebase read to infer its decimation stage.
+_STAGE_FRAMES = 4096
+
+
+def dirfile_stage(df, module: int):
+    """``(stage, shift_s)`` of *module* in an open dirfile: its
+    decimation stage, and the seconds to add to its ``timebase`` to put
+    it on the PFB clock.  A dirfile written with ``dec_stage`` has the
+    stage per frame and its timebase corrected already (shift 0); an
+    older one gives the stage away by its frame spacing, and is shifted
+    by that stage's delay.  None and 0 when neither is readable."""
+    import pygetdata as gd
+
+    prefix = f"m{module:02d}_"
+    fields = {f.decode() if isinstance(f, bytes) else f
+              for f in df.field_list()}
+    if prefix + "dec_stage" in fields:
+        stage = df.getdata(prefix + "dec_stage", gd.UINT8, num_frames=1)
+        return (int(stage[0]) if len(stage) else None), 0.0
+    tb = np.asarray(df.getdata(prefix + "timebase", gd.FLOAT64,
+                               num_frames=_STAGE_FRAMES), dtype=np.float64)
+    step = float(np.median(np.diff(tb))) if tb.size > 1 else 0.0
+    if step <= 0:
+        return None, 0.0
+    stage = sampling_to_decimation(1.0 / step)
+    return stage, -decimated_stream_delay_s(stage)
+
+
 def dirfile_window(path, module: int, channel: int, t0: float,
                    t1: float) -> Dict[str, Any]:
     """*channel* of *module* over seconds-of-day ``[t0, t1]`` from a
@@ -381,16 +424,9 @@ def dirfile_window(path, module: int, channel: int, t0: float,
 
     df = gd.dirfile(str(path), gd.RDONLY)
     prefix = f"m{module:02d}_"
-    fields = {f.decode() if isinstance(f, bytes) else f
-              for f in df.field_list()}
+    _, shift = dirfile_stage(df, module)
     tb = np.asarray(df.getdata(prefix + "timebase", gd.FLOAT64),
-                    dtype=np.float64)
-    shift = 0.0
-    if prefix + "dec_stage" not in fields and tb.size > 1:
-        step = float(np.median(np.diff(tb)))
-        if step > 0:
-            shift = -decimated_stream_delay_s(sampling_to_decimation(1.0 / step))
-    tb = tb + shift
+                    dtype=np.float64) + shift
     i0 = int(np.searchsorted(tb, t0, side="left"))
     i1 = int(np.searchsorted(tb, t1, side="right"))
     z = np.asarray(df.getdata(prefix + f"c{channel:04d}", gd.COMPLEX128,
@@ -562,6 +598,11 @@ def _merge_into(reader: PulseHDF5Reader, rec: Recording, tmp: Path,
                     fast = fast_window(c, window[0], window[1])
                     if fast is not None:
                         pair["fast_tod"] = fast
+                        # The threshold the channel triggered at, for
+                        # its decay constant and template alignment.
+                        if "threshold_sigma" in pulse:
+                            fast = {**fast, "threshold_sigma":
+                                    pulse["threshold_sigma"]}
                         hists.add_pulse(c, fast, noise[c], to_raw=to_raw[c])
                         templates.add_pulse(c, fast, noise[c])
                 writer.append_match(c, pair)

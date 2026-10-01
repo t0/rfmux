@@ -126,3 +126,34 @@ def test_events_round_trip_through_a_dual_file(tmp_path):
         regrouped = events_of(r, window_s=0.005)
     assert [[m["channel"] for m in e["members"]] for e in regrouped] == \
         [[1, 2], [3]]
+
+
+# ── per-channel settings ──────────────────────────────────────────
+
+def test_a_record_only_channel_is_dumped_from_both_streams():
+    got, _ = _capture(per_channel={3: {"trigger": False}})
+    assert {p["channel"] for p in got["pairs"]} == {1, 2}
+    pulse_events = [e for e in got["events"] if e["kind"] == "pulses"]
+    assert pulse_events
+    for event in pulse_events:
+        assert sorted(event["dump"][3]) == ["fast_tod", "slow_tod"]
+
+
+def test_a_channels_own_threshold_holds_on_both_streams():
+    """Channel 1 pulses on both streams; above its threshold on
+    either, it would still make a pair."""
+    got, _ = _capture(per_channel={1: {"threshold_sigma": 1000.0}})
+    assert {p["channel"] for p in got["pairs"]} == {2, 3}
+
+
+def test_a_dual_file_records_its_trigger_config(tmp_path):
+    from rfmux.pulse_capture import read_trigger_config
+    _, path = _capture(tmp_path, per_channel={3: {"trigger": False}})
+    config, setup = read_trigger_config(path)
+    assert config.per_channel == {3: {"trigger": False}}
+    assert setup["streamer_mode"] == "both"
+
+
+def test_a_setting_for_a_channel_not_captured_makes_no_events():
+    got, _ = _capture(per_channel={9: {"trigger": False}})
+    assert got["events"] == []

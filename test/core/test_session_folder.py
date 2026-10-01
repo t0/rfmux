@@ -54,3 +54,13 @@ def test_the_newest_session_under_a_base_is_by_name(tmp_path):
     (tmp_path / "session_20260911_000000").mkdir()       # no metadata
     assert sf.newest_session(tmp_path) == tmp_path / "session_20260910_154331"
     assert sf.newest_session(tmp_path / "none") is None
+
+
+def test_metadata_json_cannot_hold_leaves_the_file_as_it_was(tmp_path):
+    session = sf.open_session(base=tmp_path)
+    before = sf.load_metadata(session)
+    try:
+        sf.save_metadata(session, {"bad": {(1, 2): 3}})
+    except TypeError:
+        pass
+    assert sf.load_metadata(session) == before

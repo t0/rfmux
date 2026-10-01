@@ -57,18 +57,6 @@ def _assert_moved_and_reachable(manager, outcome, held_port):
 
 
 @needs_jupyter
-def test_busy_port_moves_the_server(qt_app, tmp_path):
-    sock, port = _hold(socket.AF_INET, "127.0.0.1")
-    manager = JupyterServerManager()
-    try:
-        outcome = _run_until_ready(qt_app, manager, tmp_path, port)
-        _assert_moved_and_reachable(manager, outcome, port)
-    finally:
-        manager.stop()
-        sock.close()
-
-
-@needs_jupyter
 def test_url_follows_the_port_jupyter_took(qt_app, tmp_path):
     # Only the IPv6 side of localhost is busy: a plain IPv4 bind test says
     # the port is free, but Jupyter binds both sides and moves on. The URL

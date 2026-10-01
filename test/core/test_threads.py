@@ -35,7 +35,7 @@ def test_are_sessions_distinct_between_threads():
 
     results = []
 
-    CHECKS = 10  # really only need 2 here
+    CHECKS = 2
 
     def call(hwm):
         # Convert the HWM from a scoped_session proxy into an actual

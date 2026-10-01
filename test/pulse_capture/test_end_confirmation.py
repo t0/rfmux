@@ -63,7 +63,7 @@ def test_floor_reaches_the_engine_through_the_config():
 def test_floor_is_described_in_time_at_the_rate():
     d = PulseCaptureConfig(min_end_samples=10).describe(596.0)
     assert d["min_end_samples"] == 10
-    assert d["min_end_ms"] == pytest.approx(16.78, abs=0.05)
+    assert d["min_end_ms"] == pytest.approx(10 / 596.0 * 1e3)
 
 
 def test_floor_below_one_is_refused():

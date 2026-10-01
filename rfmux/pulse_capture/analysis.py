@@ -201,7 +201,10 @@ def pulse_summary(
         duration_s = 0.0
 
     if threshold_sigma is not None:
-        tau_s = derive_tau(pulse_data, noise_stats, threshold_sigma)
+        # The threshold the pulse's channel triggered at, when the
+        # engine recorded it: channels can have their own.
+        tau_s = derive_tau(pulse_data, noise_stats,
+                           pulse_data.get("threshold_sigma", threshold_sigma))
     else:
         tau_s = float("nan")
 

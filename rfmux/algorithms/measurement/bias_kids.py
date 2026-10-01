@@ -9,8 +9,7 @@ import asyncio
 import warnings
 from typing import Union, Dict, List, Optional, Any, Tuple, Callable
 from scipy.signal import butter, filtfilt
-from ...core.dac_scale import (DAC_SCALE_LABEL_OFFSET_DB,  # noqa: F401
-                               dac_scale_dbm)
+from ...core.dac_scale import dac_scale_dbm
 from ...core.transferfunctions import BASE_FREQUENCY, convert_roc_to_volts
 from .df_calibration import (bias_frequency_from_fit, df_calibration_for_entry,
                              ensure_fits, fitted_linewidth, step_slope_correction)

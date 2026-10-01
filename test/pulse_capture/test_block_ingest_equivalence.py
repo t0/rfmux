@@ -1,41 +1,20 @@
 """
-Headless and GUI must ingest the slow stream identically.
-
-Both routes go through SlowIngest now, but the accumulator
-only earns that trust if a block of samples produces exactly what the
-same samples produce one at a time.  These tests feed identical
-synthetic packets down each path and compare what the sessions saw.
+SlowIngest carries the slow stream for both the headless and the GUI
+route, so what it hands the engine has to be the samples that arrived,
+once each and stamped as they came.  (That a block of them detects what
+the same samples detect one at a time is held in
+test_walk_equivalence.py, bitwise over every record field.)
 """
 
 import numpy as np
-import pytest
 
-from rfmux.pulse_capture.capture_session import (
-    CaptureState, PulseCaptureSession)
+from rfmux.pulse_capture.capture_session import PulseCaptureSession
 from rfmux.pulse_capture.sources import (
     SlowIngest, columns_for_width)
 
 from test.pulse_capture.ingest_helpers import (  # noqa: E402
     FS, NOISE, packets as _packets, run_blocks as _run_blocks,
-    run_per_sample as _run_per_sample, session as _session)
-
-
-@pytest.mark.parametrize("channels", [(1,), (1, 2, 3)])
-def test_block_and_sample_ingest_agree(channels):
-    rng = np.random.default_rng(11)
-    packets = _packets(channels, 1400, rng)
-
-    by_sample, by_block = [], []
-    s1 = _run_per_sample(channels, packets, by_sample)
-    s2 = _run_blocks(channels, packets, by_block)
-
-    assert s1.state is s2.state is CaptureState.STOPPED
-    # Blocks dispatch a whole channel at a time, so the CALLBACK order
-    # differs from interleaved per-sample feeding.  What must not
-    # differ is which pulses were found, and when.
-    assert sorted(by_block) == sorted(by_sample), \
-        "block ingest changed what was detected"
-    assert by_block, "the fixture should produce pulses at all"
+    session as _session)
 
 
 def test_unusable_timestamps_are_dropped_not_poisoned():
@@ -164,15 +143,15 @@ def _run_block_adds(channels, packets, pulses, rows=64, max_packets=256, **kw):
     return s
 
 
-@pytest.mark.parametrize("rows", [1, 7, 64, 5000])
-def test_block_adds_agree_with_packet_adds(rows):
+def test_block_adds_agree_with_packet_adds():
     """add_block, the batched tap's entry, is add over the block."""
     rng = np.random.default_rng(9)
     channels = (1, 2, 3)
     packets = _packets(channels, 2400, rng, pulse_starts=(600, 1500))
     by_packet, by_block = [], []
     _run_blocks(channels, packets, by_packet)
-    _run_block_adds(channels, packets, by_block, rows=rows)
+    # Rows that divide neither the accumulator's block nor the stream.
+    _run_block_adds(channels, packets, by_block, rows=7)
     assert sorted(by_block) == sorted(by_packet)
     assert by_packet
 

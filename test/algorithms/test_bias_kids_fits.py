@@ -11,6 +11,7 @@ import pytest
 from rfmux.algorithms.measurement import bias_kids as bk
 from rfmux.algorithms.measurement.fitting_nonlinear import nonlinear_iq
 from rfmux.core.transferfunctions import VOLTS_PER_ROC
+from rfmux.core.transferfunctions import BALUN_LOSS_DB
 
 FR, QR, NCO = 1.0e9, 5.0e4, 0.9e9
 
@@ -133,7 +134,7 @@ async def test_measured_calibration_holds_for_a_narrow_resonator(qr):
 @pytest.mark.asyncio
 async def test_the_entry_carries_the_dac_scale_as_labelled():
     out = await bk.bias_kids(_Board(), {1: _entry()}, module=1)
-    assert out[1]["dac_scale_dbm"] == -0.5 - bk.DAC_SCALE_LABEL_OFFSET_DB
+    assert out[1]["dac_scale_dbm"] == -0.5 - BALUN_LOSS_DB
 
 
 @pytest.mark.asyncio

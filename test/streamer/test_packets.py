@@ -1,15 +1,13 @@
 #!/usr/bin/env -S CRS_EMBEDDED=1 PYTHONPATH=.. pytest-3 -v -W error::UserWarning
 
 """
-Tests for the C++ packet receiver library.
+The C++ packet receiver against a streaming board.  Every test here
+needs one; the receiver's conversions are pinned without hardware in
+test_batched_getter.py and test_pfb_batched_getter.py.
 
-This test script can be invoked in multiple ways:
+This test script can be invoked in two ways:
 
-- By itself, without hardware (basic API tests only):
-
-      ./test_packets.py
-
-- With a live CRS board (includes streaming tests):
+- With a live CRS board:
 
       ./test_packets.py --serial=0024
 
@@ -19,74 +17,14 @@ This test script can be invoked in multiple ways:
 """
 
 import pytest
-import socket
-import struct
 import time
-import numpy as np
 from contextlib import closing
 
 from rfmux.streamer import (
     ReadoutPacketReceiver,
-    PFBPacketReceiver,
     get_multicast_socket,
     STREAMER_PORT,
-    PFB_STREAMER_PORT,
-    MULTICAST_GROUP,
-    READOUT_PACKET_MAGIC,
-    PFB_PACKET_MAGIC,
-    LONG_PACKET_SIZE,
-    SHORT_PACKET_SIZE,
 )
-
-
-def test_readout_receiver_creation():
-    """Test ReadoutPacketReceiver instantiation"""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
-        receiver = ReadoutPacketReceiver(sock, reorder_window=256)
-        assert receiver is not None
-        assert receiver.sockfd > 0
-
-        stats = receiver.get_stats()
-
-        assert stats.total_packets_received == 0
-        assert stats.total_bytes_received == 0
-        assert stats.invalid_packets == 0
-        assert stats.wrong_magic == 0
-
-
-def test_receiver_get_queue():
-    """Test that queues can be created for specific modules."""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
-        receiver = ReadoutPacketReceiver(sock)
-
-        # Get queue for a specific serial/module combination
-        queue = receiver.get_queue(serial=1234, module=1)
-        assert queue is not None
-        assert queue.empty()
-
-        stats = queue.get_stats()
-        assert stats.packets_received == 0
-        assert stats.packets_dropped == 0
-        assert stats.sequence_gaps == 0
-        assert stats.last_seq == 0
-
-
-def test_receiver_get_all_queues():
-    """Test that we can retrieve all active queues."""
-    with closing(socket.socket(socket.AF_INET, socket.SOCK_DGRAM)) as sock:
-        receiver = ReadoutPacketReceiver(sock)
-
-        # Initially no queues
-        queues = receiver.get_all_queues()
-        assert len(queues) == 0
-
-        # Create some queues
-        queue1 = receiver.get_queue(serial=1234, module=1)
-        queue2 = receiver.get_queue(serial=1234, module=2)
-
-        # Now we should see them
-        queues = receiver.get_all_queues()
-        assert len(queues) == 2
 
 
 @pytest.mark.asyncio
@@ -178,8 +116,6 @@ async def test_multiple_module_queues(crs):
 
         # Get all active queues (created by incoming packets)
         all_queues = receiver.get_all_queues()
-        for pkt_serial, module, queue in all_queues:
-            q_stats = queue.get_stats()
 
         # We should have at least one active queue
         assert (

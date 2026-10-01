@@ -69,7 +69,8 @@ simulator files are unchanged in meaning.
   `TimeoutError` instead of ending silently.
 - Periscope Pulse Capture panel: live capture with a pulse list, stacked I/Q
   or df/dissipation plots with the decision marks and bands, histograms,
-  trigger-aligned templates, review mode for any capture file, and CSV export.
+  trigger-aligned templates, review mode for any capture file, and Export
+  Config and Load Config for trigger config files.
   A **Tuning** item in the pulse list opens the sweeps the channels were
   tuned with as a multisweep window, live or in review, without touching
   the board.
@@ -227,13 +228,34 @@ Old values are main at the merge base (e46fc41).
   both-mode file names the counts per stream, `pre_samples_slow` and
   `pre_samples_fast`. A merged file has the `_slow` names only, since no
   engine ran on the recording. `noise_capture_window_s` is the length of a
-  noise sample until five records have been saved.
+  noise sample until five records have been saved. `trigger_config` is
+  the whole `PulseCaptureConfig` as JSON (`to_dict`), per-channel settings
+  included; `hdf5.TRIGGER_CONFIG_ATTR` names it.
   `DETECTION_PARAMS` is `SCALAR_PARAMS + RATE_PARAMS`.
+- Per-channel trigger settings: `PulseCaptureConfig.per_channel`,
+  `{channel: {"trigger", "threshold_sigma", "end_sigma"}}`, any subset.
+  `"trigger": False` records the channel with every event and noise sample
+  without triggering on it, and turns events on. The engine takes
+  `per_channel=` (`detection.channel_sigmas`, `is_record_only`), and each
+  pulse records its channel's `threshold_sigma` and `end_sigma`, which its
+  decay constant and template alignment use. `for_channels(channels)`
+  drops the settings for channels not captured; `trigger_capture`, the
+  dual session and Periscope call it.
+- Trigger config files: `write_trigger_config(path, config, channels=,
+  module=, streamer_mode=)` writes one, and `read_trigger_config(path)`
+  returns `(config, setup)` from one or from a capture that recorded its
+  config. `channel_keys.capture_keys` and `channel_selection` convert
+  between a `{module: channels}` selection, the capture's keys and the
+  Modules and Channels spellings. Periscope's Settings dialog has a
+  per-channel table, and its toolbar Export Config (Ctrl+E) and Load
+  Config; the `rfmux record` dialog has the table, Export Config and Load
+  Config; `rfmux record --config FILE` takes a file on the command line.
 - Headless helpers: `rfmux.pulse_capture.events` has `EventGrouper`,
   `group_by_trigger`, `events_of`, `events_from_triggers`,
   `pair_trigger_time`, `event_counts`, `lean_event` and `stamp_utc`;
   `analysis` has `baseline_level` and `project_noise_stats`;
-  `PulseCaptureConfig.from_dict` and `times_ms`; `PulseCapture.MIN_PRE_SAMPLES`.
+  `PulseCaptureConfig.from_dict`, `to_dict`, `for_channels` and
+  `times_ms`; `PulseCapture.MIN_PRE_SAMPLES`.
 - `merge_fastrx` refuses a fast capture: the recording merges into a slow
   capture as its fast stream.
 - Pulse capture record: the saved window runs from `pre_pulse_ms` before the
@@ -593,12 +615,35 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `on_noise=` for that. After the run it lists the channels that
   triggered, merges the recording into the pulse file as its fast
   stream and renames it to end in `_100G` (`--no-merge-fastrx`;
-  `rfmux fastrx merge` for an older run)
+  `rfmux fastrx merge` for an older run), repacks the dirfile and the
+  recording into `tod_module<M>_HHMMSS.h5`, one HDF5 file of
+  time-ordered data with every channel in the units the pulse file
+  stores it in, a metadata group laid out as the pulse file's, and each
+  channel's tuning (`--no-tod`;
+  `--merge-tod` copies it into the pulse file as its `tod/` group, and
+  refuses a TOD whose basis or channel units differ from the pulses';
+  review names the file's time-ordered data in its status line, its
+  Metadata item lists every attribute of the file's metadata and each
+  channel's
+  calibration scalars, and a TOD file of its own opens with those; the
+  Time-ordered data item draws a channel over the run in the Channel TOD
+  View tab from at most 500 min/max bins, filling in as you zoom (a
+  dragged box or the wheel) until the samples show, fast and slow either
+  or both (`tod_window` reads the same headlessly); the
+  command says before the run when no bias export supplies the tuning;
+  `--trigger-basis` sets the units of both files; the dialog's Data
+  products group holds the two choices with their costs and a Units
+  choice tied to the trigger basis; `write_tod` and `merge_tod` in
+  `rfmux.algorithms.measurement.tod` do the same by hand),
   and opens Periscope in review mode on the file (`--show overlay` for
   the overlay viewer on the busiest channel, `--show none`). The merged
   file is a both-mode file that Periscope reviews with the recording
   under every pulse. `periscope --review <pulse.h5>` opens any capture
-  file that way, offline, without the startup dialog. With no options
+  file that way, offline, without the startup dialog;
+  `rfmux periscope --install-desktop` adds Periscope with its icon to
+  the application menu and to HDF5 files' Open With, on Linux and
+  Windows (`--default-for-hdf5`, `--desktop-icon`,
+  `--uninstall-desktop`). With no options
   the command opens a dialog with every choice, remembered between
   runs, the pulse capture settings on their own tab and the newest
   session under the default path filled in; it checks for fastrxd and
@@ -610,8 +655,11 @@ The Pulse Capture panel is described in the how-to. Beyond it:
   `trigger_capture` takes the same `{module: [channels]}` for a slow
   capture across modules. Periscope reviews such a file with the module
   named beside each channel, its histogram Plot field taking `2:1-8` for
-  module 2's channels; a one-module file reads as before. See the 100G
-  captures guide.
+  module 2's channels; a one-module file reads as before. The first mock
+  server on a host serves at a fixed port, so `--serial MOCK` (or `0000`)
+  records from Periscope's mock with its tuned detectors, the parser on
+  `lo`, and starts a simulated board only when no mock runs; the dialog
+  fills the address in for either serial. See the 100G captures guide.
 - Pairs form on trigger instants within half the CIC2 response, three slow
   samples.
 - A trigger with no partner waits the hard stop (1.2 times `max_pulse_ms`)

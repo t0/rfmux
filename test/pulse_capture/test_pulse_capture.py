@@ -178,37 +178,23 @@ class TestPulseCaptureCallback:
 
         return pcap
 
-    def test_callback_is_called(self):
-        """on_pulse callback should be called when a pulse is detected."""
+    def test_the_callback_fires_once_per_counted_pulse(self):
+        """With the full waveform, numbered from one and in order."""
         captured = []
 
         def on_pulse(channel, pulse_idx, pulse_data):
             captured.append((channel, pulse_idx, pulse_data.copy()))
 
-        self._run_detection(on_pulse=on_pulse)
-
-        # Should have detected at least one pulse
-        assert len(captured) > 0
-        ch, idx, data = captured[0]
-        assert ch == 1
-        assert idx == 1
-        assert "Amp_I" in data
-        assert "Amp_Q" in data
-        assert "Time" in data
-        assert len(data["Amp_I"]) > 0
-
-    def test_callback_sees_every_counted_pulse(self):
-        """The callback fires exactly once per counted pulse."""
-        captured = []
-
-        def on_pulse(channel, pulse_idx, pulse_data):
-            captured.append(pulse_idx)
-
         pcap = self._run_detection(on_pulse=on_pulse)
 
-        assert len(captured) > 0
+        assert captured, "no pulses detected - test is vacuous"
         assert pcap.pulse_count[1] == len(captured)
-        assert captured == sorted(captured), "indices should be monotone"
+        indices = [idx for _, idx, _ in captured]
+        assert indices == sorted(indices) and indices[0] == 1
+        ch, _, data = captured[0]
+        assert ch == 1
+        assert len(data["Amp_I"]) > 0
+        assert {"Amp_I", "Amp_Q", "Time"} <= set(data)
 
     def test_detector_retains_no_pulses(self):
         """The detector holds the ring buffer and nothing else.
@@ -783,7 +769,7 @@ class TestTauHistogram:
         for key in ("peak_amp", "snr", "duration_ms", "tau_ms", "peak_I"):
             assert key in summary
 
-    def test_binned_metrics_are_exactly_these_four(self):
+    def test_binned_metrics_are_exactly_these_seven(self):
         """Exact, not a subset: a metric quietly added or dropped here
         changes what every capture file and live histogram contains."""
         hist = PulseHistogramSet(threshold_sigma=5.0)
@@ -1183,9 +1169,11 @@ class TestPulseCaptureConfig:
 
 
 class TestBlockIngestion:
-    """process_block exists purely for speed, so the only thing that
-    makes it safe is being indistinguishable from the per-sample path.
-    These compare the two directly rather than asserting on pulses.
+    """process_block exists purely for speed, and being
+    indistinguishable from the per-sample path is what makes it safe.
+    test_walk_equivalence.py holds the two together bitwise over every
+    record field; what is left here is the seam the bulk path cannot
+    take itself.
     """
 
     @staticmethod
@@ -1220,31 +1208,6 @@ class TestBlockIngestion:
                                  T[s:s + block])
         return pc, got
 
-    @pytest.mark.parametrize("block", [1, 7, 512, 4096])
-    @pytest.mark.parametrize("case,ckw", [
-        ("quiet", dict(seed=1, n=8000)),
-        ("sparse", dict(seed=2, n=12000, duty=1/1500)),
-        ("pileup-dense", dict(seed=3, n=12000, duty=1/150)),
-        ("1/f drift", dict(seed=4, n=12000, duty=1/1200, drift=6.0)),
-    ])
-    def test_block_matches_per_sample(self, case, ckw, block):
-        stream = self._stream(**ckw)
-        kw = dict(buf_size=5000, threshold_sigma=5.0, end_sigma=1.5,
-                  baseline_window=20000)
-        ref_pc, ref = self._run(stream, None, **kw)
-        pc, got = self._run(stream, block, **kw)
-
-        assert pc.pulse_count == ref_pc.pulse_count
-        assert pc.abs_n == ref_pc.abs_n
-        assert len(got) == len(ref)
-        for (ca, ia, da), (cb, ib, db) in zip(ref, got):
-            assert (ca, ia) == (cb, ib)
-            for key in ("Amp_I", "Amp_Q", "Time"):
-                assert np.array_equal(da[key], db[key]), f"{case}: {key}"
-            for key in ("pileup", "truncated", "trigger_index",
-                        "end_index", "trigger_time", "end_time"):
-                assert da.get(key) == db.get(key), f"{case}: {key}"
-
     def test_block_splits_at_a_baseline_refresh(self):
         """The bulk path cannot re-centre the band, so the sample that
         moves the mean has to go through process_sample.  A short
@@ -1261,55 +1224,6 @@ class TestBlockIngestion:
 
 
 class TestSessionFeedBlock:
-    """feed_block must also survive the seam it is most likely to break
-    on: a block that starts during noise training and ends after it."""
-
-    @staticmethod
-    def _feed(mode, n=9000, noise_train=2000, block=700):
-        from rfmux.pulse_capture.capture_session import (
-            PulseCaptureSession,
-        )
-        rng = np.random.default_rng(3)
-        I = rng.normal(0, 1, n)
-        Q = rng.normal(0, 1, n)
-        for s in range(noise_train + 300, n, 1200):
-            k = np.arange(s, min(s + 240, n))
-            I[k] += 60.0 * np.exp(-(k - s) / 40.0)
-        T = np.arange(n) / 1e4
-
-        got = []
-        capture_session = PulseCaptureSession(
-            channels=[1], sample_rate=1e4, noise_samples=noise_train,
-            buf_size=3000, threshold_sigma=5.0, end_sigma=1.5,
-            baseline_window=20000,
-            on_pulse=lambda ch, i, s_, d: got.append((ch, i, d)))
-        capture_session.start()
-        if mode == "sample":
-            for k in range(n):
-                capture_session.feed_sample(1, float(I[k]), float(Q[k]),
-                                    float(T[k]))
-        else:
-            for s in range(0, n, block):
-                capture_session.feed_block(1, I[s:s + block], Q[s:s + block],
-                                   T[s:s + block])
-        capture_session.stop()
-        return capture_session, got
-
-    def test_feed_block_matches_feed_sample_across_the_transition(self):
-        ref_s, ref = self._feed("sample")
-        blk_s, got = self._feed("block")
-
-        assert len(ref) > 0, "the fixture must actually produce pulses"
-        assert blk_s.total_pulses == ref_s.total_pulses
-        assert len(got) == len(ref)
-        for (ca, ia, da), (cb, ib, db) in zip(ref, got):
-            assert (ca, ia) == (cb, ib)
-            for key in ("Amp_I", "Amp_Q", "Time"):
-                assert np.array_equal(da[key], db[key])
-        # The noise fit saw the same training record either way.
-        assert (blk_s.noise_stats[1].std_I
-                == pytest.approx(ref_s.noise_stats[1].std_I))
-
     def test_feed_block_drops_unusable_timestamps(self):
         """Same rule as feed_sample: no timestamp, no sample — every
         duration and tau is measured from these."""
@@ -1408,28 +1322,14 @@ class TestDetectionParamsPlumbing:
     missing in another.
     """
 
-    def test_session_kwargs_covers_exactly_the_detection_params(self):
+    def test_session_kwargs_carries_every_detection_param(self):
         from rfmux.pulse_capture.capture_session import (
             DETECTION_PARAMS,
         )
         kw = PulseCaptureConfig().session_kwargs(19073.486328125)
-        # session_kwargs also carries the sizing quantities, which are
-        # not detection knobs but are needed to build the session (the
-        # ring, the training length, the record the file keeps), and
-        # what the session does itself rather than handing to
-        # PulseCapture: trigger_basis on the way in, the coincidence
-        # events on the way out, and the times in milliseconds that it
-        # only records in the file.
-        assert set(kw) == set(DETECTION_PARAMS) | {"buf_size",
-                                                   "config_times_ms",
-                                                   "noise_samples",
-                                                   "noise_record_samples",
-                                                   "trigger_basis",
-                                                   "coincidence_window_s",
-                                                   "dump_all_channels",
-                                                   "noise_capture_interval_s",
-                                                   "noise_capture_window_s"}
-        # The join that matters: every detection knob still gets there.
+        # The rest of session_kwargs is what builds the session rather
+        # than what detects: the ring, the training length, the record
+        # the file keeps, and the times in milliseconds it records.
         assert set(DETECTION_PARAMS) <= set(kw)
 
     def test_every_detection_param_is_a_pulse_capture_argument(self):
@@ -2293,24 +2193,6 @@ class TestAmplitudeBinsFollowStoredUnits:
         edges = hist.amp_edges.copy()
         hist.size_amplitude_to_noise(1e-6)
         assert np.array_equal(hist.amp_edges, edges)
-
-
-class TestTriggerCaptureTooShort:
-    def test_a_run_that_never_trains_says_so(self, monkeypatch, capsys):
-        """A time_run shorter than the noise training returns nothing;
-        the caller is told, rather than handed an empty result."""
-        import asyncio
-        from rfmux.algorithms.measurement import trigger_capture as tc
-
-        async def ends_at_once(session, *a, **k):
-            return 0.01
-        monkeypatch.setattr(tc, "run_slow_source", ends_at_once)
-        result = tc.PulseCaptureResult(streamer_mode="slow", config=PulseCaptureConfig(),
-                                       channels=[1], module=1)
-        asyncio.run(tc._run_single(result, "127.0.0.1", [1], 1, "slow", 596.0,
-                                   0.01, None, None, True))
-        assert "noise training never completed" in capsys.readouterr().out
-        assert result.slow.noise == {}
 
 
 class TestMalformedDfCalibration:

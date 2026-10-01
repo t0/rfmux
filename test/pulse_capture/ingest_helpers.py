@@ -36,17 +36,6 @@ def packets(channels, n, rng, pulse_starts=(600, 900), tau=15, amp=80.0):
     return out
 
 
-def run_per_sample(channels, packets_, pulses, **kw):
-    s = session(channels, pulses, **kw)
-    s.start()
-    for values, ts in packets_:
-        for column, ch in enumerate(channels):
-            v = values[column]
-            s.feed_sample(ch, float(v.real), float(v.imag), ts)
-    s.stop()
-    return s
-
-
 def run_blocks(channels, packets_, pulses, max_packets=256, **kw):
     s = session(channels, pulses, **kw)
     s.start()

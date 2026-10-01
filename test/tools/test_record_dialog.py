@@ -16,7 +16,10 @@ from test.record_helpers import bias_export  # noqa: E402
 def _dialog(tmp_path, monkeypatch, running=()):
     monkeypatch.setattr(rd, "interface_speeds",
                         lambda: {"eth0": 1000, "enp2s0f0np0": 100000,
-                                 "wlan0": None})
+                                 "wlan0": None, "enp1s0f0": None})
+    monkeypatch.setattr(rd, "interface_operstate",
+                        {"wlan0": "up", "enp1s0f0": "down"}.get)
+    monkeypatch.setattr(rd, "running_mock", lambda: None)
     fake = SimpleNamespace(running_interfaces=lambda: list(running),
                            start_command=lambda i: f"sudo fastrxd -i {i}",
                            record_stride=lambda c: (86 + 4 * c + 7) & ~7)
@@ -85,6 +88,120 @@ def test_the_channel_streamer_is_off_unless_asked_and_remembered(
     assert not dlg.streamer_check.isEnabled()
 
 
+def test_the_units_choice_is_the_captures_trigger_basis(
+        qt_app, tmp_path, monkeypatch):
+    """One setting seen twice: the pulse file and the TOD are written
+    in the same units whichever view changed it."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    assert dlg.units_combo.currentIndex() == dlg.capture_form.basis_combo.currentIndex()
+    dlg.units_combo.setCurrentIndex(0)
+    assert dlg.get_options()["config"].trigger_basis == "iq"
+    dlg.capture_form.basis_combo.setCurrentIndex(1)
+    assert dlg.units_combo.currentData() == "df"
+    assert dlg.get_options()["config"].trigger_basis == "df"
+    dlg._save()
+    again = rd.RecordDialog(settings=settings)
+    assert again.units_combo.currentData() == "df"
+
+
+def _products_dialog(tmp_path, monkeypatch, fastrx=False):
+    """A dialog ready to record channels 1-4 with the parser, the TOD
+    and its merge chosen."""
+    dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.fastrx_iface_combo.setEditText("enp2s0f0np0")
+    dlg.serial_edit.setText("0156")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-4")
+    dlg.fastrx_check.setChecked(fastrx)
+    dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(True)
+    dlg.tod_check.setChecked(True)
+    dlg.merge_tod_check.setChecked(True)
+    return dlg
+
+
+def test_the_tod_needs_a_stream_to_repack(qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.tod_check.isEnabled()
+    dlg.parser_check.setChecked(False)
+    assert not dlg.tod_check.isEnabled()
+
+
+def test_the_merge_needs_a_pulse_capture_the_tod_does_not(
+        qt_app, tmp_path, monkeypatch):
+    dlg = _products_dialog(tmp_path, monkeypatch)
+    assert dlg.merge_tod_check.isEnabled()
+    dlg.capture_check.setChecked(False)
+    assert not dlg.merge_tod_check.isEnabled()
+    assert dlg.tod_check.isEnabled()
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    assert dlg.get_options()["tod"]
+
+
+def test_each_data_product_shows_its_cost_while_chosen(
+        qt_app, tmp_path, monkeypatch):
+    """The conversion note while the TOD is chosen; the merge note while
+    the merge is, with the size of this run's TOD, which follows the
+    duration."""
+    dlg = _products_dialog(tmp_path, monkeypatch, fastrx=True)
+    assert not dlg.tod_note.isHidden() and not dlg.merge_tod_note.isHidden()
+    dlg.duration_spin.setValue(10.0)
+    short = dlg.merge_tod_note.text()
+    dlg.duration_spin.setValue(100.0)
+    assert dlg.merge_tod_note.text() != short
+    dlg.merge_tod_check.setChecked(False)
+    assert dlg.merge_tod_note.isHidden() and not dlg.tod_note.isHidden()
+    dlg.tod_check.setChecked(False)
+    assert dlg.tod_note.isHidden()
+
+
+def test_a_tod_without_a_bias_export_warns_but_records(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.serial_edit.setText("0156")
+    dlg.fastrx_check.setChecked(False)
+    dlg.parser_check.setChecked(True)
+    dlg.capture_check.setChecked(False)
+    dlg.tod_check.setChecked(True)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("2:1-4")
+    assert "warning: the TOD metadata" in dlg.status_label.text()
+    assert dlg.record_btn.isEnabled()
+    # A session whose bias export covers the module supplies the tuning.
+    folder = _session_with_bias(tmp_path)
+    dlg.rb_existing.setChecked(True)
+    dlg.session_path_edit.setText(str(folder))
+    assert "warning" not in dlg.status_label.text(), dlg.status_label.text()
+    dlg.tod_check.setChecked(False)
+    dlg.rb_new.setChecked(True)
+    assert "warning" not in dlg.status_label.text()
+
+
+def test_the_running_mock_fills_the_hostname_for_its_serial(
+        qt_app, tmp_path, monkeypatch):
+    """Serial 0000 with a mock server up fills the hostname in; another
+    serial takes the autofill away again, while an address the user
+    typed stays."""
+    dlg, settings = _dialog(tmp_path, monkeypatch)
+    monkeypatch.setattr(rd, "running_mock", lambda: "127.0.0.1:9878")
+    dlg.serial_edit.setText("MOCK")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "127.0.0.1:9878"
+    dlg.serial_edit.setText("0156")
+    assert dlg.get_options()["hostname"] is None
+    dlg.hostname_edit.setText("rfmux0156.lan")
+    dlg.serial_edit.setText("0000")
+    assert dlg.get_options()["hostname"] == "rfmux0156.lan"
+    dlg._save()
+    assert rd.RecordDialog(settings=settings).get_options()["hostname"] == \
+        "rfmux0156.lan"
+
+
 def test_the_dialog_remembers_its_values(qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     dlg.serial_edit.setText("0042")
@@ -109,8 +226,11 @@ def test_interfaces_show_their_rates_and_sort_by_role(
     dlg, _ = _dialog(tmp_path, monkeypatch)
     parser = [dlg.parser_iface_combo.itemText(i)
               for i in range(dlg.parser_iface_combo.count())]
+    # A wifi driver reports no rate; a port without a link is down; the
+    # loopback is where a mock on this host streams.
     assert parser == ["eth0 (1 Gb/s)", "enp2s0f0np0 (100 Gb/s)",
-                      "wlan0 (no link)"]
+                      "wlan0 (no rate reported)", "enp1s0f0 (down)",
+                      "lo (loopback: a mock on this host)"]
     fast = [dlg.fastrx_iface_combo.itemText(i)
             for i in range(dlg.fastrx_iface_combo.count())]
     assert fast == ["enp2s0f0np0 (100 Gb/s)"]
@@ -159,24 +279,6 @@ def test_the_session_fills_in_with_the_newest_under_the_default_path(
     assert dlg.rb_existing.isChecked() and dlg.rb_bias.isChecked()
 
 
-def test_the_session_and_channel_choices_are_separate_pairs(
-        qt_app, tmp_path, monkeypatch):
-    dlg, _ = _dialog(tmp_path, monkeypatch)
-    dlg.rb_existing.setChecked(True)
-    dlg.rb_ranges.setChecked(True)
-    assert dlg.rb_existing.isChecked() and not dlg.rb_new.isChecked()
-    dlg.rb_new.setChecked(True)
-    assert dlg.rb_ranges.isChecked() and not dlg.rb_bias.isChecked()
-
-
-def test_the_pulse_capture_settings_have_their_own_tab(
-        qt_app, tmp_path, monkeypatch):
-    dlg, _ = _dialog(tmp_path, monkeypatch)
-    assert [dlg.tabs.tabText(i) for i in range(dlg.tabs.count())] == \
-        ["Run", "Pulse capture"]
-    assert dlg.tabs.widget(1).isAncestorOf(dlg.capture_form)
-
-
 def test_several_modules_take_an_export_each_or_per_module_ranges(
         qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch)
@@ -222,3 +324,114 @@ def test_a_config_saved_with_a_retired_field_keeps_the_rest(
     cfg = rd.RecordDialog(settings=settings).get_options()["config"]
     assert cfg.threshold_sigma == 6.5
     assert cfg.pre_pulse_ms == rd.PulseCaptureConfig().pre_pulse_ms
+
+
+def test_the_capture_table_follows_the_channels_and_keeps_its_settings(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.modules_edit.setText("2")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1-3")
+    form = dlg.capture_form
+    assert form.channels == [1, 2, 3]
+    form.channel_table.item(1, 1).setCheckState(QtCore.Qt.CheckState.Unchecked)
+    dlg.channels_edit.setText("2:1-3,3:1")
+    assert dlg.capture_form.channels == [(2, 1), (2, 2), (2, 3), (3, 1)]
+    dlg.channels_edit.setText("1-3")
+    assert dlg.get_options()["config"].per_channel == {2: {"trigger": False}}
+
+
+def test_a_loaded_trigger_config_sets_the_capture_and_its_channels(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import write_trigger_config
+    config = rd.PulseCaptureConfig(threshold_sigma=6.0, per_channel={
+        3: {"trigger": False}, 5: {"end_sigma": 1.0}})
+    path = write_trigger_config(tmp_path / "trigger_config.h5", config,
+                                channels=[1, 3, 4, 5], module=2)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.load_trigger_config(path)
+    assert (dlg.modules_edit.text(), dlg.rb_ranges.isChecked(),
+            dlg.channels_edit.text()) == ("2", True, "1,3-5")
+    assert dlg.capture_form.channels == [1, 3, 4, 5]
+    assert dlg.get_options()["config"] == config
+
+
+def _ranges(dlg, modules, channels):
+    dlg.modules_edit.setText(modules)
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText(channels)
+
+
+@pytest.mark.parametrize("modules, channels", [
+    ("2", "1-4"), ("2,3", "2:1-2,3:5")])
+def test_an_exported_config_loads_back_into_a_fresh_dialog(
+        qt_app, tmp_path, monkeypatch, modules, channels):
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, modules, channels)
+    dlg.capture_form.threshold_spin.setValue(6.5)
+    dlg.capture_form.channel_table.item(0, 1).setCheckState(
+        QtCore.Qt.CheckState.Unchecked)
+    config = dlg.get_options()["config"]
+    path = dlg.export_trigger_config(tmp_path / "trigger_config.h5")
+
+    fresh, _ = _dialog(tmp_path / "other", monkeypatch)
+    fresh.load_trigger_config(path)
+    assert fresh.get_options()["config"] == config
+    assert (fresh.modules_edit.text(), fresh.capture_form.channels) == \
+        (modules, dlg.capture_form.channels)
+
+
+def test_an_export_into_a_session_is_listed_in_its_exports(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.core.session_folder import exports, open_session
+    session = open_session(None, tmp_path)
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "1-4")
+    dlg.export_trigger_config(session / "trigger_config.h5")
+    assert [e["filename"] for e in exports(session, "pulse")] == \
+        ["trigger_config.h5"]
+
+
+def test_an_export_of_one_module_names_it(qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import read_trigger_config
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "1-4")
+    path = dlg.export_trigger_config(tmp_path / "tc.h5")
+    assert read_trigger_config(path)[1]["module"] == 2
+
+
+def test_an_export_before_the_channels_resolve_says_it_has_none(
+        qt_app, tmp_path, monkeypatch):
+    from rfmux.pulse_capture import read_trigger_config
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    _ranges(dlg, "2", "")
+    path = dlg.export_trigger_config(tmp_path / "tc.h5")
+    assert "channels" not in read_trigger_config(path)[1]
+    assert "without channels" in dlg.status_label.text()
+
+
+def test_a_failed_load_is_shown_and_printed(qt_app, tmp_path, monkeypatch,
+                                            capsys):
+    from PyQt6 import QtWidgets
+    shown = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *a: shown.append(a[2]))
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg._load_config_file(str(tmp_path / "missing.h5"))
+    assert len(shown) == 1 and "Could not load" in shown[0]
+    assert "Could not load" in capsys.readouterr().out
+
+
+def test_a_loaded_config_sets_the_units_and_stays_bound_to_them(
+        qt_app, tmp_path, monkeypatch):
+    """The Units choice and the trigger basis are one setting, before a
+    load and after it."""
+    from rfmux.pulse_capture import write_trigger_config
+    path = write_trigger_config(tmp_path / "tc.h5",
+                                rd.PulseCaptureConfig(trigger_basis="iq"))
+    dlg, _ = _dialog(tmp_path, monkeypatch)
+    dlg.capture_form.basis_combo.setCurrentIndex(1)          # df
+    dlg.load_trigger_config(path)
+    assert dlg.units_combo.currentIndex() == 0               # iq
+    dlg.units_combo.setCurrentIndex(1)
+    assert dlg.get_options()["config"].trigger_basis == "df"

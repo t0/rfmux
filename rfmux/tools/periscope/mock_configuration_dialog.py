@@ -187,15 +187,17 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         layout.addWidget(self.auto_bias_check, row, 0, 1, 2)
 
         layout.addWidget(QtWidgets.QLabel("Bias Power (dBm):"), row, 2)
-        # Shown in dBm; the config holds the normalized amplitude, at the
-        # mock's DAC scale.
+        # Shown in dBm at the output; the config holds the normalized
+        # amplitude.
         self.bias_amplitude_spin = QtWidgets.QDoubleSpinBox()
-        self.bias_amplitude_spin.setRange(-120.0, mc.DAC_SCALE_DBM)
+        self.bias_amplitude_spin.setRange(
+            -120.0, mc.DAC_SCALE_DBM - mc.BALUN_LOSS_DB)
         self.bias_amplitude_spin.setSingleStep(1.0)
-        self.bias_amplitude_spin.setDecimals(1)
+        self.bias_amplitude_spin.setDecimals(2)
         self.bias_amplitude_spin.setToolTip(
-            "Tone power the automatic biasing sweeps and biases at, "
-            f"relative to the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale")
+            "Tone power the automatic biasing sweeps and biases at, at "
+            f"the output: the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale "
+            f"less the {mc.BALUN_LOSS_DB:g} dB balun loss")
         layout.addWidget(self.bias_amplitude_spin, row, 3)
 
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)

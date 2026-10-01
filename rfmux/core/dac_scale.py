@@ -2,15 +2,14 @@
 
 from typing import Optional
 
-__all__ = ["DAC_SCALE_LABEL_OFFSET_DB", "dac_scale_dbm"]
+from .transferfunctions import BALUN_LOSS_DB
 
-#: Subtracted from the board's DAC scale. Keep zero unless a physical loss
-#: is established; changing it shifts all reported and saved drive powers.
-DAC_SCALE_LABEL_OFFSET_DB = 0.0
+__all__ = ["dac_scale_dbm"]
 
 
 async def dac_scale_dbm(crs, module: int) -> Optional[float]:
-    """Return the module's DAC full-scale power in dBm, with the label offset.
+    """Return the module's DAC full-scale power at the output in dBm: the
+    programmed scale less ``BALUN_LOSS_DB``.
 
     Return None if the board reports no scale or analog banking makes the
     module inaccessible. Other board errors propagate to the caller.
@@ -21,4 +20,4 @@ async def dac_scale_dbm(crs, module: int) -> Optional[float]:
         if "Can't access module" in str(e) and "analog banking" in str(e):
             return None
         raise
-    return None if scale is None else float(scale) - DAC_SCALE_LABEL_OFFSET_DB
+    return None if scale is None else float(scale) - BALUN_LOSS_DB

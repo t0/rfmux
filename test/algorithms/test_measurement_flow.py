@@ -1,3 +1,5 @@
+"""The shipped simplified_tuning_flow.py script: its steps against a fake
+board, and the whole run against the mock."""
 from importlib import util
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock

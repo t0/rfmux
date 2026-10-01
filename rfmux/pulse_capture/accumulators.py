@@ -412,8 +412,9 @@ class PulseTemplateAccumulator:
         if pulse_data.get("pileup"):
             self.n_skipped += 1
             return False
-        trig = find_trigger_index(pulse_data, noise_stats,
-                                  self.threshold_sigma)
+        trig = find_trigger_index(
+            pulse_data, noise_stats,
+            pulse_data.get("threshold_sigma", self.threshold_sigma))
         if trig is None:
             self.n_skipped += 1
             return False

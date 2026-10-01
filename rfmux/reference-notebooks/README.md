@@ -35,7 +35,7 @@ The first four take the tuning flow a step at a time, in this order:
 Then:
 
 - **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
-  find resonators, select bias points, park the carriers, and measure noise.
+  find resonators, select bias points, bias the resonators, and measure noise.
 - **`Demos/noise_measurement.md`** — start with a biased mock array, verify it
   and calibrate it with a multisweep, call `measure_noise`, and reopen the files
   for IQ overlays, timestreams and PSDs. `example_plotting_noise.py` supplies reusable
@@ -43,12 +43,17 @@ Then:
 - **`Demos/pulse_capture.md`** — detect and record detector pulses, with
   streaming HDF5, histograms, matched slow+fast capture, coincidence events,
   noise samples and IQ-plane review using catalog-based calibration records.
+- **`Demos/fastrx_recording.md`**: open a fastrx recording (the 100G channel
+  stream on disk) offline: its times, samples, gaps and drop-outs, then the
+  recording beside a pulse capture and merged into it. It needs no board and
+  no fastrx extension, and writes a small recording when given none.
 
 `simplified_tuning_flow` and `pulse_capture` have an unattended `.py`
 counterpart beside them for cron jobs and smoke tests; the notebook is the
-documentation, the script is the runner. Both notebooks and
-`simplified_tuning_flow.py` run in the acquisition tier; `pulse_capture_flow.py`
-does not, so run it by hand after changing its notebook.
+documentation, the script is the runner. Every notebook here runs in the
+test suite, all but `fastrx_recording.md` in the acquisition tier, and so
+does `simplified_tuning_flow.py`; `pulse_capture_flow.py` does not, so run
+it by hand after changing its notebook.
 
 ## Connecting
 
@@ -63,8 +68,8 @@ await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)  # the fast stream needs a timestamp source
 ```
 
-No hardware? Every demo above stands up a simulated CRS instead — see their
-mock-mode sections.
+No hardware? Every demo above that talks to a board stands up a simulated
+CRS instead — see their mock-mode sections.
 
 ## Data products
 

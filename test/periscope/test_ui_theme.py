@@ -17,20 +17,27 @@ Role = QtGui.QPalette.ColorRole
 def test_both_modes_are_fusion_and_reach_existing_widgets(qt_app):
     """Dark paints widgets made earlier dark; light paints them light,
     whatever palette the desktop supplied."""
-    label = QtWidgets.QLabel("x")
-    qt_app.setPalette(QtGui.QPalette(QtGui.QColor("#202830")))  # a dark desktop
+    # qt_app is shared with every other GUI test: give it back the style
+    # and palette it came with.
+    style, palette = qt_app.style().objectName(), QtGui.QPalette(qt_app.palette())
+    try:
+        label = QtWidgets.QLabel("x")
+        qt_app.setPalette(QtGui.QPalette(QtGui.QColor("#202830")))  # a dark desktop
 
-    apply_ui_theme(True)
-    spin(qt_app, 0.01)
-    assert qt_app.style().objectName() == "fusion"
-    assert qt_app.palette().color(Role.Window).lightness() < 128
-    assert label.palette().color(Role.WindowText).lightness() > 128
+        apply_ui_theme(True)
+        spin(qt_app, 0.01)
+        assert qt_app.style().objectName() == "fusion"
+        assert qt_app.palette().color(Role.Window).lightness() < 128
+        assert label.palette().color(Role.WindowText).lightness() > 128
 
-    apply_ui_theme(False)
-    spin(qt_app, 0.01)
-    assert qt_app.style().objectName() == "fusion"
-    assert qt_app.palette().color(Role.Window).lightness() > 128
-    assert label.palette().color(Role.WindowText).lightness() < 128
+        apply_ui_theme(False)
+        spin(qt_app, 0.01)
+        assert qt_app.style().objectName() == "fusion"
+        assert qt_app.palette().color(Role.Window).lightness() > 128
+        assert label.palette().color(Role.WindowText).lightness() < 128
+    finally:
+        qt_app.setStyle(style)
+        qt_app.setPalette(palette)
 
 
 def test_toggle_applies_the_ui_theme_before_rebuilding(qt_app, monkeypatch):

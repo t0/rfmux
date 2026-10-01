@@ -47,8 +47,10 @@ RAM constraints, and will be preserved if the capture is interrupted.
 3. Set **Mode** (slow, fast, or both), **Channels** (`1,2`, `2-19`, or `all`
    for every biased channel) and **Module**.
 4. Set **Thresh σ** and **End σ**.
-5. **Settings** holds the rest of the individual settings; see
+5. **Settings** holds the rest of the individual settings, each channel's
+   among them; see
    [Configuring the pulse capture engine](#configuring-the-pulse-capture-engine).
+   **Load Config…** takes them all from a saved trigger config instead.
 6. To configure the data-stream used for the capture, press **Streamer**,
    which provides access to the PFB and decimated streamer settings; see
    [Selecting the stream](#selecting-the-stream).
@@ -59,7 +61,7 @@ time. **Pulse View** shows whatever displayed unit, (I,Q) or (df,diss), against
 a common time axis with vertical annotations for each of the pulse detection
 parameters (trigger; drop below threshold; settled point). 
 Left and Right move through the pulses, Home and End jump to the first and
-last, Space cycles the tabs, and Ctrl+E exports the list. **⟳ Re-estimate
+last, Space cycles the tabs, and Ctrl+E exports the trigger config. **⟳ Re-estimate
 Noise** retrains the baseline without stopping.
 
 **IQ Plane** draws the same pulse as points in the plane, grey before the
@@ -187,8 +189,50 @@ toolbar. The **Settings** dialog includes:
   everywhere. A trigger in the df basis is likely to be more sensitive than
   a trigger in an arbitrary (un-rotated) (I,Q) basis.
 
-A text box below dervies the relevant timescales and expectations for the selected
+A text box below derives the relevant timescales and expectations for the selected
 parameters.
+
+### Per-channel settings
+
+The **Settings** dialog lists the capture's channels in a table, one row
+each:
+
+- **Trigger** (checked): unchecked records the channel without triggering
+  on it. Its samples are saved with every event, over the event's span,
+  and with every noise sample. Such a channel turns events on even with
+  the coincidence window off; each pulse is then an event of its own,
+  unless two channels trigger on the same sample. The ring buffer grows as
+  it does for **Save every channel with each event**.
+- **Threshold σ** and **End σ**: the channel's own values. Blank takes the
+  capture's. A channel's End σ must sit below its threshold.
+
+Each pulse records the `threshold_sigma` and `end_sigma` its channel ran
+with, and its decay constant and template alignment use them. Settings for
+a channel taken out of **Channels** are kept, and named below the table;
+they take effect only while the channel is captured.
+
+### Save and load a trigger config
+
+**Export Config** saves the trigger configuration, with the channels, module
+and mode, as `pulse_trigger_config_<HHMMSS>.h5` in the session folder. Without a
+session it goes to the folder of the output file chosen with **…**, or to
+your home folder. The file is HDF5 with only a `metadata` group, holding
+`trigger_config` and the `channels`, `module` and `streamer_mode`, and it
+appears in the Session Browser under the Pulse Capture filter.
+
+**Load Config…** reads a trigger config file, or a capture file that
+recorded its config, and sets the panel from it, ready for a new capture.
+Captures made in Periscope, with `trigger_capture` or with `rfmux record`
+record the config they ran with, so such a run can be repeated as it was;
+files from before trigger configs existed hold none. Double-clicking a
+trigger config file in the Session Browser opens a panel set from it. The
+panel captures one module, so it refuses a config across several.
+
+The `rfmux record` dialog has the same table, **Export Config…** and
+**Load Config…** on its Pulse capture tab, and reads and writes the same
+files, a config across several modules included (see the
+[100G captures guide](100g-captures.md)). Load Config is off while a
+capture runs and in review mode.
 
 ## Histograms and templates
 
@@ -385,7 +429,10 @@ milliseconds (`pre_pulse_ms`, `post_pulse_ms`, `min_pulse_ms`,
 `max_pulse_ms`, `noise_train_ms`) beside the sample counts the engine ran
 with (`pre_samples`, `post_samples`, `min_pulse_samples`, `trigger_samples`,
 `baseline_window`, `edge_lookback`, `max_capture_samples`), with
-`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`. With
+`threshold_sigma`, `end_sigma`, `min_end_samples` and `enable_pileup`
+(the capture's; each pulse carries its channel's), and `trigger_config`,
+the whole `PulseCaptureConfig` as JSON, per-channel settings included,
+which `read_trigger_config` loads. With
 events on it records `coincidence_window_s` and `dump_all_channels`. With
 noise samples on it records `noise_capture_interval_s` and
 `noise_capture_window_s`, the length of a noise sample until five pulse
@@ -436,7 +483,8 @@ empty. The reader works from `members`; the links are for browsing.
 recording, has `layout = "dual"` and `streamer_mode = "both"` in its
 metadata, both sample rates, `fast_channels`, and the sample counts once per
 stream: `pre_samples_slow`, `pre_samples_fast` and so on. A merged file has
-the `_slow` counts only, since no engine ran on the recording.
+the `_slow` counts only, since no engine ran on the recording, and its pairs
+carry the recording's window (`fast_tod_*`) with no `fast_idx`.
 
 ```
 slow/channel_<n>/ ...          each as a channel group above
@@ -449,6 +497,33 @@ events/event_<k>/              a member's index is a pair; pulses/ links to
 histograms/slow/, histograms/fast/
 templates/slow/,  templates/fast/
 ```
+
+**A time-ordered data file**, `rfmux record`'s `tod_module<M>_HHMMSS.h5`,
+has a `metadata` group laid out as a capture file's, without the capture
+settings: `module`, `channels`, `trigger_basis`, `stored_units`,
+`volts_per_count`, the clock origin, and `sample_rate_slow`,
+`sample_rate_fast`, `slow_time_offset_s` and `fast_channels` as the
+streams it holds give them, and the parser dirfile and fastrx recording of the run under `tod/`,
+each channel in its stored units, on the PFB clock, as float32.
+`--merge-tod` copies the `tod/` group into the pulse file.
+
+```
+tod/slow/time                  seconds of day, the dirfile's timebase
+tod/slow/channel_<n>/          I, Q, tuning/, stored_units
+tod/fast/time                  seconds of day, NaN for an undisciplined stamp
+tod/fast/seq, pipe_snapshot    the record's sequence number and sent pipes
+tod/fast/channel_<n>/          I, Q, tuning/, stored_units
+tod/<stream>/channel_<n>/overview  I min, I max, Q min, Q max per bin
+tod/<stream>/time_overview     each bin's first and last finite stamp
+```
+
+A bin is `overview_samples` samples (4096, an attribute of the stream
+group), so the overview of a 20 s fast stream is about 12 000 rows.
+Across modules each stream nests `module_<m>/` with that module's `time`
+(and `seq`, `pipe_snapshot`, `time_overview`) and channel groups.
+`tod_window` in `rfmux.algorithms.measurement.tod` reads one channel over
+a time window as the viewer draws it: the samples, or at most 500 bins of
+their extremes, from the overview for a wide window.
 
 ## From a script
 
@@ -465,6 +540,19 @@ result = await crs.trigger_capture(
     config=PulseCaptureConfig(threshold_sigma=5.0, end_sigma=1.5),
     hdf5_path="capture.h5",
 )
+```
+
+A one-module trigger config, saved from Periscope or the record dialog, or a
+capture that recorded its config, supplies the config and the channels:
+
+```python
+from rfmux.pulse_capture import read_trigger_config
+
+config, setup = read_trigger_config("pulse_trigger_config_142501.h5")
+result = await crs.trigger_capture(
+    channel=setup["channels"], module=setup["module"],
+    streamer_mode=setup["streamer_mode"], time_run=15.0,
+    config=config, hdf5_path="capture.h5")
 ```
 
 Everything else, from configuring the streamers and choosing thresholds to

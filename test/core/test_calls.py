@@ -28,27 +28,14 @@ import pytest
 
 @pytest.mark.asyncio
 @pytest.mark.portable
-async def test_macro():
+async def test_a_macro_or_an_algorithm_is_callable_on_the_query():
+    """Both decorators reach every board in the query; a registered
+    macro is also callable on a single board."""
+
     @rfmux.macro(rfmux.CRS, register=True)
     async def macro_that_returns_serial_number(d):
         return d.serial
 
-    s = rfmux.load_session(
-        """
-        !HardwareMap
-        - !CRS { serial: "0024" }
-        """
-    )
-    ds = s.query(rfmux.CRS)
-    assert set(await ds.macro_that_returns_serial_number()) == {"0024"}
-
-    d = s.query(rfmux.CRS).one()
-    assert d.serial == await d.macro_that_returns_serial_number()
-
-
-@pytest.mark.asyncio
-@pytest.mark.portable
-async def test_algorithm():
     @rfmux.algorithm(rfmux.CRS)
     async def algorithm_that_returns_serial_number(d):
         return d.serial
@@ -60,7 +47,11 @@ async def test_algorithm():
         """
     )
     ds = s.query(rfmux.CRS)
+    assert set(await ds.macro_that_returns_serial_number()) == {"0024"}
     assert set(await ds.algorithm_that_returns_serial_number()) == {"0024"}
+
+    d = s.query(rfmux.CRS).one()
+    assert d.serial == await d.macro_that_returns_serial_number()
 
 
 @pytest.mark.asyncio
@@ -82,6 +73,7 @@ async def test_live_board_interaction_with_orm(live_session):
 
 
 @pytest.mark.asyncio
+@pytest.mark.portable
 async def test_macro_with_arg_filler():
     @rfmux.macro(rfmux.CRS, register=True)
     async def channel_macro(self, channel, module):

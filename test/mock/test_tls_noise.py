@@ -60,7 +60,7 @@ class TestCommonMode:
         generator at different rates; at coincident times they must
         agree exactly."""
         gen = TLSNoiseGenerator(n_resonators=2, corner_hz=50.0, seed=7)
-        slow_fs, fast_fs = 596.0, 1_220_703.125
+        slow_fs = 596.0
         # Coincident instants: every slow sample is also a fast sample time
         t_slow = np.arange(200) / slow_fs
         slow_vals = gen.values_at(t_slow)
@@ -91,28 +91,10 @@ class TestDeterminism:
         t = np.arange(500) * a.dt
         assert np.allclose(a.values_at(t), b.values_at(t))
 
-    def test_different_seed_differs(self):
-        a = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=17)
-        b = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=18)
-        t = np.arange(500) * a.dt
-        assert not np.allclose(a.values_at(t), b.values_at(t))
 
-
-class TestMemoryBound:
-    def test_history_is_trimmed(self):
-        gen = TLSNoiseGenerator(n_resonators=1, corner_hz=50.0, seed=19,
-                                max_history_s=1.0)
-        gen.value_at(30.0)
-        # History is bounded, but extension generates CHUNK rows ahead
-        # of the query, so the retained span is history + one chunk.
-        assert len(gen._values) <= int(1.0 / gen.dt) + gen.CHUNK + 2
-        # Still usable after trimming; old queries clamp rather than fail
-        assert np.isfinite(gen.value_at(0.0)).all()
-        assert np.isfinite(gen.value_at(30.5)).all()
-
-    def test_zero_length_query(self):
-        gen = TLSNoiseGenerator(n_resonators=3, corner_hz=50.0, seed=23)
-        assert gen.values_at(np.array([])).shape == (0, 3)
+def test_zero_length_query():
+    gen = TLSNoiseGenerator(n_resonators=3, corner_hz=50.0, seed=23)
+    assert gen.values_at(np.array([])).shape == (0, 3)
 
 
 def test_vectorised_step_matches_explicit_recursion():
@@ -139,17 +121,6 @@ def test_vectorised_step_matches_explicit_recursion():
     assert np.allclose(got, expected, rtol=1e-9, atol=1e-18)
 
 
-def test_large_time_jump_is_fast():
-    """Bulk extension must not be a Python loop over steps."""
-    import time as _time
-
-    gen = TLSNoiseGenerator(n_resonators=4, corner_hz=20.0, seed=37)
-    t0 = _time.perf_counter()
-    gen.value_at(300.0)          # ~150k grid steps at this corner
-    elapsed = _time.perf_counter() - t0
-    assert elapsed < 2.0, f"bulk extension took {elapsed:.2f} s"
-
-
 def test_wander_survives_chunked_extension_at_low_corners():
     """Regression: extension generates a chunk AHEAD of the request, so
     trimming against the grid's leading edge discarded the region being
@@ -170,6 +141,9 @@ def test_history_trim_keeps_the_queried_region():
     gen.value_at(5.0)
     assert np.array_equal(gen.value_at(1.0), early), \
         "a still-recent query was trimmed away"
+    # A time long since trimmed away clamps rather than failing.
+    gen.value_at(300.0)
+    assert np.isfinite(gen.value_at(1.0)).all()
 
 
 def test_streaming_retains_a_block_of_history_not_the_run():

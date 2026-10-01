@@ -47,19 +47,11 @@ def _mock_dialog(qt_app):
     return dlg
 
 
-def test_saved_module_is_restored_into_the_spinbox(qt_app, saved):
-    """The leftover really is carried in -- that is the trap."""
-    dlg = UnifiedStartupDialog()
-    try:
-        assert dlg.module_input.value() == 2
-    finally:
-        dlg.deleteLater()
-
-
 def test_mock_mode_uses_the_module_the_mock_tones(qt_app, saved):
     dlg = _mock_dialog(qt_app)
     try:
-        dlg.module_input.setValue(2)     # as restored from board use
+        # The leftover really is carried in -- that is the trap.
+        assert dlg.module_input.value() == 2
         dlg._validate_and_accept()
         assert dlg.connection_mode == UnifiedStartupDialog.CONN_MOCK
         assert dlg.module == UnifiedStartupDialog.MOCK_MODULE == 1, \

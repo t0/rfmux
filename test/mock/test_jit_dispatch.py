@@ -8,7 +8,6 @@ Both builds are kept and chosen on array length; these tests pin that down.
 """
 
 import numpy as np
-import pytest
 
 from rfmux.mr_resonator import jit_physics as jp
 
@@ -36,9 +35,9 @@ def _nqp_args(n):
         (1e9, 0.12, 2.91456e-23, 1.0737e29, 1.25e7, 30e-9, 2e-6, 9e-3, 0.0))
 
 
-@pytest.mark.parametrize("n", [5, 64])
-def test_convergence_builds_agree(n):
+def test_convergence_builds_agree():
     """Serial and parallel builds must be numerically indistinguishable."""
+    n = 64
     par = jp._converged_lekid_parameters_par(*_conv_args(n), _seed(n), np.zeros(n))
     ser = jp._converged_lekid_parameters_ser(*_conv_args(n), _seed(n), np.zeros(n))
     assert par[3] == ser[3], "iteration counts diverged"

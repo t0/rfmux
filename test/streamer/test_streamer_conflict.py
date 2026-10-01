@@ -25,21 +25,6 @@ pytestmark = pytest.mark.portable
 
 
 @pytest.fixture
-def free_port():
-    """A port nothing is using.
-
-    Bind-and-release, so the number is known-good rather than hoped-for.
-    Something else could claim it in the gap; nothing on the machine wants an
-    arbitrary ephemeral UDP port, so that has to be raced for deliberately.
-    """
-    finder = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    finder.bind(("", 0))
-    port = finder.getsockname()[1]
-    finder.close()
-    return port
-
-
-@pytest.fixture
 def sender(free_port):
     """Stream datagrams at the port until the test is done with it.
 

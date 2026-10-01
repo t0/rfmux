@@ -67,28 +67,28 @@ def test_without_a_post_pulse_span_the_record_ends_where_it_settled():
     assert len(data["Amp_I"]) - 1 == data["settled_index"]
 
 
-def test_times_reach_the_engine_as_samples_at_the_stream_rate():
-    cfg = PulseCaptureConfig(pre_pulse_ms=25.0, post_pulse_ms=40.0)
-    kw = cfg.session_kwargs(FS)
-    assert (kw["pre_samples"], kw["post_samples"]) == (25, 40)
+def _trained(**config_kw):
+    """(session_kwargs, session) with the engine built and training done."""
+    kw = PulseCaptureConfig(**config_kw).session_kwargs(FS)
     kw["noise_samples"] = 200
     s = PulseCaptureSession(channels=[1], sample_rate=FS, hdf5_path=None, **kw)
     s.start()
     rng = np.random.default_rng(1)
     s.feed_block(1, rng.normal(0, 1, 200), rng.normal(0, 1, 200),
                  np.arange(200) / FS)
+    return kw, s
+
+
+def test_times_reach_the_engine_as_samples_at_the_stream_rate():
+    kw, s = _trained(pre_pulse_ms=25.0, post_pulse_ms=40.0)
+    assert (kw["pre_samples"], kw["post_samples"]) == (25, 40)
     assert (s.pcap.pre_samples, s.pcap.post_samples) == (25, 40)
     s.stop()
 
 
-def test_the_session_records_the_pre_pulse_span_the_engine_uses():
-    """A pre-pulse time under two samples is raised to two by both."""
-    kw = PulseCaptureConfig(pre_pulse_ms=0.0).session_kwargs(FS)
-    kw["noise_samples"] = 200
-    s = PulseCaptureSession(channels=[1], sample_rate=FS, hdf5_path=None, **kw)
-    s.start()
-    rng = np.random.default_rng(1)
-    s.feed_block(1, rng.normal(0, 1, 200), rng.normal(0, 1, 200),
-                 np.arange(200) / FS)
+def test_a_pre_pulse_span_under_two_samples_is_raised_to_two():
+    """By the session and the engine alike, so the file records the
+    span that ran."""
+    _, s = _trained(pre_pulse_ms=0.0)
     assert s.pre_samples == s.pcap.pre_samples == 2
     s.stop()

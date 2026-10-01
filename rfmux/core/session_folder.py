@@ -44,8 +44,11 @@ def load_metadata(session) -> dict:
 
 
 def save_metadata(session, metadata: dict) -> None:
+    # Serialized before the file is opened: a value JSON cannot hold
+    # raises here and leaves the file as it was.
+    text = json.dumps(metadata, indent=2, default=str)
     with open(Path(session) / METADATA_FILE, "w") as f:
-        json.dump(metadata, f, indent=2, default=str)
+        f.write(text)
 
 
 def export_filename(data_type: str, identifier: str, ext: str = ".pkl",

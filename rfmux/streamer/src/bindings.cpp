@@ -99,7 +99,8 @@ PYBIND11_MODULE(_receiver, m) {
 				ts.c = (ts.c & 0xfffff000) | (control & 0xfff);
 			},
 			"Control field (12-bit, preserves source and recent bits)")
-		.def_readwrite("sbs", &Timestamp::sbs, "Sub-block sequence")
+		.def_readwrite("sbs", &Timestamp::sbs,
+		               "Straight binary seconds: the second of the day")
 		.def_property("source", &Timestamp::get_source, &Timestamp::set_source, "Timestamp source (read/write)")
 		.def_property("recent", &Timestamp::is_recent, &Timestamp::set_recent, "Recent flag (read/write)")
 		.def("renormalize", &Timestamp::renormalize, "Normalize timestamp fields (carry overflow)")

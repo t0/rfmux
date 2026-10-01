@@ -62,22 +62,6 @@ def _silent_socket():
 
 
 @linux_only
-def test_receive_batch_alone_blocks_on_a_silent_socket():
-    """Documents WHY the timeout is needed — not a bug to fix here.
-
-    If this starts returning, recvmmsg's timeout semantics changed and
-    the socket timeout could in principle go away.
-    """
-    sock = _silent_socket()
-    try:
-        assert _one_receive(_receiver_on(sock), timeout_s=3.0) is None, \
-            "recvmmsg honoured timeout_ms on a silent socket — the " \
-            "workaround in UDPReceiver may no longer be needed"
-    finally:
-        sock.close()
-
-
-@linux_only
 def test_receive_timeout_bounds_a_silent_receive():
     """SO_RCVTIMEO makes an empty receive wait the timeout, not spin or hang."""
     sock = _silent_socket()

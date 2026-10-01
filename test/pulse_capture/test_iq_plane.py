@@ -3,13 +3,12 @@ one frame, in every view."""
 
 import numpy as np
 import pytest
+from test.qt_helpers import axis_label  # noqa: E402
 
 pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
 import pyqtgraph as pg  # noqa: E402
-
-from test.qt_helpers import spin  # noqa: E402
 
 from rfmux.core.transferfunctions import VOLTS_PER_ROC  # noqa: E402
 from rfmux.pulse_capture.detection import ChannelNoiseStats  # noqa: E402
@@ -84,10 +83,8 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path, catalog_schem
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
     panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up
-    spin(qt_app)
 
     panel.units_combo.setCurrentText(UNITS_VOLTS)
-    spin(qt_app)
     items = _named(panel)
     x, y = items["tuning sweep"]
     np.testing.assert_allclose(x + 1j * y, turned * VOLTS_PER_ROC)
@@ -99,10 +96,9 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path, catalog_schem
     bias_item = [i for i in panel.iq_plot.getPlotItem().listDataItems()
                  if i.name() == "bias point"][0]
     assert bias_item.zValue() > markers.zValue()
-    assert panel.iq_plot.getPlotItem().getAxis("bottom").labelText == "I (V)"
+    assert axis_label(panel.iq_plot, "bottom") == "I (V)"
 
     panel.units_combo.setCurrentText(UNITS_DF)
-    spin(qt_app)
     items = _named(panel)
     bx, by = items["bias point"]
     [markers] = _markers(panel)
@@ -110,11 +106,10 @@ def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path, catalog_schem
     # bias point's dissipation.
     np.testing.assert_allclose(markers.data["y"], by[0], atol=1e-6)
     assert markers.data["x"].max() > bx[0]
-    assert panel.iq_plot.getPlotItem().getAxis("left").labelText == \
+    assert axis_label(panel.iq_plot, "left") == \
         "dissipation (Hz)"
     assert "bias 1000.001250 MHz" in panel.iq_info.toolTip() + panel.iq_info.text()
     panel.close()
-    spin(qt_app)
 
 
 def test_a_long_pulse_thins_its_markers(qt_app, tmp_path):
@@ -132,11 +127,9 @@ def test_a_long_pulse_thins_its_markers(qt_app, tmp_path):
         "Time": k / 2.44e6, "trigger_index": 100}
     panel._current_view = (1, 1)
     panel._render_iq_plane()
-    spin(qt_app)
     [markers] = _markers(panel)
     assert len(markers.data) == IQ_PLANE_POINTS
     panel.close()
-    spin(qt_app)
 
 
 def test_in_both_mode_the_selector_picks_the_stream_drawn(qt_app, tmp_path):
@@ -158,12 +151,10 @@ def test_in_both_mode_the_selector_picks_the_stream_drawn(qt_app, tmp_path):
     panel._show_pair(*key)
     for stream in ("slow", "fast"):
         panel.iq_stream_combo.setCurrentText(stream)
-        spin(qt_app)
         [markers] = _markers(panel)
         assert len(markers.data) == min(lengths[stream], IQ_PLANE_POINTS)
         assert f"({stream})" in panel.iq_info.toolTip() + panel.iq_info.text()
     panel.close()
-    spin(qt_app)
 
 
 def test_without_a_sweep_the_plane_says_so(qt_app, tmp_path):
@@ -173,8 +164,6 @@ def test_without_a_sweep_the_plane_says_so(qt_app, tmp_path):
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
     panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up
-    spin(qt_app)
     assert "no sweep in the tuning" in panel.iq_info.toolTip() + panel.iq_info.text()
     assert not _named(panel)
     panel.close()
-    spin(qt_app)

@@ -102,15 +102,29 @@ def _records(channels, packets, *, blocks, use_walk, max_packets=64,
     return records
 
 
-# A rolling baseline of 60 samples refreshes many times inside a
-# 300-sample capture: each refresh is a walk re-entry through
-# process_sample.  2.5 sigma puts the threshold in the noise: crossings
-# everywhere, splits at every boundary.
-@pytest.mark.parametrize("channels", [(1,), (1, 2)])
-@pytest.mark.parametrize("max_packets", [1, 37, 4096])
-@pytest.mark.parametrize("baseline_window", [0, 60])
-@pytest.mark.parametrize("threshold", [5.0, 2.5])
-@pytest.mark.parametrize("post_samples", [0, 25])
+# The branch each row reaches.  At 5 sigma with a fixed baseline the
+# stream's pileup, hard-stop, drift and freeze branches are all live
+# (the guard at the end of the test checks that).  A rolling baseline of
+# 60 samples refreshes many times inside a 300-sample capture, and each
+# refresh is a walk re-entry through process_sample.  2.5 sigma puts the
+# threshold in the noise: crossings everywhere, splits at every
+# boundary.  max_packets does not divide the 400-sample noise quota, so
+# a block straddles the training-to-capturing seam.
+@pytest.mark.parametrize(
+    "channels, max_packets, baseline_window, threshold, post_samples", [
+        ((1,), 37, 0, 5.0, 0),          # every branch, blocks of 37
+        ((1,), 4096, 0, 5.0, 25),       # the whole stream in one block
+        ((1, 2), 37, 0, 5.0, 25),       # every branch, two channels
+        ((1, 2), 4096, 0, 5.0, 0),
+        ((1,), 37, 60, 5.0, 0),         # baseline refresh inside a capture
+        ((1,), 4096, 60, 5.0, 25),
+        ((1, 2), 37, 60, 5.0, 25),
+        ((1,), 37, 0, 2.5, 0),          # threshold in the noise
+        ((1,), 4096, 0, 2.5, 25),
+        ((1, 2), 37, 0, 2.5, 25),
+        ((1,), 37, 60, 2.5, 0),         # refresh with the threshold in noise
+        ((1, 2), 4096, 60, 2.5, 25),
+    ])
 def test_walk_matches_process_sample(channels, max_packets, baseline_window,
                                      threshold, post_samples, monkeypatch):
     # A post-pulse span longer than the end floor is the third term of

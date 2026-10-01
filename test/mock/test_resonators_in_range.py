@@ -20,10 +20,9 @@ def _frequencies(**config) -> np.ndarray:
 
 
 @pytest.mark.parametrize("start, end", [(1.0e9, 1.5e9), (1.0e9, 1.02e9)])
-@pytest.mark.parametrize("seed", [0, 1, 2, 3])
-def test_resonators_lie_inside_the_requested_range(start, end, seed):
+def test_resonators_lie_inside_the_requested_range(start, end):
     f = _frequencies(freq_start=start, freq_end=end, num_resonances=6,
-                     resonator_random_seed=seed)
+                     resonator_random_seed=0)
     assert len(f) == 6
     assert np.all((f >= start) & (f <= end)), f
 

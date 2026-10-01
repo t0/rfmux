@@ -21,12 +21,12 @@ an IPv6 loopback socket alone is not sufficient.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 861 | varies | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 2360 | varies | Default while editing. |
-| `pytest --tier=acquisition` | 39 | varies | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 2399 | varies | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 863 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2418 | ~6.5 min | Default while editing. |
+| `pytest --tier=acquisition` | 37 | ~9.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 2455 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 2474 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2530 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -215,13 +215,10 @@ Directories mirror the package under test.
 
 ## Notebook tests
 
-Two kinds, both executed as tests rather than checked in as `.ipynb`:
-
-- `test/notebooks/test_*.md`: quantitative checks written as notebooks.
-- `rfmux/reference-notebooks/Demos/*.md`: the user-facing demos, executed in
-  the acquisition tier so they cannot rot.
-
-Both are jupytext markdown; edit them in JupyterLab or as text. A demo that
+`test/notebooks/test_notebooks.py` executes the user-facing demos in
+`rfmux/reference-notebooks/Demos/*.md` so they cannot rot: the two that
+stream from a MockCRS server in the acquisition tier, the fastrx one in the
+quick tier. They are jupytext markdown; edit them in JupyterLab or as text. A demo that
 writes output must write to a temp directory, since the reference copies are
 provisioned read-only. Of the `.py` scripts beside the demos,
 `simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier
@@ -232,22 +229,37 @@ drafts elsewhere until they are ready to run.
 
 ## Qt collection
 
-The `qt_app` fixture supplies a shared QApplication. An autouse fixture
-disables cyclic garbage collection during tests using it, then collects
-generation 1 on the GUI thread during teardown. This keeps dropped widget
-cycles from being finalized during event dispatch or on worker threads.
+An autouse fixture in `test/conftest.py` turns the cyclic collector off while
+a test that uses `qt_app` runs, and `pytest_runtest_logfinish` there calls
+`gc.collect(1)` on the main thread once pytest has dropped the test's fixture
+values. A panel is a reference cycle. One freed during event dispatch, or on
+a worker thread, segfaults a later test. Collecting before the drop would
+promote a fixture-held widget to generation 2, where it waits with every
+other one for a full collection to free them all at once, wherever that
+lands. A GUI test also fails when a Qt callback of its raised: PyQt
+reports such an exception through `sys.excepthook`, where capture hides it,
+and parks it in `sys.last_exc`, whose traceback holds every widget its
+frames touched (`test/periscope/test_gui_fixture_cleanup.py` pins both).
 
 ## Platform skips
 
 A few tests skip on macOS or Windows because they pin platform behaviour:
 `recvmmsg` blocking on a silent socket (Linux), `SO_REUSEPORT` (absent on
 Windows), and `SIGINT` (Windows delivers Ctrl+C as a `CTRL_C_EVENT` to a
-process group). `test/test_fastrx_file.py` skips at collection unless the
-fastrx extension was built. That needs Linux with clang, libxdp, libbpf and
-liburing present at install time (`rfmux/streamer/CMakeLists.txt`). Optional
-recording checks also require `pygetdata`; the Jupyter IPv6 case requires
-IPv6 resolution for localhost. These prerequisites can produce skips on
-Linux as well.
+process group). `test/test_fastrx_file.py` runs each format test against two
+readers, and the cases for the fastrx extension's reader skip unless the
+extension was built. That needs Linux with clang, libxdp, libbpf and
+liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
+`test/tools/test_parser_dirfile.py` skips unless pygetdata is installed:
+it is a default dependency everywhere but Linux aarch64, which has no
+pygetdata wheel. The Jupyter IPv6 case requires IPv6 resolution for
+localhost. `test_mock_capture_and_parser_cover_the_same_stretch` skips on
+Windows, because `rfmux record` starts its parser as an asyncio subprocess,
+which the selector event loop used there does not support. In
+`test/mock/test_server_lifecycle.py` the parent-exit tests run on Linux only
+(they read `/proc`), and two more need the fork start method. With fastrx
+built and the test group installed, every tier below `hardware` reports zero
+skips on Linux.
 
 ## CI
 

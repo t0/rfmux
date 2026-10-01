@@ -11,7 +11,7 @@ from tuber.codecs import TuberResult
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.schema import CRS
 from rfmux.core.transferfunctions import (
-    PFB_SAMPLING_FREQ, VOLTS_PER_ROC, convert_dacunits_to_dbm,
+    BALUN_LOSS_DB, PFB_SAMPLING_FREQ, VOLTS_PER_ROC, convert_dacunits_to_dbm,
 )
 from rfmux.algorithms.measurement.measure_noise import measure_noise
 from rfmux.tuning import store
@@ -133,10 +133,11 @@ async def test_catalog_is_snapshotted_before_acquisition(board):
     block = next(iter(result.values()))
     assert block["call_params"]["catalog"] == before
     assert block["results"]["resonators"]["A"]["channel"] == 7
-    assert block["dac_scale_dbm"] == -1.5
+    assert block["dac_scale_dbm"] == -1.5 - BALUN_LOSS_DB
     record = block["results"]["resonators"]["B"]
     assert record["bias_amplitude_dbm"] == pytest.approx(
-        convert_dacunits_to_dbm(record["bias_amplitude"], -1.5))
+        convert_dacunits_to_dbm(record["bias_amplitude"],
+                                -1.5 - BALUN_LOSS_DB))
 
 
 @pytest.mark.parametrize("reference", ["absolute", "relative"])

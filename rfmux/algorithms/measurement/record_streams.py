@@ -19,7 +19,7 @@ Without the capture the recording starts as soon as the parser is up.
 Products go into a Periscope session folder (rfmux.core.session_folder:
 ``session_YYYYMMDD_HHMMSS/`` holding ``<type>_module<M>_HHMMSS.<ext>``
 and the metadata that lists them), so an existing session takes them
-alongside its bias export, which is where the channels and df
+alongside its bias_catalog, which is where the channels and df
 calibrations come from by default::
 
     from rfmux.core.session_folder import open_session
@@ -54,8 +54,7 @@ from ...core.channels import (MAX_MODULE, format_channel_spec,
 from ...pulse_capture.channel_keys import (capture_keys, describe,
                                            keys_by_module, pair_keys)
 from ...pulse_capture.hdf5 import PulseHDF5Reader
-from ...core.resonators import ResonatorCatalog
-from ...tuning import store, tuning_rows
+from ...tuning import load_bias_catalog, tuning_rows
 from .tod import merge_tod, tod_bytes_per_s, write_tod
 
 PARSER_EXIT_S = 10.0
@@ -104,29 +103,21 @@ PARSER_CHILD = ("import sys; from rfmux.tools import parser; "
 # ── The session folder ─────────────────────────────────────────────
 
 def latest_bias_export(session: Path, module: int) -> Optional[Path]:
-    """The newest multisweep for *module* the session lists.
-
-    A multisweep is where a module's bias points live: Find Bias writes its
-    report back into the sweeps it read, so the newest one carries the
-    catalog the board was last tuned to.
-    """
-    return latest_export(session, "multisweep", f"module{module}")
+    """The newest bias_catalog file for *module* the session lists: the
+    bias ``crs.apply_bias`` last applied."""
+    return latest_export(session, "bias_catalog", f"module{module}")
 
 
 def biased_channels(bias_path: Path) -> Tuple[List[int], Dict[int, dict]]:
-    """The channels a multisweep's catalog is biased on, and the tuning row
-    of each.
+    """The channels a bias_catalog file biased, and the tuning row of each,
+    with the NCO and DAC scale setting it was applied at.
 
-    The rows are ``tuning_rows`` of the catalog in the file. There is no NCO
-    among them: a catalog holds none on purpose, and the board is not read
-    here, so the capture's tuning record says what the sweep says and no
-    more.
+    Raises ValueError for a file that is not a bias_catalog.
     """
-    container = store.load(bias_path)
-    block = next(iter(container.values()))
-    catalog = ResonatorCatalog.from_dict(block["call_params"]["catalog"])
-    rows = tuning_rows(catalog,
-                       nsamps=block["call_params"].get("nsamps"))
+    applied = load_bias_catalog(bias_path)
+    rows = tuning_rows(applied.catalog,
+                       nco_frequency_hz=applied.nco_frequency_hz,
+                       dac_scale_setting_dbm=applied.dac_scale_setting_dbm)
     return sorted(rows), rows
 
 
@@ -135,14 +126,15 @@ def resolve_channels(modules: List[int], spec: Optional[str],
                      ) -> Tuple[Dict[int, List[int]], Dict[Any, dict], List[str]]:
     """What a run records, from the command line's or the dialog's
     choices: ``(wanted, tuning, notes)``, *wanted* the ``{module:
-    channels}``, *tuning* the rows from each module's bias export keyed
+    channels}``, *tuning* the rows from each module's bias file keyed
     by channel (by (module, channel) across modules), *notes* one line
-    per export read.
+    per file read.
 
     *spec* is a range spec for every module of *modules* (``1-88``), a
     per-module spec that names the modules itself (``2:1-114,3:1-96``),
-    or None for the biased channels of each module's newest bias export
-    in *folder*; *bias* names one module's export instead of the newest.
+    or None for the biased channels of each module's newest bias_catalog
+    in *folder*; *bias* names one module's bias_catalog instead of the
+    newest.
     Raises ValueError for anything that cannot be recorded.
     """
     wanted: Dict[int, List[int]] = {}
@@ -157,8 +149,8 @@ def resolve_channels(modules: List[int], spec: Optional[str],
         if not 1 <= int(m) <= MAX_MODULE:
             raise ValueError(f"module {m}: modules run 1-{MAX_MODULE}")
     if bias is not None and len(modules) > 1:
-        raise ValueError("--bias names one module's export; several modules "
-                         "take the session's newest export each")
+        raise ValueError("--bias names one module's bias_catalog; several "
+                         "modules take the session's newest one each")
     multi = len(modules) > 1
     tuning: Dict[Any, dict] = {}
     notes = []
@@ -168,7 +160,7 @@ def resolve_channels(modules: List[int], spec: Optional[str],
         biased, rows = biased_channels(bias_path) if bias_path else ([], {})
         chosen = wanted.get(module) or ranges or biased
         if not chosen:
-            raise ValueError(f"no channels given, and no bias export for "
+            raise ValueError(f"no channels given, and no bias_catalog for "
                              f"module {module} in the session to take them "
                              "from")
         wanted[module] = chosen
@@ -180,14 +172,14 @@ def resolve_channels(modules: List[int], spec: Optional[str],
     return wanted, tuning, notes
 
 
-async def _with_board_nco(crs, tuning, module) -> Optional[Dict[Any, dict]]:
+async def _with_board_nco(crs, tuning, module,
+                         say=print) -> Optional[Dict[Any, dict]]:
     """*tuning* with each row carrying the NCO its module is playing.
 
-    The sweeps the rows come from say nothing about it -- a multisweep
-    retunes the NCO as it walks a wide array, and a catalog holds no NCO --
-    so the number is the board's, read at the moment the tones are on the
-    air for these pulses. A module that will not answer leaves its rows as
-    they are rather than failing the run.
+    The number is the board's, read at the moment the tones are on the air
+    for these pulses. When it differs from the NCO the bias file was applied
+    at, the tones have moved since and *say* is told. A module that will not
+    answer leaves its rows as they are rather than failing the run.
     """
     if not tuning:
         return tuning
@@ -200,6 +192,13 @@ async def _with_board_nco(crs, tuning, module) -> Optional[Dict[Any, dict]]:
             continue
         if nco is None:
             continue
+        applied_at = {stamped[key].get("nco_frequency_hz") for _, key in pairs
+                      if isinstance(stamped.get(key), dict)} - {None}
+        if any(abs(float(f) - float(nco)) > 1.0 for f in applied_at):
+            say(f"[record] module {m}: the NCO is {float(nco) / 1e6:.6f} MHz, "
+                f"not the {min(applied_at) / 1e6:.6f} MHz its bias was applied "
+                "at; the tones have moved since, so the bias file may not "
+                "describe them")
         for _, key in pairs:
             if isinstance(stamped.get(key), dict):
                 stamped[key]["nco_frequency_hz"] = float(nco)
@@ -383,7 +382,7 @@ async def record_streams(
                 f"{free / 1e9:.0f} GB free in {session} for a recording "
                 f"of about {need / 1e9:.0f} GB")
 
-    tuning = await _with_board_nco(crs, tuning, module)
+    tuning = await _with_board_nco(crs, tuning, module, say)
 
     stamp = datetime.datetime.now().strftime("%H%M%S")
     host = streamer.resolve_host(crs.tuber_hostname)

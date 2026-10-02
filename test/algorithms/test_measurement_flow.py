@@ -139,6 +139,12 @@ async def test_mock_flow_saves_bias_and_noise_and_stops_stream(
     assert len(report.catalog) == 10
     assert set(records) == set(report.catalog.names())
     nco = await crs.get_nco_frequency(module=1)
+    # The bias as applied, where rfmux record looks for it.
+    from rfmux.core.session_folder import latest_export
+    from rfmux.tuning import load_bias_catalog
+    applied = load_bias_catalog(latest_export(tmp_path, "bias_catalog", "module1"))
+    assert applied.nco_frequency_hz == nco
+    assert applied.catalog.names() == report.catalog.names()
     for resonator in report.catalog:
         frequency = nco + await crs.get_frequency(channel=resonator.channel, module=1)
         amplitude = await crs.get_amplitude(channel=resonator.channel, module=1)

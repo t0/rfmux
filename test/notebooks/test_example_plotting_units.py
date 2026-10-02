@@ -511,7 +511,7 @@ def noise_measurement() -> dict:
     sweep = dict(measurement()["results"][0]["upward"]["R1"], sweep_direction="upward")
     catalog = ResonatorCatalog([
         Resonator("R1", 7, BiasPoint(600e6, .01, bias_sweep={
-            key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS})),
+            key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS if key in sweep})),
     ], module=1)
     axes = dict(freq_iq=np.arange(5.), freq_dsb=np.arange(-2., 3.))
     data = dict(iq_counts=np.array([2+3j, 3+4j, 4+5j]),

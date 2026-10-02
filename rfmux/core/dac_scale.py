@@ -4,12 +4,11 @@ from typing import Optional
 
 from .transferfunctions import BALUN_LOSS_DB
 
-__all__ = ["dac_scale_dbm"]
+__all__ = ["dac_scale_dbm", "dac_scale_setting_dbm"]
 
 
-async def dac_scale_dbm(crs, module: int) -> Optional[float]:
-    """Return the module's DAC full-scale power at the output in dBm: the
-    programmed scale less ``BALUN_LOSS_DB``.
+async def dac_scale_setting_dbm(crs, module: int) -> Optional[float]:
+    """Return the module's DAC scale as programmed with ``set_dac_scale``, in dBm.
 
     Return None if the board reports no scale or analog banking makes the
     module inaccessible. Other board errors propagate to the caller.
@@ -20,4 +19,11 @@ async def dac_scale_dbm(crs, module: int) -> Optional[float]:
         if "Can't access module" in str(e) and "analog banking" in str(e):
             return None
         raise
-    return None if scale is None else float(scale) - BALUN_LOSS_DB
+    return None if scale is None else float(scale)
+
+
+async def dac_scale_dbm(crs, module: int) -> Optional[float]:
+    """Return the module's DAC full-scale power at the output in dBm: the
+    programmed scale less ``BALUN_LOSS_DB``."""
+    setting = await dac_scale_setting_dbm(crs, module)
+    return None if setting is None else setting - BALUN_LOSS_DB

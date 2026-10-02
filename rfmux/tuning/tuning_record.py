@@ -2,21 +2,50 @@
 
 The rows include each bias point's calibration sweep. Read them back as a
 catalog with :func:`catalog_from_tuning`, or as a multisweep for plotting with
-:func:`multisweep_from_tuning`.
+:func:`multisweep_from_tuning`. :func:`load_bias_catalog` reads the file
+``crs.apply_bias`` writes.
 """
 
 from __future__ import annotations
 
-from typing import Dict, Mapping, Optional
+from pathlib import Path
+from typing import Dict, Mapping, NamedTuple, Optional
 
 import numpy as np
 
 from ..core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from ..core.transferfunctions import VOLTS_PER_ROC
 from .multisweep_amplitudes import AmplitudeSchedule
+from . import store
 from .sweep_results import pack_multisweep
 
-__all__ = ["tuning_rows", "catalog_from_tuning", "multisweep_from_tuning"]
+__all__ = ["tuning_rows", "catalog_from_tuning", "multisweep_from_tuning",
+           "AppliedBias", "load_bias_catalog"]
+
+
+class AppliedBias(NamedTuple):
+    """A bias as ``crs.apply_bias`` applied it, read back from its file."""
+
+    catalog: ResonatorCatalog
+    nco_frequency_hz: Optional[float]
+    dac_scale_setting_dbm: Optional[float]  # as set with set_dac_scale
+
+
+def load_bias_catalog(path) -> AppliedBias:
+    """Read a ``bias_catalog`` file written by ``crs.apply_bias``.
+
+    Raises:
+        ValueError: the file is not a bias_catalog.
+    """
+    data = store.load(path)
+    if not (isinstance(data, dict) and data.get("measurement") == "bias_catalog"):
+        raise ValueError(
+            f"{Path(path).name} is not a bias_catalog file. crs.apply_bias "
+            f"writes one (bias_catalog_<date>_<time>.pkl) each time it biases "
+            f"a module.")
+    return AppliedBias(ResonatorCatalog.from_dict(data["catalog"]),
+                       data.get("nco_frequency_hz"),
+                       data.get("dac_scale_setting_dbm"))
 
 #: The sweep a BiasPoint carries, flattened into the row and read back out.
 _SWEEP_FIELDS = BiasPoint.BIAS_SWEEP_KEYS
@@ -27,6 +56,7 @@ def tuning_rows(
     *,
     nco_frequency_hz: Optional[float] = None,
     dac_scale_dbm: Optional[float] = None,
+    dac_scale_setting_dbm: Optional[float] = None,
     nsamps: Optional[int] = None,
 ) -> Dict[int, dict]:
     """Return ``{channel: row}`` with each resonator's bias and calibration.
@@ -37,6 +67,7 @@ def tuning_rows(
     provenance = {k: v for k, v in
                   (("nco_frequency_hz", nco_frequency_hz),
                    ("dac_scale_dbm", dac_scale_dbm),
+                   ("dac_scale_setting_dbm", dac_scale_setting_dbm),
                    ("nsamps", nsamps)) if v is not None}
     rows: Dict[int, dict] = {}
     for r in catalog:
@@ -50,6 +81,9 @@ def tuning_rows(
             # Loop rotation is stored separately from the df calibration.
             "iq_rotation_deg": bias.iq_rotation_deg,
             "bifurcated_at": bias.bifurcated_at,
+            "bias_power_dbm": bias.bias_power_dbm,
+            "flagged_kind": bias.flagged_kind,
+            "flagged_because": bias.flagged_because,
         }
         if bias.bias_sweep is not None:
             row.update({k: bias.bias_sweep[k] for k in _SWEEP_FIELDS
@@ -75,6 +109,9 @@ def _bias_point(row: Mapping) -> BiasPoint:
         iq_rotation_deg=row.get("iq_rotation_deg"),
         bifurcated_at=row.get("bifurcated_at"),
         bias_sweep=sweep or None,
+        bias_power_dbm=row.get("bias_power_dbm"),
+        flagged_kind=row.get("flagged_kind"),
+        flagged_because=row.get("flagged_because"),
     )
 
 

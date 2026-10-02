@@ -5,13 +5,22 @@ Call ``await crs.apply_bias(report.catalog)`` after bias finding.
 
 from __future__ import annotations
 
+import math
+import warnings
+from dataclasses import replace
+from pathlib import Path
+
+from ...core.dac_scale import dac_scale_setting_dbm
 from ...core.hardware_map import macro
 from ...core.resonators import ResonatorCatalog, on_grid
 from ...core.schema import CRS
+from ...core.session_folder import register_export
 from ...core.transferfunctions import (
     ALLOWED_NCO_BANDWIDTH_HZ,
+    BALUN_LOSS_DB,
     BASE_FREQUENCY,
     FREQ_QUANTUM,
+    convert_dbm_to_amplitude,
 )
 from ...tuning import store
 
@@ -45,6 +54,55 @@ def _describe_problem(nco_hz: float, unreachable: list) -> str:
     )
 
 
+def _at_measured_power(catalog: ResonatorCatalog, setting_dbm, module: int):
+    """A copy of *catalog* whose amplitudes give each bias point the power it
+    was measured at, under this DAC setting, and the ``(name, old, new)``
+    amplitude of every point that had to change.
+
+    A point without a measured power, or a board that reports no DAC scale,
+    keeps its amplitude. The calibration is kept: the resonator sees the same
+    power it was calibrated at.
+    """
+    applied = catalog.copy()
+    if setting_dbm is None:
+        return applied, []
+    full_scale_dbm = setting_dbm - BALUN_LOSS_DB
+    moved, too_loud = [], []
+    for r in applied:
+        power = r.bias.bias_power_dbm
+        if power is None:
+            continue
+        amplitude = float(convert_dbm_to_amplitude(power, full_scale_dbm))
+        if math.isclose(amplitude, r.bias.amplitude, rel_tol=1e-9):
+            continue
+        if amplitude > 1:
+            too_loud.append(f"{r.name} ({power:.2f} dBm)")
+            continue
+        moved.append((r.name, r.bias.amplitude, amplitude))
+        r.bias = replace(r.bias, amplitude=amplitude)
+    if too_loud:
+        raise ValueError(
+            f"Module {module}'s DAC scale is set to {setting_dbm:g} dBm, so its "
+            f"full scale at the output is {full_scale_dbm:g} dBm, below the power "
+            f"{len(too_loud)} bias points were measured at: "
+            f"{', '.join(too_loud)}. Raise the DAC scale; no tones were applied."
+        )
+    return applied, moved
+
+
+def _warn_recomputed(moved, catalog, setting_dbm, module) -> None:
+    """Say which amplitudes were recomputed, and from which DAC setting."""
+    name, old, new = moved[0]
+    power = catalog[name].bias.bias_power_dbm
+    measured_at = power - 20 * math.log10(old) + BALUN_LOSS_DB
+    warnings.warn(
+        f"Module {module}'s DAC scale is set to {setting_dbm:g} dBm, not the "
+        f"{measured_at:g} dBm the bias powers were measured at, so "
+        f"{len(moved)} tones' amplitudes were recomputed to keep their measured "
+        f"powers (e.g. {name}: {old:.4g} -> {new:.4g}).",
+        UserWarning, stacklevel=3)
+
+
 @macro(CRS, register=True)
 async def apply_bias(
     crs,
@@ -60,23 +118,32 @@ async def apply_bias(
     with a quiet module, call ``crs.clear_channels(module=...)`` first.
     The catalog is read without modification.
 
+    A bias point carrying the power it was measured at keeps that power: if
+    the module's DAC scale has changed since, its amplitude is recomputed for
+    the present scale, with a warning saying so.
+
+    The applied catalog is saved as a ``bias_catalog`` file holding the NCO
+    and the DAC scale setting read back from the board, and listed in the
+    folder's session metadata so ``rfmux record`` finds it. Read it with
+    ``rfmux.tuning.load_bias_catalog``.
+
     Args:
         catalog: resonators to program, with their module and channel bindings.
         allow_nco_reset: if True, move an unreachable or off-grid NCO to the
             catalog's grid-aligned midpoint. A usable NCO is left unchanged.
             Moving the NCO also shifts tones on channels outside the catalog.
-        save: save the applied catalog as a dictionary. None uses
+        save: save the bias_catalog file. None uses
             ``store.autosave_enabled()``.
-        label: label appended to the catalog filename when saving.
+        label: label appended to the filename when saving.
 
     Returns:
-        The saved catalog's path, for ``ResonatorCatalog.from_dict(
-        store.load(path))``; None when nothing was saved.
+        The bias_catalog file's path; None when nothing was saved.
 
     Raises:
         ValueError: the catalog is empty, spans more than
-            ``ALLOWED_NCO_BANDWIDTH_HZ``, or needs a forbidden NCO reset.
-            No settings have been programmed in these cases.
+            ``ALLOWED_NCO_BANDWIDTH_HZ``, needs a forbidden NCO reset, or holds
+            a power above the DAC scale's full scale. No settings have been
+            programmed in these cases.
         RuntimeError: the NCO readback remains unreachable or off-grid after
             a reset. The NCO has moved, but no tones have been applied.
     """
@@ -143,15 +210,31 @@ async def apply_bias(
                 f"no tones were applied."
             )
 
+    setting_dbm = await dac_scale_setting_dbm(crs, module)
+    applied, moved = _at_measured_power(catalog, setting_dbm, module)
+
     async with crs.tuber_context() as ctx:
-        for r in resonators:
+        for r in applied:
             ctx.set_frequency(
                 r.bias.frequency_hz - nco_hz, channel=r.channel, module=module
             )
             ctx.set_amplitude(r.bias.amplitude, channel=r.channel, module=module)
         await ctx()
+    if moved:
+        _warn_recomputed(moved, catalog, setting_dbm, module)
 
     path = store.maybe_save(
-        catalog.to_dict(), "catalog", save=save, label=label, module=module
+        {
+            "measurement": "bias_catalog",
+            "module": module,
+            "nco_frequency_hz": nco_hz,
+            "dac_scale_setting_dbm": setting_dbm,
+            "catalog": applied.to_dict(),
+        },
+        "bias_catalog", save=save, label=label, module=module,
     )
-    return None if path is None else str(path)
+    if path is None:
+        return None
+    register_export(Path(path).parent, Path(path).name, "bias_catalog",
+                    f"module{module}")
+    return str(path)

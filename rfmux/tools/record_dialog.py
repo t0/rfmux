@@ -138,7 +138,7 @@ class RecordDialog(QtWidgets.QDialog):
 
         # ── Channels and duration ────────────────────────────────
         self.rb_bias = QtWidgets.QRadioButton(
-            "Biased channels of the session's newest bias export per module")
+            "Biased channels of the session's newest bias_catalog per module")
         self.bias_label = QtWidgets.QLabel()
         self.rb_ranges = QtWidgets.QRadioButton("Ranges")
         self.channels_edit = QtWidgets.QLineEdit()
@@ -213,7 +213,7 @@ class RecordDialog(QtWidgets.QDialog):
             "After the run, the dirfile and the recording repacked as one "
             "HDF5 file of time-ordered data: every channel in the units "
             "chosen below, with a metadata group laid out as the pulse "
-            "file's and each channel's tuning row from the bias export, "
+            "file's and each channel's tuning row from the bias_catalog, "
             "readable with h5py alone")
         self.tod_note = QtWidgets.QLabel(
             "Converts after the run at less than real-time speed, typically "
@@ -445,8 +445,8 @@ class RecordDialog(QtWidgets.QDialog):
 
     def _channels(self):
         """(channels, note, tuned): the ``{module: channels}`` the
-        options resolve to, or None with the reason, and whether a bias
-        export gave them tuning rows.  Reading the bias exports costs a
+        options resolve to, or None with the reason, and whether a
+        bias_catalog gave them tuning rows.  Reading the bias_catalog files costs a
         tenth of a second, so the answer is kept until an input
         changes."""
         key = (self.rb_ranges.isChecked(), self.channels_edit.text(),
@@ -538,7 +538,7 @@ class RecordDialog(QtWidgets.QDialog):
             problems.append(note)
 
         # Data products: the TOD needs a stream to repack, the merge a
-        # pulse file to land in, and the metadata a bias export.
+        # pulse file to land in, and the metadata a bias_catalog.
         source = self.parser_check.isChecked() or self.fastrx_check.isChecked()
         self.tod_check.setEnabled(source)
         tod = source and self.tod_check.isChecked()
@@ -561,7 +561,7 @@ class RecordDialog(QtWidgets.QDialog):
         if tod and chans and not tuned:
             warnings.append(
                 "the TOD metadata (tuning, df calibration) comes from a "
-                "bias_kids export, and none was found for these modules in "
+                "bias_catalog file, and none was found for these modules in "
                 "the session: channels will be stored in volts without tuning")
 
         fx = _fastrx()

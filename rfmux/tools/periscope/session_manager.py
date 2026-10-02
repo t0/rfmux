@@ -643,8 +643,16 @@ class SessionManager(QtCore.QObject):
         """Save session metadata to JSON file."""
         if not self.is_active or self._session_path is None:
             return
-        
+
         try:
+            # Keep exports something else listed meanwhile (crs.apply_bias
+            # lists its bias_catalog file itself).
+            on_disk = _session.load_metadata(self._session_path).get('exports', [])
+            known = {e.get('filename') for e in
+                     self._session_metadata.get('exports', [])}
+            for entry in on_disk:
+                if entry.get('filename') not in known:
+                    self._session_metadata.setdefault('exports', []).append(entry)
             _session.save_metadata(self._session_path, self._session_metadata)
         except Exception as e:
             print(f"[Session] Warning: Could not save metadata: {e}")

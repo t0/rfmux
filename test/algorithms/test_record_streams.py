@@ -1,6 +1,6 @@
 """record_streams: the coordination (the parser is up before the capture
 starts; the recording window opens when noise training ends and lasts
-the duration), the session folder, and the bias export lookup.  The
+the duration), the session folder, and the bias_catalog lookup.  The
 last test drives the real thing against a MockCRS, with the parser as a
 subprocess.
 """
@@ -19,7 +19,7 @@ from rfmux.algorithms.measurement import record_streams as rs
 from rfmux.core import session_folder as core_session
 from rfmux.core.session_folder import load_metadata
 from rfmux.pulse_capture.capture_session import PulseCaptureConfig
-from test.record_helpers import bias_export as _bias_export, fake_fastrx
+from test.record_helpers import bias_catalog_file, fake_fastrx
 
 TRAIN_S = 0.05
 DURATION_S = 0.1
@@ -610,13 +610,13 @@ def test_a_module_the_channel_stream_lacks_is_refused_before_the_run(
     assert board.calls == []
 
 
-def test_the_command_takes_per_module_ranges_and_bias_exports(
+def test_the_command_takes_per_module_ranges_and_bias_catalogs(
         tmp_path, monkeypatch):
     from rfmux.tools import record
     folder = tmp_path / "session_x"
     folder.mkdir()
-    _bias_export(folder / "multisweep_2_1.pkl", 2, [1, 2])
-    _bias_export(folder / "multisweep_3_1.pkl", 3, [7])
+    bias_catalog_file(folder / "bias_catalog_2_1.pkl", 2, [1, 2])
+    bias_catalog_file(folder / "bias_catalog_3_1.pkl", 3, [7])
     seen = {}
 
     async def fake_main(serial, hostname, **kw):
@@ -648,7 +648,7 @@ def test_the_command_takes_per_module_ranges_and_bias_exports(
     record._run(modules=[2], channels=None, channel_streamer=True,
                 sample_trunc="HIGH", **common)
     assert (seen["channel_streamer"], seen["sample_trunc"]) == (True, "HIGH")
-    with pytest.raises(click.UsageError, match="no bias export for module 4"):
+    with pytest.raises(click.UsageError, match="no bias_catalog for module 4"):
         record._run(modules=[2, 4], channels=None, **common)
     # Modules run 1-4, the same bound the parser and the wire have.
     with pytest.raises(click.UsageError, match="modules run 1-4"):
@@ -662,7 +662,7 @@ def test_the_command_exits_on_a_failed_run_and_after_a_warning(
     from rfmux.tools import record
     folder = tmp_path / "session_x"
     folder.mkdir()
-    _bias_export(folder / "multisweep_2_1.pkl", 2, [1])
+    bias_catalog_file(folder / "bias_catalog_2_1.pkl", 2, [1])
     common = dict(serial="0156", hostname=None, duration=1.0,
                   session=str(folder), session_dir=".", capture=True,
                   parser=False, fastrx=False, parser_interface=None,
@@ -687,9 +687,9 @@ def test_the_command_exits_on_a_failed_run_and_after_a_warning(
     assert "[record] warning: no channel-stream packets" in \
         capsys.readouterr().err
     # --bias names one export, so one module.
-    with pytest.raises(click.UsageError, match="one module's export"):
+    with pytest.raises(click.UsageError, match="one module's bias_catalog"):
         record._run(modules=[2, 3], channels=None,
-                    bias=str(folder / "multisweep_2_1.pkl"), **common)
+                    bias=str(folder / "bias_catalog_2_1.pkl"), **common)
 
 
 def test_show_names_the_viewer_without_a_display_and_launches_it_with_one(
@@ -805,7 +805,7 @@ def test_mock_attaches_to_the_running_mock_and_simulates_only_without_one(
     assert seen["created"]["module"] == 1
 
 
-def test_a_tod_without_a_bias_export_is_said_before_the_run(
+def test_a_tod_without_a_bias_catalog_is_said_before_the_run(
         tmp_path, monkeypatch):
     from click.testing import CliRunner
     from rfmux.tools import record
@@ -818,9 +818,9 @@ def test_a_tod_without_a_bias_export_is_said_before_the_run(
             "--session-dir", str(tmp_path), "--no-fastrx", "--show", "none"]
     r = CliRunner().invoke(record.cli, args)
     assert r.exit_code == 0, r.output
-    assert "no bias export for these modules" in r.output
+    assert "no bias_catalog for these modules" in r.output
     r = CliRunner().invoke(record.cli, args + ["--no-tod"])
-    assert "no bias export" not in r.output
+    assert "no bias_catalog" not in r.output
 
 
 def _unreachable(tmp_path, monkeypatch, serial):
@@ -1003,22 +1003,22 @@ def test_products_are_listed_in_the_session_metadata(tmp_path, fake_recorders):
     assert run["capture_config"]["threshold_sigma"] == 5.0
 
 
-def test_newest_multisweep_for_the_module_gives_channels_and_tuning(tmp_path):
+def test_newest_bias_catalog_for_the_module_gives_channels_and_tuning(tmp_path):
     # Written newest first: a copied folder keeps no file times, so the
     # listing's timestamp decides; a file the listing lacks is not an
     # export.
-    _bias_export(tmp_path / "multisweep_120000.pkl", 2, [4, 5], calibrated=False,
+    bias_catalog_file(tmp_path / "bias_catalog_120000.pkl", 2, [4, 5], calibrated=False,
                  timestamp="2026-09-09T12:00:00")
-    _bias_export(tmp_path / "multisweep_110000.pkl", 1, [7],
+    bias_catalog_file(tmp_path / "bias_catalog_110000.pkl", 1, [7],
                  timestamp="2026-09-09T11:00:00")
-    _bias_export(tmp_path / "multisweep_100000.pkl", 2, [1, 2, 3],
+    bias_catalog_file(tmp_path / "bias_catalog_100000.pkl", 2, [1, 2, 3],
                  timestamp="2026-09-09T10:00:00")
 
     newest = rs.latest_bias_export(tmp_path, 2)
-    assert newest.name == "multisweep_120000.pkl"
+    assert newest.name == "bias_catalog_120000.pkl"
     chans, rows = rs.biased_channels(newest)
     assert chans == [4, 5] and set(rows) == {4, 5} and rs.calibrated(rows) == 0
-    chans, rows = rs.biased_channels(tmp_path / "multisweep_100000.pkl")
+    chans, rows = rs.biased_channels(tmp_path / "bias_catalog_100000.pkl")
     assert chans == [1, 2, 3] and rs.calibrated(rows) == 3
     # A row is the bias point of the catalog's resonator on that channel:
     # where its tone is, what drives it, and what reads it in hertz.
@@ -1026,8 +1026,48 @@ def test_newest_multisweep_for_the_module_gives_channels_and_tuning(tmp_path):
     assert rows[2]["amplitude"] == 0.01
     assert rows[2]["df_calibration"] == pytest.approx(2e6 - 1e5j)
     assert rs.latest_bias_export(tmp_path, 3) is None
-    (tmp_path / "multisweep_130000.pkl").write_bytes(b"")
+    (tmp_path / "bias_catalog_130000.pkl").write_bytes(b"")
     assert rs.latest_bias_export(tmp_path, 3) is None
+
+
+@pytest.mark.parametrize("saved", [
+    {"schema_version": 5, "name": "", "module": 2, "resonators": {}},
+    {"crs0000_rmod2": {"measurement": "multisweep", "module": 2}},
+], ids=["bare catalog", "multisweep"])
+def test_a_file_that_is_not_a_bias_catalog_is_refused(tmp_path, saved):
+    """--bias takes the file apply_bias writes; anything else is refused
+    with a message the record dialog shows."""
+    import pickle
+    path = tmp_path / "x.pkl"
+    path.write_bytes(pickle.dumps(saved))
+    with pytest.raises(ValueError, match="not a bias_catalog"):
+        rs.biased_channels(path)
+
+
+def test_the_rows_carry_what_the_bias_was_applied_at(tmp_path):
+    path = bias_catalog_file(tmp_path / "bias_catalog_1.pkl", 2, [4],
+                             nco_frequency_hz=1.05e9)
+    _, rows = rs.biased_channels(path)
+    assert rows[4]["nco_frequency_hz"] == 1.05e9
+    assert rows[4]["dac_scale_setting_dbm"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_an_nco_moved_since_the_bias_is_said():
+    class _Nco:
+        async def get_nco_frequency(self, module=None):
+            return 1.002e9
+
+    said = []
+    rows = {1: {"nco_frequency_hz": 1.0e9}, 2: {"nco_frequency_hz": 1.0e9}}
+    out = await rs._with_board_nco(_Nco(), rows, 2, said.append)
+    assert out[1]["nco_frequency_hz"] == 1.002e9
+    assert len(said) == 1 and "the tones have moved since" in said[0]
+
+    said.clear()
+    await rs._with_board_nco(_Nco(), {1: {"nco_frequency_hz": 1.002e9}}, 2,
+                             said.append)
+    assert said == []
 
 
 @pytest.mark.asyncio

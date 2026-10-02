@@ -1,6 +1,6 @@
-"""Builders shared by the record tests: a biased multisweep as
-Periscope's session writes it, and a fastrx module faked well enough for
-record_streams to reach its recording window."""
+"""Builders shared by the record tests: a bias_catalog file as
+crs.apply_bias writes and lists it, and a fastrx module faked well enough
+for record_streams to reach its recording window."""
 
 import pickle
 import time
@@ -11,17 +11,13 @@ import numpy as np
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.session_folder import register_export
-from rfmux.tuning import multisweep_from_tuning, tuning_rows
 
 
-def bias_export(path, module, channels, calibrated=True, timestamp=""):
-    """A multisweep of *channels* on *module* at *path*, its catalog
-    biased, listed in the folder's metadata as Periscope lists it.
-
-    Where a module's bias points live: Find Bias writes its report back
-    into the sweeps it read, so this is what ``record`` reads to learn
-    which channels are tuned and how they convert to hertz.
-    """
+def bias_catalog_file(path, module, channels, calibrated=True,
+                      timestamp="", nco_frequency_hz=1.0e9):
+    """A bias_catalog of *channels* on *module* at *path*, listed in the
+    folder's metadata: what ``record`` reads to learn which channels are
+    tuned and how they convert to hertz."""
     f = np.linspace(0.999e9, 1.001e9, 9)
     catalog = ResonatorCatalog(
         [Resonator(name=f"R{c:04d}", channel=c,
@@ -37,11 +33,12 @@ def bias_export(path, module, channels, calibrated=True, timestamp=""):
                                    "sweep_direction": "upward"}))
          for c in channels],
         module=module)
-    container = multisweep_from_tuning(
-        tuning_rows(catalog), module, module_id=f"crs0000_rmod{module}")
     with open(path, "wb") as fh:
-        pickle.dump(container, fh)
-    register_export(Path(path).parent, Path(path).name, "multisweep",
+        pickle.dump({"measurement": "bias_catalog", "module": module,
+                     "nco_frequency_hz": nco_frequency_hz,
+                     "dac_scale_setting_dbm": 1.0,
+                     "catalog": catalog.to_dict()}, fh)
+    register_export(Path(path).parent, Path(path).name, "bias_catalog",
                     f"module{module}", timestamp or None)
     return Path(path)
 

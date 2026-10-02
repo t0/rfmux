@@ -2677,6 +2677,42 @@ def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app, swept_c
     assert rows[biased.channel]["sweep_direction"] is not None
 
 
+def test_a_changed_dac_scale_is_said_in_a_popup_and_the_applied_bias_published(
+        board, qt_app, swept_container, tmp_path, monkeypatch):
+    """Apply Bias keeps the powers the bias was measured at: under a DAC
+    scale 6 dB up the tones go out at half the amplitude, the tuning a capture
+    records says so, and a warning that does not block the window says why."""
+    import math
+    from rfmux.tuning import store
+    loop, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    published = []
+    panel.tuning_ready.connect(
+        lambda module, rows: published.append((module, rows)))
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    store.set_autosave(True)
+    try:
+        scale = loop.run_until_complete(crs.get_dac_scale("DBM", module=catalog.module))
+        loop.run_until_complete(crs.set_dac_scale(
+            scale + 20 * math.log10(2), "DBM", module=catalog.module))
+        with pytest.warns(UserWarning, match="recomputed"):
+            _apply_bias(panel, qt_app)
+    finally:
+        store.set_autosave(None)
+        loop.run_until_complete(crs.set_dac_scale(scale, "DBM", module=catalog.module))
+
+    boxes = [w for w in panel.findChildren(QtWidgets.QMessageBox) if w.isVisible()]
+    assert len(boxes) == 1
+    assert "recomputed" in boxes[0].text()
+    assert boxes[0].windowModality() != QtCore.Qt.WindowModality.ApplicationModal
+    _, rows = published[0]
+    for r in panel.catalog:
+        assert rows[r.channel]["amplitude"] == pytest.approx(r.bias.amplitude / 2)
+    boxes[0].close()
+
+
 def test_a_noise_spectrum_needs_a_bias_first(board, qt_app, swept_container):
     """The button that reads a biased array is dead until one is."""
     _, crs, catalog = board
@@ -3080,8 +3116,9 @@ def test_the_left_plot_is_the_measurement_and_nothing_else(
 
 def test_the_bias_plot_draws_the_sweep_the_tone_will_sit_on(
         board, qt_app, swept_container):
-    """One drive of the schedule, the one chosen, and a line where the tone
-    goes on it."""
+    """One drive of the schedule, the one chosen, the model of each of its
+    sweeps that is fitted (Find Bias fits the one the bias was read from),
+    and a line where the tone goes on it."""
     panel = _panel_showing(swept_container, board)
     _find_bias(panel, qt_app)
     digest = _digest(panel, qt_app)
@@ -3089,7 +3126,9 @@ def test_the_bias_plot_draws_the_sweep_the_tone_will_sit_on(
     at_bias = _at_bias(panel, digest)
     assert 0 < len(at_bias) < len(digest._traces), \
         "this measurement should have more drives than the one it is biased at"
-    assert len(_digest_curves(digest, 2)) == len(at_bias)
+    fitted = sum(bool(trace[3].get("fits")) for trace in at_bias)
+    assert fitted >= 1
+    assert len(_digest_curves(digest, 2)) == len(at_bias) + fitted
     assert len(_digest_highlights(digest, 2)) == len(at_bias)
 
     finding = panel._bias_by_name()[digest.resonator()]

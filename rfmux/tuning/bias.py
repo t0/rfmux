@@ -16,6 +16,7 @@ from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology), via
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import NamedTuple
@@ -26,6 +27,7 @@ from scipy.signal import find_peaks
 
 from ..core.resonators import BiasPoint, ResonatorCatalog
 from . import store
+from .fits import _quiet_optimizer, fit_section
 from .store import plain
 from .sweep_results import (
     _refuse_container, _refuse_netanal, collect_amplitude_iterations_for,
@@ -340,9 +342,11 @@ def find_bias_points(
 ) -> BiasReport:
     """Choose a bias point and calibration for each resonator in a multisweep.
 
-    Reads the catalog recorded in the sweep, leaving it and the measured
-    entries unchanged. Returns a new catalog and stores the report in
-    ``ms_module_output["bias_report"]``, replacing any previous report.
+    Reads the catalog recorded in the sweep, leaving it unchanged. Returns a
+    new catalog and stores the report in ``ms_module_output["bias_report"]``,
+    replacing any previous report. Each bias point carries the sweep it was
+    chosen from with that sweep's fits (the sweep is fitted here, in place,
+    if it has none), the power that sweep was measured at, and any concern.
 
     ``report.flagged`` identifies a bifurcated lowest step, a drive with no
     known bifurcation above it, or a frequency outside the requested distance
@@ -505,27 +509,34 @@ def _find_bias_for_one(
     # 6. Quantize the bias frequency before evaluating calibration derivatives.
     bias = BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude)
     dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
-
-    # Keep the calibration and its source trace at the quantized tone frequency.
-    resonator.bias = replace(
-        bias,
-        dI_df=dI_df,
-        dQ_df=dQ_df,
-        bifurcated_at=(
-            choice.bifurcated_at
-            if choice.bifurcated_at is not None
-            else resonator.bias.bifurcated_at
-        ),
-        bias_sweep=_stored_sweep(entry),
-    )
+    bifurcated_at = (choice.bifurcated_at if choice.bifurcated_at is not None
+                     else resonator.bias.bifurcated_at)
 
     # 7. Record any concern about the amplitude or frequency choice.
     flagged_kind, flagged_because = _concern(
         choice,
-        known_bifurcation=resonator.bias.bifurcated_at,
+        known_bifurcation=bifurcated_at,
         measured_hz=measured_hz,
         centre_hz=centre_hz,
         max_distance_hz=max_distance_hz,
+    )
+
+    # 8. The bias sweep travels with its fits, so fit it if nothing has.
+    if not entry.get("fits"):
+        with _quiet_optimizer():
+            fit_section(entry)
+
+    # Keep the calibration, its source trace and the power that trace was
+    # measured at, at the quantized tone frequency.
+    resonator.bias = replace(
+        bias,
+        dI_df=dI_df,
+        dQ_df=dQ_df,
+        bifurcated_at=bifurcated_at,
+        bias_sweep=_stored_sweep(entry),
+        bias_power_dbm=entry.get("sweep_amplitude_dbm"),
+        flagged_kind=flagged_kind,
+        flagged_because=flagged_because,
     )
     return BiasFinding(
         name=resonator.name,
@@ -1137,9 +1148,13 @@ def _stored_sweep(entry: Mapping) -> dict:
     """Keep the calibration trace and context listed in ``BiasPoint.BIAS_SWEEP_KEYS``.
 
     Arrays are shared with the input, so a report saved alongside its sweeps
-    can reuse them through pickle's memoization.
+    can reuse them through pickle's memoization. The fits are copied: a later
+    refit of the sweep must not change the bias point's.
     """
-    return {k: entry[k] for k in BiasPoint.BIAS_SWEEP_KEYS if k in entry}
+    sweep = {k: entry[k] for k in BiasPoint.BIAS_SWEEP_KEYS if k in entry}
+    if "fits" in sweep:
+        sweep["fits"] = copy.deepcopy(sweep["fits"])
+    return sweep
 
 
 # ─── Reading the sweeps ───────────────────────────────────────────────────────

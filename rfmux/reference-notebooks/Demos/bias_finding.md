@@ -47,7 +47,8 @@ We begin with a
 
 import rfmux
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule, find_bias_points, store
+from rfmux.tuning import (AmplitudeSchedule, find_bias_points, load_bias_catalog,
+                          store)
 import example_plotting_multisweep as msplots
 import example_plotting_bias as biasplots
 
@@ -255,14 +256,21 @@ If you want, feed the catalog into another round of multisweeps to refine the bi
 ```python
 catalog = refined_bias_report.catalog
 
-catalog_path = await crs.apply_bias(catalog)
-print(f"applied catalog saved to {catalog_path}")
+bias_path = await crs.apply_bias(catalog, save=True)
+print(f"bias saved to {bias_path}")
 ```
 
 <!-- #region -->
-This programs the tones and, by default, saves the catalog as a pickled dictionary,
-returning the file's path. It does not make any decisions or changes, simply sets
-the chosen tone frequencies and amplitudes.
+This programs the tones and, by default, saves a `bias_catalog` file, returning
+its path: the catalog as applied, with the NCO and the DAC scale setting read back
+from the board. It does not choose anything; it sets the chosen tone frequencies
+and the amplitudes that give each tone the power it was measured at. If the DAC
+scale has changed since the sweep, those amplitudes differ from the catalog's, and
+a warning says so.
+
+Each bias point carries the sweep it was chosen from, that sweep's fits (bias
+finding fits it if nothing had), the power in dBm it was measured at, and why bias
+finding doubted the choice, if it did (`flagged_kind`, `flagged_because`).
 
 The catalog already
 carries the voltage slopes and source sweep used for calibration. It extracted these
@@ -284,14 +292,17 @@ If the system is in nominally the same or a quite simiar state to where you were
 chosen amplitudes. 
 
 If you still have the catalog loaded in your ipython session, you can simply pass that
-to the multisweep. If not, you can load it from the saved catalog pkl file that `apply_bias` 
-generated (or extract it from the last multisweep you ran before applying the bias).
+to the multisweep. If not, load it from the `bias_catalog` file `apply_bias` saved (or
+extract it from the last multisweep you ran before applying the bias).
 
 <!-- #endregion -->
 
 ```python
-# load the saved resonator catalog from when we applied the biases
-catalog = ResonatorCatalog.from_dict(store.load(catalog_path))
+# load the bias as it was applied: the catalog, the NCO and the DAC scale setting
+applied = load_bias_catalog(bias_path)
+catalog = applied.catalog
+print(f"NCO {applied.nco_frequency_hz / 1e6:.6f} MHz, "
+      f"DAC scale {applied.dac_scale_setting_dbm:g} dBm")
 
 # run a new multisweep using it, to check on the state of the array
 confirmation_multisweep = await crs.multisweep(

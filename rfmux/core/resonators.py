@@ -42,8 +42,13 @@ class BiasPoint:
     ``Resonator.update_bias_point`` to clear calibration fields automatically.
 
     ``bias_sweep`` holds the trace used for calibration: frequency in Hz,
-    complex IQ in volts, sweep centre, amplitude, and direction. Its keys are
-    listed in ``BIAS_SWEEP_KEYS``.
+    complex IQ in volts, sweep centre, amplitude, direction, and the fits of
+    that sweep. Its keys are listed in ``BIAS_SWEEP_KEYS``.
+
+    ``bias_power_dbm`` is the tone's power at the output, measured with the
+    sweep it was chosen from. ``crs.apply_bias`` keeps this power when the DAC
+    scale has changed since, recomputing the amplitude. ``flagged_kind`` and
+    ``flagged_because`` say why bias finding doubted this choice, or are None.
     """
 
     frequency_hz: float
@@ -56,6 +61,9 @@ class BiasPoint:
     # First bifurcated amplitude in the last run that observed bifurcation.
     bifurcated_at: float | None = None
     bias_sweep: dict | None = None  # the trace dI_df/dQ_df were read off
+    bias_power_dbm: float | None = None  # at the output, after the balun loss
+    flagged_kind: str | None = None
+    flagged_because: str | None = None
 
     # Fields cleared by update_bias_point when frequency or amplitude is supplied.
     _CAL_FIELDS = (
@@ -64,6 +72,9 @@ class BiasPoint:
         "iq_rotation_deg",
         "bifurcated_at",
         "bias_sweep",
+        "bias_power_dbm",
+        "flagged_kind",
+        "flagged_because",
     )
 
     # Fields retained from the sweep used to compute calibration.
@@ -73,6 +84,7 @@ class BiasPoint:
         "original_center_frequency",
         "sweep_amplitude",
         "sweep_direction",
+        "fits",
     )
 
     # Frequency and IQ arrays are required; the remaining sweep fields are optional.
@@ -214,11 +226,12 @@ class ResonatorCatalog:
     """
 
     # Version the saved catalog format; reject unsupported versions on load.
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
 
     # Version 1 uses a list of named entries; later versions key entries by name.
-    # Missing bias_sweep and catalog name fields use their constructor defaults.
-    READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4)
+    # Fields a version lacks (bias_sweep, name, bias_power_dbm, flagged_*) take
+    # their constructor defaults.
+    READABLE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
 
     def __init__(
         self,

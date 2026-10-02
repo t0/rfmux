@@ -820,7 +820,8 @@ class FindBiasTask(QtCore.QThread):
 
 
 class ApplyBiasSignals(QObject):
-    completed = pyqtSignal(object)      # the NCO the tones went out against
+    # The NCO the tones went out against, and the bias_catalog file (or None).
+    completed = pyqtSignal(object, object)
     error = pyqtSignal(str)
 
 
@@ -843,7 +844,7 @@ class ApplyBiasTask(QtCore.QThread):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self.crs.apply_bias(self.catalog))
+            path = loop.run_until_complete(self.crs.apply_bias(self.catalog))
             nco_hz = loop.run_until_complete(
                 self.crs.get_nco_frequency(module=self.catalog.module))
         except Exception as e:
@@ -853,7 +854,7 @@ class ApplyBiasTask(QtCore.QThread):
         finally:
             loop.close()
         self.signals.completed.emit(
-            None if nco_hz is None else float(nco_hz))
+            None if nco_hz is None else float(nco_hz), path)
 
 
 class CRSInitializeTask(QRunnable):

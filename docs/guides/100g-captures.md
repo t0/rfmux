@@ -81,9 +81,9 @@ The **Run** tab:
 - **Session**: an existing session folder, the newest under the default
   path filled in, or a new `session_YYYYMMDD_HHMMSS` folder under a
   directory of your choice.
-- **Channels**: the biased channels of each module's newest bias export
-  in that session, with the export named and its channel count shown, or
-  ranges you type: `1-88` on every module, or `2:1-114,3:1-96` naming the
+- **Channels**: the biased channels of each module's newest bias file in
+  that session (the `bias_catalog` Apply Bias writes), with the file named
+  and its channel count shown, or ranges you type: `1-88` on every module, or `2:1-114,3:1-96` naming the
   modules itself.
 - **Duration**, in seconds, after the capture's noise training.
 - **Products**: the pulse capture of the slow stream, the parser dirfile
@@ -109,7 +109,7 @@ The **Run** tab:
   into the pulse file, which then grows by the whole TOD (the size for
   this run is shown) where the pulse record alone is a few MB; it needs
   the pulse capture. The TOD file works without the pulse capture, but
-  its tuning and df calibrations come from the session's bias export,
+  its tuning and df calibrations come from the session's bias file,
   and the status line warns when none was found for the modules. **Units** chooses what both files store,
   I,Q voltages or df/diss units (hertz along the frequency direction, for
   calibrated channels); it is the same setting as the trigger basis on
@@ -138,7 +138,7 @@ file it cannot read is reported in a dialog and on the console.
 Every choice of the dialog is an option, except the per-channel table,
 which reaches the command line through `--config`; `rfmux record --help`
 lists them with their defaults. `--serial` and `--duration` are required. One module,
-into an existing session, channels from its newest bias export:
+into an existing session, channels from its newest bias file:
 
 ```bash
 rfmux record --serial <NNNN> --module <module> --duration 20 \
@@ -153,9 +153,11 @@ rfmux record --serial <NNNN> --module 2 --module 3 --duration 20 \
     --session-dir ~/data --channel-streamer --sample-trunc LOW
 ```
 
-Channel ranges instead of the bias export: `--channels 1-88` applies the
+Channel ranges instead of the bias file: `--channels 1-88` applies the
 same ranges to every module, `--channels 2:1-114,3:1-96` names the modules
-itself; `--bias <file>` names a bias export instead of the newest.
+itself; `--bias <file>` names a `bias_catalog` file instead of the newest.
+The capture records the NCO the board is playing, and says so when it
+differs from the NCO the bias was applied at: the tones have moved since.
 
 Without a board, `--serial MOCK` records from the mock Periscope is
 running, with its tuned detectors: the first mock server on a host serves
@@ -192,7 +194,7 @@ dialog, or a capture that recorded its config (one made in Periscope, with
 `trigger_capture` or with `rfmux record`). A capture option typed beside it
 overrides that one value (`--end-sigma 1.0`). `--channels` replaces the
 file's channels on its modules; `--module` replaces its modules, and its
-channels then come from `--channels` or the bias export.
+channels then come from `--channels` or the bias file.
 
 ## 4. What a run does
 
@@ -393,9 +395,9 @@ with PulseHDF5Reader("pulse_module2_143012.h5") as r:
 
 The time-ordered data file comes from `write_tod` in
 `rfmux.algorithms.measurement.tod`, given either product or both, the channels, and
-the tuning rows the capture used (`tuning_rows` in
-`rfmux.algorithms.measurement.df_calibration`, from a bias export's
-`bias_kids_output` and `nco_frequency_hz`); `merge_tod` copies its `tod/`
+the tuning rows the capture used (`rfmux.tuning.tuning_rows` of the
+catalog in the bias file, with its NCO and DAC scale setting); `merge_tod`
+copies its `tod/`
 group into the run's pulse file:
 
 ```python

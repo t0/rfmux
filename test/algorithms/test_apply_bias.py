@@ -10,18 +10,24 @@ user would use, so a test that passes says the tones are where the catalog says
 they are, not merely that apply_bias called the functions we expected.
 """
 
+import math
+import warnings
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import rfmux
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog, on_grid
+from rfmux.core.session_folder import latest_export
 from rfmux.core.transferfunctions import (
     ALLOWED_NCO_BANDWIDTH_HZ,
+    BALUN_LOSS_DB,
     BASE_FREQUENCY,
     FREQ_QUANTUM,
+    convert_dacunits_to_dbm,
 )
-from rfmux.tuning import BiasReport, store
+from rfmux.tuning import BiasReport, load_bias_catalog, store
 
 SESSION = """
 !HardwareMap
@@ -91,11 +97,13 @@ async def test_every_tone_lands_on_its_channel(crs_mock):
 
 
 @pytest.mark.asyncio
-async def test_a_successful_apply_saves_the_catalog_as_a_dictionary(
+async def test_a_successful_apply_saves_and_lists_a_bias_catalog(
     crs_mock,
     tmp_path,
     monkeypatch,
 ):
+    """The file says what went on the air: the catalog, the NCO and the DAC
+    scale setting read back, and it is listed so rfmux record finds it."""
     crs = crs_mock
     await crs.resolve()
     await crs.set_nco_frequency(SETTLED_NCO_HZ, module=MODULE)
@@ -104,12 +112,77 @@ async def test_a_successful_apply_saves_the_catalog_as_a_dictionary(
     catalog = a_catalog(-1e6, +1e6)
     path = await crs.apply_bias(catalog, save=True, label="chosen_bias")
 
-    assert isinstance(path, str)
-    assert list(tmp_path.glob("catalog_*_chosen_bias.pkl")) == [Path(path)]
-    saved = store.load(path)
-    assert isinstance(saved, dict)
-    assert ResonatorCatalog.from_dict(saved).to_dict() == catalog.to_dict()
-    assert saved["file_metadata"]["module"] == MODULE
+    assert list(tmp_path.glob("bias_catalog_*_chosen_bias.pkl")) == [Path(path)]
+    applied = load_bias_catalog(path)
+    assert applied.catalog.to_dict() == catalog.to_dict()
+    assert applied.nco_frequency_hz == await crs.get_nco_frequency(module=MODULE)
+    assert applied.dac_scale_setting_dbm == await crs.get_dac_scale(
+        "DBM", module=MODULE)
+    assert latest_export(tmp_path, "bias_catalog", f"module{MODULE}") == Path(path)
+
+
+def a_measured_catalog(power_dbm, amplitude=AMPLITUDE):
+    """One resonator whose bias carries the power it was measured at."""
+    catalog = a_catalog(0.0, amplitude=amplitude)
+    r = catalog["R0001"]
+    r.bias = replace(r.bias, bias_power_dbm=power_dbm, dI_df=2e-7, dQ_df=-1e-7)
+    return catalog
+
+
+@pytest.mark.asyncio
+async def test_a_changed_dac_scale_keeps_the_measured_power(
+    crs_mock, tmp_path, monkeypatch,
+):
+    """The power is what pins the bias: under a DAC scale 6 dB higher than
+    the one it was measured at, the tone is played at half the amplitude,
+    keeps its calibration, and the change is said."""
+    crs = crs_mock
+    await crs.resolve()
+    await crs.set_nco_frequency(SETTLED_NCO_HZ, module=MODULE)
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    measured_at = await crs.get_dac_scale("DBM", module=MODULE)
+    power = float(convert_dacunits_to_dbm(AMPLITUDE, measured_at - BALUN_LOSS_DB))
+    await crs.set_dac_scale(measured_at + 20 * math.log10(2), "DBM", module=MODULE)
+
+    catalog = a_measured_catalog(power)
+    with pytest.warns(UserWarning, match="recomputed to keep their measured powers"):
+        path = await crs.apply_bias(catalog, save=True)
+
+    played = await crs.get_amplitude(channel=1, module=MODULE)
+    assert played == pytest.approx(AMPLITUDE / 2)
+    bias = load_bias_catalog(path).catalog["R0001"].bias
+    assert bias.amplitude == pytest.approx(AMPLITUDE / 2)
+    assert bias.bias_power_dbm == power
+    assert (bias.dI_df, bias.dQ_df) == (2e-7, -1e-7)
+    assert catalog["R0001"].bias.amplitude == AMPLITUDE   # the input is not edited
+
+
+@pytest.mark.asyncio
+async def test_a_power_above_full_scale_is_refused_before_anything_is_programmed(
+    crs_mock,
+):
+    crs = crs_mock
+    await crs.resolve()
+    await crs.set_nco_frequency(SETTLED_NCO_HZ, module=MODULE)
+    setting = await crs.get_dac_scale("DBM", module=MODULE)
+    catalog = a_measured_catalog(setting - BALUN_LOSS_DB + 3.0)
+
+    with pytest.raises(ValueError, match="Raise the DAC scale"):
+        await crs.apply_bias(catalog, save=False)
+    await assert_nothing_applied(crs, catalog)
+
+
+@pytest.mark.asyncio
+async def test_a_bias_point_without_a_power_is_played_at_its_amplitude(crs_mock):
+    crs = crs_mock
+    await crs.resolve()
+    await crs.set_nco_frequency(SETTLED_NCO_HZ, module=MODULE)
+    await crs.set_dac_scale(-5.0, "DBM", module=MODULE)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        await crs.apply_bias(a_catalog(0.0), save=False)
+    assert await crs.get_amplitude(channel=1, module=MODULE) == pytest.approx(AMPLITUDE)
 
 
 @pytest.mark.asyncio

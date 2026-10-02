@@ -32,7 +32,8 @@ from .tasks import (
     RunFitsSignals, RunFitsTask)
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.tuning import (AmplitudeSchedule, BiasReport,
-                          collect_amplitude_iterations_for, store, tuning_rows)
+                          collect_amplitude_iterations_for, load_bias_catalog,
+                          store, tuning_rows)
 
 # A data callback arrives per sweep point; a grid of subplots takes longer to
 # draw than a point takes to measure, so live redraws are coalesced to this.
@@ -1263,25 +1264,48 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             periscope.crs, self.catalog, signals)
         self._apply_bias_task.start()
 
-    def _bias_applied(self, nco_frequency_hz=None):
+    def _bias_applied(self, nco_frequency_hz=None, bias_path=None):
         """The tones are on the air: publish the tuning record they make.
 
-        The rows carry the bias point of every resonator and the one sweep it
-        was read off, plus what the board and the sweep say around them -- the
-        NCO the tones went out against, the DAC scale they are labelled by, and
-        the sweep's ``nsamps``. A capture started after this records them.
+        The rows carry the bias point of every resonator as applied, from the
+        bias_catalog file when one was saved, and the one sweep it was read
+        off, plus the NCO the tones went out against, the DAC scale, and the
+        sweep's ``nsamps``. A capture started after this records them.
         """
         self.apply_bias_btn.setEnabled(True)
+        applied = load_bias_catalog(bias_path) if bias_path else None
+        catalog = applied.catalog if applied else self.catalog
+        if applied:
+            self._say_recomputed(applied)
         rows = tuning_rows(
-            self.catalog,
+            catalog,
             nco_frequency_hz=nco_frequency_hz,
             dac_scale_dbm=(self.dac_scales or {}).get(self.target_module),
+            dac_scale_setting_dbm=applied.dac_scale_setting_dbm if applied else None,
             nsamps=(self.module_sweeps or {}).get('call_params', {}).get('nsamps'),
         )
         if rows:
             self.tuning_ready.emit(self.target_module, rows)
         self.noise_spectrum_btn.setEnabled(True)
         self._show_bias_status("Bias applied")
+
+    def _say_recomputed(self, applied) -> None:
+        """A dismissable warning when apply_bias changed amplitudes to keep the
+        powers the bias points were measured at."""
+        moved = [r.name for r in applied.catalog
+                 if r.name in self.catalog
+                 and r.bias.amplitude != self.catalog[r.name].bias.amplitude]
+        if not moved:
+            return
+        box = QtWidgets.QMessageBox(
+            QtWidgets.QMessageBox.Icon.Warning, "Amplitudes recomputed",
+            f"The DAC scale is set to {applied.dac_scale_setting_dbm:g} dBm, not "
+            f"the scale the bias powers were measured at, so {len(moved)} tones' "
+            f"amplitudes were recomputed to keep their measured powers "
+            f"({', '.join(moved[:5])}{', ...' if len(moved) > 5 else ''}).",
+            parent=self)
+        box.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.open()
 
     def _apply_bias_error(self, message: str):
         self.apply_bias_btn.setEnabled(True)

@@ -109,7 +109,8 @@ for resonator in catalog:
     dI_df, dQ_df = iq_derivatives_at(sweep, resonator.bias.frequency_hz)
     resonator.update_bias_point(
         dI_df=dI_df, dQ_df=dQ_df,
-        bias_sweep={key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS},
+        bias_sweep={key: sweep[key] for key in BiasPoint.BIAS_SWEEP_KEYS
+                    if key in sweep},
     )
 assert all(r.bias.df_calibration is not None for r in catalog)
 await crs.apply_bias(catalog)

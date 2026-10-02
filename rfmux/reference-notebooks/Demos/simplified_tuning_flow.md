@@ -77,7 +77,7 @@ import rfmux
 from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for,
     find_bias_amplitude, find_bias_frequency, find_bias_points,
-    find_resonances_in_netanal, magnitude_db, store,
+    find_resonances_in_netanal, load_bias_catalog, magnitude_db, store,
 )
 
 from rfmux.core.resonators import ResonatorCatalog
@@ -420,7 +420,11 @@ if the current setting cannot carry the tones. It does not select operating
 points: that was analysis in section 5.
 
 ```python
-await crs.apply_bias(bias_report.catalog)
+bias_path = await crs.apply_bias(bias_report.catalog, save=True)
+applied = load_bias_catalog(bias_path)
+first = next(iter(applied.catalog))
+print(f"{bias_path}: NCO {applied.nco_frequency_hz / 1e6:.6f} MHz, "
+      f"{first.name} at {first.bias.bias_power_dbm:.2f} dBm")
 
 ```
 
@@ -509,8 +513,8 @@ restored_catalog = ResonatorCatalog.from_dict(saved_sweeps[module_id]["bias_repo
 print(restored_catalog)
 restored_noise = store.load(noise_path)
 print(f"reloaded noise for {len(restored_noise[module_id]['results']['resonators'])} resonators")
-# To reapply later, after connecting to the intended board:
-# await crs.apply_bias(restored_catalog)
+# To reapply later, after connecting to the intended board, from the bias file:
+# await crs.apply_bias(load_bias_catalog(bias_path).catalog)
 print(f"workflow completed in {time.perf_counter() - started:.1f} s")
 ```
 

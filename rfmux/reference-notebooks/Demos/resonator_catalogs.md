@@ -65,7 +65,7 @@ print(rfmux.__file__)
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.transferfunctions import BASE_FREQUENCY
 from rfmux.mock.standard_array import standard_array
-from rfmux.tuning import store
+from rfmux.tuning import load_bias_catalog, store
 ```
 
 ## 1. Start from a biased mock array
@@ -406,9 +406,10 @@ Pickle is the current format for tuning outputs. Save `catalog.to_dict()` so the
 file does not depend on the catalog class’s import path. Rebuild it with
 `from_dict()` after loading.
 
-`crs.apply_bias()` saves the successfully applied catalog as a dictionary through
+`crs.apply_bias()` saves the successfully applied catalog in a `bias_catalog`
+file, with the NCO and the DAC scale setting read back from the board, through
 the same store used by measurement routines, and returns the file's path as a
-string. Its `save=None` default follows the autosave setting; `save=True` forces
+string. `load_bias_catalog(path)` reads it back. Its `save=None` default follows the autosave setting; `save=True` forces
 a write and `save=False` applies the tones without writing, returning None.
 `label` is appended to the generated filename.
 
@@ -419,11 +420,13 @@ remains there after the notebook finishes.
 output_dir = store.session_directory()
 print(f"saving files to: {output_dir}")
 
-catalog_pkl_path = await crs.apply_bias(by_hand_catalog, save=True, label="by_hand")
-print(f"wrote {catalog_pkl_path}")
+bias_path = await crs.apply_bias(by_hand_catalog, save=True, label="by_hand")
+print(f"wrote {bias_path}")
 
-catalog_from_disk = ResonatorCatalog.from_dict(store.load(catalog_pkl_path))
-print(catalog_from_disk)
+applied = load_bias_catalog(bias_path)
+print(applied.catalog)
+print(f"NCO {applied.nco_frequency_hz / 1e6:.6f} MHz, "
+      f"DAC scale {applied.dac_scale_setting_dbm:g} dBm")
 ```
 
 The default measurement folder is `~/rfmux_data/ipy_session_YYYYMMDD/`.
@@ -432,10 +435,9 @@ The default measurement folder is `~/rfmux_data/ipy_session_YYYYMMDD/`.
 `store.set_output_directory(path)`.
 
 The save happens only after every tone has been programmed. The filename includes
-a timestamp. The saved dictionary also gains `file_metadata`, which
-`ResonatorCatalog.from_dict()` ignores when rebuilding the catalog. For a catalog
-that should be stored without being applied, use
-`store.save(catalog.to_dict(), "catalog")` directly.
+a timestamp, and the file is listed in the folder's session metadata so
+`rfmux record` finds it. For a catalog that should be stored without being
+applied, use `store.save(catalog.to_dict(), "catalog")` directly.
 
 Only load pickle files you trust: unpickling can execute code from the file.
 

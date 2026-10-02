@@ -169,7 +169,7 @@ async def run_algorithm_flow(
 
     # Like the notebook, apply the full catalog, including reported fallbacks.
     print("4. Applying bias catalog", flush=True)
-    await crs.apply_bias(report.catalog)
+    print(f"Saved bias: {await crs.apply_bias(report.catalog, save=True)}")
 
     print("5. Acquiring slow-stream and PFB noise", flush=True)
     noise = await _acquire_noise(crs, report.catalog, created_mock=created_mock)

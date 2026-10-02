@@ -70,7 +70,8 @@ from .noise import (
     remove_common_mode,
 )
 from . import store
-from .tuning_record import (catalog_from_tuning, multisweep_from_tuning,
+from .tuning_record import (AppliedBias, catalog_from_tuning,
+                            load_bias_catalog, multisweep_from_tuning,
                             tuning_rows)
 from .sweep_results import (
     RESULTS_SCHEMA_VERSION,
@@ -132,6 +133,8 @@ __all__ = [
     "merge_modules",
     "pack_multisweep",
     "catalog_from_tuning",
+    "AppliedBias",
+    "load_bias_catalog",
     "multisweep_from_tuning",
     "tuning_rows",
 ]

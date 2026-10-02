@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.dac_scale import dac_scale_dbm
-from rfmux.core.resonators import on_grid
+from rfmux.core.resonators import ResonatorCatalog, on_grid
 from rfmux.core.transferfunctions import convert_dacunits_to_dbm
 from rfmux.mock.config import bias_dbm_from_amplitude
 from rfmux.tuning import AmplitudeSchedule, find_bias_points, fit_sweeps
@@ -119,6 +119,36 @@ def test_the_calibration_lives_on_the_bias_point(bias_report):
         assert (point.dI_df, point.dQ_df) != (0.0, 0.0)
         assert point.bias_sweep is not None
         assert point.bias_sweep["sweep_amplitude"] == point.amplitude
+
+
+def test_the_bias_point_carries_its_sweep_s_fits_power_and_concern(
+        bias_report, schedule_sweeps):
+    """What the bias was read from travels with it: the sweep, that sweep's
+    fits (fitted by bias finding when nothing had), the power it was measured
+    at, and why bias finding doubted the choice, if it did."""
+    for finding in bias_report.findings:
+        point = bias_report.catalog[finding.name].bias
+        direction = point.bias_sweep["sweep_direction"]
+        entry = schedule_sweeps["results"][finding.iteration][direction][finding.name]
+        assert set(point.bias_sweep["fits"]) == {"skewed", "nonlinear", "circle"}
+        assert point.bias_sweep["fits"] == entry["fits"]
+        assert point.bias_sweep["fits"] is not entry["fits"]
+        assert point.bias_power_dbm == entry["sweep_amplitude_dbm"]
+        assert (point.flagged_kind, point.flagged_because) == \
+            (finding.flagged_kind, finding.flagged_because)
+    # The saved form of a catalog, which the bias_catalog file holds.
+    back = ResonatorCatalog.from_dict(bias_report.catalog.to_dict())
+    for before, after in zip(bias_report.catalog, back):
+        assert after.bias.bias_sweep["fits"] == before.bias.bias_sweep["fits"]
+        assert after.bias.bias_power_dbm == before.bias.bias_power_dbm
+
+
+def test_retuning_by_hand_clears_what_was_measured_at_the_old_tone(bias_report):
+    resonator = bias_report.catalog.copy()[bias_report.catalog.names()[0]]
+    resonator.update_bias_point(amplitude=resonator.bias.amplitude / 2)
+    assert resonator.bias.bias_power_dbm is None
+    assert resonator.bias.bias_sweep is None
+    assert resonator.bias.flagged_because is None
 
 
 def test_bias_finding_on_a_bifurcating_schedule_raises_no_warning(bias_report):
@@ -239,6 +269,8 @@ def test_the_tuning_record_round_trips_through_a_capture_file(
                                    before.bias.bias_sweep["iq_volts"])
         assert (after.bias.bias_sweep["sweep_direction"]
                 == before.bias.bias_sweep["sweep_direction"])
+        assert after.bias.bias_power_dbm == pytest.approx(before.bias.bias_power_dbm)
+        assert after.bias.flagged_kind == before.bias.flagged_kind
 
 
 def test_a_capture_s_tuning_reads_as_the_multisweep_it_came_from(bias_report):

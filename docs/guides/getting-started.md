@@ -119,24 +119,35 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 ### Biasing KIDs
 
-`bias_kids` takes multisweep results and biases each detector. It is not
-registered on `CRS`: import it and pass `crs`.
+Bias finding works on a catalog of resonators: find the dips in a network
+analysis, sweep each resonator at several readout powers, and let
+`find_bias_points` choose each one's bias. `crs.apply_bias` sets the tones and
+saves a `bias_catalog` file of what it applied.
 
 ```python
-from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.tuning import (AmplitudeSchedule, find_bias_points,
+                          find_resonances_in_netanal)
+
+module_id = crs.module[1].index()
+catalog = find_resonances_in_netanal(netanal[module_id]).to_catalog(
+    module=1, amplitude=0.001)
 
 sweeps = await crs.multisweep(
-    center_frequencies=resonance_frequencies,
-    span_hz=500e3, npoints_per_sweep=500, amp=0.001, module=1,
+    catalog, span_hz=100e3, npoints_per_sweep=201,
+    amp=AmplitudeSchedule.ramp(0.002, 0.032, 5),
+    sweep_direction=("upward", "downward"),
 )
-bias_results = await bias_kids(crs=crs, multisweep_results=sweeps, module=1)
+report = find_bias_points(sweeps[module_id])
+bias_path = await crs.apply_bias(report.catalog)
 
-# {detector_index: {"bias_frequency": ..., "df_calibration": ..., ...}}
+# Each bias point: frequency_hz, amplitude, bias_power_dbm, dI_df and dQ_df,
+# and the sweep it was read from with that sweep's fits.
 ```
 
-The full sequence (sweep, unwrap cable delay, find resonances, multisweep, fit,
-bias, measure noise) is documented and runnable in
-`rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`.
+The full sequence (network analysis, find resonances, multisweep, bias finding,
+apply, measure noise) is documented and runnable in
+`rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`, and step by step
+in `network_analysis_find_resonances.md`, `multisweep.md` and `bias_finding.md`.
 
 ## IPython Integration
 

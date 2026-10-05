@@ -233,7 +233,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         
         # --- Tuning storage ---
-        # The tuning rows per module, {module: {channel: bias_kids entry}},
+        # The tuning rows per module, {module: {channel: tuning row}},
         # and the df calibration of every row that has one, which the
         # plots convert with: {module: {channel: complex}}
         self.tuning: Dict[int, Dict[int, dict]] = {}
@@ -2672,6 +2672,8 @@ grid. This tab needs a selected bias step to display its curves.
                 self._load_multisweep_analysis(data)
             elif file_type == 'noise':
                 self._load_noise_from_session(data, file_path)
+            elif file_type == 'bias_catalog':
+                self.open_bias_catalog(file_path)
             else:
                 QtWidgets.QMessageBox.information(
                     self,

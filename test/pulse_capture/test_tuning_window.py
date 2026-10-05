@@ -150,3 +150,28 @@ def test_rows_without_a_sweep_open_nothing(qt_app, monkeypatch):
             if k not in ("frequencies", "iq_volts")}
     assert p.open_tuning_window({1: bare}, 1, "x.h5") is None
     assert "no tuning row carries a sweep" in p.statusBar().currentMessage()
+
+
+def test_a_bias_catalog_in_the_session_browser_opens_the_tuning_window(
+        qt_app, monkeypatch, tmp_path):
+    """Double-clicking the file apply_bias saved shows its sweeps read-only,
+    as a capture's Tuning item does."""
+    from rfmux.tools.periscope.session_manager import SessionManager
+    from rfmux.tuning import catalog_from_tuning, store
+    catalog = catalog_from_tuning({3: _row(3, 1.0e9), 7: _row(7, 1.1e9)}, 2)
+    path = store.save({"measurement": "bias_catalog", "module": 2,
+                       "nco_frequency_hz": 1.0e9, "dac_scale_setting_dbm": 1.0,
+                       "catalog": catalog.to_dict()},
+                      "bias_catalog", directory=tmp_path, module=2)
+    p = bare_periscope(monkeypatch, session_manager=SessionManager())
+
+    p._load_session_file(str(path))
+
+    title = p.dock_manager.create_dock.call_args.args[1]
+    assert title == f"Tuning of {path.name} (module 2)"
+    panel = p.dock_manager.create_dock.call_args.args[0]
+    try:
+        assert sorted(r.channel for r in panel.catalog) == [3, 7]
+        assert panel.is_capture_tuning
+    finally:
+        panel.close()

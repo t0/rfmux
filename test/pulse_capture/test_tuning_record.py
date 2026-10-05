@@ -1,6 +1,5 @@
-"""A capture file carries each channel's tuning row: the bias_kids entry
-it was captured with, under the channel's ``tuning`` group, read back
-as it was handed in."""
+"""A capture file carries each channel's tuning row under the channel's
+``tuning`` group, read back as it was handed in."""
 
 import numpy as np
 import pytest

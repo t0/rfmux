@@ -9,7 +9,10 @@ from PyQt6 import sip
 import numpy as np
 from typing import Optional
 from rfmux.core.resonators import ResonatorCatalog
-from rfmux.tuning import AmplitudeSchedule, multisweep_from_tuning
+from pathlib import Path
+from rfmux.core.transferfunctions import BALUN_LOSS_DB
+from rfmux.tuning import (AmplitudeSchedule, load_bias_catalog,
+                          multisweep_from_tuning, tuning_rows)
 from rfmux.core.transferfunctions import (
     PFB_SAMPLING_FREQ,
     apply_iq_conversion,
@@ -1572,6 +1575,18 @@ class PeriscopeRuntime:
     
         return dac_scales
     
+    def open_bias_catalog(self, path) -> None:
+        """A bias_catalog file in the tuning window a capture's Tuning item
+        opens, with the NCO and DAC scale it was applied at."""
+        applied = load_bias_catalog(path)
+        setting = applied.dac_scale_setting_dbm
+        rows = tuning_rows(
+            applied.catalog, nco_frequency_hz=applied.nco_frequency_hz,
+            dac_scale_dbm=None if setting is None else setting - BALUN_LOSS_DB,
+            dac_scale_setting_dbm=setting)
+        return self.open_tuning_window(rows, applied.catalog.module,
+                                       Path(path).name)
+
     def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):
         """Browse the sweeps a capture's channels were tuned with.
 

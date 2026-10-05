@@ -83,14 +83,15 @@ def _json_default(value):
 def _store_tuning(grp, tuning, channel) -> None:
     """Write *channel*'s tuning row under ``grp/tuning``.
 
-    A row is a bias_kids entry: its scalars and strings become
-    attributes (``df_calibration`` among them), its numeric arrays
-    datasets, and anything else (``fit_params`` and other mappings, lists
-    of strings) a JSON attribute named in ``json_fields``; a complex
-    number inside JSON is a two-element list.  None is skipped.  A field
-    h5py cannot store, or a row that is not one, is skipped with a
-    warning rather than raised: the pulses are worth more than their
-    labels, and a writer that refuses to open costs the whole capture.
+    A row is one resonator's bias (``rfmux.tuning.tuning_rows``): its
+    scalars and strings become attributes (``df_calibration`` among
+    them), its numeric arrays datasets, and anything else (``fits`` and
+    other mappings, lists of strings) a JSON attribute named in
+    ``json_fields``; a complex number inside JSON is a two-element list.
+    None is skipped.  A field h5py cannot store, or a row that is not one,
+    is skipped with a warning rather than raised: the pulses are worth more
+    than their labels, and a writer that refuses to open costs the whole
+    capture.
     """
     if not isinstance(tuning, dict) or not tuning:
         return

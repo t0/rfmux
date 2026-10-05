@@ -37,7 +37,7 @@ def bandpass_filter(data: np.ndarray, fs: float, lowcut: float, highcut: float, 
     return filtfilt(b, a, data)
 
 
-@deprecated("nothing yet", note="Setting the ADC phase is deliberately not part of the current tuning flow (see main_merge_conflict_survey.md §9.2).")
+@deprecated("nothing yet", note="Setting the ADC phase is deliberately not part of the current tuning flow.")
 async def find_optimal_phases_parallel(
     crs,
     bias_configs: Dict[int, Dict],

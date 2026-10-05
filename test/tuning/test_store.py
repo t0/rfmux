@@ -273,6 +273,22 @@ def test_resaving_one_module_keeps_the_others(output_dir):
     assert "fits" in on_disk["crs0042_rmod1"]["results"][0]["upward"]["R0001"]
 
 
+def test_a_resave_that_fails_leaves_the_file_whole(output_dir):
+    """A module that cannot be pickled is refused without costing the file
+    it was updating, or the other modules in it."""
+    sweeps = a_container(1, 2)
+    path = store.save(sweeps, "multisweep")
+    before = path.read_bytes()
+
+    module_output = sweeps["crs0042_rmod1"]
+    module_output["unpicklable"] = lambda: None
+    with pytest.raises(Exception):
+        store.save(module_output, "multisweep")
+
+    assert path.read_bytes() == before
+    assert [p.name for p in path.parent.iterdir()] == [path.name]
+
+
 def test_a_moved_file_is_saved_back_to_where_it_now_is(output_dir):
     """Files get copied off the acquisition machine before anyone fits them."""
     sweeps = a_container(2)

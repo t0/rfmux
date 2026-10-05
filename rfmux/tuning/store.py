@@ -201,12 +201,17 @@ def _save(
         created=existing.get("created") if reused else None,
     )
 
-    # Before the file is opened for writing: opening it "wb" truncates it, and
-    # _spliced has to read what is there.
     payload = _spliced(data, target) if reused else data
 
-    with target.open("wb") as f:
-        pickle.dump(payload, f)
+    # Through a temporary file, so a pickle that fails partway, or a full
+    # disk, leaves the file it was updating (and its other modules) whole.
+    partial = target.with_name(target.name + ".partial")
+    try:
+        with partial.open("wb") as f:
+            pickle.dump(payload, f)
+        os.replace(partial, target)
+    finally:
+        partial.unlink(missing_ok=True)
     return target
 
 

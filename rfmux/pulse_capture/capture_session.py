@@ -823,7 +823,7 @@ class PulseCaptureSession(_EventHost):
         When given, a :class:`PulseHDF5Writer` streams every pulse to
         this file; when None, no file is written.
     tuning : dict[int, dict], optional
-        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        Per-channel tuning row (``rfmux.tuning.tuning_rows``), keyed by
         readout channel.  Its ``df_calibration`` (magnitude in hertz per
         volt, phase minus the angle of the frequency direction in the
         (I, Q) plane) sets the storage transform; the whole row is

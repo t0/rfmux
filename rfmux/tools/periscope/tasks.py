@@ -13,7 +13,9 @@ from rfmux.pulse_capture.sources import _set_receive_timeout
 from rfmux.tuning.find_resonances import find_resonances_in_netanal
 from rfmux.tuning.fits import fit_sweeps, fit_sweeps_at_bias_amplitude
 from rfmux.tuning.bias import find_bias_points
+from rfmux.core.dac_scale import dac_scale_setting_dbm
 from rfmux.core.transferfunctions import BALUN_LOSS_DB
+from rfmux.tuning import tuning_rows
 
 from typing import Dict, Any, Optional
 
@@ -206,12 +208,28 @@ class DfCalibrationSignals(QObject):
     error = pyqtSignal(str)
 
 
+async def tuning_of_playing_tones(crs, module: int, progress=None) -> dict:
+    """``{channel: tuning row}`` of the tones *module* is playing, each
+    calibrated by ``crs.empirically_calibrate_df`` (which saves them as a
+    bias_catalog), with the NCO and DAC scale they are played at.
+    *progress* gets the sweep's percent complete."""
+    catalog = await crs.empirically_calibrate_df(
+        module=module, save=True,
+        progress_callback=(None if progress is None
+                           else lambda _module, percent: progress(percent)))
+    setting = await dac_scale_setting_dbm(crs, module)
+    return tuning_rows(
+        catalog, nco_frequency_hz=await crs.get_nco_frequency(module=module),
+        dac_scale_dbm=None if setting is None else setting - BALUN_LOSS_DB,
+        dac_scale_setting_dbm=setting)
+
+
 class DfCalibrationTask(QtCore.QThread):
     """Runs one df-calibration measurement off the GUI thread.
 
     *measure* is a callable returning the coroutine to run, whose
     result is ``{channel: tuning row}``; the app hands in
-    crs.measure_df_calibrations for the module, tests hand in whatever
+    :func:`tuning_of_playing_tones` for the module, tests hand in whatever
     they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """

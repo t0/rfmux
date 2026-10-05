@@ -384,22 +384,24 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
     """A calibration can be measured against the simulator, so mock
     captures can be in Hz.
 
-    measure_df_calibrations is host-side and uses only set_frequency and
-    get_samples, so the same code runs against a board.  A simulated
-    board has none of its own to hand out: the number is a measurement,
-    not a property of the hardware.
+    empirically_calibrate_df is host-side: a multisweep around the tones
+    playing and apply_bias to put them back, so the same code runs against
+    a board.  A simulated board has none of its own to hand out: the number
+    is a measurement, not a property of the hardware.
     """
     import numpy as np
 
+    from rfmux.tuning import tuning_rows
+
     loop, crs = mock_crs
-    cals = loop.run_until_complete(
-        crs.measure_df_calibrations(channels=[1, 2], module=1))
+    catalog = loop.run_until_complete(
+        crs.empirically_calibrate_df(module=1, save=False))
+    cals = tuning_rows(catalog)
     assert cals, "no calibration measured against the simulator"
     for ch, row in cals.items():
         cal = row["df_calibration"]
         assert isinstance(cal, complex) and np.isfinite(cal)
         assert abs(cal) > 0
-        assert row["df_calibration_source"] == "measured"
 
     path = tmp_path / "mock_cal.h5"
     result = loop.run_until_complete(crs.trigger_capture(

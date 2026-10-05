@@ -400,7 +400,7 @@ class PulseHDF5Writer(_PulseFileWriter):
     capture_params : dict
         Capture configuration (streamer_mode, threshold_sigma, etc.).
     tuning : dict[int, dict], optional
-        Per-channel tuning row as ``bias_kids`` reports it, keyed by
+        Per-channel tuning row (``rfmux.tuning.tuning_rows``), keyed by
         readout channel; its ``df_calibration`` is the complex factor
         with magnitude in hertz per volt and phase minus the angle of
         the frequency direction in the (I, Q) plane.

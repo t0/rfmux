@@ -214,7 +214,6 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     calculate_new_cable_length,
     recalculate_displayed_phase,
 )
-from rfmux.algorithms.measurement import fitting # Adjusted import
 #: Re-exported: the display path and the pulse detector share one
 #: ring buffer, so extend()'s wrap arithmetic exists in one place.
 from rfmux.pulse_capture.detection import Circular  # noqa: F401

@@ -10,8 +10,7 @@ selection and calibration use a sweep at that amplitude. Detector settings
 and fallback rules are documented on the functions below.
 
 The derivative bifurcation test and max-arc-speed frequency method are adapted
-from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology), via
-``algorithms/measurement/bias_kids.py``.
+from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology).
 """
 
 from __future__ import annotations
@@ -56,6 +55,7 @@ __all__ = [
     "iq_derivatives",
     "normalized_arc_speed",
     "iq_derivative_splines",
+    "calibrated_at",
     "iq_derivatives_at",
 ]
 
@@ -506,9 +506,9 @@ def _find_bias_for_one(
         else measured_hz
     )
 
-    # 6. Quantize the bias frequency before evaluating calibration derivatives.
-    bias = BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude)
-    dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
+    # 6. Quantize the bias frequency, then read the calibration at it.
+    bias = calibrated_at(
+        entry, BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude))
     bifurcated_at = (choice.bifurcated_at if choice.bifurcated_at is not None
                      else resonator.bias.bifurcated_at)
 
@@ -521,20 +521,9 @@ def _find_bias_for_one(
         max_distance_hz=max_distance_hz,
     )
 
-    # 8. The bias sweep travels with its fits, so fit it if nothing has.
-    if not entry.get("fits"):
-        with _quiet_optimizer():
-            fit_section(entry)
-
-    # Keep the calibration, its source trace and the power that trace was
-    # measured at, at the quantized tone frequency.
     resonator.bias = replace(
         bias,
-        dI_df=dI_df,
-        dQ_df=dQ_df,
         bifurcated_at=bifurcated_at,
-        bias_sweep=_stored_sweep(entry),
-        bias_power_dbm=entry.get("sweep_amplitude_dbm"),
         flagged_kind=flagged_kind,
         flagged_because=flagged_because,
     )
@@ -542,9 +531,9 @@ def _find_bias_for_one(
         name=resonator.name,
         iteration=choice.iteration,
         amplitude=choice.amplitude,
-        frequency_hz=resonator.bias.frequency_hz,
-        dI_df=dI_df,
-        dQ_df=dQ_df,
+        frequency_hz=bias.frequency_hz,
+        dI_df=bias.dI_df,
+        dQ_df=bias.dQ_df,
         bifurcated_at=choice.bifurcated_at,
         checks=choice.checks,
         flagged_kind=flagged_kind,
@@ -1122,6 +1111,20 @@ def iq_derivative_splines(frequencies: np.ndarray, iq: np.ndarray):
         CubicSpline(frequencies, iq.real).derivative(),
         CubicSpline(frequencies, iq.imag).derivative(),
     )
+
+
+def calibrated_at(entry: Mapping, bias: BiasPoint) -> BiasPoint:
+    """*bias* with what the sweep *entry* says at its frequency: the IQ slope
+    (``dI_df``, ``dQ_df``), the sweep itself with its fits, and the power it
+    was measured at. The sweep is fitted here, in place, if it has no fits.
+    """
+    if not entry.get("fits"):
+        with _quiet_optimizer():
+            fit_section(entry)
+    dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
+    return replace(bias, dI_df=dI_df, dQ_df=dQ_df,
+                   bias_sweep=_stored_sweep(entry),
+                   bias_power_dbm=entry.get("sweep_amplitude_dbm"))
 
 
 def iq_derivatives_at(entry: Mapping, frequency_hz: float) -> tuple[float, float]:

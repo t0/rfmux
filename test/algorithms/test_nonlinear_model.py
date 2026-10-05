@@ -4,7 +4,7 @@ recover the nonlinearity of a resonance that leans that way."""
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.fitting_nonlinear import (
+from rfmux.tuning.fits import (
     fit_nonlinear_iq, get_y_nonlinear, nonlinear_iq)
 
 FR, QR = 1.0e9, 5.0e4

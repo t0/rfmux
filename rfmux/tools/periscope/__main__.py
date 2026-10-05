@@ -47,7 +47,7 @@ _STAGE_TEXT = {
     "warming": "Warming pulse caches",
     "calibrating": "Measuring df calibrations",
 }
-_STAGE_UNIT = {"warming": "blocks", "calibrating": "points"}
+_STAGE_UNIT = {"warming": "blocks", "calibrating": "%"}
 
 
 def _build_with_progress(crs_obj, config, loop, module):
@@ -63,7 +63,7 @@ def _build_with_progress(crs_obj, config, loop, module):
     and calibrating when the array is biased.
 
     Returns ``(resonator_count, tuning)``, the rows
-    ``measure_df_calibrations`` gives.
+    ``tasks.tuning_of_playing_tones`` gives.
     """
     import threading
     import time
@@ -91,11 +91,11 @@ def _build_with_progress(crs_obj, config, loop, module):
             _, result["count"] = worker_loop.run_until_complete(
                 apply_mock_config(crs_obj, config))
             if biasing:
-                local.update(stage="calibrating", done=0, total=1)
+                local.update(stage="calibrating", done=0, total=100)
                 result["cals"] = worker_loop.run_until_complete(
-                    crs_obj.measure_df_calibrations(
-                        module=module,
-                        progress=lambda d, t: local.update(done=d, total=t)))
+                    tuning_of_playing_tones(
+                        crs_obj, module,
+                        progress=lambda pct: local.update(done=int(pct))))
         except Exception as exc:
             result["error"] = exc
         finally:

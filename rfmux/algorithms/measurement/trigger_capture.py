@@ -263,19 +263,17 @@ async def trigger_capture(
     hdf5_path : str | Path, optional
         Write a capture file as well (pulses, histograms, templates).
     tuning : dict[int, dict], optional
-        ``{channel: row}``, each row a
-        :func:`~rfmux.algorithms.measurement.bias_kids.bias_kids` entry
-        keyed by its ``bias_channel`` (``tuning_rows`` builds it from the
-        output, ``measure_df_calibrations`` returns rows with only the
-        calibration).  Under ``trigger_basis="df"`` (the default) a
+        ``{channel: row}``, each row one resonator's bias as
+        :func:`rfmux.tuning.tuning_rows` builds it from a catalog (the
+        bias_catalog file ``crs.apply_bias`` writes, or
+        ``crs.empirically_calibrate_df`` for tones already playing).
+        Under ``trigger_basis="df"`` (the default) a
         channel whose row has a ``df_calibration`` is rotated into the
         frequency basis and its samples stored as Δf in hertz; a channel
         without one, or any channel under ``"iq"``, is stored in volts on
         the quadratures.  The file records every row under the channel's
         ``tuning`` group and each channel's ``stored_units``.
-        Keyed by readout channel, not detector index -- ``bias_kids``
-        reports both, and ``bias_channel`` is the one that matches the
-        channels captured here.
+        Keyed by readout channel, the channels captured here.
     trigger_basis : str
         ``"iq"`` tests the raw quadratures; ``"df"`` rotates each channel
         with its df calibration first and tests frequency and

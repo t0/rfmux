@@ -21,12 +21,12 @@ an IPv6 loopback socket alone is not sufficient.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 863 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 2431 | ~6.5 min | Default while editing. |
+| `pytest --tier=portable` | 864 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2384 | ~6.5 min | Default while editing. |
 | `pytest --tier=acquisition` | 37 | ~9.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 2468 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 2421 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 2543 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2496 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -170,7 +170,7 @@ stage 6 long packets on teardown. Don't point it at a board mid-experiment.
   disagreeing. Run it after changing the mock's API, or when board firmware
   changes. It only reads attributes, so it is safe against a board in use.
 - The measurement algorithms are **not** covered here, or anywhere against
-  real hardware: network analysis, multisweep, fitting and `bias_kids` all run
+  real hardware: network analysis, multisweep, fitting and bias finding all run
   against the mock only. `test_mock_vs_real` is what keeps the mock
   trustworthy as that reference.
 

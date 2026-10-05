@@ -1390,12 +1390,24 @@ class PeriscopeRuntime:
         freq_dsb = np.asarray(freq_dsb_data, dtype=float); psd_dsb = np.asarray(psd_dsb_data, dtype=float)
         if ddict[ch_val]["Cmplx"].isVisible(): ddict[ch_val]["Cmplx"].setData(freq_dsb, psd_dsb)
 
+    def _wait_for_bias_writes(self, timeout_ms: int = 10_000) -> None:
+        """Let a running Apply Bias finish: cut off between moving the NCO and
+        setting the tones, it would leave every tone displaced."""
+        for panel in self.findChildren(MultisweepPanel):
+            task = getattr(panel, "_apply_bias_task", None)
+            if task is not None and task.isRunning():
+                print("[Periscope] Waiting for Apply Bias to finish")
+                if not task.wait(timeout_ms):
+                    print("[Periscope] Apply Bias did not finish; the board "
+                          "may be partly biased")
+
     def closeEvent(self, event: QtCore.QEvent):
         """Handle the main window close event. Stops timers and worker threads."""
         if getattr(self, "_noise_task", None) is not None:
             self.statusBar().showMessage("Waiting for the noise measurement to finish")
             event.ignore()
             return
+        self._wait_for_bias_writes()
         settings.set_window_geometry(self.saveGeometry())
         self.timer.stop(); self.receiver.stop(); self.receiver.wait()
         # Stop any active network analysis tasks (QThread needs proper termination)

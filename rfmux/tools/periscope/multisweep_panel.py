@@ -1362,7 +1362,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._set_analysis_enabled(False)
         self.rerun_btn.setEnabled(False)
         self.collision_status.setText("Checking collisions...")
-        self._collision_task = CollisionTask(self.module_sweeps, parameters, self)
+        # No Qt parent: a parent deletes its children however they are running,
+        # and a thread destroyed mid-run takes the process with it.
+        self._collision_task = CollisionTask(self.module_sweeps, parameters)
         self._collision_task.completed.connect(self._collisions_found)
         self._collision_task.error.connect(self.collision_status.setText)
         self._collision_task.finished.connect(self._collision_finished)

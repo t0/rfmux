@@ -63,7 +63,7 @@ def _build_with_progress(crs_obj, config, loop, module):
     and calibrating when the array is biased.
 
     Returns ``(resonator_count, tuning)``, the rows
-    ``tasks.tuning_of_playing_tones`` gives.
+    ``tasks.calibrate_df_mock`` gives.
     """
     import threading
     import time
@@ -93,7 +93,7 @@ def _build_with_progress(crs_obj, config, loop, module):
             if biasing:
                 local.update(stage="calibrating", done=0, total=100)
                 result["cals"] = worker_loop.run_until_complete(
-                    tuning_of_playing_tones(
+                    calibrate_df_mock(
                         crs_obj, module,
                         progress=lambda pct: local.update(done=int(pct))))
         except Exception as exc:

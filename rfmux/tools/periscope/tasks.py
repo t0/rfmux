@@ -208,7 +208,7 @@ class DfCalibrationSignals(QObject):
     error = pyqtSignal(str)
 
 
-async def tuning_of_playing_tones(crs, module: int, progress=None) -> dict:
+async def calibrate_df_mock(crs, module: int, progress=None) -> dict:
     """``{channel: tuning row}`` of the tones *module* is playing, each
     calibrated by ``crs.empirically_calibrate_df`` (which saves them as a
     bias_catalog), with the NCO and DAC scale they are played at.
@@ -229,7 +229,7 @@ class DfCalibrationTask(QtCore.QThread):
 
     *measure* is a callable returning the coroutine to run, whose
     result is ``{channel: tuning row}``; the app hands in
-    :func:`tuning_of_playing_tones` for the module, tests hand in whatever
+    :func:`calibrate_df_mock` for the module, tests hand in whatever
     they like.  Mock mode measures at startup
     and the sweep is seconds at many tones: it must not hold the window.
     """

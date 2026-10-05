@@ -1691,7 +1691,7 @@ grid. This tab needs a selected bias step to display its curves.
         async def _measure():
             # Every channel the module reports as biased, not just the
             # ones on screen.
-            return await tuning_of_playing_tones(crs, module)
+            return await calibrate_df_mock(crs, module)
         return _measure
 
     def _start_df_calibration(self, module: int) -> None:

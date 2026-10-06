@@ -17,6 +17,7 @@ from rfmux.core.dac_scale import dac_scale_setting_dbm
 from rfmux.core.transferfunctions import BALUN_LOSS_DB
 from rfmux.tuning import tuning_rows
 
+import copy
 from typing import Dict, Any, Optional
 
 class UDPReceiver(QtCore.QThread):
@@ -769,7 +770,9 @@ class RunFitsTask(QtCore.QThread):
     def __init__(self, ms_module_output: dict, models, amplitude_choice,
                  signals: RunFitsSignals):
         super().__init__()
-        self.ms_module_output = ms_module_output
+        # Fitted on a copy, which the panel takes over when the task
+        # completes: the panel redraws from its own while this runs.
+        self.ms_module_output = copy.deepcopy(ms_module_output)
         self.models = tuple(models)
         # None fits every sweep, "bias" each resonator's own bias amplitude,
         # and an integer one amplitude step.
@@ -820,7 +823,9 @@ class FindBiasTask(QtCore.QThread):
     def __init__(self, ms_module_output: dict, parameters: dict,
                  signals: FindBiasSignals):
         super().__init__()
-        self.ms_module_output = ms_module_output
+        # Bias finding fits and reports into a copy, which the panel takes
+        # over when the task completes.
+        self.ms_module_output = copy.deepcopy(ms_module_output)
         self.parameters = dict(parameters)
         self.signals = signals
 

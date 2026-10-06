@@ -47,8 +47,9 @@ from ...core.transferfunctions import (PFB_SAMPLING_FREQ,
                                        decimation_to_sampling)
 from ...pulse_capture.capture_session import PulseCaptureConfig
 from ...pulse_capture.events import event_counts
-from ...core.session_folder import (is_session, latest_export, load_metadata,
-                             register_export, save_metadata)
+from ...core.session_folder import (METADATA_LOCK, is_session, latest_export,
+                                    load_metadata, register_export,
+                                    save_metadata)
 from ...core.channels import (MAX_MODULE, format_channel_spec,
                               parse_channel_spec, parse_module_channels)
 from ...pulse_capture.channel_keys import (capture_keys, describe,
@@ -709,25 +710,26 @@ def _record(result: RecordResult, config: PulseCaptureConfig) -> None:
         if path is not None and path.exists():
             register_export(result.session, str(path.relative_to(result.session)),
                             kind, modules_tag(result.modules))
-    metadata = load_metadata(result.session)
-    metadata.setdefault("recordings", []).append({
-        "timestamp": datetime.datetime.now().isoformat(),
-        "module": result.module,
-        "modules": result.modules,
-        "channels": [list(c) if isinstance(c, tuple) else c
-                     for c in result.channels],
-        "duration_s": result.duration_s,
-        "training_s": result.training_s,
-        "started_at": result.started_at,
-        "pulse": result.pulse_path.name if result.pulse_path else None,
-        "dirfile": (str(result.dirfile_path.relative_to(result.session))
-                    if result.dirfile_path else None),
-        "fastrx": result.fastrx_path.name if result.fastrx_path else None,
-        "fastrx_stats": result.fastrx_stats,
-        "merged_fastrx": result.merged_fastrx,
-        "tod": result.tod_path.name if result.tod_path else None,
-        "merged_tod": result.merged_tod,
-        "capture_config": config.to_dict(),
-        "warnings": result.warnings,
-    })
-    save_metadata(result.session, metadata)
+    with METADATA_LOCK:
+        metadata = load_metadata(result.session)
+        metadata.setdefault("recordings", []).append({
+            "timestamp": datetime.datetime.now().isoformat(),
+            "module": result.module,
+            "modules": result.modules,
+            "channels": [list(c) if isinstance(c, tuple) else c
+                         for c in result.channels],
+            "duration_s": result.duration_s,
+            "training_s": result.training_s,
+            "started_at": result.started_at,
+            "pulse": result.pulse_path.name if result.pulse_path else None,
+            "dirfile": (str(result.dirfile_path.relative_to(result.session))
+                        if result.dirfile_path else None),
+            "fastrx": result.fastrx_path.name if result.fastrx_path else None,
+            "fastrx_stats": result.fastrx_stats,
+            "merged_fastrx": result.merged_fastrx,
+            "tod": result.tod_path.name if result.tod_path else None,
+            "merged_tod": result.merged_tod,
+            "capture_config": config.to_dict(),
+            "warnings": result.warnings,
+        })
+        save_metadata(result.session, metadata)

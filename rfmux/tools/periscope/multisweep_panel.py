@@ -1139,6 +1139,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         The status line says only that the run finished: what the fits found,
         and which of them did not converge, is on the tabs that draw them.
         """
+        self._adopt_sweeps(self._run_fits_task.ms_module_output)
         self._fits_done()
         # The fits went into the block, so a file that exists is now out of
         # date by exactly this much. A panel never saved keeps the Save button.
@@ -1153,6 +1154,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 return
         self._show_fit_status("Fits complete")
         self._redraw_plots()
+
+    def _adopt_sweeps(self, block: dict) -> None:
+        """Take over the sweeps a worker fitted on its own copy."""
+        for key, held in self.multisweep_container.items():
+            if held is self.module_sweeps:
+                self.multisweep_container[key] = block
+        self.module_sweeps = block
 
     def _fits_error(self, message: str):
         self._fits_done()
@@ -1205,6 +1213,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _bias_found(self, report):
         """The report's catalog is the array now: hold it, draw it, re-save."""
         self._set_analysis_enabled(True)
+        self._adopt_sweeps(self._find_bias_task.ms_module_output)
         self.bias_report = report
         self.catalog = report.catalog
         # The bias step is now a thing the fit tabs can be asked for.

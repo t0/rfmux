@@ -1703,6 +1703,26 @@ def test_the_fit_axis_carries_what_the_model_fitted(board, qt_app):
     assert "a=" not in axis.labelText
 
 
+def test_fits_are_made_on_a_copy_the_panel_takes_over(board, qt_app, swept_container):
+    """The panel redraws from its own sweeps while a fit runs, so the fit
+    writes into a copy and the panel takes the copy over when it is done."""
+    panel = _panel_showing(swept_container, board)
+    held = panel.module_sweeps
+    entries = [entry for step in held["results"].values()
+               for sweeps in step.values() for entry in sweeps.values()]
+    assert not any(entry.get("fits") for entry in entries)
+
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    assert panel.module_sweeps is not held
+    assert any(panel.module_sweeps is block
+               for block in panel.multisweep_container.values())
+    fitted = [entry for step in panel.module_sweeps["results"].values()
+              for sweeps in step.values() for entry in sweeps.values()]
+    assert all("skewed" in entry["fits"] for entry in fitted)
+    assert not any(entry.get("fits") for entry in entries)
+
+
 def test_the_fit_tab_can_draw_each_resonator_at_the_step_it_is_biased_at(
         board, qt_app, swept_container):
     """'At bias amplitude' is a different step for different resonators, and it

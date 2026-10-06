@@ -8,9 +8,18 @@ board's console to the network.  We can then drive U-Boot over that connection.
 
 Subcommands:
 
-  reflash-spi FILE     write a boot.bin to QSPI flash (sf erase / sf write)
-  reflash-mmc IMAGE    write a WIC image (raw or gzipped) to MMC (whole card,
-                       including /home)
+  list                 the firmware releases on GitHub, and what is fetched
+  fetch RELEASE        download a firmware release's files (needs no --serial
+                       or board)
+  reflash-spi FILE|RELEASE
+                       write a boot.bin to QSPI flash (sf erase / sf write)
+  reflash-mmc IMAGE|RELEASE
+                       write a disk image (raw, gzip or bzip2) to MMC (whole
+                       card, including /home)
+
+A RELEASE is fetched as by "fetch", or taken from what it already
+downloaded; an existing file of that name takes precedence. reflash-spi
+refuses a release before r1.7.0, whose boot.bin bricks the board.
   repl [COMMAND]       run one U-Boot command, or open an interactive console
   write-backplane-eeprom
                        program the crate backplane EEPROM behind each board's
@@ -32,17 +41,21 @@ board reboots). Subcommands may be chained in a single invocation; boards
 reboot between stages, so each stage starts from a fresh U-Boot environment
 and a fresh beacon:
 
-    rfmux firmware --serial 0110 reflash-spi boot.bin reflash-mmc image.wic.gz
+    rfmux firmware --serial 0110 reflash-spi r1.7.0 reflash-mmc r1.7.0
 """
 
+import bz2
 import click
 import datetime
 import functools
 import gzip
 import hashlib
+import json
 import logging
+import mimetypes
 import os
 import pathlib
+import posixpath
 import re
 import select
 import socket
@@ -51,20 +64,32 @@ import tempfile
 import termios
 import threading
 import tty
+import urllib.error
+import urllib.request
 import zlib
 
-# optional dependencies - not mandated in pyproject.toml because they would
-# bloat the Yocto build (where they are certainly unnecessary).
-try:
-    import fru
-    import pexpect
-    import pexpect.fdpexpect
-    import tqdm
-    import xmodem
-    _HAVE_IMPORTS = True
-except ImportError:
-    # A proper error message is reported in the cli() callback
-    _HAVE_IMPORTS = False
+from rfmux.paths import get_rfmux_data_dir
+
+
+def require_imports() -> None:
+    """Import the optional dependencies (rfmux[firmware]), which
+    pyproject.toml does not mandate because they would bloat the Yocto
+    build. Called when a subcommand acts, not at import, so "rfmux firmware
+    --help" works without them; a missing package fails with a remedy now,
+    not mid-flash after the user has power-cycled a board to catch its boot
+    window."""
+    global fru, pexpect, tqdm, xmodem
+    try:
+        import fru
+        import pexpect
+        import pexpect.fdpexpect
+        import tqdm
+        import xmodem
+    except ImportError as error:
+        raise click.ClickException(
+            f"The \"rfmux firmware\" command's Python dependencies are "
+            f"optional, and {error.name} is missing.\n"
+            f"Install them with 'pip install rfmux[firmware]'.") from error
 
 
 log = logging.getLogger(__name__)
@@ -72,6 +97,151 @@ log = logging.getLogger(__name__)
 DEFAULT_DISCOVERY_PORT = 9875
 BUF_SIZE = 4096
 PROMPT = "ZynqMP>"
+
+# Firmware releases live in this repository under firmware/, the large files
+# in Git LFS. For a public repository GitHub serves each file's LFS pointer
+# (its sha256 and size) from raw.githubusercontent.com and its content from
+# media.githubusercontent.com, so a release downloads and verifies with
+# neither git nor git-lfs. GitHub's trees API lists the releases and their
+# files in one request; raw.githubusercontent.com, which is not rate
+# limited, gives each symlink's target and each LFS pointer.
+RAW_URL = "https://raw.githubusercontent.com/t0/rfmux/main/firmware/{path}"
+MEDIA_URL = "https://media.githubusercontent.com/media/t0/rfmux/main/firmware/{path}"
+TREE_URL = "https://api.github.com/repos/t0/rfmux/git/trees/main:firmware?recursive=1"
+
+
+def firmware_tree() -> dict:
+    """{release: {name: (mode, path under firmware/)}}, from one GitHub API
+    request; GITHUB_TOKEN, when set, raises its rate limit."""
+
+    request = urllib.request.Request(
+        TREE_URL,
+        headers={"Accept": "application/vnd.github+json"})
+    if token := os.environ.get("GITHUB_TOKEN"):
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            tree = json.load(response)["tree"]
+    except urllib.error.URLError as error:
+        raise click.ClickException(
+            f"cannot reach GitHub: {error.reason}") from error
+    releases: dict = {}
+    for entry in tree:
+        release, _, name = entry["path"].partition("/")
+        if name and "/" not in name and entry["type"] == "blob":
+            releases.setdefault(release, {})[name] = (entry["mode"],
+                                                     entry["path"])
+    return releases
+
+
+def _resolve(path: str, mode: str, tree: dict) -> str:
+    """The path at the end of a chain of symlinks, read from raw URLs."""
+    while mode == "120000": # symlink
+        with urllib.request.urlopen(
+                RAW_URL.format(path=path),
+                timeout=60) as response:
+            target = response.read().decode().strip()
+        path = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+        release, _, name = path.partition("/")
+        mode = tree.get(release, {}).get(name, ("100644", path))[0]
+
+    return path
+
+
+def _download(url: str, target: pathlib.Path, sha256: str, size: int) -> None:
+    """Stream url to target, which appears only once its size and sha256
+    match."""
+    part = target.with_name(target.name + ".part")
+    digest = hashlib.sha256()
+
+    with urllib.request.urlopen(url, timeout=60) as response, \
+            open(part, "wb") as f, \
+            tqdm.tqdm(total=size, unit="B", unit_scale=True,
+                      desc=target.name, file=sys.stderr, disable=None,
+                      leave=False) as bar:
+        for block in iter(lambda: response.read(1 << 20), b""):
+            digest.update(block)
+            f.write(block)
+            bar.update(len(block))
+    got = part.stat().st_size
+    if got != size or digest.hexdigest() != sha256:
+        part.unlink()
+        raise click.ClickException(
+            f"{url}: got {got} bytes with sha256 {digest.hexdigest()}, "
+            f"expected {size} bytes with sha256 {sha256}")
+    os.replace(part, target)
+
+
+def fetch_release(release: str, dest: pathlib.Path, files=(),
+                  tree: dict | None = None) -> list[pathlib.Path]:
+    """Download a release's files (all of them, or those named in files)
+    into dest, each checked against its LFS pointer's sha256 and size. A
+    file already there with that checksum is kept. Returns their paths."""
+
+    LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
+
+    if tree is None:
+        tree = firmware_tree()
+    if release not in tree:
+        raise click.ClickException(
+            f"no firmware release {release!r}; known: "
+            + ", ".join(sorted(tree)))
+    available = tree[release]
+    unknown = sorted(set(files) - set(available))
+    if unknown:
+        raise click.ClickException(
+            f"{release} has no {', '.join(unknown)}; it has "
+            + ", ".join(sorted(available)))
+    dest.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for name in files or sorted(available):
+        path = _resolve(available[name][1], available[name][0], tree)
+        target = dest / name
+        with urllib.request.urlopen(
+                RAW_URL.format(path=path), timeout=60) as response:
+            pointer = response.read()
+        if not pointer.startswith(LFS_POINTER):
+            target.write_bytes(pointer)         # a small file kept in git
+            click.echo(f"{release}/{name}: written ({len(pointer)} bytes)",
+                       err=True)
+        else:
+            fields = dict(line.split(" ", 1)
+                          for line in pointer.decode().splitlines())
+            sha256 = fields["oid"].removeprefix("sha256:")
+            size = int(fields["size"])
+            have = False
+            if target.is_file() and target.stat().st_size == size:
+                with open(target, "rb") as f:
+                    have = (hashlib.file_digest(f, "sha256").hexdigest()
+                            == sha256)
+            if have:
+                click.echo(f"{release}/{name}: already downloaded", err=True)
+            else:
+                click.echo(f"{release}/{name}: downloading "
+                           f"{size / 1e6:.1f} MB", err=True)
+                _download(MEDIA_URL.format(path=path),
+                          target, sha256, size)
+        paths.append(target)
+    click.echo(f"{release}: {len(paths)} files in {dest}", err=True)
+    return paths
+
+
+def resolve_image(arg: str, names: tuple[str, ...]
+                  ) -> tuple[pathlib.Path, str | None]:
+    """The file to flash, and the release it came from: arg itself if it
+    is a file; else the first of `names` that release arg has, from rfmux's
+    data directory (where fetch leaves only verified files) or fetched."""
+    if (path := pathlib.Path(arg)).is_file():
+        return path, None
+    release = get_rfmux_data_dir() / "firmware" / arg
+    for name in names:
+        if (release / name).is_file():
+            return release / name, arg
+    tree = firmware_tree()
+    name = next((n for n in names if n in tree.get(arg, {})), names[0])
+    (fetched,) = fetch_release(arg, release, files=[name], tree=tree)
+    return fetched, arg
+
 
 class UDPStream:
     """A connected UDP socket presented as a file-like stream for pexpect."""
@@ -654,8 +824,9 @@ def handle_board(crs_ip, crs_port, beacon_version, serial, action, position,
 
 
 @click.group(chain=True)
-@click.option("--serial", "serials", type=str, multiple=True, required=True,
-              help='Board serial to act on (repeatable, or "any").')
+@click.option("--serial", "serials", type=str, multiple=True,
+              help='Board serial to act on (repeatable, or "any"); needed '
+                   'by every subcommand but fetch.')
 @click.option("--discovery-port", "-p", type=int, default=DEFAULT_DISCOVERY_PORT,
               help=f"UDP beacon port (default: {DEFAULT_DISCOVERY_PORT}).")
 @click.option("--bind", "-b", type=str, default="0.0.0.0",
@@ -678,23 +849,18 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
 
     \b
     Examples:
+        rfmux firmware list
+        rfmux firmware fetch r1.7.0
+        rfmux firmware --serial 0110 reflash-spi r1.7.0 reflash-mmc r1.7.0
         rfmux firmware --serial 0110 repl
         rfmux firmware --serial 0110 reflash-spi boot.bin
-        rfmux firmware --serial 0110 reflash-spi boot.bin --md5sum $(md5sum boot.bin | cut -d' ' -f1)
         rfmux firmware --serial 0110 reflash-spi boot.bin reflash-mmc t0-crs-image.wic.gz
         rfmux firmware --serial any  --crate 0123 reflash-spi boot.bin
         rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 3
         rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
-    # Optional dependencies, checked here (the single gateway to every
-    # subcommand) so a missing package fails with a remedy now, not mid-flash
-    # after the user has power-cycled a board to catch its boot window.
-    if not _HAVE_IMPORTS:
-        raise click.ClickException(
-            f"The \"rfmux firmware\" command's Python dependencies are optional.\n"
-            f"Install them with 'pip install rfmux[firmware]'.")
-
+    require_imports()
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(message)s",
         datefmt="%H:%M:%S",
@@ -710,61 +876,138 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
                    bind=bind, verbose=verbose, then=then, crate=crates)
 
 
+def board_serials(ctx) -> tuple:
+    """The --serial values, which every board subcommand needs."""
+    if not ctx.obj["serials"]:
+        raise click.UsageError("--serial is required for board commands")
+    return ctx.obj["serials"]
+
+
 @cli.result_callback()
 @click.pass_context
 def run_actions(ctx, actions, **_):
-    """Run the actions collected from the chained subcommands."""
+    """Run the board actions collected from the chained subcommands (fetch
+    adds none)."""
+    actions = [a for a in actions if a is not None]
+    if not actions:
+        return
+    board_serials(ctx)
     run(ctx.obj, actions)
 
 
+@cli.command(name="list")
+def list_cmd():
+    """List the firmware releases on GitHub and which are fetched.
+
+    "fetched" means its files are in rfmux's data directory ("partly
+    fetched" when only some are); fetch and the reflash commands check a
+    file's sha256 before using it. Releases fetched earlier are listed too,
+    and so is what is local when GitHub cannot be reached.
+    """
+    try:
+        remote = firmware_tree()
+    except click.ClickException as error:
+        click.echo(f"Listing local releases only: {error.message}", err=True)
+        remote = {}
+    local = {}
+    root = get_rfmux_data_dir() / "firmware"
+    if root.is_dir():
+        local = {d.name: {f.name for f in d.iterdir()
+                          if f.is_file() and not f.name.endswith(".part")}
+                 for d in root.iterdir() if d.is_dir()}
+    releases = sorted(remote.keys() | local.keys(),
+                      key=lambda r: [int(n) for n in re.findall(r"\d+", r)])
+    for release in releases:
+        have = local.get(release, set())
+        if not have:
+            status = "-"
+        elif release in remote and not set(remote[release]) <= have:
+            status = f"partly fetched  ({root / release})"
+        else:
+            status = f"fetched  ({root / release})"
+        gone = "  (not on GitHub)" if remote and release not in remote else ""
+        click.echo(f"{release}{gone}  {status}")
+    if not releases:
+        click.echo("No firmware releases found.", err=True)
+
+
+# In a chained group a subcommand's options precede its arguments:
+# rfmux firmware fetch --file boot.bin r1.7.0
+@cli.command(name="fetch")
+@click.argument("release")
+@click.option("--file", "files", multiple=True, metavar="NAME",
+              help="Fetch only this file (repeatable).")
+@click.option("--dest", type=click.Path(file_okay=False,
+                                        path_type=pathlib.Path),
+              help="Directory to write to (default: firmware/RELEASE in "
+                   "rfmux's data directory).")
+def fetch_cmd(release, files, dest):
+    """Download a firmware release's files and print their paths ("list"
+    shows the releases).
+
+    Each is checked against the sha256 in its Git LFS pointer, and one
+    already downloaded is not fetched again. Needs neither git, git-lfs nor
+    --serial.
+    """
+    dest = dest or get_rfmux_data_dir() / "firmware" / release
+    for path in fetch_release(release, dest, files):
+        click.echo(path)
+
+
 @cli.command(name="reflash-spi")
-@click.argument("file", type=click.Path(exists=True, dir_okay=False))
-@click.option("--md5sum", type=str, default=None, metavar="HASH",
-              help="Verify the image's MD5 matches this before flashing.")
+@click.argument("file", metavar="FILE|RELEASE")
 @click.pass_context
-def reflash_spi_cmd(ctx, file, md5sum):
-    """Write a boot.bin to QSPI flash."""
-    path = pathlib.Path(file)
+def reflash_spi_cmd(ctx, file):
+    """Write a boot.bin to QSPI flash.
+
+    FILE|RELEASE is a boot.bin, or a release (r1.7.0 or later) whose
+    boot.bin is fetched, or taken from what fetch already downloaded.
+    """
+    # A release before r1.7.0 has the older layout's boot.bin.
+    match = re.fullmatch(r"r(\d+)\.(\d+)\.(\d+)", file)
+    if (match and not pathlib.Path(file).is_file()
+            and tuple(map(int, match.groups())) < (1, 7, 0)):
+        raise click.ClickException(
+            f"{file}'s boot.bin predates r1.7.0's firmware layout: writing "
+            "it with reflash-spi will require hardware recovery")
+    path, release = resolve_image(file, ("boot.bin",))
     data = path.read_bytes()
     validate_boot_bin(data, path)
-    file_md5 = hashlib.md5(data).hexdigest()
-    if md5sum is not None and file_md5 != md5sum.strip().lower():
-        raise click.ClickException(
-            f"File MD5 {file_md5} does not match expected {md5sum.strip().lower()}")
-    log.info("QSPI reflash: %s (%d bytes, MD5 %s)", path, len(data), file_md5)
+    file_md5 = hashlib.md5(data).hexdigest()   # checked against the board's
+    log.info("QSPI reflash: %s%s (%d bytes, MD5 %s)",
+             f"release {release} " if release else "", path, len(data),
+             file_md5)
     return functools.partial(reflash_qspi, path=str(path), md5=file_md5)
 
 
 @cli.command(name="reflash-mmc")
-@click.argument("image", type=click.Path(exists=True, dir_okay=False))
-@click.option("--md5sum", type=str, default=None, metavar="HASH",
-              help="Verify the image's MD5 matches this before flashing.")
+@click.argument("image", metavar="IMAGE|RELEASE")
 @click.pass_context
-def reflash_mmc_cmd(ctx, image, md5sum):
-    """Write a WIC image to MMC (whole card, including /home).
+def reflash_mmc_cmd(ctx, image):
+    """Write a disk image to MMC (whole card, including /home).
 
-    IMAGE may be gzip-compressed (*.wic.gz) or raw; a raw image is compressed
-    into a temporary file first, since the board-side write is U-Boot's
-    gzwrite (and the transfer is far slower per byte than gzip is).
+    IMAGE|RELEASE is a disk image, or a release whose rootfs.wic.gz (before
+    r1.7.0, rootfs.ext4.bz2) is fetched, or taken from what fetch already
+    downloaded. An image may be gzip-compressed (*.wic.gz), bzip2-compressed
+    (*.ext4.bz2) or raw; any but gzip is recompressed into a temporary gzip
+    file first, since the board-side write is U-Boot's gzwrite (and the
+    transfer is far slower per byte than gzip is).
     """
-    path = pathlib.Path(image)
+    path, release = resolve_image(image,
+                                  ("rootfs.wic.gz", "rootfs.ext4.bz2"))
 
-    # Validate md5sum locally, always against the file the user named.
-    if md5sum is not None:
-        file_md5 = hashlib.md5(path.read_bytes()).hexdigest()
-        if file_md5 != md5sum.strip().lower():
-            raise click.ClickException(
-                f"File MD5 {file_md5} does not match expected {md5sum.strip().lower()}")
-
-    with open(path, "rb") as fh:
-        gzipped = fh.read(2) == b"\x1f\x8b"
+    # The compression, from the file name: gzip, bzip2, or None for raw.
+    encoding = mimetypes.guess_type(path)[1]
+    if encoding not in ("gzip", "bzip2", None):
+        raise click.ClickException(
+            f"{path}: {encoding} is not supported (gzip, bzip2 or raw)")
 
     # Both branches read the whole image once, ending with a known-good gzip
     # plus the uncompressed size and CRC32 that the transcript checks against
     # gzwrite's completion report.
     size, crc = 0, 0
     tmp = None
-    if gzipped:
+    if encoding == "gzip":
         # Decompressing verifies the trailing CRC32/length record, which a
         # truncated download would fail.
         try:
@@ -779,9 +1022,11 @@ def reflash_mmc_cmd(ctx, image, md5sum):
         # xmodem needs the compressed size up front, so compress into a
         # temporary file (honouring TMPDIR) rather than streaming.
         tmp = tempfile.NamedTemporaryFile(
-            prefix=f"{path.stem}-", suffix=".wic.gz", delete=False)
+            prefix=f"{path.stem}-", suffix=".gz", delete=False)
         try:
-            with open(path, "rb") as src, \
+            # The bar follows the file as stored, compressed or not.
+            with open(path, "rb") as raw, \
+                    (bz2.open(raw) if encoding == "bzip2" else raw) as src, \
                     gzip.open(tmp, "wb", compresslevel=6) as dst, \
                     tqdm.tqdm(total=path.stat().st_size, unit="B",
                               unit_scale=True, desc=f"gzip {path.name}") as bar:
@@ -789,7 +1034,7 @@ def reflash_mmc_cmd(ctx, image, md5sum):
                     size += len(chunk)
                     crc = zlib.crc32(chunk, crc)
                     dst.write(chunk)
-                    bar.update(len(chunk))
+                    bar.update(raw.tell() - bar.n)
             tmp.close()
         except BaseException:
             os.unlink(tmp.name)
@@ -798,8 +1043,8 @@ def reflash_mmc_cmd(ctx, image, md5sum):
         log.info("Compressed to %s (%d -> %d bytes)",
                  path, size, path.stat().st_size)
 
-    log.info("MMC reflash: %s (%d bytes uncompressed, crc %#010x)",
-             path, size, crc)
+    log.info("MMC reflash: %s%s (%d bytes uncompressed, crc %#010x)",
+             f"release {release} " if release else "", path, size, crc)
     if tmp is not None:
         # The action runs from the group's result callback, so tie the
         # temporary file's lifetime to the root context, not this callback.
@@ -818,7 +1063,7 @@ def repl_cmd(ctx, command):
     always ends at the U-Boot prompt regardless of --then - the session is
     setup for a human, who can reset the board themselves.
     """
-    serials = ctx.obj["serials"]
+    serials = board_serials(ctx)
     if command is None and (serials == ("any",) or len(set(serials)) != 1):
         raise click.UsageError(
             "interactive repl needs exactly one specific --serial")
@@ -935,7 +1180,7 @@ def write_backplane_eeprom_cmd(ctx, backplane, crate_model, slots,
     programmed in a single run (one crate power-cycle), each receiving the
     shared fields plus its own slot.
     """
-    mapping = parse_slot_map(slots, ctx.obj["serials"])
+    mapping = parse_slot_map(slots, board_serials(ctx))
     reconcile_slot_serials(ctx.obj, mapping)
 
     design = BACKPLANES[backplane]
@@ -1000,7 +1245,7 @@ def read_backplane_eeprom_cmd(ctx, backplane, slots):
     """
     expected = {}
     if slots:
-        expected = parse_slot_map(slots, ctx.obj["serials"])
+        expected = parse_slot_map(slots, board_serials(ctx))
         reconcile_slot_serials(ctx.obj, expected)
     design = BACKPLANES[backplane]
     eeprom_size = design["eeprom"]["size"]

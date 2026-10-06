@@ -11,6 +11,9 @@ firmware/
 ├── r1.5.4/
 ├── r1.5.5/
 ├── r1.5.6/
+├── r1.6.0/
+├── r1.6.1/
+├── r1.7.0/
 ├── CHANGES          # Detailed firmware changelog
 └── README.md
 ```
@@ -20,6 +23,8 @@ firmware/
 ```bash
 cat firmware/CHANGES
 ```
+
+**Warning:** firmware versions 1.7.0+ require a bootloader upgrade. See the Bootloader Upgrade section for details.
 
 ## Prerequisites
 
@@ -170,6 +175,34 @@ Windows cannot natively write ext4 filesystems. Options:
    - [Win32 Disk Imager](https://sourceforge.net/projects/win32diskimager/)
 
 3. **Boot from Linux live USB** to flash cards
+
+## Bootloader Upgrade
+
+Firmware versions 1.7.0+ are not compatible with the old bootloader and require an upgrade.
+The new bootloader is backwards compatible with older firmware versions.
+See firmware/r1.7.0/README for details on how to upgrade the bootloader.
+
+To check if your bootloader needs to be upgraded, power on the CRS without inserting a MicroSD card.
+If you see that the screen on the front panel does not light up after a few seconds,
+your CRS has the old bootloader.
+
+Once upgraded to the new bootloader, all future bootloader and firmware upgrades can be done through the rfmux firmware command.
+A full description can be found by running:
+```bash
+uv run rfmux firmware --help
+```
+Note that you may be prompted to install Python dependencies that are otherwise not used in rfmux:
+```bash
+uv pip install rfmux[firmware]
+```
+To flash firmware onto a MicroSD card that has been inserted into a CRS, run:
+```bash
+uv run rfmux firmware --serial <SERIAL> reflash-mmc rootfs.wic.gz
+```
+To flash a particular bootloader binary into SPI memory on a CRS, run:
+```bash
+uv run rfmux firmware --serial <SERIAL> reflash-spi boot.bin
+```
 
 ## Troubleshooting
 

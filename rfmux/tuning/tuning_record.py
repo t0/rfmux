@@ -93,17 +93,32 @@ def tuning_rows(
     return rows
 
 
+def _amplitude(row: Mapping):
+    """The tone's amplitude; a capture from before catalogs recorded it as
+    ``sweep_amplitude``."""
+    return row.get("amplitude", row.get("sweep_amplitude"))
+
+
 def _bias_point(row: Mapping) -> BiasPoint:
     """One row's tone and the calibration measured at it."""
     cal = row.get("df_calibration")
     d = None if cal in (None, 0) else 1.0 / complex(cal)
     sweep = {k: row[k] for k in _SWEEP_FIELDS if row.get(k) is not None}
+    if "iq_volts" not in sweep and "iq_complex" in row:
+        # A capture from before catalogs: its bias_kids row holds the sweep in
+        # counts, possibly rotated. tuning_sweep undoes that, as the pulse
+        # overlay reads it. (pulse_capture imports this module.)
+        from ..pulse_capture.analysis import tuning_sweep
+        legacy = tuning_sweep(row)
+        if legacy is not None:
+            sweep["frequencies"] = legacy[0]
+            sweep["iq_volts"] = legacy[1] * VOLTS_PER_ROC
     # A stored sweep requires both frequency and IQ arrays.
     if any(k not in sweep for k in BiasPoint._SWEEP_TRACES):
         sweep = {}
     return BiasPoint(
         frequency_hz=float(row["bias_frequency"]),
-        amplitude=float(row["amplitude"]),
+        amplitude=float(_amplitude(row)),
         dI_df=None if d is None else float(d.real),
         dQ_df=None if d is None else float(d.imag),
         iq_rotation_deg=row.get("iq_rotation_deg"),
@@ -126,7 +141,7 @@ def catalog_from_tuning(rows: Mapping[int, dict], module: int,
     for channel, row in sorted(rows.items()):
         if not isinstance(row, dict):
             continue
-        if row.get("bias_frequency") is None or row.get("amplitude") is None:
+        if row.get("bias_frequency") is None or _amplitude(row) is None:
             continue
         resonators.append(Resonator(
             name=str(row.get("name") or f"channel {int(channel)}"),

@@ -106,6 +106,6 @@ amplitude as before.
 ### Old files
 
 Periscope opens network analysis, multisweep and noise files saved in the
-current format. Files saved by earlier versions do not open. Pulse capture
-files from earlier versions open, and their df calibrations are read; their
-Tuning window cannot show the sweeps, which are stored in the old form.
+current format. A file Periscope saved in an earlier version does not open,
+and Periscope says so. Pulse capture files from earlier versions open with
+their df calibrations, and their Tuning window shows each channel's sweep.

@@ -1314,6 +1314,8 @@ grid. This tab needs a selected bias step to display its curves.
         except Exception as e:
             print(f"Error in _load_network_analysis: {e}")
             traceback.print_exc()
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error", f"Could not open the network analysis:\n{e}")
 
     def _handle_analysis_completed(self, module_param: int, container: dict, window_id: str):
         """
@@ -2664,6 +2666,16 @@ grid. This tab needs a selected bias step to display its curves.
             )
             return
         
+        # Periscope's own exports before rfmux.tuning carry this marker and
+        # layouts the panels below do not read.
+        if isinstance(data, dict) and '_session_export' in data:
+            QtWidgets.QMessageBox.warning(
+                self, "Earlier format",
+                f"{Path(file_path).name} was saved by an earlier version of "
+                "Periscope and can't be opened here; its data is still in "
+                "the file.")
+            return
+
         # Create appropriate panel based on file type
         try:
             if file_type == 'netanal':

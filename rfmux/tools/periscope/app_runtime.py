@@ -1761,6 +1761,8 @@ class PeriscopeRuntime:
         except Exception as e:
             print(f"Error in _load_multisweep_analysis: {e}", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error", f"Could not open the multisweep:\n{e}")
 
     def _start_multisweep_analysis_for_window(self, window_instance: 'MultisweepPanel', params: dict):
         """

@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6")
 pytest.importorskip("h5py")
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog  # noqa: E402
-from PyQt6 import QtCore  # noqa: E402
+from PyQt6 import QtCore, QtWidgets  # noqa: E402
 
 from rfmux.tools.periscope.pulse_capture_panel import (  # noqa: E402
     PulseCapturePanel)
@@ -175,3 +175,53 @@ def test_a_bias_catalog_in_the_session_browser_opens_the_tuning_window(
         assert panel.is_capture_tuning
     finally:
         panel.close()
+
+
+def test_a_capture_from_before_catalogs_shows_its_sweep(qt_app, monkeypatch):
+    """Its row holds the sweep in counts, rotated as saved; the window shows
+    it in volts in the frame the stream had, as the pulse overlay does."""
+    from rfmux.core.transferfunctions import VOLTS_PER_ROC
+    from rfmux.pulse_capture.analysis import tuning_sweep
+    f = np.linspace(1.2344e9, 1.2346e9, 7)
+    old = {"bias_channel": 5, "bias_frequency": 1.2345e9, "sweep_amplitude": 0.01,
+           "sweep_direction": "upward", "df_calibration": 2.0e6 + 1.0e5j,
+           "applied_rotation_degrees": 12.5, "frequencies": f,
+           "iq_complex": np.exp(1j * np.linspace(0, 1, 7))}
+    p = bare_periscope(monkeypatch)
+    panel = p.open_tuning_window({5: old}, 2, "old.h5")
+    try:
+        assert panel is not None
+        [resonator] = list(panel.catalog)
+        frequencies, iq_counts, _ = tuning_sweep(old)
+        np.testing.assert_allclose(resonator.bias.bias_sweep["frequencies"], frequencies)
+        np.testing.assert_allclose(resonator.bias.bias_sweep["iq_volts"],
+                                   iq_counts * VOLTS_PER_ROC)
+        assert resonator.bias.amplitude == 0.01
+    finally:
+        panel.close()
+
+
+def test_a_file_from_an_earlier_periscope_says_so(qt_app, monkeypatch, tmp_path):
+    import pickle
+    from rfmux.tools.periscope.session_manager import SessionManager
+    path = tmp_path / "multisweep_module1_120000.pkl"
+    path.write_bytes(pickle.dumps(
+        {"_session_export": {"data_type": "multisweep"}, "results_by_detector": {}}))
+    p = bare_periscope(monkeypatch, session_manager=SessionManager())
+    said = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *a, **k: said.append(a[2]))
+
+    p._load_session_file(str(path))
+
+    assert len(said) == 1 and "earlier version of Periscope" in said[0]
+    p.dock_manager.create_dock.assert_not_called()
+
+
+def test_a_multisweep_that_cannot_be_opened_says_why(qt_app, monkeypatch):
+    p = bare_periscope(monkeypatch)
+    said = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "critical",
+                        lambda *a, **k: said.append(a[2]))
+    p._load_multisweep_analysis({"crs0000_rmod1": {"module": 1}})
+    assert len(said) == 1 and said[0].startswith("Could not open the multisweep")

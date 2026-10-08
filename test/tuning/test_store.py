@@ -210,8 +210,8 @@ def test_an_unstampable_payload_is_refused(output_dir):
 
 
 def test_a_list_of_results_is_refused_and_says_what_to_do(output_dir):
-    """Several modules used to come back as a list, and are a keyed dict now.
-    The error is the migration note for anyone whose script still builds one."""
+    """Several modules come back as a dict keyed by module; a list is refused
+    with a message that says so."""
     with pytest.raises(TypeError, match="keyed by module"):
         store.save([a_module_output(1), a_module_output(2)], "multisweep")
     assert not list(output_dir.rglob("*.pkl"))

@@ -8,9 +8,7 @@ confusion the shared container makes possible.
 The acquisition half runs the driver against a MockCRS. It is there for the
 properties the packing cannot show on its own: that the frequency grid comes
 back whole, once each and in the direction that was swept, across however many
-NCO settings it took to measure. Chunks used to overlap by a point so their
-phases could be stitched together, so "npoints in, npoints out" is a claim worth
-a test.
+NCO settings it took to measure.
 """
 
 import asyncio
@@ -288,8 +286,8 @@ class TestTheDriver:
         assert result[crs.module[MODULE].index()]["module"] == MODULE
 
     def test_every_frequency_asked_for_is_measured_exactly_once(self, netanal):
-        """The property the NCO stitch used to break: chunks overlapped by one
-        frequency, which was measured twice and then dropped."""
+        """Chunks share no frequency, so none is measured twice and none
+        dropped."""
         crs, result = netanal
         frequencies = result[crs.module[MODULE].index()]["results"]["frequencies"]
 

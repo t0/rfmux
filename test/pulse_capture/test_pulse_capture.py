@@ -1539,10 +1539,9 @@ class TestRollingBaseline:
     window long compared with a pulse."""
 
     def test_slow_drift_cannot_trigger_even_a_frozen_baseline(self):
-        """Monotonic drift used to hold the signal past threshold and
-        deadlock the engine mid-capture.  The edge test now vetoes the
-        trigger: over one lookback the drift moves a fraction of a σ, so
-        nothing fires at all, stale baseline or not."""
+        """Monotonic drift that holds the signal past threshold does not
+        trigger: over one lookback it moves a fraction of a σ, so the edge
+        test vetoes it, stale baseline or not."""
         pcap, ns = _run(baseline_window=0, amp=15.0, monotonic=True)
         assert not pcap.state[1].capturing, \
             "the engine must never wedge mid-capture"

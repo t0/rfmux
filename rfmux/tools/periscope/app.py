@@ -1571,7 +1571,7 @@ grid. This tab needs a selected bias step to display its curves.
         The panel writes the container through ``store``, which puts it in the
         session folder because the session manager is what set store's output
         directory. The session manager is told the file exists so the browser
-        shows it; it no longer writes the file itself.
+        shows it.
         """
         if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
             return
@@ -1594,7 +1594,7 @@ grid. This tab needs a selected bias step to display its curves.
         The panel writes the container through ``store``, which puts it in the
         session folder because the session manager is what set store's output
         directory. The session manager is told the file exists so the browser
-        shows it; it no longer writes the file itself.
+        shows it.
         """
         if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
             return

@@ -21,7 +21,7 @@ def test_an_earlier_panel_still_gets_its_progress(qt_app):
     first, second = _panel(1), _panel(2)
     first_signals, second_signals = MultisweepSignals(), MultisweepSignals()
     first.connect_task_signals(first_signals)
-    second.connect_task_signals(second_signals)   # the wiring that used to silence `first`
+    second.connect_task_signals(second_signals)   # must not silence `first`
 
     first_signals.progress.emit(1, 40.0)
     second_signals.progress.emit(2, 90.0)

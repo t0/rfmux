@@ -671,12 +671,8 @@ def test_changing_units_redraws_and_leaves_the_measurement_alone(board, qt_app):
 
 
 def test_a_rerun_starts_a_task_on_the_catalogs_module(board, qt_app):
-    """Re-run reads the module off the catalog, as starting a sweep does.
-
-    It used to read ``params['module']``, which the dialog stopped emitting
-    when the catalog became its subject -- so every re-run stopped with
-    "Target module not specified" before a sweep began.
-    """
+    """Re-run reads the module off the catalog, as starting a sweep does:
+    the dialog's parameters carry no module."""
     _, crs, catalog = board
     params = _multisweep_params(catalog)
     panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
@@ -1102,8 +1098,8 @@ class _StubDockManager:
 
 def test_a_finished_netanal_lands_in_the_session_folder(board, qt_app, tmp_path):
     """One measurement, one file, in the session folder, and the session knows
-    it is there so the browser lists it. The session manager no longer writes
-    the file: store does, into the directory the session set."""
+    it is there so the browser lists it. store writes the file, into the
+    directory the session set."""
     _, crs, catalog = board
     panel = _panel_with_a_sweep(crs, catalog, qt_app)
     panel.current_params["label"] = "in a session"
@@ -1281,7 +1277,7 @@ def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory
     """Import reads the file with ``store.load`` and fills the fields in from
     what the driver recorded about the sweep -- the amplitude it probed at and
     the name it was saved under. Not the module: one Periscope is one module,
-    which is why the dialog no longer has a field for it."""
+    so the dialog has no field for it."""
     _, crs, catalog = board
     panel = _panel_with_a_sweep(crs, catalog, qt_app)
     panel.current_params["label"] = "an import"

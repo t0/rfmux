@@ -151,10 +151,8 @@ async def take_netanal(
     # Identify NCO chunk boundaries by stepping up to max_span each time.
     #
     # Chunks partition the frequency list: each starts one point past where the
-    # last ended. They used to share a boundary frequency, measured twice so
-    # that the phase of one chunk could be rotated onto the previous one's at
-    # the point they had in common. That stitch is gone, and with it the reason
-    # to measure any frequency twice.
+    # last ended, so no frequency is measured twice: the chunks' phases are
+    # not stitched together at a shared point.
     chunks = []
     i_start = 0
     while i_start < npoints:

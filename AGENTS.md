@@ -181,10 +181,6 @@ driver read it. That pair is what states a drive as a power or a voltage —
 `core/transferfunctions.py`, which `BiasPoint.power_dbm` and every label in
 Periscope go through. None where the board reported none.
 
-`results_by_detector` — `{detector_id: {iteration_index: entry}}`, keyed by an
-integer index — was the old GUI's own shape. Nothing produces it; the legacy
-bias paths are its last readers.
-
 ### Unit Conversion (UnitConverter class)
 - Raw ADC counts ↔ Volts ↔ dBm
 - Use `convert_amplitude()` with `unit_mode` parameter

@@ -81,8 +81,7 @@ def a_multisweep(sections=None, direction="upward"):
     """One module's worth of a single multisweep return.
 
     Through the real packer, so these tests cannot drift from the shape a macro
-    actually produces — which is how the flat {name: entry} dicts they used to
-    build by hand went on passing after that shape stopped existing.
+    actually produces.
     """
     if sections is None:
         sections = {"R0001": a_sweep()}

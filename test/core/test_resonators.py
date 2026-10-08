@@ -203,9 +203,8 @@ def test_update_bias_point_quantizes_the_new_frequency():
 def test_the_grid_is_base_frequency_and_nothing_finer():
     """One definition of the grid, and it is transferfunctions.BASE_FREQUENCY.
 
-    A half-step offset is the shape of the bug this guards: it sits exactly on
-    the finer grid that used to be hardcoded around the tree, so it must still
-    be moved. Anything reintroducing a private grid constant fails here.
+    A half-step offset sits exactly on a grid twice as fine, so it must still
+    be moved. Anything with a private, finer grid constant fails here.
     """
     n = round(1e9 / BASE_FREQUENCY)
     requested = (n + 0.5) * BASE_FREQUENCY
@@ -363,7 +362,7 @@ def test_the_default_namer_draws_rather_than_numbers():
 
 
 def test_the_ordering_lives_on_the_channel_not_the_name():
-    """What R0001… used to assert is still recorded, just not in the name."""
+    """Frequency order is recorded in the channels, not in the names."""
     m = ResonatorCatalog.from_frequencies(
         [1.05e9, 1.01e9, 1.03e9], module=2, amplitude=0.01
     )
@@ -923,9 +922,8 @@ def test_dict_round_trip_preserves_module():
 
 
 def test_a_file_carrying_the_retired_nco_field_still_loads():
-    """The catalog used to record an NCO frequency. Dropping it was not a
-    schema change, because a file written with the key reads back fine without
-    it — which is the whole reason SCHEMA_VERSION did not have to move."""
+    """A catalog holds no NCO frequency, and a file that carries one reads
+    back without it."""
     d = ResonatorCatalog.from_frequencies([1e9], module=4, amplitude=0.01).to_dict()
     d["nco_frequency_hz"] = 1.1e9
 

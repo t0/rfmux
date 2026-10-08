@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from pathlib import Path
-from typing import Tuple, Optional, Union
+from typing import Tuple, Optional
 
 from .utils import *
 from .dialogs import MultisweepDialog

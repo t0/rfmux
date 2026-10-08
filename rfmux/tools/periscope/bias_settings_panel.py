@@ -11,7 +11,6 @@ from . import settings as periscope_settings
 from .analysis_settings_panel import AnalysisSettingsPanel
 from ...tuning.bias import (
     BIFURCATION_METHODS,
-    FREQUENCY_METHODS,
     HYSTERESIS_COMPARISONS,
     NEEDS_BOTH_DIRECTIONS,
     find_bias_points,

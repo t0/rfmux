@@ -7,7 +7,7 @@ noise spectrum analysis. Parameters are interdependent — changing one
 updates others automatically.
 """
 
-from PyQt6 import QtWidgets, QtCore, QtGui
+from PyQt6 import QtWidgets, QtGui
 from rfmux.core.transferfunctions import decimation_to_sampling
 from .field_memory import remember_fields
 

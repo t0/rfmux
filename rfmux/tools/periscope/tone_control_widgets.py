@@ -65,7 +65,7 @@ class BoardEdit(QtWidgets.QLineEdit):
 
 class ToneFields(QtWidgets.QFrame):
     """One channel's frequency (kHz from the NCO, the actual frequency
-    under it), amplitude (dBm against the module's labelled DAC scale,
+    under it), amplitude (dBm against the module's DAC scale at the output,
     the normalized value under it) and DAC and ADC phases (degrees)."""
 
     # channel, {field: value in board units}
@@ -170,8 +170,9 @@ class ToneFields(QtWidgets.QFrame):
 
 
 class NcoBanner(QtWidgets.QFrame):
-    """Module, editable NCO in MHz, the labelled DAC scale the dBm fields
-    are referenced to, and the refresh cadence."""
+    """Module, editable NCO in MHz, the module's DAC scale at the output
+    (the setting less BALUN_LOSS_DB) that the dBm fields are referenced to,
+    and the refresh cadence."""
 
     nco_committed = pyqtSignal(float)  # Hz
 

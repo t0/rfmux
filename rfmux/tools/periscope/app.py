@@ -69,7 +69,6 @@ from .session_browser_panel import SessionBrowserPanel
 from .session_startup_dialog import (
     UnifiedStartupDialog, choose_session_root, session_root,
     SESSION_ROOT_ACTION)
-from rfmux.core.transferfunctions import convert_roc_to_volts, BASE_FREQUENCY
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
 from rfmux.tuning import store

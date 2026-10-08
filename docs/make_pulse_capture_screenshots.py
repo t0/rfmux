@@ -53,8 +53,7 @@ async def _capture(path):
     from rfmux.algorithms.measurement.streamer_config import StreamerConfig
     from rfmux.core.transferfunctions import decimation_to_sampling
     from rfmux.mock.helpers import create_mock_crs
-    from rfmux.pulse_capture import (
-        PulseCaptureConfig, PulseCaptureSession, run_slow_source)
+    from rfmux.pulse_capture import PulseCaptureSession, run_slow_source
     from rfmux.streamer import find_streamer_conflict
     from rfmux.tuning import tuning_rows
 

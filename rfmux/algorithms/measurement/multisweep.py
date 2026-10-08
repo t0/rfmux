@@ -525,6 +525,9 @@ async def multisweep(
         original centre, amplitude, and direction. See
         :func:`rfmux.tuning.sweep_results.pack_multisweep` for the format.
 
+    A call that raises partway returns and saves nothing; ``sweep_callback``
+    receives each sweep as it completes.
+
     Raises:
         ValueError: invalid directions, module selection, centres, or
             amplitudes. These are checked before acquisition.
@@ -708,8 +711,7 @@ async def multisweep(
 
         for direction in directions:
             # Progress is across the whole call, so each sweep reports into its
-            # own slice of it — which for a single sweep is all of it, exactly
-            # as it was before there was an amplitude axis to share with.
+            # own slice of it.
             if progress_callback is None:
                 report_progress = None
             else:

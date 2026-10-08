@@ -40,7 +40,6 @@ Usage::
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import time
 import warnings

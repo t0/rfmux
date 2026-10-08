@@ -8,7 +8,6 @@ import math
 import traceback
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDoubleValidator, QIntValidator
 
 from rfmux.algorithms.measurement.multisweep import multisweep

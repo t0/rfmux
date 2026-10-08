@@ -2,7 +2,6 @@
 from pathlib import Path
 from typing import Optional
 
-import numpy as np
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt, pyqtSignal
 import pyqtgraph as pg
@@ -11,8 +10,7 @@ import traceback
 # Imports from within the 'periscope' subpackage
 from .layouts import FlowLayout, grouped
 from .utils import (
-    LINE_WIDTH, UnitConverter, ClickableViewBox, QtWidgets, QtCore, pg,
-    AMPLITUDE_COLORMAP_THRESHOLD, UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    UnitConverter, ClickableViewBox, AMPLITUDE_COLORMAP_THRESHOLD,
     STATUS_MESSAGE_MS, TABLEAU10_COLORS, DEFAULT_SUBPLOTS, ScreenshotMixin
 )
 from .noise_spectrum_dialog import NoiseSpectrumDialog
@@ -63,8 +61,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     # capture file as each channel's tuning record.
     tuning_ready = pyqtSignal(int, dict)  # module, {channel: row}
     
-    # Signal for session auto-export
-    data_ready = pyqtSignal(str, str, dict)  # type, identifier, data
     # Emitted once the call has returned and the panel holds it, so the session
     # can write the file where the panel, not the task, decides when.
     sweep_finished = pyqtSignal()

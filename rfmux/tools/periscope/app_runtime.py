@@ -3,7 +3,6 @@
 from .utils import *
 from .tasks import *
 from .ui import *
-import asyncio
 from .tone_control_widgets import ToneFields
 from PyQt6 import sip
 import numpy as np
@@ -13,11 +12,7 @@ from pathlib import Path
 from rfmux.core.transferfunctions import BALUN_LOSS_DB
 from rfmux.tuning import (AmplitudeSchedule, load_bias_catalog,
                           multisweep_from_tuning, tuning_rows)
-from rfmux.core.transferfunctions import (
-    PFB_SAMPLING_FREQ,
-    apply_iq_conversion,
-    convert_dacunits_to_dbm,
-)
+from rfmux.core.transferfunctions import apply_iq_conversion
 from ... import streamer as _streamer
 from ...pulse_capture.sources import (
     columns_for_width,
@@ -1537,9 +1532,6 @@ class PeriscopeRuntime:
             if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
                 panel.tuning_ready.connect(self._handle_tuning_ready)
             
-            # Connect data_ready signal for session auto-export
-            if getattr(self, 'session_manager', None) is not None:
-                panel.data_ready.connect(self.session_manager.handle_data_ready)
 
             panel.sweep_finished.connect(
                 lambda p=panel, m=target_module: self._save_multisweep_to_session(p, m))
@@ -1746,9 +1738,6 @@ class PeriscopeRuntime:
                 if hasattr(panel, 'tuning_ready') and hasattr(self, '_handle_tuning_ready'):
                     panel.tuning_ready.connect(self._handle_tuning_ready)
 
-                if getattr(self, 'session_manager', None) is not None:
-                    panel.data_ready.connect(self.session_manager.handle_data_ready)
-
                 panel.sweep_finished.connect(
                     lambda p=panel, m=block['module']:
                     self._save_multisweep_to_session(p, m))
@@ -1787,11 +1776,6 @@ class PeriscopeRuntime:
             old_task = self.multisweep_tasks.pop(old_task_key); old_task.stop()
             
         self.multisweep_windows[window_id]['params'] = params.copy() # Update stored params
-        # Pass the window_instance to the task (now starts automatically since it's a QThread)
-        
-        # Connect data_ready signal for session auto-export
-        if getattr(self, 'session_manager', None) is not None:
-            window_instance.data_ready.connect(self.session_manager.handle_data_ready)
 
         signals = MultisweepSignals()
         window_instance.connect_task_signals(signals)

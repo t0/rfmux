@@ -6,7 +6,7 @@ import numpy as np
 
 # Added import for PSD computation
 from scipy.signal import welch
-from scipy.constants import pi, c
+from scipy.constants import c
 from typing import Union, Optional, Dict, Literal
 import warnings
 from scipy import interpolate

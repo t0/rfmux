@@ -1539,7 +1539,7 @@ class TestRollingBaseline:
     window long compared with a pulse."""
 
     def test_slow_drift_cannot_trigger_even_a_frozen_baseline(self):
-        """Monotonic drift used to park the signal past threshold and
+        """Monotonic drift used to hold the signal past threshold and
         deadlock the engine mid-capture.  The edge test now vetoes the
         trigger: over one lookback the drift moves a fraction of a σ, so
         nothing fires at all, stale baseline or not."""
@@ -1560,7 +1560,7 @@ class TestRollingBaseline:
         """A 15σ step IS a fast event, so it triggers; the signal then
         never returns to the old baseline.  Frozen baseline: the hard
         stop truncates the capture at the ring's capacity and the edge
-        gate keeps the parked signal from re-firing — exactly one
+        gate keeps the held signal from re-firing — exactly one
         flagged event.  Rolling baseline: the median walks to the new
         level and the end confirmation ends the capture normally, sooner."""
         def step(window):
@@ -1580,7 +1580,7 @@ class TestRollingBaseline:
         stuck, frozen_ns = step(0)
         assert not stuck.state[1].capturing, "hard stop did not fire"
         assert stuck.pulse_count[1] == 1, \
-            "one step, one event — the parked tail must not re-fire"
+            "one step, one event — the tail held above threshold must not re-fire"
         d = stuck.pulses["Channel 1"][1]
         assert d["truncated"], "a capture ended by the hard stop is flagged"
         assert frozen_ns.mean_I == 0.0
@@ -1840,7 +1840,7 @@ class TestHardStop:
         assert d["truncated"] is False
 
     def test_stale_baseline_capture_ends_at_the_pre_pulse_anchor(self):
-        """The reported failure: drift parks the signal 6σ from the
+        """The reported failure: drift holds the signal 6σ from the
         (stale) mean, a pulse fires on top of it, and after the pulse
         the amplitude test STAYS above threshold — the below-threshold
         freeze and the end bucket both starve, and the capture used to
@@ -1853,7 +1853,7 @@ class TestHardStop:
                             threshold_sigma=5.0, end_sigma=1.5)
         rng = np.random.default_rng(11)
         for k in range(3000):
-            v = 6.0 + rng.normal(0, 1.0)  # parked: dev never drops below 5
+            v = 6.0 + rng.normal(0, 1.0)  # held: dev never drops below 5
             if k >= 800:
                 v += 60.0 * np.exp(-(k - 800) / 40.0)
             pcap.process_sample(1, float(v), float(rng.normal(0, 1.0)),

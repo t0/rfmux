@@ -243,7 +243,7 @@ to many digits and the wrong one for a test that has to survive a board.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `auto_bias_kids` | False | After building, park one tone on each resonance so a caller can sweep or stream at once. |
+| `auto_bias_kids` | False | After building, bias each resonance with one tone so a caller can sweep or stream at once. |
 | `bias_amplitude` | -56.75 dBm, stored normalized | Amplitude of those tones. `bias_amplitude_from_dbm()` in `config.py` converts; the dialog shows it in dBm. |
 
 ### Quasiparticle pulses

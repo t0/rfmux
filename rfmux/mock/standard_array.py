@@ -30,7 +30,7 @@ STANDARD_ARRAY: dict[str, Any] = {
     "freq_start": 1.00e9,
     "freq_end": 1.10e9,
     "resonator_random_seed": 42,      # the same eight resonators every time
-    "auto_bias_kids": True,           # the simulator parks a tone on each one
+    "auto_bias_kids": True,           # the simulator biases each one
     # The bath temperature sets Q through the quasiparticle density. The
     # default 0.12 K gives Q near 3e5, a 4 kHz linewidth that a 1 kHz sweep
     # grid barely resolves; 0.23 K gives Q near 5e4 and a 20 kHz linewidth,

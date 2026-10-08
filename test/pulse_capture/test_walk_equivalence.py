@@ -3,7 +3,7 @@ walk.walk is process_sample transcribed; this holds it to the original.
 
 One stream carries every branch of the capturing state machine: a
 clean pulse, a pileup chain, a step that never returns (hard stop), a
-run parked above threshold by drift with a pulse on top, and a window
+run held above threshold by drift with a pulse on top, and a window
 with triggers frozen.  It is ingested three ways -- per sample, in
 blocks without the walk, in blocks with it -- and every field of every
 record must agree bitwise.

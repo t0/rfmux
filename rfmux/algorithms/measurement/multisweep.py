@@ -363,7 +363,7 @@ async def _measure_sweep(
 
                     # Silence this sweep's *other* NCO regions — their tones would
                     # otherwise sit outside the current NCO's band. Only channels
-                    # this sweep owns, so a tone the caller parked elsewhere on the
+                    # this sweep owns, so a tone the caller set elsewhere on the
                     # module survives.
                     if not point_idx: # only need to do this once per sweep
                         for ch in sorted(swept_channels - active_res_channels):

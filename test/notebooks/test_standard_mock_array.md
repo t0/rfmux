@@ -135,7 +135,7 @@ print(search)
 print(f"netanal {timings['netanal']:.1f} s; found {len(found_hz)} of {len(tones_hz)}")
 assert len(found_hz) == len(tones_hz)
 # Found on a 4 kHz grid, at a lower probe power than the bias tone: within a
-# few grid points of where the simulator parked each tone.
+# few grid points of where the simulator biased each resonator.
 assert np.all(np.abs(found_hz - tones_hz) < 50e3)
 ```
 

@@ -129,7 +129,7 @@ MOCK_CONFIG = {
 
 crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG, verbose=False)
 
-# Where the simulator parked its own tones: one channel per resonator, and
+# Where the simulator biased each resonator: one channel per resonator, and
 # get_frequency reports relative to the NCO.
 nco_frequency = await crs.get_nco_frequency(module=MODULE)
 bias_frequencies = [

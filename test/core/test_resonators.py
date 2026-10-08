@@ -241,11 +241,11 @@ def test_moving_the_frequency_drops_calibration():
 
 def test_moving_the_amplitude_drops_calibration():
     r = a_resonator()
-    parked_at = r.bias.frequency_hz
+    biased_at = r.bias.frequency_hz
     r.update_bias_point(iq_rotation_deg=12.0)
     r.update_bias_point(amplitude=0.02)
     assert r.bias.iq_rotation_deg is None
-    assert r.bias.frequency_hz == parked_at
+    assert r.bias.frequency_hz == biased_at
 
 
 def test_moving_the_tone_keeps_calibration_passed_explicitly():
@@ -257,9 +257,9 @@ def test_moving_the_tone_keeps_calibration_passed_explicitly():
 
 def test_amending_only_calibration_leaves_the_tone_alone():
     r = a_resonator()
-    parked_at = r.bias.frequency_hz
+    biased_at = r.bias.frequency_hz
     r.update_bias_point(dI_df=1e-9, dQ_df=2e-9)
-    assert r.bias.frequency_hz == parked_at
+    assert r.bias.frequency_hz == biased_at
     assert r.bias.amplitude == 0.01
     assert r.bias.df_calibration is not None
 
@@ -515,7 +515,7 @@ def test_min_separation_hz_is_inclusive():
 
 
 def test_min_separation_hz_none_allows_identical_frequencies():
-    """The deliberate case: two channels parked on one frequency."""
+    """The deliberate case: two channels biased at one frequency."""
     m = ResonatorCatalog.from_frequencies(
         [1e9, 1e9], module=1, amplitude=0.01, min_separation_hz=None
     )

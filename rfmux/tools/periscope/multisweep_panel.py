@@ -1248,7 +1248,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     # ── applying it ──────────────────────────────────────────────────────────
 
     def _apply_bias(self):
-        """Park a tone on every resonator, off the GUI thread.
+        """Bias every resonator, off the GUI thread.
 
         The catalog is the whole of the instruction. Which NCO carries it, and
         putting the frequencies on the tone grid, are ``apply_bias``'s -- this

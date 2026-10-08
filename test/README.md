@@ -2,20 +2,8 @@
 
 ## Running
 
-Ask for a tier by name. Counts include expected failures and exclude local
-scratch notebooks. This collection has the test group installed but lacks
-`rfmux.fastrx`, so its file-format tests are not included. The missing fastrx
-extension and an environment missing `pygetdata` also skip capture and recording-review checks. Optional
-dependencies and compiled extensions can change the collected set. Measure local runtime
-with `--durations=20`; acquisition includes full demo notebooks and depends
-strongly on their measurement parameters.
-
-Use the `rfmux-tuning` environment in this checkout. Mock RPC, UDP and
-asyncio worker tests need local socket access; run outside a socket-restricted
-sandbox. `pygetdata` is a default dependency except on `aarch64`; existing
-environments may need their dependencies refreshed.
-Activate the environment (or use `conda run -n rfmux-tuning`) so subprocess
-commands such as `jupyter` also resolve there, not just the Python interpreter.
+Ask for a tier by name. Counts and times are from a warm checkout on a
+developer laptop.
 The Jupyter IPv6 busy-port check requires `localhost` to resolve to IPv6;
 an IPv6 loopback socket alone is not sufficient.
 

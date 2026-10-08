@@ -6,7 +6,8 @@
 
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
-- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
+- **Tuning** (`rfmux/tuning/`): headless tuning: resonator catalogs, finding resonances, fits, bias finding, and `store`, which saves measurements
+- **Algorithms** (`rfmux/algorithms/`): measurements on the board (network analysis, multisweep, noise, `empirically_calibrate_df`, streamer configuration, one-shot `trigger_capture`) and `apply_bias`
 - **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, coincidence events (`events.py`), the HDF5 record, and fastrx recordings read offline (`overlay.py`, and `recording_file.py` with numpy alone)
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
@@ -150,9 +151,8 @@ module, keyed by the board-and-module identifier `crs.module[m].index()`
 returns. A block carries `schema_version`, `measurement`, `module`,
 `dac_scale_dbm`, `call_params` and `results`.
 
-A multisweep's `results` is `{step: {direction: {name: sweep}}}` — amplitude
-step, sweep direction, resonator name. A sweep is a measurement and nothing
-else:
+A multisweep's `results` is `{step: {direction: {name: sweep}}}`: amplitude
+step, sweep direction, resonator name. A sweep holds what was measured:
 
 ```python
 {'channel', 'frequencies', 'iq_counts', 'iq_volts',
@@ -160,8 +160,8 @@ else:
  'sweep_amplitude_dbm'}
 ```
 
-No phase (it is `np.angle(iq_counts)` where it is wanted), no fit, no bias
-frequency. Read it through the accessors rather than walking the nesting:
+No phase (it is `np.angle(iq_counts)` where it is wanted) and no bias
+frequency. Fit and Find Bias add the sweep's fits under `entry["fits"]`. Read it through the accessors rather than walking the nesting:
 
 ```python
 from rfmux.tuning import collect_amplitude_iterations_for, find_iteration_matching_amplitude
@@ -175,8 +175,9 @@ Resonators are named, and the array a sweep was taken from is in the file:
 it walked are `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
 
 An amplitude is a fraction of DAC full scale, and `block["dac_scale_dbm"]` is
-what full scale was worth on that module when the board was asked, as the
-driver read it. That pair is what states a drive as a power or a voltage —
+what full scale was worth at the output on that module when the board was
+asked: the setting less `BALUN_LOSS_DB`. That pair states a drive as a power
+or a voltage, through
 `convert_dacunits_to_dbm` / `convert_dacunits_to_volts` in
 `core/transferfunctions.py`, which `BiasPoint.power_dbm` and every label in
 Periscope go through. None where the board reported none.
@@ -185,8 +186,8 @@ Periscope go through. None where the board reported none.
 - Raw ADC counts ↔ Volts ↔ dBm
 - Use `convert_amplitude()` with `unit_mode` parameter
 - Normalization at display time, preserve raw data. Normalizing states a
-  trace against the drive it was taken at — divide by it, subtract it in dBm
-  — so an amplitude ladder lands on one axis. Counts need only the drive;
+  trace against the drive it was taken at (divide by it, or subtract it in
+  dBm), so an amplitude ladder lands on one axis. Counts need only the drive;
   volts and dB need the module's DAC scale as well, so ask
   `UnitConverter.can_normalize()` for both the data and the axis label
 
@@ -240,12 +241,15 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 
 ```
 rfmux/
-├── core/           # CRS, session, hardware_map, schema
-├── algorithms/     # measurement/ (fitting, multisweep, streamer config)
+├── core/           # CRS, session, hardware_map, schema, resonators
+├── tuning/         # catalogs, find resonances, fits, bias finding, store
+├── algorithms/     # measurement/ (netanal, multisweep, noise, streamer
+│                   #   config, trigger_capture), operation/ (apply_bias)
 ├── pulse_capture/  # detection engine, walk, sources, session, hdf5
 ├── tools/
 │   └── periscope/  # GUI panels, dialogs, tasks, utils
 ├── mock/           # MockCRS, resonator physics
+├── resonator_names/  # generated resonator names (syllables, R0001...)
 ├── streamer/       # C++ packet receiver
 └── mr_resonator/   # Numba physics (subset of external lib)
 ```
@@ -261,9 +265,6 @@ pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope
 ```
-
-Counts exclude scratch notebooks and the unavailable `rfmux.fastrx` file-format
-tests; see `test/README.md` for the collection environment.
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
 but `hardware`/`all` excludes the board tests. Optional capture and recording

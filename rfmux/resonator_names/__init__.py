@@ -7,10 +7,9 @@ https://github.com/macleaner/resonator_name_generator
 Contents (trimmed for rfmux):
 - syllables: pronounceable syllabic strings of an exact length, made up rather
   than looked up
-- boring: a plain counter, ``R0001…``, for when a number is the right answer
 
 Modifications in this repository include:
-- Trimmed to the two modules that generate names without data. Upstream ships
+- Trimmed to the module that generates names without data. Upstream ships
   five curated word lists (~680 kB of human given names, pet names, and nouns)
   and a category-weighting layer to mix them; neither comes along, so nothing
   here reads a file.
@@ -18,9 +17,10 @@ Modifications in this repository include:
   Wikidata and other sources over the network.
 - Added the catalog-facing namers below, which draw one distinct name per
   resonator. Upstream's equivalent lives in its weighting layer.
+- Upstream's ``boring`` counter is :func:`numbered_names` here.
 - Names are upper case here and capitalised upstream (``BOTA``, not ``Bota``).
   The change is made in :func:`syllabic_name` rather than in ``syllables.py``,
-  so the vendored modules stay byte-identical and re-vendoring stays a copy.
+  so the vendored module stays byte-identical and re-vendoring stays a copy.
 
 Original project license: see rfmux/resonator_names/LICENSE (CC0 1.0, upstream
 LICENSE retained)
@@ -41,12 +41,6 @@ from __future__ import annotations
 import random
 from typing import Iterable, Sequence
 
-from .boring import (
-    DEFAULT_PREFIX,
-    DEFAULT_WIDTH,
-    boring_name,
-    boring_names,
-)
 from .syllables import (
     MIN_LENGTH,
     random_syllabic_string as _random_syllabic_string,
@@ -54,12 +48,8 @@ from .syllables import (
 
 __all__ = [
     "DEFAULT_LENGTH",
-    "DEFAULT_PREFIX",
     "DEFAULT_QUANTUM_HZ",
-    "DEFAULT_WIDTH",
     "MIN_LENGTH",
-    "boring_name",
-    "boring_names",
     "numbered_names",
     "syllabic_name",
     "syllabic_names",
@@ -179,9 +169,9 @@ def syllabic_names_from_frequency(
 def numbered_names(
     frequencies_hz: Sequence[float],
     *,
-    prefix: str = DEFAULT_PREFIX,
+    prefix: str = "R",
     start: int = 1,
-    width: int = DEFAULT_WIDTH,
+    width: int = 4,
     avoid: Iterable[str] = (),
 ) -> list[str]:
     """``R0001…``, one per frequency, in the order given.
@@ -191,13 +181,34 @@ def numbered_names(
 
     :param frequencies_hz: the resonators being named; only the count is read.
     :param prefix: what to put in front of the number, verbatim. Must not
-        contain whitespace or end in a digit.
+        contain whitespace or end in a digit, so a name reads back one way.
     :param start: the first index to use.
     :param width: the minimum number of digits; a batch running past it widens
         as a whole, so the names stay the same width as each other.
-    :param avoid: names already in use. Matched on the number, so ``R1`` and
-        ``R0001`` both mean index 1.
+    :param avoid: names already in use, skipped when matched exactly: ``R1``
+        does not stand for ``R0001``.
     """
-    return boring_names(
-        len(frequencies_hz), prefix, start=start, width=width, avoid=avoid
-    )
+    if start < 0:
+        raise ValueError(f"start must not be negative, got {start}")
+    if width < 1:
+        raise ValueError(f"width must be positive, got {width}")
+    if any(character.isspace() for character in prefix):
+        raise ValueError(f"prefix must not contain whitespace, got {prefix!r}")
+    if prefix[-1:].isdigit():
+        raise ValueError(f"prefix must not end in a digit, got {prefix!r}")
+    avoided = frozenset(avoid)
+    # Widening renames every candidate, so which ones *avoid* matches is only
+    # settled at the final width: build the batch, and again one digit wider
+    # if the last index needed it. The width only grows, so this ends.
+    while True:
+        names = []
+        index = start
+        while len(names) < len(frequencies_hz):
+            name = f"{prefix}{index:0{width}d}"
+            if name not in avoided:
+                names.append(name)
+            index += 1
+        needed = max(width, len(str(index - 1)))
+        if not names or needed == width:
+            return names
+        width = needed

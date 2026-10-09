@@ -1,7 +1,7 @@
 """What the namers promise.
 
-The two vendored modules (``syllables``, ``boring``) are upstream's and are
-tested there; this covers the rfmux layer on top — that a draw is distinct, that
+The vendored module (``syllables``) is upstream's and is tested there; this
+covers the rfmux layer on top — that a draw is distinct, that
 a frequency-derived name is stable against the things that move, and that a
 namer plugs into a catalog.
 """
@@ -13,7 +13,6 @@ import pytest
 
 from rfmux.resonator_names import (
     DEFAULT_LENGTH,
-    boring_names,
     numbered_names,
     syllabic_name,
     syllabic_names,
@@ -155,5 +154,16 @@ def test_the_syllabic_primitive_honours_an_exact_length():
     assert len(syllabic_name(9, rng=0)) == 9
 
 
-def test_the_boring_primitive_widens_a_batch_as_a_whole():
-    assert boring_names(3, start=9999) == ["R09999", "R10000", "R10001"]
+def test_numbered_names_widen_a_batch_as_a_whole():
+    assert numbered_names(some_frequencies(3), start=9999) == [
+        "R09999", "R10000", "R10001"]
+
+
+def test_numbered_names_avoid_only_exact_names():
+    assert numbered_names(some_frequencies(1), avoid=["R1"]) == ["R0001"]
+
+
+@pytest.mark.parametrize("prefix", ["R1", "k id"])
+def test_numbered_names_refuse_a_prefix_that_reads_two_ways(prefix):
+    with pytest.raises(ValueError, match="prefix"):
+        numbered_names(some_frequencies(1), prefix=prefix)

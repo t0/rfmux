@@ -75,17 +75,58 @@ def test_the_channel_streamer_is_off_unless_asked_and_remembered(
         qt_app, tmp_path, monkeypatch):
     dlg, settings = _dialog(tmp_path, monkeypatch)
     o = dlg.get_options()
-    assert (o["channel_streamer"], o["sample_trunc"]) == (False, "LOW")
+    assert o["channel_streamer"] is False
     assert "±32767" in dlg.trunc_combo.toolTip()
     dlg.streamer_check.setChecked(True)
     dlg.trunc_combo.setCurrentIndex(2)
     dlg._save()
-    o = rd.RecordDialog(settings=settings).get_options()
-    assert (o["channel_streamer"], o["sample_trunc"]) == (True, "HIGH")
+    # The streamer choice is remembered; the sample bits start empty.
+    again = rd.RecordDialog(settings=settings)
+    assert again.get_options()["channel_streamer"] is True
+    assert again.trunc_combo.currentIndex() == -1
     # The choice belongs to the fastrx product.
     dlg.fastrx_check.setChecked(False)
     dlg._refresh()
     assert not dlg.streamer_check.isEnabled()
+
+
+def test_the_sample_bits_are_measured_or_chosen_before_recording(
+        qt_app, tmp_path, monkeypatch):
+    dlg, _ = _dialog(tmp_path, monkeypatch, running=["enp2s0f0np0"])
+    dlg.parser_iface_combo.setCurrentIndex(0)
+    dlg.serial_edit.setText("0156")
+    dlg.rb_ranges.setChecked(True)
+    dlg.channels_edit.setText("1:1-4,2:1-8")
+    dlg.fastrx_check.setChecked(True)
+    dlg.fastrx_iface_combo.setEditText("enp2s0f0np0")
+    dlg.streamer_check.setChecked(True)
+    assert not dlg.record_btn.isEnabled()
+    assert "measure the bit depth" in dlg.status_label.text()
+    assert dlg.measure_btn.isEnabled()
+    seen = []
+
+    def measure(serial, hostname, wanted, iface):
+        seen.append((serial, wanted, iface))
+        return {1: (5000.0, "LOW"), 2: (100000.0, "MID")}
+    monkeypatch.setattr(rd, "measure_bit_depth", measure)
+    dlg._measure()
+    assert seen == [("0156", {1: [1, 2, 3, 4], 2: list(range(1, 9))},
+                     "enp2s0f0np0")]
+    # One window for the run: the coarsest any module needs.
+    assert dlg.trunc_combo.currentData() == "MID"
+    assert "module 2: peak 100000 counts" in dlg.trunc_note.text()
+    assert dlg.record_btn.isEnabled(), dlg.status_label.text()
+    # The suggestion can be overridden.
+    dlg.trunc_combo.setCurrentIndex(dlg.trunc_combo.findData("HIGH"))
+    assert dlg.get_options()["sample_trunc"] == "HIGH"
+
+    def fails(*a):
+        raise RuntimeError("no channel-stream packets from module 1")
+    monkeypatch.setattr(rd, "measure_bit_depth", fails)
+    dlg._measure()
+    assert "measuring failed: no channel-stream packets" in \
+        dlg.trunc_note.text()
+    assert dlg.trunc_combo.currentData() == "HIGH"
 
 
 def test_the_units_choice_is_the_captures_trigger_basis(

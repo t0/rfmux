@@ -2,9 +2,128 @@
 
 Branch `tuning_headless_revamp`, October 2026.
 
-Resonator tuning runs headlessly from `rfmux.tuning`, and Periscope calls the
-same functions. A resonator catalog carries each resonator's bias from bias
-finding to the board, to the saved files and to pulse capture.
+Resonator tuning runs from a script or a notebook as well as from Periscope:
+finding resonances, sweeping them over a schedule of readout powers, fitting,
+choosing bias points, programming them and measuring noise. Periscope calls
+the same functions. A `ResonatorCatalog` names each resonator and carries its
+channel, frequency and amplitude from one step to the next, to the board, to
+the saved files and to pulse capture. Every step saves its result through
+`rfmux.tuning.store`, into the session folder when Periscope has one open.
+
+[simplified_tuning_flow.md](../../rfmux/reference-notebooks/Demos/simplified_tuning_flow.md) runs the whole
+flow on the simulator from top to bottom. Each step below has a notebook of
+its own.
+
+## The tuning flow
+
+### Find resonances
+
+```python
+netanal = await crs.take_netanal(module=1, amp=0.001, fmin=1.0e9, fmax=1.1e9)
+search = find_resonances_in_netanal(netanal[crs.module[1].index()])
+catalog = search.to_catalog(module=1, amplitude=0.004)
+```
+
+The catalog gives each resonator a generated name (`BOTA`), a channel in
+frequency order and a frequency on the hardware tone grid.
+`numbered_names` gives `R0001…` instead, and a catalog can be built from a
+list of frequencies with `ResonatorCatalog.from_frequencies`. See
+[network_analysis_find_resonances.md](../../rfmux/reference-notebooks/Demos/network_analysis_find_resonances.md)
+and [resonator_catalogs.md](../../rfmux/reference-notebooks/Demos/resonator_catalogs.md).
+
+### Sweep over readout powers
+
+```python
+sweeps = await crs.multisweep(
+    catalog, amp=AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
+    sweep_direction=("upward", "downward"))
+```
+
+`AmplitudeSchedule.multiplicative` scales each resonator's own amplitude,
+`ramp` gives every resonator the same amplitudes, and `explicit` takes a
+list. One call measures the whole schedule, in both directions if asked, and
+saves one file. See [multisweep.md](../../rfmux/reference-notebooks/Demos/multisweep.md).
+
+### Fit
+
+```python
+fit_sweeps(sweeps[crs.module[1].index()], models=("skewed", "nonlinear"))
+```
+
+Each fit is written into its sweep, under `entry["fits"][model]`.
+
+### Choose and apply bias points
+
+```python
+report = find_bias_points(sweeps[crs.module[1].index()])
+bias_path = await crs.apply_bias(report.catalog)
+```
+
+`find_bias_points` chooses each resonator's readout power from where it
+bifurcates, judged by the IQ derivative, by up/down hysteresis, or by either
+(`amplitude_method="both"`), and its frequency where the IQ trace moves
+fastest per hertz. `report.flagged` lists the
+resonators whose choice needs a look, with the reason. `apply_bias` programs
+the catalog and saves a `bias_catalog` file with the NCO and DAC scale
+setting read back from the board; `load_bias_catalog(bias_path)` reads it.
+See [bias_finding.md](../../rfmux/reference-notebooks/Demos/bias_finding.md).
+
+### Measure noise
+
+```python
+noise = await crs.measure_noise(report.catalog)
+```
+
+Slow-stream timestreams and spectra for every biased resonator, and the
+fast PFB stream when `pfb_samples` is set. With a df calibration the
+spectra are also in Hz²/Hz. See
+[noise_measurement.md](../../rfmux/reference-notebooks/Demos/noise_measurement.md).
+
+### Calibrate tones that are already playing
+
+```python
+catalog = await crs.empirically_calibrate_df(module=1)
+```
+
+One short sweep around every biased tone of the module, at its own
+amplitude, gives each tone its IQ slope where it sits and so its df
+calibration. The tones are put back and the catalog is saved as a
+`bias_catalog` file. `rfmux record` reads the session's newest one.
+
+## Periscope
+
+The network analysis panel's **Find Resonances** marks the resonances it
+found, and **Take Multisweep** sweeps them. The multisweep window runs the
+rest of the flow from its toolbar: **Run Fit**, **Find Bias**, **Apply
+Bias** and **Get Noise Spectrum**, each with a settings panel beside it, and
+**Edit catalog** and **Re-run Multisweep**.
+
+Its tabs:
+
+- **Magnitude Sweeps** and **IQ Circles**: every resonator at every
+  readout power, coloured by power, with the chosen bias point marked.
+- **Detector Digest**: one resonator's sweeps, loops and bias point, with
+  its fit values. Double-click a subplot on any grid to open it here.
+- **Fit Results** and **Fit Histograms**: the model over the measurement,
+  and the fit parameters across the array.
+- **Bias: derivative**, **Bias: frequency** and **Bias: hysteresis**: what
+  `find_bias_points` looked at for each resonator.
+- **Collisions**: sweeps that hold two resonances closer than a threshold,
+  with **Remove names and re-sweep**.
+
+Double-click a `bias_catalog` in the session browser to see each channel's
+bias in the tuning window. If **Apply Bias** finds that the module's DAC
+scale changed since the sweep, it recomputes the amplitudes to keep each
+resonator's measured power and says so in a dismissable window.
+
+## Simulator
+
+`rfmux.mock.standard_array()` starts the simulator with eight resonators
+between 1.00 and 1.10 GHz, the same eight every run, biased by the
+simulator, and returns `(crs, catalog)`. The tuning tests start from it.
+
+The simulator biases its resonators at `BIAS_DBM`, -56.75 dBm at the
+output.
 
 ## Migrating
 

@@ -15,11 +15,13 @@ from .amplitude_colorbar import AmplitudeColorBar
 from .fit_display_toolbar import FitDisplayToolbar
 from .layouts import FlowLayout, labelled
 from .multisweep_grid_helpers import (
-    MODEL_LINE_WIDTH, model_in_counts,
-    plot_iq, plot_magnitude, si)
+    MODEL_LINE_WIDTH, add_legend, drive_legend_labels, model_in_counts,
+    plot_iq, plot_magnitude, reset_subplot, show_drive_colorbar, si,
+    sweep_title)
 from .utils import (
-    AMPLITUDE_COLORMAP_THRESHOLD, ClickableViewBox, TABLEAU10_COLORS,
-    UnitConverter, iq_axis_labels, magnitude_axis_labels, square_axes)
+    ClickableViewBox, TABLEAU10_COLORS, UnitConverter, apply_plot_theme,
+    iq_axis_labels, magnitude_axis_labels, square_axes, sweep_style,
+    theme_colors)
 
 #: The model curve's colour on the bias plot. Not the foreground, as the Fit
 #: Results grid draws it: there the model lies over traces of every drive,
@@ -98,6 +100,7 @@ class DetectorDigestTab(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._traces: list = []
+        self._colorbar_shown = False
         self._sweeps = None
         self._bias = None
         self._amplitude_to_color: dict = {}
@@ -162,7 +165,7 @@ class DetectorDigestTab(QtWidgets.QWidget):
     def redraw(self) -> None:
         """Rebuild the three plots and the columns under them."""
         for plot in self._plots:
-            self._theme(plot)
+            apply_plot_theme(plot, self._dark_mode)
         if self.resonator() is None or not self._traces:
             for plot in self._plots:
                 plot.clear()
@@ -170,7 +173,14 @@ class DetectorDigestTab(QtWidgets.QWidget):
             self._show_columns([])
             return
 
-        self._show_colorbar()
+        # Over the measurement's whole scale rather than this resonator's,
+        # so the colours mean the same thing here as on the grids.
+        self._colorbar_shown = show_drive_colorbar(
+            self.colorbar, self._amplitude_to_color,
+            {amplitude for _step, _direction, amplitude, _sweep in self._traces},
+            self._dac_scale, self._unit_mode, self._dark_mode,
+            any(direction == "downward"
+                for _step, direction, _amplitude, _sweep in self._traces))
         self._draw_sweeps(self._plots[0])
         self._draw_loops(self._plots[1])
         self._draw_bias_sweep(self._plots[2], self.toolbar.get_model())
@@ -194,22 +204,17 @@ class DetectorDigestTab(QtWidgets.QWidget):
         The measurement alone: what the fit made of it is on the third plot,
         over the one sweep it is about.
         """
-        plot_item = self._fresh(plot, self._sweep_title())
-        self._legend(plot_item)
+        plot_item = self._fresh(plot, sweep_title(self.resonator(), self._traces))
+        add_legend(plot_item, self._foreground())
         plot_magnitude(plot_item, self._traces, self._amplitude_to_color,
                        self._foreground(), self._unit_mode, self._normalize,
                        self._legend_labels(), self._bias, self._dac_scale)
         magnitude_axis_labels(plot_item, self._unit_mode, self._normalize)
 
-    def _sweep_title(self) -> str:
-        """The resonator and where it was centred, as the grids title a subplot."""
-        centre = self._traces[0][3]['original_center_frequency']
-        return f"{self.resonator()} (f_central = {centre / 1e6:.4f} MHz)"
-
     def _draw_loops(self, plot) -> None:
         """The same sweeps as loops, with the tone's place on the biased one."""
         plot_item = self._fresh(plot, "IQ loops")
-        self._legend(plot_item)
+        add_legend(plot_item, self._foreground())
         plot_iq(plot_item, self._traces, self._amplitude_to_color,
                 self._foreground(), self._unit_mode, self._normalize,
                 self._legend_labels(), self._bias, self._dac_scale)
@@ -232,10 +237,11 @@ class DetectorDigestTab(QtWidgets.QWidget):
         drive = UnitConverter.format_probe_label(
             self._bias.amplitude, self._unit_mode, self._dac_scale)
         plot_item = self._fresh(plot, f"The bias point, at {drive}")
-        self._legend(plot_item)
+        add_legend(plot_item, self._foreground())
         plot_magnitude(plot_item, traces, self._amplitude_to_color,
                        self._foreground(), self._unit_mode, self._normalize,
-                       self._labels_for(traces), self._bias, self._dac_scale)
+                       drive_legend_labels(traces, self._unit_mode, self._dac_scale),
+                       self._bias, self._dac_scale)
         if model is not None:
             label = f"{model.capitalize()} fit"
             for _step, direction, _amplitude, sweep in traces:
@@ -265,49 +271,16 @@ class DetectorDigestTab(QtWidgets.QWidget):
     def _legend_labels(self):
         """Drive labels for the two plots that draw every sweep.
 
-        None once there are more drives than a legend can carry, which is when
-        the colorbar above the plots takes them over -- the same rule, and the
-        same threshold, as the grids.
+        None when the colorbar above the plots carries the drives, by the
+        grids' rule.
         """
-        if len(self._drives_drawn()) > AMPLITUDE_COLORMAP_THRESHOLD:
+        if self._colorbar_shown:
             return None
-        return self._labels_for(self._traces)
-
-    def _labels_for(self, traces) -> dict:
-        """One entry per sweep: its drive, and which way it was swept."""
-        return {
-            (step, direction, amplitude):
-                UnitConverter.format_probe_label(
-                    amplitude, self._unit_mode, self._dac_scale)
-                + (" (Down)" if direction == "downward" else " (Up)")
-            for step, direction, amplitude, _sweep in traces
-        }
-
-    def _drives_drawn(self) -> set:
-        """The drive amplitudes this resonator's traces were taken at."""
-        return {amplitude for _step, _direction, amplitude, _sweep in self._traces}
-
-    def _show_colorbar(self) -> None:
-        """The drives as a scale, when there are too many of them to label.
-
-        Over the measurement's whole scale rather than this resonator's, so the
-        colours mean the same thing here as on the grids.
-        """
-        if len(self._drives_drawn()) <= AMPLITUDE_COLORMAP_THRESHOLD:
-            self.colorbar.hide()
-            return
-        amplitudes = sorted(self._amplitude_to_color)
-        self.colorbar.update_range(
-            amplitudes[0], amplitudes[-1], self._dac_scale, self._unit_mode,
-            self._dark_mode,
-            any(direction == "downward"
-                for _step, direction, _amplitude, _sweep in self._traces))
-        self.colorbar.show()
+        return drive_legend_labels(self._traces, self._unit_mode, self._dac_scale)
 
     def _model_pen(self, direction):
-        style = (QtCore.Qt.PenStyle.DotLine if direction == "downward"
-                 else QtCore.Qt.PenStyle.SolidLine)
-        return pg.mkPen(color=MODEL_COLOR, width=MODEL_LINE_WIDTH, style=style)
+        return pg.mkPen(color=MODEL_COLOR, width=MODEL_LINE_WIDTH,
+                        style=sweep_style(direction))
 
     # ── the columns ──────────────────────────────────────────────────────────
 
@@ -574,31 +547,7 @@ class DetectorDigestTab(QtWidgets.QWidget):
 
     def _fresh(self, plot, title: str):
         """One plot, emptied of the last resonator and titled for this one."""
-        plot_item = plot.getPlotItem()
-        plot_item.clear()
-        if getattr(plot_item, 'legend', None):
-            plot_item.legend.scene().removeItem(plot_item.legend)
-            plot_item.legend = None
-        plot_item.setTitle(title, color=self._foreground())
-        plot_item.showGrid(x=True, y=True, alpha=0.3)
-        return plot_item
-
-    def _legend(self, plot_item) -> None:
-        """A legend in the bottom left, as the grids draw one.
-
-        ``addLegend`` hands back the one that is already there, so the plotters
-        below add their entries to this rather than a second.
-        """
-        plot_item.addLegend(offset=(10, -10), labelTextColor=self._legend_colour())
-
-    def _legend_colour(self) -> str:
-        return '#CCCCCC' if self._dark_mode else '#333333'
+        return reset_subplot(plot, title, self._dark_mode)
 
     def _foreground(self) -> str:
-        return "w" if self._dark_mode else "k"
-
-    def _theme(self, plot) -> None:
-        plot.setBackground("k" if self._dark_mode else "w")
-        for axis in ("left", "bottom"):
-            plot.getAxis(axis).setPen(self._foreground())
-            plot.getAxis(axis).setTextPen(self._foreground())
+        return theme_colors(self._dark_mode)[1]

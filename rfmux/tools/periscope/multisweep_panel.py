@@ -10,7 +10,7 @@ import traceback
 # Imports from within the 'periscope' subpackage
 from .layouts import FlowLayout, grouped
 from .utils import (
-    UnitConverter, ClickableViewBox, AMPLITUDE_COLORMAP_THRESHOLD,
+    UnitConverter, ClickableViewBox,
     STATUS_MESSAGE_MS, TABLEAU10_COLORS, DEFAULT_SUBPLOTS, ScreenshotMixin
 )
 from .noise_spectrum_dialog import NoiseSpectrumDialog
@@ -18,7 +18,7 @@ from .amplitude_colorbar import AmplitudeColorBar
 from .detector_digest_tab import DetectorDigestTab
 from .multisweep_grid_helpers import (
     FIT_MEASURED_COLOR, FIT_RESONANCE_COLOR, create_amplitude_color_map,
-    hysteresis_limit_label)
+    hysteresis_limit_label, show_drive_colorbar)
 from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
@@ -948,15 +948,13 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # diagnostics use fixed colours for their plotted quantities.
         drawn = {amplitude for traces in traces_by_name.values()
                  for _step, _direction, amplitude, _sweep in traces}
-        if plot_type not in ("bias", "frequency", "fit") and len(drawn) > AMPLITUDE_COLORMAP_THRESHOLD:
-            colorbar.update_range(amplitudes[0], amplitudes[-1],
-                                  dac_scale, self.unit_mode,
-                                  self.dark_mode, has_downward)
-            colorbar.show()
-            use_legend = False  # colorbar replaces per-plot legends
-        else:
+        if plot_type in ("bias", "frequency", "fit"):
             colorbar.hide()
-            use_legend = True  # show per-plot legends
+            use_legend = True
+        else:
+            use_legend = not show_drive_colorbar(
+                colorbar, amplitudes, drawn, dac_scale, self.unit_mode,
+                self.dark_mode, has_downward)
 
         # Update the grid with widget caching
         update_sweep_grid(

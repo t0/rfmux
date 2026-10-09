@@ -7,12 +7,14 @@ import pyqtgraph as pg
 from PyQt6 import QtWidgets
 
 from rfmux.core.transferfunctions import (
-    VOLTS_PER_ROC, convert_dbm_to_volts, spectrum_from_slow_tod,
+    VOLTS_PER_ROC, convert_dbm_to_volts, convert_roc_to_volts,
+    spectrum_from_slow_tod,
 )
 from rfmux.tuning.noise import apply_pfb_correction, noise_to_df
 from .layouts import FlowLayout, labelled, WrappingLabel
 from .multisweep_grid_helpers import arrange_plot_widgets, _new_subplot
-from .utils import DEFAULT_SUBPLOTS, IQ_COLORS, LINE_WIDTH, ScreenshotMixin
+from .utils import (DEFAULT_SUBPLOTS, IQ_COLORS, LINE_WIDTH, ScreenshotMixin,
+                    apply_plot_theme, theme_colors)
 
 
 def _noise_display_products(
@@ -31,7 +33,7 @@ def _noise_display_products(
     elif info["iq_units"] == "volts":
         iq = np.asarray(data["iq_volts"])
     else:
-        iq = np.asarray(data["iq_counts"]) * VOLTS_PER_ROC
+        iq = convert_roc_to_volts(np.asarray(data["iq_counts"]))
     products = {}
     if include_tod:
         time = (np.asarray(results["shared_pfb"]["time_s"])
@@ -151,11 +153,10 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
             plots.append(widget)
         for widget in plots:
             widget.hide()
-        background, foreground = ("k", "w") if self.dark_mode else ("w", "k")
+        foreground = theme_colors(self.dark_mode)[1]
         errors = []
         for name, widget in zip(names, plots):
             widget.show()
-            widget.setBackground(background)
             plot = widget.getPlotItem()
             plot.clear()
             if plot.legend is None:
@@ -164,10 +165,8 @@ class NoiseSpectrumPanel(QtWidgets.QWidget, ScreenshotMixin):
                 plot.legend.clear()
             plot.legend.setLabelTextColor(foreground)
             record = self.block["results"]["resonators"][name]
-            plot.setTitle(f"{name} · channel {record['channel']}", color=foreground)
-            for axis in ("left", "bottom", "right", "top"):
-                plot.getAxis(axis).setPen(foreground)
-                plot.getAxis(axis).setTextPen(foreground)
+            plot.setTitle(f"{name} · channel {record['channel']}")
+            apply_plot_theme(widget, self.dark_mode)
             plot.setLogMode(x=bool(tab), y=bool(tab))
             plot.getAxis("left").enableAutoSIPrefix(not tab)
             plot.showGrid(x=True, y=True, alpha=0.3)

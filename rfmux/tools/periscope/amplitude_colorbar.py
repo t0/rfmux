@@ -4,7 +4,7 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
-from .utils import UnitConverter, COLORMAP_CHOICES
+from .utils import UnitConverter, COLORMAP_CHOICES, amplitude_cmap_position
 
 
 class AmplitudeColorBar(QtWidgets.QWidget):
@@ -76,13 +76,8 @@ class AmplitudeColorBar(QtWidgets.QWidget):
 
         if self._cmap is not None:
             for x in range(int(bar_width)):
-                t = x / max(bar_width - 1, 1)
-                # Apply same dark/light mode mapping as create_amplitude_color_map
-                if self._dark_mode:
-                    map_val = 0.3 + t * 0.7
-                else:
-                    map_val = t * 0.75
-                rgba = self._cmap.map(map_val)
+                rgba = self._cmap.map(amplitude_cmap_position(
+                    x / max(bar_width - 1, 1), self._dark_mode))
                 if isinstance(rgba, np.ndarray):
                     c = QtGui.QColor(int(rgba[0]), int(rgba[1]), int(rgba[2]))
                 else:

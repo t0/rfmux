@@ -373,6 +373,31 @@ def legend_text_color(dark_mode: bool) -> str:
     return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
 
 
+def apply_plot_theme(widget, dark_mode: bool) -> str:
+    """Theme a PlotWidget's background, four axes and title; return the
+    foreground colour."""
+    background, foreground = theme_colors(dark_mode)
+    widget.setBackground(background)
+    item = widget.getPlotItem()
+    for name in ("left", "bottom", "right", "top"):
+        item.getAxis(name).setPen(foreground)
+        item.getAxis(name).setTextPen(foreground)
+    if item.titleLabel.text:
+        item.setTitle(item.titleLabel.text, color=foreground)
+    return foreground
+
+
+def amplitude_cmap_position(t: float, dark_mode: bool) -> float:
+    """Where a drive at fraction *t* of the range sits on the amplitude
+    colour map, clear of the background's end of it."""
+    return 0.3 + 0.7 * t if dark_mode else 0.75 * t
+
+
+def sweep_style(direction: str):
+    """The line style a sweep in *direction* is drawn with."""
+    return DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
+
+
 #: Fusion's own light and dark colours, spelled out because the style
 #: only hands back the one matching the desktop's colour scheme.
 _UI_PALETTES = {

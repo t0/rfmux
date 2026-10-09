@@ -348,30 +348,11 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
                 'rejected_markers': rejected_markers,
             }
             phase_plot.setXLink(amp_plot)
-            self._apply_theme_to_plot(amp_plot)
-            self._apply_theme_to_plot(phase_plot)
+            apply_plot_theme(amp_plot, self.dark_mode)
+            apply_plot_theme(phase_plot, self.dark_mode)
 
         self._apply_zoom_box_mode()
         
-    def _apply_theme_to_plot(self, plot_widget):
-        """Apply the current theme to a specific plot widget."""
-        bg_color, pen_color = ("k", "w") if self.dark_mode else ("w", "k")
-        plot_widget.setBackground(bg_color)
-        
-        # Update plot title color using a more direct approach
-        plot_item = plot_widget.getPlotItem()
-        if plot_item:
-            # Set the title explicitly with the color parameter
-            title_text = plot_item.titleLabel.text if plot_item.titleLabel else ""
-            plot_item.setTitle(title_text, color=pen_color)
-            
-        # Update axes colors
-        for axis_name in ("left", "bottom", "right", "top"):
-            ax = plot_widget.getPlotItem().getAxis(axis_name)
-            if ax:
-                ax.setPen(pen_color)
-                ax.setTextPen(pen_color)
-
     def clear_plots(self):
         """Clear all plots, curves, and legends."""
         for module_id_iter in self.plots: 
@@ -864,64 +845,13 @@ class NetworkAnalysisPanel(QtWidgets.QWidget, NetworkAnalysisExportMixin, Screen
     def apply_theme(self, dark_mode: bool):
         """Apply the dark/light theme to all plots in this window."""
         self.dark_mode = dark_mode
-        
-        # Apply theme to all plots
-        for module in self.plots:
-            plot_info = self.plots[module]
-            bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
-            
-            # Apply to amplitude plot
-            amp_plot = plot_info['amp_plot']
-            amp_plot.setBackground(bg_color)
-            
-            # Update plot title color - use more direct approach
-            amp_plot_item = amp_plot.getPlotItem()
-            if amp_plot_item and hasattr(amp_plot_item, 'titleLabel'):
-                title_text = amp_plot_item.titleLabel.text if amp_plot_item.titleLabel.text else f"Module {module} - Magnitude"
-                amp_plot_item.setTitle(title_text, color=pen_color)
-                
-            # Update axes colors
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = amp_plot_item.getAxis(axis_name) if amp_plot_item else None
-                if ax: 
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-            
-            # Update legend text color for amplitude plot using the proper API
-            amp_legend = plot_info['amp_legend']
-            if amp_legend:
-                try:
-                    amp_legend.setLabelTextColor(pen_color)
-                    amp_legend.update()
-                except Exception as e:
-                    print(f"Error updating amp_legend colors: {e}")
-            
-            # Apply to phase plot
-            phase_plot = plot_info['phase_plot']
-            phase_plot.setBackground(bg_color)
-            
-            # Update plot title color - use more direct approach
-            phase_plot_item = phase_plot.getPlotItem()
-            if phase_plot_item and hasattr(phase_plot_item, 'titleLabel'):
-                title_text = phase_plot_item.titleLabel.text if phase_plot_item.titleLabel.text else f"Module {module} - Phase"
-                phase_plot_item.setTitle(title_text, color=pen_color)
-                
-            # Update axes colors
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = phase_plot_item.getAxis(axis_name) if phase_plot_item else None
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
-            
-            # Update legend text color for phase plot using the proper API
-            phase_legend = plot_info['phase_legend']
-            if phase_legend:
-                try:
-                    phase_legend.setLabelTextColor(pen_color)
-                    # No need to call phase_legend.update() here, setLabelTextColor should suffice
-                except Exception as e:
-                    print(f"Error updating phase_legend colors: {e}")
-            
+        pen_color = theme_colors(dark_mode)[1]
+        for module, plot_info in self.plots.items():
+            for kind in ("amp", "phase"):
+                apply_plot_theme(plot_info[f'{kind}_plot'], dark_mode)
+                if plot_info[f'{kind}_legend']:
+                    plot_info[f'{kind}_legend'].setLabelTextColor(pen_color)
+
             # Redraw plots to ensure all legend items are updated correctly
             self._redraw_all_plots()
 

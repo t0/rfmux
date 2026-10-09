@@ -13,7 +13,8 @@ from rfmux.tuning.fits import BIFURCATION_A, collect_fit_params
 
 from .fit_display_toolbar import FitDisplayToolbar
 from .fit_settings_panel import BIAS_AMPLITUDE
-from .utils import ClickableViewBox, LINE_WIDTH, TABLEAU10_COLORS
+from .utils import (ClickableViewBox, LINE_WIDTH, TABLEAU10_COLORS,
+                    apply_plot_theme, theme_colors)
 
 #: Which of a model's parameters get a histogram, in the order they are drawn.
 #: ``fr`` is not among them: it spans the whole band, so a histogram of it is a
@@ -270,8 +271,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
 
     def _colour(self, amplitude):
         """The colour the grids give this drive, or the foreground otherwise."""
-        return self._amplitude_to_color.get(
-            amplitude, "w" if self._dark_mode else "k")
+        return self._amplitude_to_color.get(amplitude, self._foreground())
 
     # ── construction ─────────────────────────────────────────────────────────
 
@@ -306,7 +306,7 @@ class FitHistogramsTab(QtWidgets.QWidget):
             self._plots.append(plot)
         for index, plot in enumerate(self._plots):
             plot.setVisible(index < count)
-            self._theme(plot)
+            apply_plot_theme(plot, self._dark_mode)
             if index < count:
                 self._grid.addWidget(plot, index // 2, index % 2)
 
@@ -316,11 +316,4 @@ class FitHistogramsTab(QtWidgets.QWidget):
             plot.hide()
 
     def _foreground(self) -> str:
-        return "w" if self._dark_mode else "k"
-
-    def _theme(self, plot) -> None:
-        """One plot's background and axes, in the current theme."""
-        plot.setBackground("k" if self._dark_mode else "w")
-        for axis in ("left", "bottom"):
-            plot.getAxis(axis).setPen(self._foreground())
-            plot.getAxis(axis).setTextPen(self._foreground())
+        return theme_colors(self._dark_mode)[1]

@@ -15,16 +15,67 @@ from rfmux.tuning.fits import nonlinear_model_iq, skewed_model_magnitude
 
 from .utils import (
     LINE_WIDTH, TABLEAU10_COLORS, COLORMAP_CHOICES, AMPLITUDE_COLORMAP_THRESHOLD,
-    UPWARD_SWEEP_STYLE, DOWNWARD_SWEEP_STYLE,
+    DOWNWARD_SWEEP_STYLE,
     ClickableViewBox, square_axes, UnitConverter,
     DEFAULT_SUBPLOT_COLUMNS, iq_axis_labels, iq_unit_mode,
-    magnitude_axis_labels,
+    magnitude_axis_labels, amplitude_cmap_position, apply_plot_theme,
+    legend_text_color, sweep_style, theme_colors,
 )
 
 
-def offset_khz(sweep):
-    """A sweep's frequencies as kHz either side of where it was centred."""
-    return (sweep['frequencies'] - sweep['original_center_frequency']) / 1e3
+def offset_khz(sweep, frequencies=None):
+    """*frequencies* (the sweep's own by default) as kHz either side of where
+    the sweep was centred."""
+    if frequencies is None:
+        frequencies = sweep['frequencies']
+    return (frequencies - sweep['original_center_frequency']) / 1e3
+
+
+def sweep_title(name, traces):
+    """A resonator's subplot title: its name and where its sweeps were centred."""
+    if not traces:
+        return name
+    centre = traces[0][3]['original_center_frequency']
+    return f"{name} (f_central = {centre / 1e6:.4f} MHz)"
+
+
+def reset_subplot(plot_widget, title, dark_mode):
+    """Empty a subplot of its last drawing and legend, then title and theme it."""
+    plot_item = plot_widget.getPlotItem()
+    plot_item.clear()
+    if plot_item.legend is not None:
+        plot_item.legend.scene().removeItem(plot_item.legend)
+        plot_item.legend = None
+    plot_item.setTitle(title)
+    apply_plot_theme(plot_widget, dark_mode)
+    plot_item.showGrid(x=True, y=True, alpha=0.3)
+    return plot_item
+
+
+def drive_legend_labels(traces, unit_mode, dac_scale, *, direction=True):
+    """``{(step, direction, amplitude): label}``: each sweep's drive, and
+    which way it was swept unless *direction* is False."""
+    labels = {}
+    for step, way, amplitude, _sweep in traces:
+        label = UnitConverter.format_probe_label(amplitude, unit_mode, dac_scale)
+        if direction:
+            label += " (Down)" if way == "downward" else " (Up)"
+        labels[(step, way, amplitude)] = label
+    return labels
+
+
+def show_drive_colorbar(colorbar, amplitudes, drawn, dac_scale, unit_mode,
+                        dark_mode, has_downward) -> bool:
+    """Show *colorbar* over *amplitudes* when more drives are *drawn* than a
+    legend can carry; return whether it is shown."""
+    if len(drawn) <= AMPLITUDE_COLORMAP_THRESHOLD:
+        colorbar.hide()
+        return False
+    amplitudes = sorted(amplitudes)
+    colorbar.update_range(amplitudes[0], amplitudes[-1], dac_scale, unit_mode,
+                          dark_mode, has_downward)
+    colorbar.show()
+    return True
 
 
 def sweep_iq(sweep, unit_mode):
@@ -87,7 +138,7 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
     if not batch_names:
         return
 
-    bg_color, pen_color = ("k", "w") if dark_mode else ("w", "k")
+    pen_color = theme_colors(dark_mode)[1]
     num_plots = len(batch_names)
 
     # Ensure widget cache exists
@@ -104,48 +155,22 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
 
     # One legend entry per sweep of the call, so the same drive reads the same
     # in every subplot. Direction is the line style, and the label says which.
-    legend_labels = {}
-    for traces in traces_by_name.values():
-        for step, direction, amplitude, _sweep in traces:
-            label = UnitConverter.format_probe_label(amplitude, unit_mode, dac_scale)
-            suffix = " (Down)" if direction == "downward" else " (Up)"
-            legend_labels[(step, direction, amplitude)] = (
-                label if plot_type == "hysteresis" else label + suffix)
+    legend_labels = drive_legend_labels(
+        (trace for traces in traces_by_name.values() for trace in traces),
+        unit_mode, dac_scale, direction=plot_type != "hysteresis")
 
     # Populate grid
     for idx, name in enumerate(batch_names):
         plot_widget = widget_cache[idx]
-        plot_widget.setBackground(bg_color)
-        plot_item = plot_widget.getPlotItem()
+        traces = traces_by_name[name]
+        plot_item = reset_subplot(plot_widget, sweep_title(name, traces), dark_mode)
 
         if plot_item:
-            # Clear previous data and legend
-            plot_item.clear()
-            if hasattr(plot_item, 'legend') and plot_item.legend:
-                plot_item.legend.scene().removeItem(plot_item.legend)
-                plot_item.legend = None
-
-            traces = traces_by_name[name]
-            center_hz = traces[0][3]['original_center_frequency'] if traces else None
-
-            if center_hz is not None:
-                plot_item.setTitle(f"{name} (f_central = {center_hz / 1e6:.4f} MHz)",
-                                   color=pen_color)
-            else:
-                plot_item.setTitle(name, color=pen_color)
-
             # Which resonator this subplot is currently drawing, for a
             # double-click to name. On the view box rather than captured in the
             # connection, because a cached widget draws a different resonator
             # on every batch and the connection is made once.
             plot_widget.getViewBox().resonator_name = name
-
-            # Style axes
-            for axis_name in ("left", "bottom", "right", "top"):
-                ax = plot_item.getAxis(axis_name)
-                if ax:
-                    ax.setPen(pen_color)
-                    ax.setTextPen(pen_color)
 
             # Plot data with legend labels (suppressed when colorbar is active)
             labels = legend_labels if (show_legend and legend_labels) else None
@@ -186,8 +211,6 @@ def update_sweep_grid(grid_layout, traces_by_name, plot_type, current_batch, bat
                         dac_scale)
                 iq_axis_labels(plot_item, unit_mode, normalize)
                 square_axes(plot_item)
-
-            plot_item.showGrid(x=True, y=True, alpha=0.3)
 
     arrange_plot_widgets(grid_layout, widget_cache[:num_plots], columns)
     for plot_widget in widget_cache[:num_plots]:
@@ -272,9 +295,12 @@ def _named_double_click(view_box, event, callback):
     event.accept()
 
 
-def _add_legend(plot_item, pen_color):
-    legend_color = '#CCCCCC' if pen_color in ('w', (255, 255, 255)) else '#333333'
-    plot_item.addLegend(offset=(10, -10), labelTextColor=legend_color)
+def add_legend(plot_item, pen_color):
+    """A legend in the bottom left. ``addLegend`` hands back the one already
+    there, so entries added later land in it rather than a second."""
+    plot_item.addLegend(
+        offset=(10, -10),
+        labelTextColor=legend_text_color(pen_color == theme_colors(True)[1]))
 
 
 #: The translucent stroke over the sweep a resonator is biased at.
@@ -290,8 +316,7 @@ def _trace_pen(amplitude, direction, amplitude_to_color, pen_color):
     steps of a schedule arrive.
     """
     color = amplitude_to_color.get(amplitude, pen_color)
-    style = DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
-    return pg.mkPen(color=color, width=LINE_WIDTH, style=style)
+    return pg.mkPen(color=color, width=LINE_WIDTH, style=sweep_style(direction))
 
 
 def _plot_trace(plot_item, x, y, amplitude, direction, amplitude_to_color,
@@ -304,12 +329,10 @@ def _plot_trace(plot_item, x, y, amplitude, direction, amplitude_to_color,
     if chosen:
         color = pg.mkColor(amplitude_to_color.get(amplitude, pen_color))
         color.setAlpha(CHOSEN_TRACE_ALPHA)
-        style = (DOWNWARD_SWEEP_STYLE if direction == "downward"
-                 else UPWARD_SWEEP_STYLE)
         highlight = plot_item.plot(
             x, y,
             pen=pg.mkPen(color=color, width=LINE_WIDTH * CHOSEN_TRACE_WIDTH,
-                         style=style))
+                         style=sweep_style(direction)))
         highlight.setProperty("bias_highlight", True)
     return curve
 
@@ -331,7 +354,7 @@ def bias_legend_label(bias) -> str:
 
 def _bias_frequency_line(plot_item, bias, sweep, amplitude_to_color, pen_color):
     """A vertical line where the tone goes, using the mapped or foreground colour."""
-    offset = (bias.frequency_hz - sweep['original_center_frequency']) / 1e3
+    offset = offset_khz(sweep, bias.frequency_hz)
     color = amplitude_to_color.get(bias.amplitude, pen_color)
     pen = pg.mkPen(color=color, width=LINE_WIDTH, style=BIAS_LINE_STYLE)
     plot_item.addLine(x=offset, pen=pen)
@@ -379,7 +402,7 @@ def plot_magnitude(plot_item, traces, amplitude_to_color, pen_color,
     # the line is the one thing on this plot that is not a measurement, and it
     # is also where a flagged point is marked.
     if legend_labels or bias is not None:
-        _add_legend(plot_item, pen_color)
+        add_legend(plot_item, pen_color)
 
     drawn = None
     for step, direction, amplitude, sweep in traces:
@@ -517,7 +540,7 @@ def _plot_fit(plot_item: pg.PlotItem, traces: list[tuple], pen_color: str,
         counts = np.asarray(sweep['iq_counts'])
         if len(counts) == 0 or counts[-1] == 0:
             continue
-        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
+        style = sweep_style(direction)
         plot_item.plot(
             offset_khz(sweep), np.abs(counts / counts[-1]),
             pen=pg.mkPen(color=FIT_MEASURED_COLOR, width=LINE_WIDTH, style=style))
@@ -558,7 +581,7 @@ def _fr_line(plot_item, sweep, fit_model):
     colour = pg.mkColor(FIT_RESONANCE_COLOR)
     colour.setAlpha(FR_LINE_ALPHA)
     plot_item.addLine(
-        x=(params['fr'] - sweep['original_center_frequency']) / 1e3,
+        x=offset_khz(sweep, params['fr']),
         pen=pg.mkPen(color=colour, width=1, style=DOWNWARD_SWEEP_STYLE))
 
 
@@ -589,9 +612,8 @@ def _plot_bifurcation(
         ):
             plot_item.plot(values[0], y, symbol=symbol, symbolSize=6,
                            symbolBrush=colour, symbolPen=colour,
-                           pen=pg.mkPen(colour, width=1.5, style=(
-                               DOWNWARD_SWEEP_STYLE if direction == "downward"
-                               else QtCore.Qt.PenStyle.SolidLine)))
+                           pen=pg.mkPen(colour, width=1.5,
+                                        style=sweep_style(direction)))
     if bias is not None and by_direction:
         pen = pg.mkPen(pen_color, style=QtCore.Qt.PenStyle.DotLine)
         plot_item.addLine(x=bias.amplitude, pen=pen)
@@ -623,7 +645,7 @@ def _plot_hysteresis(
     ylabel = "Up/down difference / limit" if limit > 0 else f"Up/down difference / {units}"
     plot_item.setLabel('left', ylabel)
     if legend_labels:
-        _add_legend(plot_item, pen_color)
+        add_legend(plot_item, pen_color)
     pairs = {}
     for step, direction, amplitude, sweep in traces:
         pairs.setdefault(step, {})[direction] = sweep
@@ -638,7 +660,7 @@ def _plot_hysteresis(
         label = legend_labels.get((step, "upward", amplitude)) if legend_labels else None
         _plot_trace(
             plot_item,
-            (frequencies - sweep["original_center_frequency"]) / 1e3,
+            offset_khz(sweep, frequencies),
             separation / divisor, amplitude, "upward", amplitude_to_color,
             pen_color, chosen=_biased_at(bias, step), name=label)
         drawn = True
@@ -688,8 +710,8 @@ def _plot_bias_frequency(plot_item, traces, pen_color, bias):
             _same, speed = iq_arc_speed(sweep)
         except (ValueError, KeyError):
             continue        # too short or too degenerate to differentiate
-        offsets = (frequencies - sweep['original_center_frequency']) / 1e3
-        style = DOWNWARD_SWEEP_STYLE if direction == 'downward' else UPWARD_SWEEP_STYLE
+        offsets = offset_khz(sweep, frequencies)
+        style = sweep_style(direction)
         for label, values in (("dI/df", dI_df), ("dQ/df", dQ_df)):
             plot_item.plot(
                 offsets, values,
@@ -732,7 +754,7 @@ def plot_iq(plot_item, traces, amplitude_to_color, pen_color,
     drawn for.
     """
     if legend_labels:
-        _add_legend(plot_item, pen_color)
+        add_legend(plot_item, pen_color)
 
     for step, direction, amplitude, sweep in traces:
         iq = sweep_iq(sweep, unit_mode)
@@ -788,11 +810,8 @@ def create_amplitude_color_map(amplitude_values, dark_mode):
                 # As a QColor rather than the RGBA array the colormap hands
                 # back by default: a scatter plot reads an array of colour
                 # components as one pen per point.
-                normalized_idx = amp_idx / max(1, num_amps - 1)
-                if dark_mode:
-                    map_value = 0.3 + normalized_idx * 0.7
-                else:
-                    map_value = normalized_idx * 0.75
+                map_value = amplitude_cmap_position(
+                    amp_idx / max(1, num_amps - 1), dark_mode)
                 color = use_cmap.map(map_value, mode=pg.ColorMap.QCOLOR)
             else:
                 color = TABLEAU10_COLORS[amp_idx % len(TABLEAU10_COLORS)]

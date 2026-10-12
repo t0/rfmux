@@ -7,7 +7,8 @@ pytest.importorskip("PyQt6")
 from rfmux.core.resonators import ResonatorCatalog  # noqa: E402
 from rfmux.core.transferfunctions import convert_dbm_to_amplitude  # noqa: E402
 from rfmux.tools.periscope.tuning_catalog_dialog import (  # noqa: E402
-    AMPLITUDE, CHANNEL, FREQUENCY, NAME, NOTES, POWER, QI, TuningCatalogDialog)
+    AMPLITUDE, CHANNEL, FIT_COLUMNS, FREQUENCY, NAME, NONLINEAR_QI, NONLINEARITY,
+    NOTES, POWER, SKEWED_QI, TuningCatalogDialog)
 
 SCALE = -0.75
 
@@ -141,37 +142,52 @@ def test_other_notes_show_in_the_tooltip_and_stay(qt_app):
 
 
 
-def _block(catalog, fitted_name):
-    """A one-step multisweep block with a skewed fit on one sweep."""
-    return {"measurement": "multisweep", "module": catalog.module,
-            "call_params": {"catalog": catalog.to_dict()},
-            "results": {0: {"upward": {fitted_name: {
-                "sweep_amplitude": catalog[fitted_name].bias.amplitude,
-                "fits": {"skewed": {"params": {
-                    "fr": 1.1e9, "Qi": 1e5, "Qc": 2e4}}}}}}}}
+
+def _with_fits(catalog, name, models):
+    """Give *name* a bias sweep that carries fits of *models*, as Find Bias
+    does."""
+    import numpy as np
+    params = {
+        "skewed": {"fr": 1.0e9, "Qr": 2e4, "Qi": 1e5, "Qc": 2.5e4},
+        "nonlinear": {"fr": 1.0e9, "Qr": 2.1e4, "Qi": 9e4, "Qc": 2.7e4,
+                      "a": 0.3},
+    }
+    f = np.linspace(0.999e9, 1.001e9, 5)
+    catalog[name].update_bias_point(
+        bias_sweep={"frequencies": f, "iq_volts": np.ones(5, complex),
+                    "fits": {m: {"params": params[m]} for m in models}})
 
 
-def test_without_a_bias_sweep_the_fit_comes_from_the_sweeps(qt_app):
-    """Run Fit writes its fits into the sweeps, and the table shows them."""
+def test_before_find_bias_only_the_nonlinearity_column_shows(qt_app):
+    """Run Fit is not enough: the catalog has fits only from Find Bias."""
+    dialog = _dialog(qt_app)
+    hidden = dialog.table.isColumnHidden
+
+    assert all(hidden(c) for c, _ in FIT_COLUMNS["skewed"] + FIT_COLUMNS["nonlinear"])
+    assert not hidden(NONLINEARITY)
+
+
+def test_each_model_of_the_bias_sweep_has_its_own_columns(qt_app):
     catalog = _catalog()
-    name = catalog.names()[1]
+    name = catalog.names()[0]
+    _with_fits(catalog, name, ("skewed", "nonlinear"))
     dialog = _dialog(qt_app, catalog)
-    dialog.set_sweeps(_block(catalog, name))
     row = _row(dialog, name)
 
-    assert dialog.table.item(row, QI).text() == "1e+05"
-    assert "step 0" in dialog.table.item(row, QI).toolTip()
+    assert dialog.table.item(row, SKEWED_QI).text() == "1e+05"
+    assert dialog.table.item(row, NONLINEAR_QI).text() == "9e+04"
+    assert dialog.table.item(row, NONLINEARITY).text() == "0.3"
 
 
-def test_new_sweeps_keep_the_edits_that_were_not_applied(qt_app):
+def test_only_the_models_that_were_fitted_show(qt_app):
     catalog = _catalog()
-    name = catalog.names()[2]
+    _with_fits(catalog, catalog.names()[0], ("skewed",))
     dialog = _dialog(qt_app, catalog)
-    dialog.table.item(_row(dialog, name), NOTES).setText("weak")
-    dialog.set_sweeps(_block(catalog, name))
+    hidden = dialog.table.isColumnHidden
 
-    assert dialog.catalog()[name].notes["comment"] == "weak"
-
+    assert not any(hidden(c) for c, _ in FIT_COLUMNS["skewed"])
+    assert all(hidden(c) for c, _ in FIT_COLUMNS["nonlinear"])
+    assert not hidden(NONLINEARITY)
 
 def test_save_and_open_round_trip_the_catalog(qt_app, tmp_path, monkeypatch):
     from rfmux.tuning import store

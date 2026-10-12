@@ -1169,8 +1169,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
     def _fits_done(self):
         self._set_analysis_enabled(True)
         self._populate_fit_display()
-        # The fit columns of the Tuning Catalog read the fitted sweeps.
-        self.catalog_editor.set_sweeps(self.module_sweeps)
 
     # ── bias finding ─────────────────────────────────────────────────────────
 
@@ -1359,7 +1357,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             self.catalog_editor.set_catalog(
                 self.catalog, self._dac_scale(),
                 read_only=self.is_foreign_module or self.is_capture_tuning)
-            self.catalog_editor.set_sweeps(self.module_sweeps)
 
     def _catalog_applied(self, catalog) -> None:
         """The edited catalog is the array now: the next multisweep and Apply

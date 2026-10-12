@@ -17,8 +17,7 @@ from PyQt6 import QtCore, QtWidgets
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import (convert_dacunits_to_dbm,
                                           convert_dbm_to_amplitude)
-from rfmux.tuning import (find_iteration_matching_amplitude,
-                          find_sweeps_with_nearby_resonances, load_catalog,
+from rfmux.tuning import (find_sweeps_with_nearby_resonances, load_catalog,
                           save_catalog)
 
 #: (header, tooltip). Columns marked editable in EDITABLE take typed values.
@@ -38,15 +37,34 @@ COLUMNS = [
     ("Bifurcated at", "The first amplitude where the resonator bifurcated."),
     ("Flag", "Why Find Bias doubted the bias point. The tooltip of a cell "
              "gives the reason."),
-    ("fr (MHz)", "The resonance frequency of the fit. The tooltip of a cell "
-                 "gives the sweep of the fit."),
-    ("Qi", "The internal quality factor of the fit."),
-    ("Qc", "The coupling quality factor of the fit."),
+    ("Skewed fr (MHz)", "The resonance frequency of the skewed fit of the "
+                        "bias sweep. Find Bias sets the bias sweep."),
+    ("Skewed Qr", "The loaded quality factor of the skewed fit."),
+    ("Skewed Qi", "The internal quality factor of the skewed fit."),
+    ("Skewed Qc", "The coupling quality factor of the skewed fit."),
+    ("Nonlinear fr (MHz)", "The resonance frequency of the nonlinear fit of "
+                           "the bias sweep. Find Bias sets the bias sweep."),
+    ("Nonlinear Qr", "The loaded quality factor of the nonlinear fit."),
+    ("Nonlinear Qi", "The internal quality factor of the nonlinear fit."),
+    ("Nonlinear Qc", "The coupling quality factor of the nonlinear fit."),
+    ("a", "The nonlinearity parameter of the nonlinear fit. Bifurcation "
+          "starts at 4√3/9 ≈ 0.77."),
     ("Notes", "Your comment about the resonator (notes['comment']). The "
               "tooltip of a cell shows other notes, read-only."),
 ]
 NAME, CHANNEL, FREQUENCY, AMPLITUDE, POWER, MEASURED, DF_CAL, BIFURCATED, \
-    FLAG, FR, QI, QC, NOTES = range(len(COLUMNS))
+    FLAG, SKEWED_FR, SKEWED_QR, SKEWED_QI, SKEWED_QC, NONLINEAR_FR, \
+    NONLINEAR_QR, NONLINEAR_QI, NONLINEAR_QC, NONLINEARITY, NOTES = range(len(COLUMNS))
+
+#: The fit columns of each model: (column, parameter). A model's group shows
+#: only when a bias sweep in the catalog has its fit. The column of ``a``
+#: always shows.
+FIT_COLUMNS = {
+    "skewed": ((SKEWED_FR, "fr"), (SKEWED_QR, "Qr"), (SKEWED_QI, "Qi"),
+               (SKEWED_QC, "Qc")),
+    "nonlinear": ((NONLINEAR_FR, "fr"), (NONLINEAR_QR, "Qr"),
+                  (NONLINEAR_QI, "Qi"), (NONLINEAR_QC, "Qc")),
+}
 EDITABLE = (FREQUENCY, AMPLITUDE, POWER, NOTES)
 
 #: A change of frequency or amplitude clears the calibration of the
@@ -59,39 +77,11 @@ def _text(value, fmt: str) -> str:
     return "" if value is None else format(value, fmt)
 
 
-def _params(sweep) -> dict:
-    """The parameters of the fits of *sweep*: skewed if there is one, else
-    nonlinear."""
-    fits = (sweep or {}).get("fits") or {}
-    for model in ("skewed", "nonlinear"):
-        params = (fits.get(model) or {}).get("params")
-        if params:
-            return params
-    return {}
-
-
-def _fit(resonator, block) -> tuple[dict, str]:
-    """Return the fit parameters for the row, and which sweep they come from.
-
-    The fit of the bias sweep, if Find Bias set one. Else the fit of the
-    measured sweep at the bias amplitude, from Run Fit.
-    """
-    params = _params(resonator.bias.bias_sweep)
-    if params:
-        return params, "The fit of the bias sweep."
-    if block is None:
-        return {}, ""
-    try:
-        by_direction, step = find_iteration_matching_amplitude(
-            block, resonator.name, resonator.bias.amplitude)
-    except (KeyError, ValueError):
-        return {}, ""
-    for direction in ("upward", "downward"):
-        params = _params(by_direction.get(direction))
-        if params:
-            return params, (f"The fit of the {direction} sweep at step {step}, "
-                            f"the step nearest the bias amplitude.")
-    return {}, ""
+def _fit_params(bias, model: str) -> dict:
+    """The parameters of the *model* fit of the bias sweep, or {}. Only Find
+    Bias sets a bias sweep, so a catalog before Find Bias has no fits."""
+    fits = (bias.bias_sweep or {}).get("fits") or {}
+    return (fits.get(model) or {}).get("params") or {}
 
 
 class TuningCatalogDialog(QtWidgets.QDialog):
@@ -106,7 +96,6 @@ class TuningCatalogDialog(QtWidgets.QDialog):
         self.setWindowTitle("Tuning Catalog")
         self.resize(1100, 800)
         self._catalog: ResonatorCatalog | None = None
-        self._sweeps = None
         self._dac_scale = None
         self._read_only = False
         self._filling = False
@@ -260,12 +249,6 @@ class TuningCatalogDialog(QtWidgets.QDialog):
             button.setEnabled(not read_only)
         self._fill()
 
-    def set_sweeps(self, block) -> None:
-        """Use the fits of *block* for resonators with no bias sweep. Edits
-        that were not applied stay."""
-        self._sweeps = block
-        self._fill()
-
     def catalog(self) -> ResonatorCatalog | None:
         """The edited copy."""
         return self._catalog
@@ -281,6 +264,11 @@ class TuningCatalogDialog(QtWidgets.QDialog):
         finally:
             self.table.setSortingEnabled(True)
             self._filling = False
+        resonators = list(self._catalog) if self._catalog is not None else []
+        for model, columns in FIT_COLUMNS.items():
+            shown = any(_fit_params(r.bias, model) for r in resonators)
+            for column, _name in columns:
+                self.table.setColumnHidden(column, not shown)
         self.table.resizeColumnsToContents()
         if self._catalog is None:
             self.summary.setText("No catalog.")
@@ -294,7 +282,6 @@ class TuningCatalogDialog(QtWidgets.QDialog):
 
     def _fill_row(self, row: int, resonator) -> None:
         bias = resonator.bias
-        params, fit_source = _fit(resonator, self._sweeps)
         df_cal = bias.df_calibration
         power = (None if self._dac_scale is None
                  else float(convert_dacunits_to_dbm(bias.amplitude, self._dac_scale)))
@@ -309,13 +296,19 @@ class TuningCatalogDialog(QtWidgets.QDialog):
                      None if df_cal is None else abs(df_cal)),
             BIFURCATED: (_text(bias.bifurcated_at, ".4g"), bias.bifurcated_at),
             FLAG: (bias.flagged_kind or "", bias.flagged_kind or ""),
-            FR: (_text(None if params.get("fr") is None else params["fr"] / 1e6,
-                       ".6f"), params.get("fr")),
-            QI: (_text(params.get("Qi"), ".4g"), params.get("Qi")),
-            QC: (_text(params.get("Qc"), ".4g"), params.get("Qc")),
+            NONLINEARITY: (_text(_fit_params(bias, "nonlinear").get("a"), ".3g"),
+                           _fit_params(bias, "nonlinear").get("a")),
             NOTES: (str(resonator.notes.get("comment", "")),
                     resonator.notes.get("comment", "")),
         }
+        for model, columns in FIT_COLUMNS.items():
+            params = _fit_params(bias, model)
+            for column, name in columns:
+                value = params.get(name)
+                cells[column] = (
+                    _text(None if value is None else
+                          value / 1e6 if name == "fr" else value,
+                          ".6f" if name == "fr" else ".4g"), value)
         for column, (text, value) in cells.items():
             item = _Item(text, value)
             item.setData(QtCore.Qt.ItemDataRole.UserRole + 1, resonator.name)
@@ -325,8 +318,6 @@ class TuningCatalogDialog(QtWidgets.QDialog):
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             if column == FLAG and bias.flagged_because:
                 item.setToolTip(bias.flagged_because)
-            if column in (FR, QI, QC) and fit_source:
-                item.setToolTip(fit_source)
             if column == NOTES:
                 # The table edits "comment". Other keys stay, read-only here.
                 others = {k: v for k, v in resonator.notes.items()

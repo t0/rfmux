@@ -196,10 +196,12 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
      window shows the catalog as a table: one row for each resonator, with its
      name, channel, bias frequency, amplitude, power at the DAC scale now,
      measured power, df calibration, bifurcation amplitude, flag (the reason
-     is in the tooltip), the fr, Qi and Qc of a fit, and notes. The fit is the
-     fit of the bias sweep after Find Bias. Before Find Bias, it is the fit
-     that Run Fit made of the sweep nearest the bias amplitude. The tooltip
-     of a cell says which.
+     is in the tooltip), the fits of the bias sweep, and notes. Only Find
+     Bias sets the bias sweep, so a catalog has fits only after Find Bias;
+     Run Fit alone does not add them. The skewed fit (fr, Qr, Qi, Qc) and the
+     nonlinear fit (fr, Qr, Qi, Qc) each have their own columns, which show
+     when a bias sweep has that fit. The column of the nonlinearity parameter
+     `a` always shows.
      Click a column header to sort. You can edit the bias frequency, the
      amplitude (normalized, or as a power in dBm) and the notes, and delete
      selected rows. Name and channel are read-only, because they link the

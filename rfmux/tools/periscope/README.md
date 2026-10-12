@@ -196,7 +196,10 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
      window shows the catalog as a table: one row for each resonator, with its
      name, channel, bias frequency, amplitude, power at the DAC scale now,
      measured power, df calibration, bifurcation amplitude, flag (the reason
-     is in the tooltip), the fr, Qi and Qc of its bias-sweep fit, and notes.
+     is in the tooltip), the fr, Qi and Qc of a fit, and notes. The fit is the
+     fit of the bias sweep after Find Bias. Before Find Bias, it is the fit
+     that Run Fit made of the sweep nearest the bias amplitude. The tooltip
+     of a cell says which.
      Click a column header to sort. You can edit the bias frequency, the
      amplitude (normalized, or as a power in dBm) and the notes, and delete
      selected rows. Name and channel are read-only, because they link the
@@ -204,9 +207,14 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
      amplitude clears the calibration, the fits and the flag of that
      resonator. **Apply** gives the edited catalog to the panel: the next
      multisweep and Apply Bias use it. **Close** discards edits that you did
-     not apply. **Export CSV** and **Import CSV** use the columns name,
-     channel, bias_frequency_hz and bias_amplitude; an imported catalog has no
-     calibration. The table is read-only for a file from another module or for
+     not apply. **Save Catalog** writes the catalog in the table, with its
+     calibration, fits and notes, as a `catalog_<date>_<time>.pkl` file in the
+     session folder (`rfmux.tuning.save_catalog`). **Open Catalog** reads a
+     catalog file or a `bias_catalog` file into the table
+     (`rfmux.tuning.load_catalog`); Apply keeps it. A double-click on a catalog
+     file in the session browser opens it in the Tuning window. **Export CSV**
+     and **Import CSV** use the columns name, channel, bias_frequency_hz and
+     bias_amplitude; an imported catalog has no calibration. The table is read-only for a file from another module or for
      a capture tuning.
   2. In the **Collision Cut** section, choose the separation in kHz, and press **Run Collision Cut**. The check calls `rfmux.tuning.find_sweeps_with_nearby_resonances`: it finds pairs of dips within each fine sweep, including pairs exactly at the separation threshold. It runs only when requested. The initial separation is 100 kHz; enter `inf` to flag any second detected dip in the window.
   3. The defaults are 1 dB prominence, 10 Hz (0.01 kHz) minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.

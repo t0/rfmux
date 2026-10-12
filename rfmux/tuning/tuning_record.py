@@ -16,11 +16,12 @@ import numpy as np
 from ..core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from ..core.transferfunctions import VOLTS_PER_ROC
 from .multisweep_amplitudes import AmplitudeSchedule
+from ..core.session_folder import register_export
 from . import store
 from .sweep_results import pack_multisweep
 
 __all__ = ["tuning_rows", "catalog_from_tuning", "multisweep_from_tuning",
-           "AppliedBias", "load_bias_catalog"]
+           "AppliedBias", "load_bias_catalog", "load_catalog", "save_catalog"]
 
 
 class AppliedBias(NamedTuple):
@@ -46,6 +47,40 @@ def load_bias_catalog(path) -> AppliedBias:
     return AppliedBias(ResonatorCatalog.from_dict(data["catalog"]),
                        data.get("nco_frequency_hz"),
                        data.get("dac_scale_setting_dbm"))
+
+def save_catalog(catalog: ResonatorCatalog, *, label: Optional[str] = None
+                 ) -> Optional[str]:
+    """Save *catalog* as a ``catalog`` file in its native format
+    (``ResonatorCatalog.to_dict``), and list it in the session folder.
+
+    Return the path, or None if the save failed (``store`` warns).
+    """
+    path = store.maybe_save(
+        {"measurement": "catalog", "module": catalog.module,
+         "catalog": catalog.to_dict()},
+        "catalog", save=True, label=label, module=catalog.module)
+    if path is None:
+        return None
+    register_export(Path(path).parent, Path(path).name, "catalog",
+                    f"module{catalog.module}")
+    return str(path)
+
+
+def load_catalog(path) -> ResonatorCatalog:
+    """Read the catalog in a ``catalog`` file or in a ``bias_catalog`` file.
+
+    Raises:
+        ValueError: the file has no catalog.
+    """
+    data = store.load(path)
+    if isinstance(data, dict) and data.get("measurement") in (
+            "catalog", "bias_catalog"):
+        return ResonatorCatalog.from_dict(data["catalog"])
+    raise ValueError(
+        f"{Path(path).name} is not a catalog file. Save Catalog in the Tuning "
+        f"Catalog window writes one, and crs.apply_bias writes a "
+        f"bias_catalog file.")
+
 
 #: The sweep a BiasPoint carries, flattened into the row and read back out.
 _SWEEP_FIELDS = BiasPoint.BIAS_SWEEP_KEYS

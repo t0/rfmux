@@ -7,7 +7,7 @@ pytest.importorskip("PyQt6")
 from rfmux.core.resonators import ResonatorCatalog  # noqa: E402
 from rfmux.core.transferfunctions import convert_dbm_to_amplitude  # noqa: E402
 from rfmux.tools.periscope.tuning_catalog_dialog import (  # noqa: E402
-    AMPLITUDE, CHANNEL, FREQUENCY, NAME, NOTES, POWER, TuningCatalogDialog)
+    AMPLITUDE, CHANNEL, FREQUENCY, NAME, NOTES, POWER, QI, TuningCatalogDialog)
 
 SCALE = -0.75
 
@@ -138,3 +138,62 @@ def test_other_notes_show_in_the_tooltip_and_stay(qt_app):
     assert "flagged: noisy" in item.toolTip()
     item.setText("weaker")
     assert dialog.catalog()[name].notes == {"comment": "weaker", "flagged": "noisy"}
+
+
+
+def _block(catalog, fitted_name):
+    """A one-step multisweep block with a skewed fit on one sweep."""
+    return {"measurement": "multisweep", "module": catalog.module,
+            "call_params": {"catalog": catalog.to_dict()},
+            "results": {0: {"upward": {fitted_name: {
+                "sweep_amplitude": catalog[fitted_name].bias.amplitude,
+                "fits": {"skewed": {"params": {
+                    "fr": 1.1e9, "Qi": 1e5, "Qc": 2e4}}}}}}}}
+
+
+def test_without_a_bias_sweep_the_fit_comes_from_the_sweeps(qt_app):
+    """Run Fit writes its fits into the sweeps, and the table shows them."""
+    catalog = _catalog()
+    name = catalog.names()[1]
+    dialog = _dialog(qt_app, catalog)
+    dialog.set_sweeps(_block(catalog, name))
+    row = _row(dialog, name)
+
+    assert dialog.table.item(row, QI).text() == "1e+05"
+    assert "step 0" in dialog.table.item(row, QI).toolTip()
+
+
+def test_new_sweeps_keep_the_edits_that_were_not_applied(qt_app):
+    catalog = _catalog()
+    name = catalog.names()[2]
+    dialog = _dialog(qt_app, catalog)
+    dialog.table.item(_row(dialog, name), NOTES).setText("weak")
+    dialog.set_sweeps(_block(catalog, name))
+
+    assert dialog.catalog()[name].notes["comment"] == "weak"
+
+
+def test_save_and_open_round_trip_the_catalog(qt_app, tmp_path, monkeypatch):
+    from rfmux.tuning import store
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    catalog = _catalog()
+    dialog = _dialog(qt_app, catalog)
+    dialog.save()
+    path = next(tmp_path.rglob("catalog_*.pkl"))
+
+    other = _dialog(qt_app, ResonatorCatalog.from_frequencies(
+        [2.0e9], module=1, amplitude=0.001))
+    other.open_catalog(str(path))
+    assert other.catalog().to_dict() == catalog.to_dict()
+
+
+def test_a_catalog_of_another_module_is_not_opened(qt_app, tmp_path, monkeypatch):
+    from rfmux.tuning import save_catalog, store
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    path = save_catalog(ResonatorCatalog.from_frequencies(
+        [1.0e9], module=3, amplitude=0.004))
+    dialog = _dialog(qt_app)
+    dialog.open_catalog(path)
+
+    assert dialog.catalog().module == 1
+    assert "module 3" in dialog.status.text()

@@ -225,3 +225,23 @@ def test_a_multisweep_that_cannot_be_opened_says_why(qt_app, monkeypatch):
                         lambda *a, **k: said.append(a[2]))
     p._load_multisweep_analysis({"crs0000_rmod1": {"module": 1}})
     assert len(said) == 1 and said[0].startswith("Could not open the multisweep")
+
+
+
+def test_a_saved_catalog_in_the_session_browser_opens_the_tuning_window(
+        qt_app, monkeypatch, tmp_path):
+    """A file from Save Catalog opens as a bias_catalog file does."""
+    from rfmux.tools.periscope.session_manager import SessionManager
+    from rfmux.tuning import catalog_from_tuning, save_catalog, store
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    catalog = catalog_from_tuning({3: _row(3, 1.0e9), 7: _row(7, 1.1e9)}, 2)
+    path = save_catalog(catalog)
+    p = bare_periscope(monkeypatch, session_manager=SessionManager())
+
+    p._load_session_file(path)
+
+    panel = p.dock_manager.create_dock.call_args.args[0]
+    try:
+        assert sorted(r.channel for r in panel.catalog) == [3, 7]
+    finally:
+        panel.close()

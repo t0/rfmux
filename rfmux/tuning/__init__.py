@@ -72,8 +72,8 @@ from .noise import (
 )
 from . import store
 from .tuning_record import (AppliedBias, catalog_from_tuning,
-                            load_bias_catalog, multisweep_from_tuning,
-                            tuning_rows)
+                            load_bias_catalog, load_catalog,
+                            multisweep_from_tuning, save_catalog, tuning_rows)
 from .sweep_results import (
     RESULTS_SCHEMA_VERSION,
     collect_amplitude_iterations_for,
@@ -137,6 +137,8 @@ __all__ = [
     "catalog_from_tuning",
     "AppliedBias",
     "load_bias_catalog",
+    "load_catalog",
+    "save_catalog",
     "multisweep_from_tuning",
     "tuning_rows",
 ]

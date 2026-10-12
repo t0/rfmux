@@ -10,7 +10,7 @@ from typing import Optional
 from rfmux.core.resonators import ResonatorCatalog
 from pathlib import Path
 from rfmux.core.transferfunctions import BALUN_LOSS_DB
-from rfmux.tuning import (AmplitudeSchedule, load_bias_catalog,
+from rfmux.tuning import (AmplitudeSchedule, load_bias_catalog, load_catalog,
                           multisweep_from_tuning, tuning_rows)
 from rfmux.core.transferfunctions import apply_iq_conversion
 from ... import streamer as _streamer
@@ -1594,6 +1594,13 @@ class PeriscopeRuntime:
             dac_scale_dbm=None if setting is None else setting - BALUN_LOSS_DB,
             dac_scale_setting_dbm=setting)
         return self.open_tuning_window(rows, applied.catalog.module,
+                                       Path(path).name)
+
+    def open_catalog_file(self, path) -> None:
+        """A catalog file (Save Catalog) in the tuning window. The file has no
+        NCO or DAC scale, so the window shows the catalog without them."""
+        catalog = load_catalog(path)
+        return self.open_tuning_window(tuning_rows(catalog), catalog.module,
                                        Path(path).name)
 
     def open_tuning_window(self, tuning: dict, module: int, name: str = "capture"):

@@ -122,7 +122,11 @@ Bias** and **Get Noise Spectrum**, each with a settings panel beside it, and
 **Tuning Catalog** shows the catalog as a table, one row for each resonator.
 You can edit the bias frequency, the amplitude (normalized or dBm) and the
 notes, delete rows, and export or import the catalog as CSV. **Apply** gives
-the edited catalog to the panel; **Close** discards the edits.
+the edited catalog to the panel; **Close** discards the edits. **Save
+Catalog** and **Open Catalog** write and read the full catalog, with its
+calibration, fits and notes, as a `catalog` file in the session folder. A
+script does the same with `rfmux.tuning.save_catalog(catalog)` and
+`load_catalog(path)`; `load_catalog` also reads a `bias_catalog` file.
 
 The network analysis and multisweep dialogs take amplitudes in normalized
 units or in dBm. A selector next to the fields sets the units. Each field

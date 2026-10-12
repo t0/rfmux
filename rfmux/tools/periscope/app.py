@@ -2686,6 +2686,8 @@ grid. This tab needs a selected bias step to display its curves.
                 self._load_noise_from_session(data, file_path)
             elif file_type == 'bias_catalog':
                 self.open_bias_catalog(file_path)
+            elif file_type == 'catalog':
+                self.open_catalog_file(file_path)
             else:
                 QtWidgets.QMessageBox.information(
                     self,

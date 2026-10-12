@@ -9,10 +9,10 @@ an IPv6 loopback socket alone is not sufficient.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 879 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 2445 | ~6.5 min | Default while editing. |
+| `pytest --tier=portable` | 883 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2454 | ~6.5 min | Default while editing. |
 | `pytest --tier=acquisition` | 38 | ~9.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 2483 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 2492 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
 | `pytest --tier=all --serial 0024` | 2503 | needs a board | Before a release. |
 

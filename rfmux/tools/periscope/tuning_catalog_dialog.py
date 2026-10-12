@@ -17,7 +17,9 @@ from PyQt6 import QtCore, QtWidgets
 from rfmux.core.resonators import ResonatorCatalog
 from rfmux.core.transferfunctions import (convert_dacunits_to_dbm,
                                           convert_dbm_to_amplitude)
-from rfmux.tuning import find_sweeps_with_nearby_resonances
+from rfmux.tuning import (find_iteration_matching_amplitude,
+                          find_sweeps_with_nearby_resonances, load_catalog,
+                          save_catalog)
 
 #: (header, tooltip). Columns marked editable in EDITABLE take typed values.
 COLUMNS = [
@@ -36,9 +38,10 @@ COLUMNS = [
     ("Bifurcated at", "The first amplitude where the resonator bifurcated."),
     ("Flag", "Why Find Bias doubted the bias point. The tooltip of a cell "
              "gives the reason."),
-    ("fr (MHz)", "The resonance frequency of the fit of the bias sweep."),
-    ("Qi", "The internal quality factor of the fit of the bias sweep."),
-    ("Qc", "The coupling quality factor of the fit of the bias sweep."),
+    ("fr (MHz)", "The resonance frequency of the fit. The tooltip of a cell "
+                 "gives the sweep of the fit."),
+    ("Qi", "The internal quality factor of the fit."),
+    ("Qc", "The coupling quality factor of the fit."),
     ("Notes", "Your comment about the resonator (notes['comment']). The "
               "tooltip of a cell shows other notes, read-only."),
 ]
@@ -56,15 +59,39 @@ def _text(value, fmt: str) -> str:
     return "" if value is None else format(value, fmt)
 
 
-def _fit_params(bias) -> dict:
-    """The parameters of the fit of the bias sweep: skewed if there is one,
-    else nonlinear."""
-    fits = (bias.bias_sweep or {}).get("fits") or {}
+def _params(sweep) -> dict:
+    """The parameters of the fits of *sweep*: skewed if there is one, else
+    nonlinear."""
+    fits = (sweep or {}).get("fits") or {}
     for model in ("skewed", "nonlinear"):
         params = (fits.get(model) or {}).get("params")
         if params:
             return params
     return {}
+
+
+def _fit(resonator, block) -> tuple[dict, str]:
+    """Return the fit parameters for the row, and which sweep they come from.
+
+    The fit of the bias sweep, if Find Bias set one. Else the fit of the
+    measured sweep at the bias amplitude, from Run Fit.
+    """
+    params = _params(resonator.bias.bias_sweep)
+    if params:
+        return params, "The fit of the bias sweep."
+    if block is None:
+        return {}, ""
+    try:
+        by_direction, step = find_iteration_matching_amplitude(
+            block, resonator.name, resonator.bias.amplitude)
+    except (KeyError, ValueError):
+        return {}, ""
+    for direction in ("upward", "downward"):
+        params = _params(by_direction.get(direction))
+        if params:
+            return params, (f"The fit of the {direction} sweep at step {step}, "
+                            f"the step nearest the bias amplitude.")
+    return {}, ""
 
 
 class TuningCatalogDialog(QtWidgets.QDialog):
@@ -79,6 +106,7 @@ class TuningCatalogDialog(QtWidgets.QDialog):
         self.setWindowTitle("Tuning Catalog")
         self.resize(1100, 800)
         self._catalog: ResonatorCatalog | None = None
+        self._sweeps = None
         self._dac_scale = None
         self._read_only = False
         self._filling = False
@@ -121,7 +149,18 @@ class TuningCatalogDialog(QtWidgets.QDialog):
             "and bias_amplitude. The imported catalog has no calibration. "
             "Apply keeps it.")
         self.import_button.clicked.connect(self._import_csv)
+        self.save_button = QtWidgets.QPushButton("Save Catalog")
+        self.save_button.setToolTip(
+            "Save the catalog in the table, with its calibration, fits and "
+            "notes, as a catalog file in the session folder.")
+        self.save_button.clicked.connect(self.save)
+        self.open_button = QtWidgets.QPushButton("Open Catalog…")
+        self.open_button.setToolTip(
+            "Read a catalog file or a bias_catalog file into the table. Apply "
+            "keeps it.")
+        self.open_button.clicked.connect(self._open)
         for button in (self.delete_button, self.remove_button,
+                       self.save_button, self.open_button,
                        self.export_button, self.import_button):
             rows.addWidget(button)
         rows.addStretch(1)
@@ -216,8 +255,15 @@ class TuningCatalogDialog(QtWidgets.QDialog):
         self._catalog = None if catalog is None else catalog.copy()
         self._dac_scale = dac_scale_dbm
         self._read_only = read_only
-        for button in (self.delete_button, self.import_button, self.apply_button):
+        for button in (self.delete_button, self.import_button,
+                       self.open_button, self.apply_button):
             button.setEnabled(not read_only)
+        self._fill()
+
+    def set_sweeps(self, block) -> None:
+        """Use the fits of *block* for resonators with no bias sweep. Edits
+        that were not applied stay."""
+        self._sweeps = block
         self._fill()
 
     def catalog(self) -> ResonatorCatalog | None:
@@ -248,7 +294,7 @@ class TuningCatalogDialog(QtWidgets.QDialog):
 
     def _fill_row(self, row: int, resonator) -> None:
         bias = resonator.bias
-        params = _fit_params(bias)
+        params, fit_source = _fit(resonator, self._sweeps)
         df_cal = bias.df_calibration
         power = (None if self._dac_scale is None
                  else float(convert_dacunits_to_dbm(bias.amplitude, self._dac_scale)))
@@ -279,6 +325,8 @@ class TuningCatalogDialog(QtWidgets.QDialog):
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             if column == FLAG and bias.flagged_because:
                 item.setToolTip(bias.flagged_because)
+            if column in (FR, QI, QC) and fit_source:
+                item.setToolTip(fit_source)
             if column == NOTES:
                 # The table edits "comment". Other keys stay, read-only here.
                 others = {k: v for k, v in resonator.notes.items()
@@ -335,6 +383,42 @@ class TuningCatalogDialog(QtWidgets.QDialog):
             self.catalog_applied.emit(self._catalog.copy())
             self.status.setText("Applied. The next multisweep and Apply Bias "
                                 "use this catalog.")
+
+    # ── the native catalog file ──────────────────────────────────────────────
+
+    def save(self) -> None:
+        """Save the catalog in the table as a catalog file."""
+        if self._catalog is None:
+            return
+        path = save_catalog(self._catalog)
+        self.status.setText(f"Saved {path}." if path else
+                            "The catalog was not saved. The console says why.")
+
+    def _open(self) -> None:
+        dialog = QtWidgets.QFileDialog(self, "Open catalog", "",
+                                       "Catalog files (*.pkl)")
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFile)
+        dialog.fileSelected.connect(self.open_catalog)
+        dialog.open()
+
+    def open_catalog(self, path: str) -> None:
+        """Read a catalog file or a bias_catalog file into the table."""
+        if self._catalog is None:
+            return
+        try:
+            catalog = load_catalog(path)
+        except Exception as exc:
+            self.status.setText(f"Could not open {path}: {exc}")
+            return
+        if catalog.module != self._catalog.module:
+            self.status.setText(f"{Path(path).name} is a catalog of module "
+                                f"{catalog.module}, not of module "
+                                f"{self._catalog.module}.")
+            return
+        self._catalog = catalog
+        self._fill()
+        self.status.setText(f"Opened {len(catalog)} resonators from "
+                            f"{Path(path).name}. Apply keeps them.")
 
     # ── CSV ──────────────────────────────────────────────────────────────────
 

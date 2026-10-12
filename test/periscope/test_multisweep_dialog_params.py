@@ -176,6 +176,22 @@ def test_a_rerun_is_seeded_with_the_schedule_it_ran(qt_app):
     assert params["sweep_direction"] == ("upward", "downward")
 
 
+@pytest.mark.parametrize("schedule", [
+    AmplitudeSchedule.ramp(-60, -40, 3, units="dbm"),
+    AmplitudeSchedule.ramp(0.001, 0.01, 4, spacing="linear"),
+    AmplitudeSchedule(-50, units="dbm"),
+    AmplitudeSchedule.multiplicative(0.5, 2.0, 3, spacing="linear"),
+], ids=["dbm-ramp", "linear-ramp", "one-amplitude", "linear-multiples"])
+def test_a_rerun_opens_on_the_same_kind_of_schedule(qt_app, schedule):
+    """Re-run gives the same schedule, in the same units, and selects the
+    radio button that made it."""
+    dialog = _dialog(qt_app, amp=schedule)
+
+    rerun = dialog.get_parameters()["amp"]
+    assert rerun == schedule
+    assert (rerun.units, rerun.spacing) == (schedule.units, schedule.spacing)
+
+
 def test_it_emits_only_arguments_multisweep_accepts(qt_app):
     """The contract that a TypeError before the first sweep is what broke."""
     accepted = set(inspect.signature(multisweep).parameters)

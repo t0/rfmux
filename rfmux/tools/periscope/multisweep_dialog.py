@@ -318,16 +318,25 @@ class MultisweepDialog(QtWidgets.QDialog):
         return combo
 
     def _seed_schedule_from(self, amp):
-        """Select the radio that says what a previous call's ``amp`` was."""
+        """Select the radio button and fill the fields that make the schedule
+        of a previous call again. The spacing that the schedule records tells
+        a ramp from a list."""
         if isinstance(amp, AmplitudeSchedule):
             self.amp_units.set_units(amp.units)
             if amp.relative and amp.steps == (1.0,):
-                self.catalog_radio.setChecked(True)
+                if isinstance(amp.base, (int, float)):
+                    self.single_radio.setChecked(True)
+                    self.single_amp_edit.setText(f"{float(amp.base):g}")
+                else:
+                    self.catalog_radio.setChecked(True)
             elif amp.relative:
                 self.multiplicative_radio.setChecked(True)
-                self.factor_start_edit.setText(f"{amp.steps[0]:g}")
-                self.factor_stop_edit.setText(f"{amp.steps[-1]:g}")
-                self.factor_steps_edit.setText(str(len(amp.steps)))
+                self._seed_range(amp, self.factor_start_edit, self.factor_stop_edit,
+                                 self.factor_steps_edit, self.factor_spacing)
+            elif amp.spacing in ("log", "linear"):
+                self.ramp_radio.setChecked(True)
+                self._seed_range(amp, self.ramp_start_edit, self.ramp_stop_edit,
+                                 self.ramp_steps_edit, self.ramp_spacing)
             else:
                 self.list_radio.setChecked(True)
                 self.list_amp_edit.setText(
@@ -337,6 +346,17 @@ class MultisweepDialog(QtWidgets.QDialog):
             self.single_amp_edit.setText(f"{float(amp):g}")
         else:
             self.catalog_radio.setChecked(True)
+
+    @staticmethod
+    def _seed_range(amp, start, stop, steps, spacing) -> None:
+        """Fill the fields of a range from the first step, the last step, the
+        number of steps and the spacing of *amp*."""
+        start.setText(f"{amp.steps[0]:g}")
+        stop.setText(f"{amp.steps[-1]:g}")
+        steps.setText(str(len(amp.steps)))
+        index = spacing.findData(amp.spacing)
+        if index >= 0:
+            spacing.setCurrentIndex(index)
 
     def _parameters_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Sweep Parameters")

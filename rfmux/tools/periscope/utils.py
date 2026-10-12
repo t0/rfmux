@@ -816,6 +816,32 @@ class AmplitudeUnits(QtCore.QObject):
                 for v in values) + (" dBm" if other == "dbm" else " normalized"))
 
 
+def dac_scale_output_limits() -> tuple[float, float]:
+    """The DAC full scale at the output that a field can show, in dBm.
+
+    The limits are the range that the board accepts, rounded to two decimals
+    toward the inside, so that the board accepts each value a field shows.
+    """
+    low, high = DAC_SCALE_OUTPUT_RANGE_DBM
+    return math.ceil(low * 100) / 100, math.floor(high * 100) / 100
+
+
+def dac_scale_tooltip() -> str:
+    """The tooltip of each field that sets the DAC full scale."""
+    low, high = dac_scale_output_limits()
+    recommended = DAC_SCALE_RECOMMENDED_SETTING_DBM - BALUN_LOSS_DB
+    return (
+        f"The DAC full scale at the output. The board accepts "
+        f"{low:+.2f} to {high:+.2f} dBm (6.4 µA to 40.5 mA). Recommended: "
+        f"{recommended:+.2f} dBm (20 mA).\n"
+        "A low DAC scale decreases the dynamic range. A high DAC scale "
+        "makes the normalized amplitudes small, which can increase "
+        "quantization noise.\n"
+        "A change applies to all the tones of the module: the normalized "
+        "amplitudes stay, and the power of each tone changes by the same "
+        "number of dB.")
+
+
 class DacScaleField(QtWidgets.QDoubleSpinBox):
     """The DAC full scale at the output of a module, in dBm.
 
@@ -827,24 +853,12 @@ class DacScaleField(QtWidgets.QDoubleSpinBox):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # Round the limits to the inside of the range, so that the board
-        # accepts each value that the field shows.
-        low, high = DAC_SCALE_OUTPUT_RANGE_DBM
-        low, high = math.ceil(low * 100) / 100, math.floor(high * 100) / 100
-        self.setRange(low, high)
+        self.setRange(*dac_scale_output_limits())
         self.setDecimals(2)
         self.setSingleStep(0.25)
         self.setSuffix(" dBm")
-        recommended = DAC_SCALE_RECOMMENDED_SETTING_DBM - BALUN_LOSS_DB
-        self.setToolTip(
-            f"The DAC full scale at the output. The board accepts "
-            f"{low:+.2f} to {high:+.2f} dBm (6.4 µA to 40.5 mA). Recommended: "
-            f"{recommended:+.2f} dBm (20 mA).\n"
-            "A low DAC scale decreases the dynamic range. A high DAC scale "
-            "makes the normalized amplitudes small, which can increase "
-            "quantization noise.\n"
-            "A change applies to all the tones of the module when the "
-            "measurement starts.")
+        self.setToolTip(dac_scale_tooltip()
+                        + " The task sets it when the measurement starts.")
         self._board = None
         self._quiet = False
         self.edited = False

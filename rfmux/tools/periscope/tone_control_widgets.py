@@ -10,6 +10,8 @@ from PyQt6.QtCore import Qt, pyqtSignal
 from rfmux.core.transferfunctions import (
     BALUN_LOSS_DB, convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 
+from .utils import dac_scale_output_limits, dac_scale_tooltip
+
 
 class BoardEdit(QtWidgets.QLineEdit):
     """A field mirroring one board value.  Enter sends the text, and so
@@ -170,11 +172,12 @@ class ToneFields(QtWidgets.QFrame):
 
 
 class NcoBanner(QtWidgets.QFrame):
-    """Module, editable NCO in MHz, the module's DAC scale at the output
-    (the setting less BALUN_LOSS_DB) that the dBm fields are referenced to,
-    and the refresh cadence."""
+    """Module, editable NCO in MHz, the editable DAC full scale at the output
+    (the setting less BALUN_LOSS_DB) that the dBm fields use, and the
+    refresh cadence."""
 
     nco_committed = pyqtSignal(float)  # Hz
+    dac_scale_committed = pyqtSignal(float)  # setting in dBm, for set_dac_scale
 
     def __init__(self, module: int, parent=None):
         super().__init__(parent)
@@ -189,22 +192,23 @@ class NcoBanner(QtWidgets.QFrame):
         self.nco_edit = BoardEdit()
         self.nco_edit.setMaximumWidth(120)
         self.nco_edit.committed.connect(self._commit)
-        self.dac_label = QtWidgets.QLabel("DAC full scale at output: —")
-        self.dac_label.setToolTip(
-            "The dBm fields use this value. It is the DAC scale setting of "
-            f"the board less the {BALUN_LOSS_DB:g} dB balun loss, as in the "
-            "network analysis and multisweep dialogs.")
+        self.dac_edit = BoardEdit()
+        self.dac_edit.setMaximumWidth(80)
+        self.dac_edit.setToolTip(dac_scale_tooltip())
+        self.dac_edit.committed.connect(self._commit_dac_scale)
         row.addWidget(self.module_label)
         row.addWidget(QtWidgets.QLabel("NCO"))
         row.addWidget(self.nco_edit)
         row.addWidget(QtWidgets.QLabel("MHz"))
-        row.addWidget(self.dac_label)
+        row.addWidget(QtWidgets.QLabel("DAC full scale at output"))
+        row.addWidget(self.dac_edit)
+        row.addWidget(QtWidgets.QLabel("dBm"))
         row.addStretch(1)
         row.addWidget(QtWidgets.QLabel("refreshed every 1 s"))
 
     def show_values(self, nco: Optional[float], dac_scale: float) -> None:
         self.nco_edit.show_board("" if nco is None else f"{nco / 1e6:.6f}")
-        self.dac_label.setText(f"DAC full scale at output: {dac_scale:.2f} dBm")
+        self.dac_edit.show_board("" if dac_scale is None else f"{dac_scale:.2f}")
 
     def _commit(self, text: str) -> None:
         try:
@@ -213,3 +217,17 @@ class NcoBanner(QtWidgets.QFrame):
             self.nco_edit.reject()
             return
         self.nco_committed.emit(mhz * 1e6)
+
+    def _commit_dac_scale(self, text: str) -> None:
+        """Send the setting for a typed DAC full scale at the output, if the
+        board accepts it."""
+        low, high = dac_scale_output_limits()
+        try:
+            output = float(text)
+        except ValueError:
+            self.dac_edit.reject()
+            return
+        if not low <= output <= high:
+            self.dac_edit.reject()
+            return
+        self.dac_scale_committed.emit(output + BALUN_LOSS_DB)

@@ -12,7 +12,8 @@ pytest.importorskip("PyQt6")
 import rfmux  # noqa: E402
 from rfmux.core.transferfunctions import BALUN_LOSS_DB  # noqa: E402
 from rfmux.tools.periscope.tasks import (  # noqa: E402
-    ToneControlSignals, ToneControlTask, read_tones, write_nco, write_tone)
+    ToneControlSignals, ToneControlTask, read_tones, write_dac_scale, write_nco,
+    write_tone)
 
 SESSION = """
 !HardwareMap
@@ -95,6 +96,19 @@ def test_dac_scale_follows_the_module(mock_crs):
     got = loop.run_until_complete(read_tones(crs, 1, [1]))
     assert got["dac_scale"] == -6.0 - BALUN_LOSS_DB
     loop.run_until_complete(crs.set_dac_scale(1.0, 'DBM', module=1))
+
+
+def test_a_new_dac_scale_keeps_the_normalized_amplitudes(mock_crs):
+    """A common-mode change: each tone keeps its normalized amplitude, so
+    its power moves by the change of the DAC scale."""
+    loop, crs = mock_crs
+    before = loop.run_until_complete(read_tones(crs, 1, [1]))
+    got = loop.run_until_complete(write_dac_scale(crs, 1, 4.0, [1]))
+    try:
+        assert got["dac_scale"] == pytest.approx(4.0 - BALUN_LOSS_DB)
+        assert got["channels"][1]["amplitude"] == before["channels"][1]["amplitude"]
+    finally:
+        loop.run_until_complete(crs.set_dac_scale(1.0, 'DBM', module=1))
 
 
 def _wait_for(qt_app, received, predicate, timeout_s=5.0):

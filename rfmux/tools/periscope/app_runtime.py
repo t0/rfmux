@@ -278,6 +278,11 @@ class PeriscopeRuntime:
         if task is not None:
             task.set_nco(frequency_hz)
 
+    def _send_dac_scale(self, setting_dbm: float) -> None:
+        task = getattr(self, "_tone_control_task", None)
+        if task is not None:
+            task.set_dac_scale(setting_dbm)
+
     def _get_single_channel_colors(self) -> dict[str, str]:
         """
         Get a dictionary of default colors for single-channel plot components.

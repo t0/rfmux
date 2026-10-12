@@ -450,6 +450,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.nco_banner = NcoBanner(self.module)
         self.nco_banner.setVisible(False)
         self.nco_banner.nco_committed.connect(self._send_nco)
+        self.nco_banner.dac_scale_committed.connect(self._send_dac_scale)
 
         # CRS control buttons
         self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")

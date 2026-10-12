@@ -296,6 +296,14 @@ async def write_nco(crs, module: int, frequency_hz: float, channels) -> dict:
     return await read_tones(crs, module, channels)
 
 
+async def write_dac_scale(crs, module: int, setting_dbm: float, channels) -> dict:
+    """Set the DAC scale of the module and return :func:`read_tones` for
+    *channels*. The normalized amplitudes stay, so the power of each tone
+    changes by the same number of dB."""
+    await crs.set_dac_scale(float(setting_dbm), crs.UNITS.DBM, module=module)
+    return await read_tones(crs, module, channels)
+
+
 async def write_tone(crs, module: int, channel: int, *,
                      frequency: Optional[float] = None,
                      amplitude: Optional[float] = None,
@@ -352,6 +360,9 @@ class ToneControlTask(QtCore.QThread):
     def set_nco(self, frequency_hz: float) -> None:
         self._requests.put(("nco", float(frequency_hz)))
 
+    def set_dac_scale(self, setting_dbm: float) -> None:
+        self._requests.put(("dac", float(setting_dbm)))
+
     def stop(self) -> None:
         self.requestInterruption()
         self._requests.put(("stop",))
@@ -389,6 +400,10 @@ class ToneControlTask(QtCore.QThread):
             _, channel, fields = request
             coro = write_tone(self.crs, self.module, channel, **fields)
             label, shown = f"Ch {channel}", [channel]
+        elif request[0] == "dac":
+            coro = write_dac_scale(self.crs, self.module, request[1],
+                                   self._channels)
+            label, shown = "DAC scale", self._channels
         else:
             coro = write_nco(self.crs, self.module, request[1], self._channels)
             label, shown = "NCO", self._channels

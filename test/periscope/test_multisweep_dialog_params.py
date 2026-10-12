@@ -397,12 +397,14 @@ def test_a_typed_dac_scale_is_the_setting_with_the_balun_loss_added(qt_app):
         1.0 + BALUN_LOSS_DB)
 
 
-def test_the_dac_scale_stays_in_the_data_sheet_range(qt_app):
+def test_the_dac_scale_stays_in_the_range_the_board_accepts(qt_app):
     dialog = _dialog(qt_app)
+    """The board refuses a value above its limit, so the field stops at or
+    below it."""
     dialog.dac_scale_field.setValue(20.0)
 
-    assert dialog.dac_scale_field.value() == pytest.approx(
-        DAC_SCALE_OUTPUT_RANGE_DBM[1])
+    value = dialog.dac_scale_field.value()
+    assert DAC_SCALE_OUTPUT_RANGE_DBM[1] - 0.01 <= value <= DAC_SCALE_OUTPUT_RANGE_DBM[1]
 
 
 def test_a_schedule_that_can_clip_is_a_warning_on_the_status_line(qt_app):

@@ -97,8 +97,9 @@ The network analysis functionality allows for detailed characterization of reson
    which way through the band to measure. The amplitude is in normalized units
    or in dBm. The label next to it shows the value in the other units.
    "DAC full scale at output" shows the DAC scale of the module, after the
-   balun loss. You can change it in the range that the data sheet supports
-   (−0.75 to +2.75 dBm at the output). The task sets the new DAC scale before
+   balun loss. You can change it in the range that the board accepts
+   (−70.64 to +5.34 dBm at the output, 6.4 µA to 40.5 mA). The recommended value
+   is −0.75 dBm at the output (20 mA). The task sets the new DAC scale before
    the measurement starts, and it applies to all the tones of the module. An
    orange line shows when the tones can clip, or when they are so small that
    quantization noise can increase, and tells how to change the DAC scale.

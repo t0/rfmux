@@ -145,6 +145,7 @@ def test_at_the_lowest_dac_scale_quantization_asks_for_more_amplitude():
     assert "Raise the amplitude" in message
 
 
-def test_the_output_range_is_the_data_sheet_range_less_the_balun_loss():
+def test_the_output_range_is_the_range_the_board_accepts_less_the_balun_loss():
+    """6.425 uA to 40.5 mA into 100 ohm, as crs::set_dac_scale converts."""
     assert DAC_SCALE_OUTPUT_RANGE_DBM == pytest.approx(
-        (1.0 - BALUN_LOSS_DB, 4.5 - BALUN_LOSS_DB))
+        (-68.89 - BALUN_LOSS_DB, 7.10 - BALUN_LOSS_DB), abs=0.01)

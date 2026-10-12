@@ -8,7 +8,9 @@ import numpy as np
 from .transferfunctions import BALUN_LOSS_DB, CREST_FACTOR
 
 __all__ = [
+    "DAC_SCALE_CURRENT_RANGE_A",
     "DAC_SCALE_OUTPUT_RANGE_DBM",
+    "DAC_SCALE_RECOMMENDED_SETTING_DBM",
     "DAC_SCALE_SETTING_RANGE_DBM",
     "QUANTIZATION_PEAK_FRACTION",
     "comb_drive_issues",
@@ -17,9 +19,17 @@ __all__ = [
     "dac_scale_setting_dbm",
 ]
 
-#: The DAC scale settings that the data sheet supports, in dBm (DS926, DAC
-#: at 3.0 V): 20 mA is +1.0 dBm and 32 mA is +4.5 dBm.
-DAC_SCALE_SETTING_RANGE_DBM = (1.0, 4.5)
+#: The drive currents that ``set_dac_scale`` accepts, in amps (crs-mkids,
+#: crs::set_dac_scale). The board refuses a value outside this range.
+DAC_SCALE_CURRENT_RANGE_A = (6.425e-6, 40.5e-3)
+
+#: The same range as DAC scale settings in dBm. The board converts dBm to a
+#: current into 100 ohm: W = 3.125 * I**2.
+DAC_SCALE_SETTING_RANGE_DBM = tuple(
+    float(10 * np.log10(3.125 * i ** 2 * 1e3)) for i in DAC_SCALE_CURRENT_RANGE_A)
+
+#: The recommended DAC scale setting: 20 mA, +1.0 dBm (DS926, DAC at 3.0 V).
+DAC_SCALE_RECOMMENDED_SETTING_DBM = 1.0
 
 #: The same range at the output, after the balun loss.
 DAC_SCALE_OUTPUT_RANGE_DBM = tuple(

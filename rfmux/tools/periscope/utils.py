@@ -17,6 +17,7 @@ crash on the user's next launch.
 """
 
 import inspect
+import math
 import os
 import re
 import threading
@@ -201,7 +202,8 @@ from rfmux.core.transferfunctions import ( # Adjusted import
 from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
 from rfmux.tuning.multisweep_amplitudes import normalized_amplitude
-from rfmux.core.dac_scale import DAC_SCALE_OUTPUT_RANGE_DBM
+from rfmux.core.dac_scale import (DAC_SCALE_OUTPUT_RANGE_DBM,
+                                  DAC_SCALE_RECOMMENDED_SETTING_DBM)
 from rfmux.core.transferfunctions import BALUN_LOSS_DB
 # CRS is already imported from rfmux.core.schema
 
@@ -817,7 +819,7 @@ class AmplitudeUnits(QtCore.QObject):
 class DacScaleField(QtWidgets.QDoubleSpinBox):
     """The DAC full scale at the output of a module, in dBm.
 
-    The range is the range that the data sheet supports. Only a value that
+    The range is the range that the board accepts. Only a value that
     the user types is a change. A value from the board shows without a change.
     If the board has a value outside the range, the field shows the nearest
     limit, and :meth:`output_dbm` gives the value of the board.
@@ -825,15 +827,19 @@ class DacScaleField(QtWidgets.QDoubleSpinBox):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        # Round the limits to the inside of the range, so that the board
+        # accepts each value that the field shows.
         low, high = DAC_SCALE_OUTPUT_RANGE_DBM
+        low, high = math.ceil(low * 100) / 100, math.floor(high * 100) / 100
         self.setRange(low, high)
         self.setDecimals(2)
         self.setSingleStep(0.25)
         self.setSuffix(" dBm")
+        recommended = DAC_SCALE_RECOMMENDED_SETTING_DBM - BALUN_LOSS_DB
         self.setToolTip(
-            f"The DAC full scale at the output. The data sheet supports "
-            f"{low:+.2f} to {high:+.2f} dBm (20 mA to 32 mA). Recommended: "
-            f"{low:+.2f} dBm.\n"
+            f"The DAC full scale at the output. The board accepts "
+            f"{low:+.2f} to {high:+.2f} dBm (6.4 µA to 40.5 mA). Recommended: "
+            f"{recommended:+.2f} dBm (20 mA).\n"
             "A low DAC scale decreases the dynamic range. A high DAC scale "
             "makes the normalized amplitudes small, which can increase "
             "quantization noise.\n"

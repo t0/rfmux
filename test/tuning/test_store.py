@@ -2,6 +2,7 @@
 
 import datetime
 import pickle
+import re
 
 import numpy as np
 import pytest
@@ -442,7 +443,8 @@ def test_a_malformed_config_names_the_file(tmp_path, monkeypatch):
     written.write_text("store:\n  directory: [unclosed\n")
     monkeypatch.setenv("RFMUX_CONFIG", str(written))
     config.reload()
-    with pytest.raises(ValueError, match=str(written)):
+    # A Windows path has backslashes, which are regex escapes.
+    with pytest.raises(ValueError, match=re.escape(str(written))):
         config.get("store.directory")
 
 

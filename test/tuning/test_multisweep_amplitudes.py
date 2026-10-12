@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.core.transferfunctions import convert_dacunits_to_dbm
 from rfmux.tuning.multisweep_amplitudes import (
     AmplitudeSchedule,
     AmplitudeStep,
@@ -453,7 +454,7 @@ def test_a_schedule_round_trips_through_its_dict(schedule):
 def test_to_dict_is_plain_builtins_so_it_pickles_with_the_rest_of_a_result():
     d = AmplitudeSchedule.multiplicative(0.5, 2.0, 3, base={"R0001": 0.004}).to_dict()
 
-    assert d["schema_version"] == 2
+    assert d["schema_version"] == 3
     assert "ladder" not in d
     assert pickle.loads(pickle.dumps(d)) == d
     assert all(isinstance(v, float) for v in d["steps"])
@@ -527,3 +528,56 @@ def test_multisweep_takes_a_schedule_wherever_it_takes_an_amplitude():
     parameters = inspect.signature(multisweep.__wrapped__).parameters
     assert "AmplitudeSchedule" in str(parameters["amp"].annotation)
     assert "amp_schedule" not in parameters
+
+
+# ─── units ───────────────────────────────────────────────────────────────────
+
+
+def test_a_dbm_ramp_is_the_powers_asked_for_at_any_dac_scale():
+    schedule = AmplitudeSchedule.ramp(-60, -40, 5, units="dbm")
+
+    assert schedule.steps == pytest.approx((-60, -55, -50, -45, -40))
+    for scale in (-0.75, -10.0):
+        amplitudes = [step.amplitudes["A"]
+                      for step in schedule.resolve_steps(["A"], scale)]
+        assert convert_dacunits_to_dbm(np.array(amplitudes), scale) == \
+            pytest.approx(schedule.steps)
+
+
+def test_a_linear_dbm_ramp_takes_equal_amplitude_steps():
+    schedule = AmplitudeSchedule.ramp(-60, -40, 5, spacing="linear", units="dbm")
+    amplitudes = [step.amplitudes["A"] for step in schedule.resolve_steps(["A"], -0.75)]
+
+    assert np.diff(amplitudes) == pytest.approx([np.diff(amplitudes)[0]] * 4)
+
+
+@pytest.mark.parametrize("units", ["DBM", "dBm", "dbm"])
+def test_units_are_read_in_any_case(units):
+    assert AmplitudeSchedule(-50, units=units).units == "dbm"
+
+
+def test_units_other_than_normalized_or_dbm_are_refused():
+    with pytest.raises(ValueError, match="units"):
+        AmplitudeSchedule(0.01, units="volts")
+
+
+def test_a_dbm_schedule_needs_the_dac_scale():
+    schedule = AmplitudeSchedule.explicit([-50], units="dbm")
+
+    with pytest.raises(ValueError, match="DAC scale"):
+        schedule.resolve_steps(["A"])
+    assert schedule.validate(["A"])[0][0] == "error"
+
+
+def test_dbm_without_a_base_is_refused():
+    """Catalog amplitudes are normalized. Thus there is no dBm value to
+    convert."""
+    with pytest.raises(ValueError, match="base"):
+        AmplitudeSchedule(units="dbm")
+
+
+def test_a_schedule_saved_before_units_reads_as_normalized():
+    saved = {"schema_version": 2, "steps": [0.001, 0.002], "relative": False,
+             "base": None, "spacing": "explicit"}
+
+    assert AmplitudeSchedule.from_dict(saved).units == "normalized"

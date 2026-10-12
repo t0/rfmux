@@ -44,6 +44,27 @@ sweeps = await crs.multisweep(
 list. One call measures the whole schedule, in both directions if asked, and
 saves one file. See [multisweep.md](../../rfmux/reference-notebooks/Demos/multisweep.md).
 
+### Amplitudes in dBm
+
+```python
+await crs.take_netanal(module=1, amp=-60, amp_units=crs.UNITS.DBM)
+await crs.multisweep(catalog, amp=-55, amp_units=crs.UNITS.DBM)
+await crs.multisweep(catalog, amp=AmplitudeSchedule.ramp(-60, -40, 5, units="dbm"))
+```
+
+`amp_units` and the `units` of a schedule take `"normalized"` or `"dbm"`.
+`"normalized"` is the default. The case of the letters is not important.
+
+The algorithm reads the DAC scale of the module from the board when the
+measurement starts. It uses this DAC scale to convert a dBm amplitude. Thus
+the power is the power that you ask for, at all DAC scales.
+
+The spacing of a ramp applies to the amplitude. `"log"` gives equal dB steps.
+`"linear"` gives equal amplitude steps.
+
+The file records the schedule as you wrote it. Each sweep records its
+normalized amplitude and its power.
+
 ### Fit
 
 ```python
@@ -97,6 +118,11 @@ found, and **Take Multisweep** sweeps them. The multisweep window runs the
 rest of the flow from its toolbar: **Run Fit**, **Find Bias**, **Apply
 Bias** and **Get Noise Spectrum**, each with a settings panel beside it, and
 **Edit catalog** and **Re-run Multisweep**.
+
+The network analysis and multisweep dialogs take amplitudes in normalized
+units or in dBm. A selector next to the fields sets the units. Each field
+shows its value in the other units. When you change the units, the powers
+do not change.
 
 Its tabs:
 

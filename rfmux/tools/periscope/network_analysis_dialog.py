@@ -6,7 +6,7 @@ New-analysis mode also offers Import and Load for existing data.
 from .utils import (
     QtWidgets, QtCore, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback
+    SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback, AmplitudeUnits
 )
 from ...tuning import store
 from .field_memory import remember_fields
@@ -115,11 +115,19 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         form.addRow("Min Frequency (MHz):", self.fmin_edit)
         form.addRow("Max Frequency (MHz):", self.fmax_edit)
 
+        self.amp_units = AmplitudeUnits(
+            self, lambda: self.dac_scales.get(self.module))
+        self.amp_units.set_units(self.params.get("amp_units", "normalized"))
+        self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.amp_edit = self._number("amp", DEFAULT_AMPLITUDE)
         self.amp_edit.setToolTip(
-            "One normalized amplitude, per tone. Expressions like '1/1000' "
-            "are allowed.")
-        form.addRow("Normalized Amplitude:", self.amp_edit)
+            "One amplitude for each tone, in the units next to it. An "
+            "expression such as '1/1000' is permitted.")
+        amp_row = QtWidgets.QHBoxLayout()
+        amp_row.addWidget(self.amp_edit)
+        amp_row.addWidget(self.amp_units.combo)
+        amp_row.addWidget(self.amp_units.add(self.amp_edit))
+        form.addRow("Amplitude:", amp_row)
 
         self.dac_scale_info = QtWidgets.QLabel()
         self.dac_scale_info.setWordWrap(True)
@@ -180,6 +188,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         scale = self.dac_scales.get(self.module)
         self.dac_scale_info.setText(
             f"{scale:+.2f} dBm" if scale is not None else "Unknown")
+        self.amp_units.refresh()
 
     # ── importing a saved analysis ───────────────────────────────────────────
 
@@ -243,6 +252,8 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
                 except Exception:
                     widget.setText(str(params[key]))
 
+        # A file records the normalized amplitude of the measurement.
+        self.amp_units.set_units("normalized")
         set_if_present("amp", self.amp_edit, lambda v: f"{float(v):g}")
         set_if_present("fmin", self.fmin_edit, lambda v: f"{float(v) / 1e6:g}")
         set_if_present("fmax", self.fmax_edit, lambda v: f"{float(v) / 1e6:g}")
@@ -272,6 +283,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             params_dict = dict(self.params)
             params_dict.update({
                 'amp': float(eval(self.amp_edit.text())),
+                'amp_units': self.amp_units.units(),
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # MHz to Hz
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # MHz to Hz
                 'npoints': int(self.points_edit.text()),
@@ -291,9 +303,15 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(
                 self, "Input Error", "Min Frequency must be less than Max Frequency.")
             return None
-        if not 0 < params_dict['amp'] <= 1.0:
+        try:
+            normalized = self.amp_units.to_normalized(params_dict['amp'])
+        except ValueError as e:
+            QtWidgets.QMessageBox.warning(self, "Input Error", str(e))
+            return None
+        if not 0 < normalized <= 1.0:
             QtWidgets.QMessageBox.warning(
                 self, "Input Error",
-                "Normalized amplitude must be greater than 0 and at most 1.0.")
+                "The amplitude must be more than 0 and not more than full "
+                "scale (1.0 normalized).")
             return None
         return params_dict

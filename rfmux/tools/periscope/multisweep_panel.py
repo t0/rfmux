@@ -89,6 +89,9 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.is_foreign_module = False
         # A capture's tuning: one sweep per channel, with no schedule behind it.
         self.is_capture_tuning = False
+        # The module for the DAC scale. Set it before the amplitude scale,
+        # because a dBm schedule needs the DAC scale.
+        self.active_module_for_dac = self.target_module
 
         self.debug_phase_data = []
 
@@ -115,9 +118,6 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         # amplitude ladder lands on one axis instead of stacked by drive.
         self.normalize_traces = True
         self.zoom_box_mode = True  # Flag for enabling/disabling pyqtgraph's zoom box
-        
-        # Module context for DAC scale lookup (can be different from target_module if needed)
-        self.active_module_for_dac = self.target_module
 
         # Initialize batch tracking for sweep tabs (before _setup_ui)
         self.current_batch = 0
@@ -796,7 +796,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         schedule = amp if isinstance(amp, AmplitudeSchedule) else AmplitudeSchedule(amp)
         self._step_amplitudes = {
             step.step: dict(step.amplitudes)
-            for step in schedule.resolve_steps(self.catalog)
+            for step in schedule.resolve_steps(self.catalog, self._dac_scale())
         }
 
     def _amplitude_of(self, step: int, name: str, sweep: dict) -> float:

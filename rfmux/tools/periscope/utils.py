@@ -200,6 +200,7 @@ from rfmux.core.transferfunctions import ( # Adjusted import
 #: ring buffer, so extend()'s wrap arithmetic exists in one place.
 from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
+from rfmux.tuning.multisweep_amplitudes import normalized_amplitude
 # CRS is already imported from rfmux.core.schema
 
 # Configure PyQtGraph
@@ -703,6 +704,123 @@ _BANNER_CSS = {
     "info": "background-color: #d1ecf1; color: #0c5460; "
             "padding: 5px; border-radius: 6px;",
 }
+
+
+def amplitude_values(text: str) -> list[float]:
+    """Return the numbers in a field. Commas or spaces separate the
+    numbers. An expression such as '1/1000' is permitted."""
+    return [float(eval(part, {"__builtins__": {}}))
+            for part in text.replace(",", " ").split()]
+
+
+class AmplitudeUnits(QtCore.QObject):
+    """The normalized/dBm selector for the amplitude fields of a dialog.
+
+    The dialog reads each field in the selected units. A label next to each
+    field shows the value in the other units. When the user changes the
+    selector, the fields change to the new units and keep their power. When
+    code changes the selector (for example, to restore a dialog), the fields
+    do not change. Only the units that the dialog reads change.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget, dac_scale):
+        super().__init__(parent)
+        self._dac_scale = dac_scale   # callable: the module's scale, or None
+        self._fields: list[tuple[QtWidgets.QLineEdit, QtWidgets.QLabel]] = []
+        self.combo = QtWidgets.QComboBox()
+        self.combo.addItem("normalized", "normalized")
+        self.combo.addItem("dBm", "dbm")
+        self.combo.setToolTip(
+            "Amplitudes as fractions of DAC full scale, or as powers in dBm at "
+            "the output. The measurement converts dBm with the DAC scale of the "
+            "module when it starts.")
+        self._shown = self.units()
+        self._changed_from = None
+        # For a selection by the user, Qt sends currentIndexChanged and then
+        # activated, in the same event. A change by code does not send
+        # activated.
+        self.combo.currentIndexChanged.connect(self._read_as_selected)
+        self.combo.activated.connect(self._rewrite)
+
+    def add(self, edit: QtWidgets.QLineEdit) -> QtWidgets.QLabel:
+        """Return a label that shows the value of *edit* in the other
+        units."""
+        label = QtWidgets.QLabel()
+        self._fields.append((edit, label))
+        edit.textChanged.connect(lambda _text: self._echo(edit, label))
+        self._echo(edit, label)
+        return label
+
+    def units(self) -> str:
+        return self.combo.currentData()
+
+    def set_units(self, units: str) -> None:
+        index = self.combo.findData(str(units).lower())
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+
+    def to_normalized(self, value: float) -> float:
+        """Return *value*, in the selected units, as a normalized
+        amplitude."""
+        return float(normalized_amplitude(value, self.units(), self._dac_scale()))
+
+    def refresh(self) -> None:
+        """Update all the labels, for example when the DAC scale
+        arrives."""
+        for edit, label in self._fields:
+            self._echo(edit, label)
+
+    def _read_as_selected(self, _index) -> None:
+        self._changed_from, self._shown = self._shown, self.units()
+        QtCore.QTimer.singleShot(0, self._forget_change)
+        self.refresh()
+
+    def _forget_change(self) -> None:
+        self._changed_from = None
+
+    def _rewrite(self, _index) -> None:
+        """Write the values of the fields in the new units. The power of
+        each value does not change."""
+        previous, self._changed_from = self._changed_from, None
+        scale = self._dac_scale()
+        if previous is None or scale is None:
+            return
+        for edit, _label in self._fields:
+            try:
+                values = amplitude_values(edit.text())
+            except Exception:
+                continue
+            edit.setText(", ".join(
+                _format_amplitude(_convert(v, previous, scale), self._shown)
+                for v in values))
+        self.refresh()
+
+    def _echo(self, edit: QtWidgets.QLineEdit, label: QtWidgets.QLabel) -> None:
+        scale = self._dac_scale()
+        try:
+            values = amplitude_values(edit.text())
+        except Exception:
+            values = []
+        if not values:
+            label.setText("")
+        elif scale is None:
+            label.setText("(DAC scale unknown)")
+        else:
+            other = "normalized" if self.units() == "dbm" else "dbm"
+            label.setText("= " + ", ".join(
+                _format_amplitude(_convert(v, self.units(), scale), other)
+                for v in values) + (" dBm" if other == "dbm" else " normalized"))
+
+
+def _convert(value: float, units: str, scale: float) -> float:
+    """Return *value*, which is in *units*, in the other units."""
+    if units == "dbm":
+        return float(normalized_amplitude(value, "dbm", scale))
+    return float(convert_dacunits_to_dbm(value, scale))
+
+
+def _format_amplitude(value: float, units: str) -> str:
+    return f"{value:.2f}" if units == "dbm" else f"{value:.6g}"
 
 
 def apply_issue_banner(label, ok_button, issues) -> bool:

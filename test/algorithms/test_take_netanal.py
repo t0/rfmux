@@ -264,6 +264,17 @@ def test_mock_fixture_stops_streaming(monkeypatch):
 
 
 @pytest.mark.slow_acquisition
+def test_an_amplitude_in_dbm_is_swept_at_that_power(mock_crs):
+    loop, crs = mock_crs
+    result = loop.run_until_complete(crs.take_netanal(
+        amp=-60, amp_units=crs.UNITS.DBM, fmin=1.0e9, fmax=1.001e9,
+        npoints=4, nsamps=1, module=MODULE, save=False))
+
+    trace = result[crs.module[MODULE].index()]["results"]
+    assert trace["sweep_amplitude_dbm"] == pytest.approx(-60)
+
+
+@pytest.mark.slow_acquisition
 class TestTheDriver:
     # Three NCO chunks over the band below, so the seams are in the data.
     FMIN, FMAX, NPOINTS, MAX_SPAN = 1.0e9, 1.6e9, 600, 250e6

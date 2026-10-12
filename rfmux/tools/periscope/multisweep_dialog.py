@@ -16,7 +16,7 @@ from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for, store,
 )
 
-from .utils import DEFAULT_AMPLITUDE
+from .utils import DEFAULT_AMPLITUDE, AmplitudeUnits
 from .field_memory import remember_fields
 
 # What the driver does when you say nothing. Read once, at import, so the
@@ -154,7 +154,7 @@ class MultisweepDialog(QtWidgets.QDialog):
             shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), self)
             shortcut.activated.connect(self._start_if_valid)
 
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(640)
 
     def _sections_group(self) -> QtWidgets.QGroupBox:
         group = QtWidgets.QGroupBox("Sweep sections")
@@ -184,13 +184,20 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.custom_order_edit = QtWidgets.QLineEdit()
         self.custom_order_edit.setReadOnly(True)
         custom_form.addRow("Resonator order:", self.custom_order_edit)
+        self.amp_units = AmplitudeUnits(self, lambda: self.dac_scales.get(self.module))
+        self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.custom_amp_edit = QtWidgets.QLineEdit(str(DEFAULT_AMPLITUDE))
-        self.custom_amp_edit.setValidator(QDoubleValidator(0.0, 1.0, 9, self))
+        self.custom_amp_edit.setValidator(QDoubleValidator(-1e6, 1e6, 9, self))
         self.custom_amp_edit.textChanged.connect(self._refresh)
         self.custom_amp_label = QtWidgets.QLabel("Base amplitude:")
         self.custom_amp_edit.setToolTip(
-            "Starting amplitudes for custom resonators.")
-        custom_form.addRow(self.custom_amp_label, self.custom_amp_edit)
+            "Start amplitudes for custom resonators, in the units of the "
+            "schedule.")
+        custom_amp_row = QtWidgets.QHBoxLayout()
+        custom_amp_row.addWidget(self.custom_amp_edit)
+        self.custom_amp_echo = self.amp_units.add(self.custom_amp_edit)
+        custom_amp_row.addWidget(self.custom_amp_echo)
+        custom_form.addRow(self.custom_amp_label, custom_amp_row)
         form.addWidget(self.custom_widget)
 
         return group
@@ -199,23 +206,43 @@ class MultisweepDialog(QtWidgets.QDialog):
         """One radio per ``AmplitudeSchedule`` constructor, each with its own
         fields; the selected one is the schedule."""
         group = QtWidgets.QGroupBox("Amplitude schedule")
-        grid = QtWidgets.QGridLayout(group)
+        outer = QtWidgets.QVBoxLayout(group)
+        units_row = QtWidgets.QHBoxLayout()
+        units_row.addWidget(QtWidgets.QLabel("Amplitudes in:"))
+        units_row.addWidget(self.amp_units.combo)
+        units_row.addStretch(1)
+        outer.addLayout(units_row)
+        self.amp_units.combo.currentIndexChanged.connect(self._refresh)
+        grid = QtWidgets.QGridLayout()
+        outer.addLayout(grid)
         self.schedule_buttons = QtWidgets.QButtonGroup(self)
 
-        def radio(row, key, text, tip, fields=()):
+        def radio(row, key, text, tip, fields=(), echoes=()):
+            """Make a radio button and its fields. Below the fields, show
+            their values in the units that are not selected."""
             button = QtWidgets.QRadioButton(text)
             button.setToolTip(tip)
             self.schedule_buttons.addButton(button)
             button.setProperty("schedule_kind", key)
             grid.addWidget(button, row, 0)
             holder = QtWidgets.QWidget()
-            line = QtWidgets.QHBoxLayout(holder)
-            line.setContentsMargins(0, 0, 0, 0)
+            stack = QtWidgets.QVBoxLayout(holder)
+            stack.setContentsMargins(0, 0, 0, 0)
+            stack.setSpacing(0)
+            line = QtWidgets.QHBoxLayout()
             for label, widget in fields:
                 if label:
                     line.addWidget(QtWidgets.QLabel(label))
                 line.addWidget(widget)
             line.addStretch(1)
+            stack.addLayout(line)
+            if echoes:
+                under = QtWidgets.QHBoxLayout()
+                under.setSpacing(16)
+                for edit in echoes:
+                    under.addWidget(self.amp_units.add(edit))
+                under.addStretch(1)
+                stack.addLayout(under)
             grid.addWidget(holder, row, 1)
             self._schedule_fields[key] = holder
             return button
@@ -231,14 +258,15 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.single_radio = radio(
             1, "single", "One amplitude",
             "AmplitudeSchedule(x): one pass, at this amplitude for everything.",
-            [("", self.single_amp_edit)])
+            [("", self.single_amp_edit)], echoes=[self.single_amp_edit])
 
         self.list_amp_edit = QtWidgets.QLineEdit("0.001, 0.002, 0.004")
         self.list_amp_edit.textChanged.connect(self._refresh)
+        self.list_amp_edit.setMinimumWidth(260)
         self.list_radio = radio(
             2, "explicit", "A list of amplitudes",
             "AmplitudeSchedule.explicit([...]): these amplitudes, in this order.",
-            [("", self.list_amp_edit)])
+            [("", self.list_amp_edit)], echoes=[self.list_amp_edit])
 
         self.ramp_start_edit = self._number(0.001)
         self.ramp_stop_edit = self._number(0.01)
@@ -249,7 +277,8 @@ class MultisweepDialog(QtWidgets.QDialog):
             "AmplitudeSchedule.ramp(start, stop, steps): absolute amplitudes, "
             "the same for every resonator.",
             [("from", self.ramp_start_edit), ("to", self.ramp_stop_edit),
-             ("in", self.ramp_steps_edit), ("steps,", self.ramp_spacing)])
+             ("in", self.ramp_steps_edit), ("steps,", self.ramp_spacing)],
+            echoes=[self.ramp_start_edit, self.ramp_stop_edit])
 
         self.factor_start_edit = self._number(0.5)
         self.factor_stop_edit = self._number(2.0)
@@ -258,7 +287,8 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.multiplicative_radio = radio(
             4, "multiplicative", "Multiples of each catalog amplitude",
             "AmplitudeSchedule.multiplicative(start, stop, steps): every "
-            "resonator keeps its own scale and walks the same factors.",
+            "resonator keeps its own scale and uses the same factors. "
+            "Factors have no units.",
             [("×", self.factor_start_edit), ("to ×", self.factor_stop_edit),
              ("in", self.factor_steps_edit), ("steps,", self.factor_spacing)])
 
@@ -268,7 +298,7 @@ class MultisweepDialog(QtWidgets.QDialog):
 
     def _number(self, default) -> QtWidgets.QLineEdit:
         edit = QtWidgets.QLineEdit(f"{default:g}")
-        edit.setValidator(QDoubleValidator(0.0, 1e6, 9, self))
+        edit.setValidator(QDoubleValidator(-1e6, 1e6, 9, self))
         edit.setMaximumWidth(90)
         edit.textChanged.connect(self._refresh)
         return edit
@@ -282,13 +312,15 @@ class MultisweepDialog(QtWidgets.QDialog):
 
     def _spacing_combo(self) -> QtWidgets.QComboBox:
         combo = QtWidgets.QComboBox()
-        combo.addItems(["log", "linear"])
+        combo.addItem("equal dB steps", "log")
+        combo.addItem("equal amplitude steps", "linear")
         combo.currentIndexChanged.connect(self._refresh)
         return combo
 
     def _seed_schedule_from(self, amp):
         """Select the radio that says what a previous call's ``amp`` was."""
         if isinstance(amp, AmplitudeSchedule):
+            self.amp_units.set_units(amp.units)
             if amp.relative and amp.steps == (1.0,):
                 self.catalog_radio.setChecked(True)
             elif amp.relative:
@@ -354,6 +386,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         scale = self.dac_scales.get(self.module)
         self.dac_scale_info.setText(
             f"{scale:+.2f} dBm" if scale is not None else "Unknown")
+        self.amp_units.refresh()
 
     def _seeded_directions(self) -> tuple[str, ...]:
         seeded = self.params.get("sweep_direction",
@@ -402,25 +435,28 @@ class MultisweepDialog(QtWidgets.QDialog):
         return [float(part) for part in text.replace(",", " ").split()]
 
     def schedule(self) -> AmplitudeSchedule:
-        """The schedule the selected radio names. Raises on unusable fields."""
+        """Return the schedule of the selected radio button, in the selected
+        units. Raise an error if a field is not correct."""
         kind = self._schedule_kind()
+        units = self.amp_units.units()
         if kind == "single":
-            return AmplitudeSchedule(float(self.single_amp_edit.text()))
+            return AmplitudeSchedule(float(self.single_amp_edit.text()),
+                                     units=units)
         if kind == "explicit":
             return AmplitudeSchedule.explicit(
-                self._numbers(self.list_amp_edit.text()))
+                self._numbers(self.list_amp_edit.text()), units=units)
         if kind == "ramp":
             return AmplitudeSchedule.ramp(
                 float(self.ramp_start_edit.text()),
                 float(self.ramp_stop_edit.text()),
                 int(self.ramp_steps_edit.text()),
-                spacing=self.ramp_spacing.currentText())
+                spacing=self.ramp_spacing.currentData(), units=units)
         if kind == "multiplicative":
             return AmplitudeSchedule.multiplicative(
                 float(self.factor_start_edit.text()),
                 float(self.factor_stop_edit.text()),
                 int(self.factor_steps_edit.text()),
-                spacing=self.factor_spacing.currentText())
+                spacing=self.factor_spacing.currentData())
         return AmplitudeSchedule()
 
     def directions(self):
@@ -442,6 +478,8 @@ class MultisweepDialog(QtWidgets.QDialog):
         frequencies = [f * 1e6 for f in self._numbers(self.sections_edit.text())]
         if not frequencies or self.module is None:
             return None
+        # The amplitude of a catalog is normalized. The dialog converts it
+        # with the DAC scale that it has.
         schedule = self.schedule()
         if self._schedule_kind() in ("catalog", "multiplicative"):
             amplitude = float(self.custom_amp_edit.text())
@@ -449,6 +487,7 @@ class MultisweepDialog(QtWidgets.QDialog):
             amplitude = schedule.base
         else:
             amplitude = schedule.steps[0]
+        amplitude = self.amp_units.to_normalized(amplitude)
         return ResonatorCatalog.from_frequencies(
             frequencies, module=self.module, amplitude=amplitude)
 
@@ -496,8 +535,9 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.custom_widget.setVisible(
             self.center_source_combo.currentData() == "custom")
         relative = self._schedule_kind() in ("catalog", "multiplicative")
-        self.custom_amp_edit.setVisible(relative and self.catalog is None)
-        self.custom_amp_label.setVisible(relative and self.catalog is None)
+        for widget in (self.custom_amp_edit, self.custom_amp_label,
+                       self.custom_amp_echo):
+            widget.setVisible(relative and self.catalog is None)
         self.custom_order_edit.setText(
             ", ".join(self.catalog.names())
             if self.catalog is not None else "Creates a new array.")
@@ -534,7 +574,9 @@ class MultisweepDialog(QtWidgets.QDialog):
             except (ValueError, TypeError) as exc:
                 issues.append(("error", str(exc)))
             else:
-                issues.extend(schedule.validate(catalog, max(n_directions, 1)))
+                issues.extend(schedule.validate(
+                    catalog, max(n_directions, 1),
+                    self.dac_scales.get(self.module)))
 
         issues.extend(self._parameter_issues())
         self._show_issues(issues)

@@ -23,7 +23,8 @@ from ...core.transferfunctions import (
     convert_roc_to_volts,
 )
 from ...tuning import store
-from ...tuning.multisweep_amplitudes import AmplitudeSchedule, resolve_amplitudes
+from ...tuning.multisweep_amplitudes import (
+    AmplitudeSchedule, amplitude_units, resolve_amplitudes)
 from ...tuning.sweep_results import DIRECTIONS, merge_modules, pack_multisweep
 
 
@@ -229,14 +230,20 @@ def _resolve_schedule(
     amp,
     names: list[str],
     defaults: dict[str, float] | None,
+    amp_units=None,
 ) -> AmplitudeSchedule:
     """Return a supplied schedule or wrap ``amp`` in a one-step schedule.
 
     Validate ordinary amplitudes before wrapping them so error messages refer
     to ``amp``. Keep the supplied value in the schedule for recording in
-    ``call_params``.
+    ``call_params``. A schedule has its own units. If you give ``amp_units``
+    with a schedule, the two units must be the same.
     """
     if isinstance(amp, AmplitudeSchedule):
+        if amp_units is not None and amplitude_units(amp_units) != amp.units:
+            raise ValueError(
+                f"amp_units={amp_units!r} is not the same as the units of "
+                f"the schedule ({amp.units!r}). A schedule has its own units.")
         return amp
 
     resolve_amplitudes(
@@ -249,7 +256,7 @@ def _resolve_schedule(
         what="amp",
         of="center_frequencies",
     )
-    return AmplitudeSchedule(amp)
+    return AmplitudeSchedule(amp, units=amp_units or "normalized")
 
 
 async def _measure_sweep(
@@ -453,6 +460,7 @@ async def multisweep(
     span_hz: float = 100e3,
     npoints_per_sweep: int = 101,
     amp: float | list[float] | Mapping[str, float] | AmplitudeSchedule | None = None,
+    amp_units=None,
     nsamps: int = 10,
     sweep_direction: str | Sequence[str] = "upward",
     center_frequencies: list[float] | Mapping[str, float] | None = None,
@@ -486,12 +494,19 @@ async def multisweep(
             centres and amplitudes from their bias points.
         span_hz: full sweep width for each resonator, in Hz.
         npoints_per_sweep: frequency points per sweep.
-        amp: amplitude in DAC full-scale units, or an ``AmplitudeSchedule``.
-            With a catalog, None uses its bias amplitudes; a scalar applies
-            to all members and a name mapping must cover every member.
-            Without a catalog, supply a scalar, a list matching the centres,
-            a name mapping, or a schedule. Lists are rejected with a catalog.
-            The entire schedule is validated before measurement starts.
+        amp: amplitude as a fraction of DAC full scale, or in dBm (see
+            *amp_units*), or an ``AmplitudeSchedule``. With a catalog, None
+            uses the bias amplitudes of the catalog. A scalar applies to all
+            members. A name mapping must include each member. Without a
+            catalog, give a scalar, a list with one value for each centre, a
+            name mapping, or a schedule. A list is not permitted with a
+            catalog. The macro checks the full schedule before the
+            measurement starts.
+        amp_units: ``"normalized"`` or ``"dbm"``. None is ``"normalized"``.
+            The case of the letters is not important, so
+            ``crs.UNITS.DBM`` is correct. The macro converts a dBm amplitude
+            with the DAC scale that the board gives at the start. A schedule
+            has its own units.
         nsamps: samples averaged per frequency point.
         sweep_direction: ``"upward"``, ``"downward"``, or a sequence of both
             in acquisition order. Every amplitude step uses each direction.
@@ -581,6 +596,7 @@ async def multisweep(
                 span_hz=span_hz,
                 npoints_per_sweep=npoints_per_sweep,
                 amp=amp,
+                amp_units=amp_units,
                 nsamps=nsamps,
                 sweep_direction=sweep_direction,
                 module=m, # Pass single module here
@@ -612,7 +628,14 @@ async def multisweep(
         {r.name: float(r.bias.amplitude) for r in catalog.resonators(order="frequency")}
         if catalog is not None
         else None,
+        amp_units,
     )
+
+    # Read the DAC scale here, one time for the call. Each amplitude is a
+    # fraction of DAC full scale, and this board gives the value of full scale
+    # now. Read it before the schedule resolves, because a dBm schedule uses
+    # it to convert its amplitudes.
+    dac_scale = await dac_scale_dbm(crs, module)
 
     # Resolves the whole schedule up front, so an amplitude that overshoots full
     # scale on step 5 is a ValueError now rather than after four steps of data.
@@ -620,7 +643,8 @@ async def multisweep(
     # it asked for is still reported below.
     steps = (
         schedule.resolve_steps(
-            catalog if catalog is not None else [t.name for t in targets]
+            catalog if catalog is not None else [t.name for t in targets],
+            dac_scale,
         )
         if targets
         else []
@@ -635,12 +659,6 @@ async def multisweep(
 
     # Every sweep this call makes comes back under this one key.
     module_id = crs.module[module].index()
-
-    # Read here rather than left to whoever opens the file: every amplitude
-    # this call sweeps at is a fraction of DAC full scale, and the board that
-    # says what full scale is worth is this one, now. Once for the call, since
-    # it is one number per module.
-    dac_scale = await dac_scale_dbm(crs, module)
 
     def packed(sweeps):
         """This measurement, in the shape every sweep comes back in."""

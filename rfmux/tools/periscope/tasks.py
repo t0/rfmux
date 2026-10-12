@@ -616,6 +616,7 @@ class NetworkAnalysisTask(QtCore.QThread):
                 # Combine parameters for the take_netanal call
                 netanal_params = {
                     'amp': task_params['amp'],
+                    'amp_units': task_params['amp_units'],
                     'fmin': task_params['fmin'],
                     'fmax': task_params['fmax'],
                     'nsamps': task_params['nsamps'],
@@ -681,6 +682,7 @@ class NetworkAnalysisTask(QtCore.QThread):
     def _extract_parameters(self):
         # Constants from .utils
         return {'amp': self.params.get('amp', DEFAULT_AMPLITUDE),
+                'amp_units': self.params.get('amp_units', 'normalized'),
                 'fmin': self.params.get('fmin', DEFAULT_MIN_FREQ), 'fmax': self.params.get('fmax', DEFAULT_MAX_FREQ),
                 'nsamps': self.params.get('nsamps', DEFAULT_NSAMPLES), 'npoints': self.params.get('npoints', DEFAULT_NPOINTS),
                 'max_chans': self.params.get('max_chans', DEFAULT_MAX_CHANNELS), 'max_span': self.params.get('max_span', DEFAULT_MAX_SPAN),

@@ -16,6 +16,7 @@ from ...core.transferfunctions import (
     convert_roc_to_volts,
 )
 from ...tuning import store
+from ...tuning.multisweep_amplitudes import normalized_amplitude
 from ...tuning.sweep_results import merge_modules, pack_netanal, resolve_direction
 
 
@@ -32,6 +33,7 @@ async def take_netanal(
     rotate_phase_to_0: bool = True,
     *,
     sweep_direction: str = "upward",
+    amp_units="normalized",
     module,
     progress_callback=None,
     data_callback=None,
@@ -46,7 +48,8 @@ async def take_netanal(
 
     Args:
         crs: CRS instance, supplied by the macro.
-        amp: per-tone amplitude as a fraction of DAC full scale.
+        amp: amplitude of each tone, as a fraction of DAC full scale. With
+            ``amp_units="dbm"``, the amplitude is in dBm.
         fmin: lower frequency limit, Hz.
         fmax: upper frequency limit, Hz.
         nsamps: samples averaged per measurement.
@@ -56,6 +59,11 @@ async def take_netanal(
         rotate_phase_to_0: rotate the trace so the first point in the sweep
             direction has zero phase.
         sweep_direction: ``"upward"`` or ``"downward"``; one per call.
+        amp_units: ``"normalized"`` or ``"dbm"``. The case of the letters
+            is not important, so ``crs.UNITS.DBM`` is correct. The macro
+            converts a dBm amplitude with the DAC scale that the board gives
+            at the start. The result records the normalized amplitude and its
+            power.
         module: one module or a list within one analog bank (1–4 or 5–8).
             Multiple modules are measured concurrently.
         progress_callback: called with ``(module, percent)``.
@@ -99,6 +107,7 @@ async def take_netanal(
             # Call the same macro again, but for a single module=m
             tasks.append(crs.take_netanal(
                 amp=amp,
+                amp_units=amp_units,
                 fmin=fmin,
                 fmax=fmax,
                 nsamps=nsamps,
@@ -120,6 +129,15 @@ async def take_netanal(
         merged = merge_modules(await asyncio.gather(*tasks))
         store.maybe_save(merged, "netanal", save=save, label=label)
         return merged
+
+    # Read the DAC scale here. The amplitude is a fraction of DAC full scale,
+    # and this board gives the value of full scale now. A dBm amplitude uses
+    # it for the conversion.
+    scale_dbm = await dac_scale_dbm(crs, module)
+    amp = float(normalized_amplitude(amp, amp_units, scale_dbm))
+    if not 0 < amp <= 1:
+        raise ValueError(
+            f"amp={amp:g} is not in (0, 1] of DAC full scale.")
 
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
@@ -322,7 +340,6 @@ async def take_netanal(
     # it. A bare {} would be indistinguishable from a caller's own empty dict,
     # and the provenance of a netanal that measured nothing is worth as much as
     # any other's.
-    scale_dbm = await dac_scale_dbm(crs, module)
     netanal = pack_netanal(
         {
             'frequencies': fs_sorted,
@@ -347,9 +364,6 @@ async def take_netanal(
         rotate_phase_to_0=rotate_phase_to_0,
         sweep_direction=sweep_direction,
         requested_module=requested_module,
-        # Read here rather than left to whoever opens the file: the amplitudes
-        # above are fractions of DAC full scale, and the board that says what
-        # full scale is worth is this one, now.
         dac_scale_dbm=scale_dbm,
     )
 

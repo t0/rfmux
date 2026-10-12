@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
-from rfmux.core.transferfunctions import BALUN_LOSS_DB
+from rfmux.core.transferfunctions import BALUN_LOSS_DB, convert_dbm_to_amplitude
 from rfmux.tuning import AmplitudeSchedule
 from rfmux.algorithms.measurement import multisweep as multisweep_module
 from rfmux.algorithms.measurement.multisweep import multisweep
@@ -1025,3 +1025,22 @@ async def test_offset_center_refinement_keeps_history_through_saved_sweeps(monke
     for resonator in report.catalog:
         assert resonator.bias.bifurcated_at == pytest.approx(0.004)
         assert report[resonator.name].bifurcated_at is None
+
+
+# ─── amplitudes in dBm ────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_dbm_amplitude_is_converted_with_the_boards_dac_scale(sweeps):
+    await drive(FakeCRS(dac_scale=1.0), a_catalog(), amp=-55, amp_units="DBM")
+
+    expected = convert_dbm_to_amplitude(-55, 1.0 - BALUN_LOSS_DB)
+    assert list(sweeps.calls[0]["amplitudes"].values()) == pytest.approx([expected] * 3)
+
+
+@pytest.mark.asyncio
+async def test_amp_units_that_disagree_with_the_schedule_are_refused(sweeps):
+    with pytest.raises(ValueError, match="amp_units"):
+        await drive(FakeCRS(), a_catalog(),
+                    amp=AmplitudeSchedule.explicit([-50], units="dbm"),
+                    amp_units="normalized")

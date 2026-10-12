@@ -1,6 +1,7 @@
 """Test that the multisweep dialog emits valid driver arguments and schedules."""
 
 import inspect
+import math
 
 import pytest
 
@@ -326,3 +327,38 @@ def test_loading_sweep_settings_uses_the_tuned_catalog(qt_app, monkeypatch):
     dialog._on_file_selected("sweep.pkl")
     assert dialog.catalog["R0001"].bias.bifurcated_at == pytest.approx(0.004)
     assert dialog.catalog["R0001"].bias.amplitude == report.catalog["R0001"].bias.amplitude
+
+
+
+def test_a_ramp_in_dbm_is_a_dbm_schedule(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.amp_units.set_units("dbm")
+    dialog.ramp_radio.setChecked(True)
+    dialog.ramp_start_edit.setText("-60")
+    dialog.ramp_stop_edit.setText("-40")
+    dialog.ramp_steps_edit.setText("5")
+
+    assert dialog.get_parameters()["amp"] == AmplitudeSchedule.ramp(
+        -60, -40, 5, units="dbm")
+
+
+def test_switching_units_keeps_the_power_and_shows_the_other(qt_app):
+    """When the user changes the units, the fields change to the new units.
+    The label next to each field shows the value in the other units."""
+    dialog = _dialog(qt_app)
+    dialog.single_amp_edit.setText("0.001")
+    dialog.amp_units.combo.setCurrentIndex(dialog.amp_units.combo.findData("dbm"))
+    dialog.amp_units.combo.activated.emit(dialog.amp_units.combo.currentIndex())
+
+    dbm = float(dialog.single_amp_edit.text())
+    assert dbm == pytest.approx(-0.5 + 20 * math.log10(0.001), abs=0.01)
+    assert "normalized" in dialog.amp_units._fields[1][1].text()
+
+
+def test_units_set_in_code_do_not_rewrite_the_fields(qt_app):
+    """When code sets the units, the text of the fields does not change."""
+    dialog = _dialog(qt_app)
+    dialog.single_amp_edit.setText("-50")
+    dialog.amp_units.set_units("dbm")
+
+    assert dialog.single_amp_edit.text() == "-50"

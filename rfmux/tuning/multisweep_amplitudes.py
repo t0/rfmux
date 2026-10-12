@@ -2,7 +2,9 @@
 
 Pass an :class:`AmplitudeSchedule` as ``crs.multisweep(catalog, amp=schedule)``.
 The plain constructor gives one step; ``multiplicative``, ``ramp``, and
-``explicit`` build sequences. Amplitudes are fractions of DAC full scale.
+``explicit`` build sequences. An amplitude is a fraction of DAC full scale.
+With ``units="dbm"``, an amplitude is a power in dBm. The schedule converts
+dBm with the module's DAC scale when it resolves the steps.
 
 Steps are numbered from zero. Each step can be swept in one or both frequency
 directions; direction is chosen by the driver, independently of the schedule.
@@ -17,12 +19,49 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from ..core.resonators import ResonatorCatalog
-from ..core.transferfunctions import convert_dacunits_to_dbm
+from ..core.transferfunctions import (convert_dacunits_to_dbm,
+                                      convert_dbm_to_amplitude)
 
 __all__ = [
+    "AMPLITUDE_UNITS",
     "AmplitudeSchedule",
     "AmplitudeStep",
+    "amplitude_units",
+    "normalized_amplitude",
 ]
+
+#: The units that an amplitude can have. ``crs.UNITS.NORMALIZED`` and
+#: ``crs.UNITS.DBM`` give these values. The case of the letters is not
+#: important.
+AMPLITUDE_UNITS = ("normalized", "dbm")
+
+
+def amplitude_units(units) -> str:
+    """Return ``"normalized"`` or ``"dbm"`` for *units* in any case.
+
+    Raise ValueError for other units.
+    """
+    lowered = str(units).lower()
+    if lowered not in AMPLITUDE_UNITS:
+        raise ValueError(
+            f"units={units!r} is not correct. Use one of {AMPLITUDE_UNITS} "
+            f"(crs.UNITS.NORMALIZED or crs.UNITS.DBM).")
+    return lowered
+
+
+def normalized_amplitude(value, units, dac_scale_dbm: float | None):
+    """Return *value* in normalized DAC units.
+
+    If *units* is ``"dbm"``, convert *value* with *dac_scale_dbm*. This is
+    the DAC scale at the output of the module.
+    """
+    if amplitude_units(units) == "normalized":
+        return value
+    if dac_scale_dbm is None:
+        raise ValueError(
+            "An amplitude in dBm needs the DAC scale of the module. The "
+            "board does not give a DAC scale for this module.")
+    return convert_dbm_to_amplitude(value, dac_scale_dbm)
 
 
 # Spacings steps can be generated with. "explicit" and "none" are what the
@@ -192,19 +231,22 @@ class AmplitudeSchedule:
 
     Relative schedules multiply each resonator's ``base`` by each value in
     ``steps``. Absolute schedules use the step values directly as amplitudes.
-    All amplitudes are fractions of DAC full scale.
+    ``units`` gives the units of the base or of the absolute steps. The
+    units are fractions of DAC full scale, or dBm at the output. Factors have
+    no units.
 
     Use the constructor for one step::
 
         AmplitudeSchedule()       # use each resonator's bias amplitude
         AmplitudeSchedule(0.005)  # use 0.005 for every resonator
+        AmplitudeSchedule(-50, units="dbm")  # -50 dBm for every resonator
         AmplitudeSchedule({"BOTA": 0.004, "KOZR": 0.006})
 
     Use :meth:`multiplicative`, :meth:`ramp`, or :meth:`explicit` for a sequence.
     """
 
-    # Version 2 writes steps; version 1 remains readable for saved sweeps.
-    SCHEMA_VERSION = 2
+    # Version 3 adds units. Versions 1 and 2 have normalized amplitudes.
+    SCHEMA_VERSION = 3
 
     base: float | Mapping[str, float] | Sequence[float] | None = None
     steps: tuple[float, ...] = (1.0,)
@@ -212,8 +254,10 @@ class AmplitudeSchedule:
     # Record how steps were generated for display and saving.
     # Spacing does not affect calculations or schedule equality.
     spacing: str = field(default="none", compare=False)
+    units: str = "normalized"
 
     def __post_init__(self):
+        object.__setattr__(self, "units", amplitude_units(self.units))
         steps = tuple(float(v) for v in self.steps)
         if not steps:
             raise ValueError(
@@ -234,6 +278,10 @@ class AmplitudeSchedule:
                     f"multiplies the base amplitude, so a step of zero silences "
                     f"the tone and a negative one is not a scaling at all."
                 )
+            if self.units == "dbm" and self.base is None:
+                raise ValueError(
+                    "units='dbm' needs a base in dBm. Without a base, each "
+                    "resonator uses its catalog amplitude, which is normalized.")
         else:
             if self.base is not None:
                 raise ValueError(
@@ -242,14 +290,14 @@ class AmplitudeSchedule:
                     "Use multiplicative(..., base=...) for a schedule that "
                     "multiplies a base you chose."
                 )
-            # Check absolute amplitudes now; relative amplitudes need a resolved base.
+            # Check normalized amplitudes now. The resolution checks dBm
+            # amplitudes and relative amplitudes.
             bad = [v for v in steps if not 0 < v <= 1]
-            if bad:
+            if bad and self.units == "normalized":
                 raise ValueError(
                     f"steps {bad} are outside (0, 1]: an absolute schedule "
                     f"is in normalized DAC units. (A negative value usually "
-                    f"means dBm — convert with "
-                    f"amplitude = 10**((dbm - dac_scale_dbm) / 20).)"
+                    f"is dBm. For dBm, use units='dbm'.)"
                 )
 
         object.__setattr__(self, "steps", steps)
@@ -267,6 +315,7 @@ class AmplitudeSchedule:
         *,
         spacing: str = "log",
         base: float | Mapping[str, float] | Sequence[float] | None = None,
+        units: str = "normalized",
     ) -> AmplitudeSchedule:
         """A sequence of factors, each multiplying the base amplitude.
 
@@ -285,12 +334,14 @@ class AmplitudeSchedule:
                 dB) or ``"linear"``.
             base: ``None`` for each resonator's own ``bias.amplitude``, one
                 number for all of them, or a ``{name: amplitude}`` mapping.
+            units: the units of *base*, ``"normalized"`` or ``"dbm"``.
         """
         return cls(
             steps=_build_steps(start, stop, nsteps, spacing, what="factors"),
             relative=True,
             base=base,
             spacing=spacing,
+            units=units,
         )
 
     @classmethod
@@ -301,25 +352,38 @@ class AmplitudeSchedule:
         nsteps: int,
         *,
         spacing: str = "log",
+        units: str = "normalized",
     ) -> AmplitudeSchedule:
         """A sequence of absolute amplitudes, the same for every resonator.
 
         Args:
-            start: amplitude of the first step, normalized DAC units in (0, 1].
+            start: amplitude of the first step. Normalized DAC units are
+                in (0, 1]. With ``units="dbm"``, the amplitude is in dBm.
             stop: amplitude of the last step.
             nsteps: how many steps, inclusive of both ends.
-            spacing: ``"log"`` (the default) or ``"linear"``.
+            spacing: ``"log"`` gives equal dB steps. This is the default.
+                ``"linear"`` gives equal amplitude steps. The spacing applies
+                to the amplitude in the two units. Thus the steps of a dBm
+                ramp do not change with the DAC scale.
+            units: ``"normalized"`` or ``"dbm"``.
         """
-        return cls(
-            steps=_build_steps(start, stop, nsteps, spacing, what="amplitudes"),
-            relative=False,
-            spacing=spacing,
-        )
+        if amplitude_units(units) == "dbm":
+            # Make the steps from the amplitude relative to 0 dBm. The DAC
+            # scale is one factor for all the steps, so it does not change
+            # the spacing.
+            amplitudes = _build_steps(10 ** (start / 20), 10 ** (stop / 20),
+                                      nsteps, spacing, what="amplitudes")
+            steps = tuple(float(20 * np.log10(a)) for a in amplitudes)
+        else:
+            steps = _build_steps(start, stop, nsteps, spacing, what="amplitudes")
+        return cls(steps=steps, relative=False, spacing=spacing, units=units)
 
     @classmethod
-    def explicit(cls, levels: Sequence[float]) -> AmplitudeSchedule:
+    def explicit(cls, levels: Sequence[float],
+                 units: str = "normalized") -> AmplitudeSchedule:
         """Use the supplied absolute amplitudes in the supplied order."""
-        return cls(steps=tuple(levels), relative=False, spacing="explicit")
+        return cls(steps=tuple(levels), relative=False, spacing="explicit",
+                   units=units)
 
     # ─── the steps, without needing a catalog ───────────────────────────────
 
@@ -350,9 +414,10 @@ class AmplitudeSchedule:
             else f"{self.steps[0]:g}…{self.steps[-1]:g}, {self.spacing}"
         )
         tail = f" of {of}" if self.relative else ""
+        units = "" if self.units == "normalized" else f", {self.units}"
         return (
             f"AmplitudeSchedule({self.nsteps} "
-            f"step{'' if self.nsteps == 1 else 's'}, {kind} {steps}{tail})"
+            f"step{'' if self.nsteps == 1 else 's'}, {kind} {steps}{tail}{units})"
         )
 
     # ─── resolution against what is being swept ──────────────────────────────
@@ -426,22 +491,30 @@ class AmplitudeSchedule:
         )
 
     def _amplitudes_per_step(
-        self, target: ResonatorCatalog | Sequence[str]
+        self, target: ResonatorCatalog | Sequence[str],
+        dac_scale_dbm: float | None = None,
     ) -> tuple[list[str], list[dict[str, float]], list[float | None]]:
-        """The whole resolution, in one place: names, per-step amplitudes, and
-        the multiplier for each step.  Shared by :meth:`resolve_steps`,
-        :meth:`validate` and :meth:`describe` so the three cannot disagree."""
+        """Return the names, the normalized amplitudes of each step, and the
+        factor of each step.
+
+        :meth:`resolve_steps`, :meth:`validate` and :meth:`describe` use this
+        method. Thus the three methods always agree.
+        """
         names, defaults, allow_sequence = self._resolve_targets(target)
 
         if not self.relative:
             # The steps are the amplitudes; every sweep gets the same one.
             return (
                 names,
-                [{n: level for n in names} for level in self.steps],
+                [{n: float(normalized_amplitude(level, self.units, dac_scale_dbm))
+                  for n in names} for level in self.steps],
                 [None] * len(self.steps),
             )
 
         base = self._resolve_base(names, defaults, allow_sequence)
+        if self.base is not None:
+            base = {n: float(normalized_amplitude(a, self.units, dac_scale_dbm))
+                    for n, a in base.items()}
         return (
             names,
             [{n: base[n] * factor for n in names} for factor in self.steps],
@@ -451,7 +524,8 @@ class AmplitudeSchedule:
     # ─── the steps ───────────────────────────────────────────────────────────
 
     def resolve_steps(
-        self, target: ResonatorCatalog | Sequence[str]
+        self, target: ResonatorCatalog | Sequence[str],
+        dac_scale_dbm: float | None = None,
     ) -> list[AmplitudeStep]:
         """The numbered amplitude steps, resolved against what is being swept.
 
@@ -460,16 +534,19 @@ class AmplitudeSchedule:
                 names of the sweep sections when there is no catalog — for a bare
                 ``center_frequencies`` sweep, the same names ``multisweep``
                 will key its results by (``S0001…`` by default).
+            dac_scale_dbm: the DAC scale at the output of the module. A dBm
+                schedule uses it to convert its amplitudes.
 
         Returns:
             list[AmplitudeStep]: one per amplitude, in measurement order.
 
         Raises:
-            ValueError: if any resolved amplitude falls outside (0, 1], or if a
-                base mapping does not name every sweep. All steps are checked
-                before measurement starts.
+            ValueError: if a resolved amplitude is not in (0, 1], if a
+                base mapping does not name each sweep, or if a dBm schedule
+                has no DAC scale. The method checks all the steps before the
+                measurement starts.
         """
-        names, per_step, factors = self._amplitudes_per_step(target)
+        names, per_step, factors = self._amplitudes_per_step(target, dac_scale_dbm)
 
         errors = [m for severity, m in self._range_issues(per_step) if severity == "error"]
         if errors:
@@ -520,17 +597,19 @@ class AmplitudeSchedule:
     ) -> dict:
         """Return step counts and amplitude ranges for display.
 
-        Include power ranges when ``dac_scale_dbm`` is supplied. This resolves
-        amplitudes but does not check their range; use :meth:`validate` to check
-        settings before displaying a preview.
+        Include power ranges when you give ``dac_scale_dbm``. A dBm schedule
+        needs ``dac_scale_dbm``. This method resolves the amplitudes, but it
+        does not check their range. Use :meth:`validate` to check the settings
+        before you show a preview.
         """
-        names, per_step, factors = self._amplitudes_per_step(target)
+        names, per_step, factors = self._amplitudes_per_step(target, dac_scale_dbm)
         flat = [a for amplitudes in per_step for a in amplitudes.values()]
 
         described = {
             "nsteps": self.nsteps,
             "relative": self.relative,
             "spacing": self.spacing,
+            "units": self.units,
             "steps": list(self.steps),
             "n_sections": len(names),
             "n_directions": n_directions,
@@ -557,14 +636,17 @@ class AmplitudeSchedule:
         self,
         target: ResonatorCatalog | Sequence[str],
         n_directions: int = 1,
+        dac_scale_dbm: float | None = None,
     ) -> list[tuple[str, str]]:
         """Return ``(severity, message)`` pairs for errors, warnings, and step counts.
 
         Convert ValueError and TypeError from amplitude resolution into error
-        messages. Also report invalid amplitudes and repeated steps.
+        messages. Also report amplitudes that are not correct and steps that
+        repeat. A dBm schedule needs ``dac_scale_dbm``.
         """
         try:
-            names, per_step, factors = self._amplitudes_per_step(target)
+            names, per_step, factors = self._amplitudes_per_step(
+                target, dac_scale_dbm)
         except (ValueError, TypeError) as exc:
             return [("error", str(exc))]
 
@@ -606,12 +688,13 @@ class AmplitudeSchedule:
             "relative": self.relative,
             "base": base,
             "spacing": self.spacing,
+            "units": self.units,
         }
 
     @classmethod
     def from_dict(cls, d: Mapping) -> AmplitudeSchedule:
         version = d.get("schema_version")
-        if version not in (1, cls.SCHEMA_VERSION):
+        if version not in (1, 2, cls.SCHEMA_VERSION):
             raise ValueError(
                 f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
                 f"this dict was written by a different version of "
@@ -622,4 +705,5 @@ class AmplitudeSchedule:
             relative=bool(d["relative"]),
             base=d.get("base"),
             spacing=d.get("spacing", "none"),
+            units=d.get("units", "normalized"),
         )

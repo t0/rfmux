@@ -117,7 +117,12 @@ The network analysis panel's **Find Resonances** marks the resonances it
 found, and **Take Multisweep** sweeps them. The multisweep window runs the
 rest of the flow from its toolbar: **Run Fit**, **Find Bias**, **Apply
 Bias** and **Get Noise Spectrum**, each with a settings panel beside it, and
-**Edit catalog** and **Re-run Multisweep**.
+**Tuning Catalog** and **Re-run Multisweep**.
+
+**Tuning Catalog** shows the catalog as a table, one row for each resonator.
+You can edit the bias frequency, the amplitude (normalized or dBm) and the
+notes, delete rows, and export or import the catalog as CSV. **Apply** gives
+the edited catalog to the panel; **Close** discards the edits.
 
 The network analysis and multisweep dialogs take amplitudes in normalized
 units or in dBm. A selector next to the fields sets the units. Each field
@@ -144,7 +149,7 @@ Its tabs:
 - **Bias: derivative**, **Bias: frequency** and **Bias: hysteresis**: what
   `find_bias_points` looked at for each resonator.
 - **Collisions**: sweeps that hold two resonances closer than a threshold,
-  with **Remove names and re-sweep**.
+  with **Remove collided resonators from catalog and re-sweep**.
 
 Double-click a `bias_catalog` in the session browser to see each channel's
 bias in the tuning window. If **Apply Bias** finds that the module's DAC

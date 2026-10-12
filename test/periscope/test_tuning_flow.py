@@ -3435,8 +3435,8 @@ def test_collision_resweep_respects_measurement_restrictions(
 
 
 def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
-    from rfmux.tools.periscope.collision_settings_panel import CatalogEditDialog
-    settings = CatalogEditDialog()
+    from rfmux.tools.periscope.tuning_catalog_dialog import TuningCatalogDialog
+    settings = TuningCatalogDialog()
     settings.set_measurement({'results': {3: {'downward': {}}}})
     settings.separation.setText('20')
     settings.iteration.setCurrentIndex(1)
@@ -3459,12 +3459,12 @@ def test_edit_catalog_removes_exact_names_for_a_new_sweep(
     parent = SimpleNamespace(crs=board[1],
                              _start_multisweep_analysis=started.append)
     monkeypatch.setattr(panel, '_get_periscope_parent', lambda: parent)
-    assert panel.edit_catalog_btn.text() == 'Edit catalog'
+    assert panel.edit_catalog_btn.text() == 'Tuning Catalog'
     panel.edit_catalog_btn.click()
     editor = panel.catalog_editor
     assert editor.isVisible()
     assert editor.run_button.isVisible()
-    editor.names.setPlainText(f' {names[0]},\n{names[1]}\n{names[0]} ')
+    _select_rows(editor, names[:2])
     editor.remove_button.click()
     dialog = panel._collision_dialog
     assert dialog.catalog.names() == [n for n in names if n not in names[:2]]
@@ -3476,9 +3476,20 @@ def test_edit_catalog_removes_exact_names_for_a_new_sweep(
     panel.close()
 
 
+def _select_rows(editor, names):
+    """Select the rows of *names* in the Tuning Catalog table."""
+    from rfmux.tools.periscope.tuning_catalog_dialog import NAME
+    table = editor.table
+    table.clearSelection()
+    flags = (QtCore.QItemSelectionModel.SelectionFlag.Select
+             | QtCore.QItemSelectionModel.SelectionFlag.Rows)
+    for row in range(table.rowCount()):
+        if table.item(row, NAME).text() in names:
+            table.selectionModel().select(table.model().index(row, 0), flags)
+
+
 @pytest.mark.parametrize('entry, message', [
-    ('', 'Enter at least one resonator name.'),
-    ('unknown', 'Unknown resonator names: unknown'),
+    ('none', 'Select at least one resonator.'),
     ('all', 'Keep at least one resonator to re-sweep.'),
 ])
 def test_edit_catalog_rejects_invalid_removals(
@@ -3486,16 +3497,29 @@ def test_edit_catalog_rejects_invalid_removals(
     panel = _panel_showing(swept_container, board)
     original = panel.catalog.to_dict()
     panel.edit_catalog_btn.click()
-    names = panel.catalog.names()
-    text = '\n'.join(names) if entry == 'all' else entry
-    if entry == 'unknown':
-        text += ',' + names[0]
-    panel.catalog_editor.names.setPlainText(text)
+    _select_rows(panel.catalog_editor,
+                 panel.catalog.names() if entry == 'all' else [])
     panel.catalog_editor.remove_button.click()
     assert panel.catalog_editor.status.text() == message
     assert panel.catalog_editor.isVisible()
     assert not hasattr(panel, '_collision_dialog')
     assert panel.catalog.to_dict() == original
+    panel.close()
+
+
+def test_an_applied_catalog_is_the_array_the_panel_sweeps_next(
+        board, qt_app, swept_container):
+    """Edits stay in the window until Apply; Apply gives them to the panel."""
+    from rfmux.tools.periscope.tuning_catalog_dialog import AMPLITUDE, NAME
+    panel = _panel_showing(swept_container, board)
+    panel.edit_catalog_btn.click()
+    editor = panel.catalog_editor
+    name = editor.table.item(0, NAME).text()
+    editor.table.item(0, AMPLITUDE).setText("0.002")
+    assert panel.catalog[name].bias.amplitude != 0.002
+
+    editor.apply_button.click()
+    assert panel.catalog[name].bias.amplitude == 0.002
     panel.close()
 
 
@@ -3506,6 +3530,7 @@ def test_edit_catalog_disables_manual_resweep_for_read_only_measurements(
     setattr(panel, restriction, True)
     panel.edit_catalog_btn.click()
     assert not panel.catalog_editor.remove_button.isEnabled()
+    assert not panel.catalog_editor.apply_button.isEnabled()
     panel.close()
 
 

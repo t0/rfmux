@@ -23,7 +23,8 @@ from .fit_display_toolbar import FitDisplayToolbar
 from .fit_histograms_tab import FitHistogramsTab
 from .fit_settings_panel import (
     ALL_AMPLITUDES, BIAS_AMPLITUDE, MODELS as FIT_MODELS, FitSettingsPanel)
-from .collision_settings_panel import CatalogEditDialog, CollisionTask
+from .collision_settings_panel import CollisionTask
+from .tuning_catalog_dialog import TuningCatalogDialog
 from .bias_settings_panel import BiasSettingsPanel
 from .tasks import (
     ApplyBiasSignals, ApplyBiasTask, FindBiasSignals, FindBiasTask,
@@ -158,9 +159,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_report = None
         self._collision_names = []
         self.collision_tab = None
-        self.catalog_editor = CatalogEditDialog(self)
+        self.catalog_editor = TuningCatalogDialog(self)
         self.catalog_editor.run_requested.connect(self._run_collision_cut)
         self.catalog_editor.remove_requested.connect(self._resweep_without_names)
+        self.catalog_editor.catalog_applied.connect(self._catalog_applied)
 
         self._fit_status_timer = QtCore.QTimer(self)
         self._fit_status_timer.setSingleShot(True)
@@ -212,7 +214,10 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.rerun_btn = QtWidgets.QPushButton("Re-run Multisweep")
         self.rerun_btn.clicked.connect(self._rerun_multisweep)
         toolbar_layout.addWidget(self.rerun_btn)
-        self.edit_catalog_btn = QtWidgets.QPushButton("Edit catalog")
+        self.edit_catalog_btn = QtWidgets.QPushButton("Tuning Catalog")
+        self.edit_catalog_btn.setToolTip(
+            "Show the catalog as a table, edit it, export or import it as CSV, "
+            "and run the collision cut.")
         self.edit_catalog_btn.clicked.connect(self._show_catalog_editor)
         self.collision_status = QtWidgets.QLabel("")
         toolbar_layout.addWidget(grouped(self.edit_catalog_btn,
@@ -712,6 +717,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self.bias_report = self._stored_bias_report()
         if self.bias_report is not None:
             self.catalog = self.bias_report.catalog
+        self._refresh_catalog_editor()
         self._populate_fit_amplitudes()
         self._populate_fit_display()
         self.bias_settings.set_directions_swept(call_params.get('directions'))
@@ -1210,6 +1216,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
         self._adopt_sweeps(self._find_bias_task.ms_module_output)
         self.bias_report = report
         self.catalog = report.catalog
+        self._refresh_catalog_editor()
         # The bias step is now a thing the fit tabs can be asked for.
         self._populate_fit_display()
 
@@ -1338,9 +1345,25 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
             return
         self.catalog_editor.remove_button.setEnabled(
             not (self.is_foreign_module or self.is_capture_tuning))
+        self._refresh_catalog_editor(force=True)
         self.catalog_editor.status.clear()
         self.catalog_editor.show()
         self.catalog_editor.raise_()
+
+    def _refresh_catalog_editor(self, force: bool = False) -> None:
+        """Show the catalog of the panel in the Tuning Catalog window, if it
+        is open (or if *force*). Edits that were not applied go."""
+        if force or self.catalog_editor.isVisible():
+            self.catalog_editor.set_catalog(
+                self.catalog, self._dac_scale(),
+                read_only=self.is_foreign_module or self.is_capture_tuning)
+
+    def _catalog_applied(self, catalog) -> None:
+        """The edited catalog is the array now: the next multisweep and Apply
+        Bias use it."""
+        self.catalog = catalog
+        self.current_amp_label.setText(
+            f"Tuning catalog applied: {len(catalog)} resonators")
 
     def _clear_collision_preview(self) -> None:
         self._collision_names = []
@@ -1410,7 +1433,7 @@ class MultisweepPanel(QtWidgets.QWidget, ScreenshotMixin):
                 or self.is_capture_tuning):
             return
         if not names:
-            self.catalog_editor.status.setText("Enter at least one resonator name.")
+            self.catalog_editor.status.setText("Select at least one resonator.")
             return
         unknown = sorted(set(names) - set(self.catalog.names()))
         if unknown:

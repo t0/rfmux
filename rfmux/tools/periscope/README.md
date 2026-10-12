@@ -191,13 +191,29 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
   1. The Multisweep window's 💾 button writes the measurement through `rfmux.tuning.store`, into the session folder. It is the container `multisweep` returned, so the same file opens in a notebook with `store.load`, and one a notebook wrote opens here.
   2. Saving the same panel again overwrites the same file: the container carries the path it was written to. Running the fitters or Find Bias on a measurement that is already on disk re-saves it where it was, since both leave their results in the block.
 
-- **Edit catalog**
-  1. In a completed or loaded Multisweep panel, open **Edit catalog**. In the **Collision Cut** section, choose the separation in kHz, and press **Run Collision Cut**. The check calls `rfmux.tuning.find_sweeps_with_nearby_resonances`: it finds pairs of dips within each fine sweep, including pairs exactly at the separation threshold. It runs only when requested. The initial separation is 100 kHz; enter `inf` to flag any second detected dip in the window.
-  2. The defaults are 1 dB prominence, 10 Hz (0.01 kHz) minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.
-  3. The **Collisions** tab shows all measured traces of the flagged resonators. **Remove collided resonators from catalog and re-sweep** opens the normal multisweep configuration with a copy of the current catalog containing only survivors. After Find Bias, this copy carries the current bias points. The previous sweep settings seed the dialog.
-  4. **Start Multisweep** creates a separate measurement panel. With session auto-export enabled, it saves into the session like any multisweep; otherwise use its Save button. The original panel and saved measurement keep their catalog and data. Collision previews are not saved. Re-sweep is unavailable with no collisions, no survivors, a foreign-module file, or capture tuning.
+- **Tuning Catalog**
+  1. In a completed or loaded Multisweep panel, open **Tuning Catalog**. The
+     window shows the catalog as a table: one row for each resonator, with its
+     name, channel, bias frequency, amplitude, power at the DAC scale now,
+     measured power, df calibration, bifurcation amplitude, flag (the reason
+     is in the tooltip), the fr, Qi and Qc of its bias-sweep fit, and notes.
+     Click a column header to sort. You can edit the bias frequency, the
+     amplitude (normalized, or as a power in dBm) and the notes, and delete
+     selected rows. Name and channel are read-only, because they link the
+     resonator to the saved sweeps and to the board. A change of frequency or
+     amplitude clears the calibration, the fits and the flag of that
+     resonator. **Apply** gives the edited catalog to the panel: the next
+     multisweep and Apply Bias use it. **Close** discards edits that you did
+     not apply. **Export CSV** and **Import CSV** use the columns name,
+     channel, bias_frequency_hz and bias_amplitude; an imported catalog has no
+     calibration. The table is read-only for a file from another module or for
+     a capture tuning.
+  2. In the **Collision Cut** section, choose the separation in kHz, and press **Run Collision Cut**. The check calls `rfmux.tuning.find_sweeps_with_nearby_resonances`: it finds pairs of dips within each fine sweep, including pairs exactly at the separation threshold. It runs only when requested. The initial separation is 100 kHz; enter `inf` to flag any second detected dip in the window.
+  3. The defaults are 1 dB prominence, 10 Hz (0.01 kHz) minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.
+  4. The **Collisions** tab shows all measured traces of the flagged resonators. **Remove collided resonators from catalog and re-sweep** opens the normal multisweep configuration with a copy of the current catalog containing only survivors. After Find Bias, this copy carries the current bias points. The previous sweep settings seed the dialog.
+  5. **Start Multisweep** creates a separate measurement panel. With session auto-export enabled, it saves into the session like any multisweep; otherwise use its Save button. The original panel and saved measurement keep their catalog and data. Collision previews are not saved. Re-sweep is unavailable with no collisions, no survivors, a foreign-module file, or capture tuning.
 
-  5. To remove resonators by name, enter exact, case-sensitive names in **Remove resonators by name**, separated by commas or newlines, then press **Remove names and re-sweep**. Duplicate names count once. Unknown names and requests leaving no survivors are reported in the dialog. This opens the same multisweep configuration with a reduced copy of the catalog; canceling leaves the original unchanged. Manual re-sweep is also unavailable for foreign-module files or capture tuning.
+  6. To re-sweep without some resonators, select their rows and press **Remove selected and re-sweep**. A request that leaves no resonator is refused. This opens the same multisweep configuration with a reduced copy of the catalog; the catalog of the panel does not change. Manual re-sweep is also unavailable for foreign-module files or capture tuning.
 
 - **Sweep centers**
 

@@ -39,7 +39,8 @@ COLUMNS = [
     ("fr (MHz)", "The resonance frequency of the fit of the bias sweep."),
     ("Qi", "The internal quality factor of the fit of the bias sweep."),
     ("Qc", "The coupling quality factor of the fit of the bias sweep."),
-    ("Notes", "Your notes about the resonator."),
+    ("Notes", "Your comment about the resonator (notes['comment']). The "
+              "tooltip of a cell shows other notes, read-only."),
 ]
 NAME, CHANNEL, FREQUENCY, AMPLITUDE, POWER, MEASURED, DF_CAL, BIFURCATED, \
     FLAG, FR, QI, QC, NOTES = range(len(COLUMNS))
@@ -278,6 +279,13 @@ class TuningCatalogDialog(QtWidgets.QDialog):
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
             if column == FLAG and bias.flagged_because:
                 item.setToolTip(bias.flagged_because)
+            if column == NOTES:
+                # The table edits "comment". Other keys stay, read-only here.
+                others = {k: v for k, v in resonator.notes.items()
+                          if k != "comment"}
+                if others:
+                    item.setToolTip("Other notes (read-only here):\n" + "\n".join(
+                        f"{k}: {v}" for k, v in others.items()))
             self.table.setItem(row, column, item)
 
     def _edited(self, item: QtWidgets.QTableWidgetItem) -> None:

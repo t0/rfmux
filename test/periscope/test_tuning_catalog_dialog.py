@@ -125,3 +125,16 @@ def test_csv_export_and_import_keep_the_bias_points(qt_app, tmp_path):
     for resonator in catalog:
         assert other.catalog()[resonator.name].bias.frequency_hz == \
             pytest.approx(resonator.bias.frequency_hz)
+
+
+
+def test_other_notes_show_in_the_tooltip_and_stay(qt_app):
+    catalog = _catalog()
+    name = catalog.names()[0]
+    catalog[name].notes.update(comment="weak", flagged="noisy")
+    dialog = _dialog(qt_app, catalog)
+    item = dialog.table.item(_row(dialog, name), NOTES)
+
+    assert "flagged: noisy" in item.toolTip()
+    item.setText("weaker")
+    assert dialog.catalog()[name].notes == {"comment": "weaker", "flagged": "noisy"}

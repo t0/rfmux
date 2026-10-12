@@ -126,7 +126,11 @@ For high-resolution analysis around identified resonance frequencies:
    the powers do not change. A ramp has "equal dB steps" or "equal amplitude
    steps". Re-run Multisweep opens on the schedule of the last run. "DAC full
    scale at output" works as in the network analysis dialog. The status line
-   warns when a step can clip or when quantization noise can increase.
+   warns when a step can clip or when quantization noise can increase. With
+   dBm selected, "Each resonator's own amplitude" and "Multiples of each
+   catalog amplitude" use the power of each catalog amplitude with the DAC
+   scale of the board now. Thus a new DAC scale keeps these powers and changes
+   the normalized amplitudes.
 3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
    there in green when it finishes — what the fits found, and which of them did
    not converge, is on the tabs that draw them. "Fit Settings" holds the settings, which persist

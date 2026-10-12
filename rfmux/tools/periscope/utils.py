@@ -866,6 +866,10 @@ class DacScaleField(QtWidgets.QDoubleSpinBox):
         the value of the board."""
         return self.value() if self.edited else self._board
 
+    def board_dbm(self):
+        """Return the value of the board, or None if it is not known."""
+        return self._board
+
     def setting_dbm(self):
         """Return the value for ``set_dac_scale``, or None if the user did
         not change it."""

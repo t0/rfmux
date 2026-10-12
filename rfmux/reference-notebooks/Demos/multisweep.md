@@ -524,6 +524,11 @@ To give one amplitude in dBm, use
 `crs.multisweep(catalog, amp=-55, amp_units=crs.UNITS.DBM)`. `take_netanal`
 takes `amp_units` too.
 
+A catalog keeps normalized amplitudes. To keep the power of each resonator
+at a new DAC scale, give the powers as the base:
+`AmplitudeSchedule.multiplicative(0.5, 2.0, 5, base={r.name: r.bias.power_dbm(dac_scale) for r in catalog}, units="dbm")`.
+The Periscope dialog does this when you select dBm.
+
 ## 5. Check a schedule
 
 A quick look at the schedule can save a long measurement. `describe()` reports

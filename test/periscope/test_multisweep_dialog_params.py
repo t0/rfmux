@@ -10,7 +10,8 @@ pytest.importorskip("PyQt6")
 from rfmux.algorithms.measurement.multisweep import multisweep  # noqa: E402
 from rfmux.core.resonators import ResonatorCatalog  # noqa: E402
 from rfmux.core.dac_scale import DAC_SCALE_OUTPUT_RANGE_DBM  # noqa: E402
-from rfmux.core.transferfunctions import BALUN_LOSS_DB, BASE_FREQUENCY  # noqa: E402
+from rfmux.core.transferfunctions import (  # noqa: E402
+    BALUN_LOSS_DB, BASE_FREQUENCY, convert_dacunits_to_dbm)
 from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
 from rfmux.tuning import AmplitudeSchedule  # noqa: E402
 
@@ -413,3 +414,41 @@ def test_a_schedule_that_can_clip_is_a_warning_on_the_status_line(qt_app):
     dialog.single_amp_edit.setText("0.8")
 
     assert "can clip" in dialog.status_label.toolTip()
+
+
+
+@pytest.mark.parametrize("radio", ["catalog_radio", "multiplicative_radio"])
+def test_in_dbm_a_new_dac_scale_keeps_the_catalog_powers(qt_app, radio):
+    """The catalog amplitudes are powers at the DAC scale of the board, so the
+    sweep keeps them at a new DAC scale."""
+    dialog = _dialog(qt_app)                       # the board is at -0.5 dBm
+    getattr(dialog, radio).setChecked(True)
+    dialog.factor_start_edit.setText("1")
+    dialog.factor_stop_edit.setText("1")
+    dialog.factor_steps_edit.setText("1")
+    dialog.amp_units.set_units("dbm")
+    dialog.dac_scale_field.setValue(2.0)
+
+    schedule = dialog.get_parameters()["amp"]
+    step, = schedule.resolve_steps(dialog.catalog, 2.0)
+    for resonator in dialog.catalog:
+        power = convert_dacunits_to_dbm(step.amplitudes[resonator.name], 2.0)
+        assert power == pytest.approx(resonator.bias.power_dbm(-0.5))
+
+
+def test_in_normalized_units_the_catalog_amplitudes_stay(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.multiplicative_radio.setChecked(True)
+    dialog.dac_scale_field.setValue(2.0)
+
+    assert dialog.get_parameters()["amp"].base is None
+
+
+def test_a_typed_dac_scale_updates_the_value_next_to_an_amplitude(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.single_amp_edit.setText("0.001")
+    label = dialog.amp_units._fields[1][1]
+    before = label.text()
+    dialog.dac_scale_field.setValue(2.0)
+
+    assert label.text() != before

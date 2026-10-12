@@ -58,6 +58,13 @@ def load_multisweep_container(parent: QtWidgets.QWidget, file_path: str):
     return container
 
 
+#: What the dBm selector does to the two schedules that use the catalog.
+_CATALOG_IN_DBM = (
+    "With dBm selected, each catalog amplitude is a power: its power with the "
+    "DAC scale of the board now. A new DAC scale keeps these powers and "
+    "changes the normalized amplitudes.")
+
+
 class MultisweepDialog(QtWidgets.QDialog):
     """Configure one ``crs.multisweep`` call over a :class:`ResonatorCatalog`."""
 
@@ -190,6 +197,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.dac_scale_field = DacScaleField()
         self.dac_scale_field.valueChanged.connect(self._refresh)
         self.amp_units = AmplitudeUnits(self, self.dac_scale_field.output_dbm)
+        self.dac_scale_field.valueChanged.connect(self.amp_units.refresh)
         self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.custom_amp_edit = QtWidgets.QLineEdit(str(DEFAULT_AMPLITUDE))
         self.custom_amp_edit.setValidator(QDoubleValidator(-1e6, 1e6, 9, self))
@@ -260,7 +268,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.catalog_radio = radio(
             0, "catalog", "Each resonator's own amplitude",
             "AmplitudeSchedule(): one pass, at the amplitude the catalog "
-            "records for each resonator.")
+            "records for each resonator.\n" + _CATALOG_IN_DBM)
 
         self.single_amp_edit = self._number(DEFAULT_AMPLITUDE)
         self.single_radio = radio(
@@ -296,7 +304,7 @@ class MultisweepDialog(QtWidgets.QDialog):
             4, "multiplicative", "Multiples of each catalog amplitude",
             "AmplitudeSchedule.multiplicative(start, stop, steps): every "
             "resonator keeps its own scale and uses the same factors. "
-            "Factors have no units.",
+            "Factors have no units.\n" + _CATALOG_IN_DBM,
             [("×", self.factor_start_edit), ("to ×", self.factor_stop_edit),
              ("in", self.factor_steps_edit), ("steps,", self.factor_spacing)])
 
@@ -473,13 +481,34 @@ class MultisweepDialog(QtWidgets.QDialog):
                 float(self.ramp_stop_edit.text()),
                 int(self.ramp_steps_edit.text()),
                 spacing=self.ramp_spacing.currentData(), units=units)
+        base, base_units = self._catalog_base()
         if kind == "multiplicative":
             return AmplitudeSchedule.multiplicative(
                 float(self.factor_start_edit.text()),
                 float(self.factor_stop_edit.text()),
                 int(self.factor_steps_edit.text()),
-                spacing=self.factor_spacing.currentData())
-        return AmplitudeSchedule()
+                spacing=self.factor_spacing.currentData(),
+                base=base, units=base_units)
+        return AmplitudeSchedule(base, units=base_units)
+
+    def _catalog_base(self):
+        """Return the base and its units for the two catalog schedules.
+
+        In normalized units, the base is None: the schedule uses the
+        normalized amplitudes of the catalog. In dBm, the base is the power of
+        each catalog amplitude with the DAC scale of the board now, so a new
+        DAC scale keeps these powers. With custom frequencies, the base is the
+        typed base amplitude in dBm.
+        """
+        if self.amp_units.units() != "dbm":
+            return None, "normalized"
+        if self.catalog is None:
+            return float(self.custom_amp_edit.text()), "dbm"
+        scale = self.dac_scale_field.board_dbm()
+        if scale is None:
+            raise ValueError("Catalog amplitudes in dBm need the DAC scale of "
+                             "the board.")
+        return {r.name: r.bias.power_dbm(scale) for r in self.catalog}, "dbm"
 
     def directions(self):
         """One direction as a string, both as the sequence multisweep takes."""

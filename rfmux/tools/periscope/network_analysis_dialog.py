@@ -120,6 +120,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
 
         self.dac_scale_field = DacScaleField()
         self.amp_units = AmplitudeUnits(self, self.dac_scale_field.output_dbm)
+        self.dac_scale_field.valueChanged.connect(self.amp_units.refresh)
         self.amp_units.set_units(self.params.get("amp_units", "normalized"))
         self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.amp_edit = self._number("amp", DEFAULT_AMPLITUDE)

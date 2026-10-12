@@ -189,11 +189,11 @@ class NcoBanner(QtWidgets.QFrame):
         self.nco_edit = BoardEdit()
         self.nco_edit.setMaximumWidth(120)
         self.nco_edit.committed.connect(self._commit)
-        self.dac_label = QtWidgets.QLabel("DAC scale (labelled) —")
+        self.dac_label = QtWidgets.QLabel("DAC full scale at output: —")
         self.dac_label.setToolTip(
-            "The scale the dBm fields are referenced to: the board's DAC "
-            f"scale less the {BALUN_LOSS_DB:g} dB balun loss, as in the "
-            "network analysis and multisweep dialogs")
+            "The dBm fields use this value. It is the DAC scale setting of "
+            f"the board less the {BALUN_LOSS_DB:g} dB balun loss, as in the "
+            "network analysis and multisweep dialogs.")
         row.addWidget(self.module_label)
         row.addWidget(QtWidgets.QLabel("NCO"))
         row.addWidget(self.nco_edit)
@@ -204,7 +204,7 @@ class NcoBanner(QtWidgets.QFrame):
 
     def show_values(self, nco: Optional[float], dac_scale: float) -> None:
         self.nco_edit.show_board("" if nco is None else f"{nco / 1e6:.6f}")
-        self.dac_label.setText(f"DAC scale (labelled) {dac_scale:.2f} dBm")
+        self.dac_label.setText(f"DAC full scale at output: {dac_scale:.2f} dBm")
 
     def _commit(self, text: str) -> None:
         try:

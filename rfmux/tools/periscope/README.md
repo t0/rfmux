@@ -96,6 +96,12 @@ The network analysis functionality allows for detailed characterization of reson
 2. Set the frequency range, the points and averaging, the probe amplitude, and
    which way through the band to measure. The amplitude is in normalized units
    or in dBm. The label next to it shows the value in the other units.
+   "DAC full scale at output" shows the DAC scale of the module, after the
+   balun loss. You can change it in the range that the data sheet supports
+   (−0.75 to +2.75 dBm at the output). The task sets the new DAC scale before
+   the measurement starts, and it applies to all the tones of the module. An
+   orange line shows when the tones can clip, or when they are so small that
+   quantization noise can increase, and tells how to change the DAC scale.
 3. View amplitude and phase response for each module
 4. Use "Find Resonances" to identify resonance dips; "Find Resonances Settings" sets the
    thresholds. Apply saves edits between searches and across sessions; Close
@@ -117,7 +123,9 @@ For high-resolution analysis around identified resonance frequencies:
    "Amplitudes in" sets the units of the amplitude fields: normalized or dBm.
    Each field shows its value in the other units. When you change the units,
    the powers do not change. A ramp has "equal dB steps" or "equal amplitude
-   steps". Re-run Multisweep opens on the schedule of the last run.
+   steps". Re-run Multisweep opens on the schedule of the last run. "DAC full
+   scale at output" works as in the network analysis dialog. The status line
+   warns when a step can clip or when quantization noise can increase.
 3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
    there in green when it finishes — what the fits found, and which of them did
    not converge, is on the tabs that draw them. "Fit Settings" holds the settings, which persist

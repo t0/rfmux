@@ -13,7 +13,7 @@ import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from ...core.dac_scale import dac_scale_dbm
+from ...core.dac_scale import comb_drive_issues, dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.resonators import BiasPoint, Resonator, ResonatorCatalog
@@ -649,6 +649,14 @@ async def multisweep(
         if targets
         else []
     )
+
+    # Warn when the tones of a step can clip. All the tones are counted as one
+    # comb, which is the worst case when the catalog needs more than one NCO
+    # setting.
+    for kind, message in comb_drive_issues(
+            [step.amplitudes.values() for step in steps], dac_scale):
+        if kind == "clipping":
+            warnings.warn(message)
 
     # Both ways of saying what to sweep, as one catalog — see _resolve_catalog.
     # After the schedule because it takes the first step's amplitudes, and before

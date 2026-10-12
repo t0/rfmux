@@ -183,9 +183,14 @@ class _Module:
 class _RecordingCRS:
     """Enough board to record one ``take_netanal`` call and answer it."""
 
+    UNITS = type("Units", (), {"DBM": "dbm"})
+
     def __init__(self):
         self.calls = []
         self.module = {m: _Module(m) for m in range(1, 9)}
+
+    async def set_dac_scale(self, amplitude, units, module):
+        self.calls.append(("set_dac_scale", amplitude, units, module))
 
     async def take_netanal(self, **kwargs):
         self.calls.append(kwargs)
@@ -204,7 +209,7 @@ def _driver_call(params):
     task = NetworkAnalysisTask(crs=crs, module=1, params=params, signals=signals)
     task.start()
     assert task.wait(30_000), "task never finished"
-    return crs.calls[0]
+    return crs.calls[-1]
 
 
 def test_the_direction_reaches_the_driver(qt_app):
@@ -217,3 +222,20 @@ def test_a_netanal_is_measured_upward_unless_asked_otherwise(qt_app):
     """Parameters from before the dialog offered a direction still measure the
     way ``take_netanal`` does on its own."""
     assert _driver_call({"amp": 0.001})["sweep_direction"] == "upward"
+
+
+
+def test_a_dac_scale_from_the_dialog_is_set_before_the_netanal(qt_app):
+    crs = _RecordingCRS()
+    signals = NetworkAnalysisSignals()
+    task = NetworkAnalysisTask(crs=crs, module=1, signals=signals,
+                               params={"amp": 0.001, "dac_scale_setting_dbm": 3.0})
+    task.start()
+    assert task.wait(30_000), "task never finished"
+    assert crs.calls[0] == ("set_dac_scale", 3.0, "dbm", 1)
+    assert isinstance(crs.calls[1], dict)
+
+
+def test_without_a_change_the_dac_scale_is_not_set(qt_app):
+    call = _driver_call({"amp": 0.001, "dac_scale_setting_dbm": None})
+    assert isinstance(call, dict)

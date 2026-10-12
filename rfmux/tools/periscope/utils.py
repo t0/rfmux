@@ -201,6 +201,8 @@ from rfmux.core.transferfunctions import ( # Adjusted import
 from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
 from rfmux.tuning.multisweep_amplitudes import normalized_amplitude
+from rfmux.core.dac_scale import DAC_SCALE_OUTPUT_RANGE_DBM
+from rfmux.core.transferfunctions import BALUN_LOSS_DB
 # CRS is already imported from rfmux.core.schema
 
 # Configure PyQtGraph
@@ -810,6 +812,62 @@ class AmplitudeUnits(QtCore.QObject):
             label.setText("= " + ", ".join(
                 _format_amplitude(_convert(v, self.units(), scale), other)
                 for v in values) + (" dBm" if other == "dbm" else " normalized"))
+
+
+class DacScaleField(QtWidgets.QDoubleSpinBox):
+    """The DAC full scale at the output of a module, in dBm.
+
+    The range is the range that the data sheet supports. Only a value that
+    the user types is a change. A value from the board shows without a change.
+    If the board has a value outside the range, the field shows the nearest
+    limit, and :meth:`output_dbm` gives the value of the board.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        low, high = DAC_SCALE_OUTPUT_RANGE_DBM
+        self.setRange(low, high)
+        self.setDecimals(2)
+        self.setSingleStep(0.25)
+        self.setSuffix(" dBm")
+        self.setToolTip(
+            f"The DAC full scale at the output. The data sheet supports "
+            f"{low:+.2f} to {high:+.2f} dBm (20 mA to 32 mA). Recommended: "
+            f"{low:+.2f} dBm.\n"
+            "A low DAC scale decreases the dynamic range. A high DAC scale "
+            "makes the normalized amplitudes small, which can increase "
+            "quantization noise.\n"
+            "A change applies to all the tones of the module when the "
+            "measurement starts.")
+        self._board = None
+        self._quiet = False
+        self.edited = False
+        self.valueChanged.connect(self._mark_edited)
+
+    def show_board(self, output_dbm) -> None:
+        """Show the value of the board, without a change."""
+        self._board = output_dbm
+        self._quiet = True
+        try:
+            if output_dbm is not None and not self.edited:
+                self.setValue(output_dbm)
+        finally:
+            self._quiet = False
+        self.setEnabled(output_dbm is not None or self.edited)
+
+    def output_dbm(self):
+        """Return the value that a measurement will use: the typed value, or
+        the value of the board."""
+        return self.value() if self.edited else self._board
+
+    def setting_dbm(self):
+        """Return the value for ``set_dac_scale``, or None if the user did
+        not change it."""
+        return self.value() + BALUN_LOSS_DB if self.edited else None
+
+    def _mark_edited(self, _value) -> None:
+        if not self._quiet:
+            self.edited = True
 
 
 def _convert(value: float, units: str, scale: float) -> float:

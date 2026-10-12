@@ -171,7 +171,7 @@ def test_banner_sends_the_nco_in_hz(qt_app):
     qt_app.processEvents()
     banner.show_values(NCO, DAC)
     assert banner.nco_edit.text() == "500.000000"
-    assert banner.dac_label.text() == "DAC scale (labelled) -0.50 dBm"
+    assert banner.dac_label.text() == "DAC full scale at output: -0.50 dBm"
     sent = []
     banner.nco_committed.connect(sent.append)
     banner.nco_edit.setFocus()

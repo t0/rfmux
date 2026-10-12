@@ -124,6 +124,14 @@ units or in dBm. A selector next to the fields sets the units. Each field
 shows its value in the other units. When you change the units, the powers
 do not change.
 
+The two dialogs show "DAC full scale at output" as a field. You can set it
+from −0.75 to +2.75 dBm, which is the range that the data sheet supports
+(20 mA to 32 mA), after the balun loss. A changed value applies to all the
+tones of the module when the measurement starts. The dialogs warn when the
+tones can clip, or when they are so small that quantization noise can
+increase. `take_netanal` and `multisweep` warn when the tones can clip.
+`rfmux.core.dac_scale.comb_drive_issues` gives the same checks to a script.
+
 Its tabs:
 
 - **Magnitude Sweeps** and **IQ Circles**: every resonator at every

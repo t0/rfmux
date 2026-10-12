@@ -1044,3 +1044,10 @@ async def test_amp_units_that_disagree_with_the_schedule_are_refused(sweeps):
         await drive(FakeCRS(), a_catalog(),
                     amp=AmplitudeSchedule.explicit([-50], units="dbm"),
                     amp_units="normalized")
+
+
+
+@pytest.mark.asyncio
+async def test_a_step_that_can_clip_is_a_warning(sweeps):
+    with pytest.warns(UserWarning, match="can clip"):
+        await drive(FakeCRS(), a_catalog(), amp=0.6)

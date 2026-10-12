@@ -9,7 +9,8 @@ pytest.importorskip("PyQt6")
 
 from rfmux.algorithms.measurement.multisweep import multisweep  # noqa: E402
 from rfmux.core.resonators import ResonatorCatalog  # noqa: E402
-from rfmux.core.transferfunctions import BASE_FREQUENCY  # noqa: E402
+from rfmux.core.dac_scale import DAC_SCALE_OUTPUT_RANGE_DBM  # noqa: E402
+from rfmux.core.transferfunctions import BALUN_LOSS_DB, BASE_FREQUENCY  # noqa: E402
 from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
 from rfmux.tuning import AmplitudeSchedule  # noqa: E402
 
@@ -193,9 +194,11 @@ def test_a_rerun_opens_on_the_same_kind_of_schedule(qt_app, schedule):
 
 
 def test_it_emits_only_arguments_multisweep_accepts(qt_app):
-    """The contract that a TypeError before the first sweep is what broke."""
+    """The contract that a TypeError before the first sweep is what broke.
+    The task uses ``dac_scale_setting_dbm`` before the sweep."""
     accepted = set(inspect.signature(multisweep).parameters)
-    assert set(_dialog(qt_app).get_parameters()) <= accepted
+    assert set(_dialog(qt_app).get_parameters()) <= accepted | {
+        "dac_scale_setting_dbm"}
 
 
 def test_the_defaults_are_the_drivers_own(qt_app):
@@ -378,3 +381,33 @@ def test_units_set_in_code_do_not_rewrite_the_fields(qt_app):
     dialog.amp_units.set_units("dbm")
 
     assert dialog.single_amp_edit.text() == "-50"
+
+
+
+def test_the_dac_scale_from_the_board_is_not_a_change(qt_app):
+    """Only a value that the user types goes to the task."""
+    assert _dialog(qt_app).get_parameters()["dac_scale_setting_dbm"] is None
+
+
+def test_a_typed_dac_scale_is_the_setting_with_the_balun_loss_added(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.dac_scale_field.setValue(1.0)
+
+    assert dialog.get_parameters()["dac_scale_setting_dbm"] == pytest.approx(
+        1.0 + BALUN_LOSS_DB)
+
+
+def test_the_dac_scale_stays_in_the_data_sheet_range(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.dac_scale_field.setValue(20.0)
+
+    assert dialog.dac_scale_field.value() == pytest.approx(
+        DAC_SCALE_OUTPUT_RANGE_DBM[1])
+
+
+def test_a_schedule_that_can_clip_is_a_warning_on_the_status_line(qt_app):
+    dialog = _dialog(qt_app)
+    dialog.single_radio.setChecked(True)
+    dialog.single_amp_edit.setText("0.8")
+
+    assert "can clip" in dialog.status_label.toolTip()

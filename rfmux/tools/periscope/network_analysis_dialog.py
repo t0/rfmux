@@ -6,8 +6,10 @@ New-analysis mode also offers Import and Load for existing data.
 from .utils import (
     QtWidgets, QtCore, DEFAULT_AMPLITUDE, DEFAULT_MIN_FREQ, DEFAULT_MAX_FREQ,
     DEFAULT_NPOINTS, DEFAULT_NSAMPLES, DEFAULT_MAX_CHANNELS, DEFAULT_MAX_SPAN,
-    SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback, AmplitudeUnits
+    SWEEP_DIRECTIONS, DEFAULT_SWEEP_DIRECTION, traceback, AmplitudeUnits,
+    DacScaleField
 )
+from rfmux.core.dac_scale import comb_drive_issues
 from ...tuning import store
 from .field_memory import remember_fields
 
@@ -86,7 +88,8 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         self._update_dac_scale_info()
         # An editing dialog opens on what the panel measured with; those win
         # over what was typed into the last one, and are still remembered.
-        remember_fields(self, restore=not editing)
+        # The DAC scale comes from the board each time, not from memory.
+        remember_fields(self, restore=not editing, skip=("dac_scale_field",))
 
     # ── the UI ───────────────────────────────────────────────────────────────
 
@@ -115,8 +118,8 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         form.addRow("Min Frequency (MHz):", self.fmin_edit)
         form.addRow("Max Frequency (MHz):", self.fmax_edit)
 
-        self.amp_units = AmplitudeUnits(
-            self, lambda: self.dac_scales.get(self.module))
+        self.dac_scale_field = DacScaleField()
+        self.amp_units = AmplitudeUnits(self, self.dac_scale_field.output_dbm)
         self.amp_units.set_units(self.params.get("amp_units", "normalized"))
         self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.amp_edit = self._number("amp", DEFAULT_AMPLITUDE)
@@ -128,10 +131,14 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         amp_row.addWidget(self.amp_units.combo)
         amp_row.addWidget(self.amp_units.add(self.amp_edit))
         form.addRow("Amplitude:", amp_row)
+        form.addRow("DAC full scale at output:", self.dac_scale_field)
 
-        self.dac_scale_info = QtWidgets.QLabel()
-        self.dac_scale_info.setWordWrap(True)
-        form.addRow("DAC full scale (dBm):", self.dac_scale_info)
+        # Clipping and quantization of the comb, as a warning that does not
+        # stop the measurement.
+        self.drive_label = QtWidgets.QLabel()
+        self.drive_label.setWordWrap(True)
+        self.drive_label.setStyleSheet("color: #CC8833;")
+        form.addRow(self.drive_label)
 
         self.points_edit = self._number("npoints", DEFAULT_NPOINTS)
         form.addRow("Number of Points:", self.points_edit)
@@ -141,6 +148,10 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
 
         self.max_chans_edit = self._number("max_chans", DEFAULT_MAX_CHANNELS)
         form.addRow("Max Channels:", self.max_chans_edit)
+        for signal in (self.amp_edit.textChanged, self.max_chans_edit.textChanged,
+                       self.amp_units.combo.currentIndexChanged,
+                       self.dac_scale_field.valueChanged):
+            signal.connect(self._show_drive)
 
         self.max_span_edit = self._number("max_span", DEFAULT_MAX_SPAN, 1e6)
         form.addRow("Max Span (MHz):", self.max_span_edit)
@@ -184,11 +195,24 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
         return QtWidgets.QLineEdit(f"{float(value) / scale:g}")
 
     def _update_dac_scale_info(self):
-        """What full scale is on this session's module, as the board reports it."""
-        scale = self.dac_scales.get(self.module)
-        self.dac_scale_info.setText(
-            f"{scale:+.2f} dBm" if scale is not None else "Unknown")
+        """Show the DAC full scale that the board gives for this module."""
+        self.dac_scale_field.show_board(self.dac_scales.get(self.module))
         self.amp_units.refresh()
+        self._show_drive()
+
+    def _show_drive(self, *_args) -> None:
+        """Show the clipping and quantization warnings for one comb of
+        Max Channels tones at the amplitude."""
+        try:
+            amplitude = self.amp_units.to_normalized(
+                float(eval(self.amp_edit.text(), {"__builtins__": {}})))
+            tones = int(self.max_chans_edit.text())
+        except Exception:
+            self.drive_label.setText("")
+            return
+        self.drive_label.setText("\n".join(
+            "⚠ " + message for _kind, message in comb_drive_issues(
+                [[amplitude] * tones], self.dac_scale_field.output_dbm())))
 
     # ── importing a saved analysis ───────────────────────────────────────────
 
@@ -284,6 +308,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
             params_dict.update({
                 'amp': float(eval(self.amp_edit.text())),
                 'amp_units': self.amp_units.units(),
+                'dac_scale_setting_dbm': self.dac_scale_field.setting_dbm(),
                 'fmin': float(eval(self.fmin_edit.text())) * 1e6,  # MHz to Hz
                 'fmax': float(eval(self.fmax_edit.text())) * 1e6,  # MHz to Hz
                 'npoints': int(self.points_edit.text()),
@@ -314,4 +339,7 @@ class NetworkAnalysisDialog(QtWidgets.QDialog):
                 "The amplitude must be more than 0 and not more than full "
                 "scale (1.0 normalized).")
             return None
+        if self.dac_scale_field.edited:
+            # The callers keep this dict as the scale of the module.
+            self.dac_scales[self.module] = self.dac_scale_field.value()
         return params_dict

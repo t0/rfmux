@@ -7,11 +7,10 @@ measurement settings in ``block["call_params"]``.
 import warnings
 import asyncio
 import numpy as np
-from ...core.dac_scale import dac_scale_dbm
+from ...core.dac_scale import comb_drive_issues, dac_scale_dbm
 from ...core.hardware_map import macro
 from ...core.schema import CRS
 from ...core.transferfunctions import (
-    CREST_FACTOR,
     convert_dacunits_to_dbm,
     convert_roc_to_volts,
 )
@@ -142,15 +141,12 @@ async def take_netanal(
     # Generate a global array of frequencies across [fmin, fmax].
     freqs_global = np.linspace(fmin, fmax, npoints, endpoint=True)
 
-    # The comb's peak against DAC full scale (1.0): with random phases
-    # the rms is amp * sqrt(N / 2) and the peak about CREST_FACTOR times
-    # that; the coherent sum N * amp bounds it for a few tones.
-    peak = min(max_chans * amp, CREST_FACTOR * amp * np.sqrt(max_chans / 2))
-    if peak > 1.0:
-        warnings.warn(
-            f"{max_chans} tones at {amp:g} reach an estimated {peak:.2f} of DAC "
-            f"full scale (crest factor {CREST_FACTOR}); results may be noisy "
-            "from clipping.")
+    # Warn when a comb of max_chans tones can clip. The dialog also shows
+    # the quantization warning; a script that asks for a small drive gets
+    # what it asked for.
+    for kind, message in comb_drive_issues([[amp] * max_chans], scale_dbm):
+        if kind == "clipping":
+            warnings.warn(message)
     
     # Check actual available channels by doing a simple get_samples
     test_samples = await crs.get_samples(1, average=True, channel=None, module=module)

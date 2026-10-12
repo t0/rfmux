@@ -16,7 +16,9 @@ from rfmux.tuning import (
     AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for, store,
 )
 
-from .utils import DEFAULT_AMPLITUDE, AmplitudeUnits
+from rfmux.core.dac_scale import comb_drive_issues
+
+from .utils import DEFAULT_AMPLITUDE, AmplitudeUnits, DacScaleField
 from .field_memory import remember_fields
 
 # What the driver does when you say nothing. Read once, at import, so the
@@ -98,8 +100,9 @@ class MultisweepDialog(QtWidgets.QDialog):
         if self.crs_for_dac_scales() is not None and not self.dac_scales:
             self._fetch_dac_scales_for_dialog(self.crs_for_dac_scales())
         self._update_dac_scale_info()
+        # The DAC scale comes from the board each time, not from memory.
         remember_fields(self, restore=not self.params,
-                        skip=("custom_order_edit",))
+                        skip=("custom_order_edit", "dac_scale_field"))
         self._refresh()
 
     # ── the board, for the DAC scale only ────────────────────────────────────
@@ -184,7 +187,9 @@ class MultisweepDialog(QtWidgets.QDialog):
         self.custom_order_edit = QtWidgets.QLineEdit()
         self.custom_order_edit.setReadOnly(True)
         custom_form.addRow("Resonator order:", self.custom_order_edit)
-        self.amp_units = AmplitudeUnits(self, lambda: self.dac_scales.get(self.module))
+        self.dac_scale_field = DacScaleField()
+        self.dac_scale_field.valueChanged.connect(self._refresh)
+        self.amp_units = AmplitudeUnits(self, self.dac_scale_field.output_dbm)
         self.amp_units_combo = self.amp_units.combo   # field memory uses this name
         self.custom_amp_edit = QtWidgets.QLineEdit(str(DEFAULT_AMPLITUDE))
         self.custom_amp_edit.setValidator(QDoubleValidator(-1e6, 1e6, 9, self))
@@ -210,6 +215,9 @@ class MultisweepDialog(QtWidgets.QDialog):
         units_row = QtWidgets.QHBoxLayout()
         units_row.addWidget(QtWidgets.QLabel("Amplitudes in:"))
         units_row.addWidget(self.amp_units.combo)
+        units_row.addSpacing(24)
+        units_row.addWidget(QtWidgets.QLabel("DAC full scale at output:"))
+        units_row.addWidget(self.dac_scale_field)
         units_row.addStretch(1)
         outer.addLayout(units_row)
         self.amp_units.combo.currentIndexChanged.connect(self._refresh)
@@ -395,17 +403,11 @@ class MultisweepDialog(QtWidgets.QDialog):
         direction_layout.addStretch(1)
         form.addRow("Sweep direction:", direction_row)
 
-        self.dac_scale_info = QtWidgets.QLabel("Unknown")
-        self.dac_scale_info.setWordWrap(True)
-        form.addRow("DAC full scale (dBm):", self.dac_scale_info)
-
         return group
 
     def _update_dac_scale_info(self):
-        """What full scale is on this module, as the board reports it."""
-        scale = self.dac_scales.get(self.module)
-        self.dac_scale_info.setText(
-            f"{scale:+.2f} dBm" if scale is not None else "Unknown")
+        """Show the DAC full scale that the board gives for this module."""
+        self.dac_scale_field.show_board(self.dac_scales.get(self.module))
         self.amp_units.refresh()
 
     def _seeded_directions(self) -> tuple[str, ...]:
@@ -594,9 +596,16 @@ class MultisweepDialog(QtWidgets.QDialog):
             except (ValueError, TypeError) as exc:
                 issues.append(("error", str(exc)))
             else:
+                scale = self.dac_scale_field.output_dbm()
                 issues.extend(schedule.validate(
-                    catalog, max(n_directions, 1),
-                    self.dac_scales.get(self.module)))
+                    catalog, max(n_directions, 1), scale))
+                try:
+                    steps = schedule.resolve_steps(catalog, scale)
+                except (ValueError, TypeError):
+                    steps = []
+                issues.extend(("warning", message) for _kind, message in
+                              comb_drive_issues(
+                                  [s.amplitudes.values() for s in steps], scale))
 
         issues.extend(self._parameter_issues())
         self._show_issues(issues)
@@ -644,7 +653,7 @@ class MultisweepDialog(QtWidgets.QDialog):
         if schedule is None or catalog is None:
             self.summary_label.setText("")
             return
-        dac_scale = self.dac_scales.get(self.module)
+        dac_scale = self.dac_scale_field.output_dbm()
         try:
             described = schedule.describe(catalog, max(n_directions, 1), dac_scale)
         except (ValueError, TypeError):
@@ -721,9 +730,14 @@ class MultisweepDialog(QtWidgets.QDialog):
     # ── what the task is given ───────────────────────────────────────────────
 
     def get_parameters(self) -> dict | None:
-        """``crs.multisweep``'s keyword arguments, or the loaded container."""
+        """The keyword arguments of ``crs.multisweep``, or the loaded
+        container. ``dac_scale_setting_dbm`` is for the task: it sets the DAC
+        scale before the sweep, if the user changed it."""
         if self.use_data_from_file:
             return self.loaded_container
+        if self.dac_scale_field.edited:
+            # The callers keep this dict as the scale of the module.
+            self.dac_scales[self.module] = self.dac_scale_field.value()
         try:
             catalog = self.sweep_catalog()
             if catalog is None:
@@ -737,6 +751,7 @@ class MultisweepDialog(QtWidgets.QDialog):
                 "nsamps": int(self.nsamps_edit.text()),
                 "sweep_direction": self.directions(),
                 "label": self.label_edit.text().strip() or None,
+                "dac_scale_setting_dbm": self.dac_scale_field.setting_dbm(),
             }
         except Exception as e:
             traceback.print_exc()

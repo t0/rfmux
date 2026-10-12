@@ -1,10 +1,82 @@
-"""Read a module's DAC full-scale power for amplitude conversion."""
+"""Read a module's DAC full-scale power, and check the drive of a tone comb
+against it."""
 
-from typing import Optional
+from typing import Iterable, Optional
 
-from .transferfunctions import BALUN_LOSS_DB
+import numpy as np
 
-__all__ = ["dac_scale_dbm", "dac_scale_setting_dbm"]
+from .transferfunctions import BALUN_LOSS_DB, CREST_FACTOR
+
+__all__ = [
+    "DAC_SCALE_OUTPUT_RANGE_DBM",
+    "DAC_SCALE_SETTING_RANGE_DBM",
+    "QUANTIZATION_PEAK_FRACTION",
+    "comb_drive_issues",
+    "comb_peak_fraction",
+    "dac_scale_dbm",
+    "dac_scale_setting_dbm",
+]
+
+#: The DAC scale settings that the data sheet supports, in dBm (DS926, DAC
+#: at 3.0 V): 20 mA is +1.0 dBm and 32 mA is +4.5 dBm.
+DAC_SCALE_SETTING_RANGE_DBM = (1.0, 4.5)
+
+#: The same range at the output, after the balun loss.
+DAC_SCALE_OUTPUT_RANGE_DBM = tuple(
+    s - BALUN_LOSS_DB for s in DAC_SCALE_SETTING_RANGE_DBM)
+
+#: A comb with an estimated peak below this fraction of DAC full scale uses
+#: few DAC levels, so quantization noise can increase.
+QUANTIZATION_PEAK_FRACTION = 0.01
+
+
+def comb_peak_fraction(amplitudes: Iterable[float]) -> float:
+    """Return the estimated peak of tones that play together, as a fraction of
+    DAC full scale.
+
+    With random phases, the RMS is sqrt(sum(a**2) / 2) and the peak is about
+    CREST_FACTOR times the RMS. The sum of the amplitudes is the largest
+    possible peak, so the estimate is not more than that sum.
+    """
+    a = np.asarray(list(amplitudes), dtype=float)
+    return float(min(a.sum(), CREST_FACTOR * np.sqrt((a ** 2).sum() / 2)))
+
+
+def comb_drive_issues(combs: Iterable[Iterable[float]],
+                      dac_scale_dbm: Optional[float] = None
+                      ) -> list[tuple[str, str]]:
+    """Return ``(kind, message)`` for each problem of the drive.
+
+    *combs* is the normalized amplitudes of the tones that play together, one
+    collection for each step. *kind* is ``"clipping"`` if a step can go above
+    full scale, or ``"quantization"`` if a step stays far below it. The message
+    tells how to change the DAC scale, if *dac_scale_dbm* (at the output)
+    permits a change in the data-sheet range.
+    """
+    peaks = [comb_peak_fraction(c) for c in combs]
+    if not peaks:
+        return []
+    low, high = DAC_SCALE_OUTPUT_RANGE_DBM
+    issues = []
+    if max(peaks) > 1.0:
+        advice = (" Raise the DAC scale and lower the normalized amplitude, to "
+                  "keep the same power."
+                  if dac_scale_dbm is None or dac_scale_dbm < high
+                  else " Lower the amplitude.")
+        issues.append(("clipping",
+                       f"The tones reach an estimated {max(peaks):.2f} of DAC "
+                       f"full scale (crest factor {CREST_FACTOR:g}). The "
+                       f"output can clip.{advice}"))
+    if min(peaks) < QUANTIZATION_PEAK_FRACTION:
+        advice = (" Lower the DAC scale and raise the normalized amplitude, to "
+                  "keep the same power."
+                  if dac_scale_dbm is None or dac_scale_dbm > low
+                  else " Raise the amplitude.")
+        issues.append(("quantization",
+                       f"The tones reach only an estimated {min(peaks):.3f} of "
+                       f"DAC full scale. Quantization noise can increase."
+                       f"{advice}"))
+    return issues
 
 
 async def dac_scale_setting_dbm(crs, module: int) -> Optional[float]:

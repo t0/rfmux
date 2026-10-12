@@ -608,10 +608,13 @@ class NetworkAnalysisTask(QtCore.QThread):
             progress_cb, data_cb = self._create_progress_callback(), self._create_data_callback()
             task_params = self._extract_parameters()
 
-            # No setup here. take_netanal sets the NCO it needs and zeroes its
+            # No setup here other than a DAC scale that the user changed in
+            # the dialog. take_netanal sets the NCO it needs and zeroes its
             # own tones on the way out; anything else -- clearing channels,
             # cable length -- is the operator's, and cable length in particular
             # rotates the phase of everything the board reads.
+            loop.run_until_complete(set_dac_scale_setting(
+                self.crs, self.module, self.params.get('dac_scale_setting_dbm')))
             if not self.isInterruptionRequested():
                 # Combine parameters for the take_netanal call
                 netanal_params = {
@@ -950,6 +953,16 @@ class MultisweepSignals(QObject):
     error = pyqtSignal(str)
 
 
+async def set_dac_scale_setting(crs, module, setting_dbm) -> None:
+    """Set the DAC scale of *module* to *setting_dbm*, if it is not None.
+
+    The dialogs give a setting only when the user changes the DAC scale. The
+    algorithm then reads the new DAC scale when it starts.
+    """
+    if setting_dbm is not None:
+        await crs.set_dac_scale(float(setting_dbm), crs.UNITS.DBM, module=module)
+
+
 class MultisweepTask(QtCore.QThread):
     """Runs one ``crs.multisweep`` call off the GUI thread.
 
@@ -1034,6 +1047,8 @@ class MultisweepTask(QtCore.QThread):
 
     async def _process_multisweep(self, loop):
         """Run the one call, yielding often enough that Cancel is answered."""
+        await set_dac_scale_setting(
+            self.crs, self.module, self.params.get('dac_scale_setting_dbm'))
         task = loop.create_task(self.crs.multisweep(**self._multisweep_params()))
 
         while not task.done():

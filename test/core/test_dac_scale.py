@@ -5,9 +5,12 @@ import math
 
 import pytest
 
-from rfmux.core.dac_scale import dac_scale_dbm
+from rfmux.core.dac_scale import (
+    DAC_SCALE_OUTPUT_RANGE_DBM, QUANTIZATION_PEAK_FRACTION, comb_drive_issues,
+    comb_peak_fraction, dac_scale_dbm)
 from rfmux.core.resonators import BiasPoint
 from rfmux.core.transferfunctions import (
+    CREST_FACTOR,
     BALUN_LOSS_DB,
     convert_dacunits_to_dbm,
     convert_dacunits_to_volts,
@@ -99,3 +102,49 @@ def test_the_conversions_are_what_a_bias_point_labels_itself_with():
     bias = BiasPoint(frequency_hz=1e9, amplitude=0.017)
     assert bias.power_dbm(-0.5) == pytest.approx(
         convert_dacunits_to_dbm(0.017, -0.5))
+
+
+
+# ─── the drive of a comb ─────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("n, amplitude", [(1, 0.5), (3, 0.2), (1023, 0.001)])
+def test_the_peak_of_equal_tones_is_the_smaller_estimate(n, amplitude):
+    """The coherent sum for a few tones, the crest factor for many."""
+    expected = min(n * amplitude, CREST_FACTOR * amplitude * math.sqrt(n / 2))
+    assert comb_peak_fraction([amplitude] * n) == pytest.approx(expected)
+
+
+def test_a_comb_inside_the_limits_has_no_issue():
+    assert comb_drive_issues([[0.01] * 100], DAC_SCALE_OUTPUT_RANGE_DBM[0]) == []
+
+
+def test_a_comb_above_full_scale_can_clip_and_the_dac_scale_can_go_up():
+    (kind, message), = comb_drive_issues([[0.6] * 3], DAC_SCALE_OUTPUT_RANGE_DBM[0])
+    assert kind == "clipping"
+    assert "Raise the DAC scale" in message
+
+
+def test_at_the_highest_dac_scale_clipping_asks_for_less_amplitude():
+    (kind, message), = comb_drive_issues([[0.6] * 3], DAC_SCALE_OUTPUT_RANGE_DBM[1])
+    assert "Raise the DAC scale" not in message
+    assert "Lower the amplitude" in message
+
+
+def test_a_small_comb_risks_quantization_and_the_dac_scale_can_go_down():
+    small = QUANTIZATION_PEAK_FRACTION / 10
+    (kind, message), = comb_drive_issues([[small]], DAC_SCALE_OUTPUT_RANGE_DBM[1])
+    assert kind == "quantization"
+    assert "Lower the DAC scale" in message
+
+
+def test_at_the_lowest_dac_scale_quantization_asks_for_more_amplitude():
+    small = QUANTIZATION_PEAK_FRACTION / 10
+    (kind, message), = comb_drive_issues([[small]], DAC_SCALE_OUTPUT_RANGE_DBM[0])
+    assert "Lower the DAC scale" not in message
+    assert "Raise the amplitude" in message
+
+
+def test_the_output_range_is_the_data_sheet_range_less_the_balun_loss():
+    assert DAC_SCALE_OUTPUT_RANGE_DBM == pytest.approx(
+        (1.0 - BALUN_LOSS_DB, 4.5 - BALUN_LOSS_DB))

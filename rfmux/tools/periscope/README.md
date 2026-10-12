@@ -94,7 +94,8 @@ The network analysis functionality allows for detailed characterization of reson
 
 1. Click "Network Analyzer" to configure and run a frequency sweep
 2. Set the frequency range, the points and averaging, the probe amplitude, and
-   which way through the band to measure
+   which way through the band to measure. The amplitude is in normalized units
+   or in dBm. The label next to it shows the value in the other units.
 3. View amplitude and phase response for each module
 4. Use "Find Resonances" to identify resonance dips; "Find Resonances Settings" sets the
    thresholds. Apply saves edits between searches and across sessions; Close
@@ -112,7 +113,11 @@ The network analysis functionality allows for detailed characterization of reson
 For high-resolution analysis around identified resonance frequencies:
 
 1. First identify resonances using the Network Analysis feature
-2. Click "Take Multisweep" to configure a detailed sweep around resonances
+2. Click "Take Multisweep" to configure a detailed sweep around resonances.
+   "Amplitudes in" sets the units of the amplitude fields: normalized or dBm.
+   Each field shows its value in the other units. When you change the units,
+   the powers do not change. A ramp has "equal dB steps" or "equal amplitude
+   steps". Re-run Multisweep opens on the schedule of the last run.
 3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
    there in green when it finishes — what the fits found, and which of them did
    not converge, is on the tabs that draw them. "Fit Settings" holds the settings, which persist

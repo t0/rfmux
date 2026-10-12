@@ -171,8 +171,13 @@ at_bias, step = find_iteration_matching_amplitude(block, "BOTA")
 ```
 
 Resonators are named, and the array a sweep was taken from is in the file:
-`ResonatorCatalog.from_dict(block["call_params"]["catalog"])`. The amplitudes
-it walked are `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
+`ResonatorCatalog.from_dict(block["call_params"]["catalog"])`. The schedule
+it walked is `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
+A schedule can be in dBm (`units="dbm"`). For the normalized amplitudes, use
+`schedule.resolve_steps(catalog, block["dac_scale_dbm"])`. Each sweep also
+records `sweep_amplitude` (normalized) and `sweep_amplitude_dbm`.
+`take_netanal` and `multisweep` take `amp_units` (`"normalized"` or `"dbm"`,
+in any case) and convert dBm with the DAC scale they read at the start.
 
 An amplitude is a fraction of DAC full scale, and `block["dac_scale_dbm"]` is
 what full scale was worth at the output on that module when the board was

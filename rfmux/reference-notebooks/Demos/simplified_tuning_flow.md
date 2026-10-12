@@ -56,8 +56,10 @@ For a real array:
   samples across its narrowest resonance. The catalog applied here must fit
   within the API's allowed 500 MHz band around one module's NCO.
 - Set the probe amplitude, amplitude schedule, and sweep span for your array
-  and attenuation. Amplitudes are normalized DAC values, not dBm. The example
-  levels are demonstration settings, not a measured limit for your array.
+  and attenuation. Amplitudes are normalized DAC values. To give them in dBm,
+  use `amp_units=crs.UNITS.DBM`, or `units="dbm"` on an `AmplitudeSchedule`.
+  The example levels are demonstration settings, not a measured limit for
+  your array.
 - Configure the board's clock/timestamp source and RF path for your setup.
   The hardware connection below leaves those settings as configured.
 

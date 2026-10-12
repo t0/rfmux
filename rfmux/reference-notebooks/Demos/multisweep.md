@@ -498,6 +498,32 @@ for label, schedule in [("multiplicative (relative)", relative), ("ramp (absolut
         print(f"  step {step.step}  {shown}")
 ```
 
+### Amplitudes in dBm
+
+A schedule can be in dBm. The schedule keeps its steps in dBm. It converts
+them with the DAC scale of the module when it resolves. `multisweep` reads
+the DAC scale from the board when it starts. Here, the example uses the DAC
+scale that the first multisweep recorded.
+
+`"log"` spacing gives equal dB steps. `"linear"` spacing gives equal
+amplitude steps.
+
+```python
+dac_scale = ms[crs.module[MODULE].index()]["dac_scale_dbm"]
+in_dbm = AmplitudeSchedule.ramp(-60, -40, 3, units="dbm")
+
+print(in_dbm)
+print(f"DAC scale at the output: {dac_scale:.2f} dBm")
+for step in in_dbm.resolve_steps(catalog, dac_scale):
+    amplitude = next(iter(step.amplitudes.values()))
+    print(f"  step {step.step}  {in_dbm.steps[step.step]:.1f} dBm  "
+          f"= {amplitude:.5f} normalized")
+```
+
+To give one amplitude in dBm, use
+`crs.multisweep(catalog, amp=-55, amp_units=crs.UNITS.DBM)`. `take_netanal`
+takes `amp_units` too.
+
 ## 5. Check a schedule
 
 A quick look at the schedule can save a long measurement. `describe()` reports
@@ -515,8 +541,9 @@ for name, (lo, hi) in list(described["amplitude_range_by_name"].items())[:4]:
     print(f"  {name}  {lo:.5f} → {hi:.5f}")
 ```
 
-Amplitudes use normalized DAC units and must be in `(0, 1]`.
-`validate()` reports values above full scale:
+A normalized amplitude must be in `(0, 1]`. A dBm amplitude must also be in
+`(0, 1]` after the conversion with the DAC scale. `validate()` reports values
+above full scale:
 
 ```python
 for severity, message in amplitude_schedule.validate(catalog, n_directions=2):

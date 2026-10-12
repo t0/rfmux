@@ -144,6 +144,11 @@ bias_path = await crs.apply_bias(report.catalog)
 # and the sweep it was read from with that sweep's fits.
 ```
 
+The amplitudes above are normalized DAC values. To give them in dBm, use
+`amp_units=crs.UNITS.DBM` with `take_netanal` or `multisweep`, or
+`AmplitudeSchedule.ramp(-60, -40, 5, units="dbm")`. The algorithm converts dBm
+with the DAC scale that it reads from the board when it starts.
+
 The full sequence (network analysis, find resonances, multisweep, bias finding,
 apply, measure noise) is documented and runnable in
 `rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`, and step by step

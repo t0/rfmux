@@ -16,6 +16,7 @@ dependencies = [
   "aiohttp",
   "awaitless",
   "click>=8.0",
+  "fru",
   # Pulse capture writes its captures as HDF5, and Periscope does so by
   # default, so this is reached by ordinary use rather than an exotic
   # path.
@@ -36,6 +37,7 @@ dependencies = [
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
+  "pexpect",
   "psutil",
   # "rfmux parser --dirfile" and the dirfile "rfmux record" writes.  The
   # wheels (Linux x86_64, macOS, Windows) carry libgetdata themselves;
@@ -51,7 +53,9 @@ dependencies = [
   "scipy",
   "simplejson",
   "sqlalchemy",
+  "tqdm",
   "tuber-client[async]>=0.18",
+  "xmodem",
   # Intel Threading Building Blocks for numba parallel execution.
   # On macOS, you need libomp instead
   "tbb; sys_platform != 'darwin'",
@@ -72,15 +76,6 @@ qc = [
   "requests",
   "scikit-learn",
   "weasyprint",
-]
-
-# Dependencies for "rfmux firmware". Optional so the Yocto build (which never
-# needs them) doesn't carry extra pre-requisites.
-firmware = [
-  "fru",
-  "pexpect",
-  "tqdm",
-  "xmodem",
 ]
 
 [project.scripts]

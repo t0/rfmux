@@ -191,10 +191,6 @@ A full description can be found by running:
 ```bash
 uv run rfmux firmware --help
 ```
-Note that you may be prompted to install Python dependencies that are otherwise not used in rfmux:
-```bash
-uv pip install rfmux[firmware]
-```
 To flash firmware onto a MicroSD card that has been inserted into a CRS, run:
 ```bash
 uv run rfmux firmware --serial <SERIAL> reflash-mmc rootfs.wic.gz

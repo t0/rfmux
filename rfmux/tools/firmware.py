@@ -47,6 +47,7 @@ and a fresh beacon:
 import bz2
 import click
 import datetime
+import fru
 import functools
 import gzip
 import hashlib
@@ -55,6 +56,8 @@ import logging
 import mimetypes
 import os
 import pathlib
+import pexpect
+import pexpect.fdpexpect
 import posixpath
 import re
 import select
@@ -63,33 +66,14 @@ import sys
 import tempfile
 import termios
 import threading
+import tqdm
 import tty
 import urllib.error
 import urllib.request
+import xmodem
 import zlib
 
 from rfmux.paths import get_rfmux_data_dir
-
-
-def require_imports() -> None:
-    """Import the optional dependencies (rfmux[firmware]), which
-    pyproject.toml does not mandate because they would bloat the Yocto
-    build. Called when a subcommand acts, not at import, so "rfmux firmware
-    --help" works without them; a missing package fails with a remedy now,
-    not mid-flash after the user has power-cycled a board to catch its boot
-    window."""
-    global fru, pexpect, tqdm, xmodem
-    try:
-        import fru
-        import pexpect
-        import pexpect.fdpexpect
-        import tqdm
-        import xmodem
-    except ImportError as error:
-        raise click.ClickException(
-            f"The \"rfmux firmware\" command's Python dependencies are "
-            f"optional, and {error.name} is missing.\n"
-            f"Install them with 'pip install rfmux[firmware]'.") from error
 
 
 log = logging.getLogger(__name__)
@@ -860,7 +844,6 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
         rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
     """
-    require_imports()
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(message)s",
         datefmt="%H:%M:%S",

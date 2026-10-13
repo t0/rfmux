@@ -2067,11 +2067,11 @@ def _panel_showing(swept_container, board):
 
 
 
-#: Wide enough and fine enough that every resonator of the standard array
-#: bifurcates inside it, as ``test/tuning/test_flow_on_standard_array`` pins.
-#: The cheap schedule below brackets nothing, which is a flagged report -- fine
-#: for everything except the tests about a clean one.
-BIFURCATING = {"amp": AmplitudeSchedule.multiplicative(0.5, 8.0, 5),
+#: The schedule of ``test/tuning/test_flow_on_standard_array``: every resonator
+#: of the standard array bifurcates inside it, and its four drives are more
+#: than a legend holds. The cheap schedule below brackets nothing, which is a
+#: flagged report -- fine for everything except the tests about a clean one.
+BIFURCATING = {"amp": AmplitudeSchedule(steps=(0.5, 4.0, 8.0, 12.0)),
                "npoints_per_sweep": 41}
 
 

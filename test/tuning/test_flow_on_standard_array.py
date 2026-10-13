@@ -15,11 +15,15 @@ from rfmux.mock.config import bias_dbm_from_amplitude
 from rfmux.tuning import AmplitudeSchedule, find_bias_points, fit_sweeps
 from rfmux.tuning.fits import BIFURCATION_A
 
-#: The schedule the standard array is swept over: half to eight times the
-#: simulator's own bias amplitude, five steps. Wide enough that every
-#: resonator bifurcates inside it, and narrow enough that the answer is a step.
-SCHEDULE = AmplitudeSchedule.multiplicative(0.5, 8.0, 5)
-TOP = len(SCHEDULE.steps) - 1
+#: The schedule the standard array is swept over, as factors of the
+#: simulator's own bias amplitude. Measured on this array: at 4x each
+#: resonator's fitted a is 0.37-0.52, below bifurcation (0.77); at 8x it is
+#: 0.83-0.90, above. Above about 8x the nonlinear fit can fail. At 8x the
+#: derivative detector of Find Bias is at its threshold for some resonators,
+#: so 12x is there for it alone.
+SCHEDULE = AmplitudeSchedule(steps=(0.5, 4.0, 8.0, 12.0))
+#: The steps that the physics tests read.
+GENTLE, BELOW, ABOVE = 0, 1, 2   # 0.5x, 4x (below bifurcation), 8x (above)
 
 
 @pytest.fixture(scope="module")
@@ -83,7 +87,7 @@ def test_a_sweep_entry_is_a_measurement_and_nothing_else(schedule_sweeps, standa
     """No verdicts on the entry: bifurcation, bias frequency and calibration
     are the bias finder's to decide, and it writes them on the catalog."""
     _, _, catalog = standard_array_board
-    for step in range(TOP + 1):
+    for step in range(len(SCHEDULE.steps)):
         for direction in ("upward", "downward"):
             for name in catalog.names():
                 entry = schedule_sweeps["results"][step][direction][name]
@@ -189,15 +193,17 @@ def test_the_nonlinearity_rises_with_drive(nonlinear_fits, schedule_sweeps, stan
                 if fit["failed_because"] is not None]
     assert not failures, failures
     for name in catalog.names():
-        assert _fitted_a(schedule_sweeps, name, 0) < _fitted_a(schedule_sweeps, name, TOP - 1), name
+        assert (_fitted_a(schedule_sweeps, name, GENTLE)
+                < _fitted_a(schedule_sweeps, name, BELOW)), name
 
 
 def test_the_schedule_brackets_bifurcation_for_every_resonator(nonlinear_fits, schedule_sweeps, standard_array_board):
-    """Below the bifurcation value one step from the top, above it at the top:
-    the property the schedule is chosen for."""
+    """Below the bifurcation value at BELOW, above it at ABOVE: the property
+    the schedule is chosen for."""
     _, _, catalog = standard_array_board
     for name in catalog.names():
-        assert _fitted_a(schedule_sweeps, name, TOP - 1) < BIFURCATION_A < _fitted_a(schedule_sweeps, name, TOP), name
+        assert (_fitted_a(schedule_sweeps, name, BELOW) < BIFURCATION_A
+                < _fitted_a(schedule_sweeps, name, ABOVE)), name
 
 
 def test_the_pull_is_downward(nonlinear_fits, schedule_sweeps, standard_array_board):
@@ -214,9 +220,9 @@ def test_the_pull_is_downward(nonlinear_fits, schedule_sweeps, standard_array_bo
         return entry["fits"]["nonlinear"]["params"]["fr"] - f_min
 
     for name in catalog.names():
-        hard = pull_hz(name, TOP - 1)
+        hard = pull_hz(name, BELOW)
         assert hard > 1e3, (name, hard)  # more than a grid step below fr
-        assert hard > pull_hz(name, 1), name
+        assert hard > pull_hz(name, GENTLE), name
 
 
 # --- the tuning record a capture stores ------------------------------------

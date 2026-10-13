@@ -8,7 +8,8 @@ board's console to the network.  We can then drive U-Boot over that connection.
 
 Subcommands:
 
-  list                 the firmware releases on GitHub, and what is fetched
+  list [REF]           the firmware releases on GitHub (on branch, tag or
+                       commit REF; default main), and what is fetched
   fetch RELEASE        download a firmware release's files (needs no --serial
                        or board)
   reflash-spi FILE|RELEASE
@@ -17,9 +18,11 @@ Subcommands:
                        write a disk image (raw, gzip or bzip2) to MMC (whole
                        card, including /home)
 
-A RELEASE is fetched as by "fetch", or taken from what it already
-downloaded; an existing file of that name takes precedence. reflash-spi
-refuses a release before r1.7.0, whose boot.bin bricks the board.
+A RELEASE is [REF:]NAME, such as r1.7.0 or some_branch:r1.8.0, and is
+taken from main when REF is omitted. It is fetched as by "fetch", or taken
+from what it already downloaded; an existing file of that name takes
+precedence. reflash-spi refuses a release before r1.7.0, whose boot.bin
+bricks the board.
   repl [COMMAND]       run one U-Boot command, or open an interactive console
   write-backplane-eeprom
                        program the crate backplane EEPROM behind each board's
@@ -69,6 +72,7 @@ import threading
 import tqdm
 import tty
 import urllib.error
+import urllib.parse
 import urllib.request
 import xmodem
 import zlib
@@ -88,18 +92,54 @@ PROMPT = "ZynqMP>"
 # media.githubusercontent.com, so a release downloads and verifies with
 # neither git nor git-lfs. GitHub's trees API lists the releases and their
 # files in one request; raw.githubusercontent.com, which is not rate
-# limited, gives each symlink's target and each LFS pointer.
-RAW_URL = "https://raw.githubusercontent.com/t0/rfmux/main/firmware/{path}"
-MEDIA_URL = "https://media.githubusercontent.com/media/t0/rfmux/main/firmware/{path}"
-TREE_URL = "https://api.github.com/repos/t0/rfmux/git/trees/main:firmware?recursive=1"
+# limited, gives each symlink's target and each LFS pointer. Each takes a
+# branch, tag or commit as {ref}.
+RAW_URL = "https://raw.githubusercontent.com/t0/rfmux/{ref}/firmware/{path}"
+MEDIA_URL = "https://media.githubusercontent.com/media/t0/rfmux/{ref}/firmware/{path}"
+TREE_URL = "https://api.github.com/repos/t0/rfmux/git/trees/{ref}:firmware?recursive=1"
+DEFAULT_REF = "main"
 
 
-def firmware_tree() -> dict:
-    """{release: {name: (mode, path under firmware/)}}, from one GitHub API
-    request; GITHUB_TOKEN, when set, raises its rate limit."""
+def parse_release(arg: str) -> tuple[str, str]:
+    """(ref, release) from [REF:]RELEASE; git forbids ':' in a ref name."""
+    ref, _, release = arg.rpartition(":")
+    return ref or DEFAULT_REF, release
+
+
+def release_name(ref: str, release: str) -> str:
+    """The [REF:]RELEASE that names release on ref."""
+    return release if ref == DEFAULT_REF else f"{ref}:{release}"
+
+
+def release_dir(ref: str, release: str) -> pathlib.Path:
+    """Where a release is cached: under its [REF:]RELEASE name, so another
+    ref's release never shares a directory with main's of the same name.
+    A '/' in the ref is stored as '~', which git forbids in a ref name."""
+    return (get_rfmux_data_dir() / "firmware"
+            / release_name(ref, release).replace("/", "~"))
+
+
+def fetched_releases() -> dict[tuple[str, str], set[str]]:
+    """{(ref, release): its fetched files}, for every ref in the cache."""
+    root = release_dir(DEFAULT_REF, "")
+    if not root.is_dir():
+        return {}
+    return {parse_release(d.name.replace("~", "/")):
+            {f.name for f in d.iterdir()
+             if f.is_file() and not f.name.endswith(".part")}
+            for d in root.iterdir() if d.is_dir()}
+
+
+def _url(template: str, ref: str, path: str = "") -> str:
+    return template.format(ref=urllib.parse.quote(ref, safe="/"), path=path)
+
+
+def firmware_tree(ref: str = DEFAULT_REF) -> dict:
+    """{release: {name: (mode, path under firmware/)}} on ref, from one
+    GitHub API request; GITHUB_TOKEN, when set, raises its rate limit."""
 
     request = urllib.request.Request(
-        TREE_URL,
+        _url(TREE_URL, ref),
         headers={"Accept": "application/vnd.github+json"})
     if token := os.environ.get("GITHUB_TOKEN"):
         request.add_header("Authorization", f"Bearer {token}")
@@ -118,11 +158,11 @@ def firmware_tree() -> dict:
     return releases
 
 
-def _resolve(path: str, mode: str, tree: dict) -> str:
+def _resolve(path: str, mode: str, tree: dict, ref: str) -> str:
     """The path at the end of a chain of symlinks, read from raw URLs."""
     while mode == "120000": # symlink
         with urllib.request.urlopen(
-                RAW_URL.format(path=path),
+                _url(RAW_URL, ref, path),
                 timeout=60) as response:
             target = response.read().decode().strip()
         path = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
@@ -157,18 +197,20 @@ def _download(url: str, target: pathlib.Path, sha256: str, size: int) -> None:
 
 
 def fetch_release(release: str, dest: pathlib.Path, files=(),
-                  tree: dict | None = None) -> list[pathlib.Path]:
-    """Download a release's files (all of them, or those named in files)
-    into dest, each checked against its LFS pointer's sha256 and size. A
-    file already there with that checksum is kept. Returns their paths."""
+                  tree: dict | None = None,
+                  ref: str = DEFAULT_REF) -> list[pathlib.Path]:
+    """Download a release's files on ref (all of them, or those named in
+    files) into dest, each checked against its LFS pointer's sha256 and
+    size. A file already there with that checksum is kept. Returns their
+    paths."""
 
     LFS_POINTER = b"version https://git-lfs.github.com/spec/v1\n"
 
     if tree is None:
-        tree = firmware_tree()
+        tree = firmware_tree(ref)
     if release not in tree:
         raise click.ClickException(
-            f"no firmware release {release!r}; known: "
+            f"no firmware release {release!r} on {ref}; known: "
             + ", ".join(sorted(tree)))
     available = tree[release]
     unknown = sorted(set(files) - set(available))
@@ -177,16 +219,17 @@ def fetch_release(release: str, dest: pathlib.Path, files=(),
             f"{release} has no {', '.join(unknown)}; it has "
             + ", ".join(sorted(available)))
     dest.mkdir(parents=True, exist_ok=True)
+    shown = release_name(ref, release)
     paths = []
     for name in files or sorted(available):
-        path = _resolve(available[name][1], available[name][0], tree)
+        path = _resolve(available[name][1], available[name][0], tree, ref)
         target = dest / name
         with urllib.request.urlopen(
-                RAW_URL.format(path=path), timeout=60) as response:
+                _url(RAW_URL, ref, path), timeout=60) as response:
             pointer = response.read()
         if not pointer.startswith(LFS_POINTER):
             target.write_bytes(pointer)         # a small file kept in git
-            click.echo(f"{release}/{name}: written ({len(pointer)} bytes)",
+            click.echo(f"{shown}/{name}: written ({len(pointer)} bytes)",
                        err=True)
         else:
             fields = dict(line.split(" ", 1)
@@ -199,31 +242,34 @@ def fetch_release(release: str, dest: pathlib.Path, files=(),
                     have = (hashlib.file_digest(f, "sha256").hexdigest()
                             == sha256)
             if have:
-                click.echo(f"{release}/{name}: already downloaded", err=True)
+                click.echo(f"{shown}/{name}: already downloaded", err=True)
             else:
-                click.echo(f"{release}/{name}: downloading "
+                click.echo(f"{shown}/{name}: downloading "
                            f"{size / 1e6:.1f} MB", err=True)
-                _download(MEDIA_URL.format(path=path),
+                _download(_url(MEDIA_URL, ref, path),
                           target, sha256, size)
         paths.append(target)
-    click.echo(f"{release}: {len(paths)} files in {dest}", err=True)
+    click.echo(f"{shown}: {len(paths)} files in {dest}", err=True)
     return paths
 
 
 def resolve_image(arg: str, names: tuple[str, ...]
                   ) -> tuple[pathlib.Path, str | None]:
     """The file to flash, and the release it came from: arg itself if it
-    is a file; else the first of `names` that release arg has, from rfmux's
-    data directory (where fetch leaves only verified files) or fetched."""
+    is a file; else the first of `names` that release [REF:]arg has, from
+    rfmux's data directory (where fetch leaves only verified files) or
+    fetched."""
     if (path := pathlib.Path(arg)).is_file():
         return path, None
-    release = get_rfmux_data_dir() / "firmware" / arg
+    ref, release = parse_release(arg)
+    cache = release_dir(ref, release)
     for name in names:
-        if (release / name).is_file():
-            return release / name, arg
-    tree = firmware_tree()
-    name = next((n for n in names if n in tree.get(arg, {})), names[0])
-    (fetched,) = fetch_release(arg, release, files=[name], tree=tree)
+        if (cache / name).is_file():
+            return cache / name, arg
+    tree = firmware_tree(ref)
+    name = next((n for n in names if n in tree.get(release, {})), names[0])
+    (fetched,) = fetch_release(release, cache, files=[name], tree=tree,
+                               ref=ref)
     return fetched, arg
 
 
@@ -834,7 +880,9 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
     \b
     Examples:
         rfmux firmware list
+        rfmux firmware list some_branch
         rfmux firmware fetch r1.7.0
+        rfmux firmware fetch some_branch:r1.8.0
         rfmux firmware --serial 0110 reflash-spi r1.7.0 reflash-mmc r1.7.0
         rfmux firmware --serial 0110 repl
         rfmux firmware --serial 0110 reflash-spi boot.bin
@@ -878,38 +926,45 @@ def run_actions(ctx, actions, **_):
     run(ctx.obj, actions)
 
 
+# In a chain, list goes last: an argument after it is taken as its REF.
 @cli.command(name="list")
-def list_cmd():
+@click.argument("ref", default=DEFAULT_REF)
+def list_cmd(ref):
     """List the firmware releases on GitHub and which are fetched.
+
+    REF is the branch, tag or commit whose firmware/ is listed (default:
+    main). Another ref's releases are named REF:RELEASE, which is how fetch
+    and the reflash commands take them.
 
     "fetched" means its files are in rfmux's data directory ("partly
     fetched" when only some are); fetch and the reflash commands check a
-    file's sha256 before using it. Releases fetched earlier are listed too,
-    and so is what is local when GitHub cannot be reached.
+    file's sha256 before using it. Every release fetched earlier is listed
+    too, from whichever ref, and so is what is local when GitHub cannot be
+    reached.
     """
     try:
-        remote = firmware_tree()
+        remote = firmware_tree(ref)
     except click.ClickException as error:
         click.echo(f"Listing local releases only: {error.message}", err=True)
         remote = {}
-    local = {}
-    root = get_rfmux_data_dir() / "firmware"
-    if root.is_dir():
-        local = {d.name: {f.name for f in d.iterdir()
-                          if f.is_file() and not f.name.endswith(".part")}
-                 for d in root.iterdir() if d.is_dir()}
-    releases = sorted(remote.keys() | local.keys(),
-                      key=lambda r: [int(n) for n in re.findall(r"\d+", r)])
-    for release in releases:
-        have = local.get(release, set())
+    local = fetched_releases()
+    releases = sorted({(ref, r) for r in remote} | local.keys(),
+                      key=lambda k: (k[0] != ref, k[0],
+                                     [int(n) for n in re.findall(r"\d+", k[1])]))
+    for key in releases:
+        have = local.get(key, set())
+        where = release_dir(*key)
         if not have:
             status = "-"
-        elif release in remote and not set(remote[release]) <= have:
-            status = f"partly fetched  ({root / release})"
+        elif key[1] in remote and key[0] == ref \
+                and not set(remote[key[1]]) <= have:
+            status = f"partly fetched  ({where})"
         else:
-            status = f"fetched  ({root / release})"
-        gone = "  (not on GitHub)" if remote and release not in remote else ""
-        click.echo(f"{release}{gone}  {status}")
+            status = f"fetched  ({where})"
+        # Only the listed ref was asked of GitHub.
+        gone = ("  (not on GitHub)"
+                if remote and key[0] == ref and key[1] not in remote else "")
+        click.echo(f"{release_name(*key)}{gone}  {status}")
     if not releases:
         click.echo("No firmware releases found.", err=True)
 
@@ -923,17 +978,21 @@ def list_cmd():
 @click.option("--dest", type=click.Path(file_okay=False,
                                         path_type=pathlib.Path),
               help="Directory to write to (default: firmware/RELEASE in "
-                   "rfmux's data directory).")
+                   "rfmux's data directory, or firmware/REF:RELEASE).")
 def fetch_cmd(release, files, dest):
     """Download a firmware release's files and print their paths ("list"
     shows the releases).
+
+    RELEASE is [REF:]NAME: r1.7.0 is main's, some_branch:r1.8.0 is that
+    branch's (a tag or commit serves as REF too).
 
     Each is checked against the sha256 in its Git LFS pointer, and one
     already downloaded is not fetched again. Needs neither git, git-lfs nor
     --serial.
     """
-    dest = dest or get_rfmux_data_dir() / "firmware" / release
-    for path in fetch_release(release, dest, files):
+    ref, release = parse_release(release)
+    dest = dest or release_dir(ref, release)
+    for path in fetch_release(release, dest, files, ref=ref):
         click.echo(path)
 
 
@@ -943,11 +1002,12 @@ def fetch_cmd(release, files, dest):
 def reflash_spi_cmd(ctx, file):
     """Write a boot.bin to QSPI flash.
 
-    FILE|RELEASE is a boot.bin, or a release (r1.7.0 or later) whose
+    FILE|RELEASE is a boot.bin, or a release ([REF:]r1.7.0 or later) whose
     boot.bin is fetched, or taken from what fetch already downloaded.
     """
     # A release before r1.7.0 has the older layout's boot.bin.
-    match = re.fullmatch(r"r(\d+)\.(\d+)\.(\d+)", file)
+    # A release candidate (r1.6.2rc2) is gated as its release.
+    match = re.match(r"r(\d+)\.(\d+)\.(\d+)", parse_release(file)[1])
     if (match and not pathlib.Path(file).is_file()
             and tuple(map(int, match.groups())) < (1, 7, 0)):
         raise click.ClickException(
@@ -969,7 +1029,7 @@ def reflash_spi_cmd(ctx, file):
 def reflash_mmc_cmd(ctx, image):
     """Write a disk image to MMC (whole card, including /home).
 
-    IMAGE|RELEASE is a disk image, or a release whose rootfs.wic.gz (before
+    IMAGE|RELEASE is a disk image, or a [REF:]release whose rootfs.wic.gz (before
     r1.7.0, rootfs.ext4.bz2) is fetched, or taken from what fetch already
     downloaded. An image may be gzip-compressed (*.wic.gz), bzip2-compressed
     (*.ext4.bz2) or raw; any but gzip is recompressed into a temporary gzip

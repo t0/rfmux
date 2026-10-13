@@ -199,6 +199,17 @@ To flash a particular bootloader binary into SPI memory on a CRS, run:
 ```bash
 uv run rfmux firmware --serial <SERIAL> reflash-spi boot.bin
 ```
+Either command also takes a release name in place of a file, and fetches it
+from GitHub. To see the releases, run:
+```bash
+uv run rfmux firmware list
+```
+A release that is not yet on main is named after its branch: list it with
+`list <BRANCH>`, and give it as `<BRANCH>:<RELEASE>`:
+```bash
+uv run rfmux firmware list firmware_r1.6.2
+uv run rfmux firmware fetch firmware_r1.6.2:r1.6.2rc2
+```
 
 ## Troubleshooting
 

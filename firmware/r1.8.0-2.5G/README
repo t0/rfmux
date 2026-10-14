@@ -1,0 +1,11 @@
+This is EXPERIMENTAL firmware and is not intended for deployment use. In particular:
+
+- It may dissipate significantly (!!!) more power than "normal" firmware;
+  thermal management is non-trivial an can result in unexpected board reboots
+  and possibly even damage.
+
+- The 100G streamer (including packet format) is expected to be different and
+  is not yet integrated into our software stack (on this or any other branch).
+
+This firmware also requires a "post-yocto migration" (firmware r1.7.0 or newer)
+u-boot; see ../r1.7.0 for details.

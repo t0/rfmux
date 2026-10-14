@@ -301,8 +301,7 @@ class ServerMockCRS:
         answering, get_build_progress in particular.
         """
         try:
-            if not hasattr(self, 'resonator_model') or self._resonator_model is None:
-                self._resonator_model = MockResonatorModel(self)
+            await self.clear_channels()
 
             if config:
                 self._physics_config.update(config)
@@ -471,8 +470,10 @@ class ServerMockCRS:
         max_channel = self.channels_per_module()
         if not 1 <= channel <= max_channel:
             raise ValueError(f"Channel must be between 1 and {max_channel} for the current packet length.")
-        with self._config_lock:
+        with self._resonator_model._physics_lock, self._config_lock:
             self._amplitudes[(module, channel)] = amplitude
+            if amplitude == 0:
+                self._resonator_model.forget_tones(module, channel)
 
     async def get_amplitude(self, channel=None, module=None):
         assert channel is not None and isinstance(channel, int)
@@ -789,19 +790,16 @@ class ServerMockCRS:
 
         if channel is not None:
             if channel in module_responses:
-                # Get the S21 response with QP noise for this channel
                 response = module_responses[channel]
-                if isinstance(response, np.ndarray):
-                    i_list = (response.real * scale_factor).tolist()
-                    q_list = (response.imag * scale_factor).tolist()
-                else:
-                    i_base = response.real * scale_factor
-                    q_base = response.imag * scale_factor
-                    i_list = [i_base] * num_samples
-                    q_list = [q_base] * num_samples
+                i_signal = response.real * scale_factor
+                q_signal = response.imag * scale_factor
             else:
-                i_list = np.random.normal(0, noise_level, num_samples).tolist()
-                q_list = np.random.normal(0, noise_level, num_samples).tolist()
+                i_signal = q_signal = 0.0
+
+            i_list = (i_signal + np.random.normal(
+                0, noise_level, num_samples)).tolist()
+            q_list = (q_signal + np.random.normal(
+                0, noise_level, num_samples)).tolist()
 
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
@@ -814,17 +812,14 @@ class ServerMockCRS:
             for ch_idx in range(1, channels_per_module + 1):
                 if ch_idx in module_responses:
                     response = module_responses[ch_idx]
-                    if isinstance(response, np.ndarray):
-                        i_ch_samples = (response.real * scale_factor).tolist()
-                        q_ch_samples = (response.imag * scale_factor).tolist()
-                    else:
-                        i_base = response.real * scale_factor
-                        q_base = response.imag * scale_factor
-                        i_ch_samples = [i_base] * num_samples
-                        q_ch_samples = [q_base] * num_samples
+                    i_signal = response.real * scale_factor
+                    q_signal = response.imag * scale_factor
                 else:
-                    i_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
-                    q_ch_samples = np.random.normal(0, noise_level, num_samples).tolist()
+                    i_signal = q_signal = 0.0
+                i_ch_samples = (i_signal + np.random.normal(
+                    0, noise_level, num_samples)).tolist()
+                q_ch_samples = (q_signal + np.random.normal(
+                    0, noise_level, num_samples)).tolist()
                 i_data.append(i_ch_samples)
                 q_data.append(q_ch_samples)
 
@@ -848,8 +843,9 @@ class ServerMockCRS:
         keys_to_delete_amp = []
         keys_to_delete_phase = []
 
-        with self._config_lock:
+        with self._resonator_model._physics_lock, self._config_lock:
             for m in modules_to_clear:
+                self._resonator_model.forget_tones(m)
                 for ch in range(1, 1025):
                     if (m, ch) in self._frequencies:
                         keys_to_delete_freq.append((m, ch))

@@ -1,20 +1,164 @@
-"""The shipped simplified_tuning_flow.py script runs end to end against
-the mock."""
+"""The shipped simplified_tuning_flow.py script: its steps against a fake
+board, and the whole run against the mock."""
 from importlib import util
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
-pytestmark = pytest.mark.slow_acquisition
+from rfmux.core.resonators import ResonatorCatalog
+from rfmux.tuning import BiasReport, store
 
-# parents[2] is the repo root: test/algorithms/<this file>
-demo_path = (Path(__file__).resolve().parents[2] / "rfmux"
-             / "reference-notebooks" / "Demos" / "simplified_tuning_flow.py")
-spec = util.spec_from_file_location("simplified_tuning_flow", demo_path)
-simplified_tuning_flow = util.module_from_spec(spec)
-spec.loader.exec_module(simplified_tuning_flow)
+DEMO_PATH = (Path(__file__).resolve().parents[2] / "rfmux" /
+             "reference-notebooks" / "Demos" / "simplified_tuning_flow.py")
+spec = util.spec_from_file_location("simplified_tuning_flow", DEMO_PATH)
+demo = util.module_from_spec(spec)
+spec.loader.exec_module(demo)
+
+
+@pytest.fixture(autouse=True)
+def output_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+
+
+@pytest.fixture
+def catalog() -> ResonatorCatalog:
+    catalog = ResonatorCatalog.from_frequencies(
+        [602e6, 605e6], module=2, amplitude=0.008, names=["ALFA", "BETA"])
+    catalog["ALFA"].channel = 2
+    catalog["BETA"].channel = 5
+    return catalog
+
+
+@pytest.fixture
+def fake_crs() -> Mock:
+    fake_crs = Mock()
+    fake_crs.module = {2: Mock(index=Mock(return_value="crs0000_rmod2"))}
+    fake_crs.clear_channels = AsyncMock()
+    fake_crs.multisweep = AsyncMock()
+    fake_crs.apply_bias = AsyncMock()
+    fake_crs.get_decimation = AsyncMock(return_value=6)
+    fake_crs.start_udp_streaming = AsyncMock(return_value=True)
+    fake_crs.stop_udp_streaming = AsyncMock(return_value=True)
+    fake_crs.measure_noise = AsyncMock(return_value={"crs0000_rmod2": {"results": {}}})
+    return fake_crs
 
 
 @pytest.mark.asyncio
-async def test_mock_mode_execution():
-    assert await simplified_tuning_flow.main(serial="MOCK") == 0
+async def test_no_resonances_stops_before_biasing(fake_crs: Mock) -> None:
+    fake_crs.take_netanal = AsyncMock(return_value={
+        "crs0000_rmod2": {
+            "measurement": "netanal", "module": 2,
+            "results": {"frequencies": np.linspace(600e6, 610e6, 2000),
+                        "iq_counts": np.ones(2000, dtype=complex)},
+        },
+    })
+    with pytest.raises(RuntimeError, match="No resonances found"):
+        await demo.run_algorithm_flow(fake_crs, module=2)
+    fake_crs.multisweep.assert_not_awaited()
+    fake_crs.apply_bias.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_noise_uses_public_algorithm(
+    fake_crs: Mock, catalog: ResonatorCatalog,
+) -> None:
+    noise = await demo._acquire_noise(fake_crs, catalog, created_mock=False)
+    fake_crs.measure_noise.assert_awaited_once_with(
+        catalog, **demo.NOISE_PARAMS, save=True, label="tuning_noise")
+    assert noise is fake_crs.measure_noise.return_value
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_stops_owned_stream(
+    fake_crs: Mock, catalog: ResonatorCatalog, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(demo, "find_streamer_conflict", lambda: None)
+    fake_crs.measure_noise.side_effect = RuntimeError("PFB capture failed")
+    with pytest.raises(RuntimeError, match="PFB capture failed"):
+        await demo._acquire_noise(fake_crs, catalog, created_mock=True)
+    fake_crs.stop_udp_streaming.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_conflict_does_not_touch_existing_stream(
+    fake_crs: Mock, catalog: ResonatorCatalog, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(demo, "find_streamer_conflict", lambda: "port 9876 busy")
+    with pytest.raises(RuntimeError, match="port 9876 busy"):
+        await demo._acquire_noise(fake_crs, catalog, created_mock=True)
+    fake_crs.start_udp_streaming.assert_not_awaited()
+    fake_crs.stop_udp_streaming.assert_not_awaited()
+    fake_crs.measure_noise.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_attached_capture_leaves_sender_running(
+    fake_crs: Mock, catalog: ResonatorCatalog,
+) -> None:
+    await demo._acquire_noise(fake_crs, catalog, created_mock=False)
+    fake_crs.start_udp_streaming.assert_not_awaited()
+    fake_crs.stop_udp_streaming.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_main_reports_connection_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    monkeypatch.setattr(demo, "_connect",
+                        AsyncMock(side_effect=RuntimeError("connection failed")))
+    assert await demo.main(output=tmp_path) == 1
+    assert "RuntimeError: connection failed" in capsys.readouterr().err
+
+
+@pytest.mark.slow_acquisition
+@pytest.mark.asyncio
+async def test_mock_flow_saves_bias_and_noise_and_stops_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected = []
+    connect = demo._connect
+
+    async def record_connection(serial: str, hostname: str | None) -> tuple:
+        result = await connect(serial, hostname)
+        connected.append(result[0])
+        return result
+
+    monkeypatch.setattr(demo, "_connect", record_connection)
+    assert await demo.main(output=tmp_path) == 0
+    crs = connected[0]
+    module_id = crs.module[1].index()
+    sweeps = store.load(next(tmp_path.glob("*tuning_amplitudes.pkl")))
+    report = BiasReport.from_dict(sweeps[module_id]["bias_report"])
+    noise_files = list(tmp_path.glob("noise_*.pkl"))
+    assert len(noise_files) == 1
+    noise = store.load(noise_files[0])[module_id]
+    records = noise["results"]["resonators"]
+    assert noise["measurement"] == "noise"
+    assert len(report.catalog) == 10
+    assert set(records) == set(report.catalog.names())
+    nco = await crs.get_nco_frequency(module=1)
+    # The bias as applied, where rfmux record looks for it.
+    from rfmux.core.session_folder import latest_export
+    from rfmux.tuning import load_bias_catalog
+    applied = load_bias_catalog(latest_export(tmp_path, "bias_catalog", "module1"))
+    assert applied.nco_frequency_hz == nco
+    assert applied.catalog.names() == report.catalog.names()
+    for resonator in report.catalog:
+        frequency = nco + await crs.get_frequency(channel=resonator.channel, module=1)
+        amplitude = await crs.get_amplitude(channel=resonator.channel, module=1)
+        assert abs(frequency - resonator.bias.frequency_hz) < 1.0
+        assert amplitude == pytest.approx(resonator.bias.amplitude)
+        record = records[resonator.name]
+        assert record["channel"] == resonator.channel
+        for stream, count in (("slow", 1000), ("pfb", 20000)):
+            data = record[f"{stream}_data"]
+            assert data[f"iq_{noise['results']['info']['iq_units']}"].shape == (count,)
+            axes = noise["results"]["shared_slow"] if stream == "slow" else data
+            assert axes["freq_iq"].shape == data["psd_i"].shape == data["psd_q"].shape
+            positive = axes["freq_iq"] > 0
+            assert np.all(np.isfinite(data["psd_i"][positive]))
+            assert np.all(np.isfinite(data["psd_q"][positive]))
+    status = await crs.get_udp_streaming_status()
+    assert not status.active and not status.thread_alive

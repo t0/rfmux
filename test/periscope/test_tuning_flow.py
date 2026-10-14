@@ -1,0 +1,3599 @@
+"""Exercise Periscope tuning tasks and drivers against the standard mock array.
+
+The server uses RPC without UDP, so these tests run in the quick tier.
+"""
+
+import asyncio
+import copy
+from dataclasses import replace
+import inspect
+import threading
+from pathlib import Path
+
+import numpy as np
+import sqlalchemy.orm
+
+import pytest
+
+pytest.importorskip("PyQt6")
+
+import pyqtgraph as pg  # noqa: E402
+from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: E402
+
+from test.qt_helpers import spin, spin_until  # noqa: E402
+
+from rfmux.core.hardware_map import warm_for_threads  # noqa: E402
+from rfmux.core.resonators import on_grid  # noqa: E402
+from rfmux.mock.standard_array import STANDARD_MODULE, standard_array  # noqa: E402
+from rfmux.core.transferfunctions import convert_roc_to_dbm  # noqa: E402
+from rfmux.tuning import (  # noqa: E402
+    AmplitudeSchedule, collect_amplitude_iterations_for, store)
+from rfmux.tuning.fits import (  # noqa: E402
+    BIFURCATION_A, collect_fit_params)
+from rfmux.tuning.bias import (  # noqa: E402
+    BiasReport, bifurcated_by_derivative, iq_arc_speed,
+    iq_derivatives, hysteresis_separation)
+from rfmux.tuning.find_resonances import (  # noqa: E402
+    ResonanceSearch,
+    find_resonances_in_netanal,
+)
+from rfmux.tools.periscope.app import Periscope  # noqa: E402
+from rfmux.tools.periscope.network_analysis_dialog import (  # noqa: E402
+    NetworkAnalysisDialog,
+)
+from rfmux.tools.periscope.detector_digest_tab import MODEL_COLOR  # noqa: E402
+from rfmux.tools.periscope.fit_histograms_tab import (  # noqa: E402
+    HISTOGRAM_PARAMS,
+)
+from rfmux.tools.periscope.fit_settings_panel import BIAS_AMPLITUDE  # noqa: E402
+from rfmux.tools.periscope.multisweep_grid_helpers import (  # noqa: E402
+    DERIVATIVE_COLORS,
+    MODEL_OVERSAMPLE,
+    create_amplitude_color_map,
+)
+from rfmux.tools.periscope.session_manager import SessionManager  # noqa: E402
+from rfmux.tools.periscope.utils import (  # noqa: E402
+    DEFAULT_SUBPLOTS,
+    DEFAULT_SUBPLOT_COLUMNS,
+    LINE_WIDTH,
+    TABLEAU10_COLORS,
+    UPWARD_SWEEP_STYLE,
+    UnitConverter,
+)
+from rfmux.tools.periscope.tasks import (  # noqa: E402
+    MultisweepSignals,
+    MultisweepTask,
+    NetworkAnalysisSignals,
+    NetworkAnalysisTask,
+)
+from rfmux.tools.periscope.multisweep_dialog import MultisweepDialog  # noqa: E402
+from rfmux.tools.periscope.multisweep_panel import (  # noqa: E402
+    BIAS_STATUS_COLOURS, MultisweepPanel)
+from rfmux.tools.periscope.network_analysis_panel import (  # noqa: E402
+    NetworkAnalysisPanel,
+)
+
+#: The array's band, so a netanal over it is one NCO setting and a second of work.
+FMIN, FMAX = 1.00e9, 1.10e9
+
+
+@pytest.fixture(scope="module")
+def board():
+    """``(loop, crs, catalog)``: the standard array, biased by the simulator.
+
+    One array per module, as in ``test/tuning/conftest.py``: a second
+    ``load_session`` in the same process detaches the first board's objects.
+    """
+    loop = asyncio.new_event_loop()
+    crs, catalog = loop.run_until_complete(standard_array())
+    warm_for_threads(crs)     # Periscope.__init__ does this when it takes a board
+    yield loop, crs, catalog
+    loop.close()
+
+
+@pytest.fixture
+def output_directory(tmp_path):
+    """Where ``store`` writes during a test, as the session folder is in Periscope."""
+    store.set_output_directory(tmp_path)
+    yield tmp_path
+    store.set_output_directory(None)
+
+
+def _in_a_worker_thread(call):
+    """Run *call* on its own thread with its own loop, as a task does.
+
+    Anything awaitable it returns is driven there too, so the board is touched
+    only from that thread.
+    """
+    result = {}
+
+    def worker():
+        own_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(own_loop)
+        try:
+            value = call()
+            if inspect.isawaitable(value):
+                value = own_loop.run_until_complete(value)
+            result["value"] = value
+        except Exception as exc:                      # noqa: BLE001 - reported
+            result["error"] = f"{type(exc).__name__}: {exc}"
+        finally:
+            own_loop.close()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    thread.join(timeout=120)
+    return result
+
+
+def test_a_worker_thread_can_drive_a_warmed_board(board):
+    """Every Periscope measurement runs on a QThread, and the drivers name
+    their output block from the hardware map (``crs.module[m].index()``). The
+    map is one in-memory SQLite database that only its own thread may read, so
+    Periscope warms those attributes when it takes the board (the fixture does
+    the same); without that, the first netanal on a worker raises
+    ProgrammingError, which the next test pins."""
+    _, crs, catalog = board
+
+    result = _in_a_worker_thread(lambda: crs.take_netanal(
+        amp=0.001, fmin=FMIN, fmax=FMIN + 20e6, npoints=60, nsamps=10,
+        module=catalog.module, save=False))
+
+    assert "error" not in result, result["error"]
+    assert list(result["value"]) == [crs.module[catalog.module].index()]
+
+
+def test_an_unwarmed_attribute_is_what_would_break(board):
+    """The failure the warm-up prevents, on an attribute expired the way a
+    commit expires one: the lazy load from another thread reaches for a
+    connection that belongs to this one. If SQLAlchemy or the map ever stops
+    working this way, this test says so and the warm-up can go."""
+    _, crs, catalog = board
+    module = crs.module[catalog.module]
+    sqlalchemy.orm.object_session(module).expire(module)   # as a commit would
+
+    try:
+        result = _in_a_worker_thread(module.index)
+        assert "ProgrammingError" in result.get("error", ""), result
+    finally:
+        warm_for_threads(crs)     # leave the board as the other tests expect
+
+
+def _run_netanal(crs, module, qt_app, amplitude=0.001, npoints=400):
+    """``(errors, completed, updates)`` from one netanal through the real task."""
+    signals = NetworkAnalysisSignals()
+    completed, errors, updates = [], [], []
+    signals.completed.connect(
+        lambda mod, container: completed.append((mod, container)))
+    signals.error.connect(errors.append)
+    signals.data_update.connect(lambda mod, trace: updates.append((mod, trace)))
+
+    task = NetworkAnalysisTask(
+        crs=crs, module=module, signals=signals,
+        params={"amp": amplitude, "fmin": FMIN, "fmax": FMAX,
+                "npoints": npoints, "nsamps": 10},
+    )
+    task.start()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return errors, completed, updates
+
+
+def test_network_analysis_task_finishes_without_error(board, qt_app):
+    """A netanal through the real task reaches its completion signal, carrying
+    the container the driver returned: what gets saved, keyed by module
+    identifier."""
+    _, crs, catalog = board
+    errors, completed, _ = _run_netanal(crs, catalog.module, qt_app)
+
+    assert errors == []
+    assert len(completed) == 1
+    module, container = completed[0]
+    assert module == catalog.module
+    assert list(container) == [crs.module[catalog.module].index()]
+    assert container[crs.module[catalog.module].index()]["results"]
+
+
+def test_network_analysis_task_emits_the_measured_trace(board, qt_app):
+    """What the task hands the panel is the driver's trace, not a shape of its
+    own: the same keys, and IQ rather than a magnitude and a phase derived from
+    it. The last update is the finished sweep."""
+    _, crs, catalog = board
+    errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
+
+    assert errors == []
+    assert updates, "no data reached the panel"
+
+    module, trace = updates[-1]
+    assert module == catalog.module
+    assert set(trace) >= {"frequencies", "iq_counts"}
+    assert trace["sweep_amplitude"] == 0.001
+    assert np.iscomplexobj(trace["iq_counts"])
+    assert len(trace["frequencies"]) == len(trace["iq_counts"]) == 200
+
+    # Sorted ascending, as an upward sweep's trace is.
+    assert np.all(np.diff(trace["frequencies"]) > 0)
+
+
+def test_network_analysis_panel_holds_the_trace(board, qt_app):
+    """The panel stores what it was handed and draws magnitude from the
+    measured IQ."""
+    _, crs, catalog = board
+    panel = NetworkAnalysisPanel(module=catalog.module)
+
+    errors, _, updates = _run_netanal(crs, catalog.module, qt_app, npoints=200)
+    assert errors == []
+    for module, trace in updates:
+        panel.update_data(module, trace)
+
+    stored = panel.netanal_traces[catalog.module]
+    assert stored is updates[-1][1]
+
+    curve = panel.plots[catalog.module]["amp_curve"]
+    drawn_freqs, drawn_magnitude = curve.getData()
+    assert np.allclose(drawn_freqs, stored["frequencies"])
+    assert np.allclose(drawn_magnitude, np.abs(stored["iq_counts"]))
+
+
+def _multisweep_params(catalog, **overrides):
+    """One sweep of the standard array, small enough to be quick."""
+    params = {
+        "module": catalog.module,
+        "catalog": catalog,
+        "span_hz": 100e3,
+        "npoints_per_sweep": 21,
+        "nsamps": 10,
+        "sweep_direction": "upward",
+    }
+    params.update(overrides)
+    return params
+
+
+def _run_multisweep(crs, catalog, qt_app, **overrides):
+    """Drive the real task to completion; return what each signal carried."""
+    params = _multisweep_params(catalog, **overrides)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+    signals = MultisweepSignals()
+    panel.connect_task_signals(signals)
+
+    errors, completed, records, partials = [], [], [], []
+    signals.error.connect(errors.append)
+    signals.completed.connect(lambda module, container: completed.append((module, container)))
+    signals.sweep_completed.connect(records.append)
+    signals.partial_data.connect(
+        lambda module, partial, step, direction: partials.append((step, direction, partial)))
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
+    task.start()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel, errors, completed, records, partials
+
+
+def test_multisweep_task_finishes_without_error(board, qt_app):
+    """A multisweep through the real task reaches ``completed`` with the
+    driver's own container and nothing on the error signal."""
+    _, crs, catalog = board
+    _, errors, completed, _, _ = _run_multisweep(crs, catalog, qt_app)
+
+    assert errors == []
+    assert len(completed) == 1
+    module, container = completed[0]
+    assert module == catalog.module
+    assert container[crs.module[catalog.module].index()]["measurement"] == "multisweep"
+
+
+def test_the_whole_schedule_is_one_call(board, qt_app):
+    """Five amplitude steps in two directions are ten sweeps of one
+    measurement, not ten measurements: one container, one sweep record each."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 8, 5)
+    _, errors, completed, records, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=schedule,
+        sweep_direction=("upward", "downward"))
+
+    assert errors == []
+    assert len(completed) == 1
+    results = completed[0][1][crs.module[catalog.module].index()]["results"]
+    assert sorted(results) == [0, 1, 2, 3, 4]
+    assert all(sorted(step) == ["downward", "upward"] for step in results.values())
+
+    assert [(r["step"], r["direction"]) for r in records] == [
+        (step, direction)
+        for step in range(5)
+        for direction in ("upward", "downward")
+    ]
+    assert [r["completed"] for r in records] == list(range(1, 11))
+
+
+def test_live_points_say_which_sweep_they_belong_to(board, qt_app):
+    """``data_callback`` is re-emitted with its two coordinates, so a panel
+    drawing live knows which step and direction the points are from -- and
+    with entries in the block's own keys, so it can draw them."""
+    _, crs, catalog = board
+    _, errors, _, _, partials = _run_multisweep(
+        crs, catalog, qt_app, sweep_direction=("upward", "downward"))
+
+    assert errors == []
+    assert ({(step, direction) for step, direction, _ in partials}
+            == {(0, "upward"), (0, "downward")})
+    _, _, partial = partials[-1]
+    entry = partial[next(iter(partial))]
+    assert len(entry["frequencies"]) == len(entry["iq_counts"])
+
+
+def test_the_panel_holds_the_measurement_and_the_array_it_swept(board, qt_app):
+    """On completion the panel keeps the driver's block and the catalog out of
+    it -- not a restructuring of either."""
+    _, crs, catalog = board
+    panel, errors, completed, _, _ = _run_multisweep(crs, catalog, qt_app)
+
+    assert errors == []
+    assert panel.module_sweeps is completed[0][1][crs.module[catalog.module].index()]
+    assert sorted(panel.catalog.names()) == sorted(catalog.names())
+
+
+def test_a_cancelled_sweep_hands_over_nothing(board, qt_app):
+    """Stop mid-call and the panel is not given a half-measurement to hold."""
+    _, crs, catalog = board
+    params = _multisweep_params(
+        catalog, amp=AmplitudeSchedule.multiplicative(0.5, 8, 5),
+        sweep_direction=("upward", "downward"))
+    signals = MultisweepSignals()
+    completed, records = [], []
+    signals.completed.connect(lambda module, container: completed.append(container))
+    signals.sweep_completed.connect(records.append)
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
+    task.start()
+    assert spin_until(qt_app, lambda: bool(records), timeout=180), "no sweep ran"
+    task.stop()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "cancel was not answered"
+    spin(qt_app)
+
+    assert completed == []
+    assert len(records) < 10        # it stopped short of the whole schedule
+
+
+def test_the_worker_sweeps_a_copy_of_the_catalog(board, qt_app):
+    """The panel is free to adopt a different catalog while a sweep runs."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    task = MultisweepTask(crs=crs, params=params, signals=MultisweepSignals())
+
+    assert task.catalog is not catalog
+    assert task.module == catalog.module
+
+
+def test_a_finished_sweep_puts_its_progress_report_away(board, qt_app):
+    """The progress group reports a sweep in flight; a sweep that has landed
+    is reported by the plots."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+
+    assert errors == []
+    assert panel.progress_group.isVisibleTo(panel) is False
+
+
+def test_a_finished_sweep_says_it_is_ready_to_be_saved(board, qt_app):
+    """``sweep_finished`` fires once the panel holds the block, which is what
+    the session writes the file on."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+    signals = MultisweepSignals()
+    panel.connect_task_signals(signals)
+    finished = []
+    panel.sweep_finished.connect(lambda: finished.append(panel.module_sweeps))
+
+    task = MultisweepTask(crs=crs, params=params, signals=signals)
+    task.start()
+    assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+    spin(qt_app)
+
+    assert len(finished) == 1
+    assert finished[0] is panel.module_sweeps
+
+
+def test_a_saved_multisweep_is_the_measurement_a_notebook_reads(board, qt_app,
+                                                                output_directory):
+    """Save writes the container through ``store``, under store's own name, and
+    it comes back as the sweeps the driver returned."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.initial_params["label"] = "a saved sweep"
+
+    path = panel.save_multisweep()
+
+    assert path.name.startswith("multisweep_")
+    assert path.name.endswith("_a_saved_sweep.pkl")
+    assert panel.measurement_title.text() == \
+        f"{path.name} — Magnitude Sweeps"
+    for tab in range(panel.plot_tabs.count()):
+        panel.plot_tabs.setCurrentIndex(tab)
+        assert panel.measurement_title.text() == \
+            f"{path.name} — {panel.plot_tabs.tabText(tab)}"
+    reloaded = store.load(path)
+    block = reloaded[crs.module[catalog.module].index()]
+    assert block["measurement"] == "multisweep"
+    name = panel._selected_names()[0]
+    assert np.array_equal(
+        collect_amplitude_iterations_for(block, name)[0]["upward"]["iq_counts"],
+        collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]["iq_counts"])
+
+
+def test_saving_the_same_multisweep_again_writes_the_same_file(board, qt_app,
+                                                               output_directory):
+    """The container carries where it was written, so a second Save overwrites
+    rather than leaving a near-copy beside it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    first = panel.save_multisweep()
+    again = panel.save_multisweep()
+
+    assert first == again
+    assert len(list(Path(output_directory).glob("multisweep_*.pkl"))) == 1
+
+
+def test_a_finished_multisweep_lands_in_the_session_folder(board, qt_app, tmp_path):
+    """One measurement, one file, in the session folder, and the session knows
+    it is there so the browser lists it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.initial_params["label"] = "in a session"
+
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), "session_under_test")
+    registered = []
+    manager.file_exported.connect(
+        lambda path, data_type: registered.append((path, data_type)))
+    try:
+        _periscope_with(manager)._save_multisweep_to_session(panel, catalog.module)
+    finally:
+        manager.end_session()
+
+    written = list(Path(manager.session_path or tmp_path / "session_under_test").glob("*.pkl"))
+    assert len(written) == 1
+    assert written[0].name.endswith("_in_a_session.pkl")
+    assert registered == [(str(written[0]), "multisweep")]
+
+
+#: Which tab is which, by position in the panel's tab bar. Named here because
+#: the helpers below open a tab by number, and a tab added in the middle moves
+#: every tab after it.
+MAGNITUDE_TAB = 0
+IQ_TAB = 1
+DIGEST_TAB = 2
+FIT_TAB = 3
+HISTOGRAM_TAB = 4
+BIAS_TAB = 5
+BIAS_FREQ_TAB = 6
+HYSTERESIS_TAB = 7
+
+
+def _grid_widgets(panel, tab_idx=MAGNITUDE_TAB):
+    """The subplot widgets the grid is showing, in the order it drew them."""
+    panel.plot_tabs.setCurrentIndex(tab_idx)
+    panel._redraw_plots()
+    _plot_type, grid, _cache, _colorbar = \
+        panel._sweep_grids[panel.plot_tabs.currentWidget()]
+    return [grid.itemAt(i).widget() for i in range(grid.count())]
+
+
+def _grid_curves(panel, tab_idx=MAGNITUDE_TAB):
+    """The curves on each subplot, in the order they were plotted."""
+    return [[curve for curve in w.getPlotItem().listDataItems()
+             if not curve.property("bias_highlight")]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def _bias_highlights(panel, tab_idx=MAGNITUDE_TAB):
+    """The translucent wide strokes over the selected bias traces."""
+    return [[curve for curve in w.getPlotItem().listDataItems()
+             if curve.property("bias_highlight")]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def test_the_grid_draws_a_curve_for_every_sweep_of_every_resonator(board, qt_app):
+    """Two amplitude steps in two directions are four traces per subplot, and
+    a subplot per resonator up to the batch size."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app,
+        amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2),
+        sweep_direction=("upward", "downward"))
+    assert errors == []
+
+    curves = _grid_curves(panel)
+    assert len(curves) == min(len(catalog.names()), panel.batch_size)
+    assert all(len(subplot) == 4 for subplot in curves)
+
+
+def _grid_positions(panel, tab_idx=MAGNITUDE_TAB):
+    """The (row, column) each subplot was placed at."""
+    _grid_widgets(panel, tab_idx)          # draws the tab
+    _plot_type, grid, _cache, _colorbar = \
+        panel._sweep_grids[panel.plot_tabs.currentWidget()]
+    return [grid.getItemPosition(i)[:2] for i in range(grid.count())]
+
+
+def test_a_page_of_subplots_is_laid_out_five_to_a_row(
+        board, qt_app, swept_container):
+    """A fixed number of columns, so a subplot is the same size on every page
+    of a batch rather than growing as the last page empties."""
+    panel = _panel_showing(swept_container, board)
+    positions = _grid_positions(panel)
+
+    assert len(positions) == min(panel.batch_size, len(panel._selected_names()))
+    assert max(col for _row, col in positions) == DEFAULT_SUBPLOT_COLUMNS - 1
+    for row in {r for r, _col in positions}:
+        assert sum(1 for r, _col in positions if r == row) <= DEFAULT_SUBPLOT_COLUMNS
+
+
+def test_a_batch_narrower_than_a_row_does_not_leave_the_row_half_empty(
+        board, qt_app, swept_container):
+    """Three plots are three columns, not one beside four gaps."""
+    panel = _panel_showing(swept_container, board)
+    panel.batch_size = 3
+    positions = _grid_positions(panel)
+
+    assert len(positions) == 3
+    assert {col for _row, col in positions} == {0, 1, 2}
+
+
+def test_twenty_subplots_a_page_by_default(board, qt_app, swept_container):
+    """What the panel opens on, and what the Subplots spinner starts at."""
+    panel = _panel_showing(swept_container, board)
+
+    assert DEFAULT_SUBPLOTS == 20
+    assert panel.batch_size == DEFAULT_SUBPLOTS
+    assert panel.batch_size_spin.value() == DEFAULT_SUBPLOTS
+
+
+def test_a_curve_is_the_entry_it_was_read_from(board, qt_app):
+    """The grid draws the sweep the driver wrote: its own frequencies, offset
+    from its own centre, and the magnitude of its own IQ."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.normalize_traces = False
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    x, y = _grid_curves(panel)[0][0].getData()
+
+    assert np.allclose(
+        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(y, convert_roc_to_dbm(np.abs(sweep["iq_counts"])))
+
+
+def test_the_iq_grid_draws_the_loop_the_entry_carries(board, qt_app):
+    """IQ in volts is the entry's counts on one constant scale, which is what
+    the entry's own ``iq_volts`` holds."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.normalize_traces = False
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    i_vals, q_vals = _grid_curves(panel, tab_idx=IQ_TAB)[0][0].getData()
+
+    assert np.allclose(i_vals, np.real(sweep["iq_volts"]))
+    assert np.allclose(q_vals, np.imag(sweep["iq_volts"]))
+
+
+def test_a_live_sweep_draws_the_points_measured_so_far(board, qt_app):
+    """A partial sweep is drawn on the same grid, as far as it has got."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
+    _, errors, _, _, partials = _run_multisweep(crs, catalog, qt_app, amp=schedule)
+    assert errors == []
+
+    step, direction, partial = partials[0]
+    live = MultisweepPanel(target_module=catalog.module,
+                           initial_params=_multisweep_params(catalog, amp=schedule),
+                           dac_scales={catalog.module: -0.5})
+    live.add_partial_sweep(catalog.module, partial, step, direction)
+
+    name = next(n for n in live._selected_names() if n in partial)
+    x, _y = _grid_curves(live)[0][0].getData()
+    assert len(x) == len(partial[name]["frequencies"])
+
+
+def test_a_running_sweep_is_drawn_over_the_one_before_it(board, qt_app):
+    """Re-running in a panel that already holds a measurement draws the points
+    arriving now, not the sweep it is replacing."""
+    _, crs, catalog = board
+    panel, errors, _, _, partials = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    finished_length = len(_grid_curves(panel)[0][0].getData()[0])
+
+    step, direction, partial = partials[0]
+    panel.add_partial_sweep(catalog.module, partial, step, direction)
+
+    name = next(n for n in panel._selected_names() if n in partial)
+    x, _y = _grid_curves(panel)[0][0].getData()
+    assert len(x) == len(partial[name]["frequencies"]) < finished_length
+
+
+def test_a_live_sweep_knows_the_drive_the_finished_one_records(board, qt_app):
+    """A sweep still being measured carries no ``sweep_amplitude``, so the
+    panel takes it from the schedule -- the number the driver will write into
+    the entry, which is what keeps a live trace's colour when it finishes."""
+    _, crs, catalog = board
+    schedule = AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
+    panel, errors, _, _, partials = _run_multisweep(
+        crs, catalog, qt_app, amp=schedule)
+    assert errors == []
+
+    live = MultisweepPanel(target_module=catalog.module,
+                           initial_params=_multisweep_params(catalog, amp=schedule),
+                           dac_scales={catalog.module: -0.5})
+    step, direction, partial = partials[0]
+    name = next(iter(partial))
+
+    assert "sweep_amplitude" not in partial[name]
+    finished = collect_amplitude_iterations_for(panel.module_sweeps, name)[step][direction]
+    assert live._amplitude_of(step, name, partial[name]) == finished["sweep_amplitude"]
+    # ...and both panels grade colour over the same amplitudes, so that one
+    # number lands on the same colour before and after the sweep finishes.
+    assert live._amplitudes_drawn() == panel._amplitudes_drawn()
+
+
+def test_changing_units_redraws_and_leaves_the_measurement_alone(board, qt_app):
+    """Units, normalization and batching are how the panel is looking at the
+    block, never a change to it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    block = panel.module_sweeps
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(block, name)[0]["upward"]
+    before = sweep["iq_counts"].copy()
+
+    panel.normalize_traces = False
+    in_dbm = _grid_curves(panel)[0][0].getData()[1].copy()
+    panel.unit_mode = "counts"
+    in_counts = _grid_curves(panel)[0][0].getData()[1]
+
+    assert not np.allclose(in_dbm, in_counts)
+    assert np.allclose(in_counts, np.abs(before))
+    assert panel.module_sweeps is block
+    assert np.array_equal(sweep["iq_counts"], before)
+
+
+def test_a_rerun_starts_a_task_on_the_catalogs_module(board, qt_app):
+    """Re-run reads the module off the catalog, as starting a sweep does:
+    the dialog's parameters carry no module."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+
+    periscope = _periscope_with()
+    periscope.crs = crs
+    periscope.multisweep_windows["multisweep_0"] = {
+        "window": panel, "dock": None, "params": params}
+
+    periscope._start_multisweep_analysis_for_window(panel, params)
+
+    task_key = f"multisweep_0_module_{catalog.module}"
+    assert task_key in periscope.multisweep_tasks
+    task = periscope.multisweep_tasks[task_key]
+    try:
+        assert task.module == catalog.module
+        assert spin_until(qt_app, task.isFinished, timeout=180), "task never finished"
+        spin(qt_app)
+        assert panel.module_sweeps is not None
+    finally:
+        task.stop()
+        task.wait(2000)
+
+
+def test_rerunning_a_loaded_multisweep_saves_each_measurement(
+        board, qt_app, swept_container, tmp_path):
+    manager = SessionManager()
+    session = manager.start_session(str(tmp_path), "rerun_session")
+    periscope = _periscope_with(manager)
+    periscope.crs = board[1]
+    try:
+        original = store.save(copy.deepcopy(swept_container[1]), "multisweep")
+        original_bytes = original.read_bytes()
+        periscope._load_multisweep_analysis(store.load(original))
+        panel = next(iter(periscope.multisweep_windows.values()))['window']
+        params = _multisweep_params(panel.catalog)
+        paths = {original}
+        for _ in range(2):
+            periscope._start_multisweep_analysis_for_window(panel, params)
+            task = next(iter(periscope.multisweep_tasks.values()))
+            assert spin_until(qt_app, task.isFinished, timeout=180)
+            spin(qt_app)
+            path = store.saved_path(panel.multisweep_container)
+            assert path is not None
+            assert path not in paths
+            assert path.parent == session
+            assert store.load(path)
+            paths.add(path)
+        assert set(session.glob('*.pkl')) == paths
+        assert manager.export_count == 2
+        assert original.read_bytes() == original_bytes
+    finally:
+        for task in periscope.multisweep_tasks.values():
+            task.stop()
+            task.wait()
+        manager.end_session()
+
+
+def test_stopping_a_sweep_finds_the_task_by_the_catalogs_module(board, qt_app):
+    """The stopper keys tasks the same way the starter does, or it silently
+    stops nothing."""
+    _, crs, catalog = board
+    params = _multisweep_params(catalog)
+    panel = MultisweepPanel(target_module=catalog.module, initial_params=params,
+                            dac_scales={catalog.module: -0.5})
+
+    periscope = _periscope_with()
+    periscope.crs = crs
+    periscope.multisweep_windows["multisweep_0"] = {
+        "window": panel, "dock": None, "params": params}
+    periscope._start_multisweep_analysis_for_window(panel, params)
+
+    periscope.stop_multisweep_task_for_window(panel)
+
+    assert periscope.multisweep_tasks == {}
+    assert periscope.multisweep_windows == {}
+
+
+def _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.004, npoints=60):
+    """A netanal panel holding one measured sweep of the standard array."""
+    panel = NetworkAnalysisPanel(module=catalog.module)
+    panel.current_params = {"amp": amplitude}
+    panel.dac_scales = {catalog.module: -0.5}
+
+    errors, completed, updates = _run_netanal(
+        crs, catalog.module, qt_app, amplitude=amplitude, npoints=npoints)
+    assert errors == []
+    panel.update_data(*updates[-1])
+    panel.complete_analysis(*completed[0])
+    return panel
+
+
+def test_a_saved_netanal_is_the_measurement_a_notebook_reads(board, qt_app, output_directory):
+    """Save writes the container through ``store``, under store's own name, and
+    what comes back is the measured sweep -- the same file a notebook writes and
+    ``store.load`` opens, not a payload of Periscope's own."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    panel.current_params["label"] = "flow test"
+
+    path = panel.save_netanal()
+
+    assert path.parent == output_directory
+    assert path.name.startswith("netanal_")
+    assert path.name.endswith("_flow_test.pkl")
+    plots = panel.plots[catalog.module]
+    assert path.name in plots["amp_plot"].getPlotItem().titleLabel.text
+    assert "Magnitude" in plots["amp_plot"].getPlotItem().titleLabel.text
+    assert path.name in plots["phase_plot"].getPlotItem().titleLabel.text
+    assert "Phase" in plots["phase_plot"].getPlotItem().titleLabel.text
+
+    reloaded = store.load(path)
+    trace = reloaded[crs.module[catalog.module].index()]["results"]
+    measured = panel.netanal_traces[catalog.module]
+    assert trace["sweep_amplitude"] == 0.004
+    assert np.array_equal(trace["frequencies"], measured["frequencies"])
+    assert np.array_equal(trace["iq_counts"], measured["iq_counts"])
+
+
+def test_saving_the_same_netanal_again_writes_the_same_file(board, qt_app, output_directory):
+    """An analysis run over a measurement updates the file the measurement is
+    in, rather than leaving a near-copy beside it: the container remembers where
+    it was written. This is what Find Resonances re-saving relies on."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+
+    first = panel.save_netanal()
+    again = panel.save_netanal()
+
+    assert again == first
+    assert sorted(p.name for p in output_directory.glob("*.pkl")) == [first.name]
+
+
+def _search_on(panel, module, qt_app):
+    """Press Find Resonances and wait for the real task to come back."""
+    panel._find_resonances_action()
+    assert spin_until(qt_app, lambda: panel._find_res_task.isFinished(),
+                      timeout=60), "the search never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.resonance_searches.get(module)
+
+
+def test_find_resonances_finds_the_array_through_the_real_task(board, qt_app):
+    """The button runs ``find_resonances_in_netanal`` on the module's own
+    netanal output, off the GUI thread, and the panel marks what came back.
+
+    Every resonator of the standard array lies inside the measured band.
+    """
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert len(search.candidates) == len(catalog)
+    assert panel.resonance_searches[catalog.module] is search
+    # One dashed line per kept resonance, on both plots.
+    plot_info = panel.plots[catalog.module]
+    assert len(plot_info["resonance_lines_mag"]) == len(catalog)
+    assert len(plot_info["resonance_lines_phase"]) == len(catalog)
+    assert f"{len(catalog)} resonances" in plot_info["amp_plot"].getPlotItem().titleLabel.text
+
+
+#: A collision cut spanning the array's band, so the finder
+#: treats every resonator as colliding with its neighbour and rejects it. The
+#: point is the rejections, which are the only thing a display test can show.
+EVERYTHING_COLLIDES_KHZ = (FMAX - FMIN) / 1e3
+
+
+def test_the_settings_panel_is_what_the_search_runs_with(board, qt_app):
+    """Apply a threshold change, and the next search uses it."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    panel.find_resonances_settings.min_separation_spin.setValue(
+        EVERYTHING_COLLIDES_KHZ)
+    panel.find_resonances_settings.require_isolation_check.setChecked(True)
+    panel.find_resonances_settings.apply_button.click()
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert len(search.candidates) == 0
+    assert len(search.rejected) == len(catalog)
+    assert all("collided" in c.rejected_because for c in search.rejected)
+
+
+def test_rejected_candidates_are_drawn_with_their_reason(board, qt_app):
+    """A finder that returns fewer resonances than the array has is hard to
+    debug; the panel draws what was thrown out, and the reason is on it."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    panel.find_resonances_settings.min_separation_spin.setValue(
+        EVERYTHING_COLLIDES_KHZ)
+    panel.find_resonances_settings.apply_button.click()
+    search = _search_on(panel, catalog.module, qt_app)
+
+    markers = panel.plots[catalog.module]["rejected_markers"]
+    x, _ = markers.getData()
+    assert len(x) == len(search.rejected)
+    assert sorted(x) == pytest.approx(
+        sorted(c.frequency_hz for c in search.rejected))
+    assert [point.data() for point in markers.points()] == [
+        c.rejected_because for c in search.rejected]
+
+    # And the tooltip pyqtgraph builds on hover is that reason, unadorned.
+    reason = search.rejected[0].rejected_because
+    assert markers.opts["tip"](x=0.0, y=0.0, data=reason) == reason
+
+
+def test_a_search_updates_the_file_the_netanal_is_in(board, qt_app, output_directory):
+    """The search goes into the netanal block, so the file that holds the
+    measurement now holds the search too -- the same file, not a second one
+    beside it, and a notebook reads it back with ``ResonanceSearch``."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+    path = panel.save_netanal()
+
+    search = _search_on(panel, catalog.module, qt_app)
+
+    assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
+    trace = store.load(path)[crs.module[catalog.module].index()]["results"]
+    assert ResonanceSearch.from_dict(
+        trace["resonance_search"]).resonance_frequencies_hz == pytest.approx(
+            list(search.resonance_frequencies_hz))
+
+
+def test_a_search_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_directory):
+    """Saving stays the Save button's job and the session's: a search on a
+    panel that has never been saved leaves the folder alone."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+
+    _search_on(panel, catalog.module, qt_app)
+
+    assert list(output_directory.glob("*.pkl")) == []
+
+
+#: Between two of the array's resonances, so accepting here is the operator
+#: marking a place the finder had no candidate for rather than one of its hits.
+BETWEEN_RESONANCES_HZ = 1.05e9
+
+
+def _searched_panel(crs, catalog, qt_app):
+    """A netanal panel whose resonances have been found, ready to hand over."""
+    panel = _panel_with_a_sweep(crs, catalog, qt_app, amplitude=0.001, npoints=2000)
+    _search_on(panel, catalog.module, qt_app)
+    return panel
+
+
+def _block_search(panel, module):
+    """The search as the netanal block holds it -- what a file would carry."""
+    return ResonanceSearch.from_dict(
+        panel._module_block(module)["results"]["resonance_search"])
+
+
+def test_removing_a_resonance_rejects_it_rather_than_deleting_it(board, qt_app):
+    """Double-clicking a resonance off the plot is the last rejection pass, and
+    it works like the automatic ones: the candidate keeps everything the finder
+    measured, gains a reason, and stays in the search as a record of the
+    decision. Nothing found is thrown away."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    found = len(search.candidates)
+    dropped = sorted(search.resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert len(search.candidates) == found - 1
+    assert dropped not in search.resonance_frequencies_hz
+    gone, = [c for c in search.rejected if c.frequency_hz == dropped]
+    assert gone.rejected_because == ResonanceSearch.BY_HAND
+    assert f"{found - 1} resonances" in (
+        panel.plots[catalog.module]["amp_plot"].getPlotItem().titleLabel.text)
+
+
+def test_accepting_a_rejected_resonance_puts_it_back_as_found(board, qt_app):
+    """The other direction, so a double-click is undoable: a candidate that was
+    rejected -- by hand or by a threshold -- comes back with the depth, width
+    and Q the finder measured, not as a fresh guess."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    dropped = sorted(search.resonance_frequencies_hz)[0]
+    panel._remove_resonance(catalog.module, dropped)
+    rejected, = [c for c in search.rejected if c.frequency_hz == dropped]
+
+    panel._add_resonance(catalog.module, dropped)
+
+    restored, = [c for c in search.candidates if c.frequency_hz == dropped]
+    assert restored.accepted
+    assert (restored.depth_db, restored.width_hz, restored.q_estimate) == (
+        rejected.depth_db, rejected.width_hz, rejected.q_estimate)
+    assert dropped not in [c.frequency_hz for c in search.rejected]
+
+
+def test_adding_a_resonance_puts_a_tone_where_it_was_asked_for(board, qt_app):
+    """Double-clicking somewhere the finder had no candidate accepts that
+    frequency exactly, claiming nothing about a dip being there: it is a place
+    the operator wants a tone, and what it is for is reaching the catalog."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    found = len(search.candidates)
+
+    panel._add_resonance(catalog.module, BETWEEN_RESONANCES_HZ)
+
+    assert len(search.candidates) == found + 1
+    added, = [c for c in search.candidates
+              if c.frequency_hz == BETWEEN_RESONANCES_HZ]
+    assert added.accepted
+    assert np.isnan([added.depth_db, added.width_hz, added.q_estimate]).all()
+    # It reaches the catalog, quantized there and only there.
+    array = search.to_catalog(module=catalog.module, amplitude=0.001)
+    assert on_grid(BETWEEN_RESONANCES_HZ) in [
+        array[n].bias.frequency_hz for n in array.names()]
+
+
+def test_a_hand_added_resonance_says_so_on_its_marker(board, qt_app):
+    """Its tooltip cannot report a depth or a Q, because nothing measured one.
+    Saying which resonance it is instead is also the only thing that tells an
+    operator apart from a found one."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+
+    panel._add_resonance(catalog.module, BETWEEN_RESONANCES_HZ)
+
+    lines = panel.plots[catalog.module]["resonance_lines_mag"]
+    tooltips = [line.toolTip() for line in lines]
+    assert sum("added by hand" in tip for tip in tooltips) == 1
+    assert sum("dB deep" in tip for tip in tooltips) == len(lines) - 1
+
+
+def test_an_edit_by_hand_updates_the_file_the_search_is_in(board, qt_app, output_directory):
+    """A search lives in the netanal it searched, so an edit to it leaves that
+    file out of date by exactly that much: the same file is rewritten, and no
+    second file appears beside it -- least of all a catalog, which multisweep
+    records in its own output."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    path = panel.save_netanal()
+    dropped = sorted(panel.resonance_searches[catalog.module]
+                     .resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert sorted(p.name for p in output_directory.glob("*.pkl")) == [path.name]
+    stored = ResonanceSearch.from_dict(
+        store.load(path)[crs.module[catalog.module].index()]["results"]
+        ["resonance_search"])
+    assert dropped not in stored.resonance_frequencies_hz
+    assert dropped in [c.frequency_hz for c in stored.rejected]
+
+
+def test_an_edit_on_an_unsaved_netanal_writes_no_file(board, qt_app, output_directory):
+    """Saving stays the Save button's job and the session's, as it is for the
+    search itself."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    dropped = sorted(panel.resonance_searches[catalog.module]
+                     .resonance_frequencies_hz)[0]
+
+    panel._remove_resonance(catalog.module, dropped)
+
+    assert list(output_directory.glob("*.pkl")) == []
+    assert dropped in [c.frequency_hz
+                       for c in _block_search(panel, catalog.module).rejected]
+
+
+def test_take_multisweep_names_the_accepted_candidates(board, qt_app):
+    """What crosses from netanal to multisweep is a ``ResonatorCatalog`` built
+    with ``to_catalog``: the search's accepted dips, named, channelled in
+    frequency order, at the amplitude the netanal probed them at. It is not
+    written anywhere of its own -- multisweep records the catalog it swept."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    search = panel.resonance_searches[catalog.module]
+    panel._remove_resonance(catalog.module,
+                            sorted(search.resonance_frequencies_hz)[0])
+
+    array = search.to_catalog(module=catalog.module, amplitude=0.001)
+
+    assert array.module == catalog.module
+    assert len(array) == len(search.candidates)
+    names = array.names()
+    assert [array[n].bias.frequency_hz for n in names] == pytest.approx(
+        [on_grid(f) for f in sorted(search.resonance_frequencies_hz)])
+    assert {array[n].bias.amplitude for n in names} == {0.001}
+    assert [array[n].channel for n in names] == list(range(1, len(names) + 1))
+
+
+def _periscope_with(session_manager=None):
+    """Just enough Periscope to run the file handlers, without a window."""
+    periscope = Periscope.__new__(Periscope)
+    # The C++ side only: the panels are parented to it, and Periscope.__init__
+    # wants a board, a layout and a session.
+    QtWidgets.QMainWindow.__init__(periscope)
+    periscope.crs = None
+    periscope.host = "OFFLINE"
+    periscope.dark_mode = False
+    periscope.netanal_window_count = 0
+    periscope.netanal_windows = {}
+    periscope.multisweep_window_count = 0
+    periscope.multisweep_windows = {}
+    periscope.multisweep_tasks = {}
+    periscope.module = STANDARD_MODULE
+    periscope.session_manager = session_manager
+    periscope.dock_manager = _StubDockManager()
+    return periscope
+
+
+class _StubDockManager:
+    """The dock manager's part in loading a file: it hands back a dock."""
+
+    def create_dock(self, panel, title, window_id):
+        dock = QtWidgets.QDockWidget(title)
+        dock.setWidget(panel)
+        return dock
+
+    def get_dock(self, name):
+        return None
+
+
+def test_a_finished_netanal_lands_in_the_session_folder(board, qt_app, tmp_path):
+    """One measurement, one file, in the session folder, and the session knows
+    it is there so the browser lists it. store writes the file, into the
+    directory the session set."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    panel.current_params["label"] = "in a session"
+
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), "session_under_test")
+    registered = []
+    manager.file_exported.connect(
+        lambda path, data_type: registered.append((path, data_type)))
+    try:
+        _periscope_with(manager)._save_netanal_to_session(panel, [catalog.module])
+    finally:
+        manager.end_session()
+
+    written = list(Path(manager.session_path or tmp_path / "session_under_test").glob("*.pkl"))
+    assert len(written) == 1
+    assert written[0].name.endswith("_in_a_session.pkl")
+    assert registered == [(str(written[0]), "netanal")]
+
+
+def test_a_saved_netanal_loads_back_into_a_panel(board, qt_app, output_directory):
+    """Loading is store.load and the blocks the driver wrote: the panel draws
+    the measured trace and the resonances the search recorded, with nothing
+    rebuilt on the way in."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    module_id = crs.module[catalog.module].index()
+    search = find_resonances_in_netanal(
+        panel.netanal_container[module_id], min_dip_depth_db=0.5)
+    path = panel.save_netanal()
+
+    periscope = _periscope_with()
+    periscope._load_network_analysis(store.load(path))
+
+    loaded = periscope.netanal_windows["netanal_0"]["window"]
+    measured = panel.netanal_traces[catalog.module]
+    loaded_plots = loaded.plots[catalog.module]
+    assert path.name in loaded_plots["amp_plot"].getPlotItem().titleLabel.text
+    assert path.name in loaded_plots["phase_plot"].getPlotItem().titleLabel.text
+    drawn_freqs, _ = loaded.plots[catalog.module]["amp_curve"].getData()
+    assert np.array_equal(drawn_freqs, measured["frequencies"])
+    assert np.array_equal(
+        loaded.netanal_traces[catalog.module]["iq_counts"], measured["iq_counts"])
+    assert list(loaded.resonance_searches[catalog.module]
+                .resonance_frequencies_hz) == pytest.approx(
+        list(search.resonance_frequencies_hz))
+
+
+def test_a_saved_multisweep_loads_back_into_a_panel(board, qt_app, output_directory):
+    """A file Periscope wrote opens as the measurement it holds: the driver's
+    block, the catalog it swept, and the amplitudes the schedule walked."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_with()
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    name = panel._selected_names()[0]
+    assert loaded.measurement_title.text() == \
+        f"{path.name} — Magnitude Sweeps"
+    assert loaded.catalog.names() == panel.catalog.names()
+    assert loaded._amplitudes_drawn() == panel._amplitudes_drawn()
+    assert np.array_equal(
+        collect_amplitude_iterations_for(loaded.module_sweeps, name)[0]["upward"]["iq_counts"],
+        collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]["iq_counts"])
+
+
+def test_a_loaded_multisweep_draws_without_a_board(board, qt_app, output_directory):
+    """Loading is reading and drawing. It touches no hardware -- the panel is
+    built with no CRS at all here, which is what a review of a saved sweep is."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_with()
+    assert periscope.crs is None
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    curves = _grid_curves(loaded)
+    assert curves and all(len(subplot) == 1 for subplot in curves)
+
+
+def test_a_multisweep_file_fills_the_dialog_in(board, qt_app, output_directory):
+    """Import reads the file with ``store.load`` and fills the fields in from
+    what the driver recorded about the sweep."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+    path = panel.save_multisweep()
+
+    dialog = MultisweepDialog(dac_scales={catalog.module: -0.5},
+                              module=catalog.module,
+                              load_multisweep=True)
+    dialog._on_file_selected(str(path))
+
+    module_id = crs.module[catalog.module].index()
+    assert np.array_equal(
+        dialog.loaded_container[module_id]["results"][0]["upward"][
+            panel._selected_names()[0]]["iq_counts"],
+        collect_amplitude_iterations_for(
+            panel.module_sweeps, panel._selected_names()[0])[0]["upward"]["iq_counts"])
+    assert float(dialog.span_khz_edit.text()) == 100.0
+    assert int(dialog.npoints_edit.text()) == 21
+    assert int(dialog.nsamps_edit.text()) == 10
+    assert dialog.load_btn.isEnabled()
+    assert dialog.catalog.names() == panel.catalog.names()
+    assert dialog.schedule() == AmplitudeSchedule.multiplicative(0.5, 2.0, 2)
+
+
+def test_the_measurement_name_becomes_the_files_label(qt_app):
+    """What the user types as the measurement name is store's ``label``, which
+    is what goes on the end of the filename."""
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
+    dialog.label_edit.setText("cold plate 2")
+
+    assert dialog.get_parameters()["label"] == "cold plate 2"
+
+    dialog.label_edit.clear()
+    assert dialog.get_parameters()["label"] is None
+
+
+def test_the_dialog_asks_for_one_amplitude_and_one_direction(qt_app):
+    """A netanal measures the band once. The dialog's parameters are the
+    driver's: a scalar ``amp`` and a single ``sweep_direction``, which is
+    upward unless the operator says otherwise."""
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
+    dialog.amp_edit.setText("1/1000")
+
+    params = dialog.get_parameters()
+    assert params["amp"] == 0.001
+    assert params["sweep_direction"] == "upward"
+
+    dialog.direction_combo.setCurrentText("downward")
+    assert dialog.get_parameters()["sweep_direction"] == "downward"
+
+
+def test_an_amplitude_off_the_scale_is_refused(qt_app, monkeypatch):
+    """Normalized amplitude is a fraction of full scale, so above 1.0 there is
+    nothing to measure with."""
+    warned = []
+    monkeypatch.setattr(QtWidgets.QMessageBox, "warning",
+                        lambda *args, **kwargs: warned.append(args[-1]))
+    dialog = NetworkAnalysisDialog(module=1, dac_scales={1: -0.5})
+    dialog.amp_edit.setText("1.5")
+
+    assert dialog.get_parameters() is None
+    assert warned
+
+
+def test_editing_a_netanals_parameters_opens_on_them(qt_app):
+    """Edit Parameters opens on what the panel measured with rather than on
+    what was last typed into a new-analysis dialog, and offers no import."""
+    dialog = NetworkAnalysisDialog(params={"amp": 0.002, "fmin": 1.2e9,
+                                           "fmax": 1.3e9, "npoints": 321,
+                                           "sweep_direction": "downward"},
+                                   module=1, dac_scales={1: -0.5}, editing=True)
+
+    assert float(dialog.amp_edit.text()) == 0.002
+    assert float(dialog.fmin_edit.text()) == 1200.0
+    assert int(dialog.points_edit.text()) == 321
+    assert dialog.direction_combo.currentText() == "downward"
+    assert not hasattr(dialog, "import_button")
+
+
+def test_importing_a_netanal_fills_the_dialog_in(board, qt_app, output_directory):
+    """Import reads the file with ``store.load`` and fills the fields in from
+    what the driver recorded about the sweep -- the amplitude it probed at and
+    the name it was saved under. Not the module: one Periscope is one module,
+    so the dialog has no field for it."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    panel.current_params["label"] = "an import"
+    path = panel.save_netanal()
+
+    dialog = NetworkAnalysisDialog(module=catalog.module, dac_scales={catalog.module: -0.5})
+    dialog._on_file_selected(str(path))
+
+    module_id = crs.module[catalog.module].index()
+    assert np.array_equal(
+        dialog.loaded_container[module_id]["results"]["iq_counts"],
+        panel.netanal_traces[catalog.module]["iq_counts"])
+    assert float(dialog.amp_edit.text()) == 0.004
+    assert dialog.direction_combo.currentText() == "upward"
+    assert dialog.label_edit.text() == "an import"
+    assert dialog.load_btn.isEnabled()
+
+
+def test_the_session_browser_knows_what_periscope_wrote(board, qt_app, output_directory):
+    """A file written through ``store`` says what measurement it holds, so the
+    session browser opens it in the right panel without looking at its shape."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+
+    path = panel.save_netanal()
+
+    assert SessionManager().identify_file_type(str(path)) == "netanal"
+
+
+# ── one Periscope, one module ────────────────────────────────────────────────
+
+def _periscope_on_module(module):
+    periscope = _periscope_with()
+    periscope.module = module
+    return periscope
+
+
+def test_a_netanal_from_another_module_opens_but_cannot_be_re_run(
+        board, qt_app, output_directory):
+    """One Periscope controls one module, so a file taken on another is shown
+    and nothing more: re-running would sweep *this* module with that file's
+    settings, and taking a multisweep would sweep this module's resonators."""
+    _, crs, catalog = board
+    path = _panel_with_a_sweep(crs, catalog, qt_app).save_netanal()
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_network_analysis(store.load(path))
+
+    panel = periscope.netanal_windows["netanal_0"]["window"]
+    assert panel.is_foreign_module
+    assert not panel.edit_params_btn.isEnabled()
+    assert not panel.take_multisweep_btn.isEnabled()
+    assert str(catalog.module) in panel.edit_params_btn.toolTip()
+    # The measurement is shown as it was taken.
+    assert panel.netanal_traces[catalog.module]["sweep_amplitude"] == 0.004
+
+
+def test_loading_a_foreign_netanal_rewrites_nothing(board, qt_app, output_directory):
+    """Neither the file's module nor the session's is touched."""
+    _, crs, catalog = board
+    path = _panel_with_a_sweep(crs, catalog, qt_app).save_netanal()
+    before = store.load(path)
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_network_analysis(store.load(path))
+
+    assert periscope.module == catalog.module + 1
+    after = store.load(path)
+    assert [b["module"] for b in after.values()] == [b["module"] for b in before.values()]
+
+
+def test_a_netanal_on_this_module_is_fully_usable(board, qt_app, output_directory):
+    """The same load on the session's own module leaves every control alive."""
+    _, crs, catalog = board
+    panel = _searched_panel(crs, catalog, qt_app)
+    path = panel.save_netanal()
+
+    periscope = _periscope_on_module(catalog.module)
+    periscope._load_network_analysis(store.load(path))
+
+    loaded = periscope.netanal_windows["netanal_0"]["window"]
+    assert not loaded.is_foreign_module
+    assert loaded.edit_params_btn.isEnabled()
+    assert loaded.take_multisweep_btn.isEnabled()   # it carries a search
+
+
+def test_a_multisweep_from_another_module_opens_but_cannot_be_re_run(
+        board, qt_app, output_directory):
+    """The same rule for the sweep panel: shown, not re-runnable."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    path = panel.save_multisweep()
+
+    periscope = _periscope_on_module(catalog.module + 1)
+    periscope._load_multisweep_analysis(store.load(path))
+
+    loaded = periscope.multisweep_windows[
+        next(iter(periscope.multisweep_windows))]["window"]
+    assert loaded.is_foreign_module
+    assert not loaded.rerun_btn.isEnabled()
+    assert str(catalog.module) in loaded.rerun_btn.toolTip()
+    assert loaded.module_sweeps is not None       # still shown
+
+
+def test_unwrapping_cable_delay_redraws_the_measured_phase(board, qt_app):
+    """Unwrap Cable Delay fits a delay off the module's sweep and adjusts the
+    phase it draws. It reads the trace it was handed; nothing else is in scope
+    for it to reach for."""
+    _, crs, catalog = board
+    panel = _panel_with_a_sweep(crs, catalog, qt_app)
+    before = panel.plots[catalog.module]["phase_curve"].getData()[1].copy()
+
+    panel._unwrap_cable_delay_action()
+
+    assert catalog.module in panel.module_cable_lengths
+    after = panel.plots[catalog.module]["phase_curve"].getData()[1]
+    assert not np.allclose(before, after)
+
+
+# --- step 4: fits ----------------------------------------------------------
+
+
+def _run_fits(panel, qt_app, choice=None, models=("skewed", "nonlinear")):
+    """Press Run Fit with one set of settings; return the panel's status text."""
+    panel.fit_settings.set_parameters({"models": models})
+    panel.fit_settings.set_amplitude_choice(choice)
+    panel.fit_settings.apply_button.click()
+    assert panel.fit_settings.get_parameters() == {
+        "models": tuple(models), "amplitude_choice": choice}, \
+        f"the settings window does not offer {choice!r}"
+
+    panel._run_fits()
+    assert spin_until(qt_app, panel._run_fits_task.isFinished, timeout=180), \
+        "the fit task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.fit_status_label.text()
+
+
+def _fitted_sweeps(panel):
+    """``{(name, step, direction): entry}`` for every sweep that carries fits."""
+    return {(name, step, direction): sweep
+            for name in panel._selected_names()
+            for step, by_direction in
+            collect_amplitude_iterations_for(panel.module_sweeps, name).items()
+            for direction, sweep in by_direction.items()
+            if sweep.get("fits")}
+
+
+def test_run_fit_writes_its_fits_into_the_sweeps_the_panel_holds(board, qt_app):
+    """The fits land in the block the panel is already drawing from, which is
+    what makes them appear without the panel being told anything."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    assert _fitted_sweeps(panel) == {}
+
+    status = _run_fits(panel, qt_app)
+
+    fitted = _fitted_sweeps(panel)
+    assert len(fitted) == len(catalog.names())
+    for sweep in fitted.values():
+        assert set(sweep["fits"]) == {"skewed", "nonlinear"}
+    assert status == "Fits complete"
+
+
+def test_the_panel_reads_back_the_parameters_the_fitters_wrote(board, qt_app):
+    """A fit's numbers are read off the entry, not copied anywhere else."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    skewed = sweep["fits"]["skewed"]
+    assert skewed["failed_because"] is None
+    # The resonance the fit found is the one the sweep was centred on.
+    assert abs(skewed["params"]["fr"] - sweep["original_center_frequency"]) < 100e3
+
+
+def test_fitting_at_the_bias_amplitude_fits_one_step_per_resonator(board, qt_app):
+    """The amplitude choice is the whole of the fit settings, and 'at bias
+    amplitude' means one iteration of the schedule per resonator."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    _run_fits(panel, qt_app, choice="bias")
+
+    steps_fitted = {name: set() for name in panel._selected_names()}
+    for (name, step, _direction) in _fitted_sweeps(panel):
+        steps_fitted[name].add(step)
+    assert all(len(steps) == 1 for steps in steps_fitted.values())
+
+
+def test_fitting_one_step_leaves_the_others_unfitted(board, qt_app):
+    """A step chosen by name is the only one fitted."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    _run_fits(panel, qt_app, choice=1)
+
+    assert {step for (_name, step, _direction) in _fitted_sweeps(panel)} == {1}
+
+
+def test_the_button_is_dead_while_the_fits_run(board, qt_app):
+    """Fitting is seconds to minutes, so the button cannot be pressed twice."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    panel.fit_settings.set_parameters({"models": ("skewed",)})
+    panel.fit_settings.apply_button.click()
+    panel._run_fits()
+    assert not panel.run_fit_btn.isEnabled()
+    assert panel.fit_status_label.text().startswith("Fitting")
+
+    assert spin_until(qt_app, panel._run_fits_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.run_fit_btn.isEnabled()
+
+
+def test_the_fit_tab_draws_the_model_over_the_measurement(board, qt_app):
+    """Each resonator's panel carries its measured points and a curve for each
+    model that converged, on a grid finer than the one measured."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+
+    for model in ("skewed", "nonlinear"):
+        _show_fit_model(panel, model)
+        measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0]
+
+        # The measurement, normalized the way the skewed fit normalizes it.
+        x, y = measured.getData()
+        assert np.allclose(
+            x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+        assert np.allclose(
+            y, np.abs(sweep["iq_counts"] / sweep["iq_counts"][-1]))
+
+        # The model, on MODEL_OVERSAMPLE points per measured point, tracking
+        # the measurement it was fitted to and on the same axis as it.
+        model_x, model_y = fit.getData()
+        assert len(model_x) == MODEL_OVERSAMPLE * len(sweep["frequencies"])
+        assert np.allclose(np.interp(x, model_x, model_y), y, atol=0.05)
+
+
+def _show_fit_model(panel, model):
+    """Pick the model the Fit Results tab draws."""
+    combo = panel.fit_display.model_combo
+    index = combo.findData(model)
+    assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
+    combo.setCurrentIndex(index)
+
+
+def _show_fit_amplitude(panel, choice):
+    """Pick the sweeps the Fit Results tab draws: a step, or 'at bias'."""
+    combo = panel.fit_display.amplitude_combo
+    index = combo.findData(choice)
+    assert index >= 0, f"{choice!r} is not on offer"
+    combo.setCurrentIndex(index)
+
+
+def _measured_curves(panel, tab_idx=FIT_TAB):
+    """Per subplot, the curves that are measurement rather than model: the
+    model is the foreground colour, the measurement blue."""
+    foreground = "#ffffff" if panel.dark_mode else "#000000"
+    return [[curve for curve in subplot
+             if curve.opts["pen"].color().name() != foreground]
+            for subplot in _grid_curves(panel, tab_idx)]
+
+
+def test_only_the_chosen_model_is_drawn(board, qt_app):
+    """One line over the points, not one per model: the tab is legible with a
+    schedule's worth of traces on it."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    combo = panel.fit_display.model_combo
+    assert [combo.itemData(i)
+            for i in range(combo.count())] == ["skewed", "nonlinear"]
+    for model in ("skewed", "nonlinear"):
+        _show_fit_model(panel, model)
+        assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=FIT_TAB))
+        assert panel.fit_model_label.text() == f"━ {model.capitalize()} fit"
+
+
+def test_only_the_models_that_were_fitted_are_offered(board, qt_app):
+    """The selector says what the sweeps carry, not what could have been run."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    assert panel._models_fitted() == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    assert panel._models_fitted() == ["skewed"]
+
+
+def test_the_fit_is_a_thinner_line_over_the_measurement(board, qt_app, swept_container):
+    """Measured data has one blue on every drive; fits use the foreground."""
+    from rfmux.tools.periscope.multisweep_grid_helpers import FIT_MEASURED_COLOR
+
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, choice=0, models=("skewed",))
+
+    measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
+    assert fit.opts["pen"].color().name() == "#000000"      # light mode
+    assert measured.opts["pen"].color().name() == FIT_MEASURED_COLOR.lower()
+    assert fit.opts["pen"].width() < measured.opts["pen"].width()
+
+    panel.dark_mode = True
+    _measured, fit = _grid_curves(panel, tab_idx=FIT_TAB)[0][:2]
+    assert _measured.opts["pen"].color().name() == FIT_MEASURED_COLOR.lower()
+    assert fit.opts["pen"].color().name() == "#ffffff"
+
+
+def test_the_fit_tab_draws_only_what_was_fitted(board, qt_app):
+    """A sweep with no fits is not drawn there: an empty panel says 'not
+    fitted', where a bare measurement would read as a fit that failed."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 2))
+    assert errors == []
+
+    assert _grid_curves(panel, tab_idx=FIT_TAB) == [[] for _ in panel._selected_names()]
+
+    _run_fits(panel, qt_app, choice=1)
+
+    # One step of two was fitted, so one measured trace and its one model.
+    assert all(len(subplot) == 2 for subplot in _grid_curves(panel, tab_idx=FIT_TAB))
+
+
+def test_the_fit_tab_draws_the_amplitude_step_it_is_asked_for(board, qt_app,
+                                                             swept_container):
+    """The tab's toolbar is a filter over what was fitted: one step of the
+    schedule, in the directions it was swept, rather than all of them at once."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    steps = sorted(panel._step_amplitudes)
+    assert len(steps) > 1, "a filter over one step is not a filter"
+
+    assert all(len(subplot) == 2 * len(steps) for subplot in _measured_curves(panel))
+
+    _show_fit_amplitude(panel, steps[1])
+
+    assert all(len(subplot) == 2 for subplot in _measured_curves(panel))
+
+
+def test_the_fit_tab_uses_shared_line_labels_instead_of_a_drive_colorbar(board, qt_app):
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    _grid_widgets(panel, tab_idx=FIT_TAB)
+    assert panel.fit_colorbar.isHidden()
+
+    _show_fit_amplitude(panel, 2)
+    _grid_widgets(panel, tab_idx=FIT_TAB)
+
+    assert panel.fit_colorbar.isHidden()
+
+
+def _legend_texts(panel, tab_idx=FIT_TAB):
+    """Per subplot, what its legend says, in the order it says it."""
+    return [[label.text for _sample, label in (w.getPlotItem().legend.items
+                                               if w.getPlotItem().legend else [])]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def test_the_fit_labels_say_which_line_is_the_model_outside_the_plots(
+        board, qt_app):
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    assert all(texts == [] for texts in _legend_texts(panel))
+    labels = [label.text() for label in
+              panel.fit_plot_labels.findChildren(QtWidgets.QLabel)]
+    assert any("Measured" in label for label in labels)
+    assert any("Skewed fit" in label for label in labels)
+    assert any("f_r" in label for label in labels)
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert "<br>" not in axis.labelText
+    assert axis.labelText.startswith("med ")
+    assert "U:" in axis.toolTip()
+
+
+def test_the_fit_axis_carries_what_the_model_fitted(board, qt_app):
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 4))
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_fit_amplitude(panel, 2)
+
+    name = panel._selected_names()[0]
+    fit = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[2]["upward"]["fits"]["skewed"]["params"]
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert axis.isVisible()
+    for param in ("fr", "Qi", "Qc"):
+        assert f"{param}=" in axis.labelText
+        assert f"{param}={fit[param]:.1e}" in axis.toolTip()
+    assert "Qr=" not in axis.labelText
+    assert "a=" not in axis.labelText
+
+
+def test_fits_are_made_on_a_copy_the_panel_takes_over(board, qt_app, swept_container):
+    """The panel redraws from its own sweeps while a fit runs, so the fit
+    writes into a copy and the panel takes the copy over when it is done."""
+    panel = _panel_showing(swept_container, board)
+    held = panel.module_sweeps
+    entries = [entry for step in held["results"].values()
+               for sweeps in step.values() for entry in sweeps.values()]
+    assert not any(entry.get("fits") for entry in entries)
+
+    _run_fits(panel, qt_app, models=("skewed",))
+
+    assert panel.module_sweeps is not held
+    assert any(panel.module_sweeps is block
+               for block in panel.multisweep_container.values())
+    fitted = [entry for step in panel.module_sweeps["results"].values()
+              for sweeps in step.values() for entry in sweeps.values()]
+    assert all("skewed" in entry["fits"] for entry in fitted)
+    assert not any(entry.get("fits") for entry in entries)
+
+
+def test_the_fit_tab_can_draw_each_resonator_at_the_step_it_is_biased_at(
+        board, qt_app, swept_container):
+    """'At bias amplitude' is a different step for different resonators, and it
+    is on offer only once something has chosen one."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) == -1
+
+    _find_bias(panel, qt_app)
+    _show_fit_amplitude(panel, BIAS_AMPLITUDE)
+
+    from rfmux.tools.periscope.multisweep_grid_helpers import FIT_MEASURED_COLOR
+    for subplot in _measured_curves(panel):
+        assert len(subplot) == 2, "that resonator's bias step, both directions"
+        assert {curve.opts["pen"].color().name() for curve in subplot} == \
+            {FIT_MEASURED_COLOR.lower()}
+
+
+def test_a_new_measurement_takes_the_bias_amplitude_off_the_fit_tab(
+        board, qt_app, swept_container):
+    """A bias belongs to the sweeps it was chosen from, so the next measurement
+    cannot be drawn at the last one's step."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) >= 0
+
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
+
+    assert panel.fit_display.amplitude_combo.findData(BIAS_AMPLITUDE) == -1
+
+
+def test_fitting_nothing_is_refused_rather_than_run(board, qt_app):
+    """No models checked is a setting that cannot be acted on; the fitters
+    would raise on an empty selection, and the toolbar says so first."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    panel.fit_settings.set_parameters({"models": ()})
+    panel.fit_settings.apply_button.click()
+
+    panel._run_fits()
+
+    assert panel.fit_status_label.text() == "No models to fit"
+    assert panel.run_fit_btn.isEnabled()
+    assert _fitted_sweeps(panel) == {}
+
+
+def test_a_finished_fit_says_so_in_green_and_then_stops_saying_it(board, qt_app):
+    """A routine outcome on the status line, not a dialog, and not left on
+    screen once it has been read."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+
+    status = _run_fits(panel, qt_app, models=("skewed",))
+
+    assert status == "Fits complete"
+    assert TABLEAU10_COLORS[2] in panel.fit_status_label.styleSheet()
+    assert panel._fit_status_timer.isActive()
+
+    panel._fit_status_timer.timeout.emit()      # as it does after STATUS_MESSAGE_MS
+    assert panel.fit_status_label.text() == ""
+
+
+def test_the_progress_report_is_not_cleared_under_the_fit(qt_app):
+    """A timer that fired mid-fit would leave a dead button with nothing beside
+    it, which reads as a hang."""
+    panel = MultisweepPanel(target_module=1, initial_params={}, dac_scales={})
+
+    panel._fits_progress(3, 8)
+
+    assert panel.fit_status_label.text() == "Fitting... 37%"
+    assert not panel._fit_status_timer.isActive()
+
+
+# ── the fit histograms tab ───────────────────────────────────────────────────
+
+def _histogram_plots(panel):
+    """The histogram tab's plots, in the order it drew them.
+
+    The first is the ``fr`` scatter; the rest are the histograms of
+    ``HISTOGRAM_PARAMS[model]``, in that order.
+    """
+    panel.plot_tabs.setCurrentIndex(HISTOGRAM_TAB)
+    panel._redraw_plots()
+    grid = panel.fit_histograms_tab._grid
+    return [grid.itemAt(i).widget() for i in range(grid.count())]
+
+
+def _show_histogram_model(panel, model):
+    """Pick the model the histogram tab bins."""
+    combo = panel.fit_histograms_tab.toolbar.model_combo
+    index = combo.findData(model)
+    assert index >= 0, f"{model} is not on offer; fitted: {panel._models_fitted()}"
+    combo.setCurrentIndex(index)
+
+
+def _binned(plot):
+    """How many values a histogram plot has in it, over every drive on it."""
+    return sum(curve.getData()[1].sum()
+               for curve in plot.getPlotItem().listDataItems())
+
+
+def _converged(panel, model, step=None):
+    """The sweeps carrying a converged *model* fit, read off the entries."""
+    return {where: sweep for where, sweep in _fitted_sweeps(panel).items()
+            if (step is None or where[1] == step)
+            and sweep["fits"][model]["failed_because"] is None}
+
+
+def test_the_fit_tab_marks_where_the_model_put_the_resonance(board, qt_app):
+    """An ``fr`` line per drawn model, in its sweep's drive colour, so how far
+    the resonance moved between one drive and the next is readable."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_fit_model(panel, "skewed")
+
+    name = panel._selected_names()[0]
+    lines = _infinite_lines(panel, tab_idx=FIT_TAB)[0]
+    drawn = sorted(line.value() for line in lines)
+
+    fitted = [sweep for sweep in collect_amplitude_iterations_for(
+                  panel.module_sweeps, name).values()
+              for sweep in sweep.values()
+              if sweep["fits"]["skewed"]["failed_because"] is None]
+    assert len(fitted) > 1
+    assert drawn == pytest.approx(sorted(
+        (sweep["fits"]["skewed"]["params"]["fr"]
+         - sweep["original_center_frequency"]) / 1e3 for sweep in fitted))
+
+
+def test_the_fit_axis_carries_the_nonlinearity_it_fitted(board, qt_app):
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("nonlinear",))
+    _show_fit_model(panel, "nonlinear")
+
+    name = panel._selected_names()[0]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[0]["upward"]
+    axis = _grid_widgets(panel, tab_idx=FIT_TAB)[0].getPlotItem().getAxis('top')
+    assert "a=" in axis.labelText
+    assert f"a={sweep['fits']['nonlinear']['params']['a']:.1e}" in axis.toolTip()
+
+
+def test_the_histograms_account_for_every_fit_the_sweeps_carry(board, qt_app):
+    """Every converged fit is either in the bins or counted off the axis.
+
+    A quality factor a fit made negative cannot go on a log axis; leaving it
+    out silently is a histogram that is wrong rather than one that is short, so
+    the plot it is missing from says how many it is missing.
+    """
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    plots = _histogram_plots(panel)
+
+    assert len(plots) == 1 + len(HISTOGRAM_PARAMS["skewed"])
+    converged = len(_converged(panel, "skewed"))
+    assert converged > 0
+    not_binned = panel.fit_histograms_tab.not_binned
+    for param, plot in zip(HISTOGRAM_PARAMS["skewed"], plots[1:]):
+        assert _binned(plot) + not_binned.get(param, 0) == converged
+        assert str(not_binned.get(param, "")) in plot.getPlotItem().titleLabel.text
+
+
+def test_the_frequency_scatter_carries_the_fr_each_fit_found(board, qt_app):
+    """One point per fit, at the value on the entry -- read, not recomputed."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    scatters = [item for item in _histogram_plots(panel)[0].getPlotItem().items
+                if isinstance(item, pg.ScatterPlotItem)]
+
+    measured = sorted(sweep["fits"]["skewed"]["params"]["fr"] / 1e6
+                      for sweep in _converged(panel, "skewed").values())
+    drawn = sorted(point.pos().y() for scatter in scatters
+                   for point in scatter.points())
+    assert drawn == pytest.approx(measured)
+
+
+def test_the_quality_factors_share_one_set_of_bins(board, qt_app):
+    """Qr, Qc and Qi on separate bins each fill their own axis and look alike;
+    shared bins are what makes them readable against each other."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    edges = [plot.getPlotItem().listDataItems()[0].getData()[0]
+             for plot in _histogram_plots(panel)[1:]]
+
+    assert all(np.allclose(other, edges[0]) for other in edges[1:])
+
+
+def test_the_nonlinearity_is_binned_against_where_bifurcation_starts(board, qt_app):
+    """``a`` means nothing without BIFURCATION_A beside it, and the skewed
+    model has no ``a`` to mark."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    _show_histogram_model(panel, "nonlinear")
+    a_plot = _histogram_plots(panel)[1 + HISTOGRAM_PARAMS["nonlinear"].index("a")]
+    lines = [item for item in a_plot.getPlotItem().items
+             if isinstance(item, pg.InfiniteLine)]
+    assert [line.value() for line in lines] == [pytest.approx(BIFURCATION_A)]
+
+    _show_histogram_model(panel, "skewed")
+    assert not any(isinstance(item, pg.InfiniteLine)
+                   for plot in _histogram_plots(panel)
+                   for item in plot.getPlotItem().items)
+
+
+def test_a_fit_the_fitter_rejected_is_counted_rather_than_binned(board, qt_app):
+    """A parameter the fitter converged on and then disowned would move the
+    distribution without being a measurement of anything."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    before = _binned(_histogram_plots(panel)[1])
+
+    rejected = next(iter(_converged(panel, "skewed").values()))
+    rejected["fits"]["skewed"]["failed_because"] = "the residual is too high"
+
+    assert _binned(_histogram_plots(panel)[1]) == before - 1
+    assert "1 rejected by the fitter" in panel.fit_histograms_tab._status.text()
+
+
+def test_a_quality_factor_no_log_axis_can_hold_is_named_on_its_plot(board, qt_app):
+    """A fit can converge on a negative Q. It cannot be drawn on a log axis, so
+    the plot says how many of them it is missing rather than being short."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    before = _binned(_histogram_plots(panel)[1 + HISTOGRAM_PARAMS["skewed"].index("Qi")])
+
+    next(iter(_converged(panel, "skewed").values()))["fits"]["skewed"]["params"]["Qi"] = -1.0
+
+    plot = _histogram_plots(panel)[1 + HISTOGRAM_PARAMS["skewed"].index("Qi")]
+    assert panel.fit_histograms_tab.not_binned == {"Qi": 1}
+    assert _binned(plot) == before - 1
+    assert "1 off the axis" in plot.getPlotItem().titleLabel.text
+
+
+def test_the_histograms_bin_the_amplitude_step_they_are_asked_for(board, qt_app):
+    """The histogram bins only the selected amplitude step."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _both_directions(catalog, qt_app, crs)
+    assert errors == []
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+
+    combo = panel.fit_histograms_tab.toolbar.amplitude_combo
+    combo.setCurrentIndex(combo.findData(1))
+
+    at_step = len(_converged(panel, "skewed", step=1))
+    assert 0 < at_step < len(_converged(panel, "skewed"))
+    plot = _histogram_plots(panel)[1]
+    assert _binned(plot) + panel.fit_histograms_tab.not_binned.get("Qr", 0) == at_step
+
+
+def test_the_histograms_can_bin_each_resonator_at_the_step_it_is_biased_at(
+        board, qt_app, swept_container):
+    """'At bias amplitude' is a different step for different resonators, which
+    no step filter can express -- and it is on offer only once something has
+    chosen one."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _show_histogram_model(panel, "skewed")
+    combo = panel.fit_histograms_tab.toolbar.amplitude_combo
+    assert combo.findData(BIAS_AMPLITUDE) == -1
+
+    _find_bias(panel, qt_app)
+    combo.setCurrentIndex(combo.findData(BIAS_AMPLITUDE))
+
+    at_bias = {where for where, sweep in _converged(panel, "skewed").items()
+               if where[1] == panel._bias_by_name()[where[0]].iteration}
+    assert 0 < len(at_bias) < len(_converged(panel, "skewed"))
+    plot = _histogram_plots(panel)[1]
+    assert _binned(plot) + panel.fit_histograms_tab.not_binned.get("Qr", 0) \
+        == len(at_bias)
+
+
+def test_the_two_fit_tabs_are_chosen_independently(board, qt_app):
+    """They answer different questions about the same fits, so the model one is
+    showing is not the model the other is."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(crs, catalog, qt_app)
+    assert errors == []
+    _run_fits(panel, qt_app)
+
+    _show_fit_model(panel, "nonlinear")
+    _show_histogram_model(panel, "skewed")
+
+    assert panel.fit_display.get_model() == "nonlinear"
+    assert panel.fit_histograms_tab.toolbar.get_model() == "skewed"
+
+
+# ── finding a bias point ─────────────────────────────────────────────────────
+@pytest.fixture(scope="module")
+def swept_container(board, qt_app):
+    """One both-directions multisweep of the standard array, measured once.
+
+    A test about what the panel does with a measurement needs *a*
+    measurement, not its own: sweeping the simulator is five seconds and
+    analysing what came back is milliseconds. The tests that exercise the
+    sweep itself still run it.
+    """
+    _, crs, catalog = board
+    _panel, errors, completed, _records, _partials = _both_directions(
+        catalog, qt_app, crs)
+    assert errors == []
+    return completed[0]
+
+
+def _panel_showing(swept_container, board):
+    """A fresh panel holding its own copy of the shared measurement.
+
+    A copy because the panel writes into the block it holds -- fits and a
+    bias report both go in there -- and one test's run must not be another's
+    starting point.
+    """
+    _loop, _crs, catalog = board
+    module, container = swept_container
+    panel = MultisweepPanel(target_module=catalog.module,
+                            initial_params=_multisweep_params(catalog),
+                            dac_scales={catalog.module: -0.5})
+    panel.show_measurement(module, copy.deepcopy(container))
+    return panel
+
+
+
+#: The schedule of ``test/tuning/test_flow_on_standard_array``: every resonator
+#: of the standard array bifurcates inside it, and its four drives are more
+#: than a legend holds. The cheap schedule below brackets nothing, which is a
+#: flagged report -- fine for everything except the tests about a clean one.
+BIFURCATING = {"amp": AmplitudeSchedule(steps=(0.5, 4.0, 8.0, 12.0)),
+               "npoints_per_sweep": 41}
+
+
+def _both_directions(catalog, qt_app, crs, **overrides):
+    """A schedule swept both ways, for tests that compare the directions."""
+    params = {"amp": AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
+              "sweep_direction": ("upward", "downward")}
+    params.update(overrides)
+    return _run_multisweep(crs, catalog, qt_app, **params)
+
+
+def _find_bias(panel, qt_app, **settings):
+    """Press Find Bias with one set of settings; return the status text."""
+    if settings:
+        panel.bias_settings.set_parameters(settings)
+        panel.bias_settings.apply_button.click()
+    panel._find_bias()
+    assert spin_until(qt_app, panel._find_bias_task.isFinished, timeout=180), \
+        "the bias task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.bias_status_label.text()
+
+
+def test_find_bias_gives_every_resonator_an_operating_point(board, qt_app, swept_container):
+    """One call over the whole schedule, and a bias point per resonator."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    assert panel.bias_report is None
+
+    status = _find_bias(panel, qt_app)
+
+    assert len(panel.bias_report) == len(catalog.names())
+    assert {f.name for f in panel.bias_report.findings} == set(catalog.names())
+    # What was found, not what was done: nothing is on the board until Apply.
+    assert status.startswith("Bias found (")
+
+
+def test_the_panel_adopts_the_catalog_the_report_hands_back(board, qt_app, swept_container):
+    """The report's catalog is the array now, so what is applied and what a
+    re-run sweeps are one thing."""
+    panel = _panel_showing(swept_container, board)
+    before = panel.catalog
+
+    _find_bias(panel, qt_app)
+
+    assert panel.catalog is panel.bias_report.catalog
+    assert panel.catalog is not before
+    assert panel.catalog.names() == before.names()
+
+
+def test_the_bias_point_is_a_step_of_the_schedule_at_a_measured_frequency(
+        board, qt_app, swept_container):
+    """Both halves of the choice come off the sweeps: the amplitude is one the
+    schedule walked, and the frequency is inside the sweep it was read from."""
+    panel = _panel_showing(swept_container, board)
+
+    _find_bias(panel, qt_app)
+
+    for finding in panel.bias_report.findings:
+        measured = collect_amplitude_iterations_for(
+            panel.module_sweeps, finding.name)[finding.iteration]["upward"]
+        assert finding.amplitude == measured["sweep_amplitude"]
+        assert (measured["frequencies"].min() <= finding.frequency_hz
+                <= measured["frequencies"].max())
+
+
+def test_the_report_goes_into_the_measurement_the_panel_holds(board, qt_app, swept_container):
+    """As the fits do: the block carries it, so a save needs nothing else and
+    a notebook reads it back with ``BiasReport.from_dict``."""
+    panel = _panel_showing(swept_container, board)
+    assert "bias_report" not in panel.module_sweeps
+
+    _find_bias(panel, qt_app)
+
+    read_back = BiasReport.from_dict(panel.module_sweeps["bias_report"])
+    assert [f.name for f in read_back.findings] == \
+        [f.name for f in panel.bias_report.findings]
+
+
+def test_the_settings_window_is_what_the_search_runs_with(board, qt_app, swept_container):
+    """The window is the arguments, so a changed threshold is the one the call
+    is made with and not a default underneath it."""
+    panel = _panel_showing(swept_container, board)
+
+    _find_bias(panel, qt_app, amplitude_method="derivative",
+               frequency_method="minimum")
+
+    settings = panel.bias_report.settings
+    assert settings["amplitude_method"] == "derivative"
+    assert settings["frequency_method"] == "minimum"
+
+
+def test_a_fractional_distance_guard_is_resolved_against_the_span_swept(
+        board, qt_app, swept_container):
+    """The window passes a fraction; the finder uses this sweep's span."""
+    panel = _panel_showing(swept_container, board)
+    panel.bias_settings._distance_radios["fraction"].setChecked(True)
+    panel.bias_settings.fraction_spin.setValue(0.25)
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+
+    assert panel.bias_report.settings["max_distance_fraction"] == 0.25
+    assert panel.bias_report.settings["max_distance_hz"] is None
+
+
+def test_a_run_updates_the_file_the_multisweep_is_in(board, qt_app, swept_container, output_directory):
+    """The report went into the block, so the file is out of date by exactly
+    that much until it is rewritten."""
+    panel = _panel_showing(swept_container, board)
+    path = panel.save_multisweep()
+
+    _find_bias(panel, qt_app)
+
+    reloaded = store.load(path)
+    block = next(iter(reloaded.values()))
+    assert "bias_report" in block
+
+
+def test_a_run_on_an_unsaved_multisweep_writes_no_file(board, qt_app, swept_container, output_directory):
+    """Nothing is written behind the operator's back: a panel that was never
+    saved still has a Save button to press."""
+    panel = _panel_showing(swept_container, board)
+
+    _find_bias(panel, qt_app)
+
+    assert list(Path(output_directory).glob("*multisweep*")) == []
+
+
+def test_fitting_and_bias_finding_do_not_run_at_once(board, qt_app, swept_container):
+    """Both walk every sweep the panel holds, so one at a time, and the
+    buttons say so."""
+    panel = _panel_showing(swept_container, board)
+
+    panel._find_bias()
+    assert not panel.find_bias_btn.isEnabled()
+    assert not panel.run_fit_btn.isEnabled()
+    assert panel.bias_status_label.text().startswith("Finding")
+
+    assert spin_until(qt_app, panel._find_bias_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.find_bias_btn.isEnabled()
+    assert panel.run_fit_btn.isEnabled()
+
+
+def test_a_clean_run_says_so_and_then_stops_saying_it(board, qt_app, swept_container):
+    """A clean report is acknowledged, then the status line clears itself."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    report = _with_the_flags_cleared(panel)
+    panel._bias_found(report)
+
+    assert panel.bias_status_label.text() == f"Bias found (0 of {len(report.good)} flagged)"
+    assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
+    assert panel._bias_status_timer.isActive()
+    panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
+
+
+def test_a_flagged_run_says_how_many_and_then_stops_saying_it(board, qt_app,
+                                                             swept_container):
+    """The count, and nothing else: which resonators are flagged is on their
+    own subplots, so the status line has no list to hold and no reason to
+    stay."""
+    panel = _panel_showing(swept_container, board)
+
+    # A guard of a few hertz disbelieves every answer, which is the flag this
+    # test needs and the only one a healthy schedule can be made to produce.
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
+    status = _find_bias(panel, qt_app)
+
+    assert panel.bias_report.flagged
+    assert status == (f"Bias found ({len(panel.bias_report.flagged)} of "
+                      f"{len(panel.bias_report)} flagged)")
+    # Flags are worth a look, not an error: the line calls attention to itself
+    # in orange rather than in the colour a failure reads in.
+    assert BIAS_STATUS_COLOURS["warn"] in panel.bias_status_label.styleSheet()
+    assert BIAS_STATUS_COLOURS["error"] not in panel.bias_status_label.styleSheet()
+    # Which resonators are flagged is on their own subplots, so the status
+    # line gets out of the way like any other outcome.
+    assert panel._bias_status_timer.isActive()
+    panel._bias_status_timer.timeout.emit()   # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
+
+
+def test_a_one_direction_sweep_finds_a_bias_point_too(board, qt_app):
+    """The default derivative test can find a bias from one direction."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, amp=AmplitudeSchedule.multiplicative(0.5, 2.0, 3),
+        sweep_direction="upward")
+    assert errors == []
+
+    assert panel.bias_settings.get_parameters()["amplitude_method"] == "derivative"
+    _find_bias(panel, qt_app)
+
+    assert len(panel.bias_report) == len(catalog.names())
+
+
+def test_a_new_measurement_drops_the_report_the_last_one_produced(board, qt_app, swept_container):
+    """A report describes the sweeps it was made from, so it does not outlive
+    them into the next measurement."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    assert panel.bias_report is not None
+
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
+
+    assert panel.bias_report is None
+
+
+# ── what the report puts on the sweep grids ──────────────────────────────────
+
+
+def _infinite_lines(panel, tab_idx=MAGNITUDE_TAB):
+    """The vertical lines on each subplot -- ``addLine`` items, which are not
+    data items and so do not show up in ``listDataItems``."""
+    return [[item for item in w.getPlotItem().items
+             if isinstance(item, pg.InfiniteLine)]
+            for w in _grid_widgets(panel, tab_idx)]
+
+
+def _trace_widths(panel, name, tab_idx=MAGNITUDE_TAB):
+    """``{(step, direction): pen width}`` for one resonator's subplot."""
+    index = panel._selected_names().index(name)
+    traces = panel._collect_traces([name])[name]
+    curves = _grid_curves(panel, tab_idx)[index]
+    return {(step, direction): curve.opts["pen"].width()
+            for (step, direction, _amp, _sweep), curve in zip(traces, curves)}
+
+
+def test_the_sweep_the_resonator_is_biased_at_gets_a_faint_wide_overlay(
+        board, qt_app, swept_container):
+    """The data stays at its normal width under a translucent highlight."""
+    panel = _panel_showing(swept_container, board)
+    name = panel._selected_names()[0]
+    assert len(set(_trace_widths(panel, name).values())) == 1
+    assert _bias_highlights(panel)[0] == []
+
+    _find_bias(panel, qt_app)
+
+    widths = _trace_widths(panel, name)
+    assert set(widths.values()) == {LINE_WIDTH}
+    highlights = _bias_highlights(panel)[0]
+    directions = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[panel.bias_report[name].iteration]
+    assert len(highlights) == len(directions)
+    assert all(curve.opts["pen"].width() > LINE_WIDTH for curve in highlights)
+    assert all(0 < curve.opts["pen"].color().alpha() < 255
+               for curve in highlights)
+
+
+def test_a_line_stands_where_the_tone_will_go(board, qt_app, swept_container):
+    """On the magnitude grid the bias frequency is a frequency, so it is a
+    vertical line, at the offset from centre the plot is drawn in."""
+    panel = _panel_showing(swept_container, board)
+    assert _infinite_lines(panel)[0] == []
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    sweep = collect_amplitude_iterations_for(panel.module_sweeps, name)[
+        finding.iteration]["upward"]
+    expected = (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3
+
+    lines = _infinite_lines(panel)[0]
+    assert len(lines) == 1
+    assert lines[0].value() == pytest.approx(expected)
+
+
+def test_the_line_is_the_colour_of_the_drive_it_was_chosen_at(board, qt_app, swept_container):
+    """Same colour as the highlighted trace, so the two marks read as one
+    statement about one sweep."""
+    panel = _panel_showing(swept_container, board)
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    widths = _trace_widths(panel, name)
+    index = panel._selected_names().index(name)
+    traces = panel._collect_traces([name])[name]
+    curves = _grid_curves(panel)[index]
+    chosen_curve = next(
+        curve for (step, _d, _a, _s), curve in zip(traces, curves)
+        if step == finding.iteration)
+
+    line = _infinite_lines(panel)[0][0]
+    assert line.pen.color().name() == chosen_curve.opts["pen"].color().name()
+
+
+def test_the_iq_loop_is_marked_where_the_tone_will_sit(board, qt_app, swept_container):
+    """A loop's axis is I, not frequency, so the operating point is a point of
+    the loop rather than a line across it."""
+    panel = _panel_showing(swept_container, board)
+    panel.normalize_traces = False
+    panel.plot_tabs.setCurrentIndex(IQ_TAB)
+    panel._redraw_plots()
+    before = len(_grid_curves(panel, tab_idx=IQ_TAB)[0])
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel.bias_report[name]
+    curves = _grid_curves(panel, tab_idx=IQ_TAB)[0]
+    markers = [c for c in curves if len(c.getData()[0]) == 1]
+    # One per direction of the chosen step, each on its own trace.
+    directions = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]
+    assert len(markers) == len(directions)
+    assert len(curves) == before + len(markers)
+
+    marked = sorted(float(c.getData()[0][0]) for c in markers)
+    expected = sorted(
+        float(np.interp(finding.frequency_hz,
+                        sweep["frequencies"][np.argsort(sweep["frequencies"])],
+                        np.real(sweep["iq_volts"])[np.argsort(sweep["frequencies"])]))
+        for sweep in directions.values())
+    assert marked == pytest.approx(expected)
+
+
+def _with_flagged_points(panel, qt_app):
+    """Find bias with a tight distance guard to obtain flagged points.
+
+    A point exactly at the sweep centre can still pass. Tests of a flagged
+    point select one from the report instead of assuming every point fails.
+    """
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+    assert panel.bias_report.flagged, "a guard of a millihertz flagged nothing"
+    return panel
+
+
+def _with_the_flags_cleared(panel):
+    """The same findings, sound -- which is what the library writes when it has
+    nothing to report about them."""
+    return BiasReport(
+        catalog=panel.bias_report.catalog,
+        findings=[replace(f, flagged_kind=None, flagged_because=None)
+                  for f in panel.bias_report.findings],
+        settings=panel.bias_report.settings)
+
+
+def test_the_bias_line_is_named_with_the_drive_it_was_chosen_at(board, qt_app,
+                                                                swept_container):
+    """A bare vertical line says nothing about which drive it belongs to. The
+    drive is the normalized amplitude, which is what a bias amplitude is and
+    what goes back into a re-run."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    amplitude = panel._bias_by_name()[name].amplitude
+
+    rows = _legend_names(panel, MAGNITUDE_TAB)
+
+    assert f"f_bias<br>amp={amplitude:.2g}" in rows
+
+
+def test_the_bias_line_is_named_even_under_the_colorbar(board, qt_app):
+    """It is the one thing on the plot that is not a measurement, so the
+    colorbar taking over the drives does not take its label away."""
+    _, crs, catalog = board
+    panel, errors, _, _, _ = _run_multisweep(
+        crs, catalog, qt_app, **BIFURCATING)      # more drives than a legend holds
+    assert errors == []
+    _find_bias(panel, qt_app)
+
+    _grid_widgets(panel, MAGNITUDE_TAB)
+    assert not panel.mag_colorbar.isHidden(), "this measurement should use the bar"
+
+    rows = _legend_names(panel, MAGNITUDE_TAB)
+    assert [row for row in rows if row.startswith("f_bias")], \
+        "the bias line lost its label when the drives went to the colorbar"
+
+
+def test_flag_text_stays_out_of_plot_legends(board, qt_app, swept_container):
+    panel = _with_flagged_points(_panel_showing(swept_container, board), qt_app)
+
+    for index, _widget in enumerate(_grid_widgets(panel, MAGNITUDE_TAB)):
+        rows = _legend_names(panel, MAGNITUDE_TAB, index)
+        assert all(finding.flagged_kind not in row
+                   for finding in panel.bias_report.flagged for row in rows)
+        assert any(row.startswith("f_bias<br>") for row in rows)
+
+
+def test_the_reason_a_point_is_flagged_stays_off_the_canvas(board, qt_app,
+                                                           swept_container):
+    """Why a point is flagged is a sentence. The legend says *that* it is; the
+    sentence is the subplot's tooltip, so a measurement plot keeps its area."""
+    panel = _panel_showing(swept_container, board)
+    titles = [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)]
+
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)     # flags everything
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+    assert panel.bias_report.flagged
+
+    assert [w.getPlotItem().titleLabel.text for w in _grid_widgets(panel)] == titles
+    for name, widget in zip(panel._selected_names(), _grid_widgets(panel)):
+        finding = panel._bias_by_name()[name]
+        assert not [item for item in widget.getPlotItem().items
+                    if isinstance(item, pg.TextItem)]
+        assert widget.toolTip() == (
+            "" if finding.good else f"{name} is flagged: {finding.flagged_because}")
+
+
+def test_a_flagged_finding_is_marked_like_any_other(board, qt_app, swept_container):
+    """Its bias point is a real point -- the sweep centre it fell back to --
+    so it is drawn, and why it is a fallback is said in words elsewhere."""
+    panel = _panel_showing(swept_container, board)
+
+    panel.bias_settings._distance_radios["absolute"].setChecked(True)
+    panel.bias_settings.absolute_spin.setValue(0.001)
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+
+    assert len(_infinite_lines(panel)[0]) == 1
+    assert _infinite_lines(panel)[0][0].value() == pytest.approx(0.0, abs=1e-6)
+
+
+# ── the bias diagnostics tab ─────────────────────────────────────────────────
+
+
+
+def _on_bias_tab(swept_container, board):
+    """The shared measurement with the diagnostics tab showing."""
+    panel = _panel_showing(swept_container, board)
+    panel.plot_tabs.setCurrentIndex(BIAS_TAB)
+    panel._redraw_plots()
+    return panel
+
+
+def _diagnostic_rows(sweeps, settings=None):
+    """``[(amplitude, pair strength, shape threshold, noise threshold)]`` in
+    amplitude order, from the library the tab reads."""
+    settings = settings or {}
+    rows = []
+    for amplitude, direction, sweep in sweeps:
+        check = bifurcated_by_derivative(
+            {direction: sweep},
+            spike_prominence_factor=settings.get("spike_prominence_factor", 0.5),
+            noise_gate_factor=settings.get("noise_gate_factor", 50.0))
+        rows.append((amplitude, check.metric["pair_strength"],
+                     check.diagnostics["shape_threshold"],
+                     check.diagnostics["noise_threshold"]))
+    return sorted(rows)
+
+
+def test_the_diagnostics_tab_draws_what_the_derivative_test_looks_at(board, qt_app, swept_container):
+    """Per direction, the pair strength and both thresholds the derivative
+    test compares it with, against drive amplitude."""
+    panel = _on_bias_tab(swept_container, board)
+
+    name = panel._selected_names()[0]
+    traces = panel._collect_traces([name])[name]
+    directions = sorted({direction for _s, direction, _a, _sw in traces})
+    curves = _grid_curves(panel, BIAS_TAB)[0]
+    assert len(curves) == 3 * len(directions)
+
+    upward = _diagnostic_rows([(amplitude, direction, sweep)
+                               for _s, direction, amplitude, sweep in traces
+                               if direction == "upward"])
+    expected = np.asarray(upward).T
+    drawn = [curve.getData() for curve in curves
+             if curve.opts["pen"].style() == UPWARD_SWEEP_STYLE]
+    assert len(drawn) == 3
+    for (x, y), values in zip(drawn, expected[1:]):
+        assert np.allclose(x, expected[0])
+        assert np.allclose(y, values)
+
+
+def test_the_diagnostics_tab_marks_the_amplitude_biased_at(board, qt_app, swept_container):
+    """One vertical line at the chosen drive, once something has chosen one."""
+    panel = _on_bias_tab(swept_container, board)
+    assert _infinite_lines(panel, BIAS_TAB)[0] == []
+
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    lines = _infinite_lines(panel, BIAS_TAB)[0]
+    assert [line.value() for line in lines] == pytest.approx(
+        [panel._bias_by_name()[name].amplitude])
+
+
+
+
+
+
+
+
+def test_the_diagnostics_tab_draws_before_anything_has_been_found(board, qt_app, swept_container):
+    """It is a view of the measurement under the current settings, so it is
+    what you look at to choose them -- not a view of a report."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(swept_container, board)
+
+    assert panel.bias_report is None
+    assert all(len(subplot) > 0 for subplot in _grid_curves(panel, BIAS_TAB))
+
+
+def test_the_bars_follow_the_settings(board, qt_app, swept_container):
+    """The thresholds drawn are the ones the current settings apply, so
+    turning the noise gate off moves them."""
+    _, crs, catalog = board
+    panel = _on_bias_tab(swept_container, board)
+    before = [c.getData()[1] for c in _grid_curves(panel, BIAS_TAB)[0]]
+
+    panel.bias_settings.noise_gate_spin.setValue(0.0)
+    panel.bias_settings.apply_button.click()
+
+    after = [c.getData()[1] for c in _grid_curves(panel, BIAS_TAB)[0]]
+    assert not all(np.allclose(b, a) for b, a in zip(before, after))
+
+
+# ── applying it ──────────────────────────────────────────────────────────────
+
+
+def _panel_on_a_board(panel, crs):
+    """Parent *panel* to just enough Periscope to find a board through.
+
+    Keep the returned stub alive for as long as the panel is used: it now owns
+    the panel, and a destroyed parent takes its children's C++ objects with it.
+    """
+    periscope = _periscope_with()
+    periscope.crs = crs
+    panel.setParent(periscope)
+    return periscope
+
+
+def _apply_bias(panel, qt_app):
+    """Press Apply Bias; return the panel's status text."""
+    panel._apply_bias()
+    assert spin_until(qt_app, panel._apply_bias_task.isFinished, timeout=180), \
+        "the apply task never finished"
+    spin(qt_app)          # the signals are queued to this thread; deliver them
+    return panel.bias_status_label.text()
+
+
+def test_apply_bias_puts_every_tone_where_the_panels_catalog_says(board, qt_app, swept_container):
+    """The catalog is the whole instruction, and what lands on the board is
+    what it carries -- on the tone grid, which is ``apply_bias``'s doing."""
+    loop, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    assert _apply_bias(panel, qt_app) == "Bias applied"
+
+    nco = loop.run_until_complete(crs.get_nco_frequency(module=catalog.module))
+    for resonator in panel.catalog:
+        played = nco + loop.run_until_complete(crs.get_frequency(
+            channel=resonator.channel, module=catalog.module))
+        assert played == pytest.approx(resonator.bias.frequency_hz, abs=1.0)
+        assert loop.run_until_complete(crs.get_amplitude(
+            channel=resonator.channel, module=catalog.module)) == \
+            pytest.approx(resonator.bias.amplitude)
+
+
+def test_the_button_is_dead_while_the_bias_is_applied(board, qt_app, swept_container):
+    """It programs the board, so it cannot be pressed twice, and it says what
+    it is doing while it is not pressable."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    panel._apply_bias()
+    assert not panel.apply_bias_btn.isEnabled()
+    assert panel.bias_status_label.text() == "Applying bias..."
+
+    assert spin_until(qt_app, panel._apply_bias_task.isFinished, timeout=180)
+    spin(qt_app)
+    assert panel.apply_bias_btn.isEnabled()
+
+
+def test_a_bias_that_was_applied_says_so_in_green_and_then_stops(board, qt_app, swept_container):
+    """A routine outcome on the status line, and not left on screen once it
+    has been read."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+
+    assert _apply_bias(panel, qt_app) == "Bias applied"
+    assert TABLEAU10_COLORS[2] in panel.bias_status_label.styleSheet()
+    assert panel._bias_status_timer.isActive()
+
+    panel._bias_status_timer.timeout.emit()     # as it does after STATUS_MESSAGE_MS
+    assert panel.bias_status_label.text() == ""
+
+
+def test_applying_publishes_what_reads_the_tones_in_hertz(board, qt_app, swept_container):
+    """The tuning rows come off the catalog's own bias points, by channel --
+    which is what the main window stores, what the streams are displayed
+    through, and what a capture records as its tuning."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    published = []
+    panel.tuning_ready.connect(
+        lambda module, rows: published.append((module, rows)))
+
+    _apply_bias(panel, qt_app)
+
+    module, rows = published[0]
+    assert module == catalog.module
+    assert {ch: row["df_calibration"] for ch, row in rows.items()} == {
+        r.channel: r.bias.df_calibration for r in panel.catalog}
+    # The sweep each calibration was read off travels with it.
+    biased = next(r for r in panel.catalog if r.bias.bias_sweep is not None)
+    assert rows[biased.channel]["sweep_direction"] is not None
+
+
+def test_a_changed_dac_scale_is_said_in_a_popup_and_the_applied_bias_published(
+        board, qt_app, swept_container, tmp_path, monkeypatch):
+    """Apply Bias keeps the powers the bias was measured at: under a DAC
+    scale 6 dB up the tones go out at half the amplitude, the tuning a capture
+    records says so, and a warning that does not block the window says why."""
+    import math
+    from rfmux.tuning import store
+    loop, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    published = []
+    panel.tuning_ready.connect(
+        lambda module, rows: published.append((module, rows)))
+    monkeypatch.setattr(store, "_output_directory", tmp_path)
+    store.set_autosave(True)
+    try:
+        scale = loop.run_until_complete(crs.get_dac_scale("DBM", module=catalog.module))
+        loop.run_until_complete(crs.set_dac_scale(
+            scale + 20 * math.log10(2), "DBM", module=catalog.module))
+        with pytest.warns(UserWarning, match="recomputed"):
+            _apply_bias(panel, qt_app)
+    finally:
+        store.set_autosave(None)
+        loop.run_until_complete(crs.set_dac_scale(scale, "DBM", module=catalog.module))
+
+    boxes = [w for w in panel.findChildren(QtWidgets.QMessageBox) if w.isVisible()]
+    assert len(boxes) == 1
+    assert "recomputed" in boxes[0].text()
+    assert boxes[0].windowModality() != QtCore.Qt.WindowModality.ApplicationModal
+    _, rows = published[0]
+    for r in panel.catalog:
+        assert rows[r.channel]["amplitude"] == pytest.approx(r.bias.amplitude / 2)
+    boxes[0].close()
+
+
+def test_a_noise_spectrum_needs_a_bias_first(board, qt_app, swept_container):
+    """The button that reads a biased array is dead until one is."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    owner = _panel_on_a_board(panel, crs)     # held: it owns the panel now
+    assert not panel.noise_spectrum_btn.isEnabled()
+
+    _apply_bias(panel, qt_app)
+
+    assert panel.noise_spectrum_btn.isEnabled()
+
+
+def test_a_file_from_another_module_cannot_program_this_one(board, qt_app, swept_container):
+    """It opens and draws; what goes away is every control that would touch
+    the board."""
+    _, crs, catalog = board
+    panel = _panel_showing(swept_container, board)
+
+    panel.mark_foreign_module(catalog.module + 1)
+
+    assert not panel.apply_bias_btn.isEnabled()
+    assert not panel.rerun_btn.isEnabled()
+
+
+def test_applying_without_a_board_says_so_rather_than_failing(board, qt_app, swept_container):
+    """An offline panel is a viewer. Nothing is programmed and nothing pops
+    up; the status line says why."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    panel._apply_bias()      # no Periscope parent, so no board
+
+    assert panel.bias_status_label.text() == "No board to bias"
+    assert panel.apply_bias_btn.isEnabled()
+
+
+
+
+# ── the bias frequency tab ───────────────────────────────────────────────────
+
+
+
+def _upward_curve(panel, colour, index=0, tab_idx=None):
+    """The one upward-sweep curve of *colour* on a subplot.
+
+    Both directions of the biased step are drawn, in one colour per quantity,
+    so the line style is what tells them apart.
+    """
+    tab_idx = BIAS_FREQ_TAB if tab_idx is None else tab_idx
+    matching = [curve for curve in _grid_curves(panel, tab_idx)[index]
+                if curve.opts["pen"].color().name() == pg.mkColor(colour).name()
+                and curve.opts["pen"].style() == UPWARD_SWEEP_STYLE]
+    assert len(matching) == 1, f"{len(matching)} upward curves of {colour}"
+    return matching[0]
+
+
+def test_the_bias_frequency_tab_draws_what_chose_the_frequency(board, qt_app,
+                                                               swept_container):
+    """The IQ arc speed the ``iq_derivative`` method maximizes, read off the
+    library rather than re-derived here, with the tone's frequency on it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+    foreground = "w" if panel.dark_mode else "k"
+
+    frequencies, speed = iq_arc_speed(sweep)
+    x, y = _upward_curve(panel, foreground).getData()
+    assert np.allclose(
+        x, (frequencies - sweep["original_center_frequency"]) / 1e3)
+    assert np.allclose(y, speed)
+    assert not _bias_highlights(panel, BIAS_FREQ_TAB)[0]
+    assert panel.freq_colorbar.isHidden()
+
+
+def test_the_line_on_it_is_where_the_tone_will_go(board, qt_app, swept_container):
+    """Where the tone lands is on the hardware grid; the gap to the curve's
+    own peak is that quantization, which is what the tab is for."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+    lines = _infinite_lines(panel, BIAS_FREQ_TAB)[0]
+
+    assert [line.value() for line in lines] == [pytest.approx(
+        (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3)]
+
+
+def test_only_the_step_the_resonator_is_biased_at_is_drawn(board, qt_app,
+                                                           swept_container):
+    """The other steps chose nothing, and a grid of them would bury the one
+    that did."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    for name, curves in zip(panel._selected_names(),
+                            _grid_curves(panel, BIAS_FREQ_TAB)):
+        measured = collect_amplitude_iterations_for(panel.module_sweeps, name)
+        directions = len(measured[panel._bias_by_name()[name].iteration])
+        # The arc speed and the two components it is made of, each direction.
+        assert len(curves) == 3 * directions
+        assert len(measured) > 1, "the schedule walked more than one step"
+
+
+def test_the_bias_frequency_tab_is_empty_until_a_bias_is_found(board, qt_app,
+                                                               swept_container):
+    """Nothing has chosen a step yet, so there is no step to draw."""
+    panel = _panel_showing(swept_container, board)
+
+    assert _grid_curves(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]
+    assert _infinite_lines(panel, BIAS_FREQ_TAB) == [[] for _ in panel._selected_names()]
+
+
+def _legend_names(panel, tab_idx, index=0):
+    """The legend rows on one subplot, in the order they were added."""
+    legend = _grid_widgets(panel, tab_idx)[index].getPlotItem().legend
+    return [entry[1].text for entry in legend.items] if legend else []
+
+
+def test_the_frequency_tab_shows_which_component_carries_the_response(
+        board, qt_app, swept_container):
+    """``dI/df`` and ``dQ/df`` under the speed they make, each in its own
+    colour, because a speed that is almost all one component is an IQ loop
+    that is not oriented the way it was assumed to be."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    finding = panel._bias_by_name()[name]
+    sweep = collect_amplitude_iterations_for(
+        panel.module_sweeps, name)[finding.iteration]["upward"]
+    frequencies, dI_df, dQ_df = iq_derivatives(sweep)
+
+    for label, values in (("dI/df", dI_df), ("dQ/df", dQ_df)):
+        x, y = _upward_curve(panel, DERIVATIVE_COLORS[label]).getData()
+        assert np.allclose(
+            x, (frequencies - sweep["original_center_frequency"]) / 1e3)
+        assert np.allclose(y, values)
+
+    # The same labels serve every subplot without covering its curves.
+    assert all(widget.getPlotItem().legend is None
+               for widget in _grid_widgets(panel, BIAS_FREQ_TAB))
+    labels = [label.text() for label in
+              panel.freq_plot_labels.findChildren(QtWidgets.QLabel)]
+    assert any("dI/df" in label for label in labels)
+    assert any("dQ/df" in label for label in labels)
+
+
+def test_the_component_colours_are_not_a_drive_colour(board, qt_app, swept_container):
+    """The colorbar means drive amplitude; a component drawn in one of its
+    colours would read as another sweep."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+
+    drives = {pg.mkColor(colour).name() for colour in create_amplitude_color_map(
+        panel._amplitudes_drawn(), panel.dark_mode).values()}
+
+    assert not drives & {pg.mkColor(c).name() for c in DERIVATIVE_COLORS.values()}
+
+
+# ── the detector digest ──────────────────────────────────────────────────────
+
+
+def _digest(panel, qt_app):
+    """The digest tab, showing, on whichever resonator it is on."""
+    panel.plot_tabs.setCurrentIndex(DIGEST_TAB)
+    panel._redraw_plots()
+    spin(qt_app)
+    return panel.detector_digest_tab
+
+
+def _digest_curves(digest, plot):
+    """The curves on one of the digest's three plots, in the order drawn."""
+    return [curve for curve in digest._plots[plot].getPlotItem().listDataItems()
+            if not curve.property("bias_highlight")]
+
+
+def _digest_highlights(digest, plot):
+    """The translucent bias highlights on one digest plot."""
+    return [curve for curve in digest._plots[plot].getPlotItem().listDataItems()
+            if curve.property("bias_highlight")]
+
+
+def _digest_lines(digest, plot):
+    return [item for item in digest._plots[plot].getPlotItem().items
+            if isinstance(item, pg.InfiniteLine)]
+
+
+def _at_bias(panel, digest):
+    """The traces the digest draws on its bias plot: one amplitude step's."""
+    iteration = panel._bias_by_name()[digest.resonator()].iteration
+    return [trace for trace in digest._traces if trace[0] == iteration]
+
+
+def _digest_rows(digest):
+    """``{heading: {name: (value, tooltip)}}`` of the columns under the plots."""
+    columns = {}
+    for box in digest._columns_host.findChildren(QtWidgets.QGroupBox):
+        rows = {}
+        grid = box.layout()
+        for row in range(grid.rowCount()):
+            name = grid.itemAtPosition(row, 0)
+            value = grid.itemAtPosition(row, 1)
+            if name is None or value is None:
+                continue
+            rows[name.widget().text().rstrip(":")] = (value.widget().text(),
+                                                      value.widget().toolTip())
+        columns[box.title()] = rows
+    return columns
+
+
+def _digest_columns(digest):
+    """The same, as ``{heading: {name: value}}``."""
+    return {title: {name: value for name, (value, _tip) in rows.items()}
+            for title, rows in _digest_rows(digest).items()}
+
+
+def _show_digest_model(digest, model):
+    digest.toolbar.model_combo.setCurrentIndex(
+        digest.toolbar.model_combo.findData(model))
+
+
+def _sweep_arrays(panel):
+    """Every measured trace the panel holds, to compare a block against itself."""
+    return {(name, step, direction): np.asarray(sweep["iq_counts"])
+            for name in panel._selected_names()
+            for step, by_direction in
+            collect_amplitude_iterations_for(panel.module_sweeps, name).items()
+            for direction, sweep in by_direction.items()}
+
+
+class _DoubleClick:
+    """Enough of a mouse event for the grid's double-click handler."""
+
+    def __init__(self):
+        self.accepted = False
+
+    def accept(self):
+        self.accepted = True
+
+
+def test_the_digest_draws_every_sweep_of_the_resonator_it_is_on(
+        board, qt_app, swept_container):
+    """One resonator at the size of the panel: every drive, as a trace and as
+    a loop."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    name = panel._selected_names()[0]
+    assert digest.resonator() == name
+    traces = panel._collect_traces([name])[name]
+    assert len(_digest_curves(digest, 0)) == len(traces)
+    assert len(_digest_curves(digest, 1)) == len(traces)
+
+
+def test_a_digest_curve_is_the_sweep_it_was_read_from(board, qt_app, swept_container):
+    """Drawn off the entry, in the units the panel is showing."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    _step, _direction, _amplitude, sweep = digest._traces[0]
+    x, y = _digest_curves(digest, 0)[0].getData()
+
+    assert np.allclose(
+        x, (sweep["frequencies"] - sweep["original_center_frequency"]) / 1e3)
+    counts = np.asarray(sweep["iq_counts"])
+    assert np.allclose(y, UnitConverter.convert_amplitude(
+        np.abs(counts), panel.unit_mode, normalize=panel.normalize_traces,
+        drive=sweep["sweep_amplitude"], dac_scale=panel._dac_scale()))
+
+
+def test_the_panel_reads_the_dac_scale_the_measurement_recorded(
+        swept_container, board):
+    """The file's own number beats the board this session is connected to: a
+    loaded measurement may be from another board, and the scale that labels
+    its amplitudes is the one it was swept at."""
+    _module, container = swept_container
+    panel = _panel_showing(swept_container, board)
+    recorded = next(iter(container.values()))["dac_scale_dbm"]
+
+    assert recorded is not None
+    assert panel.dac_scales != {panel.active_module_for_dac: recorded}
+    assert panel._dac_scale() == recorded
+
+
+def test_a_normalized_grid_curve_is_the_sweep_over_its_own_drive(
+        board, qt_app, swept_container):
+    """Each trace against the amplitude it was taken at, so the ladder lands
+    on one axis."""
+    panel = _panel_showing(swept_container, board)
+    panel.normalize_traces = True
+    panel.unit_mode = "counts"
+    panel._redraw_plots()
+
+    name = panel._selected_names()[0]
+    _step, _direction, _amplitude, sweep = panel._collect_traces([name])[name][0]
+    _x, y = _grid_curves(panel)[0][0].getData()
+
+    assert np.allclose(
+        y, np.abs(sweep["iq_counts"]) / sweep["sweep_amplitude"])
+
+
+def test_an_iq_loop_is_divided_by_its_drive_and_not_its_own_peak(
+        board, qt_app, swept_container):
+    """Dividing each loop by its own peak would make every loop the same size,
+    which is the comparison across drives the grid is drawn for."""
+    panel = _panel_showing(swept_container, board)
+    panel.normalize_traces = True
+    panel.unit_mode = "counts"
+    panel.plot_tabs.setCurrentIndex(IQ_TAB)
+    panel._redraw_plots()
+
+    name = panel._selected_names()[0]
+    _step, _direction, _amplitude, sweep = panel._collect_traces([name])[name][0]
+    i_vals, q_vals = _grid_curves(panel, tab_idx=IQ_TAB)[0][0].getData()
+
+    iq = np.asarray(sweep["iq_counts"]) / sweep["sweep_amplitude"]
+    assert np.allclose(i_vals, np.real(iq))
+    assert np.allclose(q_vals, np.imag(iq))
+    assert not np.isclose(np.max(np.abs(i_vals + 1j * q_vals)), 1.0)
+
+
+def test_the_digest_walks_the_catalogs_own_names(board, qt_app, swept_container):
+    """Resonators are named, and the array ends where the catalog ends."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+    names = panel._selected_names()
+
+    assert digest.resonator() == names[0]
+    digest.next_btn.click()
+    assert digest.resonator() == names[1]
+    digest.prev_btn.click()
+    digest.prev_btn.click()
+    assert digest.resonator() == names[0]
+
+
+def test_the_arrow_keys_walk_the_array(board, qt_app, swept_container):
+    """Reading an array one resonator at a time is a keyboard job."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+    names = panel._selected_names()
+
+    digest.keyPressEvent(QtGui.QKeyEvent(
+        QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Right,
+        QtCore.Qt.KeyboardModifier.NoModifier))
+
+    assert digest.resonator() == names[1]
+
+
+def test_double_clicking_a_subplot_opens_it_in_the_digest(
+        board, qt_app, swept_container):
+    """The grid says which resonator looks wrong; the digest says what is
+    wrong with it, and the way between them is the subplot itself."""
+    panel = _panel_showing(swept_container, board)
+    widgets = _grid_widgets(panel)
+    name = panel._selected_names()[2]
+
+    event = _DoubleClick()
+    widgets[2].getViewBox().doubleClickedEvent.emit(event)
+    spin(qt_app)
+
+    assert panel.plot_tabs.currentWidget() is panel.detector_digest_tab
+    assert panel.detector_digest_tab.resonator() == name
+    assert event.accepted, \
+        "the view box's coordinate readout would pop up over the digest"
+
+
+def test_the_zoom_box_control_reaches_the_grid_subplots(
+        board, qt_app, swept_container):
+    """The checkbox is on the panel's toolbar and says it is on by default;
+    a grid drawn into a plain view box ignored it."""
+    panel = _panel_showing(swept_container, board)
+    widgets = _grid_widgets(panel)
+
+    panel._toggle_zoom_box_mode(False)
+    assert all(w.getViewBox().state["mouseMode"] == pg.ViewBox.PanMode
+               for w in widgets)
+
+    panel._toggle_zoom_box_mode(True)
+    assert all(w.getViewBox().state["mouseMode"] == pg.ViewBox.RectMode
+               for w in widgets)
+
+
+def test_the_left_plot_is_the_measurement_and_nothing_else(
+        board, qt_app, swept_container):
+    """What every drive did, with no model over it: a fit belongs on the plot
+    of the one sweep it was fitted to."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    digest = _digest(panel, qt_app)
+
+    assert len(_digest_curves(digest, 0)) == len(digest._traces)
+
+
+def test_the_bias_plot_draws_the_sweep_the_tone_will_sit_on(
+        board, qt_app, swept_container):
+    """One drive of the schedule, the one chosen, the model of each of its
+    sweeps that is fitted (Find Bias fits the one the bias was read from),
+    and a line where the tone goes on it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    at_bias = _at_bias(panel, digest)
+    assert 0 < len(at_bias) < len(digest._traces), \
+        "this measurement should have more drives than the one it is biased at"
+    fitted = sum(bool(trace[3].get("fits")) for trace in at_bias)
+    assert fitted >= 1
+    assert len(_digest_curves(digest, 2)) == len(at_bias) + fitted
+    assert len(_digest_highlights(digest, 2)) == len(at_bias)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    sweep = at_bias[0][3]
+    offset = (finding.frequency_hz - sweep["original_center_frequency"]) / 1e3
+    assert [line.value() for line in _digest_lines(digest, 2)] == pytest.approx([offset])
+
+
+def test_the_bias_plot_draws_the_model_on_the_measurements_own_axis(
+        board, qt_app, swept_container):
+    """The skewed fit works normalized to its trace's last point; drawn in
+    those units on a plot of dBm the model would sit sixty dB off the sweep."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+    _show_digest_model(digest, "skewed")
+
+    drawn = len(_at_bias(panel, digest))
+    curves = _digest_curves(digest, 2)
+    measured = np.concatenate([curve.getData()[1] for curve in curves[:drawn]])
+
+    models = curves[drawn:]
+    assert len(models) == drawn
+    for curve in models:
+        assert measured.min() <= np.median(curve.getData()[1]) <= measured.max()
+
+
+def test_the_bias_plot_says_when_nothing_has_chosen_a_drive_yet(
+        board, qt_app, swept_container):
+    """Find Bias has not been pressed, so there is no bias sweep to draw and
+    no fit at a bias amplitude to tabulate."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    assert _digest_curves(digest, 2) == []
+    assert "none found yet" in digest._plots[2].getPlotItem().titleLabel.text.lower()
+    assert list(_digest_columns(digest)) == ["Bias point"]
+
+
+def test_the_bias_column_carries_the_point_that_was_chosen(
+        board, qt_app, swept_container):
+    """The numbers behind the operating point, under the plots that show it."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    rows = _digest_columns(digest)["Bias point"]
+
+    assert rows["Amplitude step"] == str(finding.iteration)
+    assert rows["Frequency"] == f"{finding.frequency_hz / 1e6:.6f} MHz"
+    # Against the scale the measurement recorded, which is what the panel
+    # labels every drive with -- not whatever board this session is on.
+    assert rows["Drive"] == UnitConverter.format_probe_label(
+        finding.amplitude, panel.unit_mode, panel._dac_scale())
+
+
+def test_a_flagged_point_says_so_in_the_bias_column(
+        board, qt_app, swept_container):
+    """A flag is a property of the bias point, so it sits with the numbers
+    that describe it rather than over the plots."""
+    panel = _with_flagged_points(_panel_showing(swept_container, board), qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel.bias_report.flagged[0]
+    digest.select(finding.name)
+    spin(qt_app)
+    assert digest.resonator() == finding.name
+    flagged = _digest_columns(digest)["Bias point"]["Flagged"]
+    assert finding.flagged_kind in flagged
+    assert finding.flagged_because in flagged
+
+
+def test_a_fit_column_carries_what_the_fitter_wrote(
+        board, qt_app, swept_container):
+    """One column per fit of the sweep the tone sits on, off the same rows a
+    notebook gets out of ``collect_fit_params``."""
+    panel = _panel_showing(swept_container, board)
+    _run_fits(panel, qt_app, models=("skewed",))
+    _find_bias(panel, qt_app)
+    digest = _digest(panel, qt_app)
+
+    finding = panel._bias_by_name()[digest.resonator()]
+    fits = collect_fit_params(panel.module_sweeps, "skewed",
+                              names=[digest.resonator()],
+                              iterations=[finding.iteration])
+    assert fits, "the sweep the tone sits on should carry a skewed fit"
+
+    rows = _digest_rows(digest)
+    for fit in fits:
+        value, tooltip = rows[f"Skewed fit \u2014 {fit['direction']}"]["fr"]
+        assert value.startswith(f"{fit['params']['fr'] / 1e6:.6f}")
+        assert value.endswith("MHz")
+        # The row is rounded to something readable; the number the fit
+        # actually produced is a hover away.
+        assert repr(float(fit["params"]["fr"])) in tooltip
+        for param in ("Qc", "Qi"):
+            value, tooltip = rows[f"Skewed fit — {fit['direction']}"][param]
+            assert np.isfinite(fit["errors"][param])
+            assert "±" in value
+            assert repr(float(fit["errors"][param])) in tooltip
+
+
+def test_the_digest_reads_the_measurement_without_touching_it(
+        board, qt_app, swept_container):
+    """It is a view over what is already in the block: it measures nothing and
+    it writes nothing."""
+    panel = _panel_showing(swept_container, board)
+    _find_bias(panel, qt_app)
+    before = _sweep_arrays(panel)
+
+    digest = _digest(panel, qt_app)
+    digest.next_btn.click()
+    digest.prev_btn.click()
+
+    after = _sweep_arrays(panel)
+    assert before.keys() == after.keys()
+    assert all(np.array_equal(before[key], after[key]) for key in before)
+
+
+def _digest_legend(digest, plot):
+    legend = digest._plots[plot].getPlotItem().legend
+    return [entry[1].text for entry in legend.items] if legend else []
+
+
+def test_a_few_drives_are_named_beside_the_traces(board, qt_app, swept_container):
+    """One resonator has one sweep per step, which is a legend's worth of
+    lines -- so the digest names them rather than reaching for the bar."""
+    panel = _panel_showing(swept_container, board)
+    digest = _digest(panel, qt_app)
+
+    assert digest.colorbar.isHidden()
+    assert len(_digest_legend(digest, 0)) == len(digest._traces)
+
+
+def test_many_drives_go_to_the_colorbar(board, qt_app):
+    """Past three drives a legend of them stops being a legend, which is the
+    rule the grids follow and the reason they have a bar."""
+    _, crs, catalog = board
+    panel, errors, _completed, _records, _partials = _run_multisweep(
+        crs, catalog, qt_app, **BIFURCATING)
+    assert errors == []
+
+    digest = _digest(panel, qt_app)
+
+    assert not digest.colorbar.isHidden()
+    assert _digest_legend(digest, 0) == [], \
+        "the drives belong to the bar, and nothing else has asked for a row yet"
+
+
+def test_the_model_colour_is_not_a_drive_colour(qt_app):
+    """On the bias plot the model lies over one drive's trace, so it cannot be
+    drawn in a colour a drive is drawn in -- including the near-black bottom of
+    the colormap that carries a long schedule."""
+    for drawn in (3, 12):        # a legend's worth of drives, and a bar's
+        for dark_mode in (False, True):
+            drives = {pg.mkColor(colour).name()
+                      for colour in create_amplitude_color_map(
+                          np.linspace(0.001, 0.01, drawn), dark_mode).values()}
+            assert pg.mkColor(MODEL_COLOR).name() not in drives
+
+
+def test_collision_preview_uses_headless_cut_and_preserves_measurement(
+        board, qt_app, swept_container):
+    from rfmux.tuning import find_sweeps_with_nearby_resonances
+
+    panel = _panel_showing(swept_container, board)
+    # Resolve a pair in one section; leave the other measured traces intact.
+    name = panel.catalog.names()[0]
+    for by_direction in panel.module_sweeps['results'].values():
+        for sections in by_direction.values():
+            sweep = sections[name]
+            f = sweep['frequencies']
+            centre = np.mean(f)
+            width = np.ptp(f) / 40
+            magnitude = np.ones(len(f))
+            for offset in (-np.ptp(f) / 6, np.ptp(f) / 6):
+                magnitude -= 0.7 / (1 + ((f - centre - offset) / width)**2)
+            sweep['iq_counts'] = magnitude.astype(complex) * 1e6
+    before = copy.deepcopy(panel.module_sweeps['call_params']['catalog'])
+    panel.catalog_editor.separation.setText('inf')
+    parameters = panel.catalog_editor.get_parameters()
+    expected = find_sweeps_with_nearby_resonances(panel.module_sweeps, **parameters)
+    assert name in expected
+    panel._run_collision_cut()
+    spin_until(qt_app, lambda: panel.edit_catalog_btn.isEnabled())
+    assert panel._collision_names == expected
+    assert panel.plot_tabs.currentWidget() is panel.collision_tab
+    assert panel._grid_names() == expected
+    assert panel.module_sweeps['call_params']['catalog'] == before
+    panel.close()
+
+
+def test_collision_resweep_starts_new_measurement_with_copied_catalog(
+        board, qt_app, swept_container, monkeypatch):
+    from types import SimpleNamespace
+
+    panel = _panel_showing(swept_container, board)
+    original = panel.catalog.to_dict()
+    container = panel.multisweep_container
+    removed = panel.catalog.names()[0]
+    panel._collisions_found([removed])
+    started = []
+    parent = SimpleNamespace(crs=board[1],
+                             _start_multisweep_analysis=started.append)
+    monkeypatch.setattr(panel, '_get_periscope_parent', lambda: parent)
+    panel._resweep_without_collisions()
+    dialog = panel._collision_dialog
+    assert removed not in dialog.catalog.names()
+    assert len(dialog.catalog) == len(panel.catalog) - 1
+    dialog.accept()
+    assert len(started) == 1
+    assert started[0]['catalog'].names() == dialog.catalog.names()
+    assert panel.catalog.to_dict() == original
+    assert panel.multisweep_container is container
+    panel.close()
+
+
+@pytest.mark.parametrize('all_collided', [False, True])
+def test_collision_resweep_requires_collisions_and_survivors(
+        board, qt_app, swept_container, all_collided):
+    panel = _panel_showing(swept_container, board)
+    panel._collisions_found(panel.catalog.names() if all_collided else [])
+    assert not panel.collision_resweep_btn.isEnabled()
+    panel.close()
+
+
+def test_collision_preview_is_cleared_for_another_measurement(
+        board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    panel._collisions_found([panel.catalog.names()[0]])
+    module, container = swept_container
+    panel.show_measurement(module, copy.deepcopy(container))
+    assert panel.collision_tab is None
+    assert panel._collision_names == []
+    panel.close()
+
+
+def test_collision_resweep_saves_a_separate_session_measurement(
+        board, qt_app, swept_container, tmp_path, monkeypatch):
+    panel = _panel_showing(swept_container, board)
+    manager = SessionManager()
+    manager.start_session(str(tmp_path), 'collision_session')
+    periscope = _periscope_with(manager)
+    periscope.crs = board[1]
+    try:
+        periscope._save_multisweep_to_session(panel, panel.target_module)
+        original_path = store.saved_path(panel.multisweep_container)
+        original_bytes = original_path.read_bytes()
+        original_names = panel.catalog.names()
+        panel._collisions_found([original_names[0]])
+        monkeypatch.setattr(panel, '_get_periscope_parent', lambda: periscope)
+        panel._resweep_without_collisions()
+        panel._collision_dialog.accept()
+        new_panel = next(iter(periscope.multisweep_windows.values()))['window']
+        spin_until(qt_app, lambda: new_panel.module_sweeps is not None)
+        spin_until(qt_app, lambda: all(not t.isRunning()
+                                     for t in periscope.multisweep_tasks.values()))
+        new_path = store.saved_path(new_panel.multisweep_container)
+        assert new_path is not None and new_path != original_path
+        assert original_path.read_bytes() == original_bytes
+        block = next(iter(store.load(new_path).values()))
+        from rfmux.core.resonators import ResonatorCatalog
+        assert ResonatorCatalog.from_dict(
+            block['call_params']['catalog']).names() == original_names[1:]
+        assert panel.catalog.names() == original_names
+    finally:
+        for task in periscope.multisweep_tasks.values():
+            task.wait()
+        manager.end_session()
+        panel.close()
+
+
+@pytest.mark.parametrize('marker', ['mark_foreign_module', 'mark_capture_tuning'])
+def test_collision_resweep_respects_measurement_restrictions(
+        board, qt_app, swept_container, marker):
+    panel = _panel_showing(swept_container, board)
+    if marker == 'mark_foreign_module':
+        panel.mark_foreign_module(4)
+    else:
+        panel.mark_capture_tuning()
+    panel._collisions_found([panel.catalog.names()[0]])
+    assert not panel.collision_resweep_btn.isEnabled()
+    panel._collision_finished()
+    assert not panel.rerun_btn.isEnabled()
+    panel.close()
+
+
+def test_collision_settings_convert_khz_and_select_measured_steps(qt_app):
+    from rfmux.tools.periscope.tuning_catalog_dialog import TuningCatalogDialog
+    settings = TuningCatalogDialog()
+    settings.set_measurement({'results': {3: {'downward': {}}}})
+    settings.separation.setText('20')
+    settings.iteration.setCurrentIndex(1)
+    settings.direction.setCurrentIndex(1)
+    assert settings.get_parameters() == dict(
+        min_separation_hz=20e3, min_prominence_db=1.0,
+        min_dip_spacing_hz=10.0, iteration=3, direction='downward')
+    settings.close()
+
+
+def test_edit_catalog_removes_exact_names_for_a_new_sweep(
+        board, qt_app, swept_container, monkeypatch):
+    from types import SimpleNamespace
+
+    panel = _panel_showing(swept_container, board)
+    original = copy.deepcopy(panel.module_sweeps)
+    catalog = panel.catalog.to_dict()
+    names = panel.catalog.names()
+    started = []
+    parent = SimpleNamespace(crs=board[1],
+                             _start_multisweep_analysis=started.append)
+    monkeypatch.setattr(panel, '_get_periscope_parent', lambda: parent)
+    assert panel.edit_catalog_btn.text() == 'Tuning Catalog'
+    panel.edit_catalog_btn.click()
+    editor = panel.catalog_editor
+    assert editor.isVisible()
+    assert editor.run_button.isVisible()
+    _select_rows(editor, names[:2])
+    editor.remove_button.click()
+    dialog = panel._collision_dialog
+    assert dialog.catalog.names() == [n for n in names if n not in names[:2]]
+    dialog.accept()
+    assert len(started) == 1
+    assert started[0]['catalog'].names() == dialog.catalog.names()
+    assert panel.catalog.to_dict() == catalog
+    assert panel.module_sweeps['call_params'] == original['call_params']
+    panel.close()
+
+
+def _select_rows(editor, names):
+    """Select the rows of *names* in the Tuning Catalog table."""
+    from rfmux.tools.periscope.tuning_catalog_dialog import NAME
+    table = editor.table
+    table.clearSelection()
+    flags = (QtCore.QItemSelectionModel.SelectionFlag.Select
+             | QtCore.QItemSelectionModel.SelectionFlag.Rows)
+    for row in range(table.rowCount()):
+        if table.item(row, NAME).text() in names:
+            table.selectionModel().select(table.model().index(row, 0), flags)
+
+
+@pytest.mark.parametrize('entry, message', [
+    ('none', 'Select at least one resonator.'),
+    ('all', 'Keep at least one resonator to re-sweep.'),
+])
+def test_edit_catalog_rejects_invalid_removals(
+        board, qt_app, swept_container, entry, message):
+    panel = _panel_showing(swept_container, board)
+    original = panel.catalog.to_dict()
+    panel.edit_catalog_btn.click()
+    _select_rows(panel.catalog_editor,
+                 panel.catalog.names() if entry == 'all' else [])
+    panel.catalog_editor.remove_button.click()
+    assert panel.catalog_editor.status.text() == message
+    assert panel.catalog_editor.isVisible()
+    assert not hasattr(panel, '_collision_dialog')
+    assert panel.catalog.to_dict() == original
+    panel.close()
+
+
+def test_an_applied_catalog_is_the_array_the_panel_sweeps_next(
+        board, qt_app, swept_container):
+    """Edits stay in the window until Apply; Apply gives them to the panel."""
+    from rfmux.tools.periscope.tuning_catalog_dialog import AMPLITUDE, NAME
+    panel = _panel_showing(swept_container, board)
+    panel.edit_catalog_btn.click()
+    editor = panel.catalog_editor
+    name = editor.table.item(0, NAME).text()
+    editor.table.item(0, AMPLITUDE).setText("0.002")
+    assert panel.catalog[name].bias.amplitude != 0.002
+
+    editor.apply_button.click()
+    assert panel.catalog[name].bias.amplitude == 0.002
+    panel.close()
+
+
+@pytest.mark.parametrize('restriction', ['is_foreign_module', 'is_capture_tuning'])
+def test_edit_catalog_disables_manual_resweep_for_read_only_measurements(
+        board, qt_app, swept_container, restriction):
+    panel = _panel_showing(swept_container, board)
+    setattr(panel, restriction, True)
+    panel.edit_catalog_btn.click()
+    assert not panel.catalog_editor.remove_button.isEnabled()
+    assert not panel.catalog_editor.apply_button.isEnabled()
+    panel.close()
+
+
+def test_edit_catalog_disables_removal_during_analysis(
+        board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    panel.edit_catalog_btn.click()
+    panel._set_analysis_enabled(False)
+    assert not panel.catalog_editor.remove_button.isEnabled()
+    assert not panel.catalog_editor.run_button.isEnabled()
+    panel._set_analysis_enabled(True)
+    assert panel.catalog_editor.remove_button.isEnabled()
+    panel.close()
+
+
+@pytest.mark.parametrize("compare", ["magnitude", "iq"])
+def test_hysteresis_tab_uses_detector_curve(board, qt_app, swept_container, compare):
+    panel = _panel_showing(swept_container, board)
+    panel.bias_settings.compare_combo.setCurrentIndex(
+        panel.bias_settings.compare_combo.findData(compare))
+    panel.bias_settings.discrepancy_spin.setValue(0.2)
+    panel.bias_settings.apply_button.click()
+    _find_bias(panel, qt_app)
+    name = panel._selected_names()[0]
+    steps = collect_amplitude_iterations_for(panel.module_sweeps, name)
+    curves = _grid_curves(panel, HYSTERESIS_TAB)[0]
+    assert len(curves) == len(steps)
+    for curve, pair in zip(curves, steps.values()):
+        frequencies, separation = hysteresis_separation(pair, compare=compare)
+        x, y = curve.getData()
+        np.testing.assert_allclose(x, (frequencies - pair["upward"]["original_center_frequency"]) / 1e3)
+        np.testing.assert_allclose(y, separation / 0.2)
+    widths = [curve.opts["pen"].widthF() for curve in curves]
+    assert set(widths) == {LINE_WIDTH}
+    highlight, = _bias_highlights(panel, HYSTERESIS_TAB)[0]
+    chosen = list(steps).index(panel.bias_report[name].iteration)
+    np.testing.assert_allclose(highlight.getData()[0], curves[chosen].getData()[0])
+    np.testing.assert_allclose(highlight.getData()[1], curves[chosen].getData()[1])
+    assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [1]
+    units = "dip depth" if compare == "magnitude" else "loop radius"
+    assert panel.hysteresis_limit_label.text() == f"· · Limit: 0.2 × {units}"
+    assert not any("Limit:" in row for row in _legend_names(panel, HYSTERESIS_TAB))
+
+
+def test_hysteresis_tab_updates_the_allowed_difference(board, qt_app, swept_container):
+    panel = _panel_showing(swept_container, board)
+    before = _grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1].copy()
+    panel.bias_settings.discrepancy_spin.setValue(0.2)
+    panel.bias_settings.apply_button.click()
+    after = _grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1]
+    np.testing.assert_allclose(after, before / 2)
+    panel.bias_settings.discrepancy_spin.setValue(0.0)
+    panel.bias_settings.apply_button.click()
+    assert [line.value() for line in _infinite_lines(panel, HYSTERESIS_TAB)[0]] == [0]
+    assert panel.hysteresis_limit_label.text().startswith("· · Limit: 0 ×")
+    assert np.isfinite(_grid_curves(panel, HYSTERESIS_TAB)[0][0].getData()[1]).all()
+
+
+def test_hysteresis_tab_explains_missing_pairs(qt_app):
+    from rfmux.tools.periscope.multisweep_grid_helpers import _plot_hysteresis
+
+    widget = pg.PlotWidget()
+    _plot_hysteresis(widget.getPlotItem(), [], {}, "black", None, {})
+    assert any(isinstance(item, pg.TextItem) and item.toPlainText() == "No usable up/down pairs"
+               for item in widget.getPlotItem().items)
+    widget.close()

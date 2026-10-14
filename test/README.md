@@ -4,15 +4,17 @@
 
 Ask for a tier by name. Counts and times are from a warm checkout on a
 developer laptop.
+The Jupyter IPv6 busy-port check requires `localhost` to resolve to IPv6;
+an IPv6 loopback socket alone is not sufficient.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 50 | ~9 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 1221 | ~1 min | Default while editing. |
-| `pytest --tier=acquisition` | 19 | ~2.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 1240 | ~3.5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=portable` | 883 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2455 | ~6.5 min | Default while editing. |
+| `pytest --tier=acquisition` | 38 | ~9.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
+| `pytest --tier=full` | 2493 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 1315 | needs a board | Before a release. |
+| `pytest --tier=all --serial 0024` | 2503 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem
@@ -26,10 +28,59 @@ an error rather than one overriding the other.
 **Without the test group** the notebook and mock-vs-real tests skip rather than
 fail: a CI runner missing it goes green having not run them.
 
+## Timing and stalled runs
+
+Every run writes a unique UTC timestamp/PID file in `test-timings/` at the
+repository root and prints its path with a section timing summary. Files are
+ignored by Git and retained until you remove them. No extra dependency is needed.
+Use `--no-test-timings` to disable the log and summary, for example in a read-only
+checkout or when measuring the logger's overhead.
+
+The JSONL log is flushed after each event, so it can be inspected during a run:
+
+```bash
+tail -f test-timings/<run>.jsonl
+```
+
+Each line includes a UTC timestamp and monotonic elapsed seconds since logger
+initialization. Run metadata includes the invocation arguments, tier, commit
+(when Git is available), machine, platform, Python and pytest versions; the
+session-start event records the resolved marker expression. The commit does not
+identify uncommitted edits. Compare runs with the same selection and environment;
+JIT/cache warm-up can affect timings.
+
+`phase_start` and `phase_finish` identify the test node ID and setup, call or
+teardown phase. Finish events include pytest's duration in seconds and outcome.
+The summary adds those durations by directory (such as `test/pulse_capture`)
+and lists the ten slowest tests including fixtures. Shared fixture costs belong
+to the test that triggers setup or teardown. Per-file totals can be derived from
+the node IDs. Section totals exclude collection and pytest overhead; collection
+and elapsed time through the summary are shown separately.
+
+Collection has its own start/finish events and collector node IDs to help locate
+an import stall. A `session_finish_start` followed by `run_finish` brackets
+pytest's session-finish hooks. The latter records the exit status, section totals
+and elapsed time through those hooks. It does not prove the Python process has
+exited: interpreter shutdown, later plugin cleanup, or surviving threads can
+still delay exit. A forcibly killed run has no final event; its last unmatched
+start event identifies work that had begun, not proof of its cause.
+
+Pytest's fault handler dumps Python thread stacks when a test (including setup
+and teardown) exceeds **120 seconds**, without terminating it. Override with
+`-o faulthandler_timeout=300`, or disable with `-o faulthandler_timeout=0`.
+This watchdog does not cover collection or interpreter shutdown. Availability
+depends on the platform and pytest/Python versions. Notebook/server subprocess
+stacks are not included.
+
+The logger targets the suite's ordinary serial pytest runs. Distributed worker
+logs are separate files; no combined worker timeline is provided.
+
 ## What each tier covers
 
 - **portable:** hardware-map YAML/CSV parsing, schema validation, session
-  threading. Runs on a bare install: no PyQt6, no board. This is the subset
+  threading, and the tuning analysis (`test/tuning/`) on synthetic traces:
+  resonance finding, fitting, bias finding, the sweep shape and the output
+  folder. Runs on a bare install: no PyQt6, no board. This is the subset
   `tox` runs on Python 3.10, 3.11 and 3.12, which is what keeps
   `requires-python = ">=3.10"` honest. The floor is 3.10 because
   `rfmux/core/crs.py` uses `match`.
@@ -39,7 +90,9 @@ fail: a CI runner missing it goes green having not run them.
   and the receiver tests feed themselves hand-built packets over loopback. A
   MockCRS server spawned for its RPC surface alone (`load_session` on the
   `rfmux.mock` flavour, as in `test_channel_selection.py`) stays in this
-  tier; the mock sends UDP only after `start_udp_streaming()`.
+  tier; the mock sends UDP only after `start_udp_streaming()`. The tuning flow
+  tests run that way against the *standard simulated array* (below): a real
+  netanal, multisweep schedule and bias, over RPC, in under a minute.
 - **acquisition:** a MockCRS server subprocess streaming UDP over loopback.
   Covers what no unit test can: streamer config taking effect, and the slow
   (~38 kHz) and PFB (~2.44 MHz) sources feeding a session. Also decimation
@@ -49,6 +102,40 @@ fail: a CI runner missing it goes green having not run them.
 
 A test marked `portable` that needs PyQt6 or a board does not fail there, it
 *skips*, so the matrix goes green having tested nothing.
+
+## Coverage boundaries
+
+Presentation tests should reuse measured sweeps or prepared reports; keep real
+acquisition and fitting in the tests of those operations. File parity and
+provenance can be checked on the same pair of saved measurements. The
+standard-array flow tests cover resonance pull and increasing nonlinearity;
+the deprecated bias API retains its own fitting and calibration tests.
+
+Crate slots are unsupported by tuber-client. The strict expected failure in
+`core/test_schema.py::test_hardware_map_with_crate_slots_indexed_by_list` tracks
+that limitation. Before enabling crate slots, verify one-based list indexing,
+explicit dictionary slot numbers, the `crate001_slot3` board-index fallback,
+and CSV channel mappings by both board serial and crate/slot. The standalone
+board and wafer/resonator CSV tests cover the supported paths.
+
+## The standard simulated array
+
+`rfmux/mock/standard_array.py` fixes one simulated array for tests to share:
+eight seeded resonators in 1.00-1.10 GHz, biased by the simulator itself, with
+its default physics and noise except a warmer bath (0.23 K, so Q is near 5e4
+and a 20 kHz linewidth is resolvable on the default sweep grids). It is served
+over RPC with no UDP, so tests against it are quick-tier. `standard_array()`
+returns the board and a catalog of its tones; `test/tuning/conftest.py`
+provides it module-scoped as `standard_array_board`, because a second
+`load_session` in one process detaches the first board's objects. One array per
+test module.
+
+`test/notebooks/test_standard_mock_array.md` builds it and runs the whole
+tuning flow across it, printing what the array looks like and asserting the
+properties the tests lean on: every resonator found, every fit converging, and
+the test schedule bracketing bifurcation. Read it before writing a test against
+the array; change the array there first. A test that needs a different array
+passes `overrides` and says so in its name.
 
 ## Hardware tests
 
@@ -71,7 +158,7 @@ stage 6 long packets on teardown. Don't point it at a board mid-experiment.
   disagreeing. Run it after changing the mock's API, or when board firmware
   changes. It only reads attributes, so it is safe against a board in use.
 - The measurement algorithms are **not** covered here, or anywhere against
-  real hardware: network analysis, multisweep, fitting and `bias_kids` all run
+  real hardware: network analysis, multisweep, fitting and bias finding all run
   against the mock only. `test_mock_vs_real` is what keeps the mock
   trustworthy as that reference.
 
@@ -109,9 +196,9 @@ Directories mirror the package under test.
 | `streamer/` | `rfmux/streamer/`: packet decode, the batched getters, port conflict probes |
 | `mock/` | `rfmux/mock/`: simulator fidelity, config plumbing, TLS noise, JIT dispatch, multicast selection |
 | `algorithms/` | `rfmux/algorithms/measurement/`: measurement flows, streamer config |
+| `tuning/` | `rfmux/tuning/`, `rfmux/core/resonators.py`, `rfmux/algorithms/operation/`: resonance finding, fits, bias finding, catalogs, the sweep shape, the output folder; and the flow end to end on the standard simulated array |
 | `periscope/` | `rfmux/tools/periscope/`: panels, dialogs, receiver, shutdown |
 | `pulse_capture/` | `rfmux/pulse_capture/`: detection, session, ingest, HDF5, plus its Periscope panel and task |
-| `tools/` | `rfmux/tools/` outside Periscope: the parser's dirfile output and range grammar, the record dialog |
 | `notebooks/` | Jupyter-based tests |
 
 ## Notebook tests
@@ -124,9 +211,11 @@ writes output must write to a temp directory, since the reference copies are
 provisioned read-only. Of the `.py` scripts beside the demos,
 `simplified_tuning_flow.py` runs against `MOCK` in the acquisition tier
 (`test_measurement_flow.py`); `pulse_capture_flow.py` is not executed by any
-test, so run it by hand when its notebook changes.
+test, so run it by hand when its notebook changes. Every `Demos/*.md` is
+collected, so a draft notebook left in that directory is executed too: keep
+drafts elsewhere until they are ready to run.
 
-## Qt tests
+## Qt collection
 
 An autouse fixture in `test/conftest.py` turns the cyclic collector off while
 a test that uses `qt_app` runs, and `pytest_runtest_logfinish` there calls
@@ -151,13 +240,14 @@ extension was built. That needs Linux with clang, libxdp, libbpf and
 liburing present at install time (`rfmux/streamer/CMakeLists.txt`).
 `test/tools/test_parser_dirfile.py` skips unless pygetdata is installed:
 it is a default dependency everywhere but Linux aarch64, which has no
-pygetdata wheel. Two tests skip on Windows:
-`test_mock_capture_and_parser_cover_the_same_stretch`, because
-`rfmux record` starts its parser as an asyncio subprocess, which the selector
-event loop used there does not support, and
-`test/mock/test_server_exits_with_parent.py`, which kills its client with
-`SIGKILL`. With fastrx built and the test group installed, every tier below
-`hardware` reports zero skips on Linux.
+pygetdata wheel. The Jupyter IPv6 case requires IPv6 resolution for
+localhost. `test_mock_capture_and_parser_cover_the_same_stretch` skips on
+Windows, because `rfmux record` starts its parser as an asyncio subprocess,
+which the selector event loop used there does not support. In
+`test/mock/test_server_lifecycle.py` the parent-exit tests run on Linux only
+(they read `/proc`), and two more need the fork start method. With fastrx
+built and the test group installed, every tier below `hardware` reports zero
+skips on Linux.
 
 ## CI
 

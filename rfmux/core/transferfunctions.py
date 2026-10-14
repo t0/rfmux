@@ -6,15 +6,28 @@ import numpy as np
 
 # Added import for PSD computation
 from scipy.signal import welch
-from scipy.constants import pi, c
+from scipy.constants import c
 from typing import Union, Optional, Dict, Literal
 import warnings
 from scipy import interpolate
 
 
+#: Loss in the board's balun, in dB. The power at the output is the DAC scale
+#: programmed with ``set_dac_scale`` less this; the readout counts are scaled
+#: by it too.
+BALUN_LOSS_DB = 1.75
+
 # TODO: Empirical value (should probably be a hybrid)
+#
+# Being one constant is load-bearing for more than arithmetic.
+# `resonators.BiasPoint.bias_sweep` stores a sweep in volts and drops the counts
+# it was measured in, on the grounds that counts are recoverable by dividing by
+# this. The day this stops being a single number — per board, per module, per
+# frequency, or anything fitted — that stops being true for a catalog already
+# written, and what a bias sweep stores has to be reconsidered.
 VOLTS_PER_ROC = (
-    (np.sqrt(2)) * np.sqrt(50 * (10 ** (-1.75 / 10)) / 1000) / 1880796.4604246316
+    (np.sqrt(2)) * np.sqrt(50 * (10 ** (-BALUN_LOSS_DB / 10)) / 1000)
+    / 1880796.4604246316
 )
 
 CREST_FACTOR = 3.5
@@ -47,13 +60,23 @@ FREQ_QUANTUM = COMB_SAMPLING_FREQ / 256 / 2**DDS_PHASE_ACC_NBITS
 # TODO: verify still appropriate
 BASE_FREQUENCY = COMB_SAMPLING_FREQ / 256 / 2**12
 
+# How far apart the tones in one NCO region are allowed to sit: every tone
+# within +/- ALLOWED_NCO_BANDWIDTH_HZ / 2 of the NCO frequency.
+#
+# This is a policy, not a hardware limit. The band a module can actually
+# convert is a separate, wider number; this is the span across which we are
+# willing to place tones and still call the result trustworthy. It lives here,
+# in one place, so that a catalog which fits the sweep also fits the bias
+# applier -- two algorithms disagreeing about how wide a region may be is a
+# catalog that can be measured and then not played back.
+ALLOWED_NCO_BANDWIDTH_HZ = 500e6
+
 # ────────────────── Cable Delay Compensation Functions ───────────────────
 SPEED_OF_LIGHT_VACUUM = c  # m/s
 VELOCITY_FACTOR_COAX = 0.66
 EFFECTIVE_PROPAGATION_SPEED = SPEED_OF_LIGHT_VACUUM * VELOCITY_FACTOR_COAX
 
 # TODO: These should be functions that take the current and attenuation as inputs
-# CAN assume -1.75 dBm loss in the balun
 # ADC_FS = -1 # dbm
 # DAC_FS = -1 # dbm
 
@@ -146,13 +169,8 @@ def volts_squared_to_dbm(v2, termination=TERMINATION, floor=0.0):
 
 
 def convert_amplitude_to_dbm(amplitude, dac_scale_dbm):
-    """Tone power in dBm for a normalized DAC *amplitude*, against the
-    module's DAC scale in dBm (the power of a full-scale tone; see
-    ``bias_kids.dac_scale_dbm``).  Amplitude is a voltage ratio, so it
-    is 20 log10 of it below full scale."""
-    amplitude = np.asarray(amplitude, dtype=float)
-    with np.errstate(divide="ignore"):
-        dbm = dac_scale_dbm + 20.0 * np.log10(amplitude)
+    """Alias for :func:`convert_dacunits_to_dbm`."""
+    dbm = convert_dacunits_to_dbm(amplitude, dac_scale_dbm)
     return float(dbm) if dbm.ndim == 0 else dbm
 
 
@@ -187,6 +205,87 @@ def convert_volts_to_dbm(volts, termination=50.0):
 
     watts = convert_volts_to_watts(volts, termination)
     return 10.0 * np.log10(watts * 1e3)
+
+
+# ───────────────── The drive side: DAC amplitudes ─────────────────
+#
+# A tone's amplitude is a fraction of DAC full scale, in (0, 1], and the
+# module's DAC scale in dBm says what full scale is worth -- read from the
+# board by rfmux.core.dac_scale.dac_scale_dbm. The pair is what every
+# statement of a drive power is built from: a bias point's power, an
+# amplitude schedule's range, a sweep axis normalized by what drove it. The
+# arithmetic is here so those agree by construction.
+#
+# Volts are peak amplitudes here as everywhere in rfmux.
+
+
+def convert_dbm_to_volts(dbm, termination=TERMINATION):
+    """Log power to signal amplitude in volts -- convert_volts_to_dbm backwards.
+
+    Parameters
+    ----------
+
+    dbm : power in dBm
+
+    termination : the system termination resistance in ohms.
+        Default is 50.
+
+    Returns
+    -------
+
+    (float) peak amplitude in volts
+    """
+
+    watts = 10.0 ** (np.asarray(dbm, dtype=float) / 10.0) / 1e3
+    v_rms = np.sqrt(watts * termination)
+    return v_rms * np.sqrt(2.0)
+
+
+def convert_dacunits_to_dbm(amplitude, dac_scale_dbm):
+    """The power a tone in normalized DAC units drives, in dBm.
+
+    TODO: Account for carrier-frequency dependence of the DAC output power.
+
+    Parameters
+    ----------
+
+    amplitude : tone amplitude as a fraction of DAC full scale, in (0, 1]
+
+    dac_scale_dbm : what full scale is worth on this module, in dBm
+
+    Returns
+    -------
+
+    (float) drive power in dBm; -inf at zero amplitude
+    """
+
+    with np.errstate(divide="ignore"):
+        return dac_scale_dbm + 20.0 * np.log10(np.asarray(amplitude, dtype=float))
+
+
+def convert_dacunits_to_volts(amplitude, dac_scale_dbm, termination=TERMINATION):
+    """The voltage a tone in normalized DAC units drives.
+
+    TODO: Account for carrier-frequency dependence of the DAC output power.
+
+    Parameters
+    ----------
+
+    amplitude : tone amplitude as a fraction of DAC full scale, in (0, 1]
+
+    dac_scale_dbm : what full scale is worth on this module, in dBm
+
+    termination : the system termination resistance in ohms.
+        Default is 50.
+
+    Returns
+    -------
+
+    (float) peak amplitude in volts
+    """
+
+    return convert_dbm_to_volts(
+        convert_dacunits_to_dbm(amplitude, dac_scale_dbm), termination)
 
 
 def decimation_to_sampling(dec_stage):
@@ -784,6 +883,8 @@ def apply_iq_conversion(i_vals, q_vals, factor):
 
 def convert_iq_to_df(iq, fbias, f_calsweep, iq_calsweep):
     '''
+    TODO: DEPRECATED AND REPLACED BY THE CONFUSINGLY NAMED APPLY_IQ_CONVERSION ?
+
     Equation 4.5 of Pete Barry's thesis (https://orca.cardiff.ac.uk/id/eprint/71562/1/2014BarryPPhD.pdf)
     Converts from I,Q voltage units to fequency shift and dissipation.
 

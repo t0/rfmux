@@ -17,27 +17,43 @@ jupytext -o pulse_capture.ipynb pulse_capture.md
 
 ## Where to start
 
-- **`Demos/simplified_tuning_flow.md`**: sweep the band, find and fit the
-  resonators, bias the detectors, measure the noise. Everything else assumes
-  you have done this first.
-- **`Demos/pulse_capture.md`**: detect and record detector pulses, with
-  streaming HDF5, histograms and matched slow+fast capture, then a walk
-  through the capture file: events, noise samples, units and the tuning rows.
+The first four take the tuning flow a step at a time, in this order:
+
+- **`Demos/network_analysis_find_resonances.md`** — sweep a band, find the dips,
+  and seed the resonator catalog everything downstream passes around.
+- **`Demos/resonator_catalogs.md`** — the catalog on its own: building one by
+  hand, reading and amending it, the invariants, and the CSV and dictionary
+  round trips, stored calibration traces and bifurcation observations. It builds
+  a seeded mock catalog and needs no hardware or saved measurement.
+- **`Demos/multisweep.md`** — look at each resonance closely: one narrow sweep
+  per resonator, all of them in parallel, and then the same array over a schedule
+  of probe amplitudes, with sweep centers independent of catalog bias points.
+  Includes a short example of fitting and plotting measured sweeps.
+- **`Demos/bias_finding.md`** — select amplitudes and frequencies, inspect flags,
+  and carry calibration and bifurcation observations into the next measurement.
+
+Then:
+
+- **`Demos/simplified_tuning_flow.md`** — the whole chain end to end: sweep,
+  find resonators, select bias points, bias the resonators, and measure noise.
+- **`Demos/noise_measurement.md`** — start with a biased mock array, verify it
+  and calibrate it with a multisweep, call `measure_noise`, and reopen the files
+  for IQ overlays, timestreams and PSDs. `example_plotting_noise.py` supplies reusable
+  plotters for saved noise module blocks, including optional PFB captures.
+- **`Demos/pulse_capture.md`** — detect and record detector pulses, with
+  streaming HDF5, histograms, matched slow+fast capture, coincidence events,
+  noise samples and IQ-plane review using catalog-based calibration records.
 - **`Demos/fastrx_recording.md`**: open a fastrx recording (the 100G channel
   stream on disk) offline: its times, samples, gaps and drop-outs, then the
   recording beside a pulse capture and merged into it. It needs no board and
   no fastrx extension, and writes a small recording when given none.
 
-The first two have a `.py` counterpart beside them: the same sequence as a
-plain script, to copy from. `pulse_capture_flow.py` covers the captures; the
-walk through the file is in the notebook only. The notebooks and
-`simplified_tuning_flow.py` run in the acquisition tier; `pulse_capture_flow.py` does not, so run it by hand after
-changing its notebook.
-
-- **`Guides/`**: the repository's guides and installation page, provisioned
-  beside the notebooks.
-- **`Release Notes/`**: the firmware release walkthroughs and the
-  repository's release notes.
+`simplified_tuning_flow` and `pulse_capture` have an unattended `.py`
+counterpart beside them for cron jobs and smoke tests; the notebook is the
+documentation, the script is the runner. Every notebook here runs in the
+test suite, all but `fastrx_recording.md` in the acquisition tier, and so
+does `simplified_tuning_flow.py`; `pulse_capture_flow.py` does not, so run
+it by hand after changing its notebook.
 
 ## Connecting
 
@@ -51,3 +67,21 @@ crs = s.query(rfmux.CRS).one()
 await crs.resolve()
 await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)  # the fast stream needs a timestamp source
 ```
+
+No hardware? Every demo above that talks to a board stands up a simulated
+CRS instead — see their mock-mode sections.
+
+## Data products
+
+The demo workbooks use `rfmux.tuning.store` just like an in-lab workflow.
+`store.session_directory()` creates and returns the active output folder,
+which defaults to `~/rfmux_data/ipy_session_YYYYMMDD/`. Measurements and
+catalogs use `store.save()` / `store.load()`; CSV exports and pulse HDF5
+captures use the same folder with their format-specific readers and writers.
+Data products remain on disk after the workbook finishes.
+
+To choose a different root, set `RFMUX_DATA_DIR` or `store.directory` in your
+config; the store adds the dated session folder. To use an exact folder in
+a notebook session, call `store.set_output_directory(path)` before running
+the workbook's setup cell. Measurements autosave by default, subject to
+your store settings and any explicit `save=` argument in the workbook.

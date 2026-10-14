@@ -55,7 +55,7 @@ from ..core.schema import (
     ReadoutModule,
     ReadoutChannel,
     Wafer,
-    Resonator,
+    HWMResonator,
     ChannelMapping
 )
 
@@ -72,7 +72,7 @@ __all__ = [
     "ReadoutModule",
     "ReadoutChannel",
     "Wafer",
-    "Resonator",
+    "HWMResonator",
     "ChannelMapping",
     "yaml_hook",
     "config"

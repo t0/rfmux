@@ -10,8 +10,10 @@ import pytest
 pytest.importorskip("PyQt6")
 
 import rfmux  # noqa: E402
+from rfmux.core.transferfunctions import BALUN_LOSS_DB  # noqa: E402
 from rfmux.tools.periscope.tasks import (  # noqa: E402
-    ToneControlSignals, ToneControlTask, read_tones, write_nco, write_tone)
+    ToneControlSignals, ToneControlTask, read_tones, write_dac_scale, write_nco,
+    write_tone)
 
 SESSION = """
 !HardwareMap
@@ -42,7 +44,7 @@ def test_read_returns_nco_and_every_field_per_channel(mock_crs):
     loop, crs = mock_crs
     got = loop.run_until_complete(read_tones(crs, 1, [1, 2]))
     assert got["nco"] == 500e6
-    assert got["dac_scale"] == -0.5
+    assert got["dac_scale"] == 1.0 - BALUN_LOSS_DB
     assert got["channels"][1] == {
         "frequency": 1.25e6, "amplitude": 0.01,
         "dac_phase": 30.0, "adc_phase": -5.0}
@@ -88,12 +90,25 @@ def test_write_nco_moves_every_actual_frequency(mock_crs):
 
 def test_dac_scale_follows_the_module(mock_crs):
     """The dBm the fields show and accept is referenced to the module's
-    own DAC scale, less the label offset every dialog uses."""
+    own DAC scale, less the balun loss every dialog uses."""
     loop, crs = mock_crs
     loop.run_until_complete(crs.set_dac_scale(-6.0, 'DBM', module=1))
     got = loop.run_until_complete(read_tones(crs, 1, [1]))
-    assert got["dac_scale"] == -7.5
+    assert got["dac_scale"] == -6.0 - BALUN_LOSS_DB
     loop.run_until_complete(crs.set_dac_scale(1.0, 'DBM', module=1))
+
+
+def test_a_new_dac_scale_keeps_the_normalized_amplitudes(mock_crs):
+    """A common-mode change: each tone keeps its normalized amplitude, so
+    its power moves by the change of the DAC scale."""
+    loop, crs = mock_crs
+    before = loop.run_until_complete(read_tones(crs, 1, [1]))
+    got = loop.run_until_complete(write_dac_scale(crs, 1, 4.0, [1]))
+    try:
+        assert got["dac_scale"] == pytest.approx(4.0 - BALUN_LOSS_DB)
+        assert got["channels"][1]["amplitude"] == before["channels"][1]["amplitude"]
+    finally:
+        loop.run_until_complete(crs.set_dac_scale(1.0, 'DBM', module=1))
 
 
 def _wait_for(qt_app, received, predicate, timeout_s=5.0):
@@ -119,7 +134,7 @@ def test_worker_reads_writes_and_stops(qt_app, mock_crs):
         first = received[-1]
         assert first["nco"] == 500e6
         assert first["channels"][1]["frequency"] == 1.25e6
-        assert first["dac_scale"] == -0.5
+        assert first["dac_scale"] == 1.0 - BALUN_LOSS_DB
 
         task.set_channels([3])
         _wait_for(qt_app, received, lambda r: set(r["channels"]) == {3})

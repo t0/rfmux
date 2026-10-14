@@ -6,7 +6,8 @@
 
 ### Core Components
 - **Python API** (`rfmux/core/`): Hardware abstraction for CRS boards
-- **Algorithms** (`rfmux/algorithms/`): KID measurement algorithms (network analysis, multisweep, df calibration, streamer configuration, one-shot `trigger_capture`)
+- **Tuning** (`rfmux/tuning/`): headless tuning: resonator catalogs, finding resonances, fits, bias finding, and `store`, which saves measurements
+- **Algorithms** (`rfmux/algorithms/`): measurements on the board (network analysis, multisweep, noise, `empirically_calibrate_df`, streamer configuration, one-shot `trigger_capture`) and `apply_bias`
 - **Pulse capture** (`rfmux/pulse_capture/`): the trigger engine, its compiled per-sample walk (`walk.py`), the stream sources, the dual-stream session, coincidence events (`events.py`), the HDF5 record, and fastrx recordings read offline (`overlay.py`, and `recording_file.py` with numpy alone)
 - **Periscope** (`rfmux/tools/periscope/`): Real-time PyQt6 GUI for data visualization
 - **Streamer** (`rfmux/streamer/`): C++ extension for high-performance packet reception
@@ -145,18 +146,55 @@ Without `register=True` the function is not attached to `CRS`: import it
 and call `await my_algorithm(crs, module=1, channels=[1,2])`.
 
 ### Results Data Structure
-`results_by_detector`: `{detector_id: {iteration_index: {data + amplitude, direction}}}`
+Every driver returns the same container: `{module_id: block}`, one block per
+module, keyed by the board-and-module identifier `crs.module[m].index()`
+returns. A block carries `schema_version`, `measurement`, `module`,
+`dac_scale_dbm`, `call_params` and `results`.
 
-**Critical**: Dictionary keys are indices, not frequencies. Extract actual values:
+A multisweep's `results` is `{step: {direction: {name: sweep}}}`: amplitude
+step, sweep direction, resonator name. A sweep holds what was measured:
+
 ```python
-# WRONG: freq = list(results.keys())[0]  # This is an index!
-# CORRECT: freq = results[idx]['bias_frequency']
+{'channel', 'frequencies', 'iq_counts', 'iq_volts',
+ 'original_center_frequency', 'sweep_direction', 'sweep_amplitude',
+ 'sweep_amplitude_dbm'}
 ```
+
+No phase (it is `np.angle(iq_counts)` where it is wanted) and no bias
+frequency. Fit and Find Bias add the sweep's fits under `entry["fits"]`. Read it through the accessors rather than walking the nesting:
+
+```python
+from rfmux.tuning import collect_amplitude_iterations_for, find_iteration_matching_amplitude
+
+sweeps = collect_amplitude_iterations_for(block, "BOTA")   # {step: {direction: sweep}}
+at_bias, step = find_iteration_matching_amplitude(block, "BOTA")
+```
+
+Resonators are named, and the array a sweep was taken from is in the file:
+`ResonatorCatalog.from_dict(block["call_params"]["catalog"])`. The schedule
+it walked is `AmplitudeSchedule.from_dict(block["call_params"]["amp_schedule"])`.
+A schedule can be in dBm (`units="dbm"`). For the normalized amplitudes, use
+`schedule.resolve_steps(catalog, block["dac_scale_dbm"])`. Each sweep also
+records `sweep_amplitude` (normalized) and `sweep_amplitude_dbm`.
+`take_netanal` and `multisweep` take `amp_units` (`"normalized"` or `"dbm"`,
+in any case) and convert dBm with the DAC scale they read at the start.
+
+An amplitude is a fraction of DAC full scale, and `block["dac_scale_dbm"]` is
+what full scale was worth at the output on that module when the board was
+asked: the setting less `BALUN_LOSS_DB`. That pair states a drive as a power
+or a voltage, through
+`convert_dacunits_to_dbm` / `convert_dacunits_to_volts` in
+`core/transferfunctions.py`, which `BiasPoint.power_dbm` and every label in
+Periscope go through. None where the board reported none.
 
 ### Unit Conversion (UnitConverter class)
 - Raw ADC counts ↔ Volts ↔ dBm
 - Use `convert_amplitude()` with `unit_mode` parameter
-- Normalization at display time, preserve raw data
+- Normalization at display time, preserve raw data. Normalizing states a
+  trace against the drive it was taken at (divide by it, or subtract it in
+  dBm), so an amplitude ladder lands on one axis. Counts need only the drive;
+  volts and dB need the module's DAC scale as well, so ask
+  `UnitConverter.can_normalize()` for both the data and the axis label
 
 ### Session System
 ```python
@@ -171,33 +209,18 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 - `jit_physics.py` requires Numba; no Python fallback
 - `compute_s21_parallel()` handles attenuation internally: do not apply it again
 - Single convergence loop: `converged_lekid_parameters()`, run by
-  `converge_tones()` for every tone of an evaluation at once, each seeded
-  with the currents its resonators last had under it (the model's state
-  memory) and stepped adaptively, so a bifurcated resonance is
-  hysteretic: currents are a small fraction of Istar (a linewidth of
-  shift is a 1e-4 change in Lk)
-- `envelope_parameters()` gives each resonator's Kerr-resonator
-  parameters (omega_r, kappa, K, D, c) from its linear response;
-  `rfmux/mock/kerr.py` linearises about a driven state (rates, probe
-  response, idler, gain); with `envelope_dynamics` on, a pulsed
-  resonator's current rings down to each new steady state and the
-  transient reaches the stream (visible at dec 0 and on PFB)
-- Tones sharing a resonator each shift the resonance the others see:
-  each tone's solve adds twice the other tones' |I|^2 per resonator
-  (cross-phase modulation of an instantaneous nonlinearity), from the
-  states they last left
+  `converge_tones()` with each tone's previous currents to preserve hysteresis.
+  `_tone_states` holds each tone's currents, cached solves and transient field.
+  Off/clear commands immediately discard its state under the physics lock;
+  array regeneration clears all states and tones before optional auto-bias.
+- `envelope_dynamics` enables pulse ring-down; `rfmux/mock/kerr.py` supplies
+  the driven resonator's linearized dynamics. Tones on the same module
+  contribute twice the other tones' squared currents to each other's solve.
+- Generated resonators stay inside `freq_start`/`freq_end`. Sample reads use
+  the stream's clock while streaming, so they do not advance the pulse
+  schedule beyond the stream. The mock's parent watcher also handles a
+  blocked RPC when the parent dies (`rfmux/mock/server.py`).
 - Reproducibility requires concrete `resonator_random_seed` in config
-- Every generated resonator lies inside [`freq_start`, `freq_end`]
-  (`RANGE_PAD`, `RANGE_REDRAWS` in `resonator_model.py`); a test array that
-  needs resolvable neighbours in a narrow range sets a small `C_variation`
-- The K0 and I0 fits in `jit_physics.py` are Abramowitz and Stegun, within
-  2e-7 for every argument; resonators above 5 GHz build
-- One pulse schedule serves the stream and `get_samples`, and it ignores
-  any time at or before the latest it has seen; a read follows the stream's
-  clock while one runs (`MockCRS._physics_time`)
-- A mock server shuts down when the process that started it is gone
-  (`PARENT_POLL_S` in `rfmux/mock/server.py`), so a crashed client leaves
-  none behind
 
 ### Streaming
 - Slow stream: ~38 kHz at dec=0, halving per stage, port 9876, `ReadoutPacket`
@@ -213,7 +236,6 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
   cannot leave the host. If multicast does not work on the machine it
   falls back to loopback unicast and prints which step failed
   (`check_multicast_loopback()` in `rfmux/streamer`)
-- A mock module with a tone but no NCO set streams with the NCO read as 0 Hz
 
 ### Threading
 - Periscope: Qt event loop + asyncio integration
@@ -224,12 +246,15 @@ path = session_mgr.get_export_path("category", "label", ".pkl")
 
 ```
 rfmux/
-├── core/           # CRS, session, hardware_map, schema
-├── algorithms/     # measurement/ (fitting, multisweep, streamer config)
+├── core/           # CRS, session, hardware_map, schema, resonators
+├── tuning/         # catalogs, find resonances, fits, bias finding, store
+├── algorithms/     # measurement/ (netanal, multisweep, noise, streamer
+│                   #   config, trigger_capture), operation/ (apply_bias)
 ├── pulse_capture/  # detection engine, walk, sources, session, hdf5
 ├── tools/
 │   └── periscope/  # GUI panels, dialogs, tasks, utils
 ├── mock/           # MockCRS, resonator physics
+├── resonator_names/  # generated resonator names (syllables, R0001...)
 ├── streamer/       # C++ packet receiver
 └── mr_resonator/   # Numba physics (subset of external lib)
 ```
@@ -237,18 +262,18 @@ rfmux/
 ## Testing
 
 ```bash
-pytest --tier=quick                 # Edit loop: 1221 tests, ~1 min
-pytest --tier=portable              # No CRS, no GUI: 50 tests, ~9 s
-pytest --tier=full                  # All 1240 that run without a board, ~3.5 min
-pytest --tier=acquisition           # MockCRS server + real UDP: 19 tests, ~2.5 min (inside full)
+pytest --tier=quick                 # Edit loop: 2455 tests, ~6.5 min
+pytest --tier=portable              # No CRS, no GUI: 883 tests, ~13 s
+pytest --tier=full                  # All 2493 that run without a board, ~16 min
+pytest --tier=acquisition           # MockCRS server + real UDP: 38 tests, ~9.5 min (inside full)
 pytest --tier=hardware --serial 0024  # 75 tests, needs a real CRS
 pytest test/pulse_capture/          # One subsystem
 python -m rfmux.tools.periscope     # Launch Periscope
 ```
 
 `--tier` (defined in the root `conftest.py`) names an invocation; every tier
-but `hardware`/`all` excludes the board tests; on Linux with fastrx built and
-the test group installed they report zero skips.
+but `hardware`/`all` excludes the board tests. Optional capture and recording
+checks require the fastrx extension and pygetdata as well as the test group.
 Markers tag tests: `portable`, `slow_acquisition`, `hardware`; the last is
 applied automatically to anything using the `crs`/`live_session`/`serial`
 fixtures, so don't add it by hand. A bare `pytest` runs the quick tier plus

@@ -395,25 +395,27 @@ def tuning_sweep(row):
     samples stream in: ``(frequencies_hz, iq_counts, bias_point)``, or
     None when the row holds no sweep.
 
-    The sweep was taken at ADC phase zero.  Two turns can separate it
-    from the samples: a multisweep run with "rotate saved data" turned
-    the stored sweep by ``applied_rotation_degrees``, and a bias that
-    set a nonzero ``optimal_phase_degrees`` streams samples the board
-    has turned by minus that phase.  The sweep is turned by minus both
-    to sit under the samples.  *bias_point* is the sweep interpolated
-    at the bias frequency, or None without one.
+    Catalog tuning rows store unrotated ``iq_volts``. Convert those to
+    counts; ``iq_rotation_deg`` describes the loop, not a programmed ADC
+    phase. Legacy rows store ``iq_complex`` in counts and may carry saved
+    and ADC rotations, which are undone to match their stream frame.
+    *bias_point* is interpolated at the bias frequency, or None without one.
     """
-    if not isinstance(row, dict) or "frequencies" not in row \
-            or "iq_complex" not in row:
+    if not isinstance(row, dict) or "frequencies" not in row:
         return None
     f = np.asarray(row["frequencies"], dtype=float)
-    iq = np.asarray(row["iq_complex"], dtype=complex)
+    if "iq_volts" in row:
+        iq = np.asarray(row["iq_volts"], dtype=complex) / VOLTS_PER_ROC
+    elif "iq_complex" in row:
+        iq = np.asarray(row["iq_complex"], dtype=complex)
+        turn = float(row.get("optimal_phase_degrees") or 0.0) \
+            + float(row.get("applied_rotation_degrees") or 0.0)
+        if turn:
+            iq = iq * np.exp(-1j * np.radians(turn))
+    else:
+        return None
     if f.size < 2 or f.shape != iq.shape:
         return None
-    turn = float(row.get("optimal_phase_degrees") or 0.0) \
-        + float(row.get("applied_rotation_degrees") or 0.0)
-    if turn:
-        iq = iq * np.exp(-1j * np.radians(turn))
     order = np.argsort(f)
     f, iq = f[order], iq[order]
     bias = row.get("bias_frequency")

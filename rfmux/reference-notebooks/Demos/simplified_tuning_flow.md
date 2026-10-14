@@ -1,810 +1,526 @@
 ---
 jupyter:
+  jupytext:
+    formats: ipynb,md
+    text_representation:
+      extension: .md
+      format_name: markdown
+      format_version: '1.3'
+      jupytext_version: 1.19.5
   kernelspec:
-    display_name: Python 3 (ipykernel)
+    display_name: rfmux-tuning
     language: python
     name: python3
 ---
 
-# Full KID Tuning Guide
+# From network analysis to a biased array
 
-This is an end-to-end detector tuning guide using the Python API rather than
-the Periscope GUI. The first steps are for a new chip on its first cooldown.
-Once the nominal detector frequencies are known, start at section 6.
+Run this notebook from top to bottom to generate an unbiased mock array, find
+its resonances, measure narrow sweeps around each resonance, step the drive amplitude through
+bifurcation, select operating points, program the tones, and acquire slow-stream
+and PFB noise. The measurements
+use the CRS API; analysis uses `rfmux.tuning`, and a `ResonatorCatalog` carries
+the named resonators, channels, amplitudes, and frequencies between steps.
 
-Everything here is the same code path used by the Periscope GUI. Periscope
-runs these functions from `QThread` workers and draws the results; this notebook
-calls them directly and plots instead.
+Measurements use `rfmux.tuning.store` and are saved by default. The processing
+steps add their results to those measurement dictionaries in place and update
+the same files.
 
-| Step | Function |
-|---|---|
-| Perform a network analysis to find the resonances | `crs.take_netanal()` |
-| Remove the cable delay (optional) | `fit_cable_delay`, `calculate_new_cable_length` |
-| Select resonator frequencies | `find_resonances()` |
-| Characterize each one in more detail | `crs.multisweep()` |
-| Fit the resonances | `fit_skewed_multisweep`, `fit_nonlinear_iq_multisweep` |
-| Bias the detectors | `bias_kids()` |
-| Measure the noise | `crs.py_get_samples()`, `crs.py_get_pfb_samples()` |
+This is a streamlined example workflow, which will skim over many details of the
+tuning process. More details about each step can be found in the other example
+.md workbooks in this folder, which treat each aspect of the tuning flow in more
+detail.
 
-## How to use this document
+The default is a fresh ten-resonator simulation. To use a real board and array,
+change the connection and measurement settings in section 1. The remaining
+cells are shared.
 
-Run the cells in order; later ones use variables the earlier ones defined.
-Sections 1 and 2 are the exception: run only the one option (1A, 1B or 2)
-that fits.
+This is a runnable Jupytext notebook: open it as a notebook in JupyterLab and
+use **Shift+Enter**, or **Restart Kernel and Run All Cells**. Use the Python
+environment where this checkout is installed. The Markdown stores no outputs;
+use **File → Save Notebook As…** to keep an executed copy of the shipped,
+read-only notebook.
 
-This notebook format doesn't embed outputs like ipython noteboooks, and is shipped read-only.
-It is executable and will fill with outputs like an ipython notebook.
-To save it with those outputs, use *File → Save Notebook As*.
+## 1. Connection and measurement settings
 
-**This notebook changes the board's state.** 
+Keep `MODE = "mock"` for a standalone simulation. It uses the same compact,
+seeded array as `network_analysis_find_resonances.md`, with no automatic biasing.
+The seed fixes the array; measurement noise can still vary. Tuning measurements
+use RPC. Section 7 starts and stops the mock UDP streamer for noise acquisition.
+
+For a real array:
+
+- Set `MODE = "hardware"`, `SERIAL`, and `MODULE`. Set `HOSTNAME` if discovery
+  needs an explicit address; otherwise leave it `None`.
+- Set `FMIN_HZ`, `FMAX_HZ`, and `NETANAL_POINTS` to cover your array with several
+  samples across its narrowest resonance. The catalog applied here must fit
+  within the API's allowed 500 MHz band around one module's NCO.
+- Set the probe amplitude, amplitude schedule, and sweep span for your array
+  and attenuation. Amplitudes are normalized DAC values. To give them in dBm,
+  use `amp_units=crs.UNITS.DBM`, or `units="dbm"` on an `AmplitudeSchedule`.
+  The example levels are demonstration settings, not a measured limit for
+  your array.
+- Configure the board's clock/timestamp source and RF path for your setup.
+  The hardware connection below leaves those settings as configured.
+
+
 
 ```python
 %matplotlib inline
 
 import os
-import pickle
-import tempfile
+import time
 from pathlib import Path
 
-import numpy as np
 import matplotlib.pyplot as plt
-
+import numpy as np
 import rfmux
-from rfmux.core.transferfunctions import (
-    calculate_new_cable_length, fit_cable_delay,
-)
-from rfmux.algorithms.measurement.bias_kids import bias_kids
-from rfmux.algorithms.measurement.fitting import (
-    find_resonances, fit_skewed_multisweep,
-)
-from rfmux.algorithms.measurement.fitting_nonlinear import (
-    fit_nonlinear_iq_multisweep,
+
+from rfmux.tuning import (
+    AmplitudeSchedule, BiasReport, collect_amplitude_iterations_for,
+    find_bias_amplitude, find_bias_frequency, find_bias_points,
+    find_resonances_in_netanal, load_bias_catalog, magnitude_db, store,
 )
 
-# Reference notebooks are provisioned read-only, so results go to a
-# scratch directory; override it with RFMUX_DEMO_OUTPUT.
-OUTPUT_DIR = Path(os.environ.get(
-    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_tuning_flow"))
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+from rfmux.core.resonators import ResonatorCatalog
 
+# import example plotting helpers
+import sys
+DEMO_DIR = Path(rfmux.__file__).resolve().parent / "reference-notebooks" / "Demos"
+if str(DEMO_DIR) not in sys.path:
+    sys.path.insert(0, str(DEMO_DIR))
+import example_plotting_multisweep as msplots
+
+MODE = "mock"                 # "mock", "hardware", or "attached"
+SERIAL = "0042"                # replace for hardware
+HOSTNAME = None                # optional hardware address
 MODULE = 1
 
-crs = None          # set by whichever cell in section 1 or 2 you run
-IS_MOCK = False     # True only if THIS notebook created the simulation
+FMIN_HZ, FMAX_HZ = 600e6, 610e6
+NETANAL_POINTS = 2_000
+PROBE_AMPLITUDE = 0.001
+SPAN_HZ = 100e3
+SWEEP_POINTS = 201             # 500 Hz spacing across 100 kHz
+NSAMPS = 10
+SCHEDULE = AmplitudeSchedule.ramp(0.002, 0.032, 5)
 
-print(f"results → {OUTPUT_DIR}")
+OUTPUT_DIR = store.session_directory()
+print(f"rfmux: {rfmux.__file__}")
+print(f"results: {OUTPUT_DIR}")
+started = time.perf_counter()
 ```
 
-## 1. Connect
-
-Everything below needs a CRS. **Run exactly one** of the three options:
-
-| | When to use it | Where |
-|---|---|---|
-| **A. An existing Mock or Real Periscope session is already running** | Periscope launched the Jupyter environment you are viewing this notebook within, and it is already configured for either a real board or a mock instance | below |
-| **B. Starting from scratch with real hardware** | You have a CRS and this notebook is being viewed separately from Periscope | below |
-| **C. Start a new simulated environment** | No Periscope GUI instance already, and nothing already running | section 2 |
-
-### A. Attach to the CRS Periscope is driving
-
-Use this if you are viewing this notebook from within Periscope's embedded jupyter environment.
-Periscope sets `RFMUX_CRS_HOSTNAME` when it launches this notebook, which is how
-the cell finds the board with no configuration from you.
-
-This is most important if you are currently running Periscope in mock mode, to avoid
-generating a second `create_mock_crs()`, which would produce a *second, unrelated* simulation,
-whose detectors are not the ones Periscope is showing you.
-
 ```python
-HOSTNAME = os.environ.get("RFMUX_CRS_HOSTNAME")   # or paste "127.0.0.1:43431"
-SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
+created_mock = False
+if MODE == "mock":
+    from rfmux.mock.config import apply_overrides
 
-if HOSTNAME:
-    s = rfmux.load_session(
-        f'!HardwareMap [ !CRS {{ serial: "{SERIAL}", '
-        f'hostname: "{HOSTNAME}" }} ]')
-    crs = s.query(rfmux.CRS).one()
+    session = rfmux.load_session('''
+!HardwareMap
+- !flavour "rfmux.mock"
+- !CRS { serial: "0000", hostname: "127.0.0.1" }
+''')
+    crs = session.query(rfmux.CRS).one()
     await crs.resolve()
-    print(f"attached to CRS {SERIAL} at {HOSTNAME}")
+    mock_config = apply_overrides({
+        "num_resonances": 10,
+        "freq_start": 601e6,
+        "freq_end": 608e6,
+        "C_variation": 0.0001,
+        "resonator_random_seed": 42,
+        "auto_bias_kids": False,
+        "pulse_mode": "none",
+        "tls_noise_enabled": False,
+        "nqp_noise_std_factor": 0.001,
+        "T": 0.23,
+    })
+    count, _ = await crs.generate_resonators(mock_config)
+    created_mock = True
+    print(f"generated {count} unbiased mock resonators")
+elif MODE in ("hardware", "attached"):
+    if MODE == "attached":
+        HOSTNAME = os.environ["RFMUX_CRS_HOSTNAME"]
+        SERIAL = os.environ.get("RFMUX_CRS_SERIAL", "0000")
+    # JSON quoting also produces valid YAML strings for the hardware map.
+    import json
+    address = f", hostname: {json.dumps(HOSTNAME)}" if HOSTNAME else ""
+    session = rfmux.load_session(
+        f'!HardwareMap [ !CRS {{ serial: {json.dumps(SERIAL)}{address} }} ]')
+    crs = session.query(rfmux.CRS).one()
+    await crs.resolve()
 else:
-    print("Nothing advertised a board. Set HOSTNAME above, or use option B "
-          "(your own board) or section 2 (simulation).")
-```
+    raise ValueError(f"Unknown MODE: {MODE}")
 
-### B. Your own board, no Periscope GUI
-
-```python
-# SERIAL = "0042"
-# s = rfmux.load_session(f'!HardwareMap [ !CRS {{ serial: "{SERIAL}" }} ]')
-# crs = s.query(rfmux.CRS).one()
-# await crs.resolve()
-# await crs.set_timestamp_port(crs.TIMESTAMP_PORT.TEST)
-# print(f"connected to CRS {SERIAL}")
-```
-
-## 2. Mock mode configuration, no Periscope GUI
-
-**Skip this section if section 1 gave you a CRS.** The cell below does
-nothing in that case.
-
-If you have no hardware, this cell creates a simulated CRS with ten resonators
-between 600 MHz and 1 GHz. They come from a physical LEKID model and respond to
-drive power and temperature the way real ones do.
-
-`auto_bias_kids` stays at its default, `False`, so the simulation leaves the
-resonators unbiased and section 8 biases them. (`pulse_capture.md` sets it
-`True`: the simulation then sweeps each resonator at `bias_amplitude` and
-biases it at the S21 minimum it finds.)
-
-`resonator_random_seed` fixes the array: same ten detectors on every run, so a
-number that changes between runs is your change, not the simulation's.
-
-> **This cell refuses to run if something is already streaming.** Two
-> simulations send to the same UDP port and a receiver gets both interleaved,
-> with no error. The message says which case you are in. If Periscope is in
-> mock mode, attach to its simulation with option 1A.
-
-```python
-MOCK_CONFIG = {
-    "num_resonances": 10,
-    "freq_start": 0.6e9,
-    "freq_end": 1.0e9,
-    "resonator_random_seed": 42,
-}
-
-if crs is not None:
-    print("already connected: skip this cell")
-else:
-    from rfmux.streamer import find_streamer_conflict
-
-    if os.environ.get("RFMUX_CRS_HOSTNAME"):
-        raise RuntimeError(
-            "Periscope launched this notebook and is already driving a CRS.\n"
-            "Run option 1A above to attach to that one. Creating a second "
-            "simulation here would stream to the same UDP port as Periscope's, "
-            "and every reader would see the two interleaved.")
-
-    conflict = find_streamer_conflict()
-    if conflict:
-        raise RuntimeError(
-            f"Something is already using the streamer port: {conflict}.\n"
-            "A second simulation would send to that same port, and a reader "
-            "would get both streams interleaved with nothing to say so.\n"
-            "Attach to what is running with option 1A, or stop it, then re-run "
-            "this cell.")
-
-    from rfmux.mock.helpers import create_mock_crs
-    crs = await create_mock_crs(module=MODULE, config=MOCK_CONFIG,
-                                verbose=False)
-    IS_MOCK = True
-    print(f"simulated CRS ready: {MOCK_CONFIG['num_resonances']} resonators "
-          f"between {MOCK_CONFIG['freq_start']/1e9:.1f} and "
-          f"{MOCK_CONFIG['freq_end']/1e9:.1f} GHz")
-```
-
-### Confirm the connection
-
-The rest of the notebook uses `crs`; this fails early if section 1 did not set
-it, and clears channels left programmed by an earlier run.
-
-```python
-if crs is None:
-    raise RuntimeError(
-        "No CRS. Run option 1A (attach), 1B (your board), or the cell above "
-        "(simulate one) before continuing.")
-
+module_id = crs.module[MODULE].index()
 await crs.clear_channels(module=MODULE)
-
-print(f"CRS    {crs.tuber_hostname}")
-print(f"module {MODULE}, channels cleared")
-print("simulation created by this notebook" if IS_MOCK
-      else "pre-existing board: this notebook will not tear it down")
+print(f"connected: {module_id}; channels cleared")
 ```
 
-## 3. Network analysis
+## 2. Network analysis and resonance catalog
 
-The first measurement is a wide sweep: step a comb of tones across the band and
-record the transmitted amplitude and phase at each frequency. Resonators appear
-as narrow dips in |S21|, each absorbing power at its resonant frequency.
-
-`take_netanal` drives up to `max_chans` tones at once and re-tunes the NCO for
-each `max_span`-wide chunk. The cell below sweeps 50,000 points.
-
-Parameters:
-
-- **`amp`**: drive amplitude in normalized DAC units, set here from a tone
-  power in dBm. Too high drives the resonators nonlinear (they bifurcate and
-  the dip is distorted); too low measures the amplifier's noise. -60 dBm is a
-  starting point for a first look.
-- **`nsamps`**: samples averaged per point.
-- **`npoints`**: sweep resolution. A resonator with too few points across it
-  cannot be fitted, and at high Q the linewidth is a few kHz.
-- **`max_span`**: defaults to 500 MHz, the droop-free bandwidth of one NCO
-  setting.
-
-> If Periscope is attached to the same board its plots follow along, as if you
-> had driven its Network Analysis panel.
-
-The algorithms take a normalized amplitude, a fraction of the DAC's full
-scale. `dac_scale_dbm` reads the power of a full-scale tone from the board,
-and the two converters go between that amplitude and dBm. It returns `None`
-for a module that analog banking hides, which has no scale to convert with.
+The wide sweep locates dips. The mock band has about 5 kHz point spacing;
+a narrower multisweep will resolve each dip in the next step. Measurement
+results are keyed by module even when only one module was measured.
+`module_netanal["results"]` accesses that module's arrays, including raw `iq_counts`.
 
 ```python
-from rfmux.algorithms.measurement.bias_kids import dac_scale_dbm
-from rfmux.core.transferfunctions import (
-    convert_amplitude_to_dbm, convert_dbm_to_amplitude)
-
-DAC_SCALE_DBM = await dac_scale_dbm(crs, MODULE)
-assert DAC_SCALE_DBM is not None, f"module {MODULE} reports no DAC scale"
-NETANAL_POWER_DBM = -60.0
-print(f"DAC scale {DAC_SCALE_DBM:+.1f} dBm: {NETANAL_POWER_DBM:g} dBm is "
-      f"amplitude {convert_dbm_to_amplitude(NETANAL_POWER_DBM, DAC_SCALE_DBM):.3g}")
-```
-
-```python
-NETANAL_PARAMS = {
-    "amp": convert_dbm_to_amplitude(NETANAL_POWER_DBM, DAC_SCALE_DBM),
-    "fmin": 0.6e9,
-    "fmax": 1.1e9,
-    "nsamps": 10,
-    "npoints": 50000,
-    "max_chans": 1023,
-    "max_span": 500e6,
-    "module": MODULE,
-}
-
-# progress_callback is the same hook Periscope uses to drive its progress bar.
-_shown = [-25.0]
-def netanal_progress(module, percentage):
-    if percentage - _shown[0] >= 25.0:
-        _shown[0] = percentage
-        print(f"  sweeping… {percentage:.0f}%")
-
-netanal = await crs.take_netanal(progress_callback=netanal_progress,
-                                 **NETANAL_PARAMS)
-
-frequencies = netanal["frequencies"]
-iq_complex = netanal["iq_complex"]
-phase_degrees = netanal["phase_degrees"]
-
-mag_db = 20 * np.log10(np.maximum(np.abs(iq_complex), 1e-30))
-print(f"\n{len(frequencies)} points, "
-      f"{frequencies[0]/1e6:.0f}–{frequencies[-1]/1e6:.0f} MHz")
-```
-
-```python
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
-ax1.plot(frequencies / 1e6, mag_db, lw=0.6)
-ax1.set_ylabel("|S21| (dB)")
-ax1.set_title("Network analysis")
-ax2.plot(frequencies / 1e6, phase_degrees, lw=0.6, color="#CC6633")
-ax2.set_ylabel("phase (deg)"); ax2.set_xlabel("frequency (MHz)")
-plt.tight_layout(); plt.show()
-```
-
-## 4. Unwrap the cable delay
-
-A signal that takes τ seconds to travel out and back arrives with a phase that
-changes linearly with frequency: `φ = -2πfτ`. Over a 500 MHz sweep with a few
-metres of coax that is many full turns, and the resulting phase ramps can
-swamp the phase structure of the resonances themselves.
-
-This can be measured and compensated for in hardware.
-`set_cable_length` tells the firmware how much delay to compensate, so the 
-correction happens before you ever see the data.
-
-`fit_cable_delay` measures the residual slope of the *unwrapped* phase and
-converts it to a delay; `calculate_new_cable_length` adds the matching length
-to the current setting and returns the new total.
-
-```python
-tau_additional = fit_cable_delay(frequencies, phase_degrees)
-
-current_cable_length = await crs.get_cable_length(module=MODULE)
-new_cable_length = calculate_new_cable_length(current_cable_length,
-                                              tau_additional)
-await crs.set_cable_length(length=new_cable_length, module=MODULE)
-
-print(f"residual delay   {tau_additional*1e9:+.3f} ns")
-print(f"cable length     {current_cable_length:.3f} m → {new_cable_length:.3f} m")
-```
-
-A simulated CRS has no cable: the fitted delay is close to zero and the length
-barely changes.
-
-
-```python
-unwrapped_rad = np.unwrap(np.deg2rad(phase_degrees))
-slope, intercept = np.polyfit(frequencies, unwrapped_rad, 1)
-fit_deg = np.rad2deg(slope * frequencies + intercept)
-residual_deg = np.rad2deg(unwrapped_rad) - fit_deg
-
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
-ax1.plot(frequencies / 1e6, np.rad2deg(unwrapped_rad), lw=0.6,
-         label="unwrapped phase")
-ax1.plot(frequencies / 1e6, fit_deg, "k--", lw=1,
-         label=f"fit: τ = {tau_additional*1e9:.3f} ns")
-ax1.set_ylabel("phase (deg)"); ax1.legend()
-ax1.set_title("Cable delay: the slope, and what is left without it")
-ax2.plot(frequencies / 1e6, residual_deg, lw=0.6, color="#CC6633")
-ax2.set_ylabel("residual (deg)"); ax2.set_xlabel("frequency (MHz)")
-plt.tight_layout(); plt.show()
-```
-
-The delay is now set on the board, but the sweep in memory was taken before
-that. Re-run section 3 for a corrected sweep. The resonance finding below uses
-|S21|, which the delay does not affect, so the notebook continues with the
-sweep it has.
-
-## 5. Find the resonances
-
-`find_resonances` looks for dips: it converts `|S21|**data_exponent` to dB,
-runs `scipy.signal.find_peaks` on the negated trace, and keeps the peaks that
-pass the depth, width and separation cuts below.
-
-The parameters are all rejection criteria, and each one has a failure mode in
-both directions:
-
-- **`min_dip_depth_db`**: how deep a dip must be to count. Too high misses
-  shallow (overcoupled or low-Q) resonators; too low finds noise. For shallow
-  arrays, 0.3 to 0.5 dB.
-- **`min_Q` / `max_Q`**: converted into an allowed width for the dip. A feature
-  broader than `min_Q` allows is not a resonator; one narrower than `max_Q`
-  allows is a spike.
-- **`min_resonance_separation_hz`**: of any group of dips closer than this,
-  the deepest is kept. The list obeys the separation, but a kept dip can still
-  have a discarded neighbour; `require_isolation=True` drops both instead.
-
-```python
-FIND_RES_PARAMS = {
-    "min_dip_depth_db": 1.0,
-    "min_Q": 1e4,
-    "max_Q": 1e7,
-    "min_resonance_separation_hz": 100e3,
-    "data_exponent": 2.0,
-}
-
-resonance_result = find_resonances(
-    frequencies=frequencies,
-    iq_complex=iq_complex,
-    module_identifier=f"Module {MODULE}",
-    **FIND_RES_PARAMS,
+netanal = await crs.take_netanal(
+    module=MODULE, fmin=FMIN_HZ, fmax=FMAX_HZ,
+    npoints=NETANAL_POINTS, amp=PROBE_AMPLITUDE,
+    nsamps=NSAMPS, max_chans=1023, save=True, label="netanal",
 )
+module_netanal = netanal[module_id]
+trace = module_netanal["results"]
 
-resonance_frequencies = resonance_result["resonance_frequencies"]
-resonance_details = resonance_result["resonances_details"]
-
-print(f"found {len(resonance_frequencies)} resonances\n")
-for i, (freq, det) in enumerate(zip(resonance_frequencies, resonance_details), 1):
-    print(f"  {i:2d}: {freq/1e6:9.3f} MHz   Q≈{det['q_estimated']:>9.0f}   "
-          f"depth {det['prominence_db']:5.2f} dB   "
-          f"width {det['width_hz']/1e3:6.1f} kHz")
-
-if not resonance_frequencies:
-    raise RuntimeError(
-        "No resonances found. Lower min_dip_depth_db, widen the Q bounds, or "
-        "check that the sweep range actually covers your array.")
-```
-
-```python
-plt.figure(figsize=(11, 4))
-plt.plot(frequencies / 1e6, mag_db, lw=0.6)
-plt.plot(np.array(resonance_frequencies) / 1e6,
-         np.interp(resonance_frequencies, frequencies, mag_db),
-         "v", ms=9, color="#CC6633", label=f"{len(resonance_frequencies)} found")
-plt.xlabel("frequency (MHz)"); plt.ylabel("|S21| (dB)")
-plt.title("Detected resonances"); plt.legend()
-plt.tight_layout(); plt.show()
-```
-
-## 6. Multisweep
-
-The wide sweep located the resonators, but has not resolved them. At 50,000 points
-across 500 MHz there is one point every 10 kHz, and a Q of 10⁵ at 1 GHz has a
-linewidth of 10 kHz: the whole resonance is a couple of samples.
-
-`multisweep` gives **one channel per resonator** and sweeps them all at once
-over a narrow span. The cell below uses 101 points across 200 kHz, 2 kHz per
-point: five samples across a 10 kHz linewidth instead of one. The tones are
-simultaneous, so the whole array costs about the time of one sweep.
-
-The right tone power differs from resonator to resonator, so the cell
-sweeps at three powers and section 8 chooses one per detector.
-
-It also picks a bias frequency at each drive power. `bias_frequency_method`
-decides where:
-
-- **`"max-diq"`** (default): the point of steepest IQ motion, |d(I+jQ)/df|,
-  where a small frequency shift produces the largest change in the signal.
-- **`"min-s21"`**: the bottom of the dip. Not where responsivity peaks.
-- **`None`**: keep the frequency you asked for.
-
-```python
-MULTISWEEP_POWERS_DBM = [-65.0, -60.0, -55.0]   # lowest first
-MULTISWEEP_PARAMS = {
-    "span_hz": 200e3,           # Periscope's multisweep defaults: 200 kHz span,
-    "npoints_per_sweep": 101,   # 101 points, 2 kHz per point
-    "nsamps": 10,
-    "module": MODULE,
-    "bias_frequency_method": "max-diq",
-    "rotate_saved_data": False,
-    "sweep_direction": "upward",
-}
-
-def sweep_progress(module, percentage):
-    if percentage - _shown[0] >= 50.0:
-        _shown[0] = percentage
-        print(f"  sweeping… {percentage:.0f}%")
-
-# One sweep of every resonator per power, keyed by detector and then by
-# power index, as bias_kids expects.
-sweeps_by_detector = {}
-for k, power_dbm in enumerate(MULTISWEEP_POWERS_DBM):
-    amp = convert_dbm_to_amplitude(power_dbm, DAC_SCALE_DBM)
-    print(f"{power_dbm:g} dBm (amplitude {amp:.3g})")
-    _shown[0] = -50.0
-    sweep = await crs.multisweep(
-        center_frequencies=resonance_frequencies, amp=amp,
-        progress_callback=sweep_progress, **MULTISWEEP_PARAMS)
-    for det, entry in sweep.items():
-        entry["amplitude"] = amp
-        entry["direction"] = MULTISWEEP_PARAMS["sweep_direction"]
-        sweeps_by_detector.setdefault(det, {})[k] = entry
-
-# The sweeps at the middle power, for the plots and fits below.
-multisweep_results = {det: by_power[1]
-                      for det, by_power in sweeps_by_detector.items()}
-print(f"\n{len(multisweep_results)} resonances swept at "
-      f"{len(MULTISWEEP_POWERS_DBM)} powers")
-```
-
-The result is keyed by **detector index** (1-based, matching the channel each
-resonator was assigned), not by frequency. The frequencies are inside each
-entry.
-
-```python
-det_ids = sorted(k for k in multisweep_results if isinstance(k, (int, np.integer)))
-first = multisweep_results[det_ids[0]]
-
-print(f"detector indices: {det_ids}")
-print(f"\nkeys for detector {det_ids[0]}:")
-for key in sorted(first):
-    val = first[key]
-    described = (repr(val) if isinstance(val, (str, bytes))
-                 or not hasattr(val, "__len__")
-                 else f"array{np.shape(val)}")
-    print(f"  {key:<32} {described}")
-```
-
-
-```python
-n_show = min(6, len(det_ids))
-fig, axes = plt.subplots(2, n_show, figsize=(2.2 * n_show, 5))
-for col, det in enumerate(det_ids[:n_show]):
-    d = multisweep_results[det]
-    f_off = (d["frequencies"] - d["original_center_frequency"]) / 1e3
-    mag = 20 * np.log10(np.maximum(np.abs(d["iq_complex"]), 1e-30))
-    axes[0, col].plot(f_off, mag, lw=1)
-    axes[0, col].axvline(
-        (d["bias_frequency"] - d["original_center_frequency"]) / 1e3,
-        color="#CC6633", lw=1, ls="--")
-    axes[0, col].set_title(f"det {det}", fontsize=9)
-    axes[0, col].tick_params(labelsize=7)
-    axes[1, col].plot(d["iq_complex"].real, d["iq_complex"].imag, lw=1)
-    axes[1, col].set_aspect("equal", "datalim")
-    axes[1, col].tick_params(labelsize=7)
-axes[0, 0].set_ylabel("|S21| (dB)")
-axes[1, 0].set_ylabel("Q")
-fig.supxlabel("offset from center (kHz)   /   I", fontsize=9)
-fig.suptitle("Multisweep: |S21| with the chosen bias point, and the IQ circle")
-plt.tight_layout(); plt.show()
-```
-
-## 7. Fit the resonances
-
-Two fits:
-
-**The skewed Lorentzian** (`fit_skewed_multisweep`) is the standard resonator
-model with a complex coupling quality factor, which makes the dip asymmetric:
-real feedlines have impedance mismatches, and a symmetric model absorbs that
-asymmetry into a wrong `fr`. It returns `fr`, `Qr` (loaded), `Qc` (coupling),
-`Qi` (internal) and their uncertainties. `Qi` tells you about the film; `Qc` is
-set by your design.
-
-**The nonlinear fit** (`fit_nonlinear_iq_multisweep`) adds the parameter that
-matters for choosing drive power: `a`, the nonlinearity. As you drive a KID
-harder the resonance skews and then bifurcates: the frequency it sits at
-depends on which way you swept. Above `a = 0.77` you are in that regime, and
-`bias_kids` rejects such amplitudes.
-
-```python
-FIT_PARAMS = {
-    "approx_Q_for_fit": 1e4,
-    "fit_resonances": True,
-    "center_iq_circle": True,
-    "normalize_fit": True,
-}
-
-multisweep_results = fit_skewed_multisweep(multisweep_results, **FIT_PARAMS)
-
-multisweep_results = fit_nonlinear_iq_multisweep(
-    multisweep_results, fit_nonlinearity=True, n_extrema_points=5,
-    verbose=False)
-
-def fitted(det):
-    """Skewed-fit params for a detector, or None if the fit failed."""
-    p = multisweep_results[det].get("fit_params") or {}
-    return p if p.get("fr") not in (None, "nan") else None
-
-n_ok = sum(1 for d in det_ids if fitted(d))
-print(f"skewed fits: {n_ok}/{len(det_ids)} converged\n")
-print(f"{'det':>4} {'fr (MHz)':>12} {'Qr':>10} {'Qc':>10} {'Qi':>12} {'a':>7}")
-for det in det_ids:
-    p = fitted(det)
-    if p is None:
-        print(f"{det:>4}   fit failed")
-        continue
-    nl = multisweep_results[det].get("nonlinear_fit_params") or {}
-    a = nl.get("a")
-    a_str = f"{a:7.3f}" if isinstance(a, (int, float, np.floating)) else "      –"
-    print(f"{det:>4} {p['fr']/1e6:12.4f} {p['Qr']:10.0f} {p['Qc']:10.0f} "
-          f"{p['Qi']:12.0f} {a_str}")
-```
-
-
-```python
-frs = np.array([fitted(d)["fr"] for d in det_ids if fitted(d)])
-qrs = np.array([fitted(d)["Qr"] for d in det_ids if fitted(d)])
-qcs = np.array([fitted(d)["Qc"] for d in det_ids if fitted(d)])
-
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.6))
-ax1.plot(frs / 1e6, qrs, "o", label="Qr (loaded)")
-ax1.plot(frs / 1e6, qcs, "s", label="Qc (coupling)", alpha=0.7)
-ax1.set_xlabel("resonance frequency (MHz)"); ax1.set_ylabel("Q")
-ax1.set_yscale("log"); ax1.legend(fontsize=8)
-ax1.set_title("Quality factors across the array")
-
-spacing = np.diff(np.sort(frs)) / 1e6
-ax2.bar(range(len(spacing)), spacing)
-ax2.set_xlabel("gap index (sorted by frequency)")
-ax2.set_ylabel("spacing (MHz)")
-ax2.set_title("Spacing between neighbours")
-plt.tight_layout(); plt.show()
-```
-
-## 8. Bias the KIDs
-
-`bias_kids` biases each resonator: it picks an operating point and programs the
-channel frequency and amplitude. It can also rotate the IQ basis to maximize
-the signal in Q (a proxy for the df basis), with `optimize_phase=True`.
-
-`fit_method` names the resonance fit it works from, `"nonlinear"` (default) or
-`"skewed"`, and runs it on any sweep that does not already carry it. Given
-sweeps at several amplitudes, as here, it chooses for each detector the
-**highest amplitude that is not bifurcated and has `a` below
-`nonlinear_threshold`** (0.77). With `fallback_to_lowest`, a detector with no
-such amplitude is biased at the lowest one instead of being left out. The
-bias frequency is the multisweep's `max-diq` or `min-s21` point read off the
-fitted curve rather than the raw sweep grid, and the tone is programmed at
-the nearest multiple of the 298 Hz tone grid.
-
-It also returns **`df_calibration`**, a complex number in hertz per volt:
-multiply the IQ motion in volts by it to get frequency shift plus j times
-dissipation. Pulse capture uses the same number to report pulse heights in Hz.
-By default (`measure_calibration=True`) then verifies this through direct measurement:
-every biased tone steps down, then up, together, by
-`calibration_step` (0.05) of its fitted linewidth rounded to the tone grid.
-This cell briefly moves the tones. The fit's own value is kept as `df_calibration_fit`, and
-`df_calibration_source` says which one `df_calibration` is. Pass
-`measure_calibration=False` to use the fit's.
-
-```python
-BIAS_PARAMS = {
-    "nonlinear_threshold": 0.77,   # highest nonlinearity `a` to bias at
-    "fallback_to_lowest": True,    # no suitable power: use the lowest
-    "fit_method": "nonlinear",     # the fit the choice is read from
-    "measure_calibration": True,   # step the tones to measure df_calibration
-    "calibration_step": 0.05,      # that step, in fitted linewidths
-    "optimize_phase": False,       # rotate the IQ basis to put the signal in Q
-    "num_phase_samples": 300,      # samples that rotation is chosen from
-    "bandpass_params": None,       # band-pass them first; None is 5 to 20 Hz
-    "module": MODULE,
-}
-
-_shown[0] = -25.0
-def bias_progress(module, percentage):
-    if percentage - _shown[0] >= 25.0:
-        _shown[0] = percentage
-        print(f"  biasing… {percentage:.0f}%")
-
-bias_results = await bias_kids(
-    crs=crs,
-    multisweep_results={"results_by_detector": sweeps_by_detector},
-    progress_callback=bias_progress,
-    **BIAS_PARAMS,
+search = find_resonances_in_netanal(
+    module_netanal, min_dip_depth_db=1.0, min_Q=1e4, max_Q=1e7,
+    min_separation_hz=100e3, save=True,
 )
+print(search)
+if not len(search):
+    raise RuntimeError("No resonances found: inspect the band and search cuts.")
+catalog = search.to_catalog(module=MODULE, amplitude=PROBE_AMPLITUDE)
+print(catalog)
 
-n_biased = sum(1 for d in bias_results.values() if d.get("bias_successful"))
-print(f"\n{n_biased}/{len(bias_results)} detectors biased\n")
-print(f"{'det':>4} {'ch':>3} {'power (dBm)':>12} {'a':>6} {'Qr':>8} "
-      f"{'bias freq (MHz)':>16} {'offset (kHz)':>13} {'|df_cal| (Hz/V)':>16} "
-      f"{'source':>9}")
-for det in sorted(bias_results):
-    d = bias_results[det]
-    fit = d.get("nonlinear_fit_params") or {}
-    power = convert_amplitude_to_dbm(d["sweep_amplitude"], DAC_SCALE_DBM)
-    offset = (d["bias_frequency"] - d["original_center_frequency"]) / 1e3
-    cal = d.get("df_calibration")
-    cal_str = f"{abs(cal):16.3e}" if cal is not None else " " * 16
-    print(f"{det:>4} {d.get('bias_channel', '?'):>3} {power:12.1f} "
-          f"{fit.get('a', float('nan')):6.2f} {fit.get('Qr', float('nan')):8.0f} "
-          f"{d['bias_frequency']/1e6:16.4f} {offset:13.2f} {cal_str} "
-          f"{d.get('df_calibration_source', ''):>9}"
-          + ("   bifurcated at one of the powers"
-             if d.get("bifurcation_ever_seen") else ""))
+fig, ax = plt.subplots(figsize=(10, 3))
+ax.plot(search.frequencies_hz / 1e6, search.magnitude_db, lw=0.8)
+for frequency in search.resonance_frequencies_hz:
+    ax.axvline(frequency / 1e6, color="C1", alpha=0.6, lw=0.8)
+ax.set(xlabel="frequency [MHz]", ylabel="normalized magnitude [dB]",
+       title=f"Network analysis: {len(catalog)} accepted resonances")
+plt.tight_layout()
+plt.show()
 ```
 
-The power column is the one `bias_kids` chose for that detector from the three
-swept, and `a` is the fitted nonlinearity at that power. The offsets show how
-far `max-diq` moved the bias frequency from the dip that
-`find_resonances` reported. An offset that is a large fraction of the sweep
-span means the sweep did not contain its own resonance: `span_hz` is too
-small, or the wide sweep mislocated it.
+Inspect the trace before continuing. The depth cut is dip prominence; the Q
+bounds limit accepted widths. `min_separation_hz` rejects both members of a
+close pair. See `network_analysis_find_resonances.md` for rejected candidates
+and tuning those cuts. Catalog names identify resonators; channels refer to the
+hardware channel that will synthesize and digitize the resonator's bias tone.
+For more info on the Catalog and Resonator objects, see the `resonator_catalogs.md`
+workbook.
 
-## 9. Noise on the biased detectors
 
-With the detectors biased, the readout is now sensing the detector response.
-`py_get_samples` collects a timestream from the slow (decimated readout) stream
-and can return the spectrum with it.
 
-`reference="absolute"` gives dBm/Hz, an absolute power spectral density, rather
-than dBc/Hz relative to the carrier. `nsegments` sets the Welch averaging: more
-segments, smoother spectrum, coarser frequency resolution.
+
+## 3. Resolve the resonances with a multisweep
+
+A catalog-driven multisweep measures each resonator on its assigned channel.
+First take a single upward sweep at the probe amplitude and plot it, for a quick look at the array.
 
 ```python
-SAMPLE_PARAMS = {
-    "num_samples": 1000,
-    "return_spectrum": True,
-    "scaling": "psd",
-    "reference": "absolute",
-    "nsegments": 5,
-    "spectrum_cutoff": 0.9,
-    "channel": None,        # every channel on the module
-    "module": MODULE,
-}
-
-slow_data = await crs.py_get_samples(**SAMPLE_PARAMS)
-
-freq_iq = np.asarray(slow_data.spectrum.freq_iq)
-print(f"{SAMPLE_PARAMS['num_samples']} samples per channel, "
-      f"spectrum to {freq_iq.max():.1f} Hz\n")
-print(f"{'det':>4} {'mean I PSD':>14} {'mean Q PSD':>14}   (dBm/Hz, DC removed)")
-for det in sorted(bias_results):
-    idx = bias_results[det].get("bias_channel", det) - 1
-    psd_i = np.asarray(slow_data.spectrum.psd_i[idx])
-    psd_q = np.asarray(slow_data.spectrum.psd_q[idx])
-    print(f"{det:>4} {np.mean(psd_i[2:]):14.2f} {np.mean(psd_q[2:]):14.2f}")
+initial_sweeps = await crs.multisweep(
+    catalog, span_hz=SPAN_HZ, npoints_per_sweep=SWEEP_POINTS,
+    nsamps=NSAMPS, sweep_direction="upward",
+    save=True, label="initial_sweeps",
+)
+module_initial = initial_sweeps[module_id]
 ```
+
+
+The structure is `results[step][direction][resonator_name]`. A section contains
+`frequencies`, `iq_counts`, `iq_volts`, `sweep_amplitude`, and
+`sweep_amplitude_dbm`.
+
+You can write your own plotters for the data, but here we use some canned example
+plotting helpers for brevity.
+The standard `plot_magnitude_panels()` from `example_plotting_multisweep.py`
+plots one panel per resonator. Once bias finding has saved a report, its dashed
+vertical line is the new bias frequency, and the trace at the new bias
+amplitude is thicker. Pass `show_bias_frequency=False` or
+`highlight_bias_amplitude=False` to omit either decoration.
 
 ```python
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 3.8))
-for det in sorted(bias_results)[:4]:
-    idx = bias_results[det].get("bias_channel", det) - 1
-    ax1.plot(np.asarray(slow_data.i[idx])[:300], lw=0.8, label=f"det {det}")
-    ax2.semilogx(freq_iq[1:], np.asarray(slow_data.spectrum.psd_i[idx])[1:],
-                 lw=0.9, label=f"det {det}")
-ax1.set_xlabel("sample"); ax1.set_ylabel("I (V)")
-ax1.set_title("Timestream"); ax1.legend(fontsize=8)
-ax2.set_xlabel("frequency (Hz)"); ax2.set_ylabel("PSD (dBm/Hz)")
-ax2.set_title("Noise spectrum, I"); ax2.legend(fontsize=8)
-plt.tight_layout(); plt.show()
+
+
+msplots.plot_magnitude_panels(
+    module_initial, directions="upward", normalize=True, ncols=4,
+    title="Initial multisweep at the probe amplitude",
+)
 ```
 
-### The fast (PFB) stream
+The same plotter handles multiple amplitudes and directions, with a shared
+amplitude colour scale and batches of 50 resonators per figure by default.
+Use `names=catalog.names()[:4]`, `iterations=0`, or `directions="upward"`
+to inspect a subset. `msplots.plot_iq_panels()` accepts the same selections
+for an IQ view; see `example_plotting_multisweep.py` for the full options.
 
-`py_get_pfb_samples` reads one channel at the full PFB rate of 2.44 MHz. At
-decimation stage 6 the slow stream runs at 596 Hz, so this is 4096 times
-faster, which is what resolves a fast pulse rise. It applies the PFB droop
-correction before computing the spectrum.
+Check that each sweep contains its dip. Adjust the span, point count, or
+sweep centers if necessary before spending time on the amplitude scan. Pass
+`center_frequencies={name: absolute_hz}` alongside the catalog to move sweep
+windows without replacing bias points; the mapping must cover every name.
+See `multisweep.md` for a runnable example.
+
+## 4. Iterate multisweeps over various amplitudes
+
+To efficiently handle iteratively calling multisweeps at multiple amplitudes,
+we use the `AmplitudeSchedule` class. This provides a number of options, which
+are explored in more detail in `multisweep.md`.
+
+The `AmplitudeSchedule.ramp()` that we declared in the first cell
+specifies five absolute amplitudes, logarithmically
+spaced from 0.002 to 0.032. Each step measures the whole catalog in both
+frequency directions. This is ten multisweep passes; the driver handles the
+iteration and preserves the steps together in one result.
+
+For per-resonator starting amplitudes, use
+`AmplitudeSchedule.multiplicative(0.5, 8.0, 5)` instead: each factor multiplies
+that resonator's catalog amplitude. Edit `SCHEDULE` and rerun this section to
+extend or refine the range based on the bias report below.
+
+The mock retains tone state between frequency points and can follow different
+branches in upward and downward sweeps through bifurcation.
+Use its traces to explore the analysis flags; a simulated threshold does not
+establish a real array’s operating limit.
 
 ```python
-if IS_MOCK:
-    print("Simulated PFB samples are uniform noise, not detector output;\n"
-          "the call is exercised below, but the numbers measure nothing.")
-
-pfb_channel = sorted(bias_results)[0]
-pfb_data = await crs.py_get_pfb_samples(
-    20_000 if IS_MOCK else 100_000,
-    channel=bias_results[pfb_channel].get("bias_channel", pfb_channel),
-    module=MODULE, binlim=1e6, trim=False, nsegments=5,
-    reference="absolute", reset_NCO=False)
-
-pfb_freq = np.asarray(pfb_data.spectrum.freq_iq)
-pfb_psd_i = np.asarray(pfb_data.spectrum.psd_i)
-print(f"\ndet {pfb_channel}: bandwidth to {pfb_freq.max()/1e3:.0f} kHz, "
-      f"mean I PSD {np.mean(pfb_psd_i[2:]):.2f} dBm/Hz")
+print(SCHEDULE.describe(catalog, n_directions=2))
+amplitude_sweeps = await crs.multisweep(
+    catalog, amp=SCHEDULE, span_hz=SPAN_HZ,
+    npoints_per_sweep=SWEEP_POINTS, nsamps=NSAMPS,
+    sweep_direction=("upward", "downward"),
+    save=True, label="amplitude_sweeps",
+)
+msplots.plot_magnitude_panels(
+    amplitude_sweeps[module_id], normalize=True, ncols=4,
+    title="Amplitude scan: both sweep directions",
+)
 ```
 
-The two spectra are the same channel in the same units, so they go on one
-axis: the slow stream below its Nyquist frequency, the PFB samples from there
-to a megahertz. On the simulator the PFB trace is the uniform noise noted
-above, not the detector.
+Solid lines are upward sweeps; dashed lines are downward sweeps.
+
+## 5. Choose the bias amplitude, then the bias frequency at that amplitude
+
+The bias amplitude finder examines measured levels from low to high and chooses
+the step below the first detected bifurcation. The bifurcation detection method `"derivative"` looks for jumps
+in normalized IQ arc speed; `"hysteresis"` compares the two directions;
+`"both"` flags either test. This example uses the derivative test for the mock
+and both tests for the hardware example. The thresholds below are explicit so they can be
+adjusted after inspecting the traces (see `bias_finding.md`).
+
+This first cell exposes the two decisions for one resonator: first choosing the amplitude, then the frequency.
+ Frequency selection
+uses the **chosen amplitude's** upward trace: `"iq_derivative"` selects the
+largest IQ motion per hertz. `"minimum"` is the alternative dip minimum.
 
 ```python
-idx = bias_results[pfb_channel].get("bias_channel", pfb_channel) - 1
-fig, ax = plt.subplots(figsize=(9, 3.8))
-ax.semilogx(freq_iq[1:], np.asarray(slow_data.spectrum.psd_i[idx])[1:],
-            lw=0.9, label=f"slow stream, to {freq_iq.max():.0f} Hz")
-keep = pfb_freq > 0
-ax.semilogx(pfb_freq[keep], pfb_psd_i[keep], lw=0.9,
-            label=f"PFB samples, to {pfb_freq.max()/1e3:.0f} kHz")
-ax.set_xlabel("frequency (Hz)"); ax.set_ylabel("PSD (dBm/Hz)")
-ax.set_title(f"det {pfb_channel}: noise spectrum, I, both streams")
-ax.legend(fontsize=8); plt.tight_layout(); plt.show()
+AMPLITUDE_METHOD = "derivative" if MODE == "mock" else "both"
+BIAS_SETTINGS = dict(
+    amplitude_method=AMPLITUDE_METHOD,
+    frequency_method="iq_derivative", direction="upward",
+    spike_prominence_factor=0.5, noise_gate_factor=50.0,
+    max_discrepancy=0.1, compare="magnitude",
+)
+name = catalog.names()[0]
+iterations = collect_amplitude_iterations_for(amplitude_sweeps[module_id], name)
+choice = find_bias_amplitude(
+    iterations, method=AMPLITUDE_METHOD,
+    spike_prominence_factor=BIAS_SETTINGS["spike_prominence_factor"],
+    noise_gate_factor=BIAS_SETTINGS["noise_gate_factor"],
+    max_discrepancy=BIAS_SETTINGS["max_discrepancy"],
+    compare=BIAS_SETTINGS["compare"],
+)
+selected = iterations[choice.iteration]["upward"]
+frequency = find_bias_frequency(selected, method=BIAS_SETTINGS["frequency_method"])
+print(f"{name}: step {choice.iteration}, amplitude {choice.amplitude:g}, "
+      f"frequency {frequency / 1e6:.6f} MHz")
+
+columns = min(3, len(iterations))
+rows = (len(iterations) + columns - 1) // columns
+fig, axes = plt.subplots(
+    rows, columns, figsize=(3.8 * columns, 3.0 * rows),
+    sharex=True, sharey=True, squeeze=False, constrained_layout=True,
+)
+for ax, (step, entries) in zip(axes.flat, iterations.items()):
+    amplitude = entries["upward"]["sweep_amplitude"]
+    check = choice.checks.get(step)
+    verdict = f"bifurcated={check.bifurcated}" if check else "not checked"
+    chosen = step == choice.iteration
+    for direction, entry in entries.items():
+        offset = (entry["frequencies"] - selected["original_center_frequency"]) / 1e3
+        ax.plot(offset, magnitude_db(entry["iq_volts"] / entry["sweep_amplitude"]),
+                ls="-" if direction == "upward" else "--", label=direction)
+    ax.set_title(f"step {step}: amplitude {amplitude:g}"
+                 f"{' — CHOSEN' if chosen else ''}\n{verdict}", fontsize=10)
+    if chosen:
+        ax.set_facecolor("#eaf5e9")
+        for spine in ax.spines.values():
+            spine.set_color("#287a35")
+            spine.set_linewidth(2)
+        ax.axvline((frequency - selected["original_center_frequency"]) / 1e3,
+                   color="black", ls=":", label="bias frequency")
+    ax.legend(fontsize=8)
+for ax in list(axes.flat)[len(iterations):]:
+    ax.set_visible(False)
+fig.supxlabel("offset from sweep centre [kHz]")
+fig.supylabel("magnitude [dB, sweep-amplitude-normalized]")
+fig.suptitle(f"{name}: selecting amplitude and frequency")
+plt.show()
 ```
 
-Pulse detection on these streams (triggering, per-pulse metrics, streaming
-HDF5) is covered by `pulse_capture.md` in this folder. It starts where this
-notebook ends: with biased detectors.
+Each panel is one measured amplitude, with both sweep directions. The green
+panel is the selected step; its dotted line marks the selected frequency.
+The search stops at the first detected bifurcation, so higher measured levels
+can be labelled **not checked**. Each trace is divided by its recorded sweep
+amplitude before conversion to dB, removing the commanded drive scaling while
+preserving changes in its measured baseline.
 
-## 10. Keep the results
-
-The tuning is on the board, but the characterization is only in this kernel.
-Saving `bias_results` gives you the frequencies, the fits and the calibrations
-without repeating the sweep.
+`find_bias_points()` performs those steps for every resonator and returns a
+`BiasReport` with a new catalog. This `BiasReport` is also saved into the
+existing multisweep file. It rounds bias frequencies onto the tone grid
+and measures IQ derivatives there from the selected sweep. Those derivatives
+supply the catalog's `df_calibration`; no separate calibration measurement or
+phase rotation is performed by this call. The input catalog is preserved under
+`'call_params'`.
 
 ```python
-out_path = OUTPUT_DIR / "tuning_results.pkl"
-with open(out_path, "wb") as f:
-    pickle.dump({
-        "netanal": netanal,
-        "resonance_frequencies": resonance_frequencies,
-        "multisweep_results": multisweep_results,
-        "bias_results": bias_results,
-    }, f)
+bias_report = find_bias_points(amplitude_sweeps[module_id], **BIAS_SETTINGS, save=True)
+print(bias_report)
+print(bias_report.catalog)
 
-print(f"wrote {out_path} ({out_path.stat().st_size/1e6:.1f} MB)")
-
-# The entries are the tuning record pulse capture stores with each
-# channel's pulses; the df_calibration in them is what reports pulse
-# heights in Hz:
-from rfmux.algorithms.measurement.df_calibration import tuning_rows
-tuning = tuning_rows(bias_results, await crs.get_nco_frequency(module=MODULE))
-print(f"tuning rows for {len(tuning)} channels, "
-      f"{sum(r.get('df_calibration') is not None for r in tuning.values())} "
-      f"with a df calibration; pass these to crs.trigger_capture(tuning=…) "
-      f"or PulseCaptureSession")
 ```
 
-## 11. Where this maps in Periscope
+Review the flags and selected traces before applying to a real array.
+The API returns a point even for flagged resonators; it does not silently
+remove them.
 
-The Periscope panels call the same functions this notebook does:
+Note that you can run `find_bias_points` on multisweep data multiple times, using
+different analysis parameters, to refine your results. You do not need to retake
+the measurement.
 
-| Periscope control | API equivalent |
-|---|---|
-| **Network Analysis** panel | `crs.take_netanal(...)` |
-| *Unwrap Cable Delay* button | `fit_cable_delay` → `crs.set_cable_length(...)` |
-| *Find Resonances* + its dialog | `find_resonances(...)` |
-| **Multisweep** panel | `crs.multisweep(...)` |
-| *Apply Skewed Fit* / *Apply Nonlinear Fit* in the Multisweep dialog | `fit_skewed_multisweep`, `fit_nonlinear_iq_multisweep` |
-| **Bias KIDs** dialog | `bias_kids(...)` |
-| *Get Noise Spectrum* button in the Multisweep panel | `crs.py_get_samples(return_spectrum=True)` |
-| *Histograms* tab of the Multisweep panel | the `fit_params` distributions in section 7 |
-| Progress bars | the `progress_callback=` hook on every long call |
-
-`simplified_tuning_flow.py` in this folder runs the same sequence as a plain
-script, to copy from or to run against MOCK:
-
-    python simplified_tuning_flow.py MOCK      # simulated CRS
-    python simplified_tuning_flow.py 0042      # real board
+The following panels show each resonator's selected sweep, normalized by its
+recorded sweep amplitude in dB, with shared axes. Zero frequency offset marks
+its bias frequency.
 
 ```python
-# Only tear down a simulation this notebook started. If section 1 attached to
-# Periscope's CRS, stopping its streamer would kill Periscope's live plots.
-if IS_MOCK:
-    await crs.stop_udp_streaming()
-    print("simulated streamer stopped")
-else:
-    print("left the board as it is: biased, and not ours to tear down")
+columns = min(4, len(bias_report.findings))
+rows = (len(bias_report.findings) + columns - 1) // columns
+fig, axes = plt.subplots(
+    rows, columns, figsize=(3.4 * columns, 2.7 * rows),
+    sharex=True, sharey=True, squeeze=False, constrained_layout=True,
+)
+for ax, finding in zip(axes.flat, bias_report.findings):
+    entry = bias_report.catalog[finding.name].bias.bias_sweep
+    offset = (entry["frequencies"] - finding.frequency_hz) / 1e3
+    ax.plot(offset, magnitude_db(entry["iq_volts"] / entry["sweep_amplitude"]), lw=1.2)
+    ax.axvline(0, color="black", ls=":", lw=1)
+    ax.set_title(f"{finding.name}: amplitude {finding.amplitude:g}"
+                 f"{' (flagged)' if finding.flagged_because else ''}", fontsize=10)
+for ax in list(axes.flat)[len(bias_report.findings):]:
+    ax.set_visible(False)
+fig.supxlabel("offset from bias frequency [kHz]")
+fig.supylabel("magnitude [dB, sweep-amplitude-normalized]")
+fig.suptitle("Each resonator at its selected amplitude; dotted line = bias frequency")
+plt.show()
 ```
+
+## 6. Apply the bias catalog
+
+`crs.apply_bias()` programs each catalog resonator's frequency and amplitude
+on its assigned channel. It uses the catalog's module and moves the NCO only
+if the current setting cannot carry the tones. It does not select operating
+points: that was analysis in section 5.
+
+```python
+bias_path = await crs.apply_bias(bias_report.catalog, save=True)
+applied = load_bias_catalog(bias_path)
+first = next(iter(applied.catalog))
+print(f"{bias_path}: NCO {applied.nco_frequency_hz / 1e6:.6f} MHz, "
+      f"{first.name} at {first.bias.bias_power_dbm:.2f} dBm")
+
+```
+
+## 7. Acquire slow-stream and PFB noise
+
+`measure_noise()` measures the configured catalog channels and returns
+`{module_id: block}`, just like multisweep. It reads actual tone frequencies
+and amplitudes, keeps a snapshot of the catalog, and saves through `store`.
+It does not select or apply biases. `decimation=None` preserves stream settings.
+
+These short captures use `reference="absolute"`: saved time-domain IQ is in
+**volts** (`iq_volts`), and spectra are in **dBm/Hz**. Relative captures retain
+**counts** (`iq_counts`); the example plotters accept either. `nsegments` sets spectral averaging;
+increase sample counts to measure for longer and resolve lower frequencies.
+Slow UDP and per-channel PFB RPC captures are sequential, not synchronized.
+The PFB UDP streamer must be off for RPC capture; the NCO is not reset.
+
+The **mock RPC PFB capture is uniform synthetic noise**, not detector noise.
+The slow stream uses the resonator model. This example disables pulses and TLS
+noise and retains a small quasiparticle-noise term.
+
+
+```python
+from rfmux.streamer import find_streamer_conflict
+
+NOISE_PARAMS = dict(
+    num_samples=1_000, nsegments=5, reference="absolute",
+    spectrum_cutoff=0.9, pfb_samples=20_000, pfb_nsegments=5,
+)
+started_mock_stream = False
+try:
+    if created_mock:
+        conflict = find_streamer_conflict()
+        if conflict:
+            raise RuntimeError(f"Cannot start a second mock stream: {conflict}")
+        started_mock_stream = await crs.start_udp_streaming()
+    noise_results = await crs.measure_noise(
+        bias_report.catalog, **NOISE_PARAMS, save=True, label="noise_results")
+finally:
+    if started_mock_stream:
+        await crs.stop_udp_streaming()
+        print("notebook's mock UDP streamer stopped")
+
+noise_path = store.saved_path(noise_results)
+print(f"saved noise: {noise_path}")
+```
+
+Use the example noise plotters to take a quick look at the data.
+IQ overlays use
+the calibration sweep in the saved catalog; timestreams use nominal sample
+spacing; PSD plots omit carrier bins and their immediate neighbors only in
+the display. Saved arrays remain unchanged. See `noise_measurement.md` for
+file inspection, an explicit verification multisweep, and plot options.
+
+```python
+import example_plotting_noise as noiseplots
+
+module_noise = store.load(noise_path)[module_id]
+noiseplots.plot_iq_panels(module_noise)
+noiseplots.plot_timestreams(module_noise)
+noiseplots.plot_psds(module_noise)
+noiseplots.plot_psds(
+    module_noise, stream="pfb",
+    title="PFB noise (mock RPC: synthetic uniform noise)" if created_mock else None)
+```
+
+## 8. Keep and reload the results
+
+Measurements were saved through `rfmux.tuning.store`; the resonance search
+and bias report were saved back alongside their source measurements. The saved
+files are pickle files, and CAN be loaded using pickle.load() but this is not advised -
+when loaded with `store.load(...)`, the code reads and updates the path to where it read
+from, and then will be reliably able to save updates to that file, even if it is not
+in the place where it was originally generated (e.g., you sent your favourite multisweep
+to your friend)
+
+This makes it easy to reload a previous multisweep, extract its resonator
+catalog, and re-tune the array from this saved starting point.
+
+```python
+for measurement in (module_netanal, module_initial, amplitude_sweeps[module_id]):
+    print(store.saved_path(measurement))
+
+saved_sweeps = store.load(store.saved_path(amplitude_sweeps[module_id]))
+restored_catalog = ResonatorCatalog.from_dict(saved_sweeps[module_id]["bias_report"]['catalog'])
+print(restored_catalog)
+restored_noise = store.load(noise_path)
+print(f"reloaded noise for {len(restored_noise[module_id]['results']['resonators'])} resonators")
+# To reapply later, after connecting to the intended board, from the bias file:
+# await crs.apply_bias(load_bias_catalog(bias_path).catalog)
+print(f"workflow completed in {time.perf_counter() - started:.1f} s")
+```
+
+The board is left biased. Section 7 stops only the mock streamer owned by this
+notebook; it leaves hardware and attached-session streams running.
+For further characterization, see `multisweep.md` and `bias_finding.md`;
+for timestreams and pulse capture, see `pulse_capture.md`.

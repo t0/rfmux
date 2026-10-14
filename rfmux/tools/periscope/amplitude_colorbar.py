@@ -4,18 +4,11 @@ import numpy as np
 from PyQt6 import QtCore, QtWidgets, QtGui
 import pyqtgraph as pg
 
-from .utils import UnitConverter, COLORMAP_CHOICES
+from .utils import UnitConverter, COLORMAP_CHOICES, amplitude_cmap_position
 
 
 class AmplitudeColorBar(QtWidgets.QWidget):
-    """A thin horizontal colorbar that maps amplitude → color.
-
-    Shown above the sweep grid when there are too many sweeps for per-plot
-    legends (>5).  Uses the same ``inferno`` colormap and dark/light mode
-    mapping as the curves in the grid plots.
-
-    The widget is ~30 px tall and stretches to full width.
-    """
+    """Amplitude gradient with unit-aware endpoints and optional direction key."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -65,26 +58,26 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         bg_color = QtGui.QColor("#1C1C1C") if self._dark_mode else QtGui.QColor("#FFFFFF")
         painter.fillRect(self.rect(), bg_color)
 
-        # Layout constants
+        font = painter.font()
+        font.setPointSize(8)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+
+        # Reserve enough space for decimal endpoint labels.
         margin = 8
         bar_top = 4
         bar_height = 14
         label_y = bar_top + bar_height + 12
 
         # --- Gradient bar ---
-        bar_left = margin + 60   # room for min label
-        bar_right = w - margin - 60  # room for max label
+        bar_left = margin + metrics.horizontalAdvance(self._min_label) + 6
+        bar_right = w - margin - metrics.horizontalAdvance(self._max_label) - 6
         bar_width = max(bar_right - bar_left, 10)
 
         if self._cmap is not None:
             for x in range(int(bar_width)):
-                t = x / max(bar_width - 1, 1)
-                # Apply same dark/light mode mapping as create_amplitude_color_map
-                if self._dark_mode:
-                    map_val = 0.3 + t * 0.7
-                else:
-                    map_val = t * 0.75
-                rgba = self._cmap.map(map_val)
+                rgba = self._cmap.map(amplitude_cmap_position(
+                    x / max(bar_width - 1, 1), self._dark_mode))
                 if isinstance(rgba, np.ndarray):
                     c = QtGui.QColor(int(rgba[0]), int(rgba[1]), int(rgba[2]))
                 else:
@@ -98,9 +91,6 @@ class AmplitudeColorBar(QtWidgets.QWidget):
         painter.drawRect(int(bar_left), bar_top, int(bar_width), bar_height)
 
         # --- Labels ---
-        font = painter.font()
-        font.setPointSize(8)
-        painter.setFont(font)
         painter.setPen(text_color)
 
         # Min label (left of bar)

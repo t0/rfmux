@@ -18,10 +18,15 @@ Open With → Notebook).  Steps below cite its sections.
 Usage:
   python pulse_capture_flow.py MOCK      # simulated CRS
   python pulse_capture_flow.py 0042      # real board serial
+
+Files go to a temporary demo folder; set RFMUX_DEMO_OUTPUT to choose another.
 """
 
 import asyncio
+import os
+from pathlib import Path
 import sys
+import tempfile
 
 import rfmux
 from rfmux.pulse_capture import (
@@ -59,6 +64,8 @@ CONFIG = PulseCaptureConfig(
 SLOW_S = 2.0              # sample time per capture, seconds
 FAST_S = 0.25
 DUAL_S = 2.0
+OUTPUT_DIR = Path(os.environ.get(
+    "RFMUX_DEMO_OUTPUT", Path(tempfile.gettempdir()) / "rfmux_pulse_capture"))
 
 MOCK_CONFIG = {
     "num_resonances": 2,
@@ -75,9 +82,9 @@ MOCK_CONFIG = {
 async def connect(serial: str):
     """Return (crs, host, is_mock) for a serial or "MOCK"."""
     if serial.upper() == "MOCK":
-        # Refuse to be the second simulation on the port. Mock streamers all
-        # send to 127.0.0.1:9876, so a reader gets both interleaved and every
-        # pulse count below is quietly wrong.
+        # Mock streamers share the hardware multicast group, or fall back
+        # to loopback unicast. A second sender can mix unrelated samples
+        # or starve a receiver.
         conflict = find_streamer_conflict()
         if conflict:
             raise RuntimeError(
@@ -136,7 +143,7 @@ async def run_capture_flow(crs, host, is_mock) -> int:
     # axes; with them, trigger_basis defaults to "df" and hertz.
     capture_session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",
-        sample_rate=fs, hdf5_path="pulse_flow_slow.h5",
+        sample_rate=fs, hdf5_path=str(OUTPUT_DIR / "pulse_flow_slow.h5"),
         **CONFIG.session_kwargs(fs))
     capture_session.start()
     covered = await run_slow_source(capture_session, host, module=MODULE,
@@ -156,7 +163,7 @@ async def run_capture_flow(crs, host, is_mock) -> int:
         # notebook §8.  Same four calls, at the PFB rate.
         capture_session = PulseCaptureSession(
             channels=CHANNELS, module=MODULE, streamer_mode="fast",
-            sample_rate=PFB_SAMPLING_FREQ, hdf5_path="pulse_flow_fast.h5",
+            sample_rate=PFB_SAMPLING_FREQ, hdf5_path=str(OUTPUT_DIR / "pulse_flow_fast.h5"),
             **CONFIG.session_kwargs(PFB_SAMPLING_FREQ))
         capture_session.start()
         covered = await run_pfb_source(capture_session, host, CHANNELS,
@@ -171,7 +178,7 @@ async def run_capture_flow(crs, host, is_mock) -> int:
         capture_session = DualPulseCaptureSession(
             channels=CHANNELS, module=MODULE, slow_rate=fs,
             fast_rate=PFB_SAMPLING_FREQ, config=CONFIG,
-            hdf5_path="pulse_flow_dual.h5")
+            hdf5_path=str(OUTPUT_DIR / "pulse_flow_dual.h5"))
         capture_session.start()
         covered, _ = await run_dual_source(capture_session, host, CHANNELS,
                                            module=MODULE, duration_s=DUAL_S)
@@ -194,6 +201,8 @@ async def run_capture_flow(crs, host, is_mock) -> int:
 
 async def main(serial: str = "MOCK") -> int:
     try:
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        print(f"Capture files: {OUTPUT_DIR}")
         crs, host, is_mock = await connect(serial)
         return await run_capture_flow(crs, host, is_mock)
     except Exception as e:

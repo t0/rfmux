@@ -1,5 +1,4 @@
-"""Tone power in dBm against a module's DAC scale, and back: the one
-conversion the notebooks, bias_kids' labels and Periscope share."""
+"""Tone power in dBm against a module's DAC scale, and back."""
 import numpy as np
 import pytest
 
@@ -23,7 +22,6 @@ def test_the_two_are_inverse_and_take_arrays():
 def test_periscope_labels_with_the_same_arithmetic():
     pytest.importorskip("PyQt6")
     from rfmux.tools.periscope.utils import UnitConverter
-    assert UnitConverter.normalize_to_dbm(0.001, -0.5) == pytest.approx(
-        convert_amplitude_to_dbm(0.001, -0.5))
-    assert UnitConverter.dbm_to_normalize(-60.5, -0.5) == pytest.approx(0.001)
-    assert UnitConverter.normalize_to_dbm(0.0, -0.5) == -np.inf
+    assert UnitConverter.format_probe_label(0.001, dac_scale=-0.5) == \
+        f"{convert_amplitude_to_dbm(0.001, -0.5):.1f} dBm"
+    assert UnitConverter.format_probe_label(0.0, dac_scale=-0.5) == "-inf dBm"

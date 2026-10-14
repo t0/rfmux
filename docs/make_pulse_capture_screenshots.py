@@ -53,9 +53,9 @@ async def _capture(path):
     from rfmux.algorithms.measurement.streamer_config import StreamerConfig
     from rfmux.core.transferfunctions import decimation_to_sampling
     from rfmux.mock.helpers import create_mock_crs
-    from rfmux.pulse_capture import (
-        PulseCaptureConfig, PulseCaptureSession, run_slow_source)
+    from rfmux.pulse_capture import PulseCaptureSession, run_slow_source
     from rfmux.streamer import find_streamer_conflict
+    from rfmux.tuning import tuning_rows
 
     conflict = find_streamer_conflict()
     if conflict:
@@ -77,8 +77,9 @@ async def _capture(path):
 
     # auto_bias_kids skips the sweep-and-fit, so the simulated array has
     # no calibration; this is that measurement on its own.
-    tuning = await crs.measure_df_calibrations(channels=CHANNELS,
-                                               module=MODULE)
+    calibrated = await crs.empirically_calibrate_df(module=MODULE, save=False)
+    tuning = {c: row for c, row in tuning_rows(calibrated).items()
+              if c in CHANNELS}
 
     session = PulseCaptureSession(
         channels=CHANNELS, module=MODULE, streamer_mode="slow",

@@ -265,12 +265,22 @@ histograms and templates come from the file. A capture still running opens
 its live panel instead. Note -- it can take some time to load a large .hdf5
 record and re-generate the template and histograms.
 
-A capture taken after Bias KIDs carries each channel's tuning: the sweep at
-the chosen amplitude, the fit, the bias point and the df calibration. The
-pulse list shows it as a **Tuning** item, one per module. Double-click it to
-browse those sweeps in a multisweep window, one sweep per resonator, with
-the detector digest a double-click away as usual. The window reads nothing
-from the board and changes nothing on it.
+A capture taken after Apply Bias carries each channel's tuning: the bias
+point off the catalog -- where the tone is, what drives it, the df
+calibration that reads it in hertz -- and the one sweep that calibration
+was read off. The pulse list shows it as a **Tuning** item, one per module.
+Double-click it to browse those sweeps in a multisweep window, one sweep
+per resonator at the amplitude it is biased at, with the detector digest a
+double-click away as usual. The window reads nothing from the board and
+changes nothing on it, and there is nothing to re-run: a capture records
+the sweep each channel is biased at, not the schedule it came from.
+
+The **IQ Plane** tab overlays the pulse on that calibration sweep. Catalog
+tuning rows store `frequencies` and `iq_volts`; the viewer converts the sweep
+into the selected display units alongside the pulse. The catalog's
+`iq_rotation_deg` is not a programmed ADC phase and does not rotate this
+overlay. Legacy captures with `iq_complex` retain their recorded saved-data
+and ADC phase corrections.
 
 The file also keeps the tail of each channel's noise training record, the
 last five max-pulse lengths of the samples the noise statistics were
@@ -374,13 +384,15 @@ tooltip. Raise `net.core.rmem_max` before a long fast capture (see
 
 A pulse moves the resonance frequency, so in the IQ plane it lies along one
 direction set by the bias point. With a df calibration in a channel's
-tuning row from `bias_kids`, the capture rotates the channel onto that
-direction, triggers on it, and stores the samples in hertz. Without one, a
-channel triggers and stores in volts on the I and Q axes. The file keeps the
-whole row (bias frequency, amplitude, sweep, fit parameters, calibration)
-with the channel's pulses. In Periscope the tuning comes from the Bias KIDs
-step of the tuning flow; in mock mode Periscope measures a calibration for
-every simulated detector at startup.
+tuning row, the capture rotates the channel onto that direction, triggers on
+it, and stores the samples in hertz. Without one, a channel triggers and
+stores in volts on the I and Q axes. The file keeps the whole row with the
+channel's pulses: the bias frequency, amplitude and power in dBm, the
+calibration, the sweep it was read from and that sweep's fits, and any
+concern bias finding raised. In Periscope the tuning comes from Apply Bias
+in the multisweep panel, and `rfmux record` takes it from the session's
+newest `bias_catalog` file; in mock mode Periscope measures a calibration
+for every simulated detector at startup.
 
 The screenshots in this guide are frequency-basis captures: the axes are df
 and dissipation, and the amplitudes are in hertz.

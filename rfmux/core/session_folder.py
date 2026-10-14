@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -34,6 +36,11 @@ def new_metadata(folder) -> dict:
     }
 
 
+#: Held around every read-change-write of a session's metadata, so two
+#: threads of one program cannot interleave and lose an entry.
+METADATA_LOCK = threading.RLock()
+
+
 def load_metadata(session) -> dict:
     """The session's metadata, or ``{}`` when it has none it can read."""
     try:
@@ -47,8 +54,15 @@ def save_metadata(session, metadata: dict) -> None:
     # Serialized before the file is opened: a value JSON cannot hold
     # raises here and leaves the file as it was.
     text = json.dumps(metadata, indent=2, default=str)
-    with open(Path(session) / METADATA_FILE, "w") as f:
-        f.write(text)
+    # Through a temporary file: a reader never sees it half-written, which
+    # it would read as empty.
+    target = Path(session) / METADATA_FILE
+    partial = target.with_name(target.name + ".partial")
+    try:
+        partial.write_text(text)
+        os.replace(partial, target)
+    finally:
+        partial.unlink(missing_ok=True)
 
 
 def export_filename(data_type: str, identifier: str, ext: str = ".pkl",
@@ -86,10 +100,11 @@ def open_session(path=None, base=None) -> Path:
 def register_export(session, filename: str, data_type: str,
                     identifier: str, timestamp: Optional[str] = None) -> None:
     """List a file in the session's exports."""
-    metadata = load_metadata(session)
-    metadata.setdefault("exports", []).append(
-        export_entry(filename, data_type, identifier, timestamp))
-    save_metadata(session, metadata)
+    with METADATA_LOCK:
+        metadata = load_metadata(session)
+        metadata.setdefault("exports", []).append(
+            export_entry(filename, data_type, identifier, timestamp))
+        save_metadata(session, metadata)
 
 
 def exports(session, data_type: Optional[str] = None,

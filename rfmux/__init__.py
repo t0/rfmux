@@ -60,7 +60,7 @@ from .core.crs import (
     Crate,
     ReadoutChannel,
     ReadoutModule,
-    Resonator,
+    HWMResonator,
     Wafer,
 )
 

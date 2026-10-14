@@ -53,8 +53,18 @@ def test_a_panel_that_takes_the_double_click_keeps_the_view(qt_app):
 
 
 def test_histogram_plots_share_the_double_click(qt_app):
-    from rfmux.tools.periscope.parameter_histograms_panel import (
-        ParameterHistogramsPanel)
-    vb = ParameterHistogramsPanel._view_box()
-    assert isinstance(vb, ClickableViewBox)
+    from rfmux.tools.periscope.fit_histograms_tab import FitHistogramsTab
+    tab = FitHistogramsTab()
+    tab._lay_out(1)
+    tab.resize(500, 400)
+    tab.show()
+    plot = tab._plots[0]
+    plot.plot(np.arange(100.0), np.linspace(0.0, 1.0, 100))
+    vb = plot.getViewBox()
+    vb.setRange(xRange=(40, 45), yRange=(0.4, 0.45), padding=0)
+    qt_app.processEvents()
+    _double_click(plot, qt_app)
+    (x0, x1), (y0, y1) = vb.viewRange()
+    assert x0 <= 0 and x1 >= 99 and y0 <= 0 and y1 >= 1
     assert vb.state["mouseMode"] == pg.ViewBox.PanMode
+    tab.close()

@@ -12,11 +12,10 @@ The Periscope application provides a comprehensive suite of visualization and an
   - Fast Fourier Transform (FFT) analysis
   - Single-sideband Power Spectral Density (SSB PSD)
   - Dual-sideband Power Spectral Density (DSB PSD)
-  - Control mode: each displayed channel's frequency, amplitude and DAC and ADC phases beside its plots, editable, re-read from the board once a second, with the module's NCO in a banner above
+  - Control mode: each displayed channel's frequency, amplitude and DAC and ADC phases beside its plots, editable, re-read from the board once a second, with the module's NCO and DAC full scale at the output in a banner above. Both are editable. A new DAC scale changes the power of all the tones by the same number of dB; the normalized amplitudes stay
 
 - **Network Analysis**:
-  - Amplitude and phase vs frequency sweeps
-  - Multi-amplitude sweeps for characterization
+  - Amplitude and phase vs frequency sweeps, upward or downward through the band
   - Cable delay calculation and compensation
   - Resonance frequency identification
   - Export of analysis data in various formats
@@ -94,27 +93,86 @@ await raise_periscope(crs_instance, module=2, channels="3&5")
 The network analysis functionality allows for detailed characterization of resonators:
 
 1. Click "Network Analyzer" to configure and run a frequency sweep
-2. Set frequency range, sweep points, and amplitude parameters
+2. Set the frequency range, the points and averaging, the probe amplitude, and
+   which way through the band to measure. The amplitude is in normalized units
+   or in dBm. The label next to it shows the value in the other units.
+   "DAC full scale at output" shows the DAC scale of the module, after the
+   balun loss. You can change it in the range that the board accepts
+   (−70.64 to +5.34 dBm at the output, 6.4 µA to 40.5 mA). The recommended value
+   is −0.75 dBm at the output (20 mA). The task sets the new DAC scale before
+   the measurement starts, and it applies to all the tones of the module. An
+   orange line shows when the tones can clip, or when they are so small that
+   quantization noise can increase, and tells how to change the DAC scale.
 3. View amplitude and phase response for each module
-4. Use "Find Resonances" to automatically identify resonance frequencies
-5. Use "Unwrap Cable Delay" to compensate for cable length effects
-6. Export data in various formats for further analysis
+4. Use "Find Resonances" to identify resonance dips; "Find Resonances Settings" sets the
+   thresholds. Apply saves edits between searches and across sessions; Close
+   discards unapplied edits. In the collision group, resonators at or below the
+   frequency-separation threshold collide, including equality. Check **Disable
+   collision cut** to skip this check entirely and grey out its controls. Apply
+   remembers the disabled state. The default 0 kHz threshold only acts on
+   identical frequencies; other resonance filters remain independent.
+5. Rejected candidates are marked with a cross -- hover one for why it went
+6. Use "Unwrap Cable Delay" to compensate for cable length effects
+7. Save writes the measurement, and any search in it, to the session folder
 
 ### Multisweep Analysis
 
 For high-resolution analysis around identified resonance frequencies:
 
 1. First identify resonances using the Network Analysis feature
-2. Click "Take Multisweep" to configure a detailed sweep around resonances
-3. Analyze detector parameters and characteristics
-4. Export data for detailed offline analysis
+2. Click "Take Multisweep" to configure a detailed sweep around resonances.
+   "Amplitudes in" sets the units of the amplitude fields: normalized or dBm.
+   Each field shows its value in the other units. When you change the units,
+   the powers do not change. A ramp has "equal dB steps" or "equal amplitude
+   steps". Re-run Multisweep opens on the schedule of the last run. "DAC full
+   scale at output" works as in the network analysis dialog. The status line
+   warns when a step can clip or when quantization noise can increase. With
+   dBm selected, "Each resonator's own amplitude" and "Multiples of each
+   catalog amplitude" use the power of each catalog amplitude with the DAC
+   scale of the board now. Thus a new DAC scale keeps these powers and changes
+   the normalized amplitudes.
+3. Click "Run Fit". Progress is beside the button, and `Fits complete` is said
+   there in green when it finishes — what the fits found, and which of them did
+   not converge, is on the tabs that draw them. "Fit Settings" holds the settings, which persist
+   between sessions: which models to fit (skewed, nonlinear, or both) and which
+   sweeps -- all of them, each resonator at the amplitude it is biased at, or
+   one amplitude step. Apply saves edits; Close discards unapplied edits.
+4. The Fit Results tab draws each resonator's measurement with one model over
+   it. Its own toolbar says which: "Fit" offers the models the sweeps carry
+   fits for, and "Amplitude" which sweeps are drawn -- all of them, one
+   amplitude step, or, once Find Bias has chosen one, each resonator at the
+   step it is biased at. Both are remembered between sessions. Measured data
+   is blue, the model is a thinner black or white line, and its fitted resonance
+   is marked in orange. A shared label strip identifies the lines. Each fitted
+   sweep's `fr`, `Qi`, `Qc`, and nonlinear `a` appear on its subplot's top axis
+   in scientific notation. When several fits are shown, that axis gives the
+   median of each parameter; hover it for each curve's exact values or select
+   one amplitude to narrow the summary. The plotted magnitude is normalized to
+   each trace's last point,
+   which is the fits' own convention, so the
+   toolbar's "Normalize Traces" does not apply here
+5. The Fit Histograms tab answers the same fits over the whole array rather
+   than one resonator at a time: a scatter of fitted `fr` sorted in ascending
+   frequency, with each dot coloured by its fitted `Qr` on a linear colour
+   scale, and the quality factors binned on one shared set of log bins so they
+   can be read against each other. The nonlinear model
+   puts `a` beside a line at the nonlinearity where bifurcation starts. Each
+   drive gets its own outline in its own colour. Choose one amplitude step
+   or "At bias amplitude"; all amplitudes is not offered. The default is bias
+   amplitude when available, otherwise step 0. A saved single-amplitude choice
+   is retained. Its "Fit" and "Amplitude" choices are independent of Fit Results.
+   It says above the plots how many fits are drawn and how many the fitters
+   rejected and so are not binned
+6. Fits are written into the sweeps themselves, so a file saved afterwards
+   carries them and reopens with them; a measurement already saved is re-saved
+   where it was
 
 ### Import and Export Data
 Periscope provides several ways to reuse previously captured sweeps and to archive new measurements for offline study.
 
 - **Network analysis parameter import**
   1. In the *Network Analysis* dialog, select **Import Data** to load a saved configuration from a `.pkl`/`.pickle` file created by an earlier run.
-  2. The dialog non-blockingly opens a file chooser and, once a compatible payload is selected, pre-populates all sweep parameters (modules, amplitudes, frequency span, averaging, cable length, etc.).
+  2. The dialog non-blockingly opens a file chooser and, once a compatible netanal file is selected, fills the fields in with the arguments it was measured with -- amplitude, frequency range, points, averaging, max channels and span, and direction -- along with the name it was saved under. Not the module: one Periscope is one module, and the file is shown on the one it holds.
   3. After the file is validated, the **Load Analysis** button becomes available, allowing you to immediately reuse the imported settings without re-entering them by hand.
   4. If the resonance values are available it will also re-plot the data in the same way as displayed when it was saved.
 
@@ -130,18 +188,73 @@ Periscope provides several ways to reuse previously captured sweeps and to archi
 
 
 - **Multisweep data export**
-  1. The Multisweep window includes an **Export Data** button that writes a  pickle file. The export captures the timestamp, module ID, initial parameters, DAC scales in use, per-iteration results, and any Bias-KIDs analysis outputs so that complete runs can be replayed or shared.
-  2. One can again export the file from Multisweep window after setting bias. Now the Bias-KIDs output will not be empty.
+  1. The Multisweep window's 💾 button writes the measurement through `rfmux.tuning.store`, into the session folder. It is the container `multisweep` returned, so the same file opens in a notebook with `store.load`, and one a notebook wrote opens here.
+  2. Saving the same panel again overwrites the same file: the container carries the path it was written to. Running the fitters or Find Bias on a measurement that is already on disk re-saves it where it was, since both leave their results in the block.
 
-- **Load Bias**
-  1. Use **Load Bias** from the main toolbar to apply bias settings generated by a previous multisweep and Bias-KIDs solve. The dialog accepts pickle
-    exports containing `initial_parameters`, DAC scale metadata, and `bias_kids_output` results.
-  2. When a compatible file is selected, Periscope validates the payload and populates the module, tone list, amplitudes, and span fields. You can edit these values before committing them, or load them exactly as saved. The application programs the CRS with the stored amplitudes, tones, and phases and warns when board DAC scales diverge from the file so you can reconcile units before biasing.
-  3. Files missing the expected structure are rejected with a clear warning so you do not accidentally apply partial or incompatible bias information.
+- **Tuning Catalog**
+  1. In a completed or loaded Multisweep panel, open **Tuning Catalog**. The
+     window shows the catalog as a table: one row for each resonator, with its
+     name, channel, bias frequency, amplitude, power at the DAC scale now,
+     measured power, df calibration, bifurcation amplitude, flag (the reason
+     is in the tooltip), the fits of the bias sweep, and notes. Only Find
+     Bias sets the bias sweep, so a catalog has fits only after Find Bias;
+     Run Fit alone does not add them. The skewed fit (fr, Qr, Qi, Qc) and the
+     nonlinear fit (fr, Qr, Qi, Qc) each have their own columns, which show
+     when a bias sweep has that fit. The column of the nonlinearity parameter
+     `a` always shows.
+     Click a column header to sort. You can edit the bias frequency, the
+     amplitude (normalized, or as a power in dBm) and the notes, and delete
+     selected rows. Name and channel are read-only, because they link the
+     resonator to the saved sweeps and to the board. A change of frequency or
+     amplitude clears the calibration, the fits and the flag of that
+     resonator. **Apply** gives the edited catalog to the panel: the next
+     multisweep and Apply Bias use it. **Close** discards edits that you did
+     not apply. **Save Catalog** writes the catalog in the table, with its
+     calibration, fits and notes, as a `catalog_<date>_<time>.pkl` file in the
+     session folder (`rfmux.tuning.save_catalog`). **Open Catalog** reads a
+     catalog file or a `bias_catalog` file into the table
+     (`rfmux.tuning.load_catalog`); Apply keeps it. A double-click on a catalog
+     file in the session browser opens it in the Tuning window. **Export CSV**
+     and **Import CSV** use the columns name, channel, bias_frequency_hz and
+     bias_amplitude; an imported catalog has no calibration. The table is read-only for a file from another module or for
+     a capture tuning.
+  2. In the **Collision Cut** section, choose the separation in kHz, and press **Run Collision Cut**. The check calls `rfmux.tuning.find_sweeps_with_nearby_resonances`: it finds pairs of dips within each fine sweep, including pairs exactly at the separation threshold. It runs only when requested. The initial separation is 100 kHz; enter `inf` to flag any second detected dip in the window.
+  3. The defaults are 1 dB prominence, 10 Hz (0.01 kHz) minimum dip spacing, all amplitude steps and all directions. Keep dip spacing below the cut. Select an early amplitude step if high-drive bifurcation produces false hits. Neighbours outside the measured window cannot be detected.
+  4. The **Collisions** tab shows all measured traces of the flagged resonators. **Remove collided resonators from catalog and re-sweep** opens the normal multisweep configuration with a copy of the current catalog containing only survivors. After Find Bias, this copy carries the current bias points. The previous sweep settings seed the dialog.
+  5. **Start Multisweep** creates a separate measurement panel. With session auto-export enabled, it saves into the session like any multisweep; otherwise use its Save button. The original panel and saved measurement keep their catalog and data. Collision previews are not saved. Re-sweep is unavailable with no collisions, no survivors, a foreign-module file, or capture tuning.
 
-- **Take Noise** 
-  1. Opening the Detector Digest on a resonance also provides a **Take Noise** shortcut. The digest overlays the newly acquired noise timestream with the loaded rotation data, letting you confirm phase alignment, biasing and overall noise behavior without rerunning the full sweep. One can click it multiple times to see the evolution of noise in their data stream.
-  2. Noise captures are tied to the currently selected detector, making it straightforward to iterate on the bias solution and immediately see the impact on the detector’s timestream statistics.
+  6. To re-sweep without some resonators, select their rows and press **Remove selected and re-sweep**. A request that leaves no resonator is refused. This opens the same multisweep configuration with a reduced copy of the catalog; the catalog of the panel does not change. Manual re-sweep is also unavailable for foreign-module files or capture tuning.
+
+- **Sweep centers**
+
+  Sweep centers are independent of catalog bias points. Choose **Catalog bias frequencies**, **Previous multisweep centers**, or **Custom frequencies**. With an active catalog, enter one custom center per resonator in the displayed order; names, channels, bias frequencies, amplitudes and calibrations are preserved in the sweep's catalog snapshot. Without a catalog, custom frequencies seed a new array. In Python, pass `center_frequencies={name: center_hz, ...}` alongside the catalog, covering every resonator. Each measured trace records its actual `original_center_frequency`; Find Bias updates the returned catalog from those traces.
+
+- **Find Bias**
+
+  1. **Find Bias** chooses an operating amplitude and frequency for every resonator in the sweeps on screen, in one `find_bias_points` call. **Find Bias Settings** opens a settings window grouped by the test each setting belongs to: which bifurcation test decides the amplitude, the thresholds that test reads, where in the chosen sweep the tone goes, and how far from the sweep centre an answer is believed. Settings persist between sessions, **Apply** saves edits, and **Close** discards unapplied edits. **Reset to Defaults** restores the default values; press **Apply** to save them.
+     The resulting catalog keeps the last observed bifurcation amplitude when the new run detects none; a new observation replaces it. Findings record this run's bifurcation checks. A clean sweep below the retained bifurcation amplitude is not flagged for missing a new detection; a drive at or above that amplitude remains flagged, and the frequency-distance check still applies. To reset stored amplitudes in Python, call `catalog.clear_bifurcations()` before taking the next multisweep with that catalog. This preserves bias frequencies, amplitudes and calibrations. Find Bias reads the catalog snapshot recorded in its sweeps, so clearing a separate catalog does not change an existing sweep's snapshot.
+  2. The report becomes the panel's catalog, and the sweeps come back carrying it as `bias_report`. On the magnitude and IQ grids the amplitude step each resonator is biased at keeps its normal line and gains a translucent wide overlay, with a dashed line at its bias frequency on the magnitude grid. Its compact legend label reads `f_bias` and `amp=` with at most two significant figures in normalized DAC units. Flags are absent from plot labels; hover a subplot for the reason its point is flagged. The status line says `Bias found (2 of 9 flagged)`, then fades like any other outcome — nothing is on the board until Apply Bias.
+  3. The **Bias: derivative** tab shows strongest pair strength and the shape and noise thresholds versus drive amplitude. Pair strength is the smaller prominence of an eligible peak–trough pair, in inverse Hz; it must reach both thresholds to trigger detection. Zero denotes no pair when none exists. A compact label strip above the grid identifies the three curves, upward and downward line styles, and the dotted selected-amplitude line. Hover those labels for the path to the `bias_finding.md` example workbook's derivative-method explanation. The plot is available before Find Bias and redraws when you apply Find Bias Settings. Open **Help → Bias plot guide** for the scales.
+  4. The **Bias: frequency** tab draws what chose the frequency: each resonator's IQ arc speed — how far its trace moves per hertz — at the drive it is biased at, which is the quantity the default `iq_derivative` method maximizes. The speed is black or white with no thick overlay; `dI/df` and `dQ/df` are thin green and red lines. A shared label strip above the grid identifies them and the dashed `f_bias` line. That line marks the hardware-grid frequency, so the gap between it and the speed peak shows quantization. Only the step the resonator is biased at is drawn, and the tab is empty until Find Bias has chosen one. With the `minimum` frequency method the line sits at the dip instead and need not be at this curve's peak.
+  5. The **Bias: hysteresis** tab labels its limit once above the grid. Its value updates when you apply Find Bias Settings; individual drive labels remain with their own curves or in the amplitude colorbar.
+
+- **Apply Bias**
+  1. **Apply Bias** biases every resonator in the panel's catalog at the frequency and power its bias point carries. Which NCO carries them, and putting the frequencies on the tone grid, are `apply_bias`'s doing. A bias point keeps the power it was measured at: if the DAC scale has been changed since the sweep, the amplitudes are recomputed to keep those powers, and a warning you can dismiss says so.
+  2. Apply Bias saves a `bias_catalog` file in the session folder: the applied catalog (each bias point with its sweep, the sweep's fits, its power in dBm and any concern Find Bias raised) with the NCO and DAC scale setting read back from the board. `rfmux record` takes its tuning from the newest one.
+  3. On success each channel's tuning row is published to the main window — `rfmux.tuning.tuning_rows` of the applied catalog, carrying the bias frequency, the amplitude, the power, the `df_calibration`, and the sweep it was read off with its fits. The main window displays the streams in hertz through each row's calibration, and a pulse capture started afterwards records the rows as its tuning.
+
+- **Noise Spectrum**
+  1. After **Apply Bias**, choose **Get Noise Spectrum** to measure the catalog's named resonators. The main window's **Noise Spectrum** button measures explicitly selected channels. Both run `measure_noise` and save its current-format noise container in the session folder. Keep the slow stream running; a requested decimation change remains in effect after the measurement.
+  2. Open the saved file from the Session Browser to see the same viewer offline. **Timestreams** and **Power spectral densities** each show one subplot per resonator, with pages of 20 and up to five columns. Choose **Slow** or **PFB** when both captures are present. PFB times are relative to each separate capture, so they do not align across resonators or with the slow capture.
+  3. **Volts** shows I/Q in V and PSDs in V²/Hz. **df** is available when the saved catalog carries nonzero `dI_df + j*dQ_df`; it shows df and the orthogonal dissipation component in Hz, with PSDs in Hz²/Hz. The complex conversion is `IQ_volts / (dI_df + j*dQ_df)`.
+  4. **Subtract timestream mean** starts checked and affects only the timestream display. PSDs use logarithmic axes and omit the zero-frequency carrier bin. Saved arrays remain unchanged.
+  5. Calibrated measurements save `df_hz`, `psd_df`, and `psd_dissipation` beside each stream's unchanged native IQ and helper spectra. The viewer reads those scientific products directly and keeps mean subtraction and carrier-bin omission as display-only operations. PFB conversion requires the recorded NCO frequency. Noise files saved by an earlier Periscope do not open.
+
+- **Detector Digest**
+  1. The **Detector Digest** tab is one resonator at the size of the panel, which is the question a grid of subplots cannot answer. Double-click any subplot on any grid tab to open the digest on that resonator; the arrow keys and the combo box walk the catalog from there.
+  2. Three plots: its magnitude at every drive it was swept at, the same sweeps as IQ loops, and — on the right — the one sweep it is biased at, with the fitted model over it in cyan and a line where the tone will actually go. The left two are the measurement alone; the fit is drawn on the plot of the sweep it was fitted to. There is no drive selector, because the right-hand plot is about one drive: the one Find Bias chose. Until it has run, that plot says so.
+  3. Under the plots, a column of `parameter: value` rows for each thing worth reading off this resonator: the bias point — its step, its drive, its frequency and offset, the responsivity there, the drive bifurcation was first seen at, and the flag if it carries one — and then one column per fit of the sweep it is biased at, headed by the model and the sweep direction, with each parameter beside its error. Hover a row for what the parameter means and the number the fit actually produced; the values are selectable, to be copied into a notebook. The fit columns are `collect_fit_params`'s rows, so a notebook tabulates the same thing.
+  4. It measures nothing. Everything on it comes off the multisweep, the fits and the bias report the panel already holds, so it is worth opening on a file as much as on a sweep that has just finished.
 
 All import dialogs validate that the selected file contains the expected data structure and will notify you if a file is missing required sections, helping prevent accidental misuse of unrelated files
 
@@ -164,5 +277,3 @@ When extending or modifying Periscope:
 3. Keep UI operations on the main thread
 4. Implement proper error handling and user feedback
 5. Maintain consistent documentation and type annotations
-
-See the Memory Bank system patterns documentation for detailed coding guidelines.

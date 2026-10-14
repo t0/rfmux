@@ -11,7 +11,7 @@ HDF5 file of time-ordered data in the capture's units.
 The board is read; --channel-streamer turns its channel streamer on for
 the modules, nothing else is configured.  With --session the run joins
 an existing folder and takes its channels and tuning from the newest
-bias export there; otherwise a new session_YYYYMMDD_HHMMSS folder is
+bias_catalog there; otherwise a new session_YYYYMMDD_HHMMSS folder is
 made under --session-dir.
 
     rfmux record --serial 0156 --duration 20 --config trigger_config.h5
@@ -113,7 +113,7 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
 @click.option("--channels", default=None,
               help="Channel ranges, 1-88 or 1,5-10, on every module, or per "
                    "module as 2:1-114,3:1-96; default: the biased channels of "
-                   "the session's newest bias export for each module")
+                   "the session's newest bias_catalog for each module")
 @click.option("--duration", type=float, default=None,
               help="Seconds to record, after the capture's noise training")
 @click.option("--session", type=click.Path(file_okay=False), default=None,
@@ -157,7 +157,7 @@ TRUNC_HELP = ("Which 16 of each sample's 24 bits the channel stream carries, in 
               help="After the run: Periscope in review mode on the pulse file, the "
                    "overlay viewer on the channel with the most pulses, or nothing")
 @click.option("--bias", type=click.Path(dir_okay=False, exists=True), default=None,
-              help="bias_kids export for the df calibrations; default: the session's newest")
+              help="bias_catalog file for the df calibrations; default: the session's newest")
 @click.option("--config", "config_path",
               type=click.Path(dir_okay=False, exists=True), default=None,
               help="Trigger config file (Export Config in Periscope or the "
@@ -272,7 +272,7 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     """One recording, from the command line's options or the dialog's.
     *channels* is a range spec for every module of *modules*, a
     per-module spec (which names the modules itself), or None for each
-    module's newest bias export."""
+    module's newest bias_catalog."""
     folder = open_session(Path(session) if session else None, Path(session_dir))
     try:
         wanted, tuning, notes = resolve_channels(
@@ -284,9 +284,9 @@ def _run(*, serial, hostname, modules, channels, duration, session,
     if not quiet:
         click.echo(f"[record] session {folder}")
         for note in notes:
-            click.echo(f"[record] bias export {note}")
+            click.echo(f"[record] bias_catalog {note}")
         if tod and not tuning:
-            click.echo("[record] no bias export for these modules: the "
+            click.echo("[record] no bias_catalog for these modules: the "
                        "time-ordered data carries no tuning, its channels "
                        "stored in volts (--session or --bias names one)")
         for module, chosen in wanted.items():

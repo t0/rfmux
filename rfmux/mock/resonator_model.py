@@ -999,6 +999,14 @@ class MockResonatorModel:
                     system_termination=k0.system_termination))
             return out
 
+    def forget_tones(self, module: int, channel: int | None = None) -> None:
+        """Forget driven states for a disabled channel or a cleared module."""
+        with self._physics_lock:
+            for key in list(self._tone_states):
+                if key[0] == module and (channel is None or key[1] == channel):
+                    del self._tone_states[key]
+            self._set_backgrounds([k for k in self._tone_states if k[0] == module])
+
     def _tone_state(self, tone, frequency):
         """The store for *tone*, its (module, channel); a caller without
         one gets a slot per nearest resonator."""
@@ -1342,9 +1350,9 @@ class MockResonatorModel:
     def update_base_params_from_nqp(self, noisy_nqp_values):
         """
         Update base Lk and R values using physics calculations.
-        
+
         Uses JIT-compiled parallel vectorized calculations for 15-25x speedup.
-        
+
         Parameters
         ----------
         noisy_nqp_values : list
@@ -1683,7 +1691,18 @@ class MockResonatorModel:
         # CIC droop can make the response much less than 1 at high frequencies
         return max(filter_response, 0.0)
     
-    def calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0, pulse_time=None):
+    def calculate_module_response_coupled(
+        self, module: int, num_samples: int = 1, sample_rate: float | None = None,
+        start_time: float = 0, pulse_time: float | None = None,
+    ) -> dict[int, complex | np.ndarray]:
+        """Evaluate a module without racing tone shutdown."""
+        # Keep the configuration snapshot and its response atomic with tone
+        # shutdown: an old snapshot must not restore a discarded driven state.
+        with self._physics_lock:
+            return self._calculate_module_response_coupled(
+                module, num_samples, sample_rate, start_time, pulse_time)
+
+    def _calculate_module_response_coupled(self, module, num_samples=1, sample_rate=None, start_time=0, pulse_time=None):
         """
         Calculate coupled response for all channels in a module using vectorized operations.
         

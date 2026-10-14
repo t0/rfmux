@@ -12,7 +12,7 @@ from PyQt6.QtCore import Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 
 from rfmux.core.transferfunctions import (  # noqa: E402
-    convert_amplitude_to_dbm, convert_dbm_to_amplitude)
+    BALUN_LOSS_DB, convert_amplitude_to_dbm, convert_dbm_to_amplitude)
 from rfmux.tools.periscope.tone_control_widgets import (  # noqa: E402
     NcoBanner, ToneFields)
 from test.qt_helpers import bare_periscope  # noqa: E402
@@ -171,7 +171,7 @@ def test_banner_sends_the_nco_in_hz(qt_app):
     qt_app.processEvents()
     banner.show_values(NCO, DAC)
     assert banner.nco_edit.text() == "500.000000"
-    assert banner.dac_label.text() == "DAC scale (labelled) -0.50 dBm"
+    assert banner.dac_edit.text() == "-0.50"
     sent = []
     banner.nco_committed.connect(sent.append)
     banner.nco_edit.setFocus()
@@ -222,3 +222,35 @@ def test_layout_adds_nothing_with_control_off(qt_app):
     p = _bare_window([[1]], control_on=False)
     p._add_tone_columns(2)
     assert p.grid.count() == 0 and p.tone_fields == {}
+
+
+
+def _type_dac_scale(qt_app, banner, text):
+    banner.dac_edit.setFocus()
+    qt_app.processEvents()
+    banner.dac_edit.selectAll()
+    QTest.keyClicks(banner.dac_edit, text)
+    QTest.keyClick(banner.dac_edit, Qt.Key.Key_Return)
+    qt_app.processEvents()
+
+
+def test_banner_sends_the_dac_scale_setting_with_the_balun_loss(qt_app):
+    banner = NcoBanner(1)
+    banner.show()
+    banner.show_values(NCO, DAC)
+    sent = []
+    banner.dac_scale_committed.connect(sent.append)
+    _type_dac_scale(qt_app, banner, "2")
+
+    assert sent == [pytest.approx(2.0 + BALUN_LOSS_DB)]
+
+
+def test_banner_refuses_a_dac_scale_the_board_does_not_accept(qt_app):
+    banner = NcoBanner(1)
+    banner.show()
+    banner.show_values(NCO, DAC)
+    sent = []
+    banner.dac_scale_committed.connect(sent.append)
+    _type_dac_scale(qt_app, banner, "20")
+
+    assert sent == []

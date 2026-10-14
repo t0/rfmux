@@ -5,20 +5,17 @@ Session Manager for Periscope Application
 This module provides centralized session management for automatic data export
 in the Periscope application. It handles:
 - Creating and managing session folders
-- Auto-exporting data files with timestamped naming
+- Pointing ``store`` at the session folder, so measurements save there
 - Tracking session state and metadata
-- Coordinating with analysis panels via signals
 
 Usage:
     session_mgr = SessionManager(parent=main_window)
     session_mgr.start_session("/path/to/data", "my_session")
-    session_mgr.export_data("netanal", "module1", data_dict)
 """
 
 from __future__ import annotations
 
 import datetime
-import pickle
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from PyQt6 import QtCore
 
+from ...tuning import store
 from rfmux.core import session_folder as _session
 
 
@@ -60,9 +58,7 @@ class SessionManager(QtCore.QObject):
     DATA_TYPES = {
         'netanal': 'Network Analysis',
         'multisweep': 'Multisweep Analysis',
-        'bias': 'Bias KIDs',
         'noise': 'Noise Spectrum',
-        'channel_noise':'Channel Noise',
         'screenshot': 'Screenshot' ,
     }
 
@@ -166,6 +162,8 @@ class SessionManager(QtCore.QObject):
         
         # Initialize session state
         self._session_path = session_path
+        # The library writes into the session folder, flat, as the notebooks do.
+        store.set_output_directory(session_path)
         
         # Save the full session path so it's pre-selected next time
         from . import settings
@@ -222,6 +220,7 @@ class SessionManager(QtCore.QObject):
         
         # Set the session path
         self._session_path = path
+        store.set_output_directory(path)
         self._session_start_time = datetime.datetime.now()
         
         # Try to load existing metadata
@@ -261,6 +260,7 @@ class SessionManager(QtCore.QObject):
         session_name = self.session_name
         
         # Clear state
+        store.set_output_directory(None)
         self._session_path = None
         self._export_count = 0
         self._session_start_time = None
@@ -270,108 +270,6 @@ class SessionManager(QtCore.QObject):
         self.session_ended.emit()
         
         print(f"[Session] Ended session: {session_name}")
-    
-    # ─────────────────────────────────────────────────────────────────
-    # Data Export Methods
-    # ─────────────────────────────────────────────────────────────────
-    
-    def export_data(self, data_type: str, identifier: str, data: Dict[str, Any], 
-                    filename_override: Optional[str] = None) -> Optional[Path]:
-        """
-        Export data to the session folder with timestamped filename.
-        
-        This is the main method for exporting analysis data. It generates
-        a timestamped filename and saves the data as a pickle file.
-        
-        If filename_override is provided, that filename is used instead of
-        generating a new one. This enables natural file overwriting when
-        a panel re-exports updated data (e.g., after Find Resonances).
-        
-        Args:
-            data_type: Type of data being exported (netanal, multisweep, bias, noise)
-            identifier: Additional identifier (e.g., 'module1', 'module1_det3')
-            data: Dictionary of data to export
-            filename_override: If provided, use this filename instead of generating
-                              a new timestamped one. Enables natural overwriting.
-        
-        Returns:
-            Path to the exported file, or None if session not active or export disabled
-        
-        Example:
-            >>> session_mgr.export_data('netanal', 'module1', netanal_data)
-            Path('/data/session_20251201/netanal_module1_092000.pkl')
-            
-            # Re-export with same filename to overwrite:
-            >>> session_mgr.export_data('netanal', 'module1', updated_data, 
-            ...                         filename_override='netanal_module1_092000.pkl')
-        """
-        if not self.is_active or self._session_path is None:
-            print(f"[Session] No active session - skipping export of {data_type}")
-            return None
-        
-        if not self._auto_export_enabled:
-            print(f"[Session] Auto-export disabled - skipping export of {data_type}")
-            return None
-        
-        # Use override filename if provided, otherwise generate new one
-        if filename_override:
-            filename = filename_override
-            is_overwrite = True
-        else:
-            filename = self.generate_filename(data_type, identifier)
-            is_overwrite = False
-        file_path = self._session_path / filename
-        
-        # Add export metadata to the data
-        export_data = data.copy()
-        export_data['_session_export'] = {
-            'timestamp': datetime.datetime.now().isoformat(),
-            'data_type': data_type,
-            'identifier': identifier,
-            'session_name': self.session_name,
-            'export_number': self._export_count + 1,
-        }
-        
-        try:
-            # Write the pickle file
-            with open(file_path, 'wb') as f:
-                pickle.dump(export_data, f)
-            
-            # Update session state
-            self._export_count += 1
-            self._session_metadata.setdefault('exports', []).append(
-                _session.export_entry(filename, data_type, identifier))
-            self._save_metadata()
-            
-            # Emit signals
-            self.file_exported.emit(str(file_path), data_type)
-            self.session_updated.emit()
-            
-            #print(f"[Session] Exported: {filename}")
-            return file_path
-            
-        except Exception as e:
-            print(f"[Session] Error exporting data: {e}")
-            return None
-    
-    def generate_filename(self, data_type: str, identifier: str) -> str:
-        """
-        Generate a timestamped filename for data export.
-        
-        Uses time-only suffix since files are already in a timestamped session folder.
-        
-        Args:
-            data_type: Type of data (netanal, multisweep, bias, noise)
-            identifier: Additional identifier (e.g., module1, detector3)
-        
-        Returns:
-            Filename in format: <type>_<identifier>_HHMMSS.pkl
-        
-        Example:
-            >>> session_mgr.generate_filename('netanal', 'module1')
-            'netanal_module1_092000.pkl'
-        """
-        return _session.export_filename(data_type, identifier)
     
     # ─────────────────────────────────────────────────────────────────
     # Session Query Methods
@@ -519,16 +417,18 @@ class SessionManager(QtCore.QObject):
     def load_file(self, file_path: str) -> Optional[Dict[str, Any]]:
         """
         Load data from a pickle file.
-        
+
+        Through ``store``, so a file that was moved is told where it now is and
+        an analysis re-saves it in place rather than beside itself.
+
         Args:
             file_path: Path to the pickle file to load
-        
+
         Returns:
             Dictionary of loaded data, or None if load fails
         """
         try:
-            with open(file_path, 'rb') as f:
-                return pickle.load(f)
+            return store.load(file_path)
         except Exception as e:
             print(f"[Session] Error loading file {file_path}: {e}")
             return None
@@ -541,8 +441,8 @@ class SessionManager(QtCore.QObject):
         or data structures. This makes it robust against filename changes.
         
         Detection priority:
-        1. Check '_session_export' metadata (for files exported by session manager)
-        2. Inspect data structure (for older files or external files)
+        1. Check store's file_metadata (for files written through store)
+        2. Check '_session_export' metadata (for files exported by session manager)
         
         Args:
             file_path: Path to the pickle file
@@ -570,36 +470,20 @@ class SessionManager(QtCore.QObject):
         if data is None or not isinstance(data, dict):
             return None
         
-        # 1. Check for session export metadata (most reliable)
+        # 1. A file written through store says what it is, whoever wrote it:
+        # a container carries file_metadata in each module's block, and a
+        # to_dict payload carries it at the top.
+        for block in [data, *data.values()]:
+            if isinstance(block, dict) and store.METADATA_KEY in block:
+                measurement_type = block[store.METADATA_KEY].get('measurement_type')
+                if measurement_type:
+                    return measurement_type
+
+        # 2. Files the session manager wrote itself, before store
         if '_session_export' in data:
             metadata = data['_session_export']
             if isinstance(metadata, dict) and 'data_type' in metadata:
                 return metadata['data_type']
-        
-        # 2. Fall back to structure-based detection for older files
-        # Priority order matters: bias and noise are subsets of multisweep
-        
-        # Check for multisweep data (either old or new format)
-        has_multisweep = 'results_by_detector' in data or 'results_by_iteration' in data
-
-        # Bias files: have both bias_kids_output AND multisweep data
-        if 'bias_kids_output' in data and has_multisweep:
-            return 'bias'
-
-        # Noise files: have noise_data AND multisweep data
-        if 'noise_data' in data and data['noise_data'] is not None and has_multisweep:
-            return 'noise'
-
-        # Multisweep files: have multisweep data (but not bias or noise)
-        if has_multisweep:
-            return 'multisweep'
-        
-        # Network analysis files: have 'parameters' and 'modules' keys
-        if 'parameters' in data and 'modules' in data:
-            return 'netanal'
-
-        if 'channel_noise_data' in data and data['channel_noise_data'] is not None:
-            return 'channel_noise'
         
         # Unknown file type
         return None
@@ -609,12 +493,10 @@ class SessionManager(QtCore.QObject):
                                identifier: str = ""):
         """
         Register a file written directly into the session folder by a
-        panel/task (e.g. a streamed pulse-capture HDF5 that cannot go
-        through pickle-based export_data).
+        panel/task (e.g. a streamed pulse-capture HDF5).
 
-        Records the file in the session metadata 'exports' list with the
-        same entry shape as export_data, and emits file_exported /
-        session_updated so the browser refreshes.
+        Records the file in the session metadata 'exports' list and emits
+        file_exported / session_updated so the browser refreshes.
         """
         if not self.is_active or self._session_path is None:
             return
@@ -654,28 +536,18 @@ class SessionManager(QtCore.QObject):
         """Save session metadata to JSON file."""
         if not self.is_active or self._session_path is None:
             return
-        
+
         try:
-            _session.save_metadata(self._session_path, self._session_metadata)
+            # Keep exports something else listed meanwhile (crs.apply_bias
+            # lists its bias_catalog file itself, from a worker thread).
+            with _session.METADATA_LOCK:
+                on_disk = _session.load_metadata(self._session_path).get('exports', [])
+                known = {e.get('filename') for e in
+                         self._session_metadata.get('exports', [])}
+                for entry in on_disk:
+                    if entry.get('filename') not in known:
+                        self._session_metadata.setdefault('exports', []).append(entry)
+                _session.save_metadata(self._session_path, self._session_metadata)
         except Exception as e:
             print(f"[Session] Warning: Could not save metadata: {e}")
     
-    # ─────────────────────────────────────────────────────────────────
-    # Slot for Panel Signals
-    # ─────────────────────────────────────────────────────────────────
-    
-    @QtCore.pyqtSlot(str, str, dict)
-    def handle_data_ready(self, data_type: str, identifier: str, data: Dict[str, Any]):
-        """
-        Slot to handle data_ready signals from analysis panels.
-        
-        This slot should be connected to the data_ready signals emitted
-        by NetworkAnalysisPanel, MultisweepPanel, and DetectorDigestPanel.
-        
-        Args:
-            data_type: Type of data (netanal, multisweep, bias, noise)
-            identifier: Identifier string (e.g., module1)
-            data: Dictionary of data to export
-        """
-        if self.is_active and self._auto_export_enabled:
-            self.export_data(data_type, identifier, data)

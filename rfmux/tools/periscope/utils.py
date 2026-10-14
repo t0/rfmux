@@ -16,6 +16,8 @@ what turns that kind of breakage into a test failure instead of a
 crash on the user's next launch.
 """
 
+import inspect
+import math
 import os
 import re
 import threading
@@ -36,6 +38,7 @@ import asyncio
 # Adjusted imports for new location
 from rfmux.core.session import load_session
 from rfmux.core.schema import CRS
+from rfmux.algorithms.measurement.take_netanal import take_netanal
 
 # ───────────────────────── Global Constants ─────────────────────────
 # Display settings
@@ -62,14 +65,6 @@ IQ_COLORS = {
     "MAGNITUDE": None     # None will be replaced with theme-appropriate default
 }
 
-# Standard colors for scatter plots
-SCATTER_COLORS = {
-    "DEFAULT": "#1f77b4",  # Blue
-    "HIGHLIGHT": "#d62728", # Red 
-    "SELECTION": "#2ca02c", # Green
-    "NOISE": None          # None will be replaced with theme-appropriate default
-}
-
 # Default colormaps for various plot types
 COLORMAP_CHOICES = {
     "SEQUENTIAL": "viridis",    # Good for sequential data
@@ -78,18 +73,8 @@ COLORMAP_CHOICES = {
     "CATEGORICAL": "tab10"       # Good for categorical data
 }
 
-# Colors for distinct plot series (limited set - when we need distinct colors)
-DISTINCT_PLOT_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728"]
-
 # Utility colors
 RESONANCE_LINE_COLOR = "#d62728"  # Red color for resonance lines
-
-# Colors for fitting overlays
-FITTING_COLORS = {
-    "SKEWED": "#2ca02c",    # Green for skewed fit
-    "NONLINEAR": "#9467bd", # Purple for nonlinear fit
-    "ERROR_BAND": "#ffbb78" # Light orange for error bands (if used)
-}
 
 # Threshold for using distinct colors vs. colormap in amplitude sweeps
 AMPLITUDE_COLORMAP_THRESHOLD = 3  # Use distinct colors if num_amps <= this value
@@ -99,33 +84,34 @@ DEFAULT_MIN_FREQ = 1e9  # 1 GHz
 DEFAULT_MAX_FREQ = 1.5e9  # 1.5 GHz
 DEFAULT_CABLE_LENGTH = 10  # meters
 DEFAULT_AMPLITUDE = 0.005
-DEFAULT_MAX_CHANNELS = 1024
-DEFAULT_MAX_SPAN = 500e6  # 500 MHz
+# The comb's own knobs, read out of take_netanal's signature so the dialog
+# cannot offer a default the library does not have. DEFAULT_MAX_CHANNELS was
+# 1024 against the driver's 1023, which is one tone per comb iteration and a
+# different set of measured frequencies.
+_NETANAL_DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(take_netanal).parameters.items()
+    if parameter.default is not inspect.Parameter.empty
+}
+DEFAULT_MAX_CHANNELS = _NETANAL_DEFAULTS["max_chans"]
+DEFAULT_MAX_SPAN = _NETANAL_DEFAULTS["max_span"]
 DEFAULT_NPOINTS = 50000
 DEFAULT_NSAMPLES = 10
-
-# Default linspace settings for amplitude sweeps
-DEFAULT_AMP_START = -65.0   # dBm, start of the generated amplitude list
-DEFAULT_AMP_STOP = -40.0    # dBm, end of the generated amplitude list
-DEFAULT_AMP_ITERATIONS = 3  # Default number of iterations for linspace
+DEFAULT_SWEEP_DIRECTION = _NETANAL_DEFAULTS["sweep_direction"]
+#: The directions a netanal can be measured in. One per call.
+SWEEP_DIRECTIONS = ("upward", "downward")
 
 # Multisweep defaults
-MULTISWEEP_DEFAULT_AMPLITUDE = DEFAULT_AMPLITUDE  # Same as network analysis default
-MULTISWEEP_DEFAULT_SPAN_HZ = 200000.0  # 200 kHz span per resonance
-MULTISWEEP_DEFAULT_NPOINTS = 101  # Points per sweep
-MULTISWEEP_DEFAULT_NSAMPLES = DEFAULT_NSAMPLES  # Samples to average (10)
 
-# Find Resonances defaults
-DEFAULT_EXPECTED_RESONANCES = None  # Optional
-DEFAULT_MIN_DIP_DEPTH_DB = 2.0  # dB
-DEFAULT_MIN_Q = 1e4
-DEFAULT_MAX_Q = 1e7
-DEFAULT_MIN_RESONANCE_SEPARATION_HZ = 1e4  # 10 KHz
-# Off thins crowded peaks to the most prominent; on drops every member
-# of a crowded group, so nothing returned has a neighbour within the
-# separation.
-DEFAULT_REQUIRE_ISOLATION = False
-DEFAULT_DATA_EXPONENT = 2.0
+#: Resonators drawn on one grid page, and how many of them share a row. A
+#: batch of 20 in rows of 5 fills a laptop screen without the subplots
+#: becoming too small to read a lineshape off; the panel's Subplots spinner
+#: overrides the first of them.
+DEFAULT_SUBPLOTS = 20
+DEFAULT_SUBPLOT_COLUMNS = 5
+
+# How long a transient status message stays in a panel's toolbar.
+STATUS_MESSAGE_MS = 8000
 
 # Sampling settings
 BASE_SAMPLING = 625e6 / 256.0 / 64.0  # ≈38 147.46 Hz base for dec=0
@@ -133,7 +119,7 @@ DEFAULT_BUFFER_SIZE = 5_000
 DEFAULT_REFRESH_MS = 33
 
 # GUI update intervals
-NETANAL_UPDATE_INTERVAL = 0.1  # seconds
+
 
 # ICON_PATH needs to be relative to this file's new location
 ICON_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons', 'periscope-icon.svg')
@@ -205,17 +191,20 @@ from rfmux.core.transferfunctions import ( # Adjusted import
     spectrum_from_slow_tod,
     convert_roc_to_volts,
     convert_roc_to_dbm,
-    convert_amplitude_to_dbm,
-    convert_dbm_to_amplitude,
+    convert_dacunits_to_dbm,
+    convert_dacunits_to_volts,
     fit_cable_delay,
     calculate_new_cable_length,
     recalculate_displayed_phase,
 )
-from rfmux.algorithms.measurement import fitting # Adjusted import
 #: Re-exported: the display path and the pulse detector share one
 #: ring buffer, so extend()'s wrap arithmetic exists in one place.
 from rfmux.pulse_capture.detection import Circular  # noqa: F401
 from rfmux.core.hardware_map import macro # Adjusted import
+from rfmux.tuning.multisweep_amplitudes import normalized_amplitude
+from rfmux.core.dac_scale import (DAC_SCALE_OUTPUT_RANGE_DBM,
+                                  DAC_SCALE_RECOMMENDED_SETTING_DBM)
+from rfmux.core.transferfunctions import BALUN_LOSS_DB
 # CRS is already imported from rfmux.core.schema
 
 # Configure PyQtGraph
@@ -389,6 +378,31 @@ def legend_text_color(dark_mode: bool) -> str:
     return LEGEND_TEXT_DARK if dark_mode else LEGEND_TEXT_LIGHT
 
 
+def apply_plot_theme(widget, dark_mode: bool) -> str:
+    """Theme a PlotWidget's background, four axes and title; return the
+    foreground colour."""
+    background, foreground = theme_colors(dark_mode)
+    widget.setBackground(background)
+    item = widget.getPlotItem()
+    for name in ("left", "bottom", "right", "top"):
+        item.getAxis(name).setPen(foreground)
+        item.getAxis(name).setTextPen(foreground)
+    if item.titleLabel.text:
+        item.setTitle(item.titleLabel.text, color=foreground)
+    return foreground
+
+
+def amplitude_cmap_position(t: float, dark_mode: bool) -> float:
+    """Where a drive at fraction *t* of the range sits on the amplitude
+    colour map, clear of the background's end of it."""
+    return 0.3 + 0.7 * t if dark_mode else 0.75 * t
+
+
+def sweep_style(direction: str):
+    """The line style a sweep in *direction* is drawn with."""
+    return DOWNWARD_SWEEP_STYLE if direction == "downward" else UPWARD_SWEEP_STYLE
+
+
 #: Fusion's own light and dark colours, spelled out because the style
 #: only hands back the one matching the desktop's colour scheme.
 _UI_PALETTES = {
@@ -515,53 +529,126 @@ def mode_title(mode: str) -> str:
     }
     return mode_titles.get(mode, mode)
 
+# ───────────────────── Magnitude and IQ axis labels ─────────────────────
+
+
+def iq_unit_mode(unit_mode):
+    """The units an IQ loop is drawn in, for a panel showing *unit_mode*.
+
+    A loop in log power is not a loop, so dBm draws the volts that power was
+    computed from. Counts draw counts.
+    """
+    return 'counts' if unit_mode == 'counts' else 'volts'
+
+
+def magnitude_axis_labels(plot_item, unit_mode, normalize, *,
+                          frequency_offset=True):
+    """Label a magnitude-against-frequency plot for what it is drawing.
+
+    Normalized, the quantity is a transmission and not a received power:
+    |S21| against the drive, dimensionless in volts and in dB in dBm. In
+    counts it is counts per unit drive, which is |S21| times a gain nothing
+    here knows -- so the axis says counts, and says what they are over.
+
+    *frequency_offset* labels the bottom axis as the grids draw it, either
+    side of where a sweep was centred. A netanal draws absolute frequency and
+    labels its own.
+    """
+    if normalize:
+        if unit_mode == "dbm":
+            plot_item.setLabel('left', '|S21|', units='dB')
+        elif unit_mode == "volts":
+            plot_item.setLabel('left', '|S21|')
+        else:
+            plot_item.setLabel('left', 'Magnitude', units='Counts / drive')
+    elif unit_mode == "counts":
+        plot_item.setLabel('left', 'Magnitude', units='Counts')
+    elif unit_mode == "dbm":
+        plot_item.setLabel('left', 'Power', units='dBm')
+    elif unit_mode == "volts":
+        plot_item.setLabel('left', 'Magnitude', units='V')
+    if frequency_offset:
+        plot_item.setLabel('bottom', 'Frequency Offset', units='kHz')
+
+
+def iq_axis_labels(plot_item, unit_mode, normalize=False):
+    """Label an IQ loop plot for what it is drawing.
+
+    dBm has no loop to draw, so the panel's dBm draws volts here and the axis
+    says volts -- see :func:`iq_unit_mode`.
+    """
+    if normalize:
+        i_label, q_label = 'I / drive', 'Q / drive'
+        units = 'Counts / drive' if iq_unit_mode(unit_mode) == 'counts' else None
+    else:
+        i_label, q_label = 'I (Real)', 'Q (Imaginary)'
+        units = 'Counts' if iq_unit_mode(unit_mode) == 'counts' else 'V'
+    plot_item.setLabel('left', q_label, units=units)
+    plot_item.setLabel('bottom', i_label, units=units)
+
+
 # ───────────────────────── Unit Conversion ─────────────────────────
 class UnitConverter:
     """
     Utility class for converting between different units.
     """
     @staticmethod
-    def normalize_to_dbm(normalized_amplitude: float, dac_scale_dbm: float) -> float:
-        if normalized_amplitude <= 0: return -np.inf
-        return convert_amplitude_to_dbm(normalized_amplitude, dac_scale_dbm)
+    def can_normalize(unit_mode: str, drive: Optional[float],
+                      dac_scale: Optional[float]) -> bool:
+        """Whether a trace driven at *drive* can be stated against its drive.
+
+        The drive itself is always needed. Saying it in volts or in dBm needs
+        the module's DAC scale as well, because a drive is a fraction of full
+        scale and nothing else says what full scale is worth. Counts do not:
+        the drive is already the divisor.
+
+        Asked before the conversion and before the axis is labelled, so that
+        what a plot says it is showing is what it is showing.
+        """
+        if drive is None or not np.isfinite(drive) or drive <= 0:
+            return False
+        return unit_mode == "counts" or dac_scale is not None
 
     @staticmethod
-    def dbm_to_normalize(dbm: float, dac_scale_dbm: float) -> float:
-        return convert_dbm_to_amplitude(dbm, dac_scale_dbm)
+    def convert_amplitude(amps: np.ndarray, unit_mode: str = None,
+                          current_mode: str = "counts", *,
+                          normalize: bool = False,
+                          drive: Optional[float] = None,
+                          dac_scale: Optional[float] = None) -> np.ndarray:
+        """A measured magnitude in the units asked for, against its drive.
 
-    @staticmethod
-    def sweep_reference(freqs: np.ndarray) -> int:
-        """The index a sweep is normalised at: its lowest frequency, so
-        a downward sweep and an upward one are referenced at the same
-        point and their traces compare."""
-        return int(np.argmin(freqs)) if len(freqs) else 0
+        Normalizing divides the measurement by what drove it — in dBm,
+        subtracts it — so the trace is a transmission rather than a received
+        power, and sweeps taken at different amplitudes land on one axis
+        instead of stacked by drive.
 
-    @staticmethod
-    def convert_amplitude(amps: np.ndarray, iq_data: np.ndarray, unit_mode: str = None,
-                          current_mode: str = "counts", normalize: bool = False,
-                          ref_index: int = 0) -> np.ndarray:
-        mode_to_use = unit_mode if unit_mode is not None else current_mode # Renamed mode
-        if mode_to_use == "counts": result = amps.copy()
-        elif mode_to_use == "volts": result = convert_roc_to_volts(amps) # from rfmux.core.transferfunctions
-        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)   # from rfmux.core.transferfunctions
-        else: result = amps.copy()
-            
-        if normalize and len(result) > 0:
-            ref_val = result[ref_index]
-            if mode_to_use == "dbm":
-                if np.isfinite(ref_val): result = result - ref_val
-            else:
-                if ref_val != 0 and np.isfinite(ref_val): result = result / ref_val
-        return result
+        *drive* is the tone amplitude in normalized DAC units, as a sweep's
+        ``sweep_amplitude`` gives it, and *dac_scale* the module's full scale
+        in dBm. A request to normalize that :meth:`can_normalize` would refuse
+        is ignored, so a caller that asks both questions the same way cannot
+        draw one thing and label another.
+        """
+        mode_to_use = unit_mode if unit_mode is not None else current_mode
+        if mode_to_use == "volts": result = convert_roc_to_volts(amps)
+        elif mode_to_use == "dbm": result = convert_roc_to_dbm(amps)
+        else: result = np.asarray(amps).copy()
+
+        if not (normalize and len(result)
+                and UnitConverter.can_normalize(mode_to_use, drive, dac_scale)):
+            return result
+
+        if mode_to_use == "dbm":
+            return result - convert_dacunits_to_dbm(drive, dac_scale)
+        if mode_to_use == "volts":
+            return result / convert_dacunits_to_volts(drive, dac_scale)
+        return result / drive
 
     @staticmethod
     def format_probe_label(amp_value: float, unit_mode: str = "dbm",
                            dac_scale: Optional[float] = None) -> str:
         """Format a normalized amplitude as a compact human-readable power string.
 
-        Consolidates the label-formatting logic previously duplicated across
-        multisweep_panel, network_analysis_panel, detector_digest_panel, and
-        parameter_histograms_panel.
+        One formatter for every panel that labels a probe amplitude.
 
         Args:
             amp_value:  Normalized amplitude (0–1 scale).
@@ -573,23 +660,23 @@ class UnitConverter:
         Returns:
             A compact string such as ``"-23.45 dBm"`` or ``"152.3 µVpk"``.
         """
+        normalized = np.format_float_positional(
+            amp_value, precision=4, unique=False, fractional=False, trim="-",
+        )
         if unit_mode == "dbm":
             if dac_scale is not None:
-                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
-                return f"{dbm_val:.1f} dBm"
-            return f"{amp_value:.2e} (Norm)"
+                dbm = convert_dacunits_to_dbm(amp_value, dac_scale)
+                return f"{dbm:.1f} dBm"
+            return f"{normalized} (Norm)"
 
         if unit_mode == "volts":
             if dac_scale is not None:
-                dbm_val = UnitConverter.normalize_to_dbm(amp_value, dac_scale)
-                power_watts = 10 ** ((dbm_val - 30) / 10)
-                voltage_rms = np.sqrt(power_watts * 50.0)
-                voltage_peak = voltage_rms * np.sqrt(2)
-                return UnitConverter._format_si_volts(voltage_peak) + "pk"
-            return f"{amp_value:.2e} (Norm)"
+                volts = convert_dacunits_to_volts(amp_value, dac_scale)
+                return UnitConverter._format_si_volts(volts) + "pk"
+            return f"{normalized} (Norm)"
 
         # counts or anything else
-        return f"{amp_value:.2e} Norm"
+        return f"{normalized} Norm"
 
     @staticmethod
     def _format_si_volts(volts: float) -> str:
@@ -621,6 +708,201 @@ _BANNER_CSS = {
     "info": "background-color: #d1ecf1; color: #0c5460; "
             "padding: 5px; border-radius: 6px;",
 }
+
+
+def amplitude_values(text: str) -> list[float]:
+    """Return the numbers in a field. Commas or spaces separate the
+    numbers. An expression such as '1/1000' is permitted."""
+    return [float(eval(part, {"__builtins__": {}}))
+            for part in text.replace(",", " ").split()]
+
+
+class AmplitudeUnits(QtCore.QObject):
+    """The normalized/dBm selector for the amplitude fields of a dialog.
+
+    The dialog reads each field in the selected units. A label next to each
+    field shows the value in the other units. When the user changes the
+    selector, the fields change to the new units and keep their power. When
+    code changes the selector (for example, to restore a dialog), the fields
+    do not change. Only the units that the dialog reads change.
+    """
+
+    def __init__(self, parent: QtWidgets.QWidget, dac_scale):
+        super().__init__(parent)
+        self._dac_scale = dac_scale   # callable: the module's scale, or None
+        self._fields: list[tuple[QtWidgets.QLineEdit, QtWidgets.QLabel]] = []
+        self.combo = QtWidgets.QComboBox()
+        self.combo.addItem("normalized", "normalized")
+        self.combo.addItem("dBm", "dbm")
+        self.combo.setToolTip(
+            "Amplitudes as fractions of DAC full scale, or as powers in dBm at "
+            "the output. The measurement converts dBm with the DAC scale of the "
+            "module when it starts.")
+        self._shown = self.units()
+        self._changed_from = None
+        # For a selection by the user, Qt sends currentIndexChanged and then
+        # activated, in the same event. A change by code does not send
+        # activated.
+        self.combo.currentIndexChanged.connect(self._read_as_selected)
+        self.combo.activated.connect(self._rewrite)
+
+    def add(self, edit: QtWidgets.QLineEdit) -> QtWidgets.QLabel:
+        """Return a label that shows the value of *edit* in the other
+        units."""
+        label = QtWidgets.QLabel()
+        self._fields.append((edit, label))
+        edit.textChanged.connect(lambda _text: self._echo(edit, label))
+        self._echo(edit, label)
+        return label
+
+    def units(self) -> str:
+        return self.combo.currentData()
+
+    def set_units(self, units: str) -> None:
+        index = self.combo.findData(str(units).lower())
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+
+    def to_normalized(self, value: float) -> float:
+        """Return *value*, in the selected units, as a normalized
+        amplitude."""
+        return float(normalized_amplitude(value, self.units(), self._dac_scale()))
+
+    def refresh(self) -> None:
+        """Update all the labels, for example when the DAC scale
+        arrives."""
+        for edit, label in self._fields:
+            self._echo(edit, label)
+
+    def _read_as_selected(self, _index) -> None:
+        self._changed_from, self._shown = self._shown, self.units()
+        QtCore.QTimer.singleShot(0, self._forget_change)
+        self.refresh()
+
+    def _forget_change(self) -> None:
+        self._changed_from = None
+
+    def _rewrite(self, _index) -> None:
+        """Write the values of the fields in the new units. The power of
+        each value does not change."""
+        previous, self._changed_from = self._changed_from, None
+        scale = self._dac_scale()
+        if previous is None or scale is None:
+            return
+        for edit, _label in self._fields:
+            try:
+                values = amplitude_values(edit.text())
+            except Exception:
+                continue
+            edit.setText(", ".join(
+                _format_amplitude(_convert(v, previous, scale), self._shown)
+                for v in values))
+        self.refresh()
+
+    def _echo(self, edit: QtWidgets.QLineEdit, label: QtWidgets.QLabel) -> None:
+        scale = self._dac_scale()
+        try:
+            values = amplitude_values(edit.text())
+        except Exception:
+            values = []
+        if not values:
+            label.setText("")
+        elif scale is None:
+            label.setText("(DAC scale unknown)")
+        else:
+            other = "normalized" if self.units() == "dbm" else "dbm"
+            label.setText("= " + ", ".join(
+                _format_amplitude(_convert(v, self.units(), scale), other)
+                for v in values) + (" dBm" if other == "dbm" else " normalized"))
+
+
+def dac_scale_output_limits() -> tuple[float, float]:
+    """The DAC full scale at the output that a field can show, in dBm.
+
+    The limits are the range that the board accepts, rounded to two decimals
+    toward the inside, so that the board accepts each value a field shows.
+    """
+    low, high = DAC_SCALE_OUTPUT_RANGE_DBM
+    return math.ceil(low * 100) / 100, math.floor(high * 100) / 100
+
+
+def dac_scale_tooltip() -> str:
+    """The tooltip of each field that sets the DAC full scale."""
+    low, high = dac_scale_output_limits()
+    recommended = DAC_SCALE_RECOMMENDED_SETTING_DBM - BALUN_LOSS_DB
+    return (
+        f"The DAC full scale at the output. The board accepts "
+        f"{low:+.2f} to {high:+.2f} dBm (6.4 µA to 40.5 mA). Recommended: "
+        f"{recommended:+.2f} dBm (20 mA).\n"
+        "A low DAC scale decreases the dynamic range. A high DAC scale "
+        "makes the normalized amplitudes small, which can increase "
+        "quantization noise.\n"
+        "A change applies to all the tones of the module: the normalized "
+        "amplitudes stay, and the power of each tone changes by the same "
+        "number of dB.")
+
+
+class DacScaleField(QtWidgets.QDoubleSpinBox):
+    """The DAC full scale at the output of a module, in dBm.
+
+    The range is the range that the board accepts. Only a value that
+    the user types is a change. A value from the board shows without a change.
+    If the board has a value outside the range, the field shows the nearest
+    limit, and :meth:`output_dbm` gives the value of the board.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRange(*dac_scale_output_limits())
+        self.setDecimals(2)
+        self.setSingleStep(0.25)
+        self.setSuffix(" dBm")
+        self.setToolTip(dac_scale_tooltip()
+                        + " The task sets it when the measurement starts.")
+        self._board = None
+        self._quiet = False
+        self.edited = False
+        self.valueChanged.connect(self._mark_edited)
+
+    def show_board(self, output_dbm) -> None:
+        """Show the value of the board, without a change."""
+        self._board = output_dbm
+        self._quiet = True
+        try:
+            if output_dbm is not None and not self.edited:
+                self.setValue(output_dbm)
+        finally:
+            self._quiet = False
+        self.setEnabled(output_dbm is not None or self.edited)
+
+    def output_dbm(self):
+        """Return the value that a measurement will use: the typed value, or
+        the value of the board."""
+        return self.value() if self.edited else self._board
+
+    def board_dbm(self):
+        """Return the value of the board, or None if it is not known."""
+        return self._board
+
+    def setting_dbm(self):
+        """Return the value for ``set_dac_scale``, or None if the user did
+        not change it."""
+        return self.value() + BALUN_LOSS_DB if self.edited else None
+
+    def _mark_edited(self, _value) -> None:
+        if not self._quiet:
+            self.edited = True
+
+
+def _convert(value: float, units: str, scale: float) -> float:
+    """Return *value*, which is in *units*, in the other units."""
+    if units == "dbm":
+        return float(normalized_amplitude(value, "dbm", scale))
+    return float(convert_dacunits_to_dbm(value, scale))
+
+
+def _format_amplitude(value: float, units: str) -> str:
+    return f"{value:.2f}" if units == "dbm" else f"{value:.6g}"
 
 
 def apply_issue_banner(label, ok_button, issues) -> bool:
@@ -683,7 +965,7 @@ class ClickableViewBox(pg.ViewBox):
     # ── parent_window: a WEAK back-pointer.  Do not make this a plain attribute.
     #
     # Panels assign ``vb.parent_window = self`` (noise_spectrum_panel,
-    # network_analysis_panel, detector_digest_panel, multisweep_panel).  Held
+    # network_analysis_panel, multisweep_panel).  Held
     # strongly, that closes a reference cycle — ViewBox -> panel -> PlotWidget ->
     # ViewBox — so tearing a panel down goes through Python's *cyclic* collector,
     # which finalizes a graph of PyQt objects in arbitrary order and frees C++

@@ -3,6 +3,7 @@
 from .utils import (
     QtWidgets
 )
+from .field_memory import remember_fields
 
 class InitializeCRSDialog(QtWidgets.QDialog):
     """
@@ -54,6 +55,8 @@ class InitializeCRSDialog(QtWidgets.QDialog):
 
         self.ok_btn.clicked.connect(self.accept)
         self.cancel_btn.clicked.connect(self.reject)
+
+        remember_fields(self)
 
     def get_selected_irig_source(self):
         """

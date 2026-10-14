@@ -49,13 +49,13 @@ def mock_crs():
             "num_resonances": 2,
             "resonator_random_seed": 11,
             "auto_bias_kids": True,
-            # At the default -55 dBm bias and the board's readout floor
+            # At the default -56.75 dBm bias and the board's readout floor
             # the fast stream cannot trigger on single samples: a pulse
             # swings the tone no further than its off-resonance level,
             # about 7 sigma over a 605-count PFB floor.  A quarter of the
             # board's floor gives these tests 21 sigma without driving the
             # resonator into bifurcation, which more bias would.
-            "bias_amplitude": bias_amplitude_from_dbm(-55.0),
+            "bias_amplitude": bias_amplitude_from_dbm(-56.75),
             "udp_noise_level": 4.0,
             "pulse_mode": "periodic",
             "pulse_period": 0.02,
@@ -352,6 +352,8 @@ def test_macro_stores_the_tuning(mock_crs, tmp_path):
     only a real call reaches.
     """
     loop, crs = mock_crs
+    # This slow-only capture owns its streamer setup on the shared board.
+    loop.run_until_complete(crs.set_pfb_streamer(channel=None, module=1))
     path = tmp_path / "headless_cal.h5"
     row = {"df_calibration": 2.5e6, "bias_frequency": 1.2e9,
            "sweep_amplitude": 0.01}
@@ -382,22 +384,24 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
     """A calibration can be measured against the simulator, so mock
     captures can be in Hz.
 
-    measure_df_calibrations is host-side and uses only set_frequency and
-    get_samples, so the same code runs against a board.  A simulated
-    board has none of its own to hand out: the number is a measurement,
-    not a property of the hardware.
+    empirically_calibrate_df is host-side: a multisweep around the tones
+    playing and apply_bias to put them back, so the same code runs against
+    a board.  A simulated board has none of its own to hand out: the number
+    is a measurement, not a property of the hardware.
     """
     import numpy as np
 
+    from rfmux.tuning import tuning_rows
+
     loop, crs = mock_crs
-    cals = loop.run_until_complete(
-        crs.measure_df_calibrations(channels=[1, 2], module=1))
+    catalog = loop.run_until_complete(
+        crs.empirically_calibrate_df(module=1, save=False))
+    cals = tuning_rows(catalog)
     assert cals, "no calibration measured against the simulator"
     for ch, row in cals.items():
         cal = row["df_calibration"]
         assert isinstance(cal, complex) and np.isfinite(cal)
         assert abs(cal) > 0
-        assert row["df_calibration_source"] == "measured"
 
     path = tmp_path / "mock_cal.h5"
     result = loop.run_until_complete(crs.trigger_capture(
@@ -414,17 +418,20 @@ def test_mock_auto_bias_yields_a_usable_df_calibration(mock_crs, tmp_path):
 
 
 def test_periscope_takes_the_mocks_df_calibration(mock_crs):
-    """Selecting df units in mock mode measures a calibration.
+    """The mock startup measurement reaches Periscope's tuning.
 
-    Periscope only learned about calibrations through the multisweep
-    panel's bias_kids run, so a simulated session was told none existed.
+    It is the one door in a simulated session: on hardware the
+    calibration comes with the applied bias, and the factory hands back
+    nothing to run.
     """
+    import asyncio
+
     from rfmux.tools.periscope.app import Periscope
 
     loop, crs = mock_crs
 
     class Fake:
-        """Only the parts _measure_df_calibrations touches."""
+        """Only the parts the startup measurement touches."""
         module = 1
         channel_list = [[1, 2]]
 
@@ -434,21 +441,19 @@ def test_periscope_takes_the_mocks_df_calibration(mock_crs):
             self.tuning = {}
             self.df_calibrations = {}
 
-        _measure_df_calibrations = Periscope._measure_df_calibrations
         _df_calibration_measurement = Periscope._df_calibration_measurement
         _handle_tuning_ready = Periscope._handle_tuning_ready
+        _update_df_units_enabled = lambda self, **kw: None
 
     f = Fake(crs)
     assert not f.tuning.get(1), "should start with none"
-    f._measure_df_calibrations(1)
+    f._handle_tuning_ready(1, dict(asyncio.run(f._df_calibration_measurement(1)())))
     rows = f.tuning.get(1) or {}
     assert rows, "the measurement did not reach Periscope"
     cals = f.df_calibrations[1]
     assert set(cals) == set(rows)
     assert all(isinstance(c, complex) and abs(c) > 0 for c in cals.values())
 
-    # Not on hardware: sweeping moves a tuned array, so the calibration
-    # there comes from bias_kids, not from picking a units option.
-    g = Fake(crs, is_mock=False)
-    g._measure_df_calibrations(1)
-    assert g.tuning == {} and g.df_calibrations == {}
+    # Not on hardware: sweeping moves a tuned array, so there is nothing
+    # to run and the calibration comes from Apply Bias.
+    assert Fake(crs, is_mock=False)._df_calibration_measurement(1) is None

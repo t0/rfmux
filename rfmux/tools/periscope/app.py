@@ -66,14 +66,18 @@ from .main_plot_panel import MainPlotPanel
 from .tone_control_widgets import NcoBanner
 from .session_manager import SessionManager
 from .session_browser_panel import SessionBrowserPanel
-from .session_startup_dialog import UnifiedStartupDialog
-from rfmux.core.transferfunctions import convert_roc_to_volts
+from .session_startup_dialog import (
+    UnifiedStartupDialog, choose_session_root, session_root,
+    SESSION_ROOT_ACTION)
 from rfmux.mock import config as mc
 from rfmux.mock.helpers import apply_mock_config, merged, pulse_mode_kwargs
-from rfmux.algorithms.measurement.bias_kids import TONE_GRID_HZ
+from rfmux.tuning import store
+from rfmux.tuning.find_resonances import ResonanceSearch
+from rfmux.core.hardware_map import warm_for_threads
 import asyncio
 import datetime
 import time
+from pathlib import Path
 
 
 
@@ -170,6 +174,14 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         super().__init__()
 
+        # Files this session writes say which tool wrote them.
+        store.set_created_by("periscope")
+
+        # Measurements run on QThreads and name their output block from the
+        # hardware map, which only this thread may read from.
+        if crs is not None:
+            warm_for_threads(crs)
+
         # --- Core Parameters ---
         self.host: str = host                    # UDP host for data stream
         self.module: int = module                  # Module index to filter
@@ -218,12 +230,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
 
 
-        self.channel_noise_data = {}
-        self.channel_noise_panel_count = 0
-        self.loaded_channel_noise = False
         
         # --- Tuning storage ---
-        # The tuning rows per module, {module: {channel: bias_kids entry}},
+        # The tuning rows per module, {module: {channel: tuning row}},
         # and the df calibration of every row that has one, which the
         # plots convert with: {module: {channel: complex}}
         self.tuning: Dict[int, Dict[int, dict]] = {}
@@ -241,7 +250,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Measure df calibrations from startup, off the GUI thread, so
         # the window is up and streaming while the sweep runs.  Mock
-        # mode only -- see _measure_df_calibrations.  The launcher
+        # mode only -- see _df_calibration_measurement.  The launcher
         # measures them behind its build window for large arrays and
         # hands the rows in instead.
         self._df_cal_task = None
@@ -286,13 +295,24 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Start the timer for periodic GUI updates (QtCore from .utils).
         self._start_timer()
         
-        # Set initial window size (wider and taller for better visibility)
-        self.resize(900, 600)
+        # Where the window was left last time, else a wide default
+        if not self.restoreGeometry(settings.get_window_geometry()
+                                    or QtCore.QByteArray()):
+            self._resize_to_default(2700, 600)
         
         # Show session startup dialog (unless already handled by launcher)
         self._skip_startup_dialog = skip_startup_dialog
         if not skip_startup_dialog:
             QtCore.QTimer.singleShot(100, self._show_session_startup_dialog)
+
+    def _resize_to_default(self, width: int, height: int) -> None:
+        """Resize to the requested size, shrunk to fit the available screen."""
+        screen = self.screen() or QtWidgets.QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            width = min(width, available.width())
+            height = min(height, available.height())
+        self.resize(width, height)
 
     def _init_workers(self):
         """
@@ -339,9 +359,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.crs_init_signals.success.connect(self._crs_init_success)
         self.crs_init_signals.error.connect(self._crs_init_error)
         
-        # Multisweep analysis signals and tracking.
-        # MultisweepSignals and MultisweepTask are from .tasks.
-        self.multisweep_signals = MultisweepSignals()
+        # Multisweep tracking.  Each task carries its own MultisweepSignals,
+        # built where the task is started.
         self.multisweep_windows: Dict[str, Dict] = {} # Stores multisweep window instances
         self.multisweep_window_count: int = 0        # Counter for unique multisweep window_ids
         self.multisweep_tasks: Dict[str, MultisweepTask] = {} # Stores active Multisweep tasks
@@ -369,7 +388,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create toolbar widgets
         self.e_ch = QtWidgets.QLineEdit(chan_str)
         self.e_ch.setMaximumWidth(40)
-        self.e_ch.setToolTip("Enter comma-separated channels or use '&' to group in one row (e.g., 1&2,3,4&5&6).")
+        self.e_ch.setToolTip("Comma-separated channels; join channels in one row with '&'.")
         self.e_ch.returnPressed.connect(self._update_channels)
 
         self.e_buf = QtWidgets.QLineEdit(str(self.N))
@@ -389,7 +408,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
         self.rb_counts.setToolTip("Display raw ADC counts")
         self.rb_real_units.setToolTip("Display in voltage/power units (V, dBm/Hz)")
-        self.rb_df_units.setToolTip("Display frequency shift (Hz) and dissipation")
+        self.rb_df_units.setEnabled(False)
+        self._set_df_units_tooltip(False)
         
         self.unit_group.addButton(self.rb_counts, 0)
         self.unit_group.addButton(self.rb_real_units, 1)
@@ -430,6 +450,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.nco_banner = NcoBanner(self.module)
         self.nco_banner.setVisible(False)
         self.nco_banner.nco_committed.connect(self._send_nco)
+        self.nco_banner.dac_scale_committed.connect(self._send_dac_scale)
 
         # CRS control buttons
         self.btn_init_crs = QtWidgets.QPushButton("Initialize CRS Board")
@@ -457,13 +478,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_load_multi.setEnabled(False)
             self.btn_load_multi.setToolTip("CRS object not available - load multisweep disabled.")
 
-        self.btn_load_bias = QtWidgets.QPushButton("Load Bias")
-        self.btn_load_bias.setToolTip("Bias KIDS directly from the main window.")
-        self.btn_load_bias.clicked.connect(self.handle_bias_from_file)
-        if self.crs is None and self.host != "OFFLINE":
-            self.btn_load_bias.setEnabled(False)
-            self.btn_load_bias.setToolTip("CRS object not available - load Bias disabled.")
-
         self.btn_noise_spec = QtWidgets.QPushButton("Noise Spectrum")
         self.btn_noise_spec.setToolTip("Get Noise Spectrum for a Channel")
         self.btn_noise_spec.clicked.connect(self._get_channel_noise)
@@ -473,14 +487,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         self.btn_pulse_capture = QtWidgets.QPushButton("Pulse Capture")
         self.btn_pulse_capture.setToolTip(
-            "Open a live pulse capture panel: slow stream, PFB stream, or "
-            "both with pair matching")
+            "Open live pulse capture for the slow stream, PFB stream, or both.")
         self.btn_pulse_capture.clicked.connect(self._open_pulse_capture_panel)
 
         self.btn_streamer_cfg = QtWidgets.QPushButton("Streamer Config")
         self.btn_streamer_cfg.setToolTip(
-            "Configure the slow streamer (decimation, short/long packets, "
-            "modules) and the fast PFB streamer, with live bandwidth math")
+            "Configure the slow and PFB streamers.")
         self.btn_streamer_cfg.clicked.connect(
             self._show_streamer_config_dialog)
         if self.crs is None and self.host != "OFFLINE":
@@ -499,7 +511,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.btn_reconfigure_mock.clicked.connect(self._show_mock_config_dialog)
             
             self.btn_qp_pulses = QtWidgets.QPushButton("QP Pulses: Off")
-            self.btn_qp_pulses.setToolTip("Toggle quasiparticle pulses in mock mode\nCycles through: Off → Periodic → Random → Off")
+            self.btn_qp_pulses.setToolTip("Cycle mock pulses through off, periodic, and random modes.")
             self.btn_qp_pulses.clicked.connect(self._toggle_qp_pulses)
             self.qp_pulse_mode = 'none'
 
@@ -699,12 +711,12 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.spin_segments.setRange(1, 256)      # Number of segments for averaging
         self.spin_segments.setValue(1)           # Default to 1 (no averaging)
         self.spin_segments.setMaximumWidth(80)
-        self.spin_segments.setToolTip("Number of segments for Welch PSD averaging (more segments = smoother floor, less resolution).")
+        self.spin_segments.setToolTip("Welch segments; more smooths the PSD but reduces resolution.")
 
         # Binning controls
         self.cb_exp_binning = QtWidgets.QCheckBox("Exponential bins")
         self.cb_exp_binning.setChecked(False)  # Default to off
-        self.cb_exp_binning.setToolTip("Apply exponential binning to PSD plots. This is a visual aid and is not statistically rigorous.")
+        self.cb_exp_binning.setToolTip("Apply display-only exponential binning to PSD plots.")
         
         self.spin_bins = QtWidgets.QSpinBox()  # Spinbox for number of bins
         self.spin_bins.setRange(10, 5000)      # Reasonable range for bins
@@ -746,13 +758,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
 
         # Checkbox for zoom box mode vs. pan mode on plots
         self.cb_zoom_box = QtWidgets.QCheckBox("Zoom Box Mode", checked=True)
-        self.cb_zoom_box.setToolTip("Enable: Left-click drag creates a zoom box.\nDisable: Left-click drag pans the plot.")
+        self.cb_zoom_box.setToolTip("Checked: drag to zoom. Unchecked: drag to pan.")
         self.cb_zoom_box.toggled.connect(self._toggle_zoom_box_mode)
         layout.addWidget(self.cb_zoom_box)
 
         # Checkbox for auto-scaling plots (excluding TOD)
         self.cb_auto_scale = QtWidgets.QCheckBox("Auto Scale", checked=self.auto_scale_plots)
-        self.cb_auto_scale.setToolTip("Enable/disable auto-ranging for IQ, FFT, SSB, and DSB plots. Can improve display performance when disabled.")
+        self.cb_auto_scale.setToolTip("Automatically range IQ and spectrum plots.")
         self.cb_auto_scale.toggled.connect(self._toggle_auto_scale)
         layout.addWidget(self.cb_auto_scale)
         return group_box
@@ -767,8 +779,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Create the MainPlotPanel
         self.main_plot_panel = MainPlotPanel(self)
 
-        if hasattr(self.main_plot_panel, 'data_ready') and hasattr(self, 'session_manager'):
-            self.main_plot_panel.data_ready.connect(self.session_manager.handle_data_ready)
         
         # Set up references for backward compatibility with PeriscopeRuntime
         self.container = self.main_plot_panel.container
@@ -808,16 +818,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Add simulation speed label for mock mode
         if self.is_mock_mode:
             self.sim_speed_label = QtWidgets.QLabel()
-            self.sim_speed_label.setToolTip("Simulation speed relative to real-time\n>1.0x = faster than real-time\n<1.0x = slower than real-time")
+            self.sim_speed_label.setToolTip("Simulation speed relative to real time.")
         
         self.packet_loss_label = QtWidgets.QLabel()
         self.dropped_label = QtWidgets.QLabel()
         self.streaming_info_label = QtWidgets.QLabel()
         self.streaming_info_label.setToolTip(
-            "Current streaming configuration:\n"
-            "  Dec Stage: decimation stage (0-6)\n"
-            "  Fs: effective sampling frequency\n"
-            "  Short/Long: packet mode (128 or 1024 channels)"
+            "Current decimation, sample rate, and packet mode."
         )
         self.info_text = WrappingLabel()
 
@@ -842,8 +849,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Display the help dialog with usage instructions and tips.
         """
         # `QtWidgets`, `QtCore` are from .utils.
-        msg = QtWidgets.QMessageBox(self)
-        msg.setWindowTitle("Periscope Help")
         help_text = (
             "# Periscope Help\n\n"
             
@@ -953,8 +958,70 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             "\n"
             "If you are still seeing dropped packets due to UDP overflows in machines with limited UDP buffer sizes (such as OSX and Windows), it can help to reduce the periscope plotting buffer size, or number of plots.\n"            
         )
+        self._show_help_text("Periscope Help", help_text)
+
+    def _show_bias_plot_help(self) -> None:
+        self._show_help_text("Bias plot guide", """
+# Bias plot guide
+
+Find Bias chooses a drive amplitude and a tone frequency for each resonator.
+Use these three Multisweep tabs to inspect the evidence for those choices.
+
+## Bias: derivative — look for an abrupt jump
+
+A smooth resonance moves smoothly through the IQ plane as frequency changes.
+A sudden jump can indicate bifurcation. This test looks for a positive spike
+followed by a negative spike within two samples in the change in IQ speed.
+Both spikes must have enough prominence (height above their surrounding base).
+Either sweep direction can supply the pair.
+
+**Pair strength:** the smaller prominence in a peak–trough pair. The strongest
+eligible pair is retained, even below threshold. No pair means no detection.
+
+**Axes:** drive amplitude (DAC fraction) horizontally, prominence in inverse Hz
+vertically. Blue circles show pair strength (zero when no pair exists), orange
+triangles show the shape threshold, and green squares show the noise threshold.
+A pair triggers when its strength reaches both curves. The shape threshold is
+the spike factor times the speed range; the noise threshold is the noise factor
+times the robust scatter of speed changes. Raise either factor to demand
+stronger evidence. Lowering the smaller threshold does not change the verdict.
+
+The labels above the panels identify each curve. Solid curves are upward sweeps,
+dotted curves downward sweeps. A dotted vertical line marks the selected drive.
+All measured amplitudes are evaluated for the
+plot, including those beyond the amplitude search's stopping point. Apply Find
+Bias Settings to redraw these curves.
+
+## Bias: hysteresis — compare the sweep directions
+
+This test checks whether upward and downward sweeps follow different paths
+at the same drive. Both directions are required. The plot shows their
+separation divided by the allowed separation: values above 1 trigger this
+test. If the allowed separation is zero, the plot shows separation directly
+and any value above zero triggers the test. Each curve is one drive; the
+selected drive is thicker.
+The limit and its units are labelled once above the panels.
+
+The magnitude comparison measures separation in units of the upward sweep's
+dip depth. The IQ comparison measures complex separation in loop radii and
+can also respond to phase or frequency drift. Choose the comparison and
+allowed separation in Find Bias Settings.
+
+## Bias: frequency — inspect where the tone goes
+
+At the selected drive, the plot shows IQ arc speed (response change per
+hertz) in black or white, with dI/df and dQ/df as thin green and red curves.
+The labels above the panels identify these lines and f_bias. The IQ derivative
+frequency method chooses the largest arc speed; the minimum method chooses
+the magnitude dip instead, which need not coincide with the speed peak.
+The vertical line marks the selected frequency on the hardware frequency
+grid. This tab needs a selected bias step to display its curves.
+""")
+
+    def _show_help_text(self, title: str, help_text: str) -> None:
         help_dialog = QtWidgets.QDialog(self)
-        help_dialog.setWindowTitle("Periscope Help")
+        help_dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose)
+        help_dialog.setWindowTitle(title)
         layout = QtWidgets.QVBoxLayout(help_dialog)
         scroll_area = QtWidgets.QScrollArea(help_dialog)
         scroll_area.setWidgetResizable(True)
@@ -977,7 +1044,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         layout.addLayout(button_layout)
         help_dialog.setLayout(layout)
         help_dialog.resize(700, 500) 
-        help_dialog.exec()
+        help_dialog.show()
 
     def _toggle_zoom_box_mode(self, enable: bool):
         """
@@ -1054,8 +1121,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         while the thread is still running.
         
         Args:
-            dialog: A dialog instance with dac_scales dict, _update_dac_scale_info(),
-                    and _update_dbm_from_normalized() methods.
+            dialog: A dialog instance with a dac_scales dict and an
+                    _update_dac_scale_info() method.
         """
         if self.crs is None:
             return
@@ -1071,7 +1138,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # Connect signals to dialog updates
         self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: dialog.dac_scales.update(scales))
         self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dac_scale_info)
-        self._active_dac_fetcher.dac_scales_ready.connect(dialog._update_dbm_from_normalized)
         self._active_dac_fetcher.dac_scales_ready.connect(lambda scales: setattr(self, 'dac_scales', scales))
         
         self._active_dac_fetcher.start()
@@ -1092,8 +1158,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
         # NetworkAnalysisDialog from .ui (which imports from .dialogs)
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        dialog.module_entry.setText(str(self.module))
+        dialog = NetworkAnalysisDialog(self, module=self.module, dac_scales=default_dac_scales)
         
         # Fetch DAC scales if CRS is available
         self._fetch_dac_scales_for_dialog(dialog)
@@ -1102,56 +1167,41 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             
         if dialog.exec():
             self.dac_scales = dialog.dac_scales.copy()
+            if dialog.load_data_available:
+                self._load_network_analysis(dialog.loaded_container)
+                return
             params = dialog.get_parameters()
             if params:
-                if "modules" in params.keys():
-                    self._load_network_analysis(params)
-                else:
-                    if self.crs is None:
-                        QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
-                        return
-                    self._start_network_analysis(params)
+                if self.crs is None:
+                    QtWidgets.QMessageBox.warning(self, "Offline Mode", "Cannot start new network analysis without CRS hardware. Loading data only.")
+                    return
+                self._start_network_analysis(params)
 
     def _start_network_analysis(self, params: dict):
         """
         Initialize and start a new network analysis process.
 
-        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget 
-        and a `NetworkAnalysisTask` to perform the sweep in a background thread.
-        It handles single or multiple module sweeps and iterates through specified
-        amplitudes if provided.
+        This method creates a new `NetworkAnalysisPanel` wrapped in a QDockWidget
+        and one `NetworkAnalysisTask`, sweeping this session's module in a
+        background thread.
 
         Args:
             params (dict): A dictionary of parameters for the network analysis,
                            typically obtained from `NetworkAnalysisDialog`.
-                           Expected keys include 'module' (int or list of ints),
-                           'amps' (list of floats), 'amp' (float, fallback if 'amps'
-                           is not present), and other sweep-specific settings.
         """
         try:
             if self.crs is None:
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-            selected_module_param = params.get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
-            if not hasattr(self, 'dac_scales'):
-                QtWidgets.QMessageBox.critical(self, "Error", 
-                    "DAC scales are not available. Please run the network analysis configuration again.")
-                return
-            
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            
-            # Create panel
+
+            # Create panel. Without a DAC scale the panel says it cannot show
+            # dBm, which is a legend, not a reason to refuse the measurement.
             window_signals = NetworkAnalysisSignals()
-            dac_scales_local = self.dac_scales.copy()
-            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode)
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
+            panel = NetworkAnalysisPanel(self, self.module, dac_scales_local, dark_mode=self.dark_mode)
             panel.set_params(params)
             
             # Wrap panel in dock
@@ -1163,8 +1213,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 'window': panel,  # Keep 'window' key for compatibility
                 'dock': dock,
                 'signals': window_signals,
-                'amplitude_queues': {},
-                'current_amp_index': {}
             }
             
             # Connect signals (same as before)
@@ -1172,31 +1220,19 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: panel.update_progress(mod, prog),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: panel.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val: panel.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                panel.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
+                lambda mod, container: self._handle_analysis_completed(mod, container, window_id),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
                 lambda error_msg: QtWidgets.QMessageBox.critical(panel, "Network Analysis Error", error_msg),
                 QtCore.Qt.ConnectionType.QueuedConnection)
-            
-            # Connect data_ready signal for session auto-export
-            # Use default arg to capture panel reference for filename storage
-            panel.data_ready.connect(
-                lambda data, p=panel: self._handle_netanal_data_ready(modules_to_run, data, panel=p)
-            )
-            
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)])
-            window_data = self.netanal_windows[window_id]
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
-            for mod_iter in modules_to_run:
-                panel.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+
+            panel.analysis_finished.connect(
+                lambda p=panel: self._save_netanal_to_session(p, [self.module]))
+
+            self._start_netanal_task(self.module, params, window_id)
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1212,41 +1248,42 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             raise
 
 
-    def _load_network_analysis(self, params: dict):
+    def _load_network_analysis(self, container: dict):
         """
-        Load network analysis data from file and display in a docked panel.
+        Show a saved network analysis in a docked panel.
 
         Args:
-            params (dict): Loaded network analysis data with 'parameters' and 'modules' keys
+            container (dict): what take_netanal returned, as store.load read it
+                back: one output block per module, keyed by module identifier.
         """
         try:
             # Allow loading without CRS in offline mode
             if self.crs is None and self.host != "OFFLINE":
                 QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available")
                 return
-                
-            selected_module_param = params['parameters'].get('module')
-            if selected_module_param is None:
-                modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list):
-                modules_to_run = selected_module_param
-            else:
-                modules_to_run = [selected_module_param]
-            
-            # Restore DAC scales from loaded data (using existing 'dac_scales_used' key)
-            self.dac_scales = params['dac_scales_used']
-            
+
+            blocks = list(container.values())
+            file_modules = sorted({int(block['module']) for block in blocks})
+            # A file taken elsewhere is shown, not adopted: neither it nor the
+            # session's module is rewritten, and the panel stops offering to
+            # measure from it.
+            foreign = [m for m in file_modules if m != self.module]
+
             # Create unique ID for this analysis
             window_id = f"netanal_{self.netanal_window_count}"
             self.netanal_window_count += 1
-            
-            # Create panel
-            dac_scales_local = self.dac_scales.copy()
+
+            # Create panel. DAC scale is the board's to state, not the file's,
+            # so a loaded netanal shows dBm when a board is connected and says
+            # it cannot when none is.
             window_signals = NetworkAnalysisSignals()
-            panel = NetworkAnalysisPanel(self, modules_to_run, dac_scales_local, dark_mode=self.dark_mode, is_loaded_data=True)
+            dac_scales_local = dict(getattr(self, 'dac_scales', None) or {})
+            panel = NetworkAnalysisPanel(self, file_modules[0], dac_scales_local,
+                                         dark_mode=self.dark_mode, is_loaded_data=True)
             panel._hide_progress_bars()
-            panel.set_params(params['parameters'])
-            
+            panel.set_params(dict(blocks[0]['call_params']))
+            panel.netanal_container = container
+
             # Wrap panel in dock
             dock_title = f"Network Analysis #{self.netanal_window_count} (Loaded)"
             dock = self.dock_manager.create_dock(panel, dock_title, window_id)
@@ -1255,22 +1292,16 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.netanal_windows[window_id] = {'window': panel, 'dock': dock, 'signals': window_signals}
             
             # Load data into panel
-            for mod in modules_to_run:
-                # Each sweep carries its own probe amplitude; pairing by
-                # position would trust the file's ordering instead.
-                sweeps = [v for k, v in params['modules'][mod].items()
-                          if isinstance(k, int)]
-                for sweep in sweeps:
-                    freqs = np.array(sweep['frequency']['values'])
-                    amps = np.array(sweep['magnitude']['counts']['raw'])
-                    phases = np.array(sweep['phase']['values'])
+            for block in blocks:
+                trace = block['results']
+                panel.update_data(block['module'], trace)
+                if 'resonance_search' in trace:
+                    panel.draw_search(
+                        block['module'],
+                        ResonanceSearch.from_dict(trace['resonance_search']))
 
-                    panel.update_data(mod, freqs, amps, phases)
-                    panel.update_data_with_amp(mod, freqs, amps, phases,
-                                               sweep['sweep_amplitude'])
-                
-                r_freq = params['modules'][mod]['resonances_hz']
-                panel._use_loaded_resonances(mod, r_freq)
+            if foreign:
+                panel.mark_foreign_module(foreign[0])
             
             # Tabify with Main dock by default
             main_dock = self.dock_manager.get_dock("main_plots")
@@ -1283,18 +1314,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         except Exception as e:
             print(f"Error in _load_network_analysis: {e}")
             traceback.print_exc()
+            QtWidgets.QMessageBox.critical(
+                self, "Load Error", f"Could not open the network analysis:\n{e}")
 
-    def _handle_analysis_completed(self, module_param: int, window_id: str): # Renamed module
+    def _handle_analysis_completed(self, module_param: int, container: dict, window_id: str):
         """
         Handle the completion of a network analysis sweep for a specific module.
 
         This method is called when a `NetworkAnalysisTask` signals completion.
-        It updates the corresponding `NetworkAnalysisWindow` to mark the module's
-        analysis as complete. If there are more amplitudes to sweep for this
-        module, it starts the next `NetworkAnalysisTask`.
+        It hands the panel the container take_netanal returned and marks the
+        module's analysis as complete.
 
         Args:
             module_param (int): The module index for which the analysis completed.
+            container (dict): What take_netanal returned, keyed by module identifier.
             window_id (str): The unique identifier of the `NetworkAnalysisWindow`
                              associated with this analysis.
         """
@@ -1302,25 +1335,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             if window_id not in self.netanal_windows: return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
-            window.complete_analysis(module_param)
+            window.complete_analysis(module_param, container)
             for task_key in list(self.netanal_tasks.keys()):
-                if task_key.startswith(f"{window_id}_{module_param}_"):
+                if task_key.startswith(f"{window_id}_{module_param}"):
                     self.netanal_tasks.pop(task_key, None)
-            if module_param in window_data['amplitude_queues'] and window_data['amplitude_queues'][module_param]:
-                window_data['current_amp_index'][module_param] += 1
-                total_amps = len(window.original_params.get('amps', []))
-                next_amp = window_data['amplitude_queues'][module_param][0]
-                window.update_amplitude_progress(
-                    module_param, 
-                    window_data['current_amp_index'][module_param] + 1,
-                    total_amps,
-                    next_amp
-                )
-                if module_param in window.progress_bars:
-                    window.progress_bars[module_param].setValue(0)
-                    if window.progress_group:
-                        window.progress_group.setVisible(True)
-                self._start_next_amplitude_task(module_param, window.original_params, window_id)
         except Exception as e:
             print(f"Error in _handle_analysis_completed: {e}")
             traceback.print_exc()
@@ -1336,14 +1354,10 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 lambda mod, prog: window_instance.update_progress(mod, prog), # mod, prog to avoid conflict
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.data_update.connect(
-                lambda mod, freqs, amps, phases: window_instance.update_data(mod, freqs, amps, phases),
-                QtCore.Qt.ConnectionType.QueuedConnection)
-            window_signals.data_update_with_amp.connect(
-                lambda mod, freqs, amps, phases, amp_val:  # amp_val to avoid conflict
-                window_instance.update_data_with_amp(mod, freqs, amps, phases, amp_val),
+                window_instance.update_data,
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.completed.connect(
-                lambda mod: self._handle_analysis_completed(mod, window_id),
+                lambda mod, container: self._handle_analysis_completed(mod, container, window_id),
                 QtCore.Qt.ConnectionType.QueuedConnection)
             window_signals.error.connect(
                 lambda error_msg: QtWidgets.QMessageBox.critical(window_instance, "Network Analysis Error", error_msg),
@@ -1354,19 +1368,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         
     
     
-    def _start_next_amplitude_task(self, module_param: int, params: dict, window_id: str): # Renamed module
+    def _start_netanal_task(self, module_param: int, params: dict, window_id: str): # Renamed module
         """
-        Start the next network analysis task for a given module and amplitude.
-
-        This is called iteratively when sweeping through multiple amplitudes.
-        It retrieves the next amplitude from the queue for the specified module
-        and window, then creates and starts a new `NetworkAnalysisTask`.
+        Start one module's network analysis sweep.
 
         Args:
             module_param (int): The module index for which to start the task.
-            params (dict): The base parameters for the network analysis sweep.
-                           The 'amplitude' for this specific task will be taken
-                           from the queue.
+            params (dict): The parameters for the network analysis sweep.
             window_id (str): The unique identifier of the `NetworkAnalysisWindow`
                              associated with this analysis.
         """
@@ -1375,47 +1383,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             window_data = self.netanal_windows[window_id]
             self.check_connection(window_data, window_id)
             signals = window_data['signals']
-            if module_param not in window_data['amplitude_queues'] or not window_data['amplitude_queues'][module_param]:
-                return
-            amplitude = window_data['amplitude_queues'][module_param].pop(0)
             task_params = params.copy()
             task_params['module'] = module_param
             module_specific_cable_length = params.get('module_cable_lengths', {}).get(module_param)
             if module_specific_cable_length is not None:
                 task_params['cable_length'] = module_specific_cable_length
-            task_key = f"{window_id}_{module_param}_amp_{amplitude}"
+            task_key = f"{window_id}_{module_param}"
             # NetworkAnalysisTask from .tasks
-            task = NetworkAnalysisTask(
-                self.crs, module_param, task_params, signals, amplitude=amplitude
-            )
+            task = NetworkAnalysisTask(self.crs, module_param, task_params, signals)
             self.netanal_tasks[task_key] = task
             task.start()  # Start the QThread directly since NetworkAnalysisTask is now a QThread
         except Exception as e:
-            print(f"Error in _start_next_amplitude_task: {e}")
+            print(f"Error in _start_netanal_task: {e}")
             traceback.print_exc()
 
-    def _rerun_network_analysis(self, params: dict, source_panel=None):
-        """
-        Re-run a network analysis for an existing NetworkAnalysisPanel.
-
-        This method is called from a NetworkAnalysisPanel's _edit_parameters method.
-        It stops any ongoing tasks for that window, clears its data and plots, 
-        updates its parameters, and then restarts the analysis sequence.
-
-        Args:
-            params (dict): The new or updated parameters for the network analysis.
-            source_panel: The NetworkAnalysisPanel requesting the re-run (optional, auto-detected if None)
-        """
+    def _rerun_network_analysis(
+            self, params: dict, source_panel: NetworkAnalysisPanel) -> None:
+        """Sweep the session's module again in the requesting panel."""
         try:
             if self.crs is None: QtWidgets.QMessageBox.critical(self, "Error", "CRS object not available"); return
-            
-            # Find the panel that's calling this
-            if source_panel is None:
-                # Try to find it from params (fallback)
-                for w_id, w_data in self._live_netanal_windows().items():
-                    if w_data['window'].current_params == params:
-                        source_panel = w_data['window']
-                        break
             
             # Find window_id for this panel
             window_id = None
@@ -1429,24 +1415,18 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                 return
             window_data = self.netanal_windows[window_id]
             window = window_data['window']
-            window.data.clear(); window.raw_data.clear()
+            window.netanal_traces.clear()
+            # A re-run is a new measurement, so it writes a new file rather
+            # than overwriting the one the last container remembers.
+            window.netanal_container.clear()
             for mod, pbar in window.progress_bars.items(): 
                 pbar.setValue(0) # Renamed module
             window.clear_plots(); window.set_params(params)
-            selected_module_param = params.get('module') # Renamed
-            if selected_module_param is None: modules_to_run = list(range(1, 9))
-            elif isinstance(selected_module_param, list): modules_to_run = selected_module_param
-            else: modules_to_run = [selected_module_param]
             for task_key in list(self.netanal_tasks.keys()):
                 if task_key.startswith(f"{window_id}_"):
                     task = self.netanal_tasks.pop(task_key); task.stop()
-            amplitudes = params.get('amps', [params.get('amp', DEFAULT_AMPLITUDE)]) # DEFAULT_AMPLITUDE from .utils
-            window_data['amplitude_queues'] = {mod: list(amplitudes) for mod in modules_to_run}
-            window_data['current_amp_index'] = {mod: 0 for mod in modules_to_run}
             if window.progress_group: window.progress_group.setVisible(True)
-            for mod_iter in modules_to_run: # Renamed
-                window.update_amplitude_progress(mod_iter, 1, len(amplitudes), amplitudes[0])
-                self._start_next_amplitude_task(mod_iter, params, window_id)
+            self._start_netanal_task(self.module, params, window_id)
         except Exception as e:
             print(f"Error in _rerun_network_analysis: {e}")
             traceback.print_exc()
@@ -1455,39 +1435,22 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         """
         Show the dialog to configure and run multisweep analysis.
         """
-        # Try to get active module
         default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(netanal_dialog)
         if self.crs is None:
             self.dac_scales = default_dac_scales.copy()
-        
-        active_module = self.module
 
-    
-        # Try to get resonances (if available)
-        resonances = []
-        if hasattr(self, "resonance_freqs") and active_module is not None:
-            resonances = self.resonance_freqs.get(active_module, [])
-    
-        
-        # --- Launch dialog even if no resonances yet ---
-        dialog = MultisweepDialog( parent=netanal_dialog, 
-                                   section_center_frequencies=resonances,   # may be []
-                                   dac_scales=netanal_dialog.dac_scales,   # may be {}
-                                   current_module=active_module,       # may be None
-                                   initial_params=None ,                # nothing prefilled
-                                   load_multisweep = True
-                                 )
+        # Full scale is the dialog's to fetch off the board above it when this
+        # session has not read it yet, and it opens without one. A sweep loaded
+        # from a file has no resonances to seed it with either.
+        dialog = MultisweepDialog(parent=self,
+                                  dac_scales=dict(getattr(self, 'dac_scales', None) or {}),
+                                  module=self.module,
+                                  load_multisweep=True)
 
-        
         if dialog.exec():
             params = dialog.get_parameters()
             if params:
-                if "results_by_detector" in params.keys() or "results_by_iteration" in params.keys():
+                if dialog.use_data_from_file:
                     self._load_multisweep_analysis(params)
                 else:
                     if self.crs is None:
@@ -1591,214 +1554,60 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self.pulse_capture_windows[key] = {"window": panel, "dock": dock}
 
     def _get_channel_noise(self) -> None:
-        ''' Open Dialog to get noise spectrum dialog '''
-
-        default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        # NetworkAnalysisDialog from .ui (which imports from .dialogs)
-        dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        dialog.module_entry.setText(str(self.module))
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(dialog)
-        if self.crs is None:
-            self.dac_scales = default_dac_scales.copy()
-        
         from .noise_spectrum_dialog import NoiseSpectrumDialog
-        num_res = 0 ### a place holder from the dialog 
-        noise_dialog = NoiseSpectrumDialog(self, num_res, self.crs, channel=True)
-        if noise_dialog.exec():
-            params = noise_dialog.get_parameters()
-            self._collect_channel_noise(params)
-
-    
-    def handle_bias_from_file(self) -> None:
-        """Slot for the 'Load Bias…' button in the main application window."""
-        if self.crs is None and self.host != "OFFLINE":
-            QtWidgets.QMessageBox.warning(self, "CRS Not Available", "Connect to a CRS before loading bias data.")
-            return
-
-        default_dac_scales = {m: -0.5 for m in range(1, 9)}
-        netanal_dialog = NetworkAnalysisDialog(self, modules=list(range(1, 9)), dac_scales=default_dac_scales)
-        netanal_dialog.module_entry.setText(str(self.module))
-        
-        # Fetch DAC scales if CRS is available
-        self._fetch_dac_scales_for_dialog(netanal_dialog)
-        if self.crs is None:
-            self.dac_scales = default_dac_scales.copy()
-        
-        from .bias_kids_dialog import BiasKidsDialog
-        dialog = BiasKidsDialog(self, self.module, True)
-
-        if dialog.exec():
-            params = dialog.get_load_param()
-            if params:
-                if "bias_kids_output" in params.keys():
-                    self._set_and_plot_bias(params)
-                else:
-                    self._set_bias(params)
-
-    def _set_bias(self, params):
-
-        # span_hz = params.get("span_hz")
-        bias_freqs = params.get("bias_frequencies")
-        amplitudes = params.get("amplitudes")
-        phases = params.get("phases")
-        module = params.get("module")
-
-        channels = np.arange(1, len(bias_freqs)+1).tolist()
-
-        if module is None:
-            QtWidgets.QMessageBox.critical(self, "Missing Module", "The file does not specify which module was biased.")
-            return
-
-        if bias_freqs and self.crs is not None:
-            # nco_freq = ((min(bias_freqs) - span_hz / 2 + (max(bias_freqs) + span_hz / 2)) / 2
-            nco_freq = (min(bias_freqs)  + max(bias_freqs)) / 2
-            crs = self.crs
-            asyncio.run(crs.set_nco_frequency(nco_freq, module=module)) #### Setting up the nco frequency ######
-    
-        if self.crs is not None:
-            asyncio.run(self.apply_bias_output(self.crs, module, amplitudes, bias_freqs, channels, phases))
-        else:
-            print("[Offline] Skipping hardware bias application")
-        
-    async def apply_bias_output(self, crs, module: int, amplitudes: list, bias_freqs : list,
-                                channels : list, phases : list) -> None:
-    
-        if not bias_freqs:
-            return
-        nco_freq = await crs.get_nco_frequency(module=module)
-        async with crs.tuber_context() as ctx:
-            for i in range(len(amplitudes)):
-
-                quantized_bias = round(bias_freqs[i] / TONE_GRID_HZ) * TONE_GRID_HZ
-
-                ctx.set_frequency(quantized_bias - nco_freq, channel=channels[i], module=module)
-                
-                ctx.set_amplitude(float(amplitudes[i]), channel=channels[i], module=module)
-                
-                ctx.set_phase(float(phases[i]), units=crs.UNITS.DEGREES, target=crs.TARGET.ADC, channel=channels[i], module=module)
-            await ctx()
-
-        print(f"[Bias] Bias applied for {len(bias_freqs)} frequencies")
-    
-
-
-    def _set_and_plot_bias(self, load_params):
-        """
-        Load bias data from file, apply bias to hardware, and display in a docked panel.
-        
-        Uses the unified _create_multisweep_panel_from_loaded_data helper for panel creation.
-        """
-        active_module = self.module 
-
-        try:
-            # Check if module in file matches active module
-            params = load_params['initial_parameters']
-            target_module = params.get('module')
-
-            if active_module != target_module:
-                QtWidgets.QMessageBox.warning(self, "Module Mismatch", 
-                    "The module in file doesn't match the active module. The value will be changed.")
-                # Update the module in params to use the active module
-                load_params['initial_parameters']['module'] = active_module
-                target_module = active_module
-
-            if target_module is None: 
-                QtWidgets.QMessageBox.critical(self, "Error", "Target module not specified for Bias.")
-                return
-
-            # Extract bias data for hardware application BEFORE creating panel
-            bias_output = load_params.get('bias_kids_output')
-            if not bias_output:
-                QtWidgets.QMessageBox.critical(self, "Error", "No bias_kids_output in loaded file.")
-                return
-            
-            bias_freqs = []
-            amplitudes = []
-            phases = []
-            channels = []
-            
-            for det_idx, det_data in bias_output.items():
-                channel = int(det_data.get("bias_channel", det_idx))
-                channels.append(channel)
-                bias_freq = det_data.get("bias_frequency") or det_data.get("original_center_frequency")
-                bias_freqs.append(bias_freq)
-                amplitude = det_data.get("sweep_amplitude")
-                amplitudes.append(amplitude)
-                phase = det_data.get("optimal_phase_degrees", 0)
-                phases.append(phase)
-
-            # Apply bias to hardware if CRS is available
-            if self.crs is not None:
-                # Set NCO frequency to center of bias frequency range before applying bias
-                if bias_freqs:
-                    nco_freq = (min(bias_freqs) + max(bias_freqs)) / 2
-                    asyncio.run(self.crs.set_nco_frequency(nco_freq, module=target_module))
-                
-                asyncio.run(self.apply_bias_output(self.crs, target_module, amplitudes, bias_freqs, channels, phases))
-            else:
-                print("[Offline] Skipping hardware bias application and phase adjustment")
-
-            # Use the unified helper method to create the panel and dock
-            panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-                load_params, source_type="bias"
-            )
-            
-            if panel is None:
-                return  # Error already displayed by helper
-
-            # Load noise data if present
-            if load_params.get('noise_data') is not None:
-                noise_data = load_params['noise_data']
-                panel._get_spectrum(noise_data, use_loaded_noise=True)
-            else:
-                print("[Bias] There is no noise data in the file")
-            
-        except Exception as e:
-            error_msg = f"Error displaying results: {type(e).__name__}: {str(e)}"
-            print(error_msg, file=sys.stderr)
-            traceback.print_exc(file=sys.stderr)
-            QtWidgets.QMessageBox.critical(self, "Bias Error", error_msg)
-
-
+        dialog = NoiseSpectrumDialog(self, 0, self.crs, channel=True)
+        dialog.accepted.connect(
+            lambda: self._start_noise_measurement(dialog.get_parameters()))
+        self._noise_dialog = dialog
+        dialog.open()
 
     def _netanal_error(self, error_msg: str):
         """Slot for network analysis error signals. Displays a critical message box."""
         QtWidgets.QMessageBox.critical(self, "Network Analysis Error", error_msg)
     
-    def _handle_netanal_data_ready(self, modules: list, data: dict, panel=None):
-        """
-        Handle data_ready signal from NetworkAnalysisPanel for session auto-export.
+    def _save_netanal_to_session(self, panel, modules: list):
+        """Save a finished network analysis into the session folder.
 
-        Args:
-            modules: List of module IDs that were analyzed
-            data: Full export data dictionary (may contain '_filename_override' key)
-            panel: Optional reference to the NetworkAnalysisPanel for storing export filename
+        The panel writes the container through ``store``, which puts it in the
+        session folder because the session manager is what set store's output
+        directory. The session manager is told the file exists so the browser
+        shows it.
         """
         if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
             return
 
-        # Create identifier from module list
-        if len(modules) == 1:
-            identifier = f"module{modules[0]}"
-        else:
-            identifier = f"modules_{'_'.join(map(str, modules))}"
+        identifier = (f"module{modules[0]}" if len(modules) == 1
+                      else f"modules_{'_'.join(map(str, modules))}")
+        try:
+            path = panel.save_netanal()
+        except Exception as e:
+            print(f"[Session] Could not save network analysis: {e}", file=sys.stderr)
+            return
+        if path is None:
+            return
+        self.session_manager.register_external_file(str(path), 'netanal', identifier)
+        print(f"[Session] Saved network analysis: {path.name}")
 
-        # Extract filename override if present (for overwriting previous export)
-        filename_override = data.pop('_filename_override', None)
+    def _save_multisweep_to_session(self, panel, module: int):
+        """Save a finished multisweep into the session folder.
 
-        # Export via session manager
-        exported_path = self.session_manager.export_data(
-            'netanal', identifier, data, filename_override=filename_override
-        )
-        
-        # Store the exported filename on the panel for future overwrites
-        if exported_path and panel and hasattr(panel, '_last_export_filename'):
-            panel._last_export_filename = exported_path.name
-        
-        action = "updated" if filename_override else "exported"
-        print(f"[Session] Auto-{action} network analysis: {identifier}")
+        The panel writes the container through ``store``, which puts it in the
+        session folder because the session manager is what set store's output
+        directory. The session manager is told the file exists so the browser
+        shows it.
+        """
+        if not self.session_manager.is_active or not self.session_manager.auto_export_enabled:
+            return
+        try:
+            path = panel.save_multisweep()
+        except Exception as e:
+            print(f"[Session] Could not save multisweep: {e}", file=sys.stderr)
+            return
+        if path is None:
+            return
+        self.session_manager.register_external_file(str(path), 'multisweep',
+                                                    f"module{module}")
+        print(f"[Session] Saved multisweep: {path.name}")
 
     def _crs_init_success(self, message: str):
         """Slot for CRS initialization success signals. Displays an information message box."""
@@ -1865,81 +1674,26 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             self.unit_mode = "real"
             self.real_units = True
         elif button_id == 2:  # df Units
+            # Only selectable while every channel on screen has a
+            # calibration -- see _update_df_units_enabled -- so there is
+            # nothing to check for and nothing to measure here.
             self.unit_mode = "df"
-            self.real_units = False  # df units are different from standard real units
-            
-            # Check if calibration data is available
-            if (not self.df_calibrations.get(self.module)
-                    and self._df_calibration_running()):
-                # The startup measurement is still sweeping; a second
-                # sweep would fight it for the same tones.
-                self.statusBar().showMessage(
-                    "df calibration is still being measured; try again in "
-                    "a moment", 5000)
-                self.rb_counts.setChecked(True)
-                self.unit_mode = "counts"
-                self.real_units = False
-                return
-            if not self.df_calibrations.get(self.module):
-                # Normally done at startup; this catches a module tuned
-                # afterwards, and blocks the window for the sweep
-                # (seconds at many tones) when it fires.
-                self._measure_df_calibrations(self.module)
-            if not self.df_calibrations.get(self.module):
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "df Calibration Not Available",
-                    "df calibration data is not available for this module.\n\n"
-                    "To use df units:\n"
-                    "1. Run a multisweep analysis\n"
-                    "2. Click 'Bias KIDs' in the multisweep window\n"
-                    "3. The calibration data will be loaded automatically\n\n"
-                    "In mock mode, enabling auto_bias_kids measures one for "
-                    "each channel it tunes."
-                )
-                # Reset to counts mode
-                self.rb_counts.setChecked(True)
-                self.unit_mode = "counts"
-                self.real_units = False
-                return
-        
+            self.real_units = False
+
         # Rebuild layout to update axis labels
         self._build_layout()
     
-    def _measure_df_calibrations(self, module: int) -> None:
-        """Measure a calibration for every biased channel, in mock mode:
-        ``crs.measure_df_calibrations``, a narrow sweep around each bias
-        point, so a simulated session can use df units without a
-        multisweep first.
-
-        Only in mock mode.  Sweeping moves each channel's frequency and
-        puts it back, which is free against a simulator and not something
-        to do to a tuned array because someone picked a units option; on
-        hardware the calibration comes from bias_kids.
-        """
-        measure = self._df_calibration_measurement(module)
-        if measure is None:
-            return
-        try:
-            rows = asyncio.run(measure())
-        except Exception as exc:
-            print(f"[Periscope] df calibration failed: {exc}")
-            return
-        if rows:
-            self._handle_tuning_ready(module, dict(rows))
-
     def _df_calibration_measurement(self, module: int):
-        """The coroutine factory both the startup worker and the
-        synchronous fallback run, or None when there is nothing to
-        measure (a board, or no CRS)."""
+        """The coroutine the startup worker runs, or None when there is
+        nothing to measure (a board, or no CRS)."""
         crs = getattr(self, "crs", None)
         if crs is None or not getattr(self, "is_mock_mode", False):
             return None
 
         async def _measure():
             # Every channel the module reports as biased, not just the
-            # ones on screen: the macro resolves that itself.
-            return await crs.measure_df_calibrations(module=module)
+            # ones on screen.
+            return await calibrate_df_mock(crs, module)
         return _measure
 
     def _start_df_calibration(self, module: int) -> None:
@@ -1959,10 +1713,6 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"Measuring df calibrations for module {module} in the "
             "background; df units are available when it finishes")
 
-    def _df_calibration_running(self) -> bool:
-        task = getattr(self, "_df_cal_task", None)
-        return task is not None and task.isRunning()
-
     def _on_df_calibration_measured(self, module: int, rows: dict) -> None:
         if rows:
             self._handle_tuning_ready(module, rows)
@@ -1971,10 +1721,48 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             f"{module}", 8000)
         self._df_cal_task = None
 
+    def _set_df_units_tooltip(self, available: bool) -> None:
+        self.rb_df_units.setToolTip(
+            "Display frequency shift and dissipation, both in Hz"
+            if available else
+            "Needs a df calibration for every channel on screen.  It is "
+            "measured at the tone a detector is biased at, so it arrives "
+            "with the bias: run a multisweep, then Find Bias and Apply Bias.")
+
+    def _df_units_available(self) -> bool:
+        """Whether every channel on screen carries a df calibration.
+
+        All or nothing.  The conversion is per channel but the axis label
+        is per row, so a row holding one calibrated channel and one
+        without draws hertz and counts on the same axis under a single
+        label.  Offering the units only when nothing is missing keeps
+        that from arising at all.
+        """
+        calibrations = self.df_calibrations.get(self.module) or {}
+        channels = getattr(self, "all_chs", None)
+        return bool(channels) and all(ch in calibrations for ch in channels)
+
+    def _update_df_units_enabled(self, *, rebuild: bool = True) -> None:
+        """Offer df units exactly when they can be drawn, and step out of
+        them when the calibration they were drawn from is gone."""
+        if not hasattr(self, "rb_df_units"):
+            return          # called from __init__, before the controls exist
+        available = self._df_units_available()
+        self.rb_df_units.setEnabled(available)
+        self._set_df_units_tooltip(available)
+        if available or self.unit_mode != "df":
+            return
+        self.rb_counts.setChecked(True)
+        self.unit_mode = "counts"
+        self.real_units = False
+        if rebuild:
+            self._build_layout()
+
     def _handle_tuning_ready(self, module: int, tuning: Dict[int, dict]):
-        """Hold a module's tuning rows, from bias_kids, the mock startup
+        """Hold a module's tuning rows, from Apply Bias, the mock startup
         measurement, or a loaded session: {readout channel: row}.  The
-        plots convert with the df calibration of every row that has one."""
+        plots convert with the df calibration of every row that has one,
+        and offer df units once every channel on screen has one."""
         self.tuning[module] = tuning
         self.df_calibrations[module] = {
             ch: row["df_calibration"] for ch, row in tuning.items()
@@ -1982,6 +1770,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         print(f"[Periscope] tuning loaded for {len(tuning)} detectors on "
               f"module {module}, {len(self.df_calibrations[module])} with a "
               f"df calibration")
+        self._update_df_units_enabled()
 
     def _handle_psd_toggle(self, checked: bool):
         """
@@ -2105,6 +1894,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
                     # The tuning belongs to the array that is gone.
                     self.tuning.pop(self.module, None)
                     self.df_calibrations.pop(self.module, None)
+                    self._update_df_units_enabled()
                     if cfg.get("auto_bias_kids"):
                         self._start_df_calibration(self.module)
 
@@ -2197,51 +1987,8 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         else:
             self.btn_qp_pulses.setText("QP Pulses: Off")
         
-        # Update tooltip to show current state
-        # Compose tooltip including active parameters
-        try:
-            cfg = mc.apply_overrides(self.mock_config) if self.mock_config else mc.defaults()
-        except Exception:
-            cfg = mc.defaults()
-        extra = ""
-        if self.qp_pulse_mode == 'periodic':
-            extra = f"\nPeriod={cfg['pulse_period']} s, tau_rise={cfg['pulse_tau_rise']} s, tau_decay={cfg['pulse_tau_decay']} s, amp={cfg['pulse_amplitude']}, res={cfg['pulse_resonators']}"
-        elif self.qp_pulse_mode == 'random':
-            ram = cfg['pulse_random_amp_mode']
-            if ram == 'uniform':
-                amin = cfg['pulse_random_amp_min']
-                amax = cfg['pulse_random_amp_max']
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"ampMode=uniform[{amin},{amax}], "
-                    f"res={cfg['pulse_resonators']}"
-                )
-            elif ram == 'lognormal':
-                mu = cfg['pulse_random_amp_logmean']
-                sigma = cfg['pulse_random_amp_logsigma']
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"ampMode=lognormal[μ={mu},σ={sigma}], "
-                    f"res={cfg['pulse_resonators']}"
-                )
-            else:
-                extra = (
-                    f"\nProb={cfg['pulse_probability']}/s, "
-                    f"tau_rise={cfg['pulse_tau_rise']} s, "
-                    f"tau_decay={cfg['pulse_tau_decay']} s, "
-                    f"amp=fixed({cfg['pulse_amplitude']}), "
-                    f"res={cfg['pulse_resonators']}"
-                )
-        tooltip_text = (
-            f"Toggle quasiparticle pulses in mock mode\n"
-            f"Current: {self.qp_pulse_mode.title()}\n"
-            f"Cycles through: Off → Periodic → Random → Off{extra}"
-        )
-        self.btn_qp_pulses.setToolTip(tooltip_text)
+        self.btn_qp_pulses.setToolTip(
+            "Cycle mock pulses through off, periodic, and random modes.")
     
     @QtCore.pyqtSlot(str)
     def _show_pulse_error(self, error_msg):
@@ -2259,6 +2006,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         help_action.setToolTip("Open Help Dialog")
         help_action.triggered.connect(self._show_help)
         help_menu.addAction(help_action)
+        bias_help_action = QtGui.QAction("&Bias plot guide", self)
+        bias_help_action.triggered.connect(self._show_bias_plot_help)
+        help_menu.addAction(bias_help_action)
         
 
     def _create_view_menu(self):
@@ -2466,6 +2216,13 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         load_action.triggered.connect(self._load_session)
         session_menu.addAction(load_action)
         
+        # Change where new session folders are created
+        location_action = QtGui.QAction(SESSION_ROOT_ACTION, self)
+        location_action.setToolTip(
+            "Choose the folder new session folders are created in")
+        location_action.triggered.connect(self._change_session_root)
+        session_menu.addAction(location_action)
+        
         session_menu.addSeparator()
         
         # Auto-Export Toggle
@@ -2626,34 +2383,25 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         # ---- Start expanded (not collapsed) ----
         # Session browser is visible by default to help users see their session files
     
+    def _change_session_root(self):
+        """Choose the folder new session folders are created in."""
+        root = choose_session_root(self, settings.get_session_root())
+        if not root:
+            return
+        settings.set_session_root(root)
+        self.statusBar().showMessage(f"New sessions will be created in {root}",
+                                     5000)
+
     def _start_new_session(self):
         """
-        Start a new session with folder selection dialog.
+        Start a new session.
         
-        Shows a folder selection dialog, then lets the user customize
-        the session folder name before creating it.
+        Asks for the session folder name; the location comes from the
+        remembered session root, and is only asked for if there is none.
         """
-        # Show folder selection dialog
-        # Use Qt dialog (not native) to prevent hanging on some systems
-        #
-        # Start where the user last put a session.  An empty string here does
-        # NOT mean "the current directory" in practice: Qt falls back to its
-        # own process-global last-visited directory, so the dialog silently
-        # followed whatever other file dialog was opened most recently in this
-        # run of Periscope.
-        base_path = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select Session Location",
-            settings.get_last_session_directory(),
-            QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
-        )
-
+        base_path = session_root(self)
         if not base_path:
             return
-
-        # Remember it, so the next session starts here rather than wherever
-        # the file dialog happened to drift to.
-        settings.set_last_session_directory(base_path)
         
         # Generate default folder name with timestamp
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2663,7 +2411,7 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         folder_name, ok = QtWidgets.QInputDialog.getText(
             self, 
             "Session Name",
-            "Enter session folder name:",
+            f"Enter session folder name (created in {base_path}):",
             QtWidgets.QLineEdit.EchoMode.Normal,
             default_name
         )
@@ -2689,12 +2437,20 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         Shows a folder selection dialog to choose an existing session folder.
         """
         # Use Qt dialog (not native) to prevent hanging on some systems.
-        # Start from the last session directory for the same reason as
-        # _start_new_session — see the note there about the empty string.
+        #
+        # Start beside the session loaded last, or where new ones are
+        # created.  An empty string here does NOT mean "the current
+        # directory" in practice: Qt falls back to its own process-global
+        # last-visited directory, so the dialog silently follows whatever
+        # other file dialog was opened most recently in this run.
+        last_path = settings.get_last_session_path()
+        start_dir = (str(Path(last_path).parent)
+                     if last_path and Path(last_path).exists()
+                     else settings.get_session_root())
         session_path = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select Session Folder",
-            settings.get_last_session_directory(),
+            start_dir,
             QtWidgets.QFileDialog.Option.ShowDirsOnly | QtWidgets.QFileDialog.Option.DontUseNativeDialog
         )
 
@@ -2702,11 +2458,9 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             success = self.session_manager.load_session(session_path)
 
             if success:
-                # A loaded session names a session folder, so the base
-                # directory to remember is its parent.
-                from pathlib import Path
-                settings.set_last_session_directory(
-                    str(Path(session_path).parent))
+                # Only the path, not the session root: loading a session
+                # from an archive elsewhere must not move where new ones
+                # are created.
                 settings.set_last_session_path(session_path)
 
                 # Restore mock config if present and in mock mode
@@ -2912,18 +2666,28 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
             )
             return
         
+        # Periscope's own exports before rfmux.tuning carry this marker and
+        # layouts the panels below do not read.
+        if isinstance(data, dict) and '_session_export' in data:
+            QtWidgets.QMessageBox.warning(
+                self, "Earlier format",
+                f"{Path(file_path).name} was saved by an earlier version of "
+                "Periscope and can't be opened here; its data is still in "
+                "the file.")
+            return
+
         # Create appropriate panel based on file type
         try:
             if file_type == 'netanal':
-                self._load_netanal_from_session(data, file_path)
+                self._load_network_analysis(data)
             elif file_type == 'multisweep':
-                self._load_multisweep_from_session(data, file_path)
-            elif file_type == 'bias':
-                self._load_bias_from_session(data, file_path)
+                self._load_multisweep_analysis(data)
             elif file_type == 'noise':
                 self._load_noise_from_session(data, file_path)
-            elif file_type == 'channel_noise':
-                self._load_channel_noise_from_session(data, file_path)
+            elif file_type == 'bias_catalog':
+                self.open_bias_catalog(file_path)
+            elif file_type == 'catalog':
+                self.open_catalog_file(file_path)
             else:
                 QtWidgets.QMessageBox.information(
                     self,
@@ -2969,157 +2733,26 @@ class Periscope(QtWidgets.QMainWindow, PeriscopeRuntime):
         self._dock_pulse_capture_panel(
             panel, f"Pulses: {Path(file_path).stem}", f"pulse_review_{n}")
 
-    def _load_netanal_from_session(self, data: dict, file_path: str):
-        """Load network analysis data from session file into a new panel."""
-        # Check if data has the expected structure
-        if 'parameters' not in data and 'modules' not in data:
-            # Try to wrap it in expected format
-            QtWidgets.QMessageBox.information(
-                self,
-                "Network Analysis Loaded",
-                f"Loaded network analysis data.\n"
-                f"File: {file_path}\n\n"
-                "(Direct panel display not yet implemented for this format)"
-            )
-            return
-        
-        # Use existing load mechanism
-        self._load_network_analysis(data)
-    
-    def _load_multisweep_from_session(self, data: dict, file_path: str):
-        """Load multisweep data from session file into a new panel."""
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Multisweep Loaded",
-                f"Loaded multisweep data.\n"
-                f"File: {file_path}\n\n"
-                "(Direct panel display not yet implemented for this format)"
-            )
-            return
-        
-        # Use existing load mechanism
-        self._load_multisweep_analysis(data)
-    
-    def _load_bias_from_session(self, data: dict, file_path: str):
-        """
-        Load bias data from session file - show dialog with options.
-        
-        When double-clicking a bias file, the user gets to choose whether to:
-        - Set bias (apply to hardware only)
-        - Set + Plot bias (apply to hardware and create visualization panel)
-        """
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid Bias File",
-                f"File does not contain multisweep data:\n{file_path}\n\n"
-                "Cannot load this bias file."
-            )
-            return
-
-        # Show the same dialog that the "Load Bias" button shows
-        from .bias_kids_dialog import BiasKidsDialog
-        dialog = BiasKidsDialog(self, self.module, load_bias=True, loaded_data=data)
-        
-        if dialog.exec():
-            params = dialog.get_load_param()
-            if params:
-                if "bias_kids_output" in params:
-                    # User chose "Set + Plot Bias"
-                    self._set_and_plot_bias(params)
-                else:
-                    # User chose "Set Bias" (hardware only)
-                    self._set_bias(params)
-    
     def _load_noise_from_session(self, data: dict, file_path: str):
-        """
-        Load noise spectrum data from session file.
-        
-        Noise files contain complete multisweep data plus noise spectrum data.
-        Creates a MultisweepPanel, opens the DetectorDigestPanel (fit), and 
-        opens a separate NoiseSpectrumPanel for the noise visualization.
-        """
-        if 'results_by_detector' not in data and 'results_by_iteration' not in data:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid Noise File",
-                f"File does not contain multisweep data:\n{file_path}\n\n"
-                "Cannot load this noise file."
-            )
-            return
-        
-        # Use the unified helper to create the multisweep panel
-        panel, dock, window_id, target_module = self._create_multisweep_panel_from_loaded_data(
-            data, source_type="noise"
-        )
-        
-        if panel is None:
-            return  # Error already displayed by helper
-        
-        # Auto-launch detector digest panel (fit panel) by simulating a double-click
-        # This is the same logic used in _load_multisweep_analysis
-        # Find first detector frequency to auto-open digest
-        click_freq = None
-        if 'results_by_detector' in data:
-            det_data = data['results_by_detector']
-            if det_data:
-                first_det_id = sorted(det_data.keys())[0]
-                first_entry = next(iter(det_data[first_det_id].values()), {})
-                click_freq = first_entry.get('bias_frequency', first_entry.get('original_center_frequency'))
-        elif 'results_by_iteration' in data:
-            iteration_params = data.get('results_by_iteration', [])
-            if iteration_params and len(iteration_params) > 0:
-                first_iteration_data = iteration_params[0].get('data', {})
-                if first_iteration_data:
-                    first_detector_id = sorted(first_iteration_data.keys())[0]
-                    first_detector_data = first_iteration_data[first_detector_id]
-                    click_freq = first_detector_data.get('bias_frequency',
-                                                        first_detector_data.get('original_center_frequency'))
-        if click_freq is not None:
-            if click_freq and hasattr(panel, '_handle_multisweep_plot_double_click') and panel.combined_mag_plot:
-                # Create a fake event at the detector's frequency
-                class FakeEvent:
-                    def __init__(self, x, y):
-                        self._scene_pos = QtCore.QPointF(x, y)
-                    def scenePos(self):
-                        return self._scene_pos
-                    def accept(self):
-                        pass
+        """Open current noise measurement containers."""
+        from .noise_spectrum_panel import NoiseSpectrumPanel
 
-                # Map the frequency to view coordinates (x position)
-                view_box = panel.combined_mag_plot.getViewBox()
-                if view_box:
-                    view_point = QtCore.QPointF(click_freq, 0)
-                    scene_point = view_box.mapViewToScene(view_point)
-                    fake_event = FakeEvent(scene_point.x(), scene_point.y())
-                    panel._handle_multisweep_plot_double_click(fake_event)
-        
-        # Load noise data if present and open the NoiseSpectrumPanel
-        if data.get('noise_data') is not None:
-            noise_data = data['noise_data']
-            panel._get_spectrum(noise_data, use_loaded_noise=True)
-        else:
-            print("[Noise] File loaded but no noise_data found - only fit panel shown")
-        
-        # Re-raise the multisweep dock to keep focus on it
-        if dock:
+        blocks = list(data.values())
+        if not blocks or any(not isinstance(block, dict) or
+                             block.get("measurement") != "noise" for block in blocks):
+            raise ValueError("Expected a current noise measurement container")
+        for block in blocks:
+            panel = NoiseSpectrumPanel(
+                block, self, dark_mode=self.dark_mode, file_path=file_path)
+            dock = self.dock_manager.create_dock(
+                panel, f"Noise: module {block['module']}",
+                f"noise_review_{time.time_ns()}")
+            main_dock = self.dock_manager.get_dock("main_plots")
+            if main_dock:
+                self.tabifyDockWidget(main_dock, dock)
+            dock.show()
             dock.raise_()
 
-    def _load_channel_noise_from_session(self, data: dict, file_path: str):
-        """Load multisweep data from session file into a new panel."""
-        if 'channel_noise_data' not in data:
-            QtWidgets.QMessageBox.warning(
-                self,
-                "Invalid Channel Noise File",
-                f"File does not contain multisweep data:\n{file_path}\n\n"
-                "Cannot load this noise file."
-            )
-            return
-        
-        # Use existing load mechanism
-        self._collect_channel_noise(data, loaded=True)
-        
     def _open_file_with_system_default(self, file_path: str):
         """
         Open a file with the system's default application.

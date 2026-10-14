@@ -61,6 +61,10 @@ def test_url_follows_the_port_jupyter_took(qt_app, tmp_path):
     # Only the IPv6 side of localhost is busy: a plain IPv4 bind test says
     # the port is free, but Jupyter binds both sides and moves on. The URL
     # must come from where Jupyter landed, not from the pre-check.
+    families = {addr[0] for addr in socket.getaddrinfo(
+        "localhost", 0, socket.AF_UNSPEC, socket.SOCK_STREAM)}
+    if socket.AF_INET6 not in families:
+        pytest.skip("localhost does not resolve to IPv6")
     try:
         sock, port = _hold(socket.AF_INET6, "::1")
     except OSError:

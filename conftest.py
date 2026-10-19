@@ -25,13 +25,13 @@ import pytest
 # Values are marker expressions; "" means no filtering at all.
 TIERS = {
     # no CRS and no GUI — the subset tox runs on every supported Python
-    "portable": "portable and not hardware",
+    "portable": "portable and not hardware and not veth_fastrxd",
     # the edit loop: no server, no board
-    "quick": "not slow_acquisition and not hardware",
+    "quick": "not slow_acquisition and not hardware and not veth_fastrxd",
     # only the data-acquisition tests: MockCRS server + UDP over loopback
-    "acquisition": "slow_acquisition and not hardware",
+    "acquisition": "slow_acquisition and not hardware and not veth_fastrxd",
     # everything runnable without a board — run this before pushing
-    "full": "not hardware",
+    "full": "not hardware and not veth_fastrxd",
     # the board tests on their own (needs --serial)
     "hardware": "hardware",
     # literally everything (needs --serial, or the hardware tier just skips)

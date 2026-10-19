@@ -15,6 +15,10 @@
  * may span several UMEM chunks (ice: 8, mlx5: 1); that is read from the
  * kernel, and the MTU is checked against it, rather than special-cased.
  *
+ * --copy-mode asks for that copying on purpose.  Used for CI/CD tests
+ * (test/streamer/test_fastrxd_veth), where a veth pair stands in for
+ * 100G hardware (and supports AF_XDP but not ZEROCOPY). Don't use this.
+ *
  * Clients receive the UMEM memfd (read-only) and a control memfd holding
  * per-client descriptor rings plus a shared frame refcount table (see
  * include/fastrx.h for the layout).
@@ -77,6 +81,7 @@
 extern const char _binary_fastrx_bpf_o_start[], _binary_fastrx_bpf_o_end[];
 
 static bool verbose = false;
+static bool copy_mode = false;
 
 /* FIXME: die() and fail() do different things but the distinction seems
  * poorly motivated and using both printf() and std::format() is odd. */
@@ -560,9 +565,15 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom, bool multi_
 		.tx_size = 0,
 		.libxdp_flags = XSK_LIBXDP_FLAGS__INHIBIT_PROG_LOAD,
 		.xdp_flags = 0,
-		.bind_flags = (uint16_t)(XDP_ZEROCOPY | (multi_buffer ? XDP_USE_SG : 0)),
+		.bind_flags = (uint16_t)((copy_mode ? XDP_COPY : XDP_ZEROCOPY)
+				| (multi_buffer ? XDP_USE_SG : 0)),
 	};
 	if ((err = xsk_socket__create(&xsk, ifname.c_str(), kQueueId, umem, &rx, &tx, &xsk_cfg))) {
+		if (-err == EOPNOTSUPP && copy_mode)
+			fail("xsk_socket__create({}): {}\n"
+				"the driver refused a copy-mode AF_XDP socket{}.",
+				ifname.c_str(), std::strerror(-err),
+				multi_buffer ? " for packets spanning several UMEM frames" : "");
 		if (-err == EOPNOTSUPP)
 			fail("xsk_socket__create({}): {}\n"
 				"the driver refused a zero-copy AF_XDP socket{}.  fastrxd does "
@@ -585,12 +596,14 @@ Session::Session(const std::string& ifname, uint32_t frame_headroom, bool multi_
 	 * can only fire on a kernel that ignores it. */
 	struct xdp_options xo = {};
 	socklen_t xo_len = sizeof(xo);
-	if (getsockopt(xsk_fd, SOL_XDP, XDP_OPTIONS, &xo, &xo_len) == 0 &&
+	if (!copy_mode &&
+			getsockopt(xsk_fd, SOL_XDP, XDP_OPTIONS, &xo, &xo_len) == 0 &&
 			!(xo.flags & XDP_OPTIONS_ZEROCOPY))
 		fail("kernel bound the AF_XDP socket in copy mode despite XDP_ZEROCOPY");
 	if (verbose)
-		std::fprintf(stderr, "fastrxd: zero-copy AF_XDP socket on %s queue %u, "
-			"%s\n", ifname.c_str(), kQueueId,
+		std::fprintf(stderr, "fastrxd: %s AF_XDP socket on %s queue %u, "
+			"%s\n", copy_mode ? "copy-mode (TEST ONLY)" : "zero-copy",
+			ifname.c_str(), kQueueId,
 			multi_buffer ? "packets may span frames" : "one frame per packet");
 
 	bpf_object* obj = xdp_program__bpf_obj(prog);
@@ -720,6 +733,9 @@ public:
 			warn("%llu packets dropped for partial pipelines: the transmitter "
 				"sent a shape clients cannot be told about",
 				(unsigned long long)short_pkt_drops_);
+		if (deferred_returns_ && verbose)
+			std::fprintf(stderr, "fastrxd: %llu frame returns waited a pass for "
+				"FILL ring room\n", (unsigned long long)deferred_returns_);
 
 		/* The kernel's view of the socket.  A FILL ring found empty means the
 		 * NIC had nowhere to put a packet and discarded it; that is ingest (or
@@ -750,15 +766,33 @@ private:
 		if (!n)
 			return;
 
-		uint32_t idx;
-		if (xsk_ring_prod__reserve(&s_.fill, n, &idx) != n)
-			die("FILL ring refused %u frames! Double release?", n);
+		/* Return what fits and keep the rest for the next pass.  The ring
+		 * can look full when it is not: the kernel publishes the FILL
+		 * consumer index lazily, after the RX producer index of the same
+		 * NAPI poll, so a frame can arrive, be handled and come back here
+		 * before the slot it left is visible.  On a NIC the driver holds
+		 * frames of its own and the ring never sits full; in copy mode it
+		 * is full at rest and the race shows up as a refusal of a small
+		 * batch. */
+		uint32_t fit = xsk_prod_nb_free(&s_.fill, n);
+		if (fit > n)
+			fit = n;
+		if (!fit) {
+			deferred_returns_ += n;
+			return;
+		}
+		if (fit < n)
+			deferred_returns_ += n - fit;
 
-		for (uint32_t i = 0; i < n; i++)
+		uint32_t idx;
+		if (xsk_ring_prod__reserve(&s_.fill, fit, &idx) != fit)
+			die("FILL ring refused %u frames it said it had room for", fit);
+
+		for (uint32_t i = 0; i < fit; i++)
 			*xsk_ring_prod__fill_addr(&s_.fill, idx + i) = pending_returns_[i];
-		xsk_ring_prod__submit(&s_.fill, n);
-		frames_returned_ += n;
-		pending_returns_.clear();
+		xsk_ring_prod__submit(&s_.fill, fit);
+		frames_returned_ += fit;
+		pending_returns_.erase(pending_returns_.begin(), pending_returns_.begin() + fit);
 	}
 
 	void stage_packet_returns(const PendingPkt& pkt) {
@@ -1116,6 +1150,7 @@ private:
 
 	/* Frames to go back to the FILL ring at the end of this pass. */
 	std::vector<uint64_t> pending_returns_;
+	uint64_t deferred_returns_ = 0;    /* frames that waited a pass for FILL ring room */
 
 	/* Per-client ring head as ingest has advanced it but not yet published.
 	 * Bit c of pushed_mask_ is set while head_shadow_[c] is ahead of the
@@ -1218,6 +1253,9 @@ static void usage(FILE* out, const char* argv0) {
 	std::fprintf(out, " -s, --socket-path=PATH listen path (default: "
 			FASTRXD_SOCKET_DIR "/<ifname>)\n");
 	std::fprintf(out, " -v, --verbose log every client connect/disconnect\n");
+	std::fprintf(out, " -c, --copy-mode bind the AF_XDP socket in copy mode (XDP_COPY).\n"
+	                  "                 FOR TESTS ONLY: runs on a veth pair, drops packets at\n"
+	                  "                 stream rates; see the file comment\n");
 	std::fprintf(out, " -h, --help show this help\n");
 }
 
@@ -1240,12 +1278,13 @@ int main(int argc, char** argv) {
 		{ "gid", required_argument, nullptr, 'g' },
 		{ "socket-path", required_argument, nullptr, 's' },
 		{ "verbose", no_argument, nullptr, 'v' },
+		{ "copy-mode", no_argument, nullptr, 'c' },
 		{ "help", no_argument, nullptr, 'h' },
 		{ nullptr, 0, nullptr, 0 },
 	};
 
 	int opt;
-	while ((opt = getopt_long(argc, argv, "i:r:u:g:s:vh", long_opts, nullptr)) != -1) {
+	while ((opt = getopt_long(argc, argv, "i:r:u:g:s:vch", long_opts, nullptr)) != -1) {
 		switch (opt) {
 		case 'i':
 			ifname = optarg;
@@ -1278,6 +1317,9 @@ int main(int argc, char** argv) {
 			break;
 		case 'v':
 			verbose = true;
+			break;
+		case 'c':
+			copy_mode = true;
 			break;
 		case 'h':
 			usage(stdout, argv[0]);

@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+#
+# test_fastrxd_veth: run test/streamer/test_fastrxd_veth.py against the real
+# fastrxd on a veth pair.
+#
+#   test/streamer/test_fastrxd_veth [pytest args...]
+#
+# Brings up a veth pair and fastrxd on one end of it, in copy-mode AF_XDP;
+# runs the tests, as you, with any arguments passed on to pytest; and tears
+# it all down again. No 100G hardware requirements.
+
+set -euo pipefail
+
+cd "$(dirname "$0")/../.."
+
+RX=fxveth0
+TX=fxveth1
+RX_IP=10.199.77.1
+TX_IP=10.199.77.2
+MTU=9000
+SOCKET=/run/fastrxd/$RX
+LOG=/run/fastrxd/$RX.log
+
+# The privileged commands.  Already root (a container): no sudo, and
+# fastrxd then has no $SUDO_UID to drop to, so name one for it.
+if [ "$(id -u)" = 0 ]; then
+	SUDO=""
+	DROP="-u 65534 -g 65534"
+else
+	SUDO="sudo -n"
+	DROP=""
+fi
+
+# The Python the tests run under, and that knows where fastrxd is.
+for PY in python python3; do
+	command -v "$PY" >/dev/null && break
+done
+FASTRXD=$("$PY" -c 'import rfmux.fastrx as f; print(f.daemon_path())') \
+        || { echo "$0: no rfmux.fastrx on $PY's path; is the venv active?" >&2; exit 1; }
+[ -x "$FASTRXD" ] || { echo "$0: $FASTRXD is not executable" >&2; exit 1; }
+
+# Ensure we have sudo access for later
+[ -z "$SUDO" ] || sudo -v
+
+DAEMON=""
+down() {
+	if [ -n "$DAEMON" ]; then
+		# The daemon leads its own process group: its privileged parent and
+		# the worker.  Only the worker is ours, and it is the one that
+		# takes SIGTERM: its exit makes the parent detach the XDP program
+		# and exit.
+		kill -TERM -- "-$DAEMON" 2>/dev/null || true
+		for _ in $(seq 50); do
+			[ -d "/proc/$DAEMON" ] || break
+			sleep 0.1
+		done
+		kill -KILL -- "-$DAEMON" 2>/dev/null || true
+		DAEMON=""
+	fi
+	rm -f "$SOCKET"
+	# Deleting one end deletes the pair.
+	$SUDO ip link del "$RX" 2>/dev/null || true
+}
+trap down EXIT
+
+down  # a stale rig from an interrupted run
+
+configure() {  # <dev> <ip>
+	$SUDO ip link set dev "$1" mtu $MTU
+	$SUDO ip addr add "$2/24" dev "$1"
+	$SUDO ip link set dev "$1" up
+}
+$SUDO ip link add "$RX" type veth peer name "$TX"
+configure "$RX" "$RX_IP"
+configure "$TX" "$TX_IP"
+
+# fastrxd would create /run/fastrxd itself and chown it to $SUDO_UID; doing
+# it here lets the log live there too, as ours.
+$SUDO mkdir -p /run/fastrxd
+$SUDO chown "$(id -u):$(id -g)" /run/fastrxd
+: > "$LOG"
+
+# sudo runs on this terminal, where its cached credential is (the ticket is
+# per tty, so a sudo detached with setsid could not use it); the detaching
+# happens inside, as root: setsid puts the daemon in a session and process
+# group of its own, led by the pid printed back, which is what down() signals.
+DAEMON=$($SUDO sh -c 'log=$1; shift; setsid "$@" >>"$log" 2>&1 & echo $!' \
+	sh "$LOG" "$FASTRXD" -i "$RX" --copy-mode -v $DROP)
+
+for _ in $(seq 100); do
+	[ -S "$SOCKET" ] && break
+	if [ ! -d "/proc/$DAEMON" ]; then
+		echo "$0: fastrxd exited:" >&2
+		cat "$LOG" >&2
+		exit 1
+	fi
+	sleep 0.1
+done
+[ -S "$SOCKET" ] || { echo "$0: fastrxd did not come up; see $LOG" >&2; exit 1; }
+
+# The test file's shebang runs pytest with the marker selected; our
+# arguments follow.  Not exec'd, so the EXIT trap above still runs.
+export FASTRX_TEST_TX=$TX FASTRX_TEST_SOCKET=$SOCKET FASTRX_TEST_LOG=$LOG
+test/streamer/test_fastrxd_veth.py "$@"

@@ -18,6 +18,9 @@ from .streamer._fastrx import (
     MAX_SAMPLES,
     NUM_MODULES,
     SOCKET_DIR,
+    MULTICAST_GROUP,
+    PORT,
+    PACKET_VERSION,
     PacketFile,
     record_stride,
 )
@@ -40,6 +43,9 @@ __all__ = [
     "ABI_VERSION",
     "MAX_CLIENTS",
     "SOCKET_DIR",
+    "MULTICAST_GROUP",
+    "PORT",
+    "PACKET_VERSION",
 ]
 
 

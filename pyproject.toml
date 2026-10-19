@@ -130,6 +130,7 @@ markers = [
   "portable: needs no CRS at all and no GUI — the subset tox runs on every supported Python",
   "slow_acquisition: slow because it exercises the data-acquisition path for real — spawns a MockCRS server subprocess and streams UDP over loopback",
   "hardware: needs a real CRS board; applied automatically to anything using the crs/live_session fixtures, and skipped unless --serial is given",
+  "veth_fastrxd: needs the veth rig (run through test/streamer/test_fastrxd_veth): the real fastrxd in copy-mode AF_XDP on a veth pair. Skipped without it, unless named in -m, which fails instead",
 
   # The QC suite lives in rfmux/tools/qc/ and runs via "rfmux qc", not from here.
   "qc_stage1",

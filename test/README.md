@@ -12,6 +12,7 @@ developer laptop.
 | `pytest --tier=acquisition` | 19 | ~2.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
 | `pytest --tier=full` | 1240 | ~3.5 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
+| `test/streamer/test_fastrxd_veth` | 6 | ~5 s, needs sudo | The real fastrxd on a veth pair, in copy-mode AF_XDP, fed version-0 K=1 packets: the 100G receive path without a NIC. The script brings the rig up (sudo for what needs root), runs the tests as you, and tears it down; extra arguments go to pytest. After changing fastrxd, its clients, or the channel-stream wire format. CI runs it on ubuntu-24.04. |
 | `pytest --tier=all --serial 0024` | 1315 | needs a board | Before a release. |
 
 ```bash

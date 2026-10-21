@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/t0/rfmux/compare/v1.7.0...v1.7.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* **fastrxd:** return what fits to the FILL ring; test on a veth pair in CI ([b1f3960](https://github.com/t0/rfmux/commit/b1f3960dd78ac6fcde57b1cdddbc90827fa219c2))
+
 ## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-10-13)
 
 

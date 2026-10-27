@@ -1,14 +1,13 @@
-#!/usr/bin/env -S uv run pytest -s
 """
 Housekeeping Tests.
 
 Please see README for hints on using and extending these test cases.
 """
 
-import pytest
+import inspect
 from dataclasses import dataclass
 
-from .crs_qc import render_markdown, ResultTable
+from .crs_qc import CheckTable, render_markdown
 
 
 @dataclass
@@ -23,12 +22,8 @@ class SensorReading:
         return cls(name, nom=nom, min=(1 - rel) * nom, max=(1 + rel) * nom)
 
 
-@pytest.mark.qc_stage1
-@pytest.mark.asyncio
-async def test_housekeeping_temperature(d, request, shelf, check):
-    report = [
-        render_markdown(
-            f"""
+async def housekeeping_temperature(d, report):
+    """
     ## Temperatures
 
     Nominal values are fairly arbitrary. Selected maximum operating
@@ -42,8 +37,7 @@ async def test_housekeeping_temperature(d, request, shelf, check):
     Given the board's thermal design and hot spots, it is likely that the VCXO
     is the part with the lowest thermal margin.
     """
-        )
-    ]
+    report.append(render_markdown(inspect.getdoc(housekeeping_temperature)))
 
     NOM = 50
     MIN = 0
@@ -77,27 +71,13 @@ async def test_housekeeping_temperature(d, request, shelf, check):
             ctx.get_motherboard_temperature(s.name)
         temps = await ctx()
 
-    report.append(
-        rt := ResultTable(
-            "Sensor", r"Reading (C)", "Nominal (C)", "Minimum (C)", r"Maximum (C)"
-        )
-    )
+    report.append(checks := CheckTable())
     for s, v in zip(sensors, temps):
-        if check.between(v, s.min, s.max, msg=str(s.name)):
-            rt.pass_(s.name, v, s.nom, s.min, s.max)
-        else:
-            rt.fail(s.name, v, s.nom, s.min, s.max)
-
-    with shelf as x:
-        x["sections"][request.node.nodeid] = report
+        checks.check(str(s.name), v, "C", nominal=s.nom, low=s.min, high=s.max)
 
 
-@pytest.mark.qc_stage1
-@pytest.mark.asyncio
-async def test_housekeeping_voltages(d, request, shelf, check):
-    report = [
-        render_markdown(
-            f"""
+async def housekeeping_voltages(d, report):
+    """
     ## Voltages
 
     There are, in general, two kinds of on-board voltage measurements:
@@ -116,8 +96,7 @@ async def test_housekeeping_voltages(d, request, shelf, check):
     * Point-of-load (POL) measurements take their min/max values verbatim from
       the relevant component datasheets (primarily, DS926).
     """
-        )
-    ]
+    report.append(render_markdown(inspect.getdoc(housekeeping_voltages)))
 
     VOLTAGE_TOL = 0.10  # 10%
     sensors = (
@@ -196,34 +175,20 @@ async def test_housekeeping_voltages(d, request, shelf, check):
             ctx.get_motherboard_voltage(s.name)
         voltages = await ctx()
 
-    # Evaluate pass/fail
-    report.append(
-        rt := ResultTable("Sensor", "Reading", "Nominal", "Minimum", "Maximum")
-    )
+    report.append(checks := CheckTable())
     for s, v in zip(sensors, voltages):
-        if check.between(v, s.min, s.max, msg=str(s.name)):
-            rt.pass_(s.name, v, s.nom, s.min, s.max)
-        else:
-            rt.fail(s.name, v, s.nom, s.min, s.max)
-
-    with shelf as x:
-        x["sections"][request.node.nodeid] = report
+        checks.check(str(s.name), v, "V", nominal=s.nom, low=s.min, high=s.max)
 
 
-@pytest.mark.qc_stage1
-@pytest.mark.asyncio
-async def test_housekeeping_currents(d, request, shelf, check):
-    report = [
-        render_markdown(
-            f"""
+async def housekeeping_currents(d, report):
+    """
     ## Currents
 
     Because current measurements rely on parasitic elements, these tests are
     barely constrained and are mostly useful to gather historical measurements
     of nominal values.
     """
-        )
-    ]
+    report.append(render_markdown(inspect.getdoc(housekeeping_currents)))
 
     # These are sloppy measurements - give them a huge margin.
     # Nominal readings aren't reported and are arbitrary.
@@ -244,14 +209,6 @@ async def test_housekeeping_currents(d, request, shelf, check):
             ctx.get_motherboard_current(s.name)
         currents = await ctx()
 
-    report.append(
-        rt := ResultTable("Sensor", "Reading (A)", "Minimum (A)", "Maximum (A)")
-    )
+    report.append(checks := CheckTable())
     for s, v in zip(sensors, currents):
-        if check.between(v, s.min, s.max, msg=str(s.name)):
-            rt.pass_(s.name, v, s.min, s.max)
-        else:
-            rt.fail(s.name, v, s.min, s.max)
-
-    with shelf as x:
-        x["sections"][request.node.nodeid] = report
+        checks.check(str(s.name), v, "A", low=s.min, high=s.max)

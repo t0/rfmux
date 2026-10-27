@@ -12,7 +12,7 @@ So the options live here, where every in-repo invocation sees them. Fixtures
 and collection hooks stay in test/conftest.py, which has no such restriction.
 
 Deliberately dependency-light: this module is imported for every pytest run
-anywhere in the repo, including the QC suite, so it must not import rfmux.
+anywhere in the repo, so it must not import rfmux.
 """
 
 import pytest
@@ -40,13 +40,7 @@ TIERS = {
 
 
 def pytest_addoption(parser):
-    # rfmux/tools/qc/conftest.py also declares --serial and tolerates this one
-    # already existing. Be symmetric about it: either conftest may load first
-    # depending on which directory you point pytest at.
-    try:
-        parser.addoption("--serial", action="store", default=None)
-    except ValueError:
-        pass
+    parser.addoption("--serial", action="store", default=None)
 
     parser.addoption(
         "--tier",

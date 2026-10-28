@@ -511,7 +511,20 @@ class NetworkAnalysisExportMixin:
         try:
             tau_additional = fit_cable_delay(freqs_active, phases_displayed_active_deg)
             L_new_physical = calculate_new_cable_length(L_old_physical, tau_additional)
-            return L_old_physical, L_new_physical
+
+            # The firmware accepts 0-100 m. A short loopback fits to a few mm
+            # either side of zero, so clamp quietly; a clamp of more than
+            # 0.1 m (~0.5 ns) means the firmware's latency model is off.
+            L_clamped = min(max(L_new_physical, 0.0), 100.0)
+            if abs(L_clamped - L_new_physical) > 0.1:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Cable Length Out of Range",
+                    f"Fitted cable length {L_new_physical:.3f} m is outside the "
+                    f"firmware's 0-100 m range; using {L_clamped:.3f} m. The "
+                    f"remaining phase slope is not a cable delay."
+                )
+            return L_old_physical, L_clamped
         except Exception as e:
             QtWidgets.QMessageBox.critical(
                 self, 

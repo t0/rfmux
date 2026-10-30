@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.8.0](https://github.com/t0/rfmux/compare/v1.7.0...v1.8.0) (2026-10-30)
+
+
+### Features
+
+* **firmware:** add firmware discover subcommand to display CRS beacons ([63f67f1](https://github.com/t0/rfmux/commit/63f67f17b6f2b1d72805bba76e7c5cffbf3cf4b7))
+
+
+### Bug Fixes
+
+* **fastrxd:** return what fits to the FILL ring; test on a veth pair in CI ([b1f3960](https://github.com/t0/rfmux/commit/b1f3960dd78ac6fcde57b1cdddbc90827fa219c2))
+* **periscope:** clamp slightly negative cable lengths to 0 ([3e373e7](https://github.com/t0/rfmux/commit/3e373e759a78f39b9a6bcc4740f747d045899ddb))
+
 ## [1.7.0](https://github.com/t0/rfmux/compare/v1.6.0...v1.7.0) (2026-10-13)
 
 

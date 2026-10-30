@@ -49,6 +49,7 @@ and a fresh beacon:
 
 import bz2
 import click
+import curses
 import datetime
 import fru
 import functools
@@ -70,6 +71,7 @@ import tempfile
 import termios
 import threading
 import tqdm
+import time
 import tty
 import urllib.error
 import urllib.parse
@@ -891,6 +893,7 @@ def cli(ctx, serials, discovery_port, bind, verbose, then, crates):
         rfmux firmware --serial 0110 write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 3
         rfmux firmware --serial any  write-backplane-eeprom --backplane 4sbp --crate-model crc4 --chassis-serial-number 011 --board-serial-number 027 --slot 0110=1 --slot 0111=2
         rfmux firmware --serial any  read-backplane-eeprom --backplane 4sbp --slot 0110=1 --slot 0111=2
+        rfmux firmware discover
     """
     logging.basicConfig(
         format="[%(asctime)s] %(levelname)s %(message)s",
@@ -925,6 +928,49 @@ def run_actions(ctx, actions, **_):
     board_serials(ctx)
     run(ctx.obj, actions)
 
+@cli.command(name="discover")
+@click.pass_context
+def discover(ctx):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((ctx.obj["bind"], ctx.obj["discovery_port"]))
+    with sock:
+        try:
+            curses.wrapper(_discover_loop, sock)
+        except KeyboardInterrupt:
+            pass
+
+def _discover_loop(stdscr, sock):
+    curses.curs_set(0)
+    stdscr.nodelay(True)
+    boards = {}
+    while stdscr.getch() not in (ord("q"), 27):
+        if sock in select.select([sock, sys.stdin], [], [], 1.0)[0]:
+            try:
+                data, (ip, _) = sock.recvfrom(BUF_SIZE)
+                _, headers = parse_fwreq(data)
+                key = headers.get("Serial", ip)
+                boards[key] = (ip, headers, boards.get(key, (0, 0, time.time()))[2], time.time())
+            except (ValueError, UnicodeDecodeError):
+                pass
+            now = time.time()
+            h, w = stdscr.getmaxyx()
+            stdscr.erase()
+            stdscr.addnstr(0, 0, f"CRS Discovery", w-1, curses.A_NORMAL)
+            stdscr.addnstr(1, 0,
+                f"{'serial':<8} {'bootloader':<10} {'ip':<15} {'first seen':<17} {'last seen':<17} "
+                f"{'revision':<8} {'crate':<7} {'slot':<7} bootloader date".ljust(w-1),
+                w-1, curses.A_REVERSE
+            )
+            seen = lambda x: f"{time.strftime('%H:%M:%S', time.localtime(x))} ({now-x:.0f}s)"
+            for y, (s, (ip, hd, f, t)) in enumerate(sorted(boards.items())[:h-2], 2):
+                stdscr.addnstr(y, 0,
+                    f"{s:<8} {hd.get('Bootloader', '-'):<10} {ip:<15} {seen(f):<17} {seen(t):<17} "
+                    f"{hd.get('Revision', '-'):<8} {hd.get('Crate Serial', '-'):<7} "
+                    f"{hd.get('Crate Slot', hd.get('Backplane Slot', '-')):<7} {hd.get('Bootloader Date', '-')}",
+                    w-1, curses.A_DIM if now-t > 10 else 0
+                )
+            stdscr.refresh()
 
 # In a chain, list goes last: an argument after it is taken as its REF.
 @cli.command(name="list")

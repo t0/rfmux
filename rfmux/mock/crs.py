@@ -805,7 +805,8 @@ class ServerMockCRS:
 
             return {
                 "i": i_list, "q": q_list, "ts": t_list,
-                "flags": {"overrange": overrange, "overvoltage": overvoltage}
+                "flags": {"overrange": overrange, "overvoltage": overvoltage,
+                          "aux_sma": False}
             }
         else:
             channels_per_module = self.channels_per_module()
@@ -834,12 +835,14 @@ class ServerMockCRS:
                 return {
                     "mean": {"i": mean_i, "q": mean_q},
                     "i": i_data, "q": q_data, "ts": t_list,
-                    "flags": {"overrange": overrange, "overvoltage": overvoltage}
+                    "flags": {"overrange": overrange, "overvoltage": overvoltage,
+                              "aux_sma": False}
                 }
             else:
                 return {
                     "i": i_data, "q": q_data, "ts": t_list,
-                    "flags": {"overrange": overrange, "overvoltage": overvoltage}
+                    "flags": {"overrange": overrange, "overvoltage": overvoltage,
+                              "aux_sma": False}
                 }
 
     async def clear_channels(self, module=None):

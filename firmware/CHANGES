@@ -1,5 +1,23 @@
 # Changelog
 
+# r1.7.1 - 2026-11-04
+
+This is a minor update and may be upgraded from r1.7.0 using the "rfmux
+firmware" flow as follows:
+
+    $ uvx rfmux firmware --serial=0246 reflash-mmc v1.7.1
+
+After running this command, power up (or reboot) your CRS board (leave the MMC
+card installed!) and the upgrade process should proceed automatically. The
+process takes a few minutes.
+
+New features:
+
+- A SMA_AUX value is captured in all readout packets (get_samples)
+- get_fast_samples can now accept "target=DAC" to retrieve synthesizer samples
+- 100G GTY SERDES defaults have been tweaked slightly (950 mV / 1.8dB pre /
+  3.99dB post) to optimize for a variety of optical transceivers and DAC cables.
+
 # r1.7.0 - 2026-09-29
 
 This is a major update, and REQUIRES an accompanying bootloader upgrade as well.

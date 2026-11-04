@@ -84,6 +84,9 @@ from ._receiver import (
 	SHORT_PACKET_VERSION,
 	PFBPACKET_NSAMP_MAX,
 	SS_PER_SECOND,
+	PACKET_FLAGS_OVERRANGE,
+	PACKET_FLAGS_OVERVOLTAGE,
+	PACKET_FLAGS_AUX_SMA,
 )
 
 #: Bit 31 of a Timestamp's ``c`` field: the stamp is disciplined
@@ -512,6 +515,9 @@ __all__ = [
 	'PFBPACKET_NSAMP_MAX',
 	'SS_PER_SECOND',
 	'TIMESTAMP_RECENT',
+	'PACKET_FLAGS_OVERRANGE',
+	'PACKET_FLAGS_OVERVOLTAGE',
+	'PACKET_FLAGS_AUX_SMA',
 
 	# Backwards compatibility
 	'DfmuxPacket',

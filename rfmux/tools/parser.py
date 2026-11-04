@@ -36,6 +36,9 @@ from rfmux.streamer import (
     PFB_STREAMER_PORT,
     PFBPACKET_NSAMP_MAX,
     SS_PER_SECOND,
+    PACKET_FLAGS_OVERRANGE,
+    PACKET_FLAGS_OVERVOLTAGE,
+    PACKET_FLAGS_AUX_SMA,
 )
 from rfmux.core.transferfunctions import decimated_stream_delay_s
 from rfmux.core import channels as channel_spec
@@ -161,6 +164,7 @@ def setup_dirfile_for_module(
     ts_ss_field = f"m{module+1:02d}_ts_ss"
     dec_stage_field = f"m{module+1:02d}_dec_stage"
     ts_delay_field = f"m{module+1:02d}_ts_delay"
+    flags_field = f"m{module+1:02d}_flags"
 
     module_stats.dirfile_fields = {
         "raw": raw_field,
@@ -168,11 +172,21 @@ def setup_dirfile_for_module(
         "ts_ss": ts_ss_field,
         "dec_stage": dec_stage_field,
         "ts_delay": ts_delay_field,
+        "flags": flags_field,
     }
 
     # Add timestamp fields
     df.add(gd.entry(gd.RAW_ENTRY, ts_sbs_field, 0, (gd.INT32, 1)))
     df.add(gd.entry(gd.RAW_ENTRY, ts_ss_field, 0, (gd.INT32, 1)))
+
+    # The packet's flags byte, one write per frame; its bits read out by
+    # name as BIT entries, nothing more stored.
+    df.add(gd.entry(gd.RAW_ENTRY, flags_field, 0, (gd.UINT8, 1)))
+    for bit, name in ((PACKET_FLAGS_OVERRANGE, "overrange"),
+                      (PACKET_FLAGS_OVERVOLTAGE, "overvoltage"),
+                      (PACKET_FLAGS_AUX_SMA, "aux_sma")):
+        df.add(gd.entry(gd.BIT_ENTRY, f"m{module+1:02d}_{name}", 0,
+                        (flags_field, bit.bit_length() - 1, 1)))
 
     # The decimation stage and its CIC group delay (seconds), per frame:
     # the board stamps the decimated stream late by that delay.
@@ -490,12 +504,11 @@ def main_readout(args, serials, module_channels, interface_ip, board_stats):
 
                     # Text dump
                     if args.text:
-                        flags = []
-                        if pkt.flags & 0x1:
-                            flags.append("OR")
-                        if pkt.flags & 0x2:
-                            flags.append("OV")
-                        flags_str = " ".join(flags)
+                        flags_str = " ".join(
+                            name for bit, name in ((PACKET_FLAGS_OVERRANGE, "OR"),
+                                                   (PACKET_FLAGS_OVERVOLTAGE, "OV"),
+                                                   (PACKET_FLAGS_AUX_SMA, "AUX"))
+                            if pkt.flags & bit)
 
                         print(
                             f"Packet(magic=0x{pkt.magic:08x} version={pkt.version} "
@@ -550,6 +563,9 @@ def main_readout(args, serials, module_channels, interface_ip, board_stats):
                             first_frame=frame,
                         )
                         write_dec_stage(df, fields, frame, pkt)
+                        df.putdata(fields["flags"],
+                                   np.array([pkt.flags], dtype=np.uint8),
+                                   first_frame=frame)
 
                         # Write channel data from raw int32 I/Q pairs.
                         # Each pkt.raw_samples[slice] is a zero-copy view.

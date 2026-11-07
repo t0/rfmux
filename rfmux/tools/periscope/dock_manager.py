@@ -4,7 +4,7 @@ Dock Manager for Periscope Application
 
 This module provides centralized management of QDockWidget instances in the
 Periscope application. It handles the creation, tracking, lifecycle, and
-organization of dockable panels (NetworkAnalysis, Multisweep, DetectorDigest).
+organization of dockable panels (NetworkAnalysis, Multisweep, NoiseSpectrum).
 
 The DockManager enables:
 - Creating dock widgets that wrap panel content

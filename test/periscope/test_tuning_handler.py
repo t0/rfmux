@@ -5,6 +5,7 @@ import pytest
 
 pytest.importorskip("PyQt6")
 
+from rfmux.core.resonators import ResonatorCatalog  # noqa: E402
 from test.qt_helpers import bare_periscope, spin  # noqa: E402
 
 
@@ -30,7 +31,7 @@ def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
             self.kw = kw
 
         def start(self):
-            started.append(self.kw["params"]["module"])
+            started.append(self.kw["params"]["catalog"].module)
 
         def stop(self):
             pass
@@ -42,8 +43,10 @@ def test_a_live_multisweep_window_reports_its_tuning_to_the_main_window(
     p = bare_periscope(monkeypatch, crs=object())
     p.multisweep_signals, p.multisweep_tasks = MultisweepSignals(), {}
     p._start_multisweep_analysis({
-        "module": 2, "resonance_frequencies": [1.0e9], "span_hz": 2.0e5,
-        "amps": [0.01], "sweep_direction": "upward"})
+        "catalog": ResonatorCatalog.from_frequencies(
+            [1.0e9], module=2, amplitude=0.01),
+        "span_hz": 2.0e5, "npoints_per_sweep": 21, "nsamps": 10,
+        "sweep_direction": "upward"})
     panel = p.multisweep_windows["multisweep_0"]["window"]
     try:
         assert started == [2]

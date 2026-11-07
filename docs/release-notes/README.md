@@ -6,6 +6,7 @@ hand for people working on rfmux. How to use a feature is in
 
 | Release | Notes |
 | --- | --- |
+| Headless tuning branch (October 2026) | [2026-10-tuning-headless-revamp.md](2026-10-tuning-headless-revamp.md): what to change when upgrading |
 | Pulse capture branch (September 2026) | [2026-09-pulse-capture-branch.md](2026-09-pulse-capture-branch.md): what changed and what to change when upgrading |
 
 ## Relationship to the other changelogs

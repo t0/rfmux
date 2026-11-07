@@ -1,28 +1,52 @@
-"""Builders shared by the record tests: a bias export as Periscope's
-session writes it, and a fastrx module faked well enough for
-record_streams to reach its recording window."""
+"""Builders shared by the record tests: a bias_catalog file as
+crs.apply_bias writes and lists it, and a fastrx module faked well enough
+for record_streams to reach its recording window."""
 
 import pickle
 import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
 from rfmux.core.session_folder import register_export
 
 
-def bias_export(path, module, channels, calibrated=True, timestamp="",
-                nco=1.0e9):
-    """A Bias KIDs export of *channels* on *module* at *path*, listed
-    in the folder's metadata as Periscope lists it."""
-    out = {c: {"bias_channel": c,
-               "df_calibration": (complex(1e6 * c, -1e5) if calibrated else None)}
-           for c in channels}
-    with open(path, "wb") as f:
-        pickle.dump({"target_module": module, "timestamp": timestamp,
-                     "bias_kids_output": out, "nco_frequency_hz": nco}, f)
-    register_export(Path(path).parent, Path(path).name, "bias",
+def bias_catalog_file(path, module, channels, calibrated=True,
+                      timestamp="", nco_frequency_hz=1.0e9):
+    """A bias_catalog of *channels* on *module* at *path*, listed in the
+    folder's metadata: what ``record`` reads to learn which channels are
+    tuned and how they convert to hertz."""
+    f = np.linspace(0.999e9, 1.001e9, 9)
+    catalog = ResonatorCatalog(
+        [Resonator(name=f"R{c:04d}", channel=c,
+                   bias=BiasPoint(
+                       frequency_hz=1.0e9 + 1e6 * c,
+                       amplitude=0.01,
+                       # 1/(dI+jdQ) is the calibration each channel reports.
+                       **(_derivatives(c) if calibrated else {}),
+                       bias_sweep={"frequencies": f,
+                                   "iq_volts": np.exp(1j * f / 1e9),
+                                   "original_center_frequency": 1.0e9 + 1e6 * c,
+                                   "sweep_amplitude": 0.01,
+                                   "sweep_direction": "upward"}))
+         for c in channels],
+        module=module)
+    with open(path, "wb") as fh:
+        pickle.dump({"measurement": "bias_catalog", "module": module,
+                     "nco_frequency_hz": nco_frequency_hz,
+                     "dac_scale_setting_dbm": 1.0,
+                     "catalog": catalog.to_dict()}, fh)
+    register_export(Path(path).parent, Path(path).name, "bias_catalog",
                     f"module{module}", timestamp or None)
     return Path(path)
+
+
+def _derivatives(channel):
+    """dI_df and dQ_df giving a df_calibration of 1e6*channel - 1e5j."""
+    d = 1.0 / complex(1e6 * channel, -1e5)
+    return {"dI_df": d.real, "dQ_df": d.imag}
 
 
 def fake_fastrx(monkeypatch, tmp_path, *, modules_seen=0b1111, packets=0):

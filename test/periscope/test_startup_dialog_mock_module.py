@@ -35,7 +35,7 @@ def saved(monkeypatch):
     monkeypatch.setattr(ssd.settings, "get_last_session_mode", lambda: "none")
     monkeypatch.setattr(ssd.settings, "set_last_session_mode",
                         lambda m: store.__setitem__("session_mode", m))
-    monkeypatch.setattr(ssd.settings, "get_last_session_directory", lambda: "")
+    monkeypatch.setattr(ssd.settings, "get_session_root", lambda: "")
     monkeypatch.setattr(ssd.settings, "get_last_session_path", lambda: "")
     return store
 

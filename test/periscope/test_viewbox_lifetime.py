@@ -86,9 +86,7 @@ def test_parent_window_accepts_none(qt_app):
     assert vb.parent_window is None
 
 
-# Panels whose ViewBoxes exist right after construction. NetworkAnalysisPanel is
-# absent on purpose: it builds its plots per module when data arrives, so a bare
-# instance has none to tear down — the weakref contract above covers it.
+# Panels whose ViewBoxes exist right after construction.
 _TEARDOWN_SCRIPT = textwrap.dedent(
     '''
     import gc, os, sys, weakref
@@ -96,24 +94,16 @@ _TEARDOWN_SCRIPT = textwrap.dedent(
     sys.path.insert(0, "__ROOT__")
     from PyQt6 import QtWidgets
     from rfmux.tools.periscope.noise_spectrum_panel import NoiseSpectrumPanel
-    from rfmux.tools.periscope.detector_digest_panel import DetectorDigestPanel
     from rfmux.tools.periscope.multisweep_panel import MultisweepPanel
-    from test.periscope.test_noise_panel_fast_tod_units import _spectrum_data
+    from rfmux.tools.periscope.network_analysis_panel import NetworkAnalysisPanel
+    from test.tuning.test_noise_display import noise_block
 
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
     detectors = {1: {"conceptual_freq_hz": 4.0e9},
                  2: {"conceptual_freq_hz": 4.1e9}}
     cases = [
-        (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
-                                  all_detectors_data=detectors,
-                                  initial_detector_idx=1)),
-        # With data the panel draws its plots and installs the hover
-        # handler; that handler must not own the panel either.
-        (NoiseSpectrumPanel, dict(detector_id=1, resonance_frequency_ghz=4.0,
-                                  all_detectors_data=detectors,
-                                  initial_detector_idx=1,
-                                  spectrum_data=_spectrum_data("absolute"))),
-        (DetectorDigestPanel, dict(detector_id=1)),
+        (NetworkAnalysisPanel, dict(module=1)),
+        (NoiseSpectrumPanel, dict(block=noise_block())),
         (MultisweepPanel, dict(target_module=1)),
     ]
     for cls, kwargs in cases:

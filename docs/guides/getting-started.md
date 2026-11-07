@@ -64,7 +64,7 @@ Crate                    # Physical crate containing CRS boards
         └── ReadoutChannel  # Individual channel (1-1024 per module)
 
 Wafer                    # Detector wafer
-└── Resonator            # Individual KID resonator
+└── HWMResonator         # Individual KID resonator (hardware-map row)
     └── ChannelMapping   # Maps resonators to readout channels
 ```
 
@@ -96,10 +96,15 @@ Most measurement algorithms are registered on the CRS object, so you call them
 as methods rather than importing them. `module` is keyword-only:
 
 ```python
-# Sweep 600 MHz - 1.1 GHz and return frequencies, iq_complex, phase_degrees
-result = await crs.take_netanal(
+# Sweep 600 MHz - 1.1 GHz
+netanal = await crs.take_netanal(
     amp=0.001, fmin=0.6e9, fmax=1.1e9, npoints=50000, module=1
 )
+
+# Keyed by module, one entry per module swept, the way every measurement
+# algorithm returns its results. Under each module's output is what it measured.
+trace = netanal[crs.module[1].index()]["results"]
+frequencies, iq_counts = trace["frequencies"], trace["iq_counts"]
 ```
 
 ### Acquiring Samples
@@ -114,24 +119,40 @@ samples = await crs.py_get_samples(num_samples=1000, channel=1, module=1)
 
 ### Biasing KIDs
 
-`bias_kids` takes multisweep results and biases each detector. It is not
-registered on `CRS`: import it and pass `crs`.
+Bias finding works on a catalog of resonators: find the dips in a network
+analysis, sweep each resonator at several readout powers, and let
+`find_bias_points` choose each one's bias. `crs.apply_bias` sets the tones and
+saves a `bias_catalog` file of what it applied.
 
 ```python
-from rfmux.algorithms.measurement.bias_kids import bias_kids
+from rfmux.tuning import (AmplitudeSchedule, find_bias_points,
+                          find_resonances_in_netanal)
+
+module_id = crs.module[1].index()
+catalog = find_resonances_in_netanal(netanal[module_id]).to_catalog(
+    module=1, amplitude=0.001)
 
 sweeps = await crs.multisweep(
-    center_frequencies=resonance_frequencies,
-    span_hz=500e3, npoints_per_sweep=500, amp=0.001, module=1,
+    catalog, span_hz=100e3, npoints_per_sweep=201,
+    amp=AmplitudeSchedule.ramp(0.002, 0.032, 5),
+    sweep_direction=("upward", "downward"),
 )
-bias_results = await bias_kids(crs=crs, multisweep_results=sweeps, module=1)
+report = find_bias_points(sweeps[module_id])
+bias_path = await crs.apply_bias(report.catalog)
 
-# {detector_index: {"bias_frequency": ..., "df_calibration": ..., ...}}
+# Each bias point: frequency_hz, amplitude, bias_power_dbm, dI_df and dQ_df,
+# and the sweep it was read from with that sweep's fits.
 ```
 
-The full sequence (sweep, unwrap cable delay, find resonances, multisweep, fit,
-bias, measure noise) is documented and runnable in
-`rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`.
+The amplitudes above are normalized DAC values. To give them in dBm, use
+`amp_units=crs.UNITS.DBM` with `take_netanal` or `multisweep`, or
+`AmplitudeSchedule.ramp(-60, -40, 5, units="dbm")`. The algorithm converts dBm
+with the DAC scale that it reads from the board when it starts.
+
+The full sequence (network analysis, find resonances, multisweep, bias finding,
+apply, measure noise) is documented and runnable in
+`rfmux/reference-notebooks/Demos/simplified_tuning_flow.md`, and step by step
+in `network_analysis_find_resonances.md`, `multisweep.md` and `bias_finding.md`.
 
 ## IPython Integration
 
@@ -159,7 +180,7 @@ Custom YAML tags define hardware:
 
 - !Wafer
   name: "test_wafer"
-  resonators: !Resonators
+  hwm_resonators: !HWMResonators
     csv_file: "resonators.csv"
 
 - !ChannelMappings
@@ -170,8 +191,7 @@ Common tags:
 - `!HardwareMap` - Top-level hardware configuration
 - `!CRS` - CRS board definition
 - `!Wafer` - Detector wafer
-- `!Resonator` - Individual resonator
-- `!Resonators` - Bulk import from CSV
+- `!HWMResonators` - Bulk import of resonators from CSV
 - `!ChannelMappings` - Channel-to-resonator mappings from CSV
 - `!flavour "rfmux.mock"` - Enable mock mode
 

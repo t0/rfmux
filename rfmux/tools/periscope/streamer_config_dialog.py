@@ -16,6 +16,7 @@ from typing import Awaitable, List, Optional, Tuple
 from PyQt6 import QtCore, QtWidgets
 
 from .utils import apply_issue_banner
+from .field_memory import remember_fields
 from PyQt6.QtCore import pyqtSignal
 
 from ...algorithms.measurement.channel_selection import parse_channel_spec
@@ -72,6 +73,8 @@ class StreamerConfigDialog(QtWidgets.QDialog):
 
         self._setup_ui(current_dec, current_short, module)
         self._connect_signals()
+        remember_fields(self, skip=("dec_spin", "short_check",
+                                    "modules_edit", "pfb_module_spin"))
         self._update_dependent_values()
 
         if crs is not None:
@@ -106,16 +109,12 @@ class StreamerConfigDialog(QtWidgets.QDialog):
         self.short_check = QtWidgets.QCheckBox("128-channel short packets")
         self.short_check.setChecked(bool(current_short))
         self.short_check.setToolTip(
-            "Short packets carry channels 1-128 at ~1/8 the bandwidth. "
-            "Locked on at the stages where long packets would exceed "
-            "the link.")
+            "Use lower-bandwidth packets carrying channels 1–128.")
         form.addRow("Packet format:", self.short_check)
 
         self.modules_edit = QtWidgets.QLineEdit(str(module))
         self.modules_edit.setToolTip(
-            "Modules to stream, e.g. \"1,2\" or \"1-4\"; blank or \"all\" = "
-            "every module. Starts at the current module because below "
-            "stage 5 streaming is validated one module at a time.")
+            "Modules to stream, such as 1,2 or 1-4; blank means all.")
         form.addRow("Modules:", self.modules_edit)
 
         self.pfb_check = QtWidgets.QCheckBox(

@@ -4,9 +4,28 @@ import numpy as np
 import pytest
 
 from rfmux.pulse_capture.analysis import tuning_sweep
+from rfmux.core.resonators import BiasPoint, Resonator, ResonatorCatalog
+from rfmux.core.transferfunctions import VOLTS_PER_ROC
+from rfmux.tuning.tuning_record import tuning_rows
 
 F = np.linspace(1.0e9, 1.0e9 + 6.0, 7)
 IQ = np.exp(1j * np.linspace(0.0, 1.0, 7)) * 1000.0
+
+
+def test_catalog_calibration_sweep_is_shown_in_counts_without_loop_rotation():
+    bias = BiasPoint(
+        frequency_hz=F[2], amplitude=0.01, bias_frequency_quantized=False,
+        iq_rotation_deg=30.0,
+        bias_sweep={"frequencies": F[::-1],
+                    "iq_volts": IQ[::-1] * VOLTS_PER_ROC})
+    catalog = ResonatorCatalog([Resonator(name="BOTA", channel=1, bias=bias)],
+                               module=1)
+    row = tuning_rows(catalog)[1]
+    f, iq, point = tuning_sweep(row)
+    np.testing.assert_array_equal(f, F)
+    np.testing.assert_allclose(iq, IQ)
+    assert point == pytest.approx(IQ[2])
+    np.testing.assert_array_equal(row["iq_volts"], IQ[::-1] * VOLTS_PER_ROC)
 
 
 def test_the_sweep_is_turned_by_minus_the_phase_the_bias_set():

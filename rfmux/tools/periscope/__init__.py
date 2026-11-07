@@ -25,7 +25,6 @@ from .__main__ import raise_periscope, main as cli_main, cli
 from .ui import (
     NetworkAnalysisDialog,
     InitializeCRSDialog,
-    FindResonancesDialog,
     MultisweepDialog
 )
 from .noise_spectrum_panel import NoiseSpectrumPanel
@@ -40,7 +39,6 @@ __all__ = [
     "cli",                      # click entry point for "rfmux periscope"
     "NetworkAnalysisDialog",    # Dialog for network analysis settings
     "InitializeCRSDialog",      # Dialog for CRS initialization
-    "FindResonancesDialog",     # Dialog for finding resonances
     "MultisweepDialog",         # Dialog for multisweep settings
     "NoiseSpectrumPanel",       # Panel for noise spectrum analysis
 ]

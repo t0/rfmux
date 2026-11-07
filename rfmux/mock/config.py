@@ -20,20 +20,22 @@ from copy import deepcopy
 import math
 import re
 
-#: The mock's DAC scale, what a tone power in dBm is normalized against
-#: (set_dac_scale's default on the mock board).
+from ..core.transferfunctions import BALUN_LOSS_DB
+
+#: The mock's programmed DAC scale (set_dac_scale's default on the mock
+#: board). A tone power in dBm is at the output, BALUN_LOSS_DB below it.
 DAC_SCALE_DBM = 1.0
-#: Tone power the automatic biasing sweeps and biases at.
-BIAS_DBM = -55.0
+#: Tone power the automatic biasing sweeps and biases at, at the output.
+BIAS_DBM = -56.75
 
 
 def bias_amplitude_from_dbm(dbm: float) -> float:
-    """Normalized tone amplitude for a power in dBm at the mock's DAC scale."""
-    return 10 ** ((dbm - DAC_SCALE_DBM) / 20)
+    """Normalized tone amplitude for a power in dBm at the output."""
+    return 10 ** ((dbm - (DAC_SCALE_DBM - BALUN_LOSS_DB)) / 20)
 
 
 def bias_dbm_from_amplitude(amplitude: float) -> float:
-    return 20 * math.log10(max(amplitude, 1e-12)) + DAC_SCALE_DBM
+    return 20 * math.log10(max(amplitude, 1e-12)) + DAC_SCALE_DBM - BALUN_LOSS_DB
 
 # =============================================================================
 # Unified Default Configuration

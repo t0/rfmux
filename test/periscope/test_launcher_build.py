@@ -22,8 +22,19 @@ class _FakeCRS:
     async def get_build_progress(self):
         return {"stage": "generating", "done": 0, "total": 1}
 
-    async def measure_df_calibrations(self, module, progress=None):
-        return {1: {"df_calibration": 1 + 1j}}
+    async def empirically_calibrate_df(self, module, save=None,
+                                       progress_callback=None):
+        from rfmux.core.resonators import (BiasPoint, Resonator,
+                                           ResonatorCatalog)
+        return ResonatorCatalog(
+            [Resonator("R1", 1, BiasPoint(1.0e9, 0.01, dI_df=0.5, dQ_df=-0.5))],
+            module=module)
+
+    async def get_nco_frequency(self, module):
+        return 1.0e9
+
+    async def get_dac_scale(self, units, module):
+        return 1.0
 
 
 def _build(config):
@@ -38,4 +49,6 @@ def test_build_returns_the_count_and_the_calibrations(qt_app):
     count, cals = _build({"num_resonances": 40, "auto_bias_kids": True,
                           "resonator_random_seed": 7})
     assert count == 40
-    assert cals == {1: {"df_calibration": 1 + 1j}}
+    assert list(cals) == [1]
+    assert cals[1]["df_calibration"] == pytest.approx(1 + 1j)
+    assert cals[1]["nco_frequency_hz"] == 1.0e9

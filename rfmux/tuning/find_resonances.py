@@ -1,0 +1,766 @@
+"""Find resonance dips and report rejected candidates with their reasons.
+
+Use :func:`find_resonances` for frequency and S21 arrays, or
+:func:`find_resonances_in_netanal` to search and annotate one module's network
+analysis result. :func:`find_sweeps_with_nearby_resonances` checks finer
+multisweeps for nearby dips that a coarse network analysis may not resolve.
+"""
+
+from __future__ import annotations
+
+import warnings
+from dataclasses import dataclass, field, replace
+
+import numpy as np
+from scipy import signal
+
+from ..core.resonators import ResonatorCatalog
+from . import store
+from .store import plain
+from .sweep_results import _refuse_container
+
+__all__ = [
+    "ResonanceCandidate",
+    "ResonanceSearch",
+    "find_resonances",
+    "find_resonances_in_netanal",
+    "find_sweeps_with_nearby_resonances",
+    "magnitude_db",
+]
+
+
+# ─── Results ──────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class ResonanceCandidate:
+    """A detected dip and its optional rejection reason.
+
+    Width is measured at half prominence on the dB trace, not at half power.
+    ``q_estimate`` is frequency divided by that width, for screening only;
+    fit the resonance to measure Q.
+    """
+
+    frequency_hz: float
+    index: int  # index into the searched trace, for plotting and slicing
+    depth_db: float  # prominence in dB against the local baseline
+    width_hz: float  # width at half that prominence, on the dB trace
+    q_estimate: float  # frequency_hz / width_hz; screening estimate, not fitted Q
+    rejected_because: str | None = None
+
+    # Manually added candidates have NaN depth, width, and Q estimate.
+    # Compare their fields explicitly; NaN does not compare equal to itself.
+
+    @property
+    def accepted(self) -> bool:
+        return self.rejected_because is None
+
+    def to_dict(self) -> dict:
+        """Return candidate fields as Python values.
+
+        The enclosing ResonanceSearch provides the saved format version.
+        """
+        return {
+            "frequency_hz": float(self.frequency_hz),
+            "index": int(self.index),
+            "depth_db": float(self.depth_db),
+            "width_hz": float(self.width_hz),
+            "q_estimate": float(self.q_estimate),
+            "rejected_because": self.rejected_because,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> ResonanceCandidate:
+        return cls(
+            frequency_hz=float(d["frequency_hz"]),
+            index=int(d["index"]),
+            depth_db=float(d["depth_db"]),
+            width_hz=float(d["width_hz"]),
+            q_estimate=float(d["q_estimate"]),
+            rejected_because=d.get("rejected_because"),
+        )
+
+
+@dataclass(slots=True)
+class ResonanceSearch:
+    """Accepted and rejected dips, settings, and the trace used to find them.
+
+    Use the stored trace to plot the same data that the search examined.
+    """
+
+    # Saved search format. Bump when from_dict cannot read the changed shape.
+    SCHEMA_VERSION = 1
+
+    frequencies_hz: np.ndarray  # the frequency grid that was searched
+    magnitude_db: np.ndarray  # the normalized dB trace that was searched
+    candidates: list[ResonanceCandidate]  # accepted, in frequency order
+    rejected: list[ResonanceCandidate]  # every candidate a pass threw out
+    settings: dict = field(default_factory=dict)  # how this search was run
+    label: str | None = None  # e.g. "module 2", for messages
+    module: int | None = None  # module that supplied the searched netanal
+    amplitude: float | None = None  # measured netanal probe amplitude
+
+    @property
+    def resonance_frequencies_hz(self) -> np.ndarray:
+        """The accepted frequencies — what you feed multisweep."""
+        return np.array([c.frequency_hz for c in self.candidates])
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+    def to_catalog(
+        self, module: int | None = None, amplitude: float | None = None, **kwargs
+    ) -> ResonatorCatalog:
+        """Seed a :class:`~rfmux.core.resonators.ResonatorCatalog` from the hits.
+
+        The step that turns anonymous dips into named resonators on channels.
+        A search made with :func:`find_resonances_in_netanal` uses that
+        netanal's module and measured probe amplitude by default. Explicit
+        values override the recorded provenance. Searches made directly from
+        arrays need both values here.
+
+        ``amplitude`` is the probe amplitude the catalog's bias points start at;
+        remaining keyword arguments go to ``ResonatorCatalog.from_frequencies``
+        (``names``, ``name``, ``min_separation_hz``).
+        """
+        module = self.module if module is None else module
+        amplitude = self.amplitude if amplitude is None else amplitude
+        missing = [
+            name for name, value in (("module", module), ("amplitude", amplitude))
+            if value is None
+        ]
+        if missing:
+            raise ValueError(
+                "This search has no recorded "
+                f"{' and '.join(missing)}; pass {', '.join(f'{name}=' for name in missing)} "
+                "to to_catalog()."
+            )
+        return ResonatorCatalog.from_frequencies(
+            self.resonance_frequencies_hz, module=module, amplitude=amplitude, **kwargs
+        )
+
+    # -- editing by hand ------------------------------------------------------
+    #
+    # Manual edits move candidates between accepted and rejected lists,
+    # retaining their measured properties and rejection reasons.
+
+    #: Why a candidate the finder accepted is not being swept.
+    BY_HAND = "removed by hand"
+
+    def reject(self, frequency_hz: float, *,
+               reason: str = BY_HAND) -> ResonanceCandidate:
+        """Reject the accepted candidate nearest *frequency_hz*, and return it.
+
+        It keeps everything the finder measured about it and gains a reason;
+        :meth:`accept` at the same frequency puts it back.
+
+        Raises:
+            ValueError: if nothing is accepted to reject.
+        """
+        if not self.candidates:
+            raise ValueError(
+                f"{self.label or 'This search'} has no accepted candidates."
+            )
+        nearest = min(self.candidates,
+                      key=lambda c: abs(c.frequency_hz - frequency_hz))
+        self.candidates.remove(nearest)
+        rejected = replace(nearest, rejected_because=reason)
+        self.rejected.append(rejected)
+        return rejected
+
+    def accept(self, frequency_hz: float) -> ResonanceCandidate:
+        """Accept a frequency and return its candidate.
+
+        If a rejected candidate has the same nearest sample index, restore its
+        frequency and measured properties. Otherwise create a candidate at the
+        requested frequency with NaN depth, width, and Q estimate. No dip is
+        measured or required at a manually added frequency.
+
+        For a new candidate, ``index`` points to the nearest sample for plotting
+        and ``frequency_hz`` keeps the requested value. :meth:`to_catalog`
+        rounds bias frequencies to the tone grid.
+        """
+        index = self._nearest_point(frequency_hz)
+        for candidate in self.rejected:
+            if candidate.index == index:
+                self.rejected.remove(candidate)
+                return self._insert(replace(candidate, rejected_because=None))
+        return self._insert(ResonanceCandidate(
+            frequency_hz=float(frequency_hz),
+            index=index,
+            depth_db=np.nan,
+            width_hz=np.nan,
+            q_estimate=np.nan,
+        ))
+
+    def _insert(self, candidate: ResonanceCandidate) -> ResonanceCandidate:
+        """Put a candidate among the accepted, in frequency order."""
+        self.candidates.append(candidate)
+        self.candidates.sort(key=lambda c: c.frequency_hz)
+        return candidate
+
+    def _nearest_point(self, frequency_hz: float) -> int:
+        """Index of the searched grid point nearest a frequency."""
+        return int(np.argmin(
+            np.abs(np.asarray(self.frequencies_hz) - frequency_hz)))
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Return the search as dictionaries and arrays for saving.
+
+        The searched frequency and dB traces remain NumPy arrays.
+        """
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "frequencies_hz": np.asarray(self.frequencies_hz),
+            "magnitude_db": np.asarray(self.magnitude_db),
+            "candidates": [c.to_dict() for c in self.candidates],
+            "rejected": [c.to_dict() for c in self.rejected],
+            "settings": plain(self.settings),
+            "label": self.label,
+            "module": self.module,
+            "amplitude": self.amplitude,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> ResonanceSearch:
+        version = d.get("schema_version")
+        if version != cls.SCHEMA_VERSION:
+            raise ValueError(
+                f"schema_version={version!r}, expected {cls.SCHEMA_VERSION}: "
+                f"this dict was written by a different version of "
+                f"ResonanceSearch."
+            )
+        return cls(
+            frequencies_hz=np.asarray(d["frequencies_hz"]),
+            magnitude_db=np.asarray(d["magnitude_db"]),
+            candidates=[ResonanceCandidate.from_dict(c) for c in d["candidates"]],
+            rejected=[ResonanceCandidate.from_dict(c) for c in d["rejected"]],
+            settings=d.get("settings", {}),
+            label=d.get("label"),
+            module=d.get("module"),
+            amplitude=d.get("amplitude"),
+        )
+
+    def __repr__(self) -> str:
+        where = self.label or "trace"
+        span = (
+            f"{self.frequencies_hz[0] / 1e6:.3f}–{self.frequencies_hz[-1] / 1e6:.3f} MHz"
+            if len(self.frequencies_hz)
+            else "empty"
+        )
+        head = (
+            f"ResonanceSearch({where}, {span}): {len(self.candidates)} found, "
+            f"{len(self.rejected)} rejected"
+        )
+        rows = [f"  {'MHz':>12}  {'depth dB':>8}  {'est. Q':>9}"]
+        shown = self.candidates[:10]
+        for c in shown:
+            rows.append(
+                f"  {c.frequency_hz / 1e6:>12.6f}  {c.depth_db:>8.2f}  "
+                f"{c.q_estimate:>9.3g}"
+            )
+        if len(self.candidates) > len(shown):
+            rows.append(f"  ... {len(self.candidates) - len(shown)} more")
+        return "\n".join([head] + rows)
+
+
+# ─── The search ───────────────────────────────────────────────────────────────
+
+
+def magnitude_db(s21, reference: float | None = None):
+    """Return ``20 * log10(abs(s21) / reference)``.
+
+    ``reference`` is the magnitude assigned to 0 dB and defaults to the trace
+    median. Changing it shifts the dB axis without changing dip prominences
+    or widths.
+    """
+    magnitude = np.abs(np.asarray(s21))  # no-op for a magnitude, modulus for I/Q
+
+    positive = magnitude[magnitude > 0]
+    if positive.size == 0:
+        raise ValueError("|S21| is zero everywhere — there is nothing to search.")
+    # Floor exact zeros so the log is finite. Zeros mean a dead channel, not a
+    # dip of infinite depth.
+    magnitude = np.maximum(magnitude, positive.min())
+
+    if reference is None:
+        reference = float(np.median(magnitude))
+    if reference <= 0:
+        raise ValueError(f"reference={reference}: must be a positive magnitude.")
+
+    return 20.0 * np.log10(magnitude / reference)
+
+
+def find_resonances(
+    frequencies,
+    s21,
+    *,
+    min_dip_depth_db: float = 1.0,
+    min_Q: float | None = 1e4,
+    max_Q: float | None = 1e7,
+    min_separation_hz: float | None = 0.0,
+    require_isolation: bool = True,
+    expected_resonances: int | None = None,
+    label: str | None = None,
+) -> ResonanceSearch:
+    """Find the resonance dips in one swept trace.
+
+    Parameters
+    ----------
+    frequencies : array_like
+        Frequency points in Hz, strictly increasing.
+    s21 : array_like
+        The response at each frequency: complex I/Q, or a magnitude if that is
+        all you kept. ``|S21|`` is taken either way.
+    min_dip_depth_db : float, optional
+        Prominence floor, in true dB, for a dip to count. Lower it to 0.3–0.5
+        for shallow (overcoupled or low-Q) resonators. Default 1.0.
+    min_Q : float or None, optional
+        Sets the *widest* dip accepted, as ``frequency / min_Q``. Lower it for
+        broad resonances. ``None`` leaves dips unbounded above. Default 1e4.
+    max_Q : float or None, optional
+        Sets the *narrowest* dip accepted, as ``frequency / max_Q`` — this is
+        what rejects single-sample noise spikes. ``None`` disables the floor,
+        which is rarely what you want. Default 1e7.
+    min_separation_hz : float or None, optional
+        Candidates this far apart or closer are handled by
+        ``require_isolation``. Default 0.0 affects only identical frequencies.
+        ``None`` skips the spacing check.
+    require_isolation : bool, optional
+        True rejects every detected candidate with a neighbour within the
+        spacing limit. False considers candidates deepest first and rejects
+        neighbours of each accepted dip. In that mode an accepted dip can
+        still have a real resonance nearby. Both modes retain rejected
+        candidates and their reasons in ``.rejected``.
+    expected_resonances : int or None, optional
+        If given and more candidates survive, keep the ``expected_resonances``
+        deepest and reject the rest; if fewer survive, warn. For arrays whose
+        count you know.
+    label : str or None, optional
+        Name for this trace, used in warnings and in the result's repr.
+
+    Returns
+    -------
+    ResonanceSearch
+        ``.candidates`` are the hits in frequency order,
+        ``.resonance_frequencies_hz`` just their frequencies, and
+        ``.rejected`` every candidate a pass discarded, with its reason.
+
+    Raises
+    ------
+    ValueError
+        On input that cannot be searched: mismatched or too-short arrays,
+        unsorted frequencies, or out-of-range parameters.
+    """
+    frequencies = np.asarray(frequencies, dtype=float)
+    response = np.asarray(s21)
+    who = f"{label}: " if label else ""
+
+    # -- validate ------------------------------------------------------------
+    if frequencies.ndim != 1:
+        raise ValueError(f"{who}frequencies must be 1-D, got shape {frequencies.shape}.")
+    if response.shape != frequencies.shape:
+        raise ValueError(
+            f"{who}frequencies has shape {frequencies.shape} but s21 has "
+            f"{response.shape}; they must describe the same points."
+        )
+    if len(frequencies) < 3:
+        raise ValueError(
+            f"{who}a dip needs at least 3 points to have a width; got "
+            f"{len(frequencies)}."
+        )
+    if not np.all(np.diff(frequencies) > 0):
+        raise ValueError(
+            f"{who}frequencies must be strictly increasing. Sort the sweep "
+            f"first (np.argsort) — a peak finder reads the trace in order."
+        )
+    if min_dip_depth_db <= 0:
+        raise ValueError(f"{who}min_dip_depth_db={min_dip_depth_db}: must be positive.")
+    for name, q in (("min_Q", min_Q), ("max_Q", max_Q)):
+        if q is not None and q <= 0:
+            raise ValueError(f"{who}{name}={q}: must be positive or None.")
+    if min_Q is not None and max_Q is not None and min_Q >= max_Q:
+        raise ValueError(
+            f"{who}min_Q={min_Q:g} must be below max_Q={max_Q:g}. min_Q sets the "
+            f"widest dip accepted and max_Q the narrowest."
+        )
+    if min_separation_hz is not None and min_separation_hz < 0:
+        raise ValueError(
+            f"{who}min_separation_hz={min_separation_hz}: must be a separation "
+            f"in Hz. 0 cuts exact duplicates only; None skips the pass."
+        )
+    if expected_resonances is not None and expected_resonances < 1:
+        raise ValueError(
+            f"{who}expected_resonances={expected_resonances}: pass None if you "
+            f"don't know how many to expect."
+        )
+
+    settings = {
+        "min_dip_depth_db": min_dip_depth_db,
+        "min_Q": min_Q,
+        "max_Q": max_Q,
+        "min_separation_hz": min_separation_hz,
+        "require_isolation": require_isolation,
+        "expected_resonances": expected_resonances,
+    }
+
+    # -- prepare the trace ---------------------------------------------------
+    trace_db = magnitude_db(response)
+
+    # Use mean spacing because take_netanal dithers the tone frequencies.
+    point_spacing_hz = float(np.mean(np.diff(frequencies)))
+
+    # Width limits in samples, evaluated at every point so they track frequency
+    # across the sweep instead of being fixed at its middle.
+    min_width_pts = _width_in_points(frequencies, max_Q, point_spacing_hz, floor=0.0)
+    max_width_pts = _width_in_points(
+        frequencies, min_Q, point_spacing_hz, floor=float(len(frequencies))
+    )
+
+    peaks, properties = signal.find_peaks(
+        -trace_db,
+        prominence=min_dip_depth_db,
+        width=(min_width_pts, max_width_pts),
+    )
+
+    candidates = []
+    for i, peak in enumerate(peaks):
+        width_hz = float(properties["widths"][i]) * point_spacing_hz
+        frequency_hz = float(frequencies[peak])
+        candidates.append(
+            ResonanceCandidate(
+                frequency_hz=frequency_hz,
+                index=int(peak),
+                depth_db=float(properties["prominences"][i]),
+                width_hz=width_hz,
+                q_estimate=frequency_hz / width_hz if width_hz > 0 else np.inf,
+            )
+        )
+
+    # -- rejection passes ----------------------------------------------------
+    rejected: list[ResonanceCandidate] = []
+
+    if min_separation_hz is not None:
+        if require_isolation:
+            candidates, dropped = _separation_pass(candidates, min_separation_hz)
+        else:
+            candidates, dropped = _thinning_pass(candidates, min_separation_hz, trace_db)
+        rejected += dropped
+
+    if expected_resonances is not None:
+        candidates, dropped = _count_pass(candidates, expected_resonances, who)
+        rejected += dropped
+
+    return ResonanceSearch(
+        frequencies_hz=frequencies,
+        magnitude_db=trace_db,
+        candidates=candidates,
+        rejected=rejected,
+        settings=settings,
+        label=label,
+    )
+
+
+def _width_in_points(frequencies, q, point_spacing_hz: float, floor: float):
+    """``frequencies / q`` expressed in samples, or ``floor`` if ``q`` is None."""
+    if q is None:
+        return np.full(len(frequencies), floor)
+    return np.ceil(frequencies / q / point_spacing_hz)
+
+
+# ─── Rejection passes ─────────────────────────────────────────────────────────
+#
+# Each pass returns (kept, rejected), with a reason for each rejection.
+
+
+def _separation_pass(candidates, min_separation_hz: float):
+    """Reject every candidate with a neighbour at or below the spacing limit.
+
+    Compare adjacent candidates in frequency order. For example, gaps of
+    50 kHz from A to B and B to C reject all three under a 60 kHz limit.
+    Each rejection records the neighbour that caused it.
+
+    A zero threshold rejects only identical frequencies. None skips the
+    check. Use :func:`_thinning_pass` to keep the deeper dip in a close pair.
+    """
+    ordered = sorted(candidates, key=lambda c: c.frequency_hz)
+    kept: list[ResonanceCandidate] = []
+    dropped: list[ResonanceCandidate] = []
+
+    for i, c in enumerate(ordered):
+        neighbours = ordered[max(i - 1, 0) : i] + ordered[i + 1 : i + 2]
+        nearest = min(
+            neighbours, key=lambda n: abs(n.frequency_hz - c.frequency_hz), default=None
+        )
+        gap = abs(nearest.frequency_hz - c.frequency_hz) if nearest else np.inf
+
+        if gap <= min_separation_hz:
+            dropped.append(
+                replace(
+                    c,
+                    rejected_because=(
+                        f"collided: {_gap_text(gap)} from the candidate at "
+                        f"{nearest.frequency_hz / 1e6:.6f} MHz, within the "
+                        f"{_gap_text(min_separation_hz)} separation cut, so both "
+                        f"were removed"
+                    ),
+                )
+            )
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
+def _thinning_pass(candidates, min_separation_hz: float, trace_db):
+    """Keep candidates in order of depth, rejecting neighbours within the limit.
+
+    Consider the deepest remaining dip first. Reject candidates at or below
+    ``min_separation_hz`` from it, then repeat with the remaining dips.
+    Each rejection names the accepted candidate that caused it.
+    Accepted candidates may still have real resonances nearby.
+    """
+    by_depth = sorted(candidates, key=lambda c: float(trace_db[c.index]))  # deepest first
+    kept: list[ResonanceCandidate] = []
+    dropped: list[ResonanceCandidate] = []
+    for c in by_depth:
+        winner = next(
+            (k for k in kept if abs(k.frequency_hz - c.frequency_hz) <= min_separation_hz),
+            None,
+        )
+        if winner is None:
+            kept.append(c)
+        else:
+            gap = abs(winner.frequency_hz - c.frequency_hz)
+            dropped.append(
+                replace(
+                    c,
+                    rejected_because=(
+                        f"thinned: {_gap_text(gap)} from the deeper candidate at "
+                        f"{winner.frequency_hz / 1e6:.6f} MHz, within the "
+                        f"{_gap_text(min_separation_hz)} separation, which was "
+                        f"kept instead"
+                    ),
+                )
+            )
+    kept.sort(key=lambda c: c.frequency_hz)
+    return kept, dropped
+
+
+def _gap_text(gap_hz: float) -> str:
+    """A frequency gap in whichever unit reads sensibly, for messages."""
+    return f"{gap_hz:.0f} Hz" if gap_hz < 1e3 else f"{gap_hz / 1e3:.3g} kHz"
+
+
+def _count_pass(candidates, expected: int, who: str):
+    """Keep the ``expected`` deepest candidates; warn if there are too few."""
+    if len(candidates) <= expected:
+        if len(candidates) < expected:
+            warnings.warn(
+                f"{who}found {len(candidates)} resonances, expected {expected}. "
+                f"Try lowering min_dip_depth_db, or min_Q if the dips are broad."
+            )
+        return candidates, []
+
+    by_depth = sorted(candidates, key=lambda c: c.depth_db, reverse=True)
+    dropped = [
+        replace(
+            c,
+            rejected_because=(
+                f"only the {expected} deepest of {len(candidates)} candidates "
+                f"were kept (expected_resonances={expected})"
+            ),
+        )
+        for c in by_depth[expected:]
+    ]
+    warnings.warn(
+        f"{who}found {len(candidates)} candidates, kept the {expected} deepest."
+    )
+    return sorted(by_depth[:expected], key=lambda c: c.frequency_hz), dropped
+
+
+# ─── Netanal convenience wrapper ──────────────────────────────────────────────
+
+
+def find_resonances_in_netanal(
+    module_netanal, *, label: str | None = None, save=None, **kwargs
+) -> ResonanceSearch:
+    """Search one module's netanal and store the search alongside its trace.
+
+    Replaces ``module_netanal["results"]["resonance_search"]`` and returns a
+    :class:`ResonanceSearch`. Restore a saved search with
+    ``ResonanceSearch.from_dict(block["results"]["resonance_search"])``.
+
+    Descending traces are reversed for searching. Candidate indices refer to
+    ``search.frequencies_hz``, not the original descending trace.
+
+    ``save`` updates the netanal's file, preserving other modules, or creates
+    a new file. None uses ``store.autosave_enabled()``. ``label`` names the
+    search in messages and labels a first save; existing filenames are kept.
+    Remaining keywords are passed to :func:`find_resonances`.
+    """
+    _refuse_container(module_netanal, what="netanal", variable="netanal")
+    if not isinstance(module_netanal, dict) or "results" not in module_netanal:
+        raise TypeError("Expected one module's netanal with 'results'.")
+    if module_netanal.get("measurement") != "netanal":
+        raise TypeError("This result is not a netanal.")
+    trace = module_netanal["results"]
+    if not trace:
+        raise ValueError("This netanal has no trace in it — nothing was measured.")
+
+    frequencies = np.asarray(trace["frequencies"])
+    iq_counts = np.asarray(trace["iq_counts"])
+    # Check frequency order directly before calling the ascending-grid search.
+    if frequencies.size > 1 and frequencies[0] > frequencies[-1]:
+        frequencies, iq_counts = frequencies[::-1], iq_counts[::-1]
+
+    module = module_netanal.get("module")
+    search = replace(
+        find_resonances(
+            frequencies,
+            iq_counts,
+            label=label or (f"module {module}" if module is not None else None),
+            **kwargs,
+        ),
+        module=module,
+        amplitude=trace.get("sweep_amplitude"),
+    )
+    # Store the complete search, including its ascending grid, before saving.
+    trace["resonance_search"] = search.to_dict()
+    # Use the caller's file label, without the module added for search messages.
+    store.maybe_save(module_netanal, "netanal", save=save, label=label)
+    return search
+
+
+# ─── Collided resonances inside a multisweep section ──────────────────────────
+
+
+def find_sweeps_with_nearby_resonances(
+    ms_module_output,
+    min_separation_hz: float,
+    *,
+    min_prominence_db: float = 1.0,
+    min_dip_spacing_hz: float = 10.0,
+    iq_key: str = "iq_counts",
+    iteration: int | None = None,
+    direction: str | None = None,
+) -> list[str]:
+    """List multisweep sections containing a pair of nearby resonance dips.
+
+    Args:
+        ms_module_output: one module's output from ``multisweep``.
+        min_separation_hz: flag pairs separated by this distance or less.
+            Infinity flags any second dip in the window.
+        min_prominence_db: minimum dip prominence, in dB.
+        min_dip_spacing_hz: minimum spacing for detecting distinct minima.
+            Keep below ``min_separation_hz``; unresolved pairs cannot be flagged.
+        iq_key: ``"iq_counts"`` or ``"iq_volts"``.
+        iteration: amplitude step to inspect, or None for all. A bifurcated
+            high-amplitude sweep may produce extra minima; select a step with
+            a smaller amplitude if needed.
+        direction: sweep direction to inspect, or None for all.
+
+    Returns:
+        list[str]: names in sweep order, each flagged once if any selected
+        sweep contains a qualifying pair. The input is not modified.
+
+    Raises:
+        ValueError: invalid parameters or selection matching no sweeps.
+    """
+    # -- validate ------------------------------------------------------------
+    if min_separation_hz < 0:
+        raise ValueError(
+            f"min_separation_hz={min_separation_hz}: must be a separation in "
+            f"Hz (>= 0). Use float('inf') to cull on any second dip at all."
+        )
+    if min_prominence_db <= 0:
+        raise ValueError(f"min_prominence_db={min_prominence_db}: must be positive.")
+    if min_dip_spacing_hz <= 0:
+        raise ValueError(f"min_dip_spacing_hz={min_dip_spacing_hz}: must be positive.")
+
+    _refuse_container(ms_module_output)
+    try:
+        results = ms_module_output["results"]
+    except (TypeError, KeyError):
+        raise TypeError(
+            "Expected one module's multisweep output (with 'results' and "
+            "'call_params'), not one of its parts."
+        ) from None
+
+    culled: list[str] = []
+    examined = 0
+
+    for step, by_direction in results.items():
+        if iteration is not None and step != iteration:
+            continue
+
+        for swept_direction, sections in by_direction.items():
+            if direction is not None and swept_direction != direction:
+                continue
+
+            for name, sweep in sections.items():
+                examined += 1
+                # Already condemned by another amplitude or direction. One
+                # collision is enough; the rest of its sweeps say nothing new.
+                if name in culled:
+                    continue
+                if iq_key not in sweep:
+                    raise KeyError(
+                        f"{name!r} has no {iq_key!r}. Its sweep holds "
+                        f"{', '.join(repr(k) for k in sweep)}."
+                    )
+                if _has_collided_pair(
+                    sweep,
+                    min_separation_hz=min_separation_hz,
+                    min_prominence_db=min_prominence_db,
+                    min_dip_spacing_hz=min_dip_spacing_hz,
+                    iq_key=iq_key,
+                ):
+                    culled.append(name)
+
+    if not examined:
+        raise ValueError(
+            f"iteration={iteration}, direction={direction} selected no sweeps. "
+            f"This result has iterations {sorted(results)} and directions "
+            f"{sorted({d for by_direction in results.values() for d in by_direction})}."
+        )
+
+    return culled
+
+
+def _has_collided_pair(
+    sweep, *, min_separation_hz, min_prominence_db, min_dip_spacing_hz, iq_key
+) -> bool:
+    """Return whether a sweep contains two dips within ``min_separation_hz``.
+
+    Convert ``min_dip_spacing_hz`` to samples for ``find_peaks`` so nearby
+    minima within one broad dip are not counted separately. Then compare
+    the detected dips' frequency spacing to the collision threshold.
+    """
+    frequencies = np.asarray(sweep["frequencies"], dtype=float)
+    iq = np.asarray(sweep[iq_key])
+
+    # A dead channel is all zeros, which is no evidence of a collision rather
+    # than a trace to search — and magnitude_db would rightly refuse it.
+    if frequencies.size < 3 or not np.any(np.abs(iq) > 0):
+        return False
+
+    mag_db = magnitude_db(iq)
+
+    # Median step, so a downward sweep (descending frequencies) or a stray
+    # duplicated point does not set the scale.
+    step_hz = float(np.median(np.abs(np.diff(frequencies))))
+    spacing_points = max(1, int(round(min_dip_spacing_hz / step_hz)))
+
+    # Resonances are dips in |S21|, so they are peaks in the inverted trace.
+    dips, _ = signal.find_peaks(
+        -mag_db, prominence=min_prominence_db, distance=spacing_points
+    )
+    if len(dips) < 2:
+        return False
+
+    # Sorted, so the closest pair is an adjacent pair — and sorting is what lets
+    # a downward sweep be read with the same test as an upward one.
+    dip_frequencies = np.sort(frequencies[dips])
+    return bool(np.any(np.diff(dip_frequencies) <= min_separation_hz))

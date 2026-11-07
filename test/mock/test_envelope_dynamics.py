@@ -55,7 +55,7 @@ def test_near_the_fold_the_slow_mode_lingers(kerr_model):
 
 def test_the_slow_mode_never_grows():
     """Past the fold the linearisation would grow; the step clamps the
-    split at kappa/2, so a tone parked there keeps a bounded deviation
+    split at kappa/2, so a tone set there keeps a bounded deviation
     (the two directions are not orthogonal, so it can turn, not grow)."""
     kappa = 2e5
     a = -kappa / 2 - 1j * 1e6

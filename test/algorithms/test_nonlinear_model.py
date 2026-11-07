@@ -4,7 +4,7 @@ recover the nonlinearity of a resonance that leans that way."""
 import numpy as np
 import pytest
 
-from rfmux.algorithms.measurement.fitting_nonlinear import (
+from rfmux.tuning.fits import (
     fit_nonlinear_iq, get_y_nonlinear, nonlinear_iq)
 
 FR, QR = 1.0e9, 5.0e4
@@ -30,7 +30,7 @@ def test_fit_recovers_nonlinearity_of_a_pulled_resonance():
     f = np.linspace(FR - 100e3, FR + 100e3, 101)
     truth = (FR, QR, 0.6, 0.1, 0.35, 1.0, 0.0)
     z = nonlinear_iq(f, *truth)
-    _, popt, _, residual = fit_nonlinear_iq(f, z)
+    params, _, residual = fit_nonlinear_iq(f, z)
     assert residual < 1e-3
-    assert popt[4] == pytest.approx(0.35, abs=0.02)
-    assert popt[0] == pytest.approx(FR, abs=100.0)
+    assert params["a"] == pytest.approx(0.35, abs=0.02)
+    assert params["fr"] == pytest.approx(FR, abs=100.0)

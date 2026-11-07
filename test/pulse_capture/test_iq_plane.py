@@ -28,10 +28,11 @@ def _resonance():
     return f, iq
 
 
-def _write_capture(path):
+def _write_capture(path, catalog_schema=False):
     f, iq = _resonance()
     bias = F0 + 1250.0
-    turned = iq * np.exp(-1j * np.radians(PHASE))
+    phase = 0.0 if catalog_schema else PHASE
+    turned = iq * np.exp(-1j * np.radians(phase))
     point = complex(np.interp(bias, f, turned.real),
                     np.interp(bias, f, turned.imag))
     base = point * VOLTS_PER_ROC          # stored in volts, quadratures
@@ -39,13 +40,17 @@ def _write_capture(path):
     k = np.arange(n)
     step = np.where(k >= 10, np.exp(-(k - 10) / 8.0), 0.0)
     amp = base + 2e-5 * step * np.conj(CAL) / abs(CAL)
+    row = {"frequencies": f, "bias_frequency": bias, "df_calibration": CAL}
+    if catalog_schema:
+        row.update(iq_volts=iq * VOLTS_PER_ROC, iq_rotation_deg=30.0)
+    else:
+        row.update(iq_complex=iq, optimal_phase_degrees=phase)
     writer = PulseHDF5Writer(
         path, [1], {1: ChannelNoiseStats(mean_I=base.real, mean_Q=base.imag,
                                          std_I=1e-6, std_Q=1e-6)},
         {"streamer_mode": "slow", "sample_rate_slow": 596.0, "module": 1,
          "volts_per_count": VOLTS_PER_ROC},
-        tuning={1: {"frequencies": f, "iq_complex": iq, "bias_frequency": bias,
-                    "optimal_phase_degrees": PHASE, "df_calibration": CAL}},
+        tuning={1: row},
         stored_units={1: "V"})
     writer.append_pulse(1, 1, {
         "Amp_I": amp.real, "Amp_Q": amp.imag, "Time": k / 596.0,
@@ -68,12 +73,13 @@ def _markers(panel):
             if isinstance(i, pg.ScatterPlotItem)]
 
 
-def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path):
+@pytest.mark.parametrize("catalog_schema", [True, False], ids=["catalog", "legacy"])
+def test_the_pulse_and_the_sweep_share_one_frame(qt_app, tmp_path, catalog_schema):
     """The pulse's samples sit on the bias point whichever view is up,
     the sweep is turned by minus the phase the bias set, and in the df
     view the pulse runs along the df axis."""
     path = tmp_path / "plane.h5"
-    turned, base = _write_capture(path)
+    turned, base = _write_capture(path, catalog_schema)
     panel = PulseCapturePanel(dark_mode=False)
     panel.load_from_hdf5(path)
     panel.viewer_tabs.setCurrentWidget(panel.iq_view)   # draws only when up

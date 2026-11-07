@@ -28,6 +28,7 @@ from rfmux.mr_resonator.mr_complex_resonator import MR_complex_resonator
 from rfmux.mr_resonator.mr_lekid import MR_LEKID
 from . import settings
 from .custom_material_dialog import ManageCustomMaterialsDialog
+from .field_memory import remember_fields
 
 
 class ScientificDoubleValidator(QtGui.QDoubleValidator):
@@ -63,6 +64,10 @@ class MockConfigurationDialog(QtWidgets.QDialog):
 
         # Connect signals for interactions
         self._connect_signals()
+
+        # A config the caller already holds wins; the launcher, which has
+        # none, gets back the array that was last configured.
+        remember_fields(self, restore=not self.current_config)
 
         # Trigger initial derived parameter update
         self._update_all_derived()
@@ -182,15 +187,17 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         layout.addWidget(self.auto_bias_check, row, 0, 1, 2)
 
         layout.addWidget(QtWidgets.QLabel("Bias Power (dBm):"), row, 2)
-        # Shown in dBm; the config holds the normalized amplitude, at the
-        # mock's DAC scale.
+        # Shown in dBm at the output; the config holds the normalized
+        # amplitude.
         self.bias_amplitude_spin = QtWidgets.QDoubleSpinBox()
-        self.bias_amplitude_spin.setRange(-120.0, mc.DAC_SCALE_DBM)
+        self.bias_amplitude_spin.setRange(
+            -120.0, mc.DAC_SCALE_DBM - mc.BALUN_LOSS_DB)
         self.bias_amplitude_spin.setSingleStep(1.0)
-        self.bias_amplitude_spin.setDecimals(1)
+        self.bias_amplitude_spin.setDecimals(2)
         self.bias_amplitude_spin.setToolTip(
-            "Tone power the automatic biasing sweeps and biases at, "
-            f"relative to the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale")
+            "Tone power the automatic biasing sweeps and biases at, at "
+            f"the output: the mock's {mc.DAC_SCALE_DBM:g} dBm DAC scale "
+            f"less the {mc.BALUN_LOSS_DB:g} dB balun loss")
         layout.addWidget(self.bias_amplitude_spin, row, 3)
 
         self.auto_bias_check.toggled.connect(self.bias_amplitude_spin.setEnabled)
@@ -427,10 +434,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.mat_constants_label = QtWidgets.QLabel("Tc=1.2K, N₀=1.72×10¹⁰ µm⁻³eV⁻¹, τ₀=438ns")
         self.mat_constants_label.setStyleSheet("color: gray; font-size: 9pt;")
         self.mat_constants_label.setToolTip(
-            "<b>Material Constants:</b><br>"
-            "• <b>Tc</b> = Critical temperature<br>"
-            "• <b>N₀</b> = Density of states at Fermi level<br>"
-            "• <b>τ₀</b> = Quasiparticle recombination time at Tc"
+            "Tc, density of states N₀, and recombination time τ₀."
         )
         mat_layout.addWidget(self.mat_constants_label, 1, 0, 1, 4)
         
@@ -672,7 +676,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.GLNA_db_spin.setRange(-60.0, 60.0)
         self.GLNA_db_spin.setSingleStep(0.1)
         self.GLNA_db_spin.setDecimals(1)
-        self.GLNA_db_spin.setToolTip("Voltage gain of the LNA in dB (20·log10(Vout/Vin)). Internally converted to linear V/V.")
+        self.GLNA_db_spin.setToolTip("LNA voltage gain in dB.")
         layout.addWidget(self.GLNA_db_spin, row, 1)
 
         return group
@@ -707,18 +711,14 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.tls_noise_enabled_cb = QtWidgets.QCheckBox(
             "Enable TLS 1/f frequency noise")
         self.tls_noise_enabled_cb.setToolTip(
-            "Two-level-system frequency wander: a 1/f^alpha drift of the\n"
-            "resonance frequency, correlated in time. Common-mode across\n"
-            "the slow and PFB streams (it is one resonator moving).")
+            "Add correlated 1/f resonance-frequency wander.")
         layout.addWidget(self.tls_noise_enabled_cb, row, 0, 1, 2)
 
         layout.addWidget(QtWidgets.QLabel("TLS RMS (df/f):"), row, 2)
         self.tls_rms_edit = QtWidgets.QLineEdit()
         self.tls_rms_edit.setValidator(ScientificDoubleValidator())
         self.tls_rms_edit.setToolTip(
-            "RMS fractional frequency wander integrated over the band\n"
-            "(e.g. 1e-7). Compare against your detector responsivity:\n"
-            "wander comparable to the pulse height will swamp triggering.")
+            "Band-integrated RMS fractional frequency wander.")
         layout.addWidget(self.tls_rms_edit, row, 3)
 
         row += 1
@@ -733,8 +733,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         self.tls_corner_edit = QtWidgets.QLineEdit()
         self.tls_corner_edit.setValidator(ScientificDoubleValidator())
         self.tls_corner_edit.setToolTip(
-            "Upper corner of the power law; it spans three decades below.\n"
-            "Above the corner the wander rolls off and white noise wins.")
+            "Upper corner frequency of the TLS power law.")
         layout.addWidget(self.tls_corner_edit, row, 3)
 
         return group
@@ -759,7 +758,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         core_grid.addWidget(QtWidgets.QLabel("Probability (/s):"), row, 2)
         self.pulse_probability_edit = QtWidgets.QLineEdit()
         self.pulse_probability_edit.setValidator(ScientificDoubleValidator())
-        self.pulse_probability_edit.setToolTip("Per-resonator per-second probability (random mode).\nEffective per-update chance ≈ probability × dt.")
+        self.pulse_probability_edit.setToolTip("Per-resonator pulse probability per second.")
         core_grid.addWidget(self.pulse_probability_edit, row, 3)
 
         row += 1
@@ -772,14 +771,14 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         core_grid.addWidget(QtWidgets.QLabel("Tau decay (s):"), row, 2)
         self.pulse_tau_decay_edit = QtWidgets.QLineEdit()
         self.pulse_tau_decay_edit.setValidator(ScientificDoubleValidator())
-        self.pulse_tau_decay_edit.setToolTip("Exponential decay time constant (seconds). Default when random tau mode is 'fixed'.")
+        self.pulse_tau_decay_edit.setToolTip("Fixed exponential decay time constant.")
         core_grid.addWidget(self.pulse_tau_decay_edit, row, 3)
 
         row += 1
         core_grid.addWidget(QtWidgets.QLabel("Amplitude (× nqp):"), row, 0)
         self.pulse_amplitude_edit = QtWidgets.QLineEdit()
         self.pulse_amplitude_edit.setValidator(ScientificDoubleValidator())
-        self.pulse_amplitude_edit.setToolTip("Multiplicative factor relative to base quasiparticle density.\nExample: 2.0 doubles base nqp. Default when random amp mode is 'fixed'.")
+        self.pulse_amplitude_edit.setToolTip("Fixed pulse amplitude relative to base quasiparticle density.")
         core_grid.addWidget(self.pulse_amplitude_edit, row, 1)
 
         core_grid.addWidget(QtWidgets.QLabel("Resonators:"), row, 2)
@@ -914,7 +913,7 @@ class MockConfigurationDialog(QtWidgets.QDialog):
         layout.addWidget(QtWidgets.QLabel("Cache QP step (frac):"), 1, 0)
         self.cache_qp_step_edit = QtWidgets.QLineEdit()
         self.cache_qp_step_edit.setValidator(ScientificDoubleValidator())
-        self.cache_qp_step_edit.setToolTip("QP quantization as fraction of base QP (e.g., 0.001 = 0.1%). Larger = coarser = more reuse.")
+        self.cache_qp_step_edit.setToolTip("QP cache step as a fraction of base QP.")
         layout.addWidget(self.cache_qp_step_edit, 1, 1)
 
         return group

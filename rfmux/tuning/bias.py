@@ -1,0 +1,1269 @@
+"""Choose bias amplitudes, frequencies, and calibrations from measured sweeps.
+
+:func:`find_bias_points` takes one module's multisweep result and returns a
+:class:`BiasReport` with a new catalog. It also stores the report in the input
+block's ``bias_report`` field. Check ``report.flagged`` before applying the
+catalog with ``crs.apply_bias``.
+
+The amplitude search selects the measured step below bifurcation. Frequency
+selection and calibration use a sweep at that amplitude. Detector settings
+and fallback rules are documented on the functions below.
+
+The derivative bifurcation test and max-arc-speed frequency method are adapted
+from hidfmux ``analysis/find_bias.py`` (Maclean Rouble, McGill Cosmology).
+"""
+
+from __future__ import annotations
+
+import copy
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from typing import NamedTuple
+
+import numpy as np
+from scipy.interpolate import CubicSpline
+from scipy.signal import find_peaks
+
+from ..core.resonators import BiasPoint, ResonatorCatalog
+from . import store
+from .fits import _quiet_optimizer, fit_section
+from .store import plain
+from .sweep_results import (
+    _refuse_container, _refuse_netanal, collect_amplitude_iterations_for,
+)
+
+__all__ = [
+    "BIFURCATION_METHODS",
+    "FREQUENCY_METHODS",
+    "HYSTERESIS_COMPARISONS",
+    "NEEDS_BOTH_DIRECTIONS",
+    "FLAG_KINDS",
+    "FLAG_BIFURCATED_AT_SMALLEST",
+    "FLAG_NEVER_BIFURCATED",
+    "FLAG_OFF_CENTRE",
+    "BifurcationCheck",
+    "AmplitudeChoice",
+    "BiasFinding",
+    "BiasReport",
+    "find_bias_points",
+    "find_bias_amplitude",
+    "find_bias_frequency",
+    "bifurcated_by_derivative",
+    "bifurcated_by_hysteresis",
+    "bifurcated_by_either",
+    "iq_arc_speed",
+    "iq_derivatives",
+    "normalized_arc_speed",
+    "iq_derivative_splines",
+    "calibrated_at",
+    "iq_derivatives_at",
+]
+
+#: "both" detects bifurcation if either detector fires; it needs both directions.
+BIFURCATION_METHODS = ("both", "derivative", "hysteresis")
+
+#: Methods requiring upward and downward sweeps.
+NEEDS_BOTH_DIRECTIONS = ("hysteresis", "both")
+
+# Hysteresis can compare magnitudes or distances in the complex IQ plane.
+HYSTERESIS_COMPARISONS = ("magnitude", "iq")
+
+#: How :func:`find_bias_frequency` places the tone inside the chosen sweep, and
+#: the default.
+FREQUENCY_METHODS = ("iq_derivative", "minimum")
+
+#: The direction the bias frequency is measured on when an amplitude step has
+#: more than one and the caller did not say.
+PREFERRED_DIRECTION = "upward"
+
+#: Short flag labels for plots and tables; _concern supplies explanations.
+FLAG_BIFURCATED_AT_SMALLEST = "already bifurcated"
+FLAG_NEVER_BIFURCATED = "No bifurcation observed in this run"
+FLAG_OFF_CENTRE = "freq out of bounds"
+FLAG_KINDS = (FLAG_BIFURCATED_AT_SMALLEST, FLAG_NEVER_BIFURCATED, FLAG_OFF_CENTRE)
+
+#: Allow a jump to cross one or two bins when a sample falls partway across it.
+MAX_SPIKE_SEPARATION = 2
+
+
+# ─── Results ──────────────────────────────────────────────────────────────────
+
+
+class BifurcationCheck(NamedTuple):
+    """A detector's verdict and the metrics used to reach it.
+
+    ``metric`` maps quantity names to values; ``threshold`` is their comparison
+    threshold. See each detector for units and conditions. For ``"both"``,
+    metrics are normalized by each detector's threshold and ``parts`` retains
+    the original checks. ``diagnostics`` retains unscaled detector details.
+    """
+
+    method: str
+    bifurcated: bool
+    metric: dict
+    threshold: float
+    parts: dict = {}  # by method name, for a combined check; else empty
+    diagnostics: dict = {}  # unscaled detector details, including pair positions
+
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes."""
+        return {
+            "method": self.method,
+            "bifurcated": bool(self.bifurcated),
+            "metric": dict(self.metric),
+            "threshold": float(self.threshold),
+            "parts": {k: v.to_dict() for k, v in self.parts.items()},
+            "diagnostics": dict(self.diagnostics),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BifurcationCheck":
+        return cls(
+            method=d["method"],
+            bifurcated=bool(d["bifurcated"]),
+            metric=dict(d["metric"]),
+            threshold=float(d["threshold"]),
+            # .get, because a report written before combined checks existed
+            # has no parts, and a check from a single test never does.
+            parts={
+                k: cls.from_dict(v) for k, v in (d.get("parts") or {}).items()
+            },
+            diagnostics=dict(d.get("diagnostics") or {}),
+        )
+
+
+class AmplitudeChoice(NamedTuple):
+    """The selected amplitude step and the bifurcation checks used to choose it.
+
+    This named tuple unpacks as::
+
+        iteration, amplitude, bifurcated_at, checks = find_bias_amplitude(...)
+
+    Only examined steps appear in ``checks``. The search stops at the first
+    bifurcated step.
+    """
+
+    iteration: int
+    amplitude: float
+    bifurcated_at: float | None  # amplitude where bifurcation was first seen
+    checks: dict[int, BifurcationCheck]  # by iteration, in the order examined
+
+    @property
+    def is_bifurcated_at_bias(self) -> bool:
+        """Return whether the selected amplitude itself showed bifurcation.
+
+        This occurs when the lowest measured amplitude bifurcates, so there is
+        no lower step to select.
+        """
+        return self.bifurcated_at is not None and self.bifurcated_at == self.amplitude
+
+    def to_dict(self) -> dict:
+        """Plain builtins only — files never contain these classes."""
+        return {
+            "iteration": int(self.iteration),
+            "amplitude": float(self.amplitude),
+            "bifurcated_at": _or_none(self.bifurcated_at),
+            "checks": _checks_to_dict(self.checks),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "AmplitudeChoice":
+        return cls(
+            iteration=int(d["iteration"]),
+            amplitude=float(d["amplitude"]),
+            bifurcated_at=_or_none(d.get("bifurcated_at")),
+            checks=_checks_from_dict(d["checks"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BiasFinding:
+    """The selected bias point, checks, and any concern for one resonator.
+
+    ``flagged_kind`` groups concerns for plotting; ``flagged_because`` explains
+    the finding. Both are None when no concern was found. Calibration
+    derivatives are in V/Hz at ``frequency_hz``.
+    """
+
+    name: str
+    iteration: int  # the amplitude step this came off
+    amplitude: float
+    frequency_hz: float  # on the tone grid, as it went onto the BiasPoint
+    dI_df: float  # V/Hz at that frequency
+    dQ_df: float
+    bifurcated_at: float | None  # amplitude where bifurcation was first seen
+    checks: dict[int, BifurcationCheck]  # every amplitude step examined
+    flagged_because: str | None = None
+    flagged_kind: str | None = None  # one of FLAG_KINDS
+
+    @property
+    def good(self) -> bool:
+        """Return whether bias finding recorded no concern for this point."""
+        return self.flagged_because is None
+
+    def to_dict(self) -> dict:
+        """Return finding fields as Python values.
+
+        The enclosing BiasReport provides the saved format version.
+        """
+        return {
+            "name": self.name,
+            "iteration": int(self.iteration),
+            "amplitude": float(self.amplitude),
+            "frequency_hz": float(self.frequency_hz),
+            "dI_df": float(self.dI_df),
+            "dQ_df": float(self.dQ_df),
+            "bifurcated_at": _or_none(self.bifurcated_at),
+            "checks": _checks_to_dict(self.checks),
+            "flagged_because": self.flagged_because,
+            "flagged_kind": self.flagged_kind,
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BiasFinding":
+        return cls(
+            name=d["name"],
+            iteration=int(d["iteration"]),
+            amplitude=float(d["amplitude"]),
+            frequency_hz=float(d["frequency_hz"]),
+            dI_df=float(d["dI_df"]),
+            dQ_df=float(d["dQ_df"]),
+            bifurcated_at=_or_none(d.get("bifurcated_at")),
+            checks=_checks_from_dict(d["checks"]),
+            flagged_because=d.get("flagged_because"),
+            flagged_kind=d.get("flagged_kind"),
+        )
+
+
+def _or_none(value):
+    """Convert a value to float, preserving None for an absent measurement."""
+    return None if value is None else float(value)
+
+
+def _checks_to_dict(checks: Mapping) -> dict:
+    """Convert checks to dictionaries, preserving integer amplitude-step keys."""
+    return {int(k): v.to_dict() for k, v in checks.items()}
+
+
+def _checks_from_dict(d: Mapping) -> dict:
+    return {int(k): BifurcationCheck.from_dict(v) for k, v in d.items()}
+
+
+@dataclass(slots=True)
+class BiasReport:
+    """The selected catalog, per-resonator findings, and bias-finding settings.
+
+    Findings follow the input catalog's bias-frequency order.
+    """
+
+    # Version 3 reports derivative pair strength and unscaled diagnostics.
+    SCHEMA_VERSION = 3
+
+    catalog: ResonatorCatalog
+    findings: list[BiasFinding]
+    settings: dict = field(default_factory=dict)
+
+    @property
+    def flagged(self) -> list[BiasFinding]:
+        """Bias points needing review before applying them."""
+        return [f for f in self.findings if not f.good]
+
+    @property
+    def good(self) -> list[BiasFinding]:
+        return [f for f in self.findings if f.good]
+
+    def __getitem__(self, name: str) -> BiasFinding:
+        for f in self.findings:
+            if f.name == name:
+                return f
+        raise KeyError(f"No finding for {name!r}.")
+
+    def __len__(self) -> int:
+        return len(self.findings)
+
+    # -- persistence ----------------------------------------------------------
+
+    def to_dict(self) -> dict:
+        """Return the report and catalog as dictionaries for saving.
+
+        The catalog retains its own format version.
+        """
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "catalog": self.catalog.to_dict(),
+            "findings": [f.to_dict() for f in self.findings],
+            "settings": plain(self.settings),
+        }
+
+    @classmethod
+    def from_dict(cls, d) -> "BiasReport":
+        version = d.get("schema_version")
+        if version not in (2, cls.SCHEMA_VERSION):
+            raise ValueError(
+                f"schema_version={version!r}, expected 2 or {cls.SCHEMA_VERSION}: "
+                f"this dict was written by a different version of BiasReport."
+            )
+        return cls(
+            catalog=ResonatorCatalog.from_dict(d["catalog"]),
+            findings=[BiasFinding.from_dict(f) for f in d["findings"]],
+            settings=d.get("settings", {}),
+        )
+
+    def __repr__(self) -> str:
+        flagged = self.flagged
+        head = (
+            f"BiasReport: {len(self.findings)} biased, {len(flagged)} flagged"
+        )
+        rows = []
+        for f in flagged[:5]:
+            rows.append(f"  {f.name}: {f.flagged_because}")
+        if len(flagged) > 5:
+            rows.append(f"  ... {len(flagged) - 5} more")
+        return "\n".join([head] + rows)
+
+
+# ─── The entry point ──────────────────────────────────────────────────────────
+
+
+def find_bias_points(
+    ms_module_output,
+    *,
+    amplitude_method: str = "derivative",
+    frequency_method: str = "iq_derivative",
+    direction: str | None = None,
+    spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
+    max_distance_hz: float | None = None,
+    max_distance_fraction: float | None = None,
+    save=None,
+    label=None,
+) -> BiasReport:
+    """Choose a bias point and calibration for each resonator in a multisweep.
+
+    Reads the catalog recorded in the sweep, leaving it unchanged. Returns a
+    new catalog and stores the report in ``ms_module_output["bias_report"]``,
+    replacing any previous report. Each bias point carries the sweep it was
+    chosen from with that sweep's fits (the sweep is fitted here, in place,
+    if it has none), the power that sweep was measured at, and any concern.
+
+    ``report.flagged`` identifies a bifurcated lowest step, a drive with no
+    known bifurcation above it, or a frequency outside the requested distance
+    limit.
+    A prior bifurcation amplitude is retained when this run observes none.
+    Clear it with ``catalog.clear_bifurcations()`` before taking new sweeps.
+
+    Args:
+        ms_module_output: one module's multisweep output,
+            ``multisweep_output[crs.module[m].index()]``.
+        amplitude_method: ``"derivative"`` (default) works with one sweep
+            direction. ``"both"`` and ``"hysteresis"`` require both.
+        frequency_method: ``"iq_derivative"`` or ``"minimum"``; see
+            :func:`find_bias_frequency`.
+        direction: sweep used for frequency and calibration. None prefers
+            ``"upward"``, otherwise uses the available direction. Amplitude
+            detection still uses all directions required by its method.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
+        max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
+        max_distance_hz: maximum allowed offset from the sweep centre. Beyond
+            it, use the centre and flag the finding. None imposes no limit.
+        max_distance_fraction: maximum allowed offset as a fraction of the
+            recorded sweep span. Mutually exclusive with ``max_distance_hz``.
+            Beyond it, use the centre and flag the finding. None imposes no
+            limit.
+        save: save the sweeps with the report, updating their existing file
+            or creating one. None uses ``store.autosave_enabled()``.
+        label: filename label for a first save; existing filenames are kept.
+
+    Returns:
+        BiasReport: new catalog and findings in input bias-frequency order. Each
+        bias point carries derivatives in V/Hz at its grid-aligned frequency
+        and the sweep used to compute them. IQ rotation is left unset.
+
+    Raises:
+        TypeError: the input is a whole module container.
+        ValueError: a method or direction is invalid, required directions are
+            missing, or the result has no catalog.
+        KeyError: a catalog resonator has no sweep data.
+    """
+    # Check shared settings once before analyzing individual resonators.
+    _check_method("amplitude_method", amplitude_method, BIFURCATION_METHODS)
+    _check_method("frequency_method", frequency_method, FREQUENCY_METHODS)
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
+    distance_limit_hz = _distance_limit_hz(
+        ms_module_output, max_distance_hz, max_distance_fraction
+    )
+
+    directions = _directions_swept(ms_module_output)
+    if (
+        amplitude_method in NEEDS_BOTH_DIRECTIONS
+        and not {"upward", "downward"} <= directions
+    ):
+        raise ValueError(
+            f"The {amplitude_method!r} method compares an upward sweep against "
+            f"a downward one, and this result holds only {sorted(directions)}. "
+            f"Sweep both directions, or use amplitude_method='derivative', "
+            f"which reads one sweep at a time."
+        )
+    if direction is not None and direction not in directions:
+        raise ValueError(
+            f"direction={direction!r} was not swept. This result holds "
+            f"{sorted(directions)}."
+        )
+
+    # Rebuild the measured catalog so bias updates leave its snapshot unchanged.
+    biased = _catalog_swept(ms_module_output)
+
+    amplitude_settings = dict(
+        method=amplitude_method,
+        spike_prominence_factor=spike_prominence_factor,
+        noise_gate_factor=noise_gate_factor,
+        max_discrepancy=max_discrepancy,
+        compare=compare,
+    )
+
+    # One finding per resonator, in bias-frequency order, because that is what
+    # iterating a catalog gives you.
+    findings = [
+        _find_bias_for_one(
+            ms_module_output,
+            resonator,
+            direction=direction,
+            frequency_method=frequency_method,
+            max_distance_hz=distance_limit_hz,
+            amplitude_settings=amplitude_settings,
+        )
+        for resonator in biased
+    ]
+
+    report = BiasReport(
+        catalog=biased,
+        findings=findings,
+        settings={
+            "module": ms_module_output.get("module"),
+            "amplitude_method": amplitude_method,
+            "frequency_method": frequency_method,
+            "direction": direction,
+            "spike_prominence_factor": spike_prominence_factor,
+            "noise_gate_factor": noise_gate_factor,
+            "max_discrepancy": max_discrepancy,
+            "compare": compare,
+            "max_distance_hz": max_distance_hz,
+            "max_distance_fraction": max_distance_fraction,
+        },
+    )
+    # Store a dictionary report in the measurement so it saves to the same file.
+    ms_module_output["bias_report"] = report.to_dict()
+    store.maybe_save(ms_module_output, "multisweep", save=save, label=label)
+    return report
+
+
+def _find_bias_for_one(
+    ms_module_output,
+    resonator,
+    *,
+    direction: str | None,
+    frequency_method: str,
+    max_distance_hz: float | None,
+    amplitude_settings: dict,
+) -> BiasFinding:
+    """Choose and store one resonator's bias point in the copied catalog.
+
+    Missing sweeps or voltage data raise an error for the caller to resolve.
+    """
+    # 1. Collect this resonator's measured amplitude steps and directions.
+    iterations = collect_amplitude_iterations_for(
+        ms_module_output, resonator.name
+    )
+
+    # 2. Select the amplitude using the requested bifurcation test.
+    choice = find_bias_amplitude(iterations, **amplitude_settings)
+
+    # 3. Select one trace for frequency selection and calibration.
+    entries = iterations[choice.iteration]
+    if direction is None:
+        entry = _directions(entries)[0]
+    else:
+        if direction not in entries:
+            raise ValueError(
+                f"The chosen amplitude step has no {direction!r} sweep; "
+                f"it has {sorted(entries)}."
+            )
+        entry = entries[direction]
+
+    # 4. Select a frequency from that trace.
+    measured_hz = find_bias_frequency(entry, method=frequency_method)
+
+    # 5. Fall back to the sweep centre if the selected frequency is too far away.
+    #    The report flags this choice below.
+    centre_hz = float(entry["original_center_frequency"])
+    frequency_hz = (
+        centre_hz
+        if _too_far(measured_hz, centre_hz, max_distance_hz)
+        else measured_hz
+    )
+
+    # 6. Quantize the bias frequency, then read the calibration at it.
+    bias = calibrated_at(
+        entry, BiasPoint(frequency_hz=frequency_hz, amplitude=choice.amplitude))
+    bifurcated_at = (choice.bifurcated_at if choice.bifurcated_at is not None
+                     else resonator.bias.bifurcated_at)
+
+    # 7. Record any concern about the amplitude or frequency choice.
+    flagged_kind, flagged_because = _concern(
+        choice,
+        known_bifurcation=bifurcated_at,
+        measured_hz=measured_hz,
+        centre_hz=centre_hz,
+        max_distance_hz=max_distance_hz,
+    )
+
+    resonator.bias = replace(
+        bias,
+        bifurcated_at=bifurcated_at,
+        flagged_kind=flagged_kind,
+        flagged_because=flagged_because,
+    )
+    return BiasFinding(
+        name=resonator.name,
+        iteration=choice.iteration,
+        amplitude=choice.amplitude,
+        frequency_hz=bias.frequency_hz,
+        dI_df=bias.dI_df,
+        dQ_df=bias.dQ_df,
+        bifurcated_at=choice.bifurcated_at,
+        checks=choice.checks,
+        flagged_kind=flagged_kind,
+        flagged_because=flagged_because,
+    )
+
+
+def _concern(
+    choice: AmplitudeChoice,
+    *,
+    known_bifurcation: float | None = None,
+    measured_hz: float,
+    centre_hz: float,
+    max_distance_hz: float | None,
+) -> tuple[str | None, str | None]:
+    """Return the first concern as ``(kind, explanation)``, or ``(None, None)``.
+
+    Checks lowest-step bifurcation, missing bifurcation above the chosen
+    amplitude, then frequency bounds. A clean sweep below a retained
+    bifurcation amplitude passes the amplitude check.
+    """
+    if choice.is_bifurcated_at_bias:
+        return FLAG_BIFURCATED_AT_SMALLEST, (
+            f"the smallest amplitude measured ({choice.amplitude:g}) was already "
+            "bifurcated"
+        )
+    if choice.bifurcated_at is None and (
+        known_bifurcation is None or choice.amplitude >= known_bifurcation
+    ):
+        return FLAG_NEVER_BIFURCATED, (
+            f"No bifurcation observed up to {choice.amplitude:g} "
+            "(largest amplitude measured)"
+        )
+    if _too_far(measured_hz, centre_hz, max_distance_hz):
+        return FLAG_OFF_CENTRE, (
+            f"the resonance was {(measured_hz - centre_hz) / 1e3:+.1f} kHz "
+            f"from the sweep centre (limit {max_distance_hz / 1e3:.1f} kHz)"
+        )
+    return None, None
+
+
+def _too_far(measured_hz: float, centre_hz: float, max_distance_hz: float | None):
+    """Return whether the frequency exceeds the allowed offset from the centre.
+
+    None disables the distance limit. Used for both frequency selection and
+    report flags.
+    """
+    return max_distance_hz is not None and abs(measured_hz - centre_hz) > max_distance_hz
+
+
+def _distance_limit_hz(
+    ms_module_output,
+    max_distance_hz: float | None,
+    max_distance_fraction: float | None,
+) -> float | None:
+    """Resolve either supported distance limit into hertz for one multisweep."""
+    if max_distance_hz is not None and max_distance_fraction is not None:
+        raise ValueError(
+            "Pass at most one of max_distance_hz and max_distance_fraction."
+        )
+    if max_distance_fraction is None:
+        return max_distance_hz
+    try:
+        span_hz = ms_module_output["call_params"]["span_hz"]
+    except KeyError as error:
+        raise ValueError(
+            "max_distance_fraction needs the sweep's recorded span_hz."
+        ) from error
+    if span_hz is None:
+        raise ValueError(
+            "max_distance_fraction needs the sweep's recorded span_hz."
+        )
+    return max_distance_fraction * span_hz
+
+
+def _check_method(argument: str, value: str, allowed: tuple[str, ...]) -> None:
+    """Refuse an unknown method by name, the same way for every dispatch."""
+    if value not in allowed:
+        raise ValueError(
+            f"Unknown {argument} {value!r}. Must be one of {allowed}."
+        )
+
+
+# ─── Which amplitude ──────────────────────────────────────────────────────────
+
+
+def find_bias_amplitude(
+    iterations: Mapping[int, Mapping[str, dict]],
+    *,
+    method: str = "derivative",
+    spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
+) -> AmplitudeChoice:
+    """Search one resonator's amplitude steps for the one to bias at.
+
+    Test steps in ascending amplitude, regardless of acquisition order.
+    Stop at the first step that shows bifurcation and select the step below it.
+
+    If no step shows bifurcation, select the highest measured amplitude. This
+    does not establish the bifurcation limit. If the lowest step bifurcates,
+    select it and set :attr:`AmplitudeChoice.is_bifurcated_at_bias` to True.
+    :func:`find_bias_points` reports concerns for these fallback choices,
+    unless a clean selected step is below a retained bifurcation amplitude.
+
+    Args:
+        iterations: one resonator's sweeps, ``{iteration: {direction: entry}}``
+            — what
+            :func:`~rfmux.tuning.sweep_results.collect_amplitude_iterations_for`
+            returns. A single ``multisweep`` gives one amplitude step, which is
+            a legitimate thing to hand over.
+        method: which test, from :data:`BIFURCATION_METHODS`. The default,
+            ``"derivative"``, detects jumps within each supplied sweep.
+            ``"both"`` runs the derivative and hysteresis tests and takes
+            either verdict, so it needs both sweep directions.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
+        max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
+
+    Returns:
+        AmplitudeChoice: the iteration and amplitude to bias at, where
+        bifurcation was first seen, and each examined step's verdict.
+
+    Raises:
+        ValueError: for an unknown *method* or *compare*, or for no sweeps at
+            all.
+    """
+    _check_method("method", method, BIFURCATION_METHODS)
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
+    if not iterations:
+        raise ValueError("No sweeps here, so there is no amplitude to choose.")
+
+    detector = _BIFURCATION[method]
+    # Pass only the settings used by the selected detector.
+    spikes = {
+        "spike_prominence_factor": spike_prominence_factor,
+        "noise_gate_factor": noise_gate_factor,
+    }
+    separation = {"max_discrepancy": max_discrepancy, "compare": compare}
+    settings = {
+        "derivative": spikes,
+        "hysteresis": separation,
+        "both": {**spikes, **separation},
+    }[method]
+
+    # What each step probed at, and the steps in ascending order of it. Every
+    # direction of a step shares one amplitude, so this is one number per step.
+    amplitude = {
+        i: float(_directions(entries)[0]["sweep_amplitude"])
+        for i, entries in iterations.items()
+    }
+    smallest_first = sorted(iterations, key=amplitude.get)
+
+    # Keep the preceding amplitude step to select if the current one bifurcates.
+    checks: dict[int, BifurcationCheck] = {}
+    for previous, iteration in zip([None, *smallest_first], smallest_first):
+        checks[iteration] = detector(iterations[iteration], **settings)
+        if not checks[iteration].bifurcated:
+            continue
+
+        # Found the limit. Bias one step below it — or here, if this is the
+        # smallest amplitude we have and there is nothing below to fall back to.
+        chosen = iteration if previous is None else previous
+        return AmplitudeChoice(
+            iteration=chosen,
+            amplitude=amplitude[chosen],
+            bifurcated_at=amplitude[iteration],
+            checks=checks,
+        )
+
+    # No bifurcation detected: select the highest measured amplitude.
+    # The bifurcation limit remains unknown.
+    largest = smallest_first[-1]
+    return AmplitudeChoice(
+        iteration=largest,
+        amplitude=amplitude[largest],
+        bifurcated_at=None,
+        checks=checks,
+    )
+
+
+def bifurcated_by_derivative(
+    entries: Mapping[str, dict],
+    *,
+    spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
+) -> BifurcationCheck:
+    """Detect a jump using the strongest adjacent peak–trough pair.
+
+    I and Q are scaled by their ranges. Point-to-point IQ distance per Hz
+    gives speed; its differences reveal peaks and troughs. A pair is a peak
+    followed by a trough one or two indices later. Its strength is the smaller
+    of their prominences. The strongest pair must reach both thresholds.
+    Any usable sweep direction can trigger detection.
+
+    Args:
+        entries: one amplitude step, ``{direction: sweep_entry}``.
+        spike_prominence_factor: shape threshold as a fraction of the speed
+            range (default 0.5). Larger values are less sensitive.
+        noise_gate_factor: noise threshold as a multiple of the robust
+            scatter of speed differences (default 50). Larger values are less
+            sensitive; zero disables this requirement. See :func:`_noise_floor`.
+
+    Returns:
+        BifurcationCheck: ``metric`` holds ``pair_strength`` (inverse Hz,
+        zero if absent) and ``pair_found``. Detection requires a pair and
+        strength >= ``threshold``, the larger of the shape and noise thresholds.
+        ``diagnostics`` holds both thresholds, the direction, and ``pair``:
+        either None or its peak/trough indices into the speed-difference array
+        and their prominences. Details describe a triggering direction if any,
+        otherwise the direction with greatest pair strength.
+
+    Raises:
+        ValueError: no direction contains a usable sweep.
+    """
+    reported = None
+    for direction in sorted(entries, key=lambda d: (d != PREFERRED_DIRECTION, d)):
+        frequencies, iq = _sorted_trace(entries[direction], "iq_counts")
+        speed = _point_to_point_speed(frequencies, iq)
+        if speed is None or len(speed) < 3:
+            continue
+
+        jumps = np.diff(speed)
+        shape_threshold = float(spike_prominence_factor * np.ptp(speed))
+        noise_threshold = float(noise_gate_factor * _noise_floor(jumps))
+        threshold = max(shape_threshold, noise_threshold)
+        pair = _strongest_pair(jumps)
+        strength = (min(pair["positive_spike_prominence"],
+                        pair["negative_spike_prominence"]) if pair else 0.0)
+        detected = pair is not None and strength >= threshold
+        check = BifurcationCheck(
+            method="derivative", bifurcated=detected,
+            metric={"pair_strength": strength, "pair_found": pair is not None},
+            threshold=threshold,
+            diagnostics={"direction": direction, "pair": pair,
+                         "shape_threshold": shape_threshold,
+                         "noise_threshold": noise_threshold},
+        )
+        rank = (detected, strength)
+        if reported is None or rank > reported[0]:
+            reported = (rank, check)
+
+    if reported is None:
+        raise ValueError(
+            "No usable sweep at this amplitude: every direction is too short "
+            "to have a shape, or has a degenerate frequency or IQ axis."
+        )
+    return reported[1]
+
+
+def bifurcated_by_hysteresis(
+    entries: Mapping[str, dict],
+    *,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
+) -> BifurcationCheck:
+    """Detect bifurcation from disagreement between upward and downward sweeps.
+
+    Args:
+        entries: one amplitude step with ``"upward"`` and ``"downward"``.
+        max_discrepancy: largest allowed normalized separation. Tune against
+            known sweeps; magnitude and IQ comparisons use different scales.
+        compare: ``"magnitude"`` compares |S21| in units of the upward trace's
+            dip depth, ignoring phase. ``"iq"`` compares complex IQ distance
+            in loop radii and is sensitive to phase or frequency drift too.
+
+    Returns:
+        BifurcationCheck: ``metric["max_separation"]`` is the largest
+        normalized separation. Bifurcation means it exceeds
+        ``threshold=max_discrepancy``.
+
+    Raises:
+        ValueError: unknown comparison, missing or unusable direction, or
+            frequency ranges that do not overlap.
+    """
+    _, separation = hysteresis_separation(entries, compare=compare)
+    maximum = float(np.max(separation))
+    return BifurcationCheck(
+        method="hysteresis",
+        bifurcated=maximum > max_discrepancy,
+        metric={"max_separation": maximum},
+        threshold=max_discrepancy,
+    )
+
+
+def hysteresis_separation(
+    entries: Mapping[str, dict], *, compare: str = "magnitude",
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ascending frequencies and the hysteresis test's separation curve.
+
+    Magnitude differences are in upward-sweep dip depths; IQ distances are in
+    upward-sweep loop radii. Downward samples are interpolated onto the upward
+    grid, using endpoint values outside their range. The ranges must overlap.
+    The detector compares the maximum of this curve to max_discrepancy.
+    """
+    _check_method("compare", compare, HYSTERESIS_COMPARISONS)
+
+    missing = {"upward", "downward"} - set(entries)
+    if missing:
+        raise ValueError(
+            f"The hysteresis test compares an upward sweep against a downward "
+            f"one, and this amplitude step has no "
+            f"{' or '.join(sorted(missing))} sweep."
+        )
+
+    f_up, z_up = _sorted_trace(entries["upward"], "iq_counts")
+    f_down, z_down = _sorted_trace(entries["downward"], "iq_counts")
+    if len(f_up) < 2 or len(f_down) < 2:
+        raise ValueError("A sweep of fewer than two points has nothing to compare.")
+    if f_down[0] > f_up[-1] or f_down[-1] < f_up[0]:
+        raise ValueError(
+            f"The two directions do not cover the same frequencies "
+            f"({f_up[0] / 1e6:.6f}–{f_up[-1] / 1e6:.6f} MHz upward, "
+            f"{f_down[0] / 1e6:.6f}–{f_down[-1] / 1e6:.6f} MHz downward), so "
+            f"there is nothing to compare them at."
+        )
+
+    return f_up, _HYSTERESIS_COMPARISON[compare](f_up, z_up, f_down, z_down)
+
+
+def bifurcated_by_either(
+    entries: Mapping[str, dict],
+    *,
+    spike_prominence_factor: float = 0.5,
+    noise_gate_factor: float = 50.0,
+    max_discrepancy: float = 0.1,
+    compare: str = "magnitude",
+) -> BifurcationCheck:
+    """Run both detectors and report bifurcation if either detects it.
+
+    Both sweep directions are required. This catches either kind of evidence,
+    but also accepts false positives from either detector.
+
+    Args:
+        entries: one amplitude step with ``"upward"`` and ``"downward"``.
+        spike_prominence_factor: passed to :func:`bifurcated_by_derivative`.
+        noise_gate_factor: passed to :func:`bifurcated_by_derivative`.
+        max_discrepancy: passed to :func:`bifurcated_by_hysteresis`.
+        compare: passed to :func:`bifurcated_by_hysteresis`.
+
+    Returns:
+        BifurcationCheck: ``parts`` contains both original checks.
+        ``metric`` prefixes each quantity with its method and divides numeric
+        values by that method's threshold; boolean pair availability is unchanged.
+        The combined threshold is 1.0. For a zero source threshold, positive
+        values become infinity and other values become zero.
+
+    Raises:
+        ValueError: either detector rejects the input or settings.
+    """
+    parts = {
+        "derivative": bifurcated_by_derivative(
+            entries,
+            spike_prominence_factor=spike_prominence_factor,
+            noise_gate_factor=noise_gate_factor,
+        ),
+        "hysteresis": bifurcated_by_hysteresis(
+            entries, max_discrepancy=max_discrepancy, compare=compare
+        ),
+    }
+
+    metric = {
+        f"{name}_{key}": _in_thresholds(value, part.threshold)
+        for name, part in parts.items()
+        for key, value in part.metric.items()
+    }
+    return BifurcationCheck(
+        method="both",
+        bifurcated=any(part.bifurcated for part in parts.values()),
+        metric=metric,
+        threshold=1.0,
+        parts=parts,
+    )
+
+
+def _in_thresholds(value, threshold: float):
+    """Divide a metric by its threshold, preserving boolean conditions.
+
+    A zero threshold gives infinity for positive values and zero otherwise.
+    """
+    if isinstance(value, bool):
+        return value
+    if threshold == 0:
+        return float("inf") if value > 0 else 0.0
+    return float(value) / threshold
+
+
+def _separation_in_iq(
+    f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
+) -> np.ndarray:
+    """Pointwise IQ separation in upward-sweep loop radii."""
+    # Interpolate the downward trace onto the upward frequency grid.
+    on_up = np.interp(f_up, f_down, z_down.real) + 1j * np.interp(
+        f_up, f_down, z_down.imag
+    )
+
+    radius = float(np.max(np.abs(z_up - z_up.mean())))
+    if radius == 0:
+        raise ValueError(
+            "The upward sweep is a single point in IQ — no loop, so no scale "
+            "to measure a discrepancy against."
+        )
+
+    return np.abs(z_up - on_up) / radius
+
+
+def _separation_in_magnitude(
+    f_up: np.ndarray, z_up: np.ndarray, f_down: np.ndarray, z_down: np.ndarray
+) -> np.ndarray:
+    """Return pointwise magnitude differences in upward-sweep dip depths.
+
+    Interpolate magnitudes so phase differences do not affect the result.
+    Divide by the upward trace's maximum minus minimum magnitude.
+    """
+    up, down = np.abs(z_up), np.abs(z_down)
+    on_up = np.interp(f_up, f_down, down)
+
+    depth = float(np.ptp(up))
+    if depth == 0:
+        raise ValueError(
+            "The upward sweep's |S21| is flat — no dip, so no scale to measure "
+            "a discrepancy against."
+        )
+
+    return np.abs(up - on_up) / depth
+
+
+def _spikes(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return local maxima and their prominences, without a prominence cutoff."""
+    peaks, properties = find_peaks(values, prominence=0)
+    return peaks, properties["prominences"]
+
+
+def _noise_floor(values: np.ndarray) -> float:
+    """Estimate Gaussian-equivalent noise with median absolute deviation × 1.4826.
+
+    This limits the influence of jump outliers on the noise estimate.
+    A constant trace returns zero, disabling the noise gate for that trace.
+    """
+    return float(np.median(np.abs(values - np.median(values))) * 1.4826)
+
+
+def _strongest_pair(jumps: np.ndarray) -> dict | None:
+    """Return the eligible peak–trough pair with greatest minimum prominence."""
+    up, up_prominence = _spikes(jumps)
+    down, down_prominence = _spikes(-jumps)
+    separation = down[np.newaxis, :] - up[:, np.newaxis]
+    i, j = np.nonzero((separation >= 1) & (separation <= MAX_SPIKE_SEPARATION))
+    if not len(i):
+        return None
+    best = int(np.argmax(np.minimum(up_prominence[i], down_prominence[j])))
+    u, d = i[best], j[best]
+    return {"positive_index": int(up[u]), "negative_index": int(down[d]),
+            "positive_spike_prominence": float(up_prominence[u]),
+            "negative_spike_prominence": float(down_prominence[d])}
+
+
+# ─── Which frequency ──────────────────────────────────────────────────────────
+
+
+def find_bias_frequency(entry: Mapping, *, method: str = "iq_derivative") -> float:
+    """Return a bias frequency in Hz from one sweep's measured grid.
+
+    ``"iq_derivative"`` selects the maximum spline-derived IQ speed;
+    ``"minimum"`` selects the minimum |S21|. This function does not quantize
+    the result or check its distance from the sweep centre; ``find_bias_points``
+    handles those steps.
+
+    Raises ValueError for an unknown method or an unusable trace.
+    """
+    _check_method("method", method, FREQUENCY_METHODS)
+    return float(_FREQUENCY[method](entry))
+
+
+def iq_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(frequencies, |dI/df + j*dQ/df|)`` in Hz and counts/Hz.
+
+    Uses :func:`iq_derivatives`; both arrays follow ascending frequency.
+    Raises ValueError if the trace cannot be differentiated.
+    """
+    frequencies, dI_df, dQ_df = iq_derivatives(entry)
+    return frequencies, np.abs(dI_df + 1j * dQ_df)
+
+
+def iq_derivatives(entry: Mapping) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return ``(frequencies, dI_df, dQ_df)`` in ascending frequency order.
+
+    Derivatives are evaluated from splines through ``iq_counts`` and are in
+    counts/Hz. For calibration in V/Hz, use :func:`iq_derivatives_at`.
+    Raises ValueError if the trace cannot be differentiated.
+    """
+    frequencies, iq = _sorted_trace(entry, "iq_counts")
+    try:
+        dI_df, dQ_df = iq_derivative_splines(frequencies, iq)
+    except ValueError as exc:
+        raise ValueError(
+            f"This sweep cannot be differentiated: {exc}"
+        ) from exc
+    return frequencies, dI_df(frequencies), dQ_df(frequencies)
+
+
+def normalized_arc_speed(entry: Mapping) -> tuple[np.ndarray, np.ndarray]:
+    """Return normalized point-to-point IQ speed for the derivative detector.
+
+    I and Q are each divided by their range before differencing. Returns
+    ``(frequencies, speed)`` at ascending pair midpoints, one element shorter
+    than the sweep, with speed in inverse Hz. Raises ValueError for an
+    unusable trace.
+    """
+    frequencies, iq = _sorted_trace(entry, "iq_counts")
+    speed = _point_to_point_speed(frequencies, iq)
+    if speed is None:
+        raise ValueError(
+            "This sweep is too short, or has a flat I or Q axis, or visits a "
+            "frequency twice — there is no point-to-point speed to take."
+        )
+    return 0.5 * (frequencies[:-1] + frequencies[1:]), speed
+
+
+def _frequency_by_iq_derivative(entry: Mapping) -> float:
+    """The frequency of maximum IQ arc-length speed."""
+    frequencies, speed = iq_arc_speed(entry)
+    return float(frequencies[int(np.argmax(speed))])
+
+
+def _frequency_by_minimum(entry: Mapping) -> float:
+    """The frequency of minimum |S21|."""
+    frequencies, iq = _sorted_trace(entry, "iq_counts")
+    if len(frequencies) < 1:
+        raise ValueError("This sweep has no points, so it has no minimum.")
+    return float(frequencies[int(np.argmin(np.abs(iq)))])
+
+
+# ─── The calibration at that frequency ────────────────────────────────────────
+
+
+def iq_derivative_splines(frequencies: np.ndarray, iq: np.ndarray):
+    """Cubic splines through I(f) and Q(f), differentiated.
+
+    The building block under both the arc-length speed and the calibration, so
+    that the frequency a bias point is placed at and the derivatives read off
+    it come from one interpolation rather than two.
+
+    Args:
+        frequencies: Hz. Sorted internally, so a downward sweep is fine.
+        iq: the complex trace, in whatever units the answer should be per-hertz
+            in.
+
+    Returns:
+        tuple: ``(dI_df, dQ_df)``, each callable at a frequency or an array of
+        them.
+
+    Raises:
+        ValueError: for fewer than four points, or repeated frequencies —
+            either way there is no cubic spline to fit.
+    """
+    order = np.argsort(frequencies)
+    frequencies = np.asarray(frequencies, dtype=float)[order]
+    iq = np.asarray(iq)[order]
+
+    if len(frequencies) < 4:
+        raise ValueError(
+            f"A cubic spline needs at least four points; this sweep has "
+            f"{len(frequencies)}."
+        )
+    if np.any(np.diff(frequencies) <= 0):
+        raise ValueError(
+            "This sweep visits the same frequency twice, so there is no "
+            "single-valued I(f) to interpolate."
+        )
+
+    return (
+        CubicSpline(frequencies, iq.real).derivative(),
+        CubicSpline(frequencies, iq.imag).derivative(),
+    )
+
+
+def calibrated_at(entry: Mapping, bias: BiasPoint) -> BiasPoint:
+    """*bias* with what the sweep *entry* says at its frequency: the IQ slope
+    (``dI_df``, ``dQ_df``), the sweep itself with its fits, and the power it
+    was measured at. The sweep is fitted here, in place, if it has no fits.
+    """
+    if not entry.get("fits"):
+        with _quiet_optimizer():
+            fit_section(entry)
+    dI_df, dQ_df = iq_derivatives_at(entry, bias.frequency_hz)
+    return replace(bias, dI_df=dI_df, dQ_df=dQ_df,
+                   bias_sweep=_stored_sweep(entry),
+                   bias_power_dbm=entry.get("sweep_amplitude_dbm"))
+
+
+def iq_derivatives_at(entry: Mapping, frequency_hz: float) -> tuple[float, float]:
+    """Evaluate ``(dI_df, dQ_df)`` in V/Hz at ``frequency_hz``.
+
+    Splines use the entry's ``iq_volts``. Pass the quantized bias frequency to
+    calibrate the tone that will be applied. ``BiasPoint.df_calibration`` is
+    the reciprocal complex derivative, in Hz/V.
+
+    Raises ValueError for missing volts or a trace that cannot be interpolated.
+    """
+    if entry.get("iq_volts") is None:
+        raise ValueError(
+            "This sweep has no 'iq_volts', so a calibration read off it would "
+            "be in counts per hertz. Sweeps carry volts as measured; an entry "
+            "without them predates that and cannot be calibrated."
+        )
+    frequencies, iq = _sorted_trace(entry, "iq_volts")
+    dI_df, dQ_df = iq_derivative_splines(frequencies, iq)
+    return float(dI_df(frequency_hz)), float(dQ_df(frequency_hz))
+
+
+def _stored_sweep(entry: Mapping) -> dict:
+    """Keep the calibration trace and context listed in ``BiasPoint.BIAS_SWEEP_KEYS``.
+
+    Arrays are shared with the input, so a report saved alongside its sweeps
+    can reuse them through pickle's memoization. The fits are copied: a later
+    refit of the sweep must not change the bias point's.
+    """
+    sweep = {k: entry[k] for k in BiasPoint.BIAS_SWEEP_KEYS if k in entry}
+    if "fits" in sweep:
+        sweep["fits"] = copy.deepcopy(sweep["fits"])
+    return sweep
+
+
+# ─── Reading the sweeps ───────────────────────────────────────────────────────
+
+
+def _directions_swept(ms_module_output) -> set[str]:
+    """Collect available directions so requirements can be checked before analysis."""
+    _refuse_container(ms_module_output)
+    _refuse_netanal(ms_module_output)
+    return {
+        direction
+        for by_direction in ms_module_output["results"].values()
+        for direction in by_direction
+    }
+
+
+def _catalog_swept(ms_module_output) -> ResonatorCatalog:
+    """Rebuild the catalog from the snapshot in the measurement.
+
+    The returned catalog can be updated without changing the saved snapshot.
+    """
+    snapshot = (ms_module_output.get("call_params") or {}).get("catalog")
+    if snapshot is None:
+        raise ValueError(
+            "No catalog in these sweeps to bias. Every multisweep records one "
+            "— a bare center_frequencies call generates one from the list — so "
+            "this is a result from before that was so (schema_version 5 or "
+            "earlier). Re-sweep, or build the catalog yourself and put it in "
+            "call_params['catalog'] as ResonatorCatalog.to_dict() output."
+        )
+    return ResonatorCatalog.from_dict(snapshot)
+
+
+def _directions(entries: Mapping[str, dict]) -> list[dict]:
+    """The sweeps of one amplitude step, upward first when it is there."""
+    return [
+        entries[d]
+        for d in sorted(entries, key=lambda d: (d != PREFERRED_DIRECTION, d))
+    ]
+
+
+def _sorted_trace(entry: Mapping, key: str) -> tuple[np.ndarray, np.ndarray]:
+    """Return an entry's frequency and IQ arrays sorted by ascending frequency."""
+    frequencies = entry.get("frequencies")
+    iq = entry.get(key)
+    if frequencies is None or iq is None:
+        raise ValueError(
+            f"This sweep entry has no "
+            f"{'frequencies' if frequencies is None else key}. Its keys are "
+            f"{sorted(entry)}."
+        )
+
+    frequencies = np.asarray(frequencies, dtype=float)
+    iq = np.asarray(iq)
+    if len(frequencies) != len(iq):
+        raise ValueError(
+            f"This sweep has {len(frequencies)} frequencies and {len(iq)} "
+            f"{key} — they describe different measurements."
+        )
+
+    order = np.argsort(frequencies)
+    return frequencies[order], iq[order]
+
+
+def _point_to_point_speed(
+    frequencies: np.ndarray, iq: np.ndarray
+) -> np.ndarray | None:
+    """Return IQ distance per hertz after scaling I and Q by their own ranges.
+
+    Use finite differences to preserve the adjacent spikes at a jump;
+    spline interpolation could spread them over more samples.
+    Return None for a flat I or Q axis or repeated frequency.
+    """
+    frequencies = np.asarray(frequencies, dtype=float)
+    i_range = float(np.ptp(iq.real))
+    q_range = float(np.ptp(iq.imag))
+    if i_range == 0 or q_range == 0 or len(frequencies) < 3:
+        return None
+
+    spacing = np.diff(frequencies)
+    if np.any(spacing == 0):
+        return None
+
+    return (
+        np.sqrt(
+            np.diff(iq.real / i_range) ** 2 + np.diff(iq.imag / q_range) ** 2
+        )
+        / np.abs(spacing)
+    )
+
+
+# Bifurcation detectors take one amplitude step as {direction: entry}.
+_BIFURCATION = {
+    "derivative": bifurcated_by_derivative,
+    "hysteresis": bifurcated_by_hysteresis,
+    "both": bifurcated_by_either,
+}
+
+# Hysteresis comparisons take sorted traces and return normalized separations.
+_HYSTERESIS_COMPARISON = {
+    "magnitude": _separation_in_magnitude,
+    "iq": _separation_in_iq,
+}
+
+# Frequency-selection methods take one sweep entry.
+_FREQUENCY = {
+    "iq_derivative": _frequency_by_iq_derivative,
+    "minimum": _frequency_by_minimum,
+}

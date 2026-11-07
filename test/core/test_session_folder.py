@@ -64,3 +64,25 @@ def test_metadata_json_cannot_hold_leaves_the_file_as_it_was(tmp_path):
     except TypeError:
         pass
     assert sf.load_metadata(session) == before
+
+
+def test_exports_listed_from_several_threads_at_once_are_all_kept(tmp_path):
+    """Periscope lists exports from its window while apply_bias lists a
+    bias_catalog from a worker thread; none may be lost, and the listing is
+    never read half-written (which reads as empty)."""
+    import threading
+    folder = sf.open_session(base=tmp_path)
+
+    def register(worker):
+        for k in range(25):
+            sf.register_export(folder, f"w{worker}_{k}.pkl", "multisweep", "module1")
+
+    threads = [threading.Thread(target=register, args=(w,)) for w in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    listed = {e["filename"] for e in sf.load_metadata(folder)["exports"]}
+    assert listed == {f"w{w}_{k}.pkl" for w in range(8) for k in range(25)}
+    assert not list(folder.glob("*.partial"))

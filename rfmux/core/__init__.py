@@ -15,7 +15,7 @@ from .schema import (
     ReadoutModule,
     ReadoutChannel,
     Wafer,
-    Resonator,
+    HWMResonator,
     ChannelMapping
 )
 
@@ -26,6 +26,6 @@ __all__ = [
     "ReadoutModule",
     "ReadoutChannel",
     "Wafer",
-    "Resonator",
+    "HWMResonator",
     "ChannelMapping",
 ]

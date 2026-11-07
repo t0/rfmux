@@ -10,7 +10,7 @@ __all__ = [
     "ReadoutModule",
     "ReadoutChannel",
     "Wafer",
-    "Resonator",
+    "HWMResonator",
     "ChannelMapping",
 ]
 
@@ -21,7 +21,7 @@ from .schema import (
     Crate,
     ReadoutChannel,
     ReadoutModule,
-    Resonator,
+    HWMResonator,
     Wafer,
 )
 from .session import HWMConstructor, HWMCSVConstructor, read_csv
@@ -65,8 +65,8 @@ class YAMLLoader(session.YAMLLoader):
         )
 
         self.add_constructor(
-            "!Resonators",
-            HWMCSVConstructor(lambda loader: getattr(loader.flavour, "Resonator")),
+            "!HWMResonators",
+            HWMCSVConstructor(lambda loader: getattr(loader.flavour, "HWMResonator")),
         )
 
         self.add_constructor("!ChannelMappings", ChannelMappingCSVConstructor)
@@ -97,7 +97,7 @@ def ChannelMappingCSVConstructor(loader, node):
     """
     Expect the following attributes:
 
-    resonator:
+    hwm_resonator:
         A path specifying a resonator (wafer/name or name)
 
     channel:
@@ -146,21 +146,21 @@ def ChannelMappingCSVConstructor(loader, node):
             case _:
                 raise yaml.YAMLError(f"Unable to parse {mapping['readout_channel']} into a ReadoutChannel")
 
-        # Parse 'resonator' entry into a Resonator mapping
-        if "resonator" not in mapping:
-            raise yaml.YAMLError("Missing 'resonator' mapping in ChannelMapping CSV")
+        # Parse 'hwm_resonator' entry into an HWMResonator mapping
+        if "hwm_resonator" not in mapping:
+            raise yaml.YAMLError("Missing 'hwm_resonator' mapping in ChannelMapping CSV")
 
-        match mapping["resonator"].split("/"):
+        match mapping["hwm_resonator"].split("/"):
             case (wafer, resonator):
-                mapping["resonator"] = (
-                    loader.hwm.query(Resonator)
+                mapping["hwm_resonator"] = (
+                    loader.hwm.query(HWMResonator)
                     .join(Wafer)
-                    .filter(Resonator.name == resonator, Wafer.name == wafer)
+                    .filter(HWMResonator.name == resonator, Wafer.name == wafer)
                     .one()
                 )
 
             case _:
-                raise yaml.YAMLError(f"Unable to parse {mapping['resonator']} into Resonator mapping!")
+                raise yaml.YAMLError(f"Unable to parse {mapping['hwm_resonator']} into HWMResonator mapping!")
 
     loader.hwm.add_all([ChannelMapping(**x) for x in dr])
 

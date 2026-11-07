@@ -13,6 +13,81 @@ import datetime
 from . import settings
 
 
+#: The Session menu entry that changes where sessions are created.  The
+#: dialogs quote its path so the location does not look permanent.
+SESSION_ROOT_ACTION = "Change Session Folder &Location..."
+SESSION_ROOT_MENU_PATH = f"Session \u25b8 {SESSION_ROOT_ACTION.replace('&', '')}"
+
+
+def _install_enter_key_filter(dialog: QtWidgets.QFileDialog):
+    """Make the Enter key accept a file dialog."""
+
+    class EnterKeyFilter(QtCore.QObject):
+        def __init__(self, dialog):
+            super().__init__()
+            self.dialog = dialog
+
+        def eventFilter(self, obj, event):
+            if event.type() == QtCore.QEvent.Type.KeyPress:
+                if event.key() in (QtCore.Qt.Key.Key_Return,
+                                   QtCore.Qt.Key.Key_Enter):
+                    self.dialog.accept()
+                    return True
+            return False
+
+    key_filter = EnterKeyFilter(dialog)
+    dialog.installEventFilter(key_filter)
+    # Keep a reference, or the filter is garbage collected.
+    dialog._enter_key_filter = key_filter
+
+
+def choose_session_root(parent, start_dir: str = "") -> str | None:
+    """
+    Ask for the folder new session folders are created in.
+
+    Returns the chosen directory, or None if the user cancelled.  The
+    caller decides whether to save it.
+    """
+    dialog = QtWidgets.QFileDialog(
+        parent, "Select Session Location", start_dir)
+    dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+    dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
+    dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
+    # A row of its own under the file list: the dialog's own labels are
+    # all beside a control that needs the width.
+    note = QtWidgets.QLabel(
+        "Session folders are created here.  "
+        f"Change this location later from {SESSION_ROOT_MENU_PATH}")
+    note.setWordWrap(True)
+    note.setStyleSheet("font-style: italic;")
+    layout = dialog.layout()
+    if isinstance(layout, QtWidgets.QGridLayout):
+        layout.addWidget(note, layout.rowCount(), 0, 1, layout.columnCount())
+
+    _install_enter_key_filter(dialog)
+
+    if not dialog.exec():
+        return None
+    selected = dialog.selectedFiles()
+    return selected[0] if selected else None
+
+
+def session_root(parent) -> str | None:
+    """
+    The folder new session folders are created in, asking once if needed.
+
+    Returns None if the user cancelled the first-run question, in which
+    case there is nowhere to create a session.
+    """
+    root = settings.get_session_root()
+    if root and os.path.isdir(root):
+        return root
+    root = choose_session_root(parent, root)
+    if root:
+        settings.set_session_root(root)
+    return root
+
+
 class UnifiedStartupDialog(QtWidgets.QDialog):
     """
     Unified startup dialog for connection and session configuration.
@@ -118,33 +193,6 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         self._radio_filter = RadioButtonEnterFilter()
         for rb in radio_buttons:
             rb.installEventFilter(self._radio_filter)
-    
-    def _install_enter_key_filter(self, dialog: QtWidgets.QFileDialog):
-        """
-        Install an event filter on a QFileDialog to make Enter key accept the dialog.
-        
-        Args:
-            dialog: The QFileDialog instance to enhance
-        """
-        class EnterKeyFilter(QtCore.QObject):
-            """Event filter that makes Enter key accept the dialog."""
-            def __init__(self, dialog):
-                super().__init__()
-                self.dialog = dialog
-            
-            def eventFilter(self, obj, event):
-                if event.type() == QtCore.QEvent.Type.KeyPress:
-                    if event.key() in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                        # Accept the dialog (equivalent to clicking Choose/Open)
-                        self.dialog.accept()
-                        return True  # Event handled
-                return False  # Pass through other events
-        
-        # Create and install the filter
-        key_filter = EnterKeyFilter(dialog)
-        dialog.installEventFilter(key_filter)
-        # Store reference to prevent garbage collection
-        dialog._enter_key_filter = key_filter
     
     def _setup_ui(self):
         """Create the dialog UI."""
@@ -263,11 +311,6 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         new_session_layout = QtWidgets.QVBoxLayout(self.new_session_details)
         new_session_layout.setContentsMargins(20, 10, 0, 10)
         
-        # Description
-        new_desc = QtWidgets.QLabel("A folder selection dialog will open when you click OK.")
-        new_desc.setStyleSheet("color: gray; font-style: italic;")
-        new_session_layout.addWidget(new_desc)
-        
         # Folder name input
         folder_name_layout = QtWidgets.QHBoxLayout()
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -277,6 +320,14 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         folder_name_layout.addWidget(QtWidgets.QLabel("Folder Name:"))
         folder_name_layout.addWidget(self.folder_name_input)
         new_session_layout.addLayout(folder_name_layout)
+
+        # Where it will be created.  Only the very first run has to answer
+        # that, so the rest of the time this is a statement, not a question.
+        self.session_root_label = QtWidgets.QLabel()
+        self.session_root_label.setWordWrap(True)
+        self.session_root_label.setStyleSheet("color: gray; font-style: italic;")
+        self._refresh_session_root_label()
+        new_session_layout.addWidget(self.session_root_label)
         
         layout.addWidget(self.new_session_details)
         
@@ -301,6 +352,20 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
         
         return group
     
+    def _refresh_session_root_label(self):
+        """Say where the session folder will be created."""
+        root = settings.get_session_root()
+        if root:
+            self.session_root_label.setText(
+                f"Created in: {root}\n"
+                f"Change this location from {SESSION_ROOT_MENU_PATH}")
+        else:
+            self.session_root_label.setText(
+                "A folder selection dialog will open when you click OK, to "
+                "choose where session folders are created.  Periscope keeps "
+                "that location; change it later from "
+                f"{SESSION_ROOT_MENU_PATH}")
+
     def _on_connection_mode_changed(self):
         """Handle connection mode radio button changes."""
         # Show/hide hardware details
@@ -361,9 +426,6 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.crs_serial = None
             self.module = None
         
-        # Get last session directory for file dialogs
-        last_session_dir = settings.get_last_session_directory()
-        
         # Determine session mode and open appropriate file dialogs
         if self.rb_new_session.isChecked():
             self.session_mode = self.SESS_NEW
@@ -377,34 +439,15 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 )
                 return
             self.session_folder_name = self.folder_name_input.text().strip()
-            
-            # Open folder selection dialog for base path
-            # Start from last used directory if available
-            start_dir = last_session_dir if last_session_dir else ""
-            
-            # Create non-static dialog to allow Enter key handling
-            dialog = QtWidgets.QFileDialog(self, "Select Session Location", start_dir)
-            dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-            dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly)
-            dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog)
-            
-            # Install Enter key filter
-            self._install_enter_key_filter(dialog)
-            
-            # Show dialog and get result
-            if not dialog.exec():
+
+            # Asks for the location only when there is none to reuse.
+            base_path = session_root(self)
+            if not base_path:
                 # User cancelled, stay in dialog
                 return
-            
-            selected_files = dialog.selectedFiles()
-            if not selected_files:
-                return
-            
-            base_path = selected_files[0]
+
             self.session_path = base_path
-            # Save this directory for next time
-            settings.set_last_session_directory(base_path)
-            # Also save the full session path so it's pre-selected next time
+            # Save the full session path so it's pre-selected next time
             full_session_path = os.path.join(base_path, self.session_folder_name)
             settings.set_last_session_path(full_session_path)
             
@@ -421,8 +464,8 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 start_dir = os.path.dirname(last_session_path)
                 preselect_path = last_session_path
             else:
-                # Fall back to last session directory
-                start_dir = last_session_dir if last_session_dir else ""
+                # Fall back to where new sessions are created
+                start_dir = settings.get_session_root()
                 preselect_path = None
             
             # Use non-static QFileDialog for more control (allows pre-selection)
@@ -436,7 +479,7 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
                 dialog.selectFile(preselect_path)
             
             # Install Enter key filter
-            self._install_enter_key_filter(dialog)
+            _install_enter_key_filter(dialog)
             
             # Show dialog and get result
             if not dialog.exec():
@@ -451,13 +494,10 @@ class UnifiedStartupDialog(QtWidgets.QDialog):
             self.session_path = session_path
             self.session_folder_name = None
             
-            # Save the loaded session path for quick reload next time
+            # Save the loaded session path for quick reload next time.
+            # NOT the session root: loading a session from an archive
+            # somewhere else must not silently move where new ones go.
             settings.set_last_session_path(session_path)
-            
-            # Also save the parent directory for new session creation
-            parent_dir = os.path.dirname(session_path)
-            if parent_dir:
-                settings.set_last_session_directory(parent_dir)
             
         elif self.rb_no_session.isChecked():
             self.session_mode = self.SESS_NONE

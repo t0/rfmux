@@ -10,7 +10,7 @@ from PyQt6 import QtCore  # noqa: E402
 
 from rfmux.tools import record_dialog as rd  # noqa: E402
 from rfmux.tools.record import _run  # noqa: E402
-from test.record_helpers import bias_export  # noqa: E402
+from test.record_helpers import bias_catalog_file  # noqa: E402
 
 
 def _dialog(tmp_path, monkeypatch, running=()):
@@ -32,7 +32,7 @@ def _dialog(tmp_path, monkeypatch, running=()):
 def _session_with_bias(tmp_path, module=2, channels=(3, 7)):
     folder = tmp_path / "session_x"
     folder.mkdir(exist_ok=True)
-    bias_export(folder / f"bias_module{module}_1.pkl", module, channels)
+    bias_catalog_file(folder / f"bias_module{module}_1.pkl", module, channels)
     return folder
 
 
@@ -156,7 +156,7 @@ def test_each_data_product_shows_its_cost_while_chosen(
     assert dlg.tod_note.isHidden()
 
 
-def test_a_tod_without_a_bias_export_warns_but_records(
+def test_a_tod_without_a_bias_catalog_warns_but_records(
         qt_app, tmp_path, monkeypatch):
     dlg, _ = _dialog(tmp_path, monkeypatch)
     dlg.parser_iface_combo.setCurrentIndex(0)
@@ -169,7 +169,7 @@ def test_a_tod_without_a_bias_export_warns_but_records(
     dlg.channels_edit.setText("2:1-4")
     assert "warning: the TOD metadata" in dlg.status_label.text()
     assert dlg.record_btn.isEnabled()
-    # A session whose bias export covers the module supplies the tuning.
+    # A session whose bias_catalog covers the module supplies the tuning.
     folder = _session_with_bias(tmp_path)
     dlg.rb_existing.setChecked(True)
     dlg.session_path_edit.setText(str(folder))
@@ -298,7 +298,7 @@ def test_several_modules_take_an_export_each_or_per_module_ranges(
     assert dlg.record_btn.isEnabled(), dlg.status_label.text()
     dlg.modules_edit.setText("2,4")
     assert not dlg.record_btn.isEnabled()
-    assert "no bias export for module 4" in dlg.status_label.text()
+    assert "no bias_catalog for module 4" in dlg.status_label.text()
     dlg.rb_ranges.setChecked(True)
     dlg.channels_edit.setText("2:1-4,3:1-2")
     assert dlg.record_btn.isEnabled(), dlg.status_label.text()

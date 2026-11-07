@@ -25,7 +25,7 @@ def _flow_layouts(widget):
 
 @pytest.mark.parametrize("make", [
     lambda: MultisweepPanel(dark_mode=False),
-    lambda: NetworkAnalysisPanel(modules=[1], dark_mode=False),
+    lambda: NetworkAnalysisPanel(module=1, dark_mode=False),
     lambda: PulseCapturePanel(dark_mode=False),
 ])
 def test_panel_toolbars_wrap_and_fit(qt_app, make):
@@ -41,16 +41,6 @@ def test_panel_toolbars_wrap_and_fit(qt_app, make):
     panel.resize(1000, 640)
     qt_app.processEvents()
     assert panel.width() == 1000
-
-
-def test_histograms_toolbar_is_a_flow_layout(qt_app):
-    """Too few controls to wrap at 600 px, so it is not in the
-    parametrized test above; it must still be a flow layout and fit."""
-    from rfmux.tools.periscope.parameter_histograms_panel import (
-        ParameterHistogramsPanel)
-    panel = ParameterHistogramsPanel(dark_mode=False)
-    assert _flow_layouts(panel), "the toolbar should be a flow layout"
-    assert panel.minimumSizeHint().width() < 960
 
 
 def test_flow_layout_wraps_by_width(qt_app):

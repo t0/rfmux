@@ -11,6 +11,7 @@ from sqlalchemy.orm.collections import attribute_mapped_collection
 from . import hardware_map
 from .hardware_map import Boolean, HWMResource, HWMQuery
 
+import re
 import sqlalchemy
 import tuber
 
@@ -197,6 +198,44 @@ class CRS(hardware_map.HWMResource, tuber.TuberObject):
             "I need serial or crate information."
         )
 
+    def index(self):
+        """A short, stable string naming this board, in the form 'crs0030'.
+
+        The identity of the board, not the route to it — which is why this
+        prefers the serial where ``tuber_hostname`` prefers the hostname. The
+        two answer different questions, and an explicit hostname that overrides
+        a serial for *connecting* does not make the board a different board.
+        The standard mock map carries both (``!CRS { serial: "0000", hostname:
+        "127.0.0.1" }``), and it should name itself after the serial that is
+        sitting right there.
+
+        A board with no serial is reachable — Periscope's "just type an IP"
+        path builds one (``tools/periscope/__main__.py:337``) — so the fallbacks
+        exist to keep this from rendering the word "None" into a dict key or a
+        filename. Each form says what identified it:
+
+            crs0030             a serial
+            crate001_slot3      a crate and slot
+            host127-0-0-1       a hostname, punctuation flattened to dashes
+        """
+
+        if self.serial:
+            return f"crs{self.serial}"
+
+        if self.slot and self.crate:
+            return f"crate{self.crate.serial}_slot{self.slot}"
+
+        if self.hostname:
+            flattened = re.sub(r"[^A-Za-z0-9]+", "-", self.hostname).strip("-")
+            return f"host{flattened}"
+
+        # Unreachable for a constructed CRS: __init__ goes through
+        # tuber_hostname, which raises on exactly this state.
+        raise NameError(
+            "Couldn't figure out an identifier for this board! "
+            "I need serial, crate or hostname information."
+        )
+
     async def resolve(self):
         await self.tuber_resolve()
 
@@ -224,9 +263,14 @@ class ReadoutModule(HWMResource):
         """
         A shorthand string representation for this readout module, in the form:
         'crs0030_rmod1'
+
+        Built from the board's own :meth:`CRS.index`, so a board with no serial
+        names itself by crate/slot or hostname rather than rendering "None".
+        The ``_rmod{N}`` suffix is constant across all of those forms, which is
+        the part anything grouping or parsing these should rely on.
         """
 
-        return "crs%s_rmod%d" % (self.crs.serial, self.module)
+        return f"{self.crs.index()}_rmod{self.module}"
 
     # Boilerplate
     _cls = Column(String, nullable=False)
@@ -296,15 +340,15 @@ class ReadoutChannel(HWMResource):
         doc="Shortcut back to the CRS board",
     )
 
-    resonator = relationship(
-        "Resonator",
+    hwm_resonator = relationship(
+        "HWMResonator",
         secondary="channel_mappings",
         primaryjoin="ReadoutChannel._pk == ChannelMapping._readout_channel_pk",
-        secondaryjoin="ChannelMapping._resonator_pk == Resonator._pk",
+        secondaryjoin="ChannelMapping._hwm_resonator_pk == HWMResonator._pk",
         uselist=False,
         lazy="joined",
-        doc="Shortcut through channelmapping to associated resonator obj.",
-        overlaps="resonator,readout_channel",
+        doc="Shortcut through channelmapping to associated HWMResonator.",
+        overlaps="hwm_resonator,readout_channel",
     )
 
 
@@ -324,26 +368,36 @@ class Wafer(HWMResource):
 
     name = Column(String, nullable=False)  # eg DrkC
 
-    resonator = relationship(
-        "Resonator",
-        backref=backref("wafer", overlaps="resonators"),
+    hwm_resonator = relationship(
+        "HWMResonator",
+        backref=backref("wafer", overlaps="hwm_resonators"),
         collection_class=attribute_mapped_collection("name"),
         doc="""doc.""",
     )
 
-    resonators = relationship(
-        "Resonator",
+    hwm_resonators = relationship(
+        "HWMResonator",
         lazy="dynamic",
         query_class=HWMQuery,
-        doc="This is a SQLAlchemy subquery; you probably want 'resonator'",
-        overlaps="resonator",
+        doc="This is a SQLAlchemy subquery; you probably want 'hwm_resonator'",
+        overlaps="hwm_resonator",
     )
 
 
-class Resonator(HWMResource):
-    """Resonator keeps tabs on individual MKID resonators and their properties"""
+class HWMResonator(HWMResource):
+    """Hardware-map ORM row for an individual MKID resonator.
 
-    __tablename__ = "resonators"
+    Named ``HWMResonator`` to keep it distinct from
+    ``rfmux.core.resonators.Resonator``, the plain value object measurement
+    code passes around. This one is a database row: it is loaded from a
+    hardware-map YAML/CSV, lives in a session, and is joined to a
+    ``ReadoutChannel`` through ``ChannelMapping``. Everything named after the
+    class follows it: the ``!HWMResonators`` YAML tag, the ``hwm_resonators``
+    wafer key, the ``hwm_resonator`` column in a ChannelMappings CSV, and the
+    ``hwm_resonators`` table.
+    """
+
+    __tablename__ = "hwm_resonators"
     __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
 
     def __repr__(self):
@@ -360,23 +414,23 @@ class Resonator(HWMResource):
     readout_channel = relationship(
         "ReadoutChannel",
         secondary="channel_mappings",
-        primaryjoin="ChannelMapping._resonator_pk == Resonator._pk",
+        primaryjoin="ChannelMapping._hwm_resonator_pk == HWMResonator._pk",
         secondaryjoin="ReadoutChannel._pk == ChannelMapping._readout_channel_pk",
         uselist=False,
         lazy="joined",
-        overlaps="resonator,readout_channel",
+        overlaps="hwm_resonator,readout_channel",
     )
 
 
 class ChannelMapping(HWMResource):
-    """ChannelMappings associate ReadoutChannels with Resonators"""
+    """ChannelMappings associate ReadoutChannels with HWMResonators"""
 
     __tablename__ = "channel_mappings"
     __table_args__ = ()
     __mapper_args__ = {"polymorphic_identity": __package__, "polymorphic_on": "_cls"}
 
     # def __repr__(self):
-    #     return "%s: ReadoutChannel: %r, Resonator: %r" % (self.__class__.__name__, self.readout_channel, self.resonator)
+    #     return "%s: ReadoutChannel: %r, HWMResonator: %r" % (self.__class__.__name__, self.readout_channel, self.hwm_resonator)
 
     _cls = Column(String)
     _pk = Column(Integer, primary_key=True)
@@ -384,24 +438,24 @@ class ChannelMapping(HWMResource):
     _readout_channel_pk = Column(
         Integer, ForeignKey("readout_channels._pk"), index=True
     )
-    _resonator_pk = Column(Integer, ForeignKey("resonators._pk"), index=True)
+    _hwm_resonator_pk = Column(Integer, ForeignKey("hwm_resonators._pk"), index=True)
 
     def __repr__(self):
         return f"""{self.__class__.__name__}:
             ReadoutChannel: {self.readout_channel}
-            Resonator:      {self.resonator}"""
+            HWMResonator:   {self.hwm_resonator}"""
 
     readout_channel = relationship(
         "ReadoutChannel",
         backref=backref(
-            "channel_map", uselist=False, overlaps="resonator,readout_channel"
+            "channel_map", uselist=False, overlaps="hwm_resonator,readout_channel"
         ),
     )
 
-    resonator = relationship(
-        "Resonator",
+    hwm_resonator = relationship(
+        "HWMResonator",
         backref=backref(
-            "channel_map", uselist=False, overlaps="resonator,readout_channel"
+            "channel_map", uselist=False, overlaps="hwm_resonator,readout_channel"
         ),
     )
 

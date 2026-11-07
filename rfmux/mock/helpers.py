@@ -72,6 +72,7 @@ async def create_mock_crs(
         print(f"Frequency Range: {merged['freq_start']/1e9:.1f} - {merged['freq_end']/1e9:.1f} GHz")
         print("="*60)
     
+    session = None
     try:
         # Create MockCRS using the proper flavour syntax
         if verbose:
@@ -114,7 +115,11 @@ async def create_mock_crs(
         
         return crs
         
-    except Exception as e:
+    except BaseException as e:
+        if session is not None:
+            session.close()
+        if not isinstance(e, Exception):
+            raise
         error_msg = f"Failed to create Mock CRS: {str(e)}"
         if verbose:
             print(f"\n❌ Error: {error_msg}")

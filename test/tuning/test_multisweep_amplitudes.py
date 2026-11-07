@@ -165,9 +165,9 @@ def test_a_relative_schedule_can_scale_a_base_of_your_own_choosing():
         1.0, 2.0, 2, base={"R0001": 0.01, "R0002": 0.02}
     )
 
-    assert amplitudes_of(schedule, catalog) == pytest.approx(
-        [{"R0001": 0.01, "R0002": 0.02}, {"R0001": 0.02, "R0002": 0.04}]
-    )
+    first, second = amplitudes_of(schedule, catalog)
+    assert first == pytest.approx({"R0001": 0.01, "R0002": 0.02})
+    assert second == pytest.approx({"R0001": 0.02, "R0002": 0.04})
 
 
 def test_an_absolute_schedule_ignores_the_catalogs_amplitudes_entirely():
@@ -306,9 +306,9 @@ def test_names_have_no_amplitude_to_fall_back_to():
 def test_a_positional_base_is_accepted_alongside_names():
     """Where the ordering is the caller's own, as multisweep's amp= allows."""
     schedule = AmplitudeSchedule.multiplicative(1.0, 2.0, 2, base=[0.001, 0.002])
-    assert amplitudes_of(schedule, ["low", "high"]) == pytest.approx(
-        [{"low": 0.001, "high": 0.002}, {"low": 0.002, "high": 0.004}]
-    )
+    first, second = amplitudes_of(schedule, ["low", "high"])
+    assert first == pytest.approx({"low": 0.001, "high": 0.002})
+    assert second == pytest.approx({"low": 0.002, "high": 0.004})
 
 
 def test_a_mismatched_positional_base_is_an_error():
@@ -359,9 +359,10 @@ def test_describe_gives_each_resonators_own_amplitude_range():
     catalog = a_catalog(amplitudes=(0.001, 0.002))
     described = AmplitudeSchedule.multiplicative(1.0, 2.0, 2).describe(catalog)
 
-    assert described["amplitude_range_by_name"] == pytest.approx(
-        {"R0001": (0.001, 0.002), "R0002": (0.002, 0.004)}
-    )
+    ranges = described["amplitude_range_by_name"]
+    assert list(ranges) == ["R0001", "R0002"]
+    assert ranges["R0001"] == pytest.approx((0.001, 0.002))
+    assert ranges["R0002"] == pytest.approx((0.002, 0.004))
     assert described["amplitude_min"] == pytest.approx(0.001)
     assert described["amplitude_max"] == pytest.approx(0.004)
 

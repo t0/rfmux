@@ -167,13 +167,9 @@ async def test_amplitude_is_the_outer_axis_and_direction_the_inner(sweeps):
         sweep_direction=("upward", "downward"),
     )
 
-    assert [
-        (c["amplitudes"]["R0001"], c["sweep_direction"]) for c in sweeps.calls
-    ] == pytest.approx([
-        (1e-3, "upward"), (1e-3, "downward"),
-        (1e-2, "upward"), (1e-2, "downward"),
-        (1e-1, "upward"), (1e-1, "downward"),
-    ])
+    assert [c["amplitudes"]["R0001"] for c in sweeps.calls] == pytest.approx(
+        [1e-3, 1e-3, 1e-2, 1e-2, 1e-1, 1e-1])
+    assert [c["sweep_direction"] for c in sweeps.calls] == ["upward", "downward"] * 3
 
 
 @pytest.mark.asyncio

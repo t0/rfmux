@@ -1361,6 +1361,12 @@ PYBIND11_MODULE(_fastrx, m) {
 	m.attr("NUM_MODULES") = NUM_MODULES;
 	m.attr("MAX_SAMPLES") = SAMPLES_PER_PIPELINE;
 	m.attr("MAX_CHANNELS") = MAX_SAMPLES_PER_PACKET;
+	/* The wire contract fastrxd's BPF filter admits (packet.h): the
+	 * channel-stream multicast group and UDP port, and the header version
+	 * the daemon validates. */
+	m.attr("MULTICAST_GROUP") = FASTRX_MULTICAST_GROUP;
+	m.attr("PORT") = FASTRX_PORT;
+	m.attr("PACKET_VERSION") = FASTRX_PACKET_VERSION;
 	m.attr("ABI_VERSION") = FASTRXD_ABI_VERSION;
 	m.attr("MAX_CLIENTS") = FASTRXD_MAX_CLIENTS;
 

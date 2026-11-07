@@ -57,6 +57,7 @@ td {
 }
 td.pass { background-color: #c8e6c9; }
 td.fail { background-color: #ffcdd2; }
+td.near { background-color: #ffe0b2; }
 tr {
     /* Discourage splitting cells across page breaks */
     page-break-inside: avoid;
@@ -76,6 +77,32 @@ figure img {
     display: block;
     height: auto;
 }
+/* A figure's placeholder has the figure's size (set inline); once drawn, its
+   toolbar floats in its top-right corner, shown on hover */
+.qc-plot { position: relative; margin: 0 auto; max-width: 100%; text-align: left; }
+.qc-plot:not([data-state="drawn"]) { background: #f6f6f6; }
+.qc-plot-status { padding: 1em; }
+.qc-plot .ui-dialog-titlebar { display: none; }
+/* matplotlib's figure is inline-block: without this it sits on a text
+   baseline, a few pixels taller than its placeholder */
+.qc-plot > div > div { vertical-align: top; }
+.qc-plot .mpl-toolbar {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 3;  /* above the canvas, which matplotlib's style puts at 2 */
+    background: rgba(255, 255, 255, 0.9);
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    opacity: 0;
+    transition: opacity 0.2s;
+}
+.qc-plot:hover .mpl-toolbar, .qc-plot .mpl-toolbar:focus-within { opacity: 1; }
+figcaption button.copy { font-size: 80%; margin-left: 0.5em; }
+#console textarea { width: 100%; font-family: monospace; }
+#console-output { white-space: pre-wrap; font-family: monospace; }
+.qc-plot-status { font-style: italic; color: #555; }
+
 figure figcaption {
     text-align: center;
     font-weight: bold;
@@ -89,30 +116,85 @@ ul, ol {
     text-indent: -1.5em;
 }
 
-/* Page header/footer */
-@page {
-    margin: 1in;
+/* Status words: colour only repeats the word */
+.status {
+    display: inline-block;
+    min-width: 4.5em;
+    padding: 0 0.4em;
+    border-radius: 3px;
+    font-weight: bold;
+    text-align: center;
+}
+.status.pass { background-color: #c8e6c9; color: #1b5e20; }
+.status.fail { background-color: #ffcdd2; color: #b71c1c; }
+.status.near { background-color: #ffe0b2; color: #8a4b00; }
+.status.skip { background-color: #eceff1; color: #455a64; }
 
-    /* Header */
-    @top-center {
-        content: "CRS Quality Control (QC) Report";
-	font-size: 12px;
-	font-family: 'Montserrat', sans-serif;
-    }
-
-    /* Footer */
-    @bottom-center {
-        content: "Page " counter(page) " / " counter(pages);
-	font-size: 12px;
-	font-family: 'Montserrat', sans-serif;
-	color: #222;
-    }
+.verdict {
+    font-size: 130%;
+    margin: 1em 0;
 }
 
-/* Suppress header on first page */
-@page :first { @top-center { content: none; } }
+/* The top bar: title, view, and "show all" */
+header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em 1.5em;
+    align-items: baseline;
+    padding: 0.5em 2em;
+    background: #fafafa;
+    border-bottom: 1px solid #ccc;
+}
+header.topbar h1 { margin: 0; border: none; font-size: 150%; }
+.facts { color: #555; margin: 1em 0 0; }
+header.topbar label { white-space: nowrap; }
 
-/* For the table of contents, add page number links */
-#toc a::after {
-    content: ' ' leader('.') ' ' target-counter(attr(href), page);
+/* The overview: problems, then the test x module matrix */
+.problems ul { margin-left: 0; padding-left: 0; text-indent: 0; }
+.problems li { list-style: none; margin: 0.3em 0; }
+.problems h2 { margin: 1em 0 0.5em; }
+table.matrix { width: auto; margin: 1em 0; }
+table.matrix td { font-size: 100%; text-align: center; font-weight: bold; min-width: 4.5em; }
+table.matrix td.test { text-align: left; font-weight: normal; }
+table.matrix td.skip { background-color: #eceff1; }
+table.matrix td.none { color: #999; }
+table.matrix a { display: block; color: inherit; }
+#overview a.selected { outline: 2px solid #0077cc; outline-offset: 1px; }
+
+/* One result's detail at a time, or all of them */
+#detail { border-top: 2px solid #ccc; margin-top: 1.5em; padding-top: 0.5em; }
+.stepper { display: flex; gap: 0.5em; justify-content: flex-end; }
+.result { display: none; }
+.result.selected { display: block; }
+body.show-all .result[data-chosen="true"] { display: block; margin-bottom: 3em; }
+body.show-all #nothing-selected, body.show-all .stepper { display: none; }
+.result h2 { margin-top: 0.5em; }
+.result .module, .result .meta { color: #666; font-weight: normal; }
+.result .meta { font-size: 85%; margin-bottom: 0.5em; }
+details.about { margin: 0.5em 0 1em; color: #444; }
+details.about > summary { cursor: pointer; color: #0077cc; }
+ul.failures { color: #b71c1c; margin: 0.5em 0 1em 1.5em; }
+
+/* Other folded sections: runs, the console */
+details.section {
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    margin: 1.5em 0 0.6em;
+    padding: 0.3em 0.8em;
+}
+details.section > summary { cursor: pointer; font-weight: bold; padding: 0.3em 0; }
+
+@media screen {
+    body { font-size: 14px; }
+    main { padding: 0 2em 2em; max-width: 80rem; }
+    html { scroll-padding-top: 4em; }
+}
+
+@media print {
+    header.topbar { position: static; }
+    .show-all, .stepper, #nothing-selected, #console { display: none; }
+    .result[data-chosen="true"] { display: block; break-before: page; }
 }

@@ -5,7 +5,6 @@ Datapath tests
 Please see README for hints on using and extending these test cases.
 """
 
-import htpy
 import os
 import pytest
 import rfmux
@@ -13,7 +12,7 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .crs_qc import render_markdown, ResultTable
+from .crs_qc import render_fig, render_markdown, ResultTable
 from scipy import signal
 from scipy.stats import linregress
 
@@ -45,7 +44,7 @@ def psd_helper(data_i_raw, data_q_raw):
 
 
 @pytest.mark.asyncio
-async def test_loopback_noise(d, request, shelf, check):
+async def test_loopback_noise(d, request, report, check):
     """
     ## Network Analysis - Ambient Noise
 
@@ -121,18 +120,8 @@ async def test_loopback_noise(d, request, shelf, check):
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(f"{request.session.results_dir}/{request.node.name}.png")
+    report += [render, rt, render_fig(plt.gcf(), "Noise environment")]
     plt.close()
-
-    with shelf as x:
-        x["sections"][request.node.name] = [
-            render,
-            rt,
-            htpy.figure[
-                htpy.img(src=f"{request.node.name}.png"),
-                htpy.figcaption[f"Noise environment"],
-            ],
-        ]
 
 
 """

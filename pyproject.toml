@@ -16,10 +16,12 @@ dependencies = [
   "aiohttp",
   "awaitless",
   "click>=8.0",
+  "fru",
   # Pulse capture writes its captures as HDF5, and Periscope does so by
   # default, so this is reached by ordinary use rather than an exotic
   # path.
   "h5py",
+  "htpy",
   # Pin to 6.x for qtconsole in-process kernel compatibility: ipykernel 7.x
   # do_execute dereferences shell_channel_thread.parent_thread, which the
   # in-process kernel (embedded Periscope console) never creates ->
@@ -33,9 +35,12 @@ dependencies = [
   # notebooks (rfmux/reference-notebooks/) as real notebooks. Without it they
   # are inert markdown, so this is a runtime dependency and not a dev one.
   "jupytext",
+  "markdown",
+  "markupsafe",
   "matplotlib",
   "numba",  # Required for high-performance physics calculations in MockCRS
   "numpy",
+  "pexpect",
   "psutil",
   # "rfmux parser --dirfile" and the dirfile "rfmux record" writes.  The
   # wheels (Linux x86_64, macOS, Windows) carry libgetdata themselves;
@@ -43,15 +48,15 @@ dependencies = [
   # pygetdata is imported only on the paths that use it.
   "pygetdata; platform_machine != 'aarch64'",
   "pyqtgraph",
-  "pytest",
-  "pytest-asyncio",
   "pyyaml",
   "qtconsole",
-  "requests_futures",
+  "requests",
   "scipy",
   "simplejson",
   "sqlalchemy",
+  "tqdm",
   "tuber-client[async]>=0.18",
+  "xmodem",
   # Intel Threading Building Blocks for numba parallel execution.
   # On macOS, you need libomp instead
   "tbb; sys_platform != 'darwin'",
@@ -59,29 +64,6 @@ dependencies = [
 
 # 3.10: rfmux/core/crs.py uses match/case, so 3.9 cannot import the package.
 requires-python = ">=3.10"
-
-[project.optional-dependencies]
-
-# Dependencies for "rfmux qc".
-qc = [
-  "beautifulsoup4",
-  "htpy",
-  "markdown",
-  "markupsafe",
-  "pytest_check",
-  "requests",
-  "scikit-learn",
-  "weasyprint",
-]
-
-# Dependencies for "rfmux firmware". Optional so the Yocto build (which never
-# needs them) doesn't carry extra pre-requisites.
-firmware = [
-  "fru",
-  "pexpect",
-  "tqdm",
-  "xmodem",
-]
 
 [project.scripts]
 rfmux = "rfmux.tools.cli:main"
@@ -92,17 +74,15 @@ periscope = "rfmux.tools.periscope.__main__:main"
 
 [dependency-groups]
 # Exactly what the test suite imports beyond the runtime dependencies.
-# Kept separate from `dev` so CI can install this and nothing else: the
-# qc extra pulls weasyprint, whose native libraries are a liability on
-# the Windows and macOS runners, and a test run should not depend on
-# them building.
+# Kept separate from `dev` so CI can install this and nothing else.
 test = [
   "nbclient",
   "nbformat",
+  "pytest",
+  "pytest-asyncio",
   "pytest_check",
 ]
 dev = [
-  "rfmux[qc]",  # run the QC suite from a checkout
   {include-group = "test"},
 ]
 
@@ -127,7 +107,6 @@ fallback_version = "0.0.0"
 exclude-newer = "3 weeks"
 
 [tool.pytest.ini_options]
-# The QC suite (rfmux/tools/qc/) is excluded here; run it via "rfmux qc".
 testpaths = ["test"]
 
 markers = [
@@ -135,10 +114,7 @@ markers = [
   "portable: needs no CRS at all and no GUI — the subset tox runs on every supported Python",
   "slow_acquisition: slow because it exercises the data-acquisition path for real — spawns a MockCRS server subprocess and streams UDP over loopback",
   "hardware: needs a real CRS board; applied automatically to anything using the crs/live_session fixtures, and skipped unless --serial is given",
-
-  # The QC suite lives in rfmux/tools/qc/ and runs via "rfmux qc", not from here.
-  "qc_stage1",
-  "qc_stage2",
+  "veth_fastrxd: needs the veth rig (run through test/streamer/test_fastrxd_veth): the real fastrxd in copy-mode AF_XDP on a veth pair. Skipped without it, unless named in -m, which fails instead",
 ]
 
 # A bare `pytest` runs the quick tier plus the hardware skips; `--tier`

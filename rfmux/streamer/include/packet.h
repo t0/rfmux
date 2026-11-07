@@ -92,6 +92,11 @@ struct readout_packet_header {
 	uint32_t seq;
 } PACKED;
 
+/* readout_packet_header.flags */
+#define PACKET_FLAGS_OVERRANGE 0x1
+#define PACKET_FLAGS_OVERVOLTAGE 0x2
+#define PACKET_FLAGS_AUX_SMA 0x4 /* aux SMA input level, sampled with the timestamp */
+
 #define LONG_PACKET_CHANNELS 1024
 #define SHORT_PACKET_CHANNELS 128
 

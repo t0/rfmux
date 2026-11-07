@@ -1,0 +1,44 @@
+Firmware r1.7.0
+===============
+
+Upgrading from (firmware < 1.7.0) to (firmware >= 1.7.0) requires an upgrade to
+the SPI-flash bootloader. If you have been sent one of "Flat Mark" or
+"Flat Stanley", here are the necessary steps:
+
+1. Remove the MicroSD card from the CRS and turn it on.
+
+2. Set up a keyboard, mouse, and monitor for the portable computer and log in.
+   There is no password for this computer.
+
+3. There is a script called "UPGRADE_BOOTLOADER" on the Desktop. Double click
+   the desktop icon and follow the prompts. If you wish to do these steps
+   manually, proceed to step 4, otherwise skip to step 7.
+
+4. The rfmux repository has already been cloned with the necessary firmware
+   files unpacked. Open a terminal and navigate to the r1.7.0 firmware release
+   directory with:
+
+	$ cd ~/rfmux/firmware/r1.7.0
+
+5. Set up the Vitis execution environment:
+
+	$ source /opt/xilinx/2025.2/Vitis/settings64.sh
+
+6. Connect the CRS to the portable computer with a micro USB cable and run:
+
+	$ program_flash -f boot.bin -fsbl fsbl.elf -flash_type qspi-x8-dual_parallel
+
+7. The program_flash command should finish with "Flash Operation Successful".
+   Once you see this message, power cycle the CRS. The screen on the front panel
+   should turn on after a few seconds with the t0.technology logo. You may now
+   proceed to flashing firmware version 1.7.0 to your MicroSD card. See
+   rfmux/docs/guides/firmware.md for details.
+
+Tip: although not strictly necessary, it can be helpful to see what the CRS is
+doing while booting. On the portable computer, open a new terminal before
+powering on the CRS and run:
+
+	$ screen /dev/ttyUSB1 115200
+
+Once you power on the CRS, you will start to see its output as it is booting.
+To exit screen, press "Ctrl-a" then "d".

@@ -9,12 +9,13 @@ an IPv6 loopback socket alone is not sufficient.
 
 | Command | Runs | Time | Use when |
 | --- | --- | --- | --- |
-| `pytest --tier=portable` | 883 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
-| `pytest --tier=quick` | 2455 | ~6.5 min | Default while editing. |
+| `pytest --tier=portable` | 932 | ~13 s | Changing packaging, dependencies, or the Python floor. This is what `tox` runs on 3.10-3.12. |
+| `pytest --tier=quick` | 2504 | ~6.5 min | Default while editing. |
 | `pytest --tier=acquisition` | 38 | ~9.5 min | After changing streaming, decimation, the PFB path, or pulse capture. A subset of `full`: run one or the other, not both. |
-| `pytest --tier=full` | 2493 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
+| `pytest --tier=full` | 2542 | ~16 min | Before pushing. Everything that runs without a board, the acquisition tier included. |
 | `pytest --tier=hardware --serial 0024` | 75 | needs a board | Against a connected board; see *Hardware tests*. |
-| `pytest --tier=all --serial 0024` | 2503 | needs a board | Before a release. |
+| `test/streamer/test_fastrxd_veth` | 6 | ~5 s, needs sudo | The real fastrxd on a veth pair, in copy-mode AF_XDP, fed version-0 K=1 packets: the 100G receive path without a NIC. The script brings the rig up (sudo for what needs root), runs the tests as you, and tears it down; extra arguments go to pytest. After changing fastrxd, its clients, or the channel-stream wire format. CI runs it on ubuntu-24.04. |
+| `pytest --tier=all --serial 0024` | 2623 | needs a board | Before a release. |
 
 ```bash
 pytest test/pulse_capture/         # one subsystem

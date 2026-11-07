@@ -1,7 +1,18 @@
 """Repository-wide pytest options and incremental timing reports.
 
-Options live in the root conftest so pytest parses them even when invoked
-outside test/. Keep this module dependency-light: the QC suite also loads it.
+``pytest_addoption`` is only honoured from an *initial* conftest — one pytest
+loads before parsing arguments, which means the rootdir conftest and the
+conftests along the path of the arguments you passed. It is emphatically not
+honoured from ``test/conftest.py`` when the arguments do not point into
+``test/``: run ``pytest --tier=quick`` from any subdirectory with the options
+declared down there and you get "unrecognized arguments" rather than a test
+run.
+
+So the options live here, where every in-repo invocation sees them. Fixtures
+and collection hooks stay in test/conftest.py, which has no such restriction.
+
+Deliberately dependency-light: this module is imported for every pytest run
+anywhere in the repo, so it must not import rfmux.
 """
 
 from collections import defaultdict
@@ -24,13 +35,13 @@ import pytest
 # Values are marker expressions; "" means no filtering at all.
 TIERS = {
     # no CRS and no GUI — the subset tox runs on every supported Python
-    "portable": "portable and not hardware",
+    "portable": "portable and not hardware and not veth_fastrxd",
     # the edit loop: no server, no board
-    "quick": "not slow_acquisition and not hardware",
+    "quick": "not slow_acquisition and not hardware and not veth_fastrxd",
     # only the data-acquisition tests: MockCRS server + UDP over loopback
-    "acquisition": "slow_acquisition and not hardware",
+    "acquisition": "slow_acquisition and not hardware and not veth_fastrxd",
     # everything runnable without a board — run this before pushing
-    "full": "not hardware",
+    "full": "not hardware and not veth_fastrxd",
     # the board tests on their own (needs --serial)
     "hardware": "hardware",
     # literally everything (needs --serial, or the hardware tier just skips)
@@ -43,13 +54,7 @@ def pytest_addoption(parser):
         "--no-test-timings", action="store_true",
         help="Disable the automatic test-timings JSONL log and section summary.",
     )
-    # rfmux/tools/qc/conftest.py also declares --serial and tolerates this one
-    # already existing. Be symmetric about it: either conftest may load first
-    # depending on which directory you point pytest at.
-    try:
-        parser.addoption("--serial", action="store", default=None)
-    except ValueError:
-        pass
+    parser.addoption("--serial", action="store", default=None)
 
     parser.addoption(
         "--tier",
